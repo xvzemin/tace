@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+.ipynb_checkpoints
+.DS_Store
+/wandb
+/checkpoints
+/results
+# *.txt
+# *.png
