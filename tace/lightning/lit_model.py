@@ -39,6 +39,7 @@ class LightningWrapperModel(L.LightningModule):
                     k: (v / total if k != 'monitor_metric_name' else v)
                     for k, v in synth_metric.items()
                 }
+        self.synth_metric = synth_metric
         self._create_metrics("train")
         self._create_metrics("val")
         test_sets = cfg.get("dataset", {}).get("test_files", [])

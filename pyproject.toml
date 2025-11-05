@@ -28,9 +28,9 @@ dependencies = [
 
 [project.optional-dependencies]
 
-les = [
-    "les @ git+https://github.com/ChengUCB/les"
-]
+#les = [
+#    "les @ git+https://github.com/ChengUCB/les"
+#]
 
 lammps = [
     "cython",
