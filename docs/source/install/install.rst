@@ -20,10 +20,10 @@ Install from Source (recommended)
     
     # If you want to use les, you can run the following command.
     # If your network connection is poor, you can manually download and install it from https://github.com/ChengUCB/les
-    pip install .[les]
+    pip install les@git+https://github.com/ChengUCB/les
 
 
-Install via pip
+Install via pip (not recommended, may be have bug)
 ---------------
 
 .. code-block:: bash
@@ -32,6 +32,6 @@ Install via pip
 
     # If you want to use les, you can run the following command.
     # If your network connection is poor, you can manually download and install it from https://github.com/ChengUCB/les
-    pip install tace[les]
+    pip install les@git+https://github.com/ChengUCB/les
 
 
