@@ -1,0 +1,37 @@
+# Wildcard
+*.txt
+*.log
+*.ckpt
+*.py[cod]
+*$py.class
+*.egg-info/
+*.png
+*.xzm
+*.out
+
+
+# Ignore all dir
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+logs/
+wandb/
+results/
+output/
+outputs/
+checkpoints/
+build/
+__pycache__/
+tmp/
+test/
+xzm/
+
+
+# Ignore specific files
+.DS_Store
+.ipynb_checkpoints
+
+
+# White list
+!arch.png

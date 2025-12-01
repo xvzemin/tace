@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "TACE"
+version = "0.0.7"
+description = "TACE - Cartesian Tensor based E(3) equivariant interatomic potentials."
+authors = [{ name = "Zemin Xu", email = "xvzemin@smail.nju.edu.cn" }]
+
+requires-python = ">=3.10"
+dependencies = [
+    "torch<2.10",
+    "lightning",
+    "omegaconf",
+    "hydra-core>=1.3",
+    "matscipy",
+    "ase",
+    "numpy",
+    "e3nn",
+    "wandb",
+    "torch_geometric",
+    "scipy",
+    "configargparse",
+    "lmdb",
+    "pandas",
+]
+
+[project.optional-dependencies]
+
+#les = [
+#    "les @ git+https://github.com/ChengUCB/les"
+#]
+
+lammps = [
+    "cython",
+    "cupy-cuda12x",
+]
+
+dev = [
+    "sphinx",
+    "myst-parser",
+    "sphinx-copybutton",
+    "pydata-sphinx-theme", 
+    "black",
+    "isort",
+    "pre-commit",
+
+    "MDAnalysis",
+    "tidynamics",
+    "mdtraj",
+    "scikit-learn",
+    "umap-learn",
+    "cotengra",
+    "optuna",
+    "cmaes", 
+    "nevergrad",
+    "configargparse",
+    "ase_db_backends",
+    "tomli",
+    "matcalc",
+    "pandas",
+    "matminer",
+    "vtk",
+    "pymatgen",
+    "pymatviz==0.15.1",
+]
+
+
+[project.urls]
+Homepage = "https://github.com/xvzemin/tace"
+
+[project.scripts]
+tace-train = "tace.scripts.train:main"
+tace-eval = "tace.scripts.eval:main"
+tace-clean = "tace.scripts.clean:main"
+tace-split = "tace.scripts.split:main"
+tace-export = "tace.scripts.export:main"
+tace-graph = "tace.scripts.xyz2lmdb:main"
+tace-convert = "tace.scripts.convert:main"
+tace-utils = "tace.scripts.utils:main"
+
+[tool.setuptools.packages.find]
+include = ["tace", "tace.*", "cartnn", "cartnn.*"]
+
+[tool.setuptools.package-data]
+"tace.utils" = ["*.yaml"]
+

@@ -1,0 +1,12 @@
+1
+Properties=species:S:1:pos:R:3 energy=-1029.4889999855063 pbc="F F F"
+C        0.00000000       0.00000000       0.00000000
+1
+Properties=species:S:1:pos:R:3 energy=-13.587222780835477 pbc="F F F"
+H        0.00000000       0.00000000       0.00000000
+1
+Properties=species:S:1:pos:R:3 energy=-1484.9814568572233 pbc="F F F"
+N        0.00000000       0.00000000       0.00000000
+1
+Properties=species:S:1:pos:R:3 energy=-2041.9816003861047 pbc="F F F"
+O        0.00000000       0.00000000       0.00000000

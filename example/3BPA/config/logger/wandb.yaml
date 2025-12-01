@@ -1,0 +1,9 @@
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: 3BPA
+  name: ${misc.project_name} 
+  # entity: xuzemin-nanjing-university 
+  log_model: final  # all, final
+  # tags: ["baseline", "v0.0.1"]
+  # group: "experiments"
+  save_dir: wandb_logs  
