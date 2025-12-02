@@ -125,8 +125,6 @@ class LegacyCartesianHarmonics1(torch.nn.Module):
         return f"{self.__class__.__name__}(r={self.lmax}, norm={self.norm})"
 
 
-
-@compile_mode("script")
 class LegacyCartesianHarmonics2(torch.nn.Module):
     def __init__(self, lmax: int, norm: bool = True, traceless: bool = True) -> None:
         super().__init__()
@@ -142,22 +140,29 @@ class LegacyCartesianHarmonics2(torch.nn.Module):
         T = torch.ones_like(v[..., 0])
         edge_attrs: Dict[int, Tensor] = {}
         edge_attrs[0] = T.unsqueeze(1)
+
         for l in range(1, self.lmax+1):
             T = T[..., None] * expand_dims_to(v, T.ndim + 1, dim=v.ndim - 1)
-            if self.norm:
-                T = T * _norm(l)
-            if self.traceless:
+            edge_attrs[l] = T
+                
+        if self.traceless:
+            for l in range(1, self.lmax+1):
+                T = edge_attrs[l]
                 B = T.size(0)
-                if B == 0:
-                    pass
-                else:
+                if B != 0:
                     REST = T.size()[1:]
                     T = T.reshape(B, -1)
                     T = T @ self.Q(l)
                     T = T.reshape((B,) + REST)
-            else:
-                pass
-            edge_attrs[l] = T.unsqueeze(1)
+                edge_attrs[l] = T
+
+        if self.norm:
+            for l in range(1, self.lmax+1):
+                edge_attrs[l] = edge_attrs[l] * _norm(l)
+                
+        for l in range(1, self.lmax+1):
+            edge_attrs[l] = edge_attrs[l].unsqueeze(1)
+
         return edge_attrs
 
     def Q(self, l: int):
@@ -165,6 +170,7 @@ class LegacyCartesianHarmonics2(torch.nn.Module):
     
     def __repr__(self):
         return f"{self.__class__.__name__}(r={self.lmax}, norm={self.norm}, traceless={self.traceless})"
+    
 
 @compile_mode("script")
 class CartesianHarmonics(torch.nn.Module):

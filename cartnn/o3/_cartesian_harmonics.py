@@ -189,21 +189,20 @@ class CartesianHarmonics(torch.nn.Module):
         B = T.size(0)
         edge_attrs: List[Tensor] = []
         edge_attrs.append(T.view(B, -1))
+
         for l in range(1, self._lmax+1):
             T = T[..., None] * expand_dims_to(v, T.ndim + 1, dim=v.ndim - 1)
+            edge_attrs.append(T.view(B, -1))
+
+        for l in range(1, self._lmax+1):
+            T = edge_attrs[l]
             if self.norm:
                 T = T * _norm(l)
             if self.traceless:
-                if B == 0:
-                    pass
-                else:
-                    REST = T.size()[1:]
-                    T = T.reshape(B, -1)
+                if B != 0:
                     T = T @ self.D(l).to(v.dtype)
-                    T = T.reshape((B,) + REST)
-            else:
-                pass
-            edge_attrs.append(T.view(B, -1))
+            edge_attrs[l] = T
+
         ch = torch.cat(edge_attrs, dim=-1)
         if not self._is_range_lmax:
             ch = torch.cat(
