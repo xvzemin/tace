@@ -11,6 +11,7 @@ DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
     "Lmax": 2,
     "lmax": 3,
+    "mag_Lmax": 1,
     "parity": False,
     "num_channel": 64,
     "num_layers": 2,
@@ -34,6 +35,7 @@ DEFAULT_MODEL_CONFIG = {
         "r_min": 0.0,
         "radial_basis": "j0",
         "num_radial_basis": 8,
+        "num_mag_radial_basis": 8,
         "distance_transform": None,
         "cutoff_fn": "c2poly",
         "polynomial_cutoff": 5,
@@ -222,6 +224,13 @@ def check_model_config(cfg: dict[str, Any]):
     # Update default config with user config
     cfg = recursive_update(cfg)
 
+    if (
+        not isinstance(cfg["mag_Lmax"], int)
+        or isinstance(cfg["mag_Lmax"], bool)
+        or not 1 <= cfg["mag_Lmax"] <= cfg["Lmax"]
+    ):
+        raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
+
     if cfg.get("max_neighbors") is not None:
         raise ValueError(
             "TACE does not "
@@ -236,6 +245,25 @@ def check_model_config(cfg: dict[str, Any]):
     cfg["avg_num_neighbors"] = sum(
         s["avg_num_neighbors"] for s in cfg["statistics"]
     ) / len(cfg["statistics"])
+
+    # TODO
+    magnetic_statistics = [
+        stats["magmoms_norm_by_element"]
+        for stats in cfg["statistics"]
+        if "magmoms_norm_by_element" in stats
+    ]
+    cfg["magmoms_norm_by_element"] = (
+        {
+            z: max(
+                float(stats.get(z, stats.get(str(z), 0.0)))
+                for stats in magnetic_statistics
+            )
+            for z in cfg["atomic_numbers"]
+        }
+        if magnetic_statistics
+        else None
+    )
+
     cfg["atomic_energies"] = (
         [stats["atomic_energy"] for stats in cfg["statistics"]]
         if "energy" in cfg["target_property"]

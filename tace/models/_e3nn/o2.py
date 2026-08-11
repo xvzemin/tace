@@ -104,19 +104,18 @@ class _O3O2Layout(torch.nn.Module):
 class O2MagneticScatterLinear(torch.nn.Module):
     """Edge-aligned complete-O2 magnetic linear convolution.
 
-    The source node and source magnetic vector are concatenated in the local
-    representation. In ``uv`` mode, edge weights first apply a diagonal
-    channel-wise radial map and an independent internal ``uv`` linear mixes
-    channels. In ``uu`` mode, edge weights parameterize the external
+    The source node and source magnetic solid harmonics are concatenated in
+    the local representation. In ``uv`` mode, edge weights first apply a
+    diagonal channel-wise radial map and an independent internal ``uv`` linear
+    mixes channels. In ``uu`` mode, edge weights parameterize the external
     channel-wise linear directly.
     """
-
-    magnetic_irreps = o3.Irreps("1x1e")
 
     def __init__(
         self,
         irreps_node: o3.Irreps,
         irreps_out: o3.Irreps,
+        magnetic_irreps: o3.Irreps,
         *,
         num_channel: int,
         lmax: int,
@@ -128,6 +127,7 @@ class O2MagneticScatterLinear(torch.nn.Module):
             raise ValueError("path_mode must be 'uv' or 'uu'.")
         self.irreps_node = o3.Irreps(irreps_node)
         self.irreps_out = o3.Irreps(irreps_out)
+        self.magnetic_irreps = o3.Irreps(magnetic_irreps)
         self.num_channel = num_channel
         self.path_mode = path_mode
         if _common_multiplicity(self.irreps_node, "irreps_node") != num_channel:
@@ -180,7 +180,7 @@ class O2MagneticScatterLinear(torch.nn.Module):
     def forward(
         self,
         node_feats: torch.Tensor,
-        magnetic_moments: torch.Tensor,
+        magnetic_node_attrs: torch.Tensor,
         radial_weights: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: Union[torch.Tensor, None],
@@ -192,7 +192,7 @@ class O2MagneticScatterLinear(torch.nn.Module):
         source = edge_index[0]
         node_local = self.node_layout(node_feats[source], wigner)
         magnetic_local = self.magnetic_layout(
-            magnetic_moments[source].unsqueeze(-1),
+            magnetic_node_attrs[source].unsqueeze(-1),
             wigner,
         ).expand(-1, -1, self.num_channel)
         input_local = torch.cat((node_local, magnetic_local), dim=1)

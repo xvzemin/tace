@@ -111,8 +111,9 @@ Plugins
 
 TACE currently supports the following plugin:
 
-- **LES** (Latent Ewald Summation)
-
+- **TACE-LES** (Latent Ewald Summation)
+- **TACE-QEq** (Lagrangian)
+- **mTACE**    (Magnetic, Spin-Orbit Coupling)
 
 Interfaces
 ----------

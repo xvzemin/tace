@@ -192,6 +192,8 @@ def _compute_statistics(
     force_norm_by_element = [
         [_RunningMoments() for _ in atomic_numbers] for _ in range(num_fidelities)
     ]
+    magmoms_norm_by_element = torch.zeros(len(atomic_numbers), dtype=torch.float64)
+    has_noncollinear_magmoms = False
 
     atomic_energy_fn = None
     if "energy" in target_property:
@@ -241,6 +243,20 @@ def _compute_statistics(
                 neighbor_by_element[element_id].update(
                     neighbor_counts[element_idx == element_id]
                 )
+
+            initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
+            if initial_noncollinear_magmoms is not None:
+                has_noncollinear_magmoms = True
+                magnetic_norm = torch.linalg.vector_norm(
+                    initial_noncollinear_magmoms,
+                    dim=-1,
+                )
+                for element_id in element_idx.unique().tolist():
+                    element_mask = element_idx == element_id
+                    magmoms_norm_by_element[element_id] = torch.maximum(
+                        magmoms_norm_by_element[element_id],
+                        magnetic_norm[element_mask].max().cpu(),
+                    )
 
             if "energy" in target_property:
                 num_atoms_arange = torch.arange(
@@ -312,6 +328,14 @@ def _compute_statistics(
         z: float(neighbor_by_element[idx].mean_or_zeros().item())
         for idx, z in enumerate(atomic_numbers)
     }
+    if has_noncollinear_magmoms:
+        logging.info(
+            "Automatically computed magmoms_norm_by_element: %s",
+            {
+                z: float(magmoms_norm_by_element[idx])
+                for idx, z in enumerate(atomic_numbers)
+            },
+        )
 
     per_level_stats = []
     for level in range(num_fidelities):
@@ -325,6 +349,11 @@ def _compute_statistics(
             "avg_num_neighbors": avg_num_neighbors,
             "avg_neighbors_by_element": avg_neighbors_by_element,
         }
+        if has_noncollinear_magmoms:
+            stats["magmoms_norm_by_element"] = {
+                z: float(magmoms_norm_by_element[idx])
+                for idx, z in enumerate(atomic_numbers)
+            }
 
         if "energy" in target_property:
             energy_mean = float(energy_moments[level].mean_or_zeros().item())

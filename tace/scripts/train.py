@@ -18,6 +18,7 @@ from tace.dataset.quantity import (
     KEYS,
     KeySpecification,
     get_embedding_property,
+    get_need_property,
     get_target_property,
     update_keyspec_from_kwargs,
 )
@@ -112,6 +113,11 @@ def build(cfg: DictConfig):
     )
     target_property = get_target_property(cfg)
     embedding_property = get_embedding_property(cfg)
+    needs_noncollinear_magmoms = "initial_noncollinear_magmoms" in get_need_property(
+        target_property,
+        embedding_property,
+        training=True,
+    )
     userKeys = copy.deepcopy(KEYS)
     userKeys.update(cfg["dataset"].get("keys", {}))
     keyspec = KeySpecification()
@@ -132,14 +138,23 @@ def build(cfg: DictConfig):
                 with open(yaml_file, "r") as f:
                     statistics_data = yaml.safe_load(f)
                     statistics.append(statistics_data)
-            for idx, yaml_file in enumerate(statistics_yaml):
+            if needs_noncollinear_magmoms and any(
+                "magmoms_norm_by_element" not in stats for stats in statistics
+            ):
                 logging.info(
-                    "Using '%s' for fidelity %s",
-                    yaml_file,
-                    fidelity[idx]["name"],
+                    "Cached statistics do not contain magmoms_norm_by_element; "
+                    "recomputing statistics for the noncollinear magnetic input"
                 )
-            atomic_numbers = statistics[0]["atomic_numbers"]
-        else:
+                statistics = None
+            else:
+                for idx, yaml_file in enumerate(statistics_yaml):
+                    logging.info(
+                        "Using '%s' for fidelity %s",
+                        yaml_file,
+                        fidelity[idx]["name"],
+                    )
+                atomic_numbers = statistics[0]["atomic_numbers"]
+        if statistics is None:
             logging.info("Computing statistics information from scratch")
             element, threeAtomsList, atomic_energies = build_atomsList(
                 cfg, target_property, embedding_property, keyspec

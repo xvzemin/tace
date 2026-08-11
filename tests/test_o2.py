@@ -6,7 +6,9 @@ from e3nn import o3
 
 from tace.models import o2
 from tace.models._e3nn.inter import O2MagneticInteraction
+from tace.models.angular import SolidHarmonics
 from tace.models.legacy_so2 import WignerD
+from tace.models.mag import MagmomsNormalizer
 from tace.models.o2 import (
     Irrep,
     Irreps,
@@ -21,6 +23,7 @@ from tace.models.o2 import (
     tensor_product_irrep,
     tensor_product_irreps,
 )
+from tace.models.radial import MagneticChebyshevBasis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
@@ -519,22 +522,31 @@ def test_o2_linear_rejects_complex_input_and_weight():
         )
 
 
-def _build_o2_magnetic_interaction(monkeypatch, path_mode):
+def _build_o2_magnetic_interaction(
+    monkeypatch,
+    path_mode,
+    mag_Lmax=1,
+    angular_max=None,
+):
     monkeypatch.setattr(O2MagneticInteraction, "path_mode", path_mode)
+    angular_max = mag_Lmax if angular_max is None else angular_max
     module = O2MagneticInteraction(
         layer=0,
         num_layers=1,
         num_elements=2,
         avg_num_neighbors=4.0,
-        mmax=1,
-        Lmax=1,
-        lmax=1,
+        mmax=angular_max,
+        Lmax=angular_max,
+        lmax=angular_max,
+        mag_Lmax=mag_Lmax,
         correlation=[1],
         num_channel=2,
         use_temperature=False,
         edge_feats_channel=4,
         target_irreps=o3.Irreps("0e"),
         num_radial_basis=4,
+        num_mag_radial_basis=3,
+        magnetic_irreps=o3.Irreps.spherical_harmonics(mag_Lmax, p=1),
         radial_mlp=[8],
         radial_bias=True,
         irreps_in=o3.Irreps("2x0e + 2x1o"),
@@ -570,7 +582,7 @@ def _o2_magnetic_inputs(module):
         device=DEVICE,
         requires_grad=True,
     )
-    magnetic_moments = torch.randn(
+    initial_noncollinear_magmoms = torch.randn(
         num_nodes,
         3,
         dtype=DTYPE,
@@ -585,7 +597,7 @@ def _o2_magnetic_inputs(module):
         edge_vectors,
         edge_index,
         cutoff,
-        magnetic_moments,
+        initial_noncollinear_magmoms,
     )
 
 
@@ -597,15 +609,28 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
         edge_vectors,
         edge_index,
         cutoff,
-        magnetic_moments,
+        initial_noncollinear_magmoms,
     ) = inputs
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
-        wigner_module = WignerD(1, 1)
+        wigner_module = WignerD(module.mmax, module.Lmax)
     finally:
         torch.set_default_dtype(previous_dtype)
     wigner, wigner_inv = wigner_module.to(device=DEVICE).get_wigner(edge_vectors)
+    magnetic_radial_basis = MagneticChebyshevBasis(num_basis=3).to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )(
+        MagmomsNormalizer([4.0, 4.0], num_elements=2).to(device=DEVICE, dtype=DTYPE)(
+            initial_noncollinear_magmoms, node_attrs
+        )
+    )
+    magnetic_node_attrs = SolidHarmonics(
+        module.magnetic_irreps,
+        normalization="integral",
+        irreps_in=o3.Irreps("1e"),
+    ).to(device=DEVICE, dtype=DTYPE)(initial_noncollinear_magmoms)
     return module._compute_messages(
         node_feats,
         node_attrs,
@@ -613,9 +638,11 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
         None,
         edge_index,
         cutoff,
-        magnetic_moments,
+        initial_noncollinear_magmoms,
         wigner,
         wigner_inv,
+        magnetic_radial_basis,
+        magnetic_node_attrs,
     )
 
 
@@ -627,7 +654,7 @@ def test_o2_magnetic_interaction_uses_standard_linear_paths(
     torch.manual_seed(7)
     module = _build_o2_magnetic_interaction(monkeypatch, path_mode)
     assert module.rejector.path_mode == path_mode
-    assert module.edge_info.dims[0] == module.edge_feats_channel + 2 * 2 + 2
+    assert module.edge_info.dims[0] == module.edge_feats_channel + 2 * 3
     if path_mode == "uv":
         assert module.rejector.linear.internal_weights
         assert module.rejector.radial_linear.path_mode == "uu"
@@ -646,14 +673,16 @@ def test_o2_magnetic_interaction_uses_standard_linear_paths(
 
 
 @pytest.mark.parametrize("path_mode", ["uv", "uu"])
+@pytest.mark.parametrize("mag_Lmax", [1, 2])
 @pytest.mark.parametrize("improper", [False, True])
 def test_o2_magnetic_interaction_is_globally_o3_equivariant(
     path_mode,
+    mag_Lmax,
     improper,
     monkeypatch,
 ):
     torch.manual_seed(8)
-    module = _build_o2_magnetic_interaction(monkeypatch, path_mode)
+    module = _build_o2_magnetic_interaction(monkeypatch, path_mode, mag_Lmax)
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
 
@@ -688,3 +717,25 @@ def test_o2_magnetic_interaction_is_globally_o3_equivariant(
         atol=3.0e-10,
         rtol=3.0e-10,
     )
+
+
+def test_o2_magnetic_interaction_restricts_all_magnetic_degrees(monkeypatch):
+    module = _build_o2_magnetic_interaction(monkeypatch, "uu", mag_Lmax=2)
+    assert module.magnetic_irreps == o3.Irreps("0e + 1e + 2e")
+    assert module.rejector.magnetic_layout.local_irreps == o2.Irreps(
+        "0e + 0o + 1m + 0e + 1m + 2m"
+    )
+
+
+@pytest.mark.parametrize("mag_Lmax", [0, 2])
+def test_o2_magnetic_interaction_validates_mag_Lmax(mag_Lmax, monkeypatch):
+    with pytest.raises(
+        ValueError,
+        match="mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax",
+    ):
+        _build_o2_magnetic_interaction(
+            monkeypatch,
+            "uu",
+            mag_Lmax=mag_Lmax,
+            angular_max=1,
+        )

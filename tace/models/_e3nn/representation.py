@@ -11,11 +11,12 @@ import torch
 from e3nn import o3
 
 from ...utils.env import get_tace_use_dens
-from ..angular import SphericalHarmonics
+from ..angular import SolidHarmonics, SphericalHarmonics
 from ..layout import LayoutTransform
 from ..legacy_so2 import WignerD
 from ..linear import e3nnLinear
-from ..radial import RadialBasis
+from ..mag import MagmomsNormalizer
+from ..radial import MagneticChebyshevBasis, RadialBasis
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import INTERACTION  # , SO2EdgeInteraction
 from .layer_norm import get_normalization_layer
@@ -31,9 +32,11 @@ class Representation(torch.nn.Module):
         atomic_numbers: List[int],
         cutoff: float,
         avg_num_neighbors: float,
+        magmoms_norm_by_element,
         mmax: int,
         Lmax: int,
         lmax: int,
+        mag_Lmax: int,
         num_channel: int,
         target_irreps: o3.Irreps,
         node_embedding: Dict,
@@ -92,6 +95,31 @@ class Representation(torch.nn.Module):
             any(t != "so2" for t in atomic_basis["type"])
             or node_embedding["type"] == "tensor"
         )
+        self.use_magnetic_radial_basis = any(
+            interaction in {"o3_w6j_mag", "o2_mag"}
+            for interaction in atomic_basis["type"]
+        )
+        if self.use_magnetic_radial_basis:
+            self.magmom_normalizer = MagmomsNormalizer(
+                magmoms_norm_by_element,
+                atomic_numbers=atomic_numbers,
+                num_elements=self.num_elements,
+            )
+            self.magnetic_radial_basis = MagneticChebyshevBasis(
+                num_basis=radial_basis["num_mag_radial_basis"],
+                include_constant=False,
+            )
+        self.use_magnetic_node_attrs = any(
+            interaction in {"o3_w6j_mag", "o2_mag"}
+            for interaction in atomic_basis["type"]
+        )
+        self.magnetic_irreps = o3.Irreps.spherical_harmonics(mag_Lmax, p=1)
+        if self.use_magnetic_node_attrs:
+            self.magnetic_angular_basis = SolidHarmonics(
+                self.magnetic_irreps,
+                normalization="integral",
+                irreps_in=o3.Irreps("1e"),
+            )
         if self.use_so2:
             assert Lmax == lmax, "SO2Interaciton require Lmax == lmax in TACE"
             self.so2_angular_basis = WignerD(mmax, Lmax)
@@ -156,9 +184,11 @@ class Representation(torch.nn.Module):
             "mmax": mmax,
             "Lmax": Lmax,
             "lmax": lmax,
+            "mag_Lmax": mag_Lmax,
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "num_radial_basis": radial_basis["num_radial_basis"],
+            "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
             "l1l2": atomic_basis["l1l2"],
@@ -183,6 +213,7 @@ class Representation(torch.nn.Module):
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
             "edge_ace_hidden": atomic_basis["edge_ace_hidden"],
+            "magnetic_irreps": self.magnetic_irreps,
         }
 
         self.interactions = torch.nn.ModuleList()
@@ -324,6 +355,24 @@ class Representation(torch.nn.Module):
                 self._forward_dens_forces_encoding(data)
             )
 
+        initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
+        magnetic_radial_basis = None
+        magnetic_node_attrs = None
+        if self.use_magnetic_radial_basis:
+            if initial_noncollinear_magmoms is None:
+                raise ValueError(
+                    "A magnetic interaction requires initial_noncollinear_magmoms"
+                )
+            scaled_magnetic_norm = self.magmom_normalizer(
+                initial_noncollinear_magmoms,
+                data["node_attrs"],
+            )
+            magnetic_radial_basis = self.magnetic_radial_basis(scaled_magnetic_norm)
+
+        if self.use_magnetic_node_attrs:
+            magnetic_node_attrs = self.magnetic_angular_basis(
+                initial_noncollinear_magmoms
+            )
         # === representation Learning ===
         prev_feats = []
         for idx, (edge_update, inter, prod) in enumerate(
@@ -353,9 +402,9 @@ class Representation(torch.nn.Module):
                 wigner,
                 wigner_inv,
                 data["batch"],
-                data["initial_noncollinear_magmoms"]
-                if "initial_noncollinear_magmoms" in data
-                else None,
+                initial_noncollinear_magmoms,
+                magnetic_radial_basis,
+                magnetic_node_attrs,
             )
             if graph.lmp and idx == 0:
                 node_attrs_slice = node_attrs_slice[: graph.lmp_natoms[0]]

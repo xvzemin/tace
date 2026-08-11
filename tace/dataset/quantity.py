@@ -857,6 +857,14 @@ def get_embedding_property(cfg: Dict) -> List[str]:
                 f"Universal_embedding allowed property are {SUPPORT_EMBEDDING_PROPERTY}"
             )
             embedding_property.append(p)
+    atomic_basis_type = cfg["model"]["config"].get("atomic_basis", {}).get("type")
+    if isinstance(atomic_basis_type, str):
+        atomic_basis_type = [atomic_basis_type]
+    if atomic_basis_type is not None and any(
+        interaction in {"o3_w6j_mag", "o2_mag"} for interaction in atomic_basis_type
+    ):
+        if "initial_noncollinear_magmoms" not in embedding_property:
+            embedding_property.append("initial_noncollinear_magmoms")
     return embedding_property
 
 

@@ -2,13 +2,16 @@ import pytest
 import torch
 from e3nn import o3
 
-from tace.models._e3nn.fused import O3ScatterTensorProduct
+from tace.models._e3nn.fused import O3ScatterTensorProduct, uvuTensorProduct
 from tace.models._e3nn.inter import O3Wigner6jMagneticInteraction
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
     sympy_wigner_6j,
     wigner_6j,
 )
+from tace.models.angular import SolidHarmonics
+from tace.models.mag import MagmomsNormalizer
+from tace.models.radial import MagneticChebyshevBasis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -18,18 +21,89 @@ def test_standard_wigner_6j_symbol():
     assert wigner_6j(1, 1, 1, 1, 1, 1) == pytest.approx(1.0 / 2.0)
 
 
-def _build_tensor_product(*, magnetic_weight_level="edge"):
-    irreps_node = o3.Irreps("2x0e + 2x1o + 2x1e")
-    irreps_edge = o3.Irreps.spherical_harmonics(2, p=-1)
+@pytest.mark.parametrize("shared_weights", [False, True])
+def test_uvu_tensor_product_oeq_matches_e3nn(shared_weights, monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("OEQ requires CUDA")
+    pytest.importorskip("openequivariance")
+    torch.manual_seed(0)
+    torch.set_default_dtype(torch.float64)
+
+    irreps_in1 = o3.Irreps("2x0e + 2x1o")
+    irreps_in2 = o3.Irreps("1x1e")
+    irreps_out = o3.Irreps("2x1e + 2x0o + 2x1o + 2x2o")
+    instructions = [
+        (0, 0, 0, "uvu", True, 1.0),
+        (1, 0, 1, "uvu", True, 1.0),
+        (1, 0, 2, "uvu", True, 1.0),
+        (1, 0, 3, "uvu", True, 1.0),
+    ]
+
+    monkeypatch.setenv("TACE_USE_OEQ", "0")
+    reference = uvuTensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        shared_weights=shared_weights,
+    ).to(DEVICE)
+    monkeypatch.setenv("TACE_USE_OEQ", "1")
+    actual = uvuTensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        shared_weights=shared_weights,
+    ).to(DEVICE)
+    assert actual.use_oeq
+    assert hasattr(actual, "fused_tp")
+    assert not hasattr(reference, "fused_tp")
+
+    num_nodes = 7
+    x = torch.randn(num_nodes, irreps_in1.dim, device=DEVICE, requires_grad=True)
+    y = torch.randn(num_nodes, irreps_in2.dim, device=DEVICE, requires_grad=True)
+    weight_shape = (
+        (reference.weight_numel,)
+        if shared_weights
+        else (num_nodes, reference.weight_numel)
+    )
+    weights = torch.randn(*weight_shape, device=DEVICE, requires_grad=True)
+
+    expected = reference(x, y, weights)
+    observed = actual(x, y, weights)
+    torch.testing.assert_close(observed, expected, atol=2.0e-12, rtol=2.0e-12)
+
+    grad_output = torch.randn_like(expected)
+    expected_grads = torch.autograd.grad(
+        (expected * grad_output).sum(), (x, y, weights), retain_graph=True
+    )
+    observed_grads = torch.autograd.grad(
+        (observed * grad_output).sum(), (x, y, weights)
+    )
+    for observed_grad, expected_grad in zip(observed_grads, expected_grads):
+        torch.testing.assert_close(
+            observed_grad,
+            expected_grad,
+            atol=3.0e-12,
+            rtol=3.0e-12,
+        )
+
+
+def _build_tensor_product(*, weight_level="edge", register_reference=True):
+    irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x1e")
+    irreps_edge_attrs = o3.Irreps.spherical_harmonics(2, p=-1)
     irreps_out = o3.Irreps("2x0e + 2x0o + 2x1e + 2x1o + 2x2e + 2x2o")
     module = O3Wigner6jScatterTensorProduct(
-        irreps_node,
-        irreps_edge,
+        irreps_node_feats,
+        irreps_edge_attrs,
         irreps_out,
-        magnetic_irreps=o3.Irreps("1x1e"),
-        magnetic_weight_level=magnetic_weight_level,
+        extra_irreps_node_attrs=o3.Irreps("0o + 0e + 1o + 1e + 2o + 2e"),
+        weight_level=weight_level,
+        register_reference=register_reference,
     )
-    assert isinstance(module.recoupled_pos_tp, O3ScatterTensorProduct)
+    assert isinstance(module.recoupled_node_node_tp, uvuTensorProduct)
+    assert module.recoupled_node_node_tp.shared_weights == (weight_level == "edge")
+    assert isinstance(module.recoupled_node_edge_tp, O3ScatterTensorProduct)
     return module.to(DEVICE)
 
 
@@ -44,54 +118,52 @@ def _random_inputs(module, *, requires_grad=False):
     )
     node_feats = torch.randn(
         num_nodes,
-        module.irreps_node.dim,
+        module.irreps_node_feats.dim,
         device=DEVICE,
         requires_grad=requires_grad,
     )
     edge_attrs = torch.randn(
         num_edges,
-        module.irreps_edge.dim,
+        module.irreps_edge_attrs.dim,
         device=DEVICE,
         requires_grad=requires_grad,
     )
-    magnetic_moments = torch.randn(
+    extra_node_attrs = torch.randn(
         num_nodes,
-        3,
+        module.extra_irreps_node_attrs.dim,
         device=DEVICE,
         requires_grad=requires_grad,
     )
-    radial_weights = torch.randn(
+    edge_weights = torch.randn(
         num_edges,
-        module.radial_weight_numel,
+        module.edge_weight_numel,
         device=DEVICE,
         requires_grad=requires_grad,
     )
-    num_magnetic_weights = (
-        num_edges if module.magnetic_weight_level == "edge" else num_nodes
-    )
-    magnetic_weights = torch.randn(
-        num_magnetic_weights,
-        module.magnetic_weight_numel,
+    num_extra_weights = num_edges if module.weight_level == "edge" else num_nodes
+    extra_weights = torch.randn(
+        num_extra_weights,
+        module.extra_weight_numel,
         device=DEVICE,
         requires_grad=requires_grad,
     )
     return (
         node_feats,
         edge_attrs,
-        magnetic_moments,
-        radial_weights,
-        magnetic_weights,
+        extra_node_attrs,
+        edge_weights,
+        extra_weights,
         edge_index,
     )
 
 
-@pytest.mark.parametrize("magnetic_weight_level", ["edge", "node"])
-def test_wigner6j_recoupling_matches_position_first_and_gradients(
-    magnetic_weight_level,
+@pytest.mark.parametrize("weight_level", ["edge", "node"])
+def test_wigner6j_recoupling_matches_reference_and_gradients(
+    weight_level,
 ):
     torch.manual_seed(0)
     torch.set_default_dtype(torch.float64)
-    module = _build_tensor_product(magnetic_weight_level=magnetic_weight_level)
+    module = _build_tensor_product(weight_level=weight_level)
     inputs = _random_inputs(module, requires_grad=True)
 
     recoupled = module(*inputs)
@@ -118,33 +190,31 @@ def test_wigner6j_recoupling_matches_position_first_and_gradients(
         )
 
 
-@pytest.mark.parametrize("magnetic_weight_level", ["edge", "node"])
+@pytest.mark.parametrize("weight_level", ["edge", "node"])
 @pytest.mark.parametrize("improper", [False, True])
-def test_wigner6j_magnetic_tensor_product_is_o3_equivariant(
+def test_wigner6j_tensor_product_is_o3_equivariant(
     improper,
-    magnetic_weight_level,
+    weight_level,
 ):
     torch.manual_seed(1)
     torch.set_default_dtype(torch.float64)
-    module = _build_tensor_product(magnetic_weight_level=magnetic_weight_level)
+    module = _build_tensor_product(weight_level=weight_level)
     inputs = _random_inputs(module)
-    node_feats, edge_attrs, magnetic_moments, radial_weights, magnetic_weights, _ = (
-        inputs
-    )
+    node_feats, edge_attrs, extra_node_attrs, edge_weights, extra_weights, _ = inputs
 
     rotation = o3.rand_matrix(dtype=torch.float64)
     if improper:
         rotation = -rotation
-    node_rotation = module.irreps_node.D_from_matrix(rotation).to(DEVICE)
-    edge_rotation = module.irreps_edge.D_from_matrix(rotation).to(DEVICE)
-    magnetic_rotation = module.magnetic_irreps.D_from_matrix(rotation).to(DEVICE)
+    node_rotation = module.irreps_node_feats.D_from_matrix(rotation).to(DEVICE)
+    edge_rotation = module.irreps_edge_attrs.D_from_matrix(rotation).to(DEVICE)
+    extra_rotation = module.extra_irreps_node_attrs.D_from_matrix(rotation).to(DEVICE)
     output_rotation = module.irreps_out.D_from_matrix(rotation).to(DEVICE)
     rotated_inputs = (
         node_feats @ node_rotation.T,
         edge_attrs @ edge_rotation.T,
-        magnetic_moments @ magnetic_rotation.T,
-        radial_weights,
-        magnetic_weights,
+        extra_node_attrs @ extra_rotation.T,
+        edge_weights,
+        extra_weights,
         inputs[-1],
     )
 
@@ -159,14 +229,38 @@ def test_wigner6j_magnetic_tensor_product_is_o3_equivariant(
     )
 
 
-def test_wigner6j_uses_edge_magnetic_weights_by_default():
-    module = _build_tensor_product()
-    assert module.magnetic_weight_level == "edge"
+def test_wigner6j_requires_extra_irreps_node_attrs():
+    with pytest.raises(TypeError, match="extra_irreps_node_attrs"):
+        O3Wigner6jScatterTensorProduct(
+            o3.Irreps("1x0e"),
+            o3.Irreps("1x0e"),
+            o3.Irreps("1x0e"),
+            weight_level="edge",
+        )
 
 
-def test_wigner6j_rejects_unknown_magnetic_weight_level():
-    with pytest.raises(ValueError, match="magnetic_weight_level"):
-        _build_tensor_product(magnetic_weight_level="graph")
+def test_wigner6j_requires_weight_level():
+    with pytest.raises(TypeError, match="weight_level"):
+        O3Wigner6jScatterTensorProduct(
+            o3.Irreps("1x0e"),
+            o3.Irreps("1x0e"),
+            o3.Irreps("1x0e"),
+            o3.Irreps("1x0e"),
+        )
+
+
+def test_wigner6j_does_not_register_reference_by_default():
+    module = _build_tensor_product(register_reference=False)
+    assert not hasattr(module, "reference_node_edge_tp")
+    assert not hasattr(module, "reference_edge_edge_tp")
+    assert not any(name.startswith("reference_") for name in module.state_dict())
+    with pytest.raises(RuntimeError, match="register_reference=True"):
+        module.forward_reference(*_random_inputs(module))
+
+
+def test_wigner6j_rejects_unknown_weight_level():
+    with pytest.raises(ValueError, match="weight_level"):
+        _build_tensor_product(weight_level="graph")
 
 
 def _build_interaction():
@@ -184,6 +278,8 @@ def _build_interaction():
         edge_feats_channel=4,
         target_irreps=o3.Irreps("0e"),
         num_radial_basis=4,
+        num_mag_radial_basis=3,
+        magnetic_irreps=o3.Irreps("1e"),
         radial_mlp=[8],
         radial_bias=True,
         irreps_in=o3.Irreps("2x0e + 2x1o"),
@@ -200,12 +296,12 @@ def _build_interaction():
     "options",
     [
         {},
-        {"magnetic_weight_level": "node"},
-        {"use_magnetic_edge_features": False},
+        {"weight_level": "node"},
+        {"use_magnetic_edge_feats": False},
         {"use_message_magnetic_tensor_product": False},
         {
             "use_message_magnetic_tensor_product": False,
-            "use_magnetic_edge_features": False,
+            "use_magnetic_edge_feats": False,
         },
     ],
 )
@@ -214,6 +310,11 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
     for name, value in options.items():
         monkeypatch.setattr(O3Wigner6jMagneticInteraction, name, value)
     module = _build_interaction()
+    assert not hasattr(module, "magnetic_angular_basis")
+    expected_edge_input = module.edge_feats_channel
+    if module.use_magnetic_edge_feats:
+        expected_edge_input += module.num_mag_radial_basis
+    assert module.edge_info.dims[0] == expected_edge_input
     num_nodes = 5
     num_edges = 9
     edge_index = torch.stack(
@@ -239,7 +340,7 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
         device=DEVICE,
         requires_grad=True,
     )
-    magnetic_moments = torch.randn(
+    initial_noncollinear_magmoms = torch.randn(
         num_nodes,
         3,
         device=DEVICE,
@@ -247,9 +348,24 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
     )
     if (
         not module.use_message_magnetic_tensor_product
-        and not module.use_magnetic_edge_features
+        and not module.use_magnetic_edge_feats
     ):
-        magnetic_moments = None
+        initial_noncollinear_magmoms = None
+        magnetic_radial_basis = None
+    else:
+        magnetic_radial_basis = MagneticChebyshevBasis(num_basis=3).to(DEVICE)(
+            MagmomsNormalizer([4.0, 4.0], num_elements=2).to(DEVICE)(
+                initial_noncollinear_magmoms,
+                node_attrs,
+            )
+        )
+    magnetic_node_attrs = None
+    if module.use_message_magnetic_tensor_product:
+        magnetic_node_attrs = SolidHarmonics(
+            module.magnetic_irreps,
+            normalization="component",
+            irreps_in=o3.Irreps("1e"),
+        ).to(DEVICE)(initial_noncollinear_magmoms)
 
     output = module._compute_messages(
         node_feats,
@@ -258,7 +374,9 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
         edge_attrs,
         edge_index,
         torch.rand(num_edges, 1, device=DEVICE),
-        magnetic_moments,
+        initial_noncollinear_magmoms,
+        magnetic_radial_basis=magnetic_radial_basis,
+        magnetic_node_attrs=magnetic_node_attrs,
     )
     assert output.shape == (num_nodes, module.rejector.irreps_out.dim)
     output.square().sum().backward()

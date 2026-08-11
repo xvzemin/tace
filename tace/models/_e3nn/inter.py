@@ -146,9 +146,11 @@ class CgtpInteraction(Interaction):
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
-        magnetic_moments: Union[torch.Tensor, None],
+        initial_noncollinear_magmoms: Union[torch.Tensor, None],
         wigner: Union[torch.Tensor, None] = None,
         wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
         if cutoff is not None:
@@ -169,7 +171,9 @@ class CgtpInteraction(Interaction):
         wigner: Union[torch.Tensor, None],
         wigner_inv: Union[torch.Tensor, None],
         batch,
-        magnetic_moments: Union[torch.Tensor, None] = None,
+        initial_noncollinear_magmoms: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ):
 
         lmp_data = graph.lmp_data
@@ -208,9 +212,11 @@ class CgtpInteraction(Interaction):
                     edge_attrs,
                     edge_index,
                     cutoff,
-                    magnetic_moments,
+                    initial_noncollinear_magmoms,
                     wigner,
                     wigner_inv,
+                    magnetic_radial_basis,
+                    magnetic_node_attrs,
                 ),
                 nlocal,
             )
@@ -402,7 +408,9 @@ class uuSO2Interaction(Interaction):
         wigner: Union[torch.Tensor, None],
         wigner_inv: Union[torch.Tensor, None],
         batch,
-        magnetic_moments: Union[torch.Tensor, None] = None,
+        initial_noncollinear_magmoms: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ):
 
         lmp_data = graph.lmp_data
@@ -642,7 +650,9 @@ class uvSO2Interaction(Interaction):
         wigner: Union[torch.Tensor, None],
         wigner_inv: Union[torch.Tensor, None],
         batch,
-        magnetic_moments: Union[torch.Tensor, None] = None,
+        initial_noncollinear_magmoms: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ):
 
         lmp_data = graph.lmp_data
@@ -712,24 +722,26 @@ class uvSO2Interaction(Interaction):
 class O3Wigner6jMagneticInteraction(CgtpInteraction):
     """O(3) magnetic interaction evaluated in a Wigner-6j recoupled tree.
 
-    Positional and magnetic path weights are edge dependent, and
-    both weight networks receive the source atom's element and magnetic moment
-    magnitude in addition to the edge features.
+    Positional and magnetic path weights are edge dependent, and both weight
+    networks receive the source atom's magnetic radial basis in addition to the
+    edge features.
 
     The tensor-product order is node @ magnetic first and spherical harmonic
     second, while remaining exactly equivalent to
     (node @ spherical harmonic) @ magnetic.
     """
 
-    # Any multiplicity-one subset of 0e + 1e + 2e + ... is supported.
-    magnetic_irreps = o3.Irreps("1x1e")
-    # magnetic_weight_level = "edge"
-    magnetic_weight_level = "node"
-    use_magnetic_edge_features = True
+    weight_level = "edge"
+    use_magnetic_edge_feats = True
     use_message_magnetic_tensor_product = True
 
     def _setup(self) -> None:
-        self.magnetic_irreps = o3.Irreps(self.magnetic_irreps)
+        if self.magnetic_irreps is None:
+            raise ValueError("o3_w6j_mag requires magnetic_irreps.")
+        if not 1 <= self.mag_Lmax <= self.Lmax:
+            raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
+        if self.magnetic_irreps.lmax != self.mag_Lmax:
+            raise ValueError("magnetic_irreps must end at mag_Lmax.")
         if any(multiplicity != 1 for multiplicity, _ in self.magnetic_irreps):
             raise ValueError("magnetic_irreps solid harmonics require multiplicity one")
         if any(irrep.p != 1 for _, irrep in self.magnetic_irreps):
@@ -738,10 +750,10 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
             raise ValueError(
                 "wigner6j_magnetic_conv requires parity: true for full O(3)"
             )
-        if self.magnetic_weight_level not in {"edge", "node"}:
+        if self.weight_level not in {"edge", "node"}:
             raise ValueError(
-                "magnetic_weight_level must be either 'edge' or 'node', "
-                f"got {self.magnetic_weight_level!r}"
+                "weight_level must be either 'edge' or 'node', "
+                f"got {self.weight_level!r}"
             )
 
         if self.use_message_magnetic_tensor_product:
@@ -777,10 +789,10 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
 
         super()._setup()
 
-        magnetic_invariant_dim = self.num_elements + 1
+        magnetic_radial_dim = self.num_mag_radial_basis
         edge_weight_input_dim = self.edge_feats_channel
-        if self.use_magnetic_edge_features:
-            edge_weight_input_dim += magnetic_invariant_dim
+        if self.use_magnetic_edge_feats:
+            edge_weight_input_dim += magnetic_radial_dim
 
         if not self.use_message_magnetic_tensor_product:
             self.edge_info = MLP(
@@ -802,20 +814,20 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
         self.edge_info = MLP(
             [edge_weight_input_dim]
             + self.radial_mlp
-            + [self.rejector.radial_weight_numel],
+            + [self.rejector.edge_weight_numel],
             bias=self.radial_bias,
             layer_norm=self.radial_layer_norm,
             act="silu",
         )
         magnetic_weight_input_dim = (
             edge_weight_input_dim
-            if self.magnetic_weight_level == "edge"
-            else magnetic_invariant_dim
+            if self.weight_level == "edge"
+            else magnetic_radial_dim
         )
         self.magnetic_info = MLP(
             [magnetic_weight_input_dim]
             + self.radial_mlp
-            + [self.rejector.magnetic_weight_numel],
+            + [self.rejector.extra_weight_numel],
             bias=self.radial_bias,
             # layer_norm=self.radial_layer_norm, # TODO
             act="silu",
@@ -826,16 +838,16 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
             self.irreps_in,
             self.irreps_sh,
             self.irreps_out,
-            magnetic_irreps=self.magnetic_irreps,
+            extra_irreps_node_attrs=self.magnetic_irreps,
             l1l2=self.l1l2,
-            magnetic_weight_level=self.magnetic_weight_level,
+            weight_level=self.weight_level,
         )
 
     def _apply_magnetic_rejector(
         self,
         node_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
-        magnetic_moments: torch.Tensor,
+        magnetic_node_attrs: torch.Tensor,
         radial_weights: torch.Tensor,
         magnetic_weights: torch.Tensor,
         edge_index: torch.Tensor,
@@ -845,7 +857,7 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
         return self.rejector(
             node_feats,
             edge_attrs,
-            magnetic_moments,
+            magnetic_node_attrs,
             radial_weights,
             magnetic_weights,
             edge_index,
@@ -859,36 +871,32 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
-        magnetic_moments: Union[torch.Tensor, None],
+        initial_noncollinear_magmoms: Union[torch.Tensor, None],
         wigner: Union[torch.Tensor, None] = None,
         wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         magnetic_input_required = (
-            self.use_magnetic_edge_features or self.use_message_magnetic_tensor_product
+            self.use_magnetic_edge_feats or self.use_message_magnetic_tensor_product
         )
-        if magnetic_input_required and magnetic_moments is None:
+        if magnetic_input_required and magnetic_radial_basis is None:
             raise ValueError(
-                f"{type(self).__name__} requires initial_noncollinear_magmoms"
+                f"{type(self).__name__} requires precomputed magnetic_radial_basis"
+            )
+        if self.use_message_magnetic_tensor_product and magnetic_node_attrs is None:
+            raise ValueError(
+                f"{type(self).__name__} requires precomputed magnetic_node_attrs"
             )
 
-        magnetic_invariants = None
-        if magnetic_moments is not None:
-            magnetic_invariants = torch.cat(
-                [
-                    node_attrs_total,
-                    magnetic_moments.norm(dim=-1, keepdim=True),
-                ],
+        magnetic_edge_feats = edge_feats
+        if self.use_magnetic_edge_feats:
+            magnetic_edge_feats = torch.cat(
+                [edge_feats, magnetic_radial_basis[edge_index[0]]],
                 dim=-1,
             )
 
-        edge_weight_features = edge_feats
-        if self.use_magnetic_edge_features:
-            edge_weight_features = torch.cat(
-                [edge_feats, magnetic_invariants[edge_index[0]]],
-                dim=-1,
-            )
-
-        radial_weights = self.edge_info(edge_weight_features)
+        radial_weights = self.edge_info(magnetic_edge_feats)
         if cutoff is not None:
             radial_weights = radial_weights * cutoff
 
@@ -900,21 +908,15 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
                 edge_index,
             )
 
-        if self.magnetic_weight_level == "edge":
-            magnetic_weight_features = edge_weight_features
+        if self.weight_level == "edge":
+            magnetic_weights = self.magnetic_info(magnetic_edge_feats)
         else:
-            magnetic_weight_features = magnetic_invariants
-        magnetic_weights = self.magnetic_info(magnetic_weight_features)
-        magnetic_features = o3.spherical_harmonics( 
-            self.magnetic_irreps,
-            magnetic_moments,
-            normalize=False, # solid harmonics here
-            normalization="norm",
-        )
+            magnetic_node_feats = self.magnetic_info(magnetic_radial_basis)
+            magnetic_weights = magnetic_node_feats
         return self._apply_magnetic_rejector(
             node_feats,
             edge_attrs,
-            magnetic_features,
+            magnetic_node_attrs,
             radial_weights,
             magnetic_weights,
             edge_index,
@@ -929,17 +931,24 @@ class O2MagneticInteraction(CgtpInteraction):
     path_mode = "uu"
 
     def _setup(self) -> None:
-        if self.mmax != self.lmax:
-            raise ValueError("o2_mag requires mmax == lmax.")
+        if not self.mmax == self.Lmax == self.lmax:
+            raise ValueError("o2_mag requires mmax == Lmax == lmax.")
         if not self.parity:
             raise ValueError("o2_mag requires parity: true for full O(3)")
         if self.path_mode not in {"uv", "uu"}:
             raise ValueError("O2 magnetic path_mode must be 'uv' or 'uu'.")
+        if self.magnetic_irreps is None:
+            raise ValueError("o2_mag requires magnetic_irreps.")
+        if not 1 <= self.mag_Lmax <= self.Lmax:
+            raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
+        if self.magnetic_irreps.lmax != self.mag_Lmax:
+            raise ValueError("magnetic_irreps must end at mag_Lmax.")
 
         super()._setup()
         self.rejector = O2MagneticScatterLinear(
             self.irreps_in,
             self.irreps_out,
+            self.magnetic_irreps,
             num_channel=self.num_channel,
             lmax=self.lmax,
             path_mode=self.path_mode,
@@ -949,7 +958,7 @@ class O2MagneticInteraction(CgtpInteraction):
             self.linear_down.irreps_out,
             bias=self.use_bias,
         )
-        edge_weight_input_dim = self.edge_feats_channel + 2 * self.num_elements + 2
+        edge_weight_input_dim = self.edge_feats_channel + 2 * self.num_mag_radial_basis
         self.edge_info = MLP(
             [edge_weight_input_dim] + self.radial_mlp + [self.rejector.weight_numel],
             bias=self.radial_bias,
@@ -965,33 +974,40 @@ class O2MagneticInteraction(CgtpInteraction):
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
-        magnetic_moments: Union[torch.Tensor, None],
+        initial_noncollinear_magmoms: Union[torch.Tensor, None],
         wigner: Union[torch.Tensor, None] = None,
         wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
-        if magnetic_moments is None:
+        if initial_noncollinear_magmoms is None:
             raise ValueError(
                 "O2MagneticInteraction requires initial_noncollinear_magmoms"
             )
+        if magnetic_radial_basis is None:
+            raise ValueError(
+                "O2MagneticInteraction requires precomputed magnetic_radial_basis"
+            )
+        if magnetic_node_attrs is None:
+            raise ValueError(
+                "O2MagneticInteraction requires precomputed magnetic_node_attrs"
+            )
 
         source, target = edge_index
-        magnetic_norm = magnetic_moments.norm(dim=-1, keepdim=True)
-        edge_weight_features = torch.cat(
+        magnetic_edge_feats = torch.cat(
             (
                 edge_feats,
-                node_attrs_total[source],
-                node_attrs_total[target],
-                magnetic_norm[source],
-                magnetic_norm[target],
+                magnetic_radial_basis[source],
+                magnetic_radial_basis[target],
             ),
             dim=-1,
         )
-        radial_weights = self.edge_info(edge_weight_features)
+        radial_weights = self.edge_info(magnetic_edge_feats)
         if cutoff is not None:
             radial_weights = radial_weights * cutoff
         return self.rejector(
             node_feats,
-            magnetic_moments,
+            magnetic_node_attrs,
             radial_weights,
             edge_index,
             wigner,

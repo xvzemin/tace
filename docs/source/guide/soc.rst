@@ -1,4 +1,4 @@
-Spin--Orbit Coupling and Non-Collinear Magnetism
+Spin-Orbit Coupling and Non-Collinear Magnetism
 ================================================
 
 Magnetic TACE provides three ways to incorporate non-collinear magnetic
@@ -30,6 +30,7 @@ initial moments with ``initial_noncollinear_magmoms_key``:
    model:
      config:
        parity: true
+       mag_Lmax: 1
 
 If non-collinear magnetic forces are trained, include
 ``noncollinear_magnetic_forces`` in ``loss.loss_property`` together with its
@@ -62,6 +63,12 @@ The construction is described in the
 ``normalizer`` controls the fixed scale applied to the input magnetic moments.
 This method is the current recommendation.
 
+Whenever noncollinear magnetic moments are model inputs, TACE automatically
+computes the element-wise ``max(|m|)`` from the training set and stores it as
+``magmoms_norm_by_element`` in ``statistics_*.yaml``. Inside the model, the
+magnetic-moment normalizer uses ``1.2 * magmoms_norm_by_element + 0.1`` as the
+effective scale like mMACE.
+
 Wigner-6j recoupling (experimental)
 -----------------------------------
 
@@ -75,6 +82,10 @@ universal magnetic embedding disabled when testing this method in isolation:
    model:
      config:
        parity: true
+       mag_Lmax: 1
+
+       radial_basis:
+         num_mag_radial_basis: 8
 
        atomic_basis:
          type: o3_w6j_mag
@@ -85,6 +96,10 @@ universal magnetic embedding disabled when testing this method in isolation:
 
 This path is experimental; its detailed
 design and recommended hyperparameters will accompany the formal paper.
+
+``mag_Lmax`` selects ``0e + 1e + ... + mag_Lmax e`` solid harmonics of the
+axial magnetic-moment input. Its default value is ``1`` and it must satisfy
+``1 <= mag_Lmax <= Lmax``.
 
 Local O(2) frame (experimental)
 -------------------------------
@@ -103,6 +118,10 @@ magnetic interaction, and then returns the result to the global
        mmax: 3
        Lmax: 3
        lmax: 3
+       mag_Lmax: 1
+
+       radial_basis:
+         num_mag_radial_basis: 8
 
        atomic_basis:
          type: o2_mag
@@ -113,6 +132,9 @@ magnetic interaction, and then returns the result to the global
 
 This path is also experimental; its theoretical and implementation
 details will be documented with the formal paper.
+For ``o2_mag``, the existing ``mmax = Lmax = lmax`` requirement ensures that
+every restricted ``0e``, ``0o``, and positive-order ``m`` block through
+``mag_Lmax`` is retained in the local frame.
 
 Choosing a method
 -----------------

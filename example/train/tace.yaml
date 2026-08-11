@@ -302,13 +302,15 @@ model:
     mmax: 3 # Truncation for SO2 irreps, 3 is recommended.
     Lmax: 2 # Truncation for node, 2 is recommended.
     lmax: 3 # Truncation for edge, 3 is recommended.
+    mag_Lmax: 1 # Maximum degree of magnetic solid harmonics, in [1, Lmax].
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
     num_channel: 48 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
     parity: false # (bool) in test, not for users, always false
 
     radial_basis:
       radial_basis: j0   # [j0, jn, gaussian]
-      num_radial_basis: 8 # (int) 8-10 for j0 and jn, 8-64 for gaussian 
+      num_radial_basis: 8 # (int) 8-10 for j0 and jn, 8-64 for gaussian
+      num_mag_radial_basis: 8 # magnetic Chebyshev basis for o3_w6j_mag and o2_mag
       distance_transform: null # [null, Agnesi, Soft], this plug-in from mace, if you do not know what it means, never use
       cutoff_fn: c2poly # [c2poly, c3poly, mollifier, cosine]
       polynomial_cutoff: 5 # (int)
