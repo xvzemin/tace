@@ -198,7 +198,7 @@ class _O3O2Layout(torch.nn.Module):
             for (_, irrep), sources in zip(self.local_irreps, self.block_sources)
         )
 
-    def forward(
+    def _rotate_towers(
         self,
         input: torch.Tensor,
         wigner: torch.Tensor,
@@ -223,6 +223,14 @@ class _O3O2Layout(torch.nn.Module):
                 columns = getattr(self, f"tower_columns_{tower_index}")
                 rotation = wigner.index_select(1, rows).index_select(2, columns)
             tower_outputs.append(torch.bmm(rotation, tower_input))
+        return tuple(tower_outputs)
+
+    def forward(
+        self,
+        input: torch.Tensor,
+        wigner: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        tower_outputs = self._rotate_towers(input, wigner)
 
         output_blocks = []
         for (_, irrep), locations in zip(self.local_irreps, self.source_locations):
@@ -242,6 +250,34 @@ class _O3O2Layout(torch.nn.Module):
                     else torch.cat((first, second), dim=1)
                 )
             output_blocks.append(torch.cat(parts, dim=-1))
+        return tuple(output_blocks)
+
+    def forward_channel_major(
+        self,
+        input: torch.Tensor,
+        wigner: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Return ``(edge, channel, irrep_dim, multiplicity)`` blocks."""
+        tower_outputs = self._rotate_towers(input, wigner)
+        output_blocks = []
+        for (_, irrep), locations in zip(self.local_irreps, self.source_locations):
+            parts = []
+            for location in locations:
+                tower_index, first_position, *remainder = location
+                tower_output = tower_outputs[tower_index]
+                if irrep.m == 0:
+                    part = tower_output[:, first_position : first_position + 1]
+                else:
+                    second_position, odd = remainder
+                    first = tower_output[:, first_position : first_position + 1]
+                    second = tower_output[:, second_position : second_position + 1]
+                    part = (
+                        torch.cat((-second, first), dim=1)
+                        if odd
+                        else torch.cat((first, second), dim=1)
+                    )
+                parts.append(part.transpose(1, 2))
+            output_blocks.append(torch.stack(parts, dim=-1))
         return tuple(output_blocks)
 
     def inverse(
@@ -272,6 +308,59 @@ class _O3O2Layout(torch.nn.Module):
                     component : component + 1,
                     source_position * channels : (source_position + 1) * channels,
                 ]
+                rows.append(row if sign == 1 else -row)
+            tower_input = torch.cat(rows, dim=1)
+            if self.tower_is_full[tower_index]:
+                rotation = wigner_inv
+            else:
+                row_indices = getattr(self, f"tower_rows_{tower_index}")
+                column_indices = getattr(self, f"tower_columns_{tower_index}")
+                rotation = wigner_inv.index_select(1, column_indices).index_select(
+                    2, row_indices
+                )
+            tower_output = torch.bmm(rotation, tower_input)
+
+            offset = 0
+            for group_index in groups:
+                width = self.irreps[group_index][1].dim
+                output_by_group[group_index] = tower_output[:, offset : offset + width]
+                offset += width
+        return self.layout.inverse(torch.cat(output_by_group, dim=1))
+
+    def inverse_channel_major(
+        self,
+        input_blocks: tuple[torch.Tensor, ...],
+        wigner_inv: torch.Tensor,
+    ) -> torch.Tensor:
+        """Invert ``(edge, channel, irrep_dim, multiplicity)`` blocks."""
+        if len(input_blocks) != len(self.local_irreps):
+            raise ValueError("Expected one input block per local O(2) irrep group.")
+        channels = input_blocks[0].size(1)
+        for input_block, ((multiplicity, irrep), sources) in zip(
+            input_blocks,
+            zip(self.local_irreps, self.block_sources),
+        ):
+            expected_shape = (channels, irrep.dim, multiplicity)
+            if tuple(input_block.shape[-3:]) != expected_shape:
+                raise ValueError(
+                    "Channel-major O(2) block trailing shape must be "
+                    f"{expected_shape}, got {tuple(input_block.shape)}."
+                )
+            if multiplicity != len(sources):
+                raise RuntimeError("Local O(2) multiplicity resolution failed.")
+
+        output_by_group = [None] * len(self.irreps)
+        for tower_index, (groups, inverse_specs) in enumerate(
+            zip(self.tower_groups, self.tower_inverse_specs)
+        ):
+            rows = []
+            for block_index, source_position, component, sign in inverse_specs:
+                row = input_blocks[block_index][
+                    :,
+                    :,
+                    component,
+                    source_position,
+                ].unsqueeze(1)
                 rows.append(row if sign == 1 else -row)
             tower_input = torch.cat(rows, dim=1)
             if self.tower_is_full[tower_index]:
@@ -355,15 +444,62 @@ class O2MagneticScatterLinear(torch.nn.Module):
             )
             self.weight_numel = self.irreps_in_local.num_irreps * num_channel
         else:
-            self.linear = o2.Linear(
-                self.irreps_in_local,
-                self.irreps_out_local,
-                num_channel,
-                path_mode="uu",
-                internal_weights=False,
-                bias=False,
+            input_groups = {
+                irrep: (index, multiplicity)
+                for index, (multiplicity, irrep) in enumerate(self.irreps_in_local)
+            }
+            self.uu_group_specs = tuple(
+                (
+                    *input_groups.get(output_irrep, (-1, 0)),
+                    output_multiplicity,
+                )
+                for output_multiplicity, output_irrep in self.irreps_out_local
             )
-            self.weight_numel = self.linear.weight_numel
+            self.weight_numel = sum(
+                num_channel * input_multiplicity * output_multiplicity
+                for _, input_multiplicity, output_multiplicity in self.uu_group_specs
+            )
+
+    def _uu_linear(
+        self,
+        input_blocks: tuple[torch.Tensor, ...],
+        radial_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        radial_weights = radial_weights.reshape(radial_weights.size(0), -1)
+        output_blocks = []
+        offset = 0
+        zero_dependency = input_blocks[0].sum() * 0 + radial_weights.sum() * 0
+        for (
+            (output_multiplicity, output_irrep),
+            (input_index, input_multiplicity, _),
+        ) in zip(self.irreps_out_local, self.uu_group_specs):
+            if input_index < 0:
+                output_blocks.append(
+                    radial_weights.new_zeros(
+                        radial_weights.size(0),
+                        self.num_channel,
+                        output_irrep.dim,
+                        output_multiplicity,
+                    )
+                    + zero_dependency
+                )
+                continue
+            weight_numel = self.num_channel * output_multiplicity * input_multiplicity
+            weight = radial_weights[:, offset : offset + weight_numel].reshape(
+                radial_weights.size(0),
+                self.num_channel,
+                output_multiplicity,
+                input_multiplicity,
+            )
+            output_block = torch.matmul(
+                input_blocks[input_index],
+                weight.transpose(-1, -2),
+            )
+            output_blocks.append(output_block * input_multiplicity**-0.5)
+            offset += weight_numel
+        if offset != radial_weights.size(-1):
+            raise ValueError("Invalid grouped UU radial weight size.")
+        return tuple(output_blocks)
 
     def forward(
         self,
@@ -378,17 +514,30 @@ class O2MagneticScatterLinear(torch.nn.Module):
             raise ValueError("O2 magnetic convolution requires edge Wigner matrices.")
 
         source = edge_index[0]
-        node_blocks = self.node_layout(node_feats[source], wigner)
-        magnetic_blocks = self.magnetic_layout(
-            magnetic_node_attrs[source].unsqueeze(-1),
-            wigner,
-        )
-        magnetic_blocks = tuple(
-            block.reshape(*block.shape, 1)
-            .expand(*block.shape, self.num_channel)
-            .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
-            for block in magnetic_blocks
-        )
+        if self.path_mode == "uv":
+            node_blocks = self.node_layout(node_feats[source], wigner)
+            magnetic_blocks = self.magnetic_layout(
+                magnetic_node_attrs[source].unsqueeze(-1),
+                wigner,
+            )
+            magnetic_blocks = tuple(
+                block.reshape(*block.shape, 1)
+                .expand(*block.shape, self.num_channel)
+                .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
+                for block in magnetic_blocks
+            )
+        else:
+            node_blocks = self.node_layout.forward_channel_major(
+                node_feats[source],
+                wigner,
+            )
+            magnetic_blocks = self.magnetic_layout.forward_channel_major(
+                magnetic_node_attrs[source].unsqueeze(-1),
+                wigner,
+            )
+            magnetic_blocks = tuple(
+                block.expand(-1, self.num_channel, -1, -1) for block in magnetic_blocks
+            )
 
         input_blocks = []
         for irrep in self.input_block_irreps:
@@ -416,13 +565,15 @@ class O2MagneticScatterLinear(torch.nn.Module):
                 offset += width
             output_blocks = self.linear.forward_grouped(tuple(weighted_blocks))
         else:
-            radial_weights = radial_weights.reshape(
-                radial_weights.size(0),
-                *self.linear.weight_shape,
-            )
-            output_blocks = self.linear.forward_grouped(input_blocks, radial_weights)
+            output_blocks = self._uu_linear(input_blocks, radial_weights)
 
-        messages = self.output_layout.inverse(output_blocks, wigner_inv)
+        if self.path_mode == "uv":
+            messages = self.output_layout.inverse(output_blocks, wigner_inv)
+        else:
+            messages = self.output_layout.inverse_channel_major(
+                output_blocks,
+                wigner_inv,
+            )
         return scatter_sum(
             messages,
             edge_index[1],

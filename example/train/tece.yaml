@@ -299,12 +299,12 @@ model:
     edge_update:
       type: element2  # [identity, element2], identity is safer
 
-    mmax: 3 # Truncation for SO2 irreps, 3 is recommended.
-    Lmax: 2 # Truncation for node, 2 is recommended.
+    mmax: 2 # Truncation for SO2 irreps, 3 is recommended.
+    Lmax: 3 # Truncation for node, 2 is recommended.
     lmax: 3 # Truncation for edge, 3 is recommended.
     mag_Lmax: 1 # Maximum degree of magnetic solid harmonics, in [1, Lmax].
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
-    num_channel: 48 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
+    num_channel: 64 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
     parity: false # (bool) in test, not for users, always false
 
     radial_basis:
@@ -326,7 +326,7 @@ model:
 
     resnet: 
       type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect
-      linear_type: aware # [aware, agnostic, identity]
+      linear_type: identity # [aware, agnostic, identity]
       use_first_resnet: false
 
     layer_norm: # If training is unstable, prioritize specifying pre_norm_type. If it is still unstable, specify final_norm_type.
@@ -335,7 +335,7 @@ model:
       use_first_pre_norm: false 
           
     atomic_basis:
-      type: cgtp # (str or list[str]) [cgtp, uu_so2, uv_so2, o3_w6j_mag] 
+      type: [cgtp, uv_so2, uv_so2] # (str or list[str]) [cgtp, uu_so2, uv_so2, o3_w6j_mag] 
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, density] density are from mace
       nonlinear: sigmoid_gate # [null, sigmoid_gate]
@@ -344,10 +344,10 @@ model:
       # in test, not use
       node_wise_hidden: null
       edge_wise_hidden: null
-      edge_ace_hidden: null
-      num_head: null
-      use_graph_softmax: false
-      use_so2_edge_ace: false
+      edge_ace_hidden: 32
+      num_head: 4
+      use_graph_softmax: true
+      use_so2_edge_ace: true
       so2_l1l3: null
       so2_linear_type: w1 # [w1, w1_w1, w1_w2], always use w1
       so2_agnostic: true
@@ -364,9 +364,9 @@ model:
       return_components: null # [null, list(int)], if not specify, last layer will only return target weight
       num_expert: null
       num_channel_per_expert: null
-      nonlinear: null # [null, silu_bilineargate]
+      nonlinear: silu_bilineargate # [null, silu_bilineargate]
       use_shared_expert: false
-      agnostic: false
+      agnostic: true
 
     readout_emlp:
       bias: false

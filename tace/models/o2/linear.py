@@ -298,7 +298,7 @@ class Linear(torch.nn.Module):
         input_blocks: Sequence[torch.Tensor],
         weight: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, ...]:
-        """Apply one dense contraction per contiguous O(2) irrep group.
+        """Apply one dense UV contraction per contiguous O(2) irrep group.
 
         Each input block has shape ``(..., irrep.dim, mul * channels_in)``.
         The multiplicity and channel axes are already contiguous, so every
@@ -307,6 +307,8 @@ class Linear(torch.nn.Module):
         """
         if len(input_blocks) != len(self.irreps_in):
             raise ValueError("Expected one input block per O(2) irrep group.")
+        if self.path_mode != "uv":
+            raise ValueError("Grouped Linear is only available in path_mode='uv'.")
         if any(specification is None for specification in self._grouped_paths):
             raise ValueError(
                 "Grouped Linear requires regrouped irreps and fully connected paths."
@@ -356,73 +358,43 @@ class Linear(torch.nn.Module):
                     f"{expected_shape}, got {tuple(input_block.shape)}."
                 )
 
-            if self.path_mode == "uv":
-                path_weight = weight.narrow(-3, first_path, num_paths)
-                path_weight = path_weight.reshape(
-                    *path_weight.shape[:-3],
-                    output_multiplicity,
-                    input_multiplicity,
-                    self.channels_in,
-                    self.channels_out,
-                )
-                scales = self.path_scales.narrow(0, first_path, num_paths).reshape(
-                    output_multiplicity,
-                    input_multiplicity,
-                    1,
-                    1,
-                )
-                path_weight = path_weight * scales
-                matrix = path_weight.permute(
-                    *range(path_weight.ndim - 4),
-                    -3,
-                    -2,
-                    -4,
-                    -1,
+            path_weight = weight.narrow(-3, first_path, num_paths)
+            path_weight = path_weight.reshape(
+                *path_weight.shape[:-3],
+                output_multiplicity,
+                input_multiplicity,
+                self.channels_in,
+                self.channels_out,
+            )
+            scales = self.path_scales.narrow(0, first_path, num_paths).reshape(
+                output_multiplicity,
+                input_multiplicity,
+                1,
+                1,
+            )
+            path_weight = path_weight * scales
+            matrix = path_weight.permute(
+                *range(path_weight.ndim - 4),
+                -3,
+                -2,
+                -4,
+                -1,
+            ).reshape(
+                *path_weight.shape[:-4],
+                input_multiplicity * self.channels_in,
+                output_multiplicity * self.channels_out,
+            )
+            if matrix.ndim == 2:
+                output_block = torch.mm(
+                    input_block.reshape(-1, matrix.size(0)),
+                    matrix,
                 ).reshape(
-                    *path_weight.shape[:-4],
-                    input_multiplicity * self.channels_in,
+                    *input_block.shape[:-2],
+                    output_irrep.dim,
                     output_multiplicity * self.channels_out,
                 )
-                if matrix.ndim == 2:
-                    output_block = torch.mm(
-                        input_block.reshape(-1, matrix.size(0)),
-                        matrix,
-                    ).reshape(
-                        *input_block.shape[:-2],
-                        output_irrep.dim,
-                        output_multiplicity * self.channels_out,
-                    )
-                else:
-                    output_block = torch.matmul(input_block, matrix)
             else:
-                path_weight = weight.narrow(-2, first_path, num_paths)
-                path_weight = path_weight.reshape(
-                    *path_weight.shape[:-2],
-                    output_multiplicity,
-                    input_multiplicity,
-                    self.channels_in,
-                )
-                scales = self.path_scales.narrow(0, first_path, num_paths).reshape(
-                    output_multiplicity,
-                    input_multiplicity,
-                    1,
-                )
-                path_weight = path_weight * scales
-                input_grouped = input_block.reshape(
-                    *input_block.shape[:-2],
-                    output_irrep.dim,
-                    input_multiplicity,
-                    self.channels_in,
-                )
-                output_block = torch.einsum(
-                    "...dic,...oic->...doc",
-                    input_grouped,
-                    path_weight,
-                ).reshape(
-                    *input_block.shape[:-2],
-                    output_irrep.dim,
-                    output_multiplicity * self.channels_out,
-                )
+                output_block = torch.matmul(input_block, matrix)
 
             if self.bias is not None and output_irrep == Irrep("0e"):
                 output_block = output_block + self.bias.reshape(
