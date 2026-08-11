@@ -128,7 +128,7 @@ class uvuTensorProduct(torch.nn.Module):
         if any(instruction[3] != "uvu" for instruction in instructions):
             raise ValueError("uvuTensorProduct only accepts uvu instructions")
 
-        e3nn_tp = o3.TensorProduct(
+        self.tp = o3.TensorProduct(
             irreps_in1,
             irreps_in2,
             irreps_out,
@@ -140,8 +140,8 @@ class uvuTensorProduct(torch.nn.Module):
         self.irreps_in1 = irreps_in1
         self.irreps_in2 = irreps_in2
         self.irreps_out = irreps_out
-        self.instructions = e3nn_tp.instructions
-        self.weight_numel = e3nn_tp.weight_numel
+        self.instructions = self.tp.instructions
+        self.weight_numel = self.tp.weight_numel
         self.shared_weights = shared_weights
         use_oeq = acceleration_enabled("oeq")
         oeq_compatible = all(multiplicity == 1 for multiplicity, _ in irreps_in2)
@@ -160,20 +160,18 @@ class uvuTensorProduct(torch.nn.Module):
         if self.use_oeq:
             from ..oeq import e3nnOeqTensorProduct
 
-            self.tp = e3nnOeqTensorProduct(
+            self.fused_tp = e3nnOeqTensorProduct(
                 irreps_in1=irreps_in1,
                 irreps_in2=irreps_in2,
                 irreps_out=irreps_out,
                 instructions=instructions,
                 shared_weights=shared_weights,
             )
-            if self.tp.weight_numel != self.weight_numel:
+            if self.fused_tp.weight_numel != self.weight_numel:
                 raise RuntimeError(
                     "OEQ and e3nn generated different uvu tensor-product paths: "
-                    f"{self.tp.weight_numel} != {self.weight_numel}."
+                    f"{self.fused_tp.weight_numel} != {self.weight_numel}."
                 )
-        else:
-            self.tp = e3nn_tp
 
     def forward(
         self,
@@ -181,6 +179,8 @@ class uvuTensorProduct(torch.nn.Module):
         y: torch.Tensor,
         weights: torch.Tensor,
     ) -> torch.Tensor:
+        if hasattr(self, "fused_tp"):
+            return self.fused_tp(x, y, weights)
         return self.tp(x, y, weights)
 
 
