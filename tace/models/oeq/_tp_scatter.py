@@ -21,6 +21,7 @@ class e3nnOeqTensorProduct(torch.nn.Module):
         irreps_in2: o3.Irreps,
         irreps_out: o3.Irreps,
         instructions: Tuple,
+        shared_weights: bool = False,
     ):
         super().__init__()
 
@@ -30,7 +31,7 @@ class e3nnOeqTensorProduct(torch.nn.Module):
             irreps_in2,
             irreps_out,
             instructions,
-            shared_weights=False,
+            shared_weights=shared_weights,
             internal_weights=False,
             irrep_dtype=dtype,
             weight_dtype=dtype,

@@ -14,7 +14,7 @@ from e3nn import o3
 
 from tace.utils.torch_scatter import scatter_sum
 
-from .fused import O3ScatterTensorProduct
+from .fused import O3ScatterTensorProduct, uvuTensorProduct
 from .paths import satisfy
 
 
@@ -259,13 +259,12 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                 recoupling_path_indices.append(path_index)
                 component_recoupling_coefficients.append(coefficient)
 
-        self.recoupled_node_node_tp = o3.TensorProduct(
+        self.recoupled_node_node_tp = uvuTensorProduct(
             self.irreps_node_feats,
             self.extra_irreps_node_attrs,
             o3.Irreps(recoupled_intermediate),
-            recoupled_node_node_instructions,
-            internal_weights=False,
-            shared_weights=False,
+            instructions=recoupled_node_node_instructions,
+            shared_weights=self.weight_level == "edge",
         )
         self.recoupled_node_edge_tp = O3ScatterTensorProduct(
             o3.Irreps(recoupled_intermediate),
@@ -343,9 +342,8 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             if extra_weights.size(0) != edge_index.size(1):
                 raise ValueError("edge weights must have one row per graph edge")
             unit_weights = node_feats.new_ones(
-                1,
                 self.recoupled_node_node_tp.weight_numel,
-            ).expand(node_feats.size(0), -1)
+            )
             node_node_intermediate = self.recoupled_node_node_tp(
                 node_feats,
                 extra_node_attrs,
