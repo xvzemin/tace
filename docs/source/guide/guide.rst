@@ -25,10 +25,12 @@ and `Hydra <https://hydra.cc/>`_.
    acceleration.rst
    foundation.rst
    finetune.rst
+   qeq.rst
    soc.rst
    ase.rst
    lammps.rst
    openmm.rst
    uspex.rst
+   nvalchemi.rst
    torchSim.rst
    scripts.rst

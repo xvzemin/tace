@@ -144,6 +144,33 @@ Install the optional TorchSim interface with:
 
 See the :doc:`../guide/torchSim` tutorial for calculator usage.
 
+.. _nvalchemi-installation:
+
+NValCHEMI
+---------
+
+The NValCHEMI interface is optional and requires Python 3.11 through 3.13.
+Install TACE together with the interface dependencies using:
+
+.. code-block:: bash
+
+   pip install "tace[nvalchemi]"
+
+For a source checkout, use:
+
+.. code-block:: bash
+
+   pip install ".[nvalchemi]"
+
+The extra installs ``nvalchemi-toolkit`` and its required
+``nvalchemi-toolkit-ops`` dependency. Other TACE interfaces and workflows do
+not require either package.
+
+The two upstream NVIDIA repositories are provided for reference:
+
+- `nvalchemi-toolkit <https://github.com/NVIDIA/nvalchemi-toolkit>`_
+- `nvalchemi-toolkit-ops <https://github.com/NVIDIA/nvalchemi-toolkit-ops>`_
+
 Acceleration Selection
 ----------------------
 

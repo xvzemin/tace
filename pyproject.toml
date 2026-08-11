@@ -41,6 +41,11 @@ oeq = [
 torchsim = [
     "torch-sim-atomistic>=0.6.1",
 ]
+
+nvalchemi = [
+    "nvalchemi-toolkit>=0.1.0",
+    "nvalchemi-toolkit-ops",
+]
  
 cueq12 = [
     "cuequivariance",
