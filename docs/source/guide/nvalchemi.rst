@@ -25,3 +25,8 @@ A TACE checkpoint can be loaded directly through the wrapper factory:
 Importing this module requires ``nvalchemi-toolkit`` and
 ``nvalchemi-toolkit-ops``. These packages remain optional for every other TACE
 workflow.
+
+Upstream projects:
+
+- `nvalchemi-toolkit <https://github.com/NVIDIA/nvalchemi-toolkit>`_
+- `nvalchemi-toolkit-ops <https://github.com/NVIDIA/nvalchemi-toolkit-ops>`_

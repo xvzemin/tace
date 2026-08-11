@@ -124,9 +124,23 @@ Interfaces
 
 - ✅ Supports integration with **TorchSim**.
 
+- ✅ Supports integration with `NVIDIA NValCHEMI
+  <https://github.com/NVIDIA/nvalchemi-toolkit>`_ .
+
 - ✅ Supports integration with **OpenMM-ML (OpenMM-ML -> ASE -> TACE)**.
 
 - ✅ Supports integration with **USPEX (USPEX -> LAMMPS-ML-IAP -> TACE)** (Python=3.9).
+
+The NValCHEMI interface is optional. Install its two upstream packages and
+import the wrapper with:
+
+.. code-block:: bash
+
+   pip install nvalchemi-toolkit nvalchemi-toolkit-ops
+
+.. code-block:: python
+
+   from tace.interface.nvalchemi import TACEWrapper
 
 
 Citing

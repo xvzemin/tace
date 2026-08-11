@@ -66,6 +66,9 @@ Interfaces
 
 - ✅ Supports integration with **TorchSim**.
 
+- ✅ Supports integration with :doc:`NVIDIA NValCHEMI
+  <guide/nvalchemi>`.
+
 - ✅ Supports integration with **OpenMM-ML (OpenMM-ML -> ASE -> TACE)**.
 
 - ✅ Supports integration with **USPEX (USPEX -> LAMMPS-ML-IAP -> TACE)** (Python=3.9).
