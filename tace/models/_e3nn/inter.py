@@ -928,7 +928,7 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
 class O2MagneticInteraction(CgtpInteraction):
     """Full-O3 magnetic interaction executed with complete local O2 linears."""
 
-    path_mode = "uu"
+    path_mode = "uv"
 
     def _setup(self) -> None:
         if not self.mmax == self.Lmax == self.lmax:
