@@ -31,6 +31,3 @@ follows:
        special:
          charges:
            method: lagrangian
-
-``total_charge`` is required during both training and inference. The
-``charges`` array is required when charge labels or charge metrics are used.

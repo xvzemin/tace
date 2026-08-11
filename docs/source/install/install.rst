@@ -149,7 +149,7 @@ See the :doc:`../guide/torchSim` tutorial for calculator usage.
 NValCHEMI
 ---------
 
-The NValCHEMI interface is optional and requires Python 3.11 through 3.13.
+The NValCHEMI interface is optional and requires ``Python >= 3.11``.
 Install TACE together with the interface dependencies using:
 
 .. code-block:: bash

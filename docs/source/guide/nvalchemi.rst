@@ -12,19 +12,10 @@ Install both optional dependencies as described in
 .. code-block:: python
 
    from tace.interface.nvalchemi import TACEWrapper
-
-A TACE checkpoint can be loaded directly through the wrapper factory:
-
-.. code-block:: python
-
    model = TACEWrapper.from_checkpoint(
-       "model.ckpt",
+       "model.pt",
        device="cuda",
    )
-
-Importing this module requires ``nvalchemi-toolkit`` and
-``nvalchemi-toolkit-ops``. These packages remain optional for every other TACE
-workflow.
 
 Upstream projects:
 
