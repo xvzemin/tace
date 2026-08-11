@@ -46,10 +46,12 @@ def _enable_tace_acceleration(
     """Configure the supported TACE acceleration flags before model loading.
 
     TACE acceleration has three main categories: OEQ/CUE accelerate edge
-    computation, EQT accelerates node computation, and Eqx provides TACE's
-    custom operators. AOTInductor is used for compiled deployment. OEQ and CUE
-    are mutually exclusive, while CUE currently conflicts with AOTI. For a
-    typical model, OEQ + AOTI is currently recommended.
+    computation, EQT accelerates node computation, and EQX selects the future
+    general O(3), O(2), Wigner-6j, and Cartesian operator library. The current
+    EQX preview is backed by temporary ``triton_ops`` kernels. AOTInductor is
+    used for compiled deployment. OEQ and CUE are mutually exclusive, while
+    CUE currently conflicts with AOTI. For a typical model, OEQ + AOTI is
+    currently recommended.
     """
 
     if sum((enable_oeq, enable_cue)) > 1:

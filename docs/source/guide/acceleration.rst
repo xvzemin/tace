@@ -10,8 +10,8 @@ TACE provides several composable acceleration layers:
   mutually exclusive;
 * EquiTorch (EQT) independently accelerates supported product-basis tensor
   products and can be combined with either OEQ or CUEQ;
-* the TACE Triton operator independently accelerates only the scatter
-  calculation in ``uuSO2Interaction``;
+* the EQX preview backend currently accelerates only the scatter calculation
+  in ``uuSO2Interaction``;
 * PyTorch compilation accelerates a larger part of the model and can either
   run inside the current Python process or produce an AOTInductor package for
   later deployment. AOTI is independent of the kernel-backend selection.
@@ -43,9 +43,9 @@ The following kernel backends are available:
    * - EquiTorch
      - Independent product-basis acceleration
      - ``TACE_USE_EQT=1``
-   * - TACE Triton uuSO2 scatter
+   * - EQX preview
      - Independent ``uuSO2Interaction`` scatter acceleration
-     - ``TACE_USE_TRITON=1``
+     - ``TACE_USE_EQX=1``
 
 For example:
 
@@ -55,9 +55,15 @@ For example:
 
 Do not enable OEQ and CUEQ at the same time. EQT is independent and may be
 enabled together with either one when the model contains a supported product
-basis. Triton is also independent, but currently affects only the scatter
-calculation in ``uuSO2Interaction``. OpenEquivariance is the recommended
-edge-level backend for supported NVIDIA GPUs.
+basis. EQX is also independent. It is planned as a general operator library
+for ``O(3)``, ``O(2)``, Wigner-6j, and Cartesian equivariant computations, but
+the current TACE integration only accelerates the scatter calculation in
+``uuSO2Interaction``. OpenEquivariance is the recommended edge-level backend
+for supported NVIDIA GPUs.
+
+The current EQX path calls kernels from ``tace.models.triton_ops``. That module
+is a temporary implementation placeholder while the corresponding operators
+are developed in EQX; it is not a separate user-facing backend.
 
 The acceleration environment can also be configured through one Python
 interface before constructing or loading the model:
@@ -66,7 +72,7 @@ interface before constructing or loading the model:
 
    from tace.utils.env import enable_acceleration
 
-   enable_acceleration(enable_oeq=True, enable_triton=True)
+   enable_acceleration(enable_oeq=True, enable_eqx=True)
 
 By default, this interface only enables the requested backends and preserves
 existing environment settings. Pass ``force=True`` to explicitly write every
@@ -83,7 +89,7 @@ options. For example:
        model="model.pt",
        device="cuda",
        enable_oeq=True,
-       enable_triton=True,
+       enable_eqx=True,
    )
 
 .. note::
@@ -125,7 +131,7 @@ AOTI produces a ``.pt2`` package containing compiled native code. Loading the
 package does not call ``torch.compile`` again.
 
 AOTI is an independent compilation and deployment layer. It does not replace
-OEQ, CUEQ, EQT, or Triton. Configure the desired compatible acceleration
+OEQ, CUEQ, EQT, or EQX. Configure the desired compatible acceleration
 backends before export; the resulting package captures the model constructed
 with those selections.
 

@@ -108,18 +108,22 @@ Use the `PyTorch Geometric installation guide
 <https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html>`_
 to select a different PyTorch or CUDA wheel.
 
-TACE Triton Operators
----------------------
+EQX Operator Preview
+--------------------
 
-TACE's fused Triton operators use the Triton installation supplied by a
-compatible CUDA-enabled PyTorch build; no additional TACE extra is required:
+EQX is planned as a general operator library for ``O(3)``, ``O(2)``, Wigner-6j,
+and Cartesian equivariant computations. The current TACE preview uses Triton
+from a compatible CUDA-enabled PyTorch build and requires no additional TACE
+extra:
 
 .. code-block:: bash
 
-   export TACE_USE_TRITON=1
+   export TACE_USE_EQX=1
 
-Triton acceleration is independent of OEQ, CUEQ, and EQT. It currently applies
-only to the scatter calculation in ``uuSO2Interaction``.
+The preview is independent of OEQ, CUEQ, and EQT and currently applies only to
+the scatter calculation in ``uuSO2Interaction``. Internally it calls
+``tace.models.triton_ops``; that module is a temporary placeholder until the
+operators move into EQX and is not a separate public backend.
 
 TorchSim
 --------
@@ -176,8 +180,8 @@ Acceleration Selection
 
 OEQ and CUEQ are alternative implementations of the same edge-level
 operations; enable only one of them. EQT is an independent product-basis
-acceleration and may be combined with either OEQ or CUEQ. The TACE Triton
-operator is also independent and currently accelerates only the
-``uuSO2Interaction`` scatter calculation. AOTI is a separate compilation and
+acceleration and may be combined with either OEQ or CUEQ. The EQX preview is
+also independent and currently accelerates only the ``uuSO2Interaction``
+scatter calculation. AOTI is a separate compilation and
 deployment layer. See the :ref:`acceleration-tutorial` for backend selection,
 Python interfaces, compilation, and AOTI export.

@@ -395,7 +395,7 @@ def _check_inputs(
     wigner_inv: torch.Tensor,
 ) -> None:
     if not x.is_cuda:
-        raise ValueError("TACE_USE_TRITON=1 requires CUDA tensors")
+        raise ValueError("TACE_USE_EQX=1 requires CUDA tensors")
     if x.dtype not in (torch.float32, torch.float64):
         raise TypeError(
             "The Triton uuSO2 scatter operator supports float32 and float64"

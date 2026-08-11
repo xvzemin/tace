@@ -110,9 +110,36 @@ class Irrep:
     def __repr__(self) -> str:
         return str(self)
 
+    def __mul__(self, other):
+        try:
+            return tensor_product_irreps(self, other)
+        except (TypeError, ValueError):
+            return NotImplemented
+
 
 def check_o2_irrep(irrep: IrrepLike) -> Irrep:
     return irrep if isinstance(irrep, Irrep) else Irrep(irrep)
+
+
+def tensor_product_irreps(
+    irrep1: IrrepLike,
+    irrep2: IrrepLike,
+) -> Tuple[Irrep, ...]:
+    """Return the complete real O(2) irreps in ``irrep1 x irrep2``."""
+    irrep1 = check_o2_irrep(irrep1)
+    irrep2 = check_o2_irrep(irrep2)
+    if irrep1.m == 0 and irrep2.m == 0:
+        return (Irrep(0, irrep1.p * irrep2.p),)
+    if irrep1.m == 0:
+        return (irrep2,)
+    if irrep2.m == 0:
+        return (irrep1,)
+    if irrep1.m == irrep2.m:
+        return (Irrep("0e"), Irrep("0o"), Irrep(2 * irrep1.m, 0))
+    return (
+        Irrep(abs(irrep1.m - irrep2.m), 0),
+        Irrep(irrep1.m + irrep2.m, 0),
+    )
 
 
 def _parse_irreps_string(irreps: str) -> List[Tuple[int, Irrep]]:

@@ -286,7 +286,6 @@ class O3ScatterTensorProduct(torch.nn.Module):
         )
 
 
-# will be new eqx kernel in future versions
 class uuSO2ScatterTensorProduct(torch.nn.Module):
     def __init__(
         self,
@@ -318,13 +317,14 @@ class uuSO2ScatterTensorProduct(torch.nn.Module):
             l1l3=self.l1l3,
         )
         self.weight_numel = self.linear_up.weight_numel
-        if acceleration_enabled("triton"):
+        if acceleration_enabled("eqx"):
+            # Temporary bridge until this operator is provided by eqx itself.
             from ..triton_ops import UUSO2Scatter
 
             self.fused_tp = UUSO2Scatter(self.linear_up)
         else:
             logging.warning(
-                "You are not using fused uuSO2Interaction, please export TACE_USE_TRITON=1. "
+                "You are not using the EQX preview operator; export TACE_USE_EQX=1. "
                 "For acceleration options, see "
                 "https://tace.readthedocs.io/en/latest/guide/acceleration.html"
             )

@@ -11,7 +11,7 @@ ACCELERATION_ENV = {
     "cue": "TACE_USE_CUE",
     "eqt": "TACE_USE_EQT",
     "compile": "TACE_USE_COMPILE",
-    "triton": "TACE_USE_TRITON",
+    "eqx": "TACE_USE_EQX",
 }
 
 
@@ -32,16 +32,21 @@ def enable_acceleration(
     enable_cue: bool = False,
     enable_eqt: bool = False,
     enable_compile: bool = False,
-    enable_triton: bool = False,
+    enable_eqx: bool = False,
     force: bool = False,
 ) -> None:
-    """Enable accelerations, preserving existing settings unless forced."""
+    """Enable accelerations, preserving existing settings unless forced.
+
+    ``enable_eqx`` selects the EQX operator path. Until the general EQX O(3),
+    O(2), Wigner-6j, and Cartesian operators are available, supported calls
+    are routed to the temporary kernels in :mod:`tace.models.triton_ops`.
+    """
     enabled_accelerations = {
         "oeq": enable_oeq,
         "cue": enable_cue,
         "eqt": enable_eqt,
         "compile": enable_compile,
-        "triton": enable_triton,
+        "eqx": enable_eqx,
     }
     for name, enabled in enabled_accelerations.items():
         if enabled or force:

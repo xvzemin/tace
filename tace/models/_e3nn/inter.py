@@ -271,7 +271,7 @@ class uuSO2Interaction(Interaction):
     An interaction module based on uuSO2Linear.
 
     It achieves the same accuracy and extrapolation capability as CGTP.
-    Set `export TACE_USE_TRITON=1` to reduce memory.
+    Set `export TACE_USE_EQX=1` to use the current EQX preview operator.
 
     This interaction block does not directly add nonlinearity to the message.
     """

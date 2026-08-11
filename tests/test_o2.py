@@ -116,8 +116,139 @@ def test_o2_direct_sum_representation_uses_complete_layout():
 
 def test_o2_linear_is_exported_without_prefixed_class_name():
     assert o2.Linear.__name__ == "Linear"
+    assert o2.TensorProduct.__name__ == "TensorProduct"
     assert o2.Irrep.__name__ == "Irrep"
     assert o2.Irreps.__name__ == "Irreps"
+
+
+def test_o2_tensor_product_irrep_rules_are_complete():
+    assert Irrep("0e") * Irrep("0o") == (Irrep("0o"),)
+    assert Irrep("0o") * Irrep("0o") == (Irrep("0e"),)
+    assert Irrep("0o") * Irrep("2m") == (Irrep("2m"),)
+    assert Irrep("1m") * Irrep("2m") == (Irrep("1m"), Irrep("3m"))
+    assert Irrep("2m") * Irrep("2m") == (
+        Irrep("0e"),
+        Irrep("0o"),
+        Irrep("4m"),
+    )
+
+
+@pytest.mark.parametrize("reflected", [False, True])
+@pytest.mark.parametrize("path_mode", ["uuu", "uvw"])
+def test_o2_tensor_product_is_equivariant(reflected, path_mode):
+    torch.manual_seed(11)
+    irreps_in1 = o2.Irreps("0e+0o+1m+2m")
+    irreps_in2 = o2.Irreps("0e+0o+1m")
+    irreps_out = o2.Irreps("2x0e+2x0o+2x1m+2x2m+3m")
+    module = o2.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        channels_in1=2,
+        channels_in2=2,
+        channels_out=2 if path_mode == "uuu" else 3,
+        path_mode=path_mode,
+    ).to(device=DEVICE, dtype=DTYPE)
+    input1 = torch.randn(4, irreps_in1.dim, 2, dtype=DTYPE, device=DEVICE)
+    input2 = torch.randn(4, irreps_in2.dim, 2, dtype=DTYPE, device=DEVICE)
+    angle = torch.tensor(0.37, dtype=DTYPE, device=DEVICE)
+    representation1 = o2.o2_irreps_representation(
+        irreps_in1,
+        angle,
+        reflected,
+    )
+    representation2 = o2.o2_irreps_representation(
+        irreps_in2,
+        angle,
+        reflected,
+    )
+    representation_out = o2.o2_irreps_representation(
+        irreps_out,
+        angle,
+        reflected,
+    )
+
+    transformed1 = torch.einsum("ij,bjc->bic", representation1, input1)
+    transformed2 = torch.einsum("ij,bjc->bic", representation2, input2)
+    actual = module(transformed1, transformed2)
+    expected = torch.einsum(
+        "ij,bjc->bic",
+        representation_out,
+        module(input1, input2),
+    )
+    torch.testing.assert_close(actual, expected)
+
+
+def test_o2_tensor_product_pseudoscalar_rotates_positive_order_by_quarter_turn():
+    module = o2.TensorProduct(
+        "0o",
+        "1m",
+        "1m",
+        channels_in1=1,
+        path_mode="uuu",
+        internal_weights=False,
+        path_norm=False,
+    ).to(device=DEVICE, dtype=DTYPE)
+    input1 = torch.tensor([[[2.0]]], dtype=DTYPE, device=DEVICE)
+    input2 = torch.tensor([[[3.0], [5.0]]], dtype=DTYPE, device=DEVICE)
+    weight = torch.ones(module.weight_shape, dtype=DTYPE, device=DEVICE)
+    expected = torch.tensor([[[-10.0], [6.0]]], dtype=DTYPE, device=DEVICE)
+    torch.testing.assert_close(module(input1, input2, weight), expected)
+
+
+def test_o2_tensor_product_zero_pads_missing_output_irreps():
+    module = o2.TensorProduct(
+        "0e",
+        "0e",
+        "0e+0o+1m",
+        channels_in1=2,
+        path_mode="uuu",
+    ).to(device=DEVICE, dtype=DTYPE)
+    input1 = torch.randn(3, 1, 2, dtype=DTYPE, device=DEVICE)
+    input2 = torch.randn(3, 1, 2, dtype=DTYPE, device=DEVICE)
+    output = module(input1, input2)
+    torch.testing.assert_close(output[:, 1:], torch.zeros_like(output[:, 1:]))
+
+
+def test_o2_tensor_product_external_weight_gradcheck_and_gradgradcheck():
+    module = o2.TensorProduct(
+        "0e+1m",
+        "0o+1m",
+        "0e+0o+1m+2m",
+        channels_in1=1,
+        channels_in2=2,
+        channels_out=2,
+        path_mode="uvw",
+        internal_weights=False,
+    ).to(device=DEVICE, dtype=DTYPE)
+    input1 = torch.randn(
+        2,
+        module.irreps_in1.dim,
+        module.channels_in1,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    input2 = torch.randn(
+        2,
+        module.irreps_in2.dim,
+        module.channels_in2,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    weight = torch.randn(
+        module.weight_shape,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+
+    def function(x, y, w):
+        return module(x, y, w)
+
+    assert torch.autograd.gradcheck(function, (input1, input2, weight))
+    assert torch.autograd.gradgradcheck(function, (input1, input2, weight))
 
 
 def test_o2_linear_defaults_to_uv_path_mode():
