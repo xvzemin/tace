@@ -327,6 +327,43 @@ class GaussianBasis(torch.nn.Module):
         return f"{self.__class__.__name__}(cutoff={self.cutoff}, width={self.width})"
 
 
+class MagneticChebyshevBasis(torch.nn.Module):
+    """
+    Chebyshev basis assuming inputs are already normalized to `[-1, 1]`.
+    num_basis should generally remain small (typically below 10), 
+    as numerical errors may accumulate at higher orders (recurrence relation).
+    """
+
+    def __init__(
+        self,
+        num_basis: int = 8,
+        include_constant: bool = False,
+    ) -> None:
+        super().__init__()
+
+        if not isinstance(include_constant, bool):
+            raise TypeError("include_constant must be a bool")
+        self.num_basis = num_basis
+        self.include_constant = include_constant
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        t0 = torch.ones_like(x)
+        t1 = x
+        basis = [t0, t1]
+        start = 0 if self.include_constant else 1
+        stop = start + self.num_basis
+        for _ in range(2, stop):
+            t0, t1 = t1, 2.0 * x * t1 - t0
+            basis.append(t1)
+        return torch.cat(basis[start:stop], dim=-1)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(num_basis={self.num_basis}, "
+            f"include_constant={self.include_constant})"
+        )
+
+
 class CosineCutoff(torch.nn.Module):
     """
     The fourth derivative and above are discontinuous

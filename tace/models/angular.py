@@ -313,3 +313,18 @@ class SphericalHarmonics(torch.nn.Module):
             )
 
         return sh
+
+
+class SolidHarmonics(SphericalHarmonics):
+    def __init__(
+        self,
+        irreps_out: Union[int, List[int], str, Irreps],
+        normalization: str = "integral",
+        irreps_in: Any = None,
+    ) -> None:
+        super().__init__(
+            irreps_out,
+            normalize=False,
+            normalization=normalization,
+            irreps_in=irreps_in,
+        )
