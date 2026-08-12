@@ -1,5 +1,5 @@
-Magnetic TACE (in dev)
-======================
+Magnetic TACE
+=============
 
 Magnetic TACE provides three ways to incorporate non-collinear magnetic
 moments.  All three methods consider spin--orbit coupling (SOC): the magnetic
