@@ -28,6 +28,7 @@ and `Hydra <https://hydra.cc/>`_.
    qeq.rst
    soc.rst
    ase.rst
+   magnetic_relax.rst
    lammps.rst
    openmm.rst
    uspex.rst
