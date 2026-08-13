@@ -68,8 +68,10 @@ class TensorProduct(torch.nn.Module):
     """A weighted tensor product between complete real O(2) representations.
 
     Inputs use shapes ``(..., irreps_in1.dim, channels_in1)`` and
-    ``(..., irreps_in2.dim, channels_in2)``. ``path_mode="uuu"`` contracts
-    equal channel indices and requires all channel counts to match.
+    ``(..., irreps_in2.dim, channels_in2)``. ``path_mode="u1u"`` requires
+    one channel in the second input and preserves the first input channels.
+    ``path_mode="uuu"`` contracts equal channel indices and requires all
+    channel counts to match.
     ``path_mode="uvw"`` learns a dense channel tensor for every equivariant
     path. Paths are ``(output_index, input1_index, input2_index)`` tuples over
     expanded irrep-copy layouts.
@@ -95,7 +97,7 @@ class TensorProduct(torch.nn.Module):
         self.irreps_in2 = check_o2_irreps(irreps_in2)
         self.irreps_out = check_o2_irreps(irreps_out)
         if channels_in2 is None:
-            channels_in2 = channels_in1
+            channels_in2 = 1 if path_mode == "u1u" else channels_in1
         if channels_out is None:
             channels_out = channels_in1
         channel_counts = (channels_in1, channels_in2, channels_out)
@@ -106,8 +108,13 @@ class TensorProduct(torch.nn.Module):
             raise TypeError("TensorProduct channel counts must be integers.")
         if any(value < 1 for value in channel_counts):
             raise ValueError("TensorProduct channel counts must be positive.")
-        if path_mode not in ("uuu", "uvw"):
-            raise ValueError("path_mode must be 'uuu' or 'uvw'.")
+        if path_mode not in ("u1u", "uuu", "uvw"):
+            raise ValueError("path_mode must be 'u1u', 'uuu', or 'uvw'.")
+        if path_mode == "u1u" and (channels_in2 != 1 or channels_in1 != channels_out):
+            raise ValueError(
+                "path_mode='u1u' requires channels_in2 == 1 and "
+                "channels_in1 == channels_out."
+            )
         if path_mode == "uuu" and len(set(channel_counts)) != 1:
             raise ValueError("path_mode='uuu' requires all channel counts to match.")
 
@@ -177,7 +184,7 @@ class TensorProduct(torch.nn.Module):
         self._input1_slices = self.irreps_in1.expanded_slices()
         self._input2_slices = self.irreps_in2.expanded_slices()
 
-        if self.path_mode == "uuu":
+        if self.path_mode in ("u1u", "uuu"):
             self.weight_shape = (len(paths), self.channels_out)
         else:
             self.weight_shape = (
@@ -192,7 +199,7 @@ class TensorProduct(torch.nn.Module):
             if self.weight_numel:
                 fan_in = (
                     1
-                    if self.path_mode == "uuu"
+                    if self.path_mode in ("u1u", "uuu")
                     else self.channels_in1 * self.channels_in2
                 )
                 bound = math.sqrt(3.0 / fan_in)
@@ -278,6 +285,11 @@ class TensorProduct(torch.nn.Module):
                 )
                 if self.path_mode == "uuu":
                     contribution = torch.diagonal(product, dim1=-2, dim2=-1)
+                    contribution = contribution * weight[..., path_index, :].unsqueeze(
+                        -2
+                    )
+                elif self.path_mode == "u1u":
+                    contribution = product.squeeze(-1)
                     contribution = contribution * weight[..., path_index, :].unsqueeze(
                         -2
                     )

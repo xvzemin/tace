@@ -388,7 +388,18 @@ class TensorModel(torch.nn.Module):
             self.fidelity_idx = fidelity_idx
 
     def get_embedding_property(self) -> list[str]:
-        return list(set(self.readout_fn.embedding_property))
+        embedding_property = set(self.readout_fn.embedding_property)
+        atomic_basis = getattr(self.readout_fn, "model_config", {}).get(
+            "atomic_basis", {}
+        )
+        atomic_basis_type = atomic_basis.get("type")
+        if isinstance(atomic_basis_type, str):
+            atomic_basis_type = [atomic_basis_type]
+        if atomic_basis_type is not None and any(
+            interaction in {"o3_w6j_mag", "o2_mag"} for interaction in atomic_basis_type
+        ):
+            embedding_property.add("initial_noncollinear_magmoms")
+        return list(embedding_property)
 
     def get_target_property(self) -> list[str]:
         return list(set(self.readout_fn.target_property))

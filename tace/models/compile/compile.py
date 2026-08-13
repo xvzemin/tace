@@ -1,4 +1,5 @@
 import operator
+import sys
 from contextlib import contextmanager
 from typing import Callable, Dict, Iterable, Sequence
 
@@ -52,6 +53,8 @@ def trace_and_compile(
 def trace_to_fx(
     fn: Callable,
     inputs: Sequence[torch.Tensor],
+    *,
+    functionalize: bool = False,
 ) -> torch.fx.GraphModule:
     with _disable_duck_shape():
         traced = make_fx(
@@ -63,10 +66,40 @@ def trace_to_fx(
             _allow_non_fake_inputs=True,
             _error_on_data_dependent_ops=True,
         )(*[value.clone() for value in inputs])
+        if functionalize:
+            traced = make_fx(
+                torch.func.functionalize(traced),
+                tracing_mode="symbolic",
+                _allow_non_fake_inputs=True,
+                _error_on_data_dependent_ops=True,
+            )(*[value.clone() for value in inputs])
     _strip_saved_tensor_detach(traced)
     traced = _rebuild_graph_module(traced)
     _replace_sym_numel(traced)
+    _remove_full_slice_scatter(traced)
     return traced
+
+
+def _remove_full_slice_scatter(graph_module: torch.fx.GraphModule) -> None:
+    """Remove identity slice scatters emitted for a full ``:`` assignment."""
+    changed = False
+    for node in list(graph_module.graph.nodes):
+        if (
+            node.op != "call_function"
+            or node.target != torch.ops.aten.slice_scatter.default
+        ):
+            continue
+        start = node.args[3] if len(node.args) > 3 else node.kwargs.get("start")
+        end = node.args[4] if len(node.args) > 4 else node.kwargs.get("end")
+        step = node.args[5] if len(node.args) > 5 else node.kwargs.get("step", 1)
+        if start not in {None, 0} or end not in {None, sys.maxsize} or step != 1:
+            continue
+        node.replace_all_uses_with(node.args[1])
+        graph_module.graph.erase_node(node)
+        changed = True
+    if changed:
+        graph_module.graph.eliminate_dead_code()
+        graph_module.recompile()
 
 
 def compiled_call(

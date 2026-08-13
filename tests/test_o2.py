@@ -4,22 +4,46 @@ from e3nn import o3
 
 from tace.models import o2
 from tace.models._e3nn.inter import O2MagneticInteraction
-from tace.models._e3nn.o2 import _O3O2Layout
 from tace.models.angular import SolidHarmonics
 from tace.models.legacy_so2 import WignerD
 from tace.models.mag import MagmomsNormalizer
 from tace.models.o2 import (
     Irrep,
     Irreps,
+    O2Gate,
     o2_irreps_representation,
     o2_representation,
     restrict_o3_irrep,
     restrict_o3_irreps,
 )
-from tace.models.radial import MagneticChebyshevBasis
+from tace.models.radial import (
+    MagneticChebyshevBasis,
+    j0SincSphericalBesselBasis,
+    j0SphericalBesselBasis,
+)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+def test_j0_sinc_preserves_nonzero_values_and_defines_origin():
+    reference = j0SphericalBesselBasis(cutoff=1.0, num_basis=3).to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    sinc = j0SincSphericalBesselBasis(cutoff=1.0, num_basis=3).to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    x = torch.tensor([[0.2], [0.7]], device=DEVICE, dtype=DTYPE)
+    torch.testing.assert_close(sinc(x), reference(x, None, None))
+
+    at_origin = sinc(torch.zeros(1, 1, device=DEVICE, dtype=DTYPE))
+    torch.testing.assert_close(
+        at_origin,
+        sinc.prefactor * sinc.bessel_weights.unsqueeze(0),
+    )
+    assert torch.isfinite(at_origin).all()
 
 
 def test_o3_o2_layout_roundtrip_supports_both_parities_per_degree():
@@ -27,7 +51,7 @@ def test_o3_o2_layout_roundtrip_supports_both_parities_per_degree():
     torch.set_default_dtype(DTYPE)
     try:
         irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
-        layout = _O3O2Layout(irreps, 2).to(device=DEVICE)
+        layout = o2.O3O2Layout(irreps, 2).to(device=DEVICE)
         wigner_module = WignerD(2, 2).to(device=DEVICE)
     finally:
         torch.set_default_dtype(previous_dtype)
@@ -114,11 +138,181 @@ def test_o2_direct_sum_representation_uses_complete_layout():
     torch.testing.assert_close(representation[:, 4:6, 4:6], expected)
 
 
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize("reflected", [False, True])
+def test_circular_harmonics_is_native_o2_equivariant(normalize, reflected):
+    module = o2.CircularHarmonics(4, normalize=normalize).to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    vectors = torch.randn(9, 2, dtype=DTYPE, device=DEVICE)
+    angle = torch.tensor(0.37, dtype=DTYPE, device=DEVICE)
+    input_transform = o2.o2_representation("1m", angle, reflected)
+    output_transform = o2.o2_irreps_representation(
+        module.irreps_out,
+        angle,
+        reflected,
+    )
+
+    transformed_vectors = torch.einsum("ij,bj->bi", input_transform, vectors)
+    actual = module(transformed_vectors)
+    expected = torch.einsum("ij,bj->bi", output_transform, module(vectors))
+    torch.testing.assert_close(actual, expected)
+
+
+def test_circular_harmonics_matches_analytic_angles_and_zero():
+    angles = torch.tensor([0.2, -0.7], dtype=DTYPE, device=DEVICE)
+    vectors = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
+    actual = o2.circular_harmonics(vectors, 3)
+    expected = torch.cat(
+        [torch.ones_like(angles).unsqueeze(-1)]
+        + [
+            torch.stack((torch.cos(order * angles), torch.sin(order * angles)), dim=-1)
+            for order in range(1, 4)
+        ],
+        dim=-1,
+    )
+    torch.testing.assert_close(actual, expected)
+
+    at_zero = o2.CircularHarmonics(3)(torch.zeros(1, 2, dtype=DTYPE, device=DEVICE))
+    torch.testing.assert_close(at_zero[:, :1], torch.ones_like(at_zero[:, :1]))
+    torch.testing.assert_close(at_zero[:, 1:], torch.zeros_like(at_zero[:, 1:]))
+
+
+def test_circular_harmonics_gradcheck():
+    vectors = torch.randn(
+        4,
+        2,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    module = o2.CircularHarmonics(3, normalize=True).to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    assert torch.autograd.gradcheck(module, (vectors,))
+
+
 def test_o2_linear_is_exported_without_prefixed_class_name():
+    assert o2.CircularHarmonics.__name__ == "CircularHarmonics"
     assert o2.Linear.__name__ == "Linear"
+    assert o2.O2Gate.__name__ == "O2Gate"
+    assert o2.O3O2Layout.__name__ == "O3O2Layout"
     assert o2.TensorProduct.__name__ == "TensorProduct"
     assert o2.Irrep.__name__ == "Irrep"
     assert o2.Irreps.__name__ == "Irreps"
+
+
+@pytest.mark.parametrize("reflected", [False, True])
+def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
+    irreps_out = o2.Irreps("2x0e+0o+2x1m+2m")
+    module = O2Gate(
+        irreps_out,
+        act_0e=torch.nn.SiLU(),
+        act_lm=torch.nn.Sigmoid(),
+    ).to(device=DEVICE, dtype=DTYPE)
+    input = torch.randn(
+        4,
+        module.irreps_in.dim,
+        3,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+
+    output = module(input)
+    grouped = module.forward_grouped(_pack_o2_groups(module.irreps_in, input))
+    grouped_output = _unpack_o2_groups(irreps_out, grouped, input.size(-1))
+    torch.testing.assert_close(grouped_output, output)
+
+    angle = torch.tensor(0.41, dtype=DTYPE, device=DEVICE)
+    input_transform = o2.o2_irreps_representation(
+        module.irreps_in,
+        angle,
+        reflected,
+    )
+    output_transform = o2.o2_irreps_representation(
+        module.irreps_out,
+        angle,
+        reflected,
+    )
+    transformed_input = torch.einsum("ij,bjc->bic", input_transform, input)
+    transformed_output = module(transformed_input)
+    expected = torch.einsum("ij,bjc->bic", output_transform, output)
+    torch.testing.assert_close(transformed_output, expected)
+
+
+@pytest.mark.parametrize("direct_0o", [False, True])
+def test_o2_gate_gradcheck_and_gradgradcheck(direct_0o):
+    module = O2Gate(
+        "0e+0o+1m",
+        act_0e=torch.nn.SiLU(),
+        act_0o=torch.nn.Tanh() if direct_0o else None,
+        act_lm=torch.nn.Sigmoid(),
+    ).to(device=DEVICE, dtype=DTYPE)
+    input = torch.randn(
+        2,
+        module.irreps_in.dim,
+        2,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    assert torch.autograd.gradcheck(module, (input,), fast_mode=True)
+    assert torch.autograd.gradgradcheck(module, (input,), fast_mode=True)
+
+
+@pytest.mark.parametrize("reflected", [False, True])
+def test_o2_gate_direct_0o_activation_is_equivariant(reflected):
+    irreps_out = o2.Irreps("2x0e+0o+2x1m+2m")
+    module = O2Gate(
+        irreps_out,
+        act_0e=torch.nn.SiLU(),
+        act_0o=torch.nn.Tanh(),
+        act_lm=torch.nn.Sigmoid(),
+    ).to(device=DEVICE, dtype=DTYPE)
+    assert module.num_gates == 3
+
+    input = torch.randn(
+        4,
+        module.irreps_in.dim,
+        3,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    output = module(input)
+    grouped = module.forward_grouped(_pack_o2_groups(module.irreps_in, input))
+    torch.testing.assert_close(
+        _unpack_o2_groups(irreps_out, grouped, input.size(-1)),
+        output,
+    )
+
+    angle = torch.tensor(0.41, dtype=DTYPE, device=DEVICE)
+    input_transform = o2.o2_irreps_representation(
+        module.irreps_in,
+        angle,
+        reflected,
+    )
+    output_transform = o2.o2_irreps_representation(
+        module.irreps_out,
+        angle,
+        reflected,
+    )
+    transformed_input = torch.einsum("ij,bjc->bic", input_transform, input)
+    transformed_output = module(transformed_input)
+    expected = torch.einsum("ij,bjc->bic", output_transform, output)
+    torch.testing.assert_close(transformed_output, expected)
+
+
+def test_o2_gate_rejects_nonodd_direct_0o_activation():
+    with pytest.raises(ValueError, match="act_0o must be an odd function"):
+        O2Gate(
+            "0e+0o+1m",
+            act_0e=torch.nn.SiLU(),
+            act_0o=torch.nn.SiLU(),
+            act_lm=torch.nn.Sigmoid(),
+        )
 
 
 def test_o2_tensor_product_irrep_rules_are_complete():
@@ -134,7 +328,7 @@ def test_o2_tensor_product_irrep_rules_are_complete():
 
 
 @pytest.mark.parametrize("reflected", [False, True])
-@pytest.mark.parametrize("path_mode", ["uuu", "uvw"])
+@pytest.mark.parametrize("path_mode", ["u1u", "uuu", "uvw"])
 def test_o2_tensor_product_is_equivariant(reflected, path_mode):
     torch.manual_seed(11)
     irreps_in1 = o2.Irreps("0e+0o+1m+2m")
@@ -145,12 +339,18 @@ def test_o2_tensor_product_is_equivariant(reflected, path_mode):
         irreps_in2,
         irreps_out,
         channels_in1=2,
-        channels_in2=2,
-        channels_out=2 if path_mode == "uuu" else 3,
+        channels_in2=1 if path_mode == "u1u" else 2,
+        channels_out=2 if path_mode in ("u1u", "uuu") else 3,
         path_mode=path_mode,
     ).to(device=DEVICE, dtype=DTYPE)
     input1 = torch.randn(4, irreps_in1.dim, 2, dtype=DTYPE, device=DEVICE)
-    input2 = torch.randn(4, irreps_in2.dim, 2, dtype=DTYPE, device=DEVICE)
+    input2 = torch.randn(
+        4,
+        irreps_in2.dim,
+        module.channels_in2,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
     angle = torch.tensor(0.37, dtype=DTYPE, device=DEVICE)
     representation1 = o2.o2_irreps_representation(
         irreps_in1,
@@ -179,6 +379,63 @@ def test_o2_tensor_product_is_equivariant(reflected, path_mode):
     torch.testing.assert_close(actual, expected)
 
 
+def test_o2_tensor_product_u1u_matches_dense_uvw():
+    irreps_in1 = o2.Irreps("0e+1m")
+    irreps_in2 = o2.Irreps("0o+1m")
+    irreps_out = o2.Irreps("0e+0o+1m+2m")
+    u1u = o2.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        channels_in1=3,
+        path_mode="u1u",
+        internal_weights=False,
+    ).to(device=DEVICE, dtype=DTYPE)
+    uvw = o2.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        channels_in1=3,
+        channels_in2=1,
+        channels_out=3,
+        path_mode="uvw",
+        internal_weights=False,
+    ).to(device=DEVICE, dtype=DTYPE)
+    assert u1u.path == uvw.path
+    input1 = torch.randn(5, irreps_in1.dim, 3, dtype=DTYPE, device=DEVICE)
+    input2 = torch.randn(5, irreps_in2.dim, 1, dtype=DTYPE, device=DEVICE)
+    weight = torch.randn(*u1u.weight_shape, dtype=DTYPE, device=DEVICE)
+    dense_weight = torch.zeros(*uvw.weight_shape, dtype=DTYPE, device=DEVICE)
+    channel_indices = torch.arange(3, device=DEVICE)
+    dense_weight[:, channel_indices, 0, channel_indices] = weight
+    torch.testing.assert_close(
+        u1u(input1, input2, weight),
+        uvw(input1, input2, dense_weight),
+    )
+
+
+def test_o2_tensor_product_u1u_validates_channels():
+    with pytest.raises(ValueError, match="channels_in2 == 1"):
+        o2.TensorProduct(
+            "1m",
+            "1m",
+            "0e",
+            channels_in1=2,
+            channels_in2=2,
+            path_mode="u1u",
+        )
+    with pytest.raises(ValueError, match="channels_in1 == channels_out"):
+        o2.TensorProduct(
+            "1m",
+            "1m",
+            "0e",
+            channels_in1=2,
+            channels_in2=1,
+            channels_out=3,
+            path_mode="u1u",
+        )
+
+
 def test_o2_tensor_product_pseudoscalar_rotates_positive_order_by_quarter_turn():
     module = o2.TensorProduct(
         "0o",
@@ -196,29 +453,37 @@ def test_o2_tensor_product_pseudoscalar_rotates_positive_order_by_quarter_turn()
     torch.testing.assert_close(module(input1, input2, weight), expected)
 
 
-def test_o2_tensor_product_zero_pads_missing_output_irreps():
+@pytest.mark.parametrize("path_mode", ["u1u", "uuu"])
+def test_o2_tensor_product_zero_pads_missing_output_irreps(path_mode):
     module = o2.TensorProduct(
         "0e",
         "0e",
         "0e+0o+1m",
         channels_in1=2,
-        path_mode="uuu",
+        path_mode=path_mode,
     ).to(device=DEVICE, dtype=DTYPE)
     input1 = torch.randn(3, 1, 2, dtype=DTYPE, device=DEVICE)
-    input2 = torch.randn(3, 1, 2, dtype=DTYPE, device=DEVICE)
+    input2 = torch.randn(
+        3,
+        1,
+        module.channels_in2,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
     output = module(input1, input2)
     torch.testing.assert_close(output[:, 1:], torch.zeros_like(output[:, 1:]))
 
 
-def test_o2_tensor_product_external_weight_gradcheck_and_gradgradcheck():
+@pytest.mark.parametrize("path_mode", ["u1u", "uvw"])
+def test_o2_tensor_product_external_weight_gradcheck_and_gradgradcheck(path_mode):
     module = o2.TensorProduct(
         "0e+1m",
         "0o+1m",
         "0e+0o+1m+2m",
-        channels_in1=1,
-        channels_in2=2,
+        channels_in1=2,
+        channels_in2=1 if path_mode == "u1u" else 2,
         channels_out=2,
-        path_mode="uvw",
+        path_mode=path_mode,
         internal_weights=False,
     ).to(device=DEVICE, dtype=DTYPE)
     input1 = torch.randn(
@@ -610,12 +875,10 @@ def test_o2_linear_rejects_complex_input_and_weight():
 
 
 def _build_o2_magnetic_interaction(
-    monkeypatch,
-    path_mode,
     mag_Lmax=1,
     angular_max=None,
+    nonlinear=None,
 ):
-    monkeypatch.setattr(O2MagneticInteraction, "path_mode", path_mode)
     angular_max = mag_Lmax if angular_max is None else angular_max
     module = O2MagneticInteraction(
         layer=0,
@@ -640,7 +903,7 @@ def _build_o2_magnetic_interaction(
         tensor_act=None,
         edge_ace_hidden=None,
         parity=True,
-        nonlinear=None,
+        nonlinear=nonlinear,
     )
     return module.to(device=DEVICE, dtype=DTYPE)
 
@@ -732,172 +995,63 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
     )
 
 
-@pytest.mark.parametrize("path_mode", ["uv", "uu"])
-def test_o2_magnetic_interaction_uses_grouped_linear_paths(
-    path_mode,
-    monkeypatch,
-):
+def test_o2_magnetic_interaction_uses_uv_gate_uv():
     torch.manual_seed(7)
-    module = _build_o2_magnetic_interaction(monkeypatch, path_mode)
-    assert module.rejector.path_mode == path_mode
+    module = _build_o2_magnetic_interaction()
     assert module.edge_info.dims[0] == module.edge_feats_channel + 2 * 3
-    if path_mode == "uv":
-        assert module.rejector.linear.internal_weights
-    else:
-        assert not hasattr(module.rejector, "linear")
-        assert module.rejector.uu_group_specs
+    assert module.rejector.linear_in.path_mode == "uv"
+    assert module.rejector.linear_in.internal_weights
+    assert isinstance(module.rejector.gate, O2Gate)
+    assert module.rejector.linear_out.path_mode == "uv"
+    assert module.rejector.linear_out.internal_weights
+    assert not isinstance(module.linear_down, torch.nn.Identity)
 
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
     assert output.shape == (inputs[0].size(0), module.rejector.irreps_out.dim)
+    trainable = tuple(module.rejector.parameters()) + tuple(
+        module.edge_info.parameters()
+    )
     gradients = torch.autograd.grad(
         output.square().sum(),
-        (inputs[0], inputs[2], inputs[-1]),
+        (inputs[0], inputs[2], inputs[-1], *trainable),
         create_graph=True,
     )
     assert all(gradient.isfinite().all() for gradient in gradients)
 
 
-def test_o2_grouped_uu_matches_pathwise_weights(monkeypatch):
-    torch.manual_seed(10)
-    rejector = _build_o2_magnetic_interaction(monkeypatch, "uu").rejector
-    num_edges = 5
-    input_blocks = tuple(
-        torch.randn(
-            num_edges,
-            rejector.num_channel,
-            irrep.dim,
-            multiplicity,
-            dtype=DTYPE,
-            device=DEVICE,
-            requires_grad=True,
-        )
-        for multiplicity, irrep in rejector.irreps_in_local
-    )
-    radial_weights = torch.randn(
-        num_edges,
-        rejector.weight_numel,
-        dtype=DTYPE,
-        device=DEVICE,
-        requires_grad=True,
-    )
-    observed = rejector._uu_linear(input_blocks, radial_weights)
+def test_o2_magnetic_interaction_preserves_outer_o3_gate_and_linears():
+    torch.manual_seed(11)
+    module = _build_o2_magnetic_interaction(nonlinear="sigmoid_gate")
+    assert not isinstance(module.linear_up, torch.nn.Identity)
+    assert not isinstance(module.linear_down, torch.nn.Identity)
+    assert not isinstance(module.nonlinearity, torch.nn.Identity)
+    assert not isinstance(module.linear_nonlinearity, torch.nn.Identity)
 
-    reference_linear = o2.Linear(
-        rejector.irreps_in_local,
-        rejector.irreps_out_local,
-        rejector.num_channel,
-        path_mode="uu",
-        internal_weights=False,
-        bias=False,
-    ).to(device=DEVICE, dtype=DTYPE)
-    reference_inputs = tuple(
-        block.permute(0, 2, 3, 1).reshape(
-            num_edges,
-            irrep.dim,
-            multiplicity * rejector.num_channel,
-        )
-        for (multiplicity, irrep), block in zip(
-            rejector.irreps_in_local,
-            input_blocks,
-        )
+    messages = _evaluate_o2_magnetic_interaction(
+        module,
+        _o2_magnetic_inputs(module),
     )
-    weight_blocks = []
-    offset = 0
-    for input_index, input_multiplicity, output_multiplicity in rejector.uu_group_specs:
-        if input_index < 0:
-            continue
-        weight_numel = rejector.num_channel * input_multiplicity * output_multiplicity
-        weight_blocks.append(
-            radial_weights[:, offset : offset + weight_numel]
-            .reshape(
-                num_edges,
-                rejector.num_channel,
-                output_multiplicity,
-                input_multiplicity,
-            )
-            .permute(0, 2, 3, 1)
-            .reshape(
-                num_edges,
-                output_multiplicity * input_multiplicity,
-                rejector.num_channel,
-            )
-        )
-        offset += weight_numel
-    reference_input = torch.cat(
-        [
-            block.reshape(
-                num_edges,
-                irrep.dim,
-                multiplicity,
-                rejector.num_channel,
-            )
-            .permute(0, 2, 1, 3)
-            .reshape(
-                num_edges,
-                multiplicity * irrep.dim,
-                rejector.num_channel,
-            )
-            for (multiplicity, irrep), block in zip(
-                rejector.irreps_in_local,
-                reference_inputs,
-            )
-        ],
-        dim=1,
+    output = module.linear_nonlinearity(
+        module.nonlinearity(module.linear_down(messages))
     )
-    reference = _pack_o2_groups(
-        rejector.irreps_out_local,
-        reference_linear(
-            reference_input,
-            torch.cat(weight_blocks, dim=1),
-        ),
+    assert output.shape == (messages.size(0), module.irreps_out.dim)
+    parameters = (
+        *module.linear_down.parameters(),
+        *module.linear_nonlinearity.parameters(),
     )
-    observed_in_reference_layout = tuple(
-        block.permute(0, 2, 3, 1).reshape(
-            num_edges,
-            irrep.dim,
-            multiplicity * rejector.num_channel,
-        )
-        for (multiplicity, irrep), block in zip(
-            rejector.irreps_out_local,
-            observed,
-        )
-    )
-    for observed_block, reference_block in zip(
-        observed_in_reference_layout,
-        reference,
-    ):
-        torch.testing.assert_close(observed_block, reference_block)
-
-    observed_loss = sum(block.square().sum() for block in observed)
-    reference_loss = sum(block.square().sum() for block in reference)
-    observed_gradients = torch.autograd.grad(
-        observed_loss,
-        (*input_blocks, radial_weights),
-        retain_graph=True,
-    )
-    reference_gradients = torch.autograd.grad(
-        reference_loss,
-        (*input_blocks, radial_weights),
-    )
-    for observed_gradient, reference_gradient in zip(
-        observed_gradients,
-        reference_gradients,
-    ):
-        torch.testing.assert_close(observed_gradient, reference_gradient)
+    gradients = torch.autograd.grad(output.square().sum(), (messages, *parameters))
+    assert all(gradient.isfinite().all() for gradient in gradients)
 
 
-@pytest.mark.parametrize("path_mode", ["uv", "uu"])
 @pytest.mark.parametrize("mag_Lmax", [1, 2])
 @pytest.mark.parametrize("improper", [False, True])
 def test_o2_magnetic_interaction_is_globally_o3_equivariant(
-    path_mode,
     mag_Lmax,
     improper,
-    monkeypatch,
 ):
     torch.manual_seed(8)
-    module = _build_o2_magnetic_interaction(monkeypatch, path_mode, mag_Lmax)
+    module = _build_o2_magnetic_interaction(mag_Lmax)
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
 
@@ -934,8 +1088,8 @@ def test_o2_magnetic_interaction_is_globally_o3_equivariant(
     )
 
 
-def test_o2_magnetic_interaction_restricts_all_magnetic_degrees(monkeypatch):
-    module = _build_o2_magnetic_interaction(monkeypatch, "uu", mag_Lmax=2)
+def test_o2_magnetic_interaction_restricts_all_magnetic_degrees():
+    module = _build_o2_magnetic_interaction(mag_Lmax=2)
     assert module.magnetic_irreps == o3.Irreps("0e + 1e + 2e")
     assert module.rejector.magnetic_layout.local_irreps == o2.Irreps(
         "2x0e + 0o + 2x1m + 2m"
@@ -943,14 +1097,9 @@ def test_o2_magnetic_interaction_restricts_all_magnetic_degrees(monkeypatch):
 
 
 @pytest.mark.parametrize("mag_Lmax", [0, 2])
-def test_o2_magnetic_interaction_validates_mag_Lmax(mag_Lmax, monkeypatch):
+def test_o2_magnetic_interaction_validates_mag_Lmax(mag_Lmax):
     with pytest.raises(
         ValueError,
         match="mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax",
     ):
-        _build_o2_magnetic_interaction(
-            monkeypatch,
-            "uu",
-            mag_Lmax=mag_Lmax,
-            angular_max=1,
-        )
+        _build_o2_magnetic_interaction(mag_Lmax=mag_Lmax, angular_max=1)

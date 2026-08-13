@@ -92,6 +92,7 @@ class AOTICompiledTensorModel(torch.nn.Module):
             "direct_forces": None,
             "direct_virials": None,
             "direct_stress": None,
+            "noncollinear_magnetic_forces": None,
         }
         result.update(zip(self.output_keys, outputs))
         return result
@@ -209,7 +210,7 @@ def export_aotinductor(
     model.eval()
     compile_model = _as_compile_tensor_model(model)
     CompileTensorModel._validate_compile_properties(compile_model.readout_fn)
-    input_keys = TACE_AOTI_INPUT_KEYS
+    input_keys = _graph_aoti_input_keys(compile_model)
     output_keys = compile_model._output_keys()
     if not output_keys:
         raise ValueError("TACE graph .pt2 export needs at least one output property.")
@@ -225,9 +226,14 @@ def export_aotinductor(
     custom_ops_libs = _custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
     with _size_oblivious_export():
-        traced = trace_to_fx(flat_model, inputs)
+        traced = trace_to_fx(
+            flat_model,
+            inputs,
+            functionalize=compile_model.flags.compute_noncollinear_magnetic_forces,
+        )
         dynamic_shapes = _graph_dynamic_shapes(
-            num_graphs=sample_data["ptr"].numel() - 1
+            input_keys,
+            num_graphs=sample_data["ptr"].numel() - 1,
         )
         exported = torch.export.export(
             traced,
@@ -257,12 +263,11 @@ def export_aotinductor(
         }
     )
     _ensure_cxx_compiler()
-    with _size_oblivious_export():
-        out_path = torch._inductor.aoti_compile_and_package(
-            exported,
-            package_path=output_path,
-            inductor_configs=inductor_configs,
-        )
+    out_path = torch._inductor.aoti_compile_and_package(
+        exported,
+        package_path=output_path,
+        inductor_configs=inductor_configs,
+    )
     _embed_custom_ops_libs(out_path, custom_ops_libs)
     return str(out_path)
 
@@ -392,7 +397,7 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
     node_attrs[:, 0] = 1.0
     lattice = torch.eye(3, dtype=dtype, device=device).reshape(1, 3, 3)
     lattice = lattice.repeat(2, 1, 1) * max(model.get_cutoff() * 4.0, 1.0)
-    return {
+    sample = {
         "positions": torch.tensor(
             [
                 [0.0, 0.0, 0.0],
@@ -420,6 +425,18 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
             device=device,
         ),
     }
+    if model._requires_noncollinear_magmoms():
+        sample["initial_noncollinear_magmoms"] = torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+            ],
+            dtype=dtype,
+            device=device,
+        )
+    return sample
 
 
 def _synthetic_lammps_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
@@ -481,32 +498,32 @@ def _ensure_sample_inputs(
             sample_data[key] = value.to(device=device)
 
 
-def _graph_dynamic_shapes(num_graphs: int) -> tuple[Dict[int, object], ...]:
+def _graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
+    keys = list(TACE_AOTI_INPUT_KEYS)
+    if model._requires_noncollinear_magmoms():
+        keys.append("initial_noncollinear_magmoms")
+    return tuple(keys)
+
+
+def _graph_dynamic_shapes(
+    input_keys: Sequence[str],
+    num_graphs: int,
+) -> tuple[Dict[int, object], ...]:
     num_nodes = torch.export.Dim("num_nodes", min=2)
     num_edges = torch.export.Dim("num_edges", min=1)
-    if num_graphs == 1:
-        return (
-            {0: num_nodes},
-            {0: num_nodes},
-            {1: num_edges},
-            {0: num_edges},
-            {},
-            {0: num_nodes},
-            {},
-            {},
-        )
-
-    num_graphs_dim = torch.export.Dim("num_graphs", min=1)
-    return (
-        {0: num_nodes},
-        {0: num_nodes},
-        {1: num_edges},
-        {0: num_edges},
-        {0: num_graphs_dim},
-        {0: num_nodes},
-        {0: num_graphs_dim + 1},
-        {0: num_graphs_dim},
-    )
+    num_graphs_dim = torch.export.Dim("num_graphs", min=1) if num_graphs != 1 else None
+    shapes = {
+        "positions": {0: num_nodes},
+        "node_attrs": {0: num_nodes},
+        "edge_index": {1: num_edges},
+        "edge_shifts": {0: num_edges},
+        "lattice": {} if num_graphs_dim is None else {0: num_graphs_dim},
+        "batch": {0: num_nodes},
+        "ptr": {} if num_graphs_dim is None else {0: num_graphs_dim + 1},
+        "fidelity_idx": {} if num_graphs_dim is None else {0: num_graphs_dim},
+        "initial_noncollinear_magmoms": {0: num_nodes},
+    }
+    return tuple(shapes[key] for key in input_keys)
 
 
 def _size_oblivious_export():
@@ -539,13 +556,19 @@ def _export_metadata(
     target: str = "graph",
     export_num_graphs: Union[int, None] = None,
 ) -> Dict[str, str]:
+    embedding_property = list(model.get_embedding_property())
+    if (
+        model._requires_noncollinear_magmoms()
+        and "initial_noncollinear_magmoms" not in embedding_property
+    ):
+        embedding_property.append("initial_noncollinear_magmoms")
     metadata = {
         "tace_format": aoti_format,
         "tace_aoti_target": target,
         "tace_input_keys": json.dumps(list(input_keys)),
         "tace_output_keys": json.dumps(list(output_keys)),
         "tace_target_property": json.dumps(model.get_target_property()),
-        "tace_embedding_property": json.dumps(model.get_embedding_property()),
+        "tace_embedding_property": json.dumps(embedding_property),
         "tace_atomic_numbers": json.dumps(model.get_atomic_numbers()),
         "tace_cutoff": str(model.get_cutoff()),
         "tace_max_neighbors": json.dumps(model.get_max_neighbors()),

@@ -109,6 +109,12 @@ def _build_sample_data(
 
     key_spec = KeySpecification()
     update_keyspec_from_kwargs(key_spec, KEYS)
+    embedding_property = model.get_embedding_property()
+    if (
+        "noncollinear_magnetic_forces" in model.get_target_property()
+        and "initial_noncollinear_magmoms" not in embedding_property
+    ):
+        embedding_property.append("initial_noncollinear_magmoms")
     dataset = [
         from_atoms(
             model.get_torch_element(),
@@ -117,7 +123,7 @@ def _build_sample_data(
             max_neighbors=model.get_max_neighbors(),
             keyspec=key_spec,
             target_property=model.get_target_property(),
-            embedding_property=model.get_embedding_property(),
+            embedding_property=embedding_property,
             training=False,
             neighborlist_backend=nl_backend,
         )

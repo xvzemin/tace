@@ -18,6 +18,7 @@ class CompileTensorModel(TensorModel):
             "direct_forces",
             "direct_stress",
             "direct_virials",
+            "noncollinear_magnetic_forces",
         }
     )
 
@@ -96,12 +97,12 @@ class CompileTensorModel(TensorModel):
             "direct_forces": None,
             "direct_virials": None,
             "direct_stress": None,
+            "noncollinear_magnetic_forces": None,
         }
         result.update(zip(output_keys, outputs))
         return result
 
-    @staticmethod
-    def _input_keys(data: Dict[str, torch.Tensor]) -> tuple[str, ...]:
+    def _input_keys(self, data: Dict[str, torch.Tensor]) -> tuple[str, ...]:
         required = [
             "positions",
             "node_attrs",
@@ -113,6 +114,8 @@ class CompileTensorModel(TensorModel):
         ]
         if "fidelity_idx" in data:
             required.append("fidelity_idx")
+        if self._requires_noncollinear_magmoms():
+            required.append("initial_noncollinear_magmoms")
         missing = [key for key in required if key not in data]
         if missing:
             raise KeyError(f"missing e3nn compile inputs: {missing}")
@@ -131,7 +134,15 @@ class CompileTensorModel(TensorModel):
         keys.extend(
             key for key in ("forces", "virials", "stress") if key in target_property
         )
+        if "noncollinear_magnetic_forces" in target_property:
+            keys.append("noncollinear_magnetic_forces")
         return tuple(keys)
+
+    def _requires_noncollinear_magmoms(self) -> bool:
+        return (
+            "initial_noncollinear_magmoms" in self.get_embedding_property()
+            or "noncollinear_magnetic_forces" in self.get_target_property()
+        )
 
     @classmethod
     def _validate_compile_properties(cls, readout_fn: torch.nn.Module) -> None:
@@ -149,13 +160,20 @@ class CompileTensorModel(TensorModel):
         if invalid:
             raise ValueError(
                 "TACE_USE_COMPILE only supports energy, direct_forces, "
-                "direct_stress, direct_virials, forces, stress and virials; "
+                "direct_stress, direct_virials, forces, stress, virials and "
+                "noncollinear_magnetic_forces; "
                 f"got {sorted(invalid)}"
             )
-        if {"forces", "stress", "virials"} & set(target_property):
+        if {
+            "forces",
+            "stress",
+            "virials",
+            "noncollinear_magnetic_forces",
+        } & set(target_property):
             if "energy" not in target_property:
                 raise ValueError(
-                    "TACE_USE_COMPILE requires energy for forces, stress and virials."
+                    "TACE_USE_COMPILE requires energy for forces, stress, virials, "
+                    "and noncollinear magnetic forces."
                 )
 
 
@@ -174,13 +192,21 @@ class _FlatE3nnCompileModel(torch.nn.Module):
         self.compute_forces = model.flags.compute_forces
         self.compute_stress = model.flags.compute_stress
         self.compute_virials = model.flags.compute_virials
+        self.compute_noncollinear_magnetic_forces = (
+            model.flags.compute_noncollinear_magnetic_forces
+        )
         self.training_mode = model.training
 
     def forward(self, *args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         data = {key: value for key, value in zip(self.input_keys, args)}
         graph = self._prepare_graph(data)
         output = self.readout_fn(data, graph)
-        if self.compute_forces or self.compute_stress or self.compute_virials:
+        if (
+            self.compute_forces
+            or self.compute_stress
+            or self.compute_virials
+            or self.compute_noncollinear_magnetic_forces
+        ):
             output.update(self._first_derivatives(data, graph, output["energy"]))
         return tuple(output[key] for key in self.output_keys)
 
@@ -192,6 +218,8 @@ class _FlatE3nnCompileModel(torch.nn.Module):
         )
         num_graphs = data["ptr"].numel() - 1
         data["positions"].requires_grad_(self.compute_forces)
+        if self.compute_noncollinear_magnetic_forces:
+            data["initial_noncollinear_magmoms"].requires_grad_(True)
         displacement = (
             compute_symmetric_displacement(data, num_graphs)
             if self.compute_stress or self.compute_virials
@@ -239,6 +267,8 @@ class _FlatE3nnCompileModel(torch.nn.Module):
             inputs.append(graph.positions)
         if self.compute_stress or self.compute_virials:
             inputs.append(graph.displacement)
+        if self.compute_noncollinear_magnetic_forces:
+            inputs.append(data["initial_noncollinear_magmoms"])
         if not inputs:
             return {}
 
@@ -267,6 +297,13 @@ class _FlatE3nnCompileModel(torch.nn.Module):
             output["virials"] = virials
             output["stress"] = torch.where(
                 torch.abs(stress) < 1e10, stress, torch.zeros_like(stress)
+            )
+            grad_index += 1
+        if self.compute_noncollinear_magnetic_forces:
+            grad = grads[grad_index]
+            magmoms = data["initial_noncollinear_magmoms"]
+            output["noncollinear_magnetic_forces"] = (
+                torch.zeros_like(magmoms) if grad is None else -grad
             )
         return output
 

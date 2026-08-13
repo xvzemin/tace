@@ -9,18 +9,18 @@ import torch
 from e3nn import o3
 
 from tace.utils.torch_scatter import scatter_sum
+
+from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
-from ..mlp import MLP, ScaledSigmoid, ScaledSiLU
-from ..lammps import Graph
+from ..mlp import ACTIVATION, MLP, ScaledSigmoid, ScaledSiLU
 from .base import Interaction, _to_possible_tp_irreps
-from .residual import get_resnet_layer
-from .nonlinear import get_nonlinear_layer
-from .layer_norm import get_normalization_layer
 from .fused import O3ScatterTensorProduct, uuSO2ScatterTensorProduct, uvSO2TensorProduct
-from .wigner6j import O3Wigner6jScatterTensorProduct
+from .layer_norm import get_normalization_layer
+from .nonlinear import get_nonlinear_layer
 from .o2 import O2MagneticScatterLinear
-
+from .residual import get_resnet_layer
+from .wigner6j import O3Wigner6jScatterTensorProduct
 
 
 class O3CgtpInteraction(Interaction):
@@ -387,9 +387,7 @@ class uvSO2Interaction(O3CgtpInteraction):
         )
 
     def _linear_down_irreps_in(self) -> o3.Irreps:
-        return o3.Irreps(
-            [(self.edge_wise_hidden, ir) for _, ir in self.irreps_out]
-        )
+        return o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
 
     def _compute_messages(
         self,
@@ -627,15 +625,11 @@ class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
 class O2MagneticInteraction(O3CgtpInteraction):
     """Full-O3 magnetic interaction executed with local O2 linears."""
 
-    path_mode = "uv"
-
     def _setup(self) -> None:
         if not self.mmax == self.Lmax == self.lmax:
             raise ValueError("o2_mag requires mmax == Lmax == lmax.")
         if not self.parity:
             raise ValueError("o2_mag requires parity: true for full O(3)")
-        if self.path_mode not in {"uv", "uu"}:
-            raise ValueError("O2 magnetic path_mode must be 'uv' or 'uu'.")
         if self.magnetic_irreps is None:
             raise ValueError("o2_mag requires magnetic_irreps.")
         if not 1 <= self.mag_Lmax <= self.Lmax:
@@ -644,13 +638,25 @@ class O2MagneticInteraction(O3CgtpInteraction):
             raise ValueError("magnetic_irreps must end at mag_Lmax.")
 
         super()._setup()
+        scalar_act = self.scalar_act or "silu"
+        tensor_act = self.tensor_act or "sigmoid"
+
+        def activation(name: str) -> torch.nn.Module:
+            if name == "silu":
+                return ScaledSiLU()
+            if name == "sigmoid":
+                return ScaledSigmoid()
+            return ACTIVATION[name]()
+
         self.rejector = O2MagneticScatterLinear(
             self.irreps_in,
             self.irreps_out,
             self.magnetic_irreps,
             num_channel=self.num_channel,
             lmax=self.lmax,
-            path_mode=self.path_mode,
+            act_0e=activation(scalar_act),
+            act_0o=None,
+            act_lm=activation(tensor_act),
         )
         self.linear_down = e3nnLinear(
             self.rejector.irreps_out.simplify(),

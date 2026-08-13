@@ -19,7 +19,7 @@ loads the model and which workflows the file supports.
      - Lightning training checkpoint
      - Resume training
      - Coupled to the TACE version
-   * - ``.pt`` / ``.pth``
+   * - ``.pt``
      - Model configuration and parameter state dictionary
      - Long-term storage and eager inference
      - Portable while the required TACE modules remain supported

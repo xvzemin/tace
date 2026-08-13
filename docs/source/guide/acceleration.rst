@@ -142,8 +142,10 @@ with those selections.
    When OpenEquivariance is enabled for AOTI export, OEQ 0.6.4 or newer is
    required.
 
-Compilation currently supports energy and its force, stress, and virial
-derivatives, together with their direct prediction variants. Models using
+Compilation currently supports energy and its atomic-force, stress, virial,
+and noncollinear-magnetic-force derivatives, together with the direct
+prediction variants. A graph AOTI package for a magnetic model takes
+``initial_noncollinear_magmoms`` as an additional per-atom input. Models using
 unsupported output properties or LES cannot be exported through the current
 AOTI path.
 
