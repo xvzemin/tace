@@ -13,7 +13,7 @@ from tace.utils.torch_scatter import scatter_sum
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
-from ..mlp import ACTIVATION, MLP, ScaledSigmoid, ScaledSiLU
+from ..mlp import MLP, ScaledSigmoid, ScaledSiLU, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct, uuSO2ScatterTensorProduct, uvSO2TensorProduct
 from .layer_norm import get_normalization_layer
@@ -637,16 +637,22 @@ class O2MagneticInteraction(O3CgtpInteraction):
         if self.magnetic_irreps.lmax != self.mag_Lmax:
             raise ValueError("magnetic_irreps must end at mag_Lmax.")
 
-        super()._setup()
-        scalar_act = self.scalar_act or "silu"
-        tensor_act = self.tensor_act or "sigmoid"
+        scalar_act = self.scalar_act
+        if isinstance(scalar_act, str):
+            act_0e_name = scalar_act
+            act_0o_name = "scaled_tanh"
+        elif isinstance(scalar_act, list) and len(scalar_act) == 2:
+            act_0e_name, act_0o_name = scalar_act
+            if not isinstance(act_0e_name, str) or not isinstance(act_0o_name, str):
+                raise TypeError("O2 scalar_act entries must be strings.")
+        else:
+            raise TypeError(
+                "O2 scalar_act must be a string or a list of two strings for 0e and 0o."
+            )
 
-        def activation(name: str) -> torch.nn.Module:
-            if name == "silu":
-                return ScaledSiLU()
-            if name == "sigmoid":
-                return ScaledSigmoid()
-            return ACTIVATION[name]()
+        self.scalar_act = act_0e_name
+        super()._setup()
+        tensor_act = self.tensor_act or "sigmoid"
 
         self.rejector = O2MagneticScatterLinear(
             self.irreps_in,
@@ -654,9 +660,9 @@ class O2MagneticInteraction(O3CgtpInteraction):
             self.magnetic_irreps,
             num_channel=self.num_channel,
             lmax=self.lmax,
-            act_0e=activation(scalar_act),
-            act_0o=None,
-            act_lm=activation(tensor_act),
+            act_0e=get_scaled_activation(act_0e_name),
+            act_0o=get_scaled_activation(act_0o_name),
+            act_lm=get_scaled_activation(tensor_act),
         )
         self.linear_down = e3nnLinear(
             self.rejector.irreps_out.simplify(),

@@ -40,12 +40,12 @@ def _check_odd_activation(activation: torch.nn.Module) -> None:
 class O2Gate(torch.nn.Module):
     """Apply equivariant nonlinearities to complete O(2) features.
 
-    ``0e`` outputs are passed directly through ``act_0e``. When ``act_0o``
-    is provided, ``0o`` outputs are passed directly through it, and the
-    activation is required to be odd. Otherwise, every ``0o`` output is
-    multiplied by an auxiliary ``0e`` gate. Positive-order ``lm`` outputs
-    are always multiplied by auxiliary ``0e`` gates. All auxiliary gates are
-    passed through ``act_lm`` before multiplication.
+    ``0e`` outputs are passed directly through ``act_0e``. If ``act_0o`` is
+    provided, it must be odd and is applied directly to ``0o`` outputs. If
+    ``act_0o=None``, every ``0o`` output is instead multiplied by an
+    auxiliary ``0e`` gate. Positive-order ``lm`` outputs are always
+    multiplied by auxiliary ``0e`` gates. All auxiliary gates are passed
+    through ``act_lm`` before multiplication.
 
     The input irreps are ordered as the output ``0e`` scalars, the auxiliary
     ``0e`` gates, the directly activated ``0o`` scalars, and the gated
@@ -61,10 +61,13 @@ class O2Gate(torch.nn.Module):
         irreps_out: IrrepsLike,
         *,
         act_0e: torch.nn.Module,
-        act_0o: Union[torch.nn.Module, None] = None,
+        act_0o: Union[torch.nn.Module, None],
         act_lm: torch.nn.Module,
     ) -> None:
         super().__init__()
+
+        if act_0o is not None and not isinstance(act_0o, torch.nn.Module):
+            raise TypeError("act_0o must be a torch.nn.Module or None.")
 
         self.irreps_out = check_o2_irreps(irreps_out)
         even_groups = []

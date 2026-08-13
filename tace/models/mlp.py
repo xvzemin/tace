@@ -3,20 +3,35 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from functools import lru_cache
 from math import sqrt
-from typing import List, Union
+from typing import Callable, List, Union
 
 import torch
 import torch.nn.functional as F
 
 from .linear import mlpLinear
 
+def get_activation_scale_factor(
+    activation: Callable[[torch.Tensor], torch.Tensor],
+) -> float:
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    samples = torch.randn(
+        1_000_000,
+        generator=generator,
+        dtype=torch.float64,
+        device="cpu",
+    )
+    with torch.no_grad():
+        second_moment = activation(samples).square().mean()
+    return second_moment.rsqrt().item()
+
 
 class ScaledSiLU(torch.nn.Module):
     def __init__(self, inplace: bool = False) -> None:
         super().__init__()
         self.inplace = inplace
-        self.scale_factor = 1.6791767923989418  # scale from e3nn Activation
+        self.scale_factor = 1.6791767923989418
 
     def forward(self, inputs):
         return F.silu(inputs, inplace=self.inplace) * self.scale_factor
@@ -25,10 +40,19 @@ class ScaledSiLU(torch.nn.Module):
 class ScaledSigmoid(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.scale_factor = 1.8467055342154763  # scale from e3nn Activation
+        self.scale_factor = 1.8467055342154763
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(x) * self.scale_factor
+
+
+class ScaledTanh(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale_factor = 1.5937334472592695
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(x) * self.scale_factor
 
 
 class SmoothLeakyReLU(torch.nn.Module):
@@ -48,6 +72,12 @@ ACTIVATION = {
     "None": torch.nn.Identity,
     "null": torch.nn.Identity,
     "identity": torch.nn.Identity,
+    "silu": torch.nn.SiLU,
+    "scaled_silu": ScaledSiLU,
+    "sigmoid": torch.nn.Sigmoid,
+    "scaled_sigmoid": ScaledSigmoid,
+    "tanh": torch.nn.Tanh,
+    "scaled_tanh": ScaledTanh,
     "relu": torch.nn.ReLU,
     "leaky_relu": torch.nn.LeakyReLU,
     "smooth_leaky_relu": SmoothLeakyReLU,
@@ -55,19 +85,52 @@ ACTIVATION = {
     "elu": torch.nn.ELU,
     "selu": torch.nn.SELU,
     "gelu": torch.nn.GELU,
-    "silu": torch.nn.SiLU,  
-    "scaled_silu": ScaledSiLU,  
     "mish": torch.nn.Mish,
     "softplus": torch.nn.Softplus,
     "softsign": torch.nn.Softsign,
-    "tanh": torch.nn.Tanh,
-    "sigmoid": torch.nn.Sigmoid,
-    "scaled_sigmoid": ScaledSigmoid,  
     "hardtanh": torch.nn.Hardtanh,
     "hardswish": torch.nn.Hardswish,
     "hardsigmoid": torch.nn.Hardsigmoid,
     "tanhshrink": torch.nn.Tanhshrink,
 }
+
+
+class ScaledActivation(torch.nn.Module):
+    """Scale an activation to unit second moment for normal inputs."""
+
+    def __init__(
+        self,
+        activation: torch.nn.Module,
+        scale_factor: float,
+    ) -> None:
+        super().__init__()
+        self.activation = activation
+        self.scale_factor = scale_factor
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.activation(input) * self.scale_factor
+
+
+@lru_cache(maxsize=None)
+def _activation_scale_factor_from_name(name: str) -> float:
+    return get_activation_scale_factor(ACTIVATION[name]())
+
+
+def get_scaled_activation(name: str) -> torch.nn.Module:
+    if not isinstance(name, str):
+        raise TypeError("Activation name must be a string.")
+    if name not in ACTIVATION:
+        raise ValueError(f"Unknown activation: {name!r}.")
+    if name.startswith("scaled_"):
+        return ACTIVATION[name]()
+
+    scaled_name = f"scaled_{name}"
+    if scaled_name in ACTIVATION:
+        return ACTIVATION[scaled_name]()
+    return ScaledActivation(
+        ACTIVATION[name](),
+        _activation_scale_factor_from_name(name),
+    )
 
 
 class MLP(torch.nn.Module):

@@ -7,6 +7,14 @@ from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models.angular import SolidHarmonics
 from tace.models.legacy_so2 import WignerD
 from tace.models.mag import MagmomsNormalizer
+from tace.models.mlp import (
+    ACTIVATION,
+    ScaledSigmoid,
+    ScaledSiLU,
+    ScaledTanh,
+    get_activation_scale_factor,
+    get_scaled_activation,
+)
 from tace.models.o2 import (
     Irrep,
     Irreps,
@@ -210,6 +218,7 @@ def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
     module = O2Gate(
         irreps_out,
         act_0e=torch.nn.SiLU(),
+        act_0o=None,
         act_lm=torch.nn.Sigmoid(),
     ).to(device=DEVICE, dtype=DTYPE)
     input = torch.randn(
@@ -313,6 +322,69 @@ def test_o2_gate_rejects_nonodd_direct_0o_activation():
             act_0o=torch.nn.SiLU(),
             act_lm=torch.nn.Sigmoid(),
         )
+
+
+def test_o2_gate_accepts_passed_scaled_tanh_for_0o():
+    module = O2Gate(
+        "0e+0o+1m",
+        act_0e=torch.nn.SiLU(),
+        act_0o=ScaledTanh(),
+        act_lm=torch.nn.Sigmoid(),
+    )
+    assert isinstance(module.act_0o, ScaledTanh)
+    assert module.num_gates == 1
+
+    gated_0o = O2Gate(
+        "0e+0o+1m",
+        act_0e=torch.nn.SiLU(),
+        act_0o=None,
+        act_lm=torch.nn.Sigmoid(),
+    )
+    assert gated_0o.act_0o is None
+    assert gated_0o.num_gates == 2
+
+
+@pytest.mark.parametrize(
+    ("activation", "scaled_activation"),
+    [
+        (torch.nn.functional.silu, ScaledSiLU),
+        (torch.sigmoid, ScaledSigmoid),
+        (torch.tanh, ScaledTanh),
+    ],
+)
+def test_activation_scale_factor_matches_e3nn_without_changing_rng(
+    activation,
+    scaled_activation,
+):
+    from e3nn.math import normalize2mom
+
+    torch.manual_seed(1729)
+    random_state = torch.random.get_rng_state().clone()
+    actual = get_activation_scale_factor(activation)
+    torch.testing.assert_close(torch.random.get_rng_state(), random_state)
+
+    expected = normalize2mom(activation).cst
+    assert actual == expected
+    assert scaled_activation().scale_factor == expected
+    assert (
+        ACTIVATION[f"scaled_{scaled_activation.__name__[6:].lower()}"]
+        is scaled_activation
+    )
+
+
+def test_scaled_activation_factory_uses_fixed_common_constants_and_general_fallback():
+    from e3nn.math import normalize2mom
+
+    assert isinstance(get_scaled_activation("silu"), ScaledSiLU)
+    assert isinstance(get_scaled_activation("scaled_silu"), ScaledSiLU)
+    assert isinstance(get_scaled_activation("sigmoid"), ScaledSigmoid)
+    assert isinstance(get_scaled_activation("tanh"), ScaledTanh)
+
+    torch.manual_seed(1729)
+    random_state = torch.random.get_rng_state().clone()
+    scaled_relu = get_scaled_activation("relu")
+    torch.testing.assert_close(torch.random.get_rng_state(), random_state)
+    assert scaled_relu.scale_factor == normalize2mom(torch.nn.ReLU()).cst
 
 
 def test_o2_tensor_product_irrep_rules_are_complete():
@@ -878,6 +950,7 @@ def _build_o2_magnetic_interaction(
     mag_Lmax=1,
     angular_max=None,
     nonlinear=None,
+    scalar_act="silu",
 ):
     angular_max = mag_Lmax if angular_max is None else angular_max
     module = O2MagneticInteraction(
@@ -899,7 +972,7 @@ def _build_o2_magnetic_interaction(
         radial_mlp=[8],
         radial_bias=True,
         irreps_in=o3.Irreps("2x0e + 2x1o"),
-        scalar_act=None,
+        scalar_act=scalar_act,
         tensor_act=None,
         edge_ace_hidden=None,
         parity=True,
@@ -1002,6 +1075,7 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert module.rejector.linear_in.path_mode == "uv"
     assert module.rejector.linear_in.internal_weights
     assert isinstance(module.rejector.gate, O2Gate)
+    assert isinstance(module.rejector.gate.act_0o, ScaledTanh)
     assert module.rejector.linear_out.path_mode == "uv"
     assert module.rejector.linear_out.internal_weights
     assert not isinstance(module.linear_down, torch.nn.Identity)
@@ -1018,6 +1092,36 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
         create_graph=True,
     )
     assert all(gradient.isfinite().all() for gradient in gradients)
+
+
+def test_o2_magnetic_interaction_parses_scalar_activations():
+    single = _build_o2_magnetic_interaction(scalar_act="scaled_silu")
+    assert isinstance(single.rejector.gate.act_0e, ScaledSiLU)
+    assert isinstance(single.rejector.gate.act_0o, ScaledTanh)
+
+    separate = _build_o2_magnetic_interaction(scalar_act=["scaled_silu", "tanh"])
+    assert isinstance(separate.rejector.gate.act_0e, ScaledSiLU)
+    assert isinstance(separate.rejector.gate.act_0o, ScaledTanh)
+
+
+@pytest.mark.parametrize(
+    "scalar_act",
+    [
+        ["silu"],
+        ["silu", "tanh", "sigmoid"],
+        ("silu", "tanh"),
+        1,
+        None,
+    ],
+)
+def test_o2_magnetic_interaction_rejects_invalid_scalar_activations(scalar_act):
+    with pytest.raises(TypeError, match="string or a list of two strings"):
+        _build_o2_magnetic_interaction(scalar_act=scalar_act)
+
+
+def test_o2_magnetic_interaction_rejects_nonstring_scalar_activation_entries():
+    with pytest.raises(TypeError, match="entries must be strings"):
+        _build_o2_magnetic_interaction(scalar_act=["silu", None])
 
 
 def test_o2_magnetic_interaction_preserves_outer_o3_gate_and_linears():

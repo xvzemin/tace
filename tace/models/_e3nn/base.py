@@ -128,7 +128,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         radial_mlp: list[int],
         radial_bias: bool,
         irreps_in: o3.Irreps,
-        scalar_act: str,
+        scalar_act: Union[str, list[str], None],
         tensor_act: str,
         edge_ace_hidden: Union[int, None],
         l1l2: Union[str, None] = None,
@@ -249,6 +249,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         if self.scatter_norm == "avg_num_neighbors":
             return messages / self.avg_num_neighbors
         return messages / density
+
 
 class Product(torch.nn.Module):
     def __init__(
