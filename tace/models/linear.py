@@ -337,6 +337,13 @@ class e3nnLinear(torch.nn.Module):
             self.bias = torch.nn.Parameter(torch.zeros(bias_acc))
         else:
             self.register_parameter("bias", None)
+        bias_index = torch.zeros(self.irreps_out.dim, dtype=torch.long)
+        bias_mask = torch.zeros(self.irreps_out.dim)
+        for sl, bias_sl in zip(self._0e_slices, self._bias_slices):
+            bias_index[sl] = torch.arange(bias_sl.start, bias_sl.stop)
+            bias_mask[sl] = 1.0
+        self.register_buffer("_bias_index", bias_index, persistent=False)
+        self.register_buffer("_bias_mask", bias_mask, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         weight = self.weight
@@ -358,8 +365,8 @@ class e3nnLinear(torch.nn.Module):
         out = self.linear(x, weight)
 
         if self.bias is not None:
-            for sl, bias_sl in zip(self._0e_slices, self._bias_slices):
-                out[:, sl] = out[:, sl] + self.bias[bias_sl].unsqueeze(0)
+            bias = self.bias.index_select(0, self._bias_index)
+            out = out + bias * self._bias_mask
 
         return out
 
@@ -424,6 +431,13 @@ class e3nnElementLinear(torch.nn.Module):
                 self.bias = torch.nn.Parameter(torch.zeros(num_elements, bias_acc))
             else:
                 self.register_parameter("bias", None)
+        bias_index = torch.zeros(self.irreps_out.dim, dtype=torch.long)
+        bias_mask = torch.zeros(self.irreps_out.dim)
+        for sl, bias_sl in zip(self._0e_slices, self._bias_slices):
+            bias_index[sl] = torch.arange(bias_sl.start, bias_sl.stop)
+            bias_mask[sl] = 1.0
+        self.register_buffer("_bias_index", bias_index, persistent=False)
+        self.register_buffer("_bias_mask", bias_mask, persistent=False)
 
     def forward(self, x: torch.Tensor, attrs: torch.Tensor) -> torch.Tensor:
 
@@ -442,7 +456,11 @@ class e3nnElementLinear(torch.nn.Module):
                 weight = torch.cat(
                     [w.view(self.num_elements, -1) for w in self.weight], dim=-1
                 )
-            bias = self.bias.view(self.num_elements, -1)
+            bias = (
+                self.bias.view(self.num_elements, -1)
+                if self.bias is not None
+                else None
+            )
         else:
             weight = self.weight
             if has_lora(self):
@@ -455,8 +473,8 @@ class e3nnElementLinear(torch.nn.Module):
         out = self.linear(x, weight)
         if bias is not None:
             bias = torch.einsum("bz,zi->bi", attrs, bias)
-            for sl, bias_sl in zip(self._0e_slices, self._bias_slices):
-                out[:, sl] = out[:, sl] + bias[:, bias_sl]
+            bias = bias.index_select(1, self._bias_index)
+            out = out + bias * self._bias_mask
         return out
 
     def __repr__(self):

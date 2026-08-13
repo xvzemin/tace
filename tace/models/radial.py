@@ -84,6 +84,14 @@ class j0SphericalBesselBasis(torch.nn.Module):
         )
 
 
+class j0SincSphericalBesselBasis(j0SphericalBesselBasis):
+    """Stable value at the origin."""
+
+    def forward(self, r: torch.Tensor) -> torch.Tensor:
+        basis = self.bessel_weights * torch.sinc(self.bessel_weights * r / math.pi)
+        return self.prefactor * basis
+
+
 class jnTaylorSphericalBessel(torch.nn.Module):
     def __init__(self, n: int, K: int = 6):
         super().__init__()
@@ -912,6 +920,12 @@ class RadialBasis(torch.nn.Module):
 
         if radial_basis == "bessel" or radial_basis == "j0":
             self.radial_fn = j0SphericalBesselBasis(
+                cutoff=cutoff,
+                num_basis=num_basis,
+                trainable=trainable,
+            )
+        elif radial_basis == "j0sinc":
+            self.radial_fn = j0SincSphericalBesselBasis(
                 cutoff=cutoff,
                 num_basis=num_basis,
                 trainable=trainable,
