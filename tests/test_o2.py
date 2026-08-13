@@ -399,6 +399,195 @@ def test_o2_tensor_product_irrep_rules_are_complete():
     )
 
 
+def _build_o2_asymmetric_contractions(correlation=3, channels=2):
+    kwargs = {
+        "irreps_in": "0e+0o+1m",
+        "irreps_out": "0e+0o+1m+2m",
+        "channels": channels,
+        "correlation": correlation,
+    }
+    edge = o2.O2AsymmetricContraction(**kwargs, algorithm="edge").to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    node = o2.O2AsymmetricContraction(**kwargs, algorithm="node").to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    assert edge.order_num_paths == node.order_num_paths
+    assert edge.weight_numel == node.weight_numel
+    return edge, node
+
+
+def test_o2_asymmetric_contraction_algorithms_match_with_batch_weights():
+    edge, node = _build_o2_asymmetric_contractions()
+    assert not tuple(edge.buffers())
+    assert any(name.startswith("generalized_cg_") for name, _ in node.named_buffers())
+    inputs = [
+        torch.randn(5, edge.irreps_in.dim, 2, dtype=DTYPE, device=DEVICE)
+        for _ in range(edge.correlation)
+    ]
+    weights = torch.randn(
+        5,
+        edge.weight_numel,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    edge_output = edge(inputs, weights)
+    node_output = node(inputs, weights)
+    torch.testing.assert_close(edge_output, node_output)
+
+    sample_outputs = torch.cat(
+        [
+            node(
+                [input[index : index + 1] for input in inputs],
+                weights[index : index + 1],
+            )
+            for index in range(weights.size(0))
+        ],
+        dim=0,
+    )
+    torch.testing.assert_close(node_output, sample_outputs)
+
+
+@pytest.mark.parametrize("algorithm", ["edge", "node"])
+@pytest.mark.parametrize("reflected", [False, True])
+def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
+    module = o2.O2AsymmetricContraction(
+        "0e+0o+1m",
+        "0e+0o+1m+2m",
+        channels=2,
+        correlation=3,
+        algorithm=algorithm,
+    ).to(device=DEVICE, dtype=DTYPE)
+    inputs = [
+        torch.randn(4, module.irreps_in.dim, 2, dtype=DTYPE, device=DEVICE)
+        for _ in range(module.correlation)
+    ]
+    weights = torch.randn(
+        4,
+        module.weight_numel,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    angle = torch.tensor(0.43, dtype=DTYPE, device=DEVICE)
+    input_representation = o2.o2_irreps_representation(
+        module.irreps_in,
+        angle,
+        reflected,
+    )
+    output_representation = o2.o2_irreps_representation(
+        module.irreps_out,
+        angle,
+        reflected,
+    )
+    transformed_inputs = [
+        torch.einsum("ij,bjc->bic", input_representation, input) for input in inputs
+    ]
+    actual = module(transformed_inputs, weights)
+    expected = torch.einsum(
+        "ij,bjc->bic",
+        output_representation,
+        module(inputs, weights),
+    )
+    torch.testing.assert_close(actual, expected)
+
+
+def test_o2_asymmetric_contraction_algorithms_match_first_and_second_derivatives():
+    edge, node = _build_o2_asymmetric_contractions(correlation=2, channels=1)
+    edge_inputs = [
+        torch.randn(
+            2,
+            edge.irreps_in.dim,
+            1,
+            dtype=DTYPE,
+            device=DEVICE,
+            requires_grad=True,
+        )
+        for _ in range(edge.correlation)
+    ]
+    node_inputs = [input.detach().clone().requires_grad_() for input in edge_inputs]
+    edge_weights = torch.randn(
+        2,
+        edge.weight_numel,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    node_weights = edge_weights.detach().clone().requires_grad_()
+    output_probe = torch.randn(
+        2,
+        edge.irreps_out.dim,
+        1,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+
+    edge_tensors = (*edge_inputs, edge_weights)
+    node_tensors = (*node_inputs, node_weights)
+    edge_first = torch.autograd.grad(
+        edge(edge_inputs, edge_weights),
+        edge_tensors,
+        grad_outputs=output_probe,
+        create_graph=True,
+    )
+    node_first = torch.autograd.grad(
+        node(node_inputs, node_weights),
+        node_tensors,
+        grad_outputs=output_probe,
+        create_graph=True,
+    )
+    for edge_gradient, node_gradient in zip(edge_first, node_first):
+        torch.testing.assert_close(edge_gradient, node_gradient)
+
+    gradient_probes = [torch.randn_like(gradient) for gradient in edge_first]
+    edge_target = sum(
+        (gradient * probe).sum() for gradient, probe in zip(edge_first, gradient_probes)
+    )
+    node_target = sum(
+        (gradient * probe).sum() for gradient, probe in zip(node_first, gradient_probes)
+    )
+    edge_second = torch.autograd.grad(edge_target, edge_tensors + (output_probe,))
+    node_second = torch.autograd.grad(node_target, node_tensors + (output_probe,))
+    for edge_gradient, node_gradient in zip(edge_second, node_second):
+        torch.testing.assert_close(edge_gradient, node_gradient)
+
+
+def test_o2_asymmetric_contraction_has_stable_variance_for_independent_inputs():
+    torch.manual_seed(19)
+    batch = 20_000
+    module = o2.O2AsymmetricContraction(
+        "0e+0o+1m",
+        "0e+0o+1m",
+        channels=1,
+        correlation=3,
+        algorithm="node",
+    )
+    inputs = [
+        torch.randn(batch, module.irreps_in.dim, 1) for _ in range(module.correlation)
+    ]
+    weights = torch.randn(batch, module.weight_numel)
+    output = module(inputs, weights).squeeze(-1)
+    variance = output.var(dim=0, unbiased=False)
+    torch.testing.assert_close(
+        variance, torch.ones_like(variance), rtol=0.08, atol=0.08
+    )
+
+
+def test_o2_asymmetric_contraction_validates_algorithm_inputs_and_weights():
+    with pytest.raises(ValueError, match="algorithm"):
+        o2.O2AsymmetricContraction("0e", "0e", 1, 2, algorithm="invalid")
+
+    module = o2.O2AsymmetricContraction("0e", "0e", 1, 2, algorithm="edge")
+    input = torch.randn(3, 1, 1)
+    weights = torch.randn(3, module.weight_numel)
+    with pytest.raises(ValueError, match="Expected 2 independent"):
+        module([input], weights)
+    with pytest.raises(ValueError, match="trailing dimension"):
+        module([input, input.clone()], weights[:, :-1])
+
+
 @pytest.mark.parametrize("reflected", [False, True])
 @pytest.mark.parametrize("path_mode", ["u1u", "uuu", "uvw"])
 def test_o2_tensor_product_is_equivariant(reflected, path_mode):

@@ -1,5 +1,6 @@
 """Standalone real O(2) layers with optional global-O(3)/local-O(2) layouts."""
 
+from .asymmetric_contraction import O2AsymmetricContraction
 from .circular_harmonics import CircularHarmonics, circular_harmonics
 from .gate import O2Gate
 from .irreps import (
@@ -22,6 +23,7 @@ __all__ = [
     "Irreps",
     "Linear",
     "O2Gate",
+    "O2AsymmetricContraction",
     "O3O2Layout",
     "CircularHarmonics",
     "TensorProduct",
