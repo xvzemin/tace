@@ -9,17 +9,18 @@ import torch
 from e3nn import o3
 
 from tace.utils.torch_scatter import scatter_sum
-
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import MLP, ScaledSigmoid, ScaledSiLU
+from ..lammps import Graph
 from .base import Interaction, _to_possible_tp_irreps
-from .fused import O3ScatterTensorProduct, uuSO2ScatterTensorProduct, uvSO2TensorProduct
-from .layer_norm import get_normalization_layer
-from .nonlinear import get_nonlinear_layer
-from .o2 import O2MagneticScatterLinear
 from .residual import get_resnet_layer
+from .nonlinear import get_nonlinear_layer
+from .layer_norm import get_normalization_layer
+from .fused import O3ScatterTensorProduct, uuSO2ScatterTensorProduct, uvSO2TensorProduct
 from .wigner6j import O3Wigner6jScatterTensorProduct
+from .o2 import O2MagneticScatterLinear
+
 
 
 class CgtpInteraction(Interaction):
@@ -145,16 +146,15 @@ class CgtpInteraction(Interaction):
         edge_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        initial_noncollinear_magmoms: Union[torch.Tensor, None],
-        wigner: Union[torch.Tensor, None] = None,
-        wigner_inv: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None] = None,
+        edge_wigner_inv: Union[torch.Tensor, None] = None,
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
         magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
-        if cutoff is not None:
-            conv_weights = conv_weights * cutoff
+        if edge_cutoff is not None:
+            conv_weights = conv_weights * edge_cutoff
         return self.rejector(node_feats, edge_attrs, conv_weights, edge_index)
 
     def forward(
@@ -162,18 +162,17 @@ class CgtpInteraction(Interaction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         node_attrs_slice: torch.Tensor,
-        radial_basis: torch.Tensor,
+        edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        graph,
-        wigner: Union[torch.Tensor, None],
-        wigner_inv: Union[torch.Tensor, None],
-        batch,
-        initial_noncollinear_magmoms: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None],
+        edge_wigner_inv: Union[torch.Tensor, None],
+        magnetic_radial_basis: Union[torch.Tensor, None],
+        magnetic_node_attrs: Union[torch.Tensor, None],
+        batch: torch.Tensor,
+        graph: Graph,
     ):
 
         lmp_data = graph.lmp_data
@@ -211,10 +210,9 @@ class CgtpInteraction(Interaction):
                     edge_feats,
                     edge_attrs,
                     edge_index,
-                    cutoff,
-                    initial_noncollinear_magmoms,
-                    wigner,
-                    wigner_inv,
+                    edge_cutoff,
+                    edge_wigner,
+                    edge_wigner_inv,
                     magnetic_radial_basis,
                     magnetic_node_attrs,
                 ),
@@ -224,8 +222,8 @@ class CgtpInteraction(Interaction):
 
         if hasattr(self, "edge_density"):
             density = torch.tanh(self.edge_density(edge_feats) ** 2)
-            if cutoff is not None and self.apply_density_cutoff:
-                density = density * cutoff
+            if edge_cutoff is not None and self.apply_density_cutoff:
+                density = density * edge_cutoff
             density = scatter_sum(
                 density, edge_index[1], dim=0, dim_size=node_attrs_total.size(0)
             )
@@ -399,18 +397,17 @@ class uuSO2Interaction(Interaction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         node_attrs_slice: torch.Tensor,
-        radial_basis,
+        edge_radial_basis,
         edge_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        graph,
-        wigner: Union[torch.Tensor, None],
-        wigner_inv: Union[torch.Tensor, None],
-        batch,
-        initial_noncollinear_magmoms: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None],
+        edge_wigner_inv: Union[torch.Tensor, None],
+        magnetic_radial_basis: Union[torch.Tensor, None],
+        magnetic_node_attrs: Union[torch.Tensor, None],
+        batch: torch.Tensor,
+        graph: Graph,
     ):
 
         lmp_data = graph.lmp_data
@@ -442,8 +439,8 @@ class uuSO2Interaction(Interaction):
 
         conv_weights = self.edge_info(edge_feats)
 
-        if cutoff is not None:
-            conv_weights = conv_weights * cutoff
+        if edge_cutoff is not None:
+            conv_weights = conv_weights * edge_cutoff
 
         m_i = self.linear_down(
             self.truncate_ghosts(
@@ -451,8 +448,8 @@ class uuSO2Interaction(Interaction):
                     node_feats,
                     conv_weights,
                     edge_index,
-                    wigner,
-                    wigner_inv,
+                    edge_wigner,
+                    edge_wigner_inv,
                 ),
                 nlocal,
             )
@@ -460,8 +457,8 @@ class uuSO2Interaction(Interaction):
 
         if hasattr(self, "edge_density"):
             density = torch.tanh(self.edge_density(edge_feats) ** 2)
-            if cutoff is not None and self.apply_density_cutoff:
-                density = density * cutoff
+            if edge_cutoff is not None and self.apply_density_cutoff:
+                density = density * edge_cutoff
             density = scatter_sum(
                 density, edge_index[1], dim=0, dim_size=node_attrs_total.size(0)
             )
@@ -641,18 +638,17 @@ class uvSO2Interaction(Interaction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         node_attrs_slice: torch.Tensor,
-        radial_basis,
+        edge_radial_basis,
         edge_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        graph,
-        wigner: Union[torch.Tensor, None],
-        wigner_inv: Union[torch.Tensor, None],
-        batch,
-        initial_noncollinear_magmoms: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None],
+        edge_wigner_inv: Union[torch.Tensor, None],
+        magnetic_radial_basis: Union[torch.Tensor, None],
+        magnetic_node_attrs: Union[torch.Tensor, None],
+        batch: torch.Tensor,
+        graph: Graph,
     ):
 
         lmp_data = graph.lmp_data
@@ -685,10 +681,10 @@ class uvSO2Interaction(Interaction):
                 node_feats,
                 self.edge_info(edge_feats),
                 edge_index,
-                cutoff,
-                wigner,
-                wigner_inv,
-                radial_basis,
+                edge_cutoff,
+                edge_wigner,
+                edge_wigner_inv,
+                edge_radial_basis,
             ),
             nlocal,
         )
@@ -851,8 +847,8 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
         radial_weights: torch.Tensor,
         magnetic_weights: torch.Tensor,
         edge_index: torch.Tensor,
-        wigner: Union[torch.Tensor, None],
-        wigner_inv: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None],
+        edge_wigner_inv: Union[torch.Tensor, None],
     ) -> torch.Tensor:
         return self.rejector(
             node_feats,
@@ -870,10 +866,9 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
         edge_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        initial_noncollinear_magmoms: Union[torch.Tensor, None],
-        wigner: Union[torch.Tensor, None] = None,
-        wigner_inv: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None] = None,
+        edge_wigner_inv: Union[torch.Tensor, None] = None,
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
         magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
@@ -897,8 +892,8 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
             )
 
         radial_weights = self.edge_info(magnetic_edge_feats)
-        if cutoff is not None:
-            radial_weights = radial_weights * cutoff
+        if edge_cutoff is not None:
+            radial_weights = radial_weights * edge_cutoff
 
         if not self.use_message_magnetic_tensor_product:
             return self.rejector(
@@ -920,13 +915,13 @@ class O3Wigner6jMagneticInteraction(CgtpInteraction):
             radial_weights,
             magnetic_weights,
             edge_index,
-            wigner,
-            wigner_inv,
+            edge_wigner,
+            edge_wigner_inv,
         )
 
 
 class O2MagneticInteraction(CgtpInteraction):
-    """Full-O3 magnetic interaction executed with complete local O2 linears."""
+    """Full-O3 magnetic interaction executed with local O2 linears."""
 
     path_mode = "uv"
 
@@ -973,17 +968,12 @@ class O2MagneticInteraction(CgtpInteraction):
         edge_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        initial_noncollinear_magmoms: Union[torch.Tensor, None],
-        wigner: Union[torch.Tensor, None] = None,
-        wigner_inv: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None] = None,
+        edge_wigner_inv: Union[torch.Tensor, None] = None,
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
         magnetic_node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
-        if initial_noncollinear_magmoms is None:
-            raise ValueError(
-                "O2MagneticInteraction requires initial_noncollinear_magmoms"
-            )
         if magnetic_radial_basis is None:
             raise ValueError(
                 "O2MagneticInteraction requires precomputed magnetic_radial_basis"
@@ -1003,15 +993,15 @@ class O2MagneticInteraction(CgtpInteraction):
             dim=-1,
         )
         radial_weights = self.edge_info(magnetic_edge_feats)
-        if cutoff is not None:
-            radial_weights = radial_weights * cutoff
+        if edge_cutoff is not None:
+            radial_weights = radial_weights * edge_cutoff
         return self.rejector(
             node_feats,
             magnetic_node_attrs,
             radial_weights,
             edge_index,
-            wigner,
-            wigner_inv,
+            edge_wigner,
+            edge_wigner_inv,
         )
 
 

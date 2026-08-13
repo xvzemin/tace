@@ -304,7 +304,7 @@ class Representation(torch.nn.Module):
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
 
         # === edge initialize (radial) ===
-        radial_basis, cutoff = self.radial_basis(
+        edge_radial_basis, edge_cutoff = self.radial_basis(
             graph.edge_length,
             data["node_attrs"],
             data["edge_index"],
@@ -314,10 +314,12 @@ class Representation(torch.nn.Module):
 
         # === angular basis ===
         edge_attrs = None
-        wigner = None
-        wigner_inv = None
+        edge_wigner = None
+        edge_wigner_inv = None
         if self.use_so2:
-            wigner, wigner_inv = self.so2_angular_basis.get_wigner(graph.edge_vector)
+            edge_wigner, edge_wigner_inv = self.so2_angular_basis.get_wigner(
+                graph.edge_vector
+            )
         if self.use_o3:
             edge_attrs = self.o3_angular_basis(
                 graph.edge_vector / graph.edge_length
@@ -326,12 +328,12 @@ class Representation(torch.nn.Module):
         # === node initialize ===
         node_feats = self.node_embedding(
             data["node_attrs"],
-            radial_basis,
+            edge_radial_basis,
             data["edge_index"],
             edge_attrs,
-            cutoff,
-            wigner,
-            wigner_inv,
+            edge_cutoff,
+            edge_wigner,
+            edge_wigner_inv,
         )
         if hasattr(self, "uie_embedding"):
             uie_feats = self.uie_embedding(data)
@@ -342,9 +344,9 @@ class Representation(torch.nn.Module):
         edge_feats = self.edge_embedding(
             node_feats,
             data["node_attrs"],
-            radial_basis,
+            edge_radial_basis,
             data["edge_index"],
-            cutoff,
+            edge_cutoff,
         )
 
         forces_embedding = None
@@ -385,7 +387,7 @@ class Representation(torch.nn.Module):
                 node_attrs_total,
                 edge_feats,
                 data["edge_index"],
-                cutoff,
+                edge_cutoff,
             )
             if graph.lmp and idx > 0:
                 node_attrs_slice = node_attrs_slice[: graph.lmp_natoms[0]]
@@ -393,18 +395,17 @@ class Representation(torch.nn.Module):
                 node_feats,
                 node_attrs_total,
                 node_attrs_slice,
-                radial_basis,
+                edge_radial_basis,
                 this_edge_feats,
                 edge_attrs,
                 data["edge_index"],
-                cutoff,
-                graph,
-                wigner,
-                wigner_inv,
-                data["batch"],
-                initial_noncollinear_magmoms,
+                edge_cutoff,
+                edge_wigner,
+                edge_wigner_inv,
                 magnetic_radial_basis,
                 magnetic_node_attrs,
+                data["batch"],
+                graph,
             )
             if graph.lmp and idx == 0:
                 node_attrs_slice = node_attrs_slice[: graph.lmp_natoms[0]]

@@ -374,7 +374,6 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
         edge_attrs,
         edge_index,
         torch.rand(num_edges, 1, device=DEVICE),
-        initial_noncollinear_magmoms,
         magnetic_radial_basis=magnetic_radial_basis,
         magnetic_node_attrs=magnetic_node_attrs,
     )

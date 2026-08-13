@@ -725,7 +725,6 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
         None,
         edge_index,
         cutoff,
-        initial_noncollinear_magmoms,
         wigner,
         wigner_inv,
         magnetic_radial_basis,
