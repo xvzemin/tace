@@ -351,7 +351,12 @@ class ScaleShift(torch.nn.Module):
                 )
             else:
                 edge_batch = batch[edge_index[1]]
-                num_edges = torch.bincount(edge_batch, minlength=num_graphs)
+                num_edges = scatter_sum(
+                    torch.ones_like(edge_batch),
+                    edge_batch,
+                    dim=0,
+                    dim_size=num_graphs,
+                )
 
             isolated_mask = (num_nodes == 1) & (num_edges == 0)
 
@@ -449,17 +454,3 @@ class ScaleShift(torch.nn.Module):
             all_atoms=cfg["all_atoms"],
             atomic_numbers=atomic_numbers,
         )
-
-
-def has_no_isolated_atoms(edge_index: torch.Tensor, num_atoms: int):
-    if torch.all(
-        scatter_sum(
-            torch.ones((num_atoms,))[edge_index[0]],
-            edge_index[1],
-            dim_size=num_atoms,
-            dim=0,
-        )
-    ):
-        return True
-    else:
-        return False
