@@ -638,7 +638,10 @@ class O2MagneticInteraction(O3CgtpInteraction):
             raise ValueError("magnetic_irreps must end at mag_Lmax.")
 
         scalar_act = self.scalar_act
-        if isinstance(scalar_act, str):
+        if scalar_act is None:
+            act_0e_name = "scaled_silu"
+            act_0o_name = "scaled_tanh"
+        elif isinstance(scalar_act, str):
             act_0e_name = scalar_act
             act_0o_name = "scaled_tanh"
         elif isinstance(scalar_act, list) and len(scalar_act) == 2:
@@ -647,12 +650,13 @@ class O2MagneticInteraction(O3CgtpInteraction):
                 raise TypeError("O2 scalar_act entries must be strings.")
         else:
             raise TypeError(
-                "O2 scalar_act must be a string or a list of two strings for 0e and 0o."
+                "O2 scalar_act must be None, a string, or a list of two strings "
+                "for 0e and 0o."
             )
 
         self.scalar_act = act_0e_name
         super()._setup()
-        tensor_act = self.tensor_act or "sigmoid"
+        tensor_act = self.tensor_act or "scaled_sigmoid"
 
         self.rejector = O2MagneticScatterLinear(
             self.irreps_in,

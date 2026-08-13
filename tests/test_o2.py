@@ -950,7 +950,8 @@ def _build_o2_magnetic_interaction(
     mag_Lmax=1,
     angular_max=None,
     nonlinear=None,
-    scalar_act="silu",
+    scalar_act=None,
+    tensor_act=None,
 ):
     angular_max = mag_Lmax if angular_max is None else angular_max
     module = O2MagneticInteraction(
@@ -973,7 +974,7 @@ def _build_o2_magnetic_interaction(
         radial_bias=True,
         irreps_in=o3.Irreps("2x0e + 2x1o"),
         scalar_act=scalar_act,
-        tensor_act=None,
+        tensor_act=tensor_act,
         edge_ace_hidden=None,
         parity=True,
         nonlinear=nonlinear,
@@ -1075,7 +1076,9 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert module.rejector.linear_in.path_mode == "uv"
     assert module.rejector.linear_in.internal_weights
     assert isinstance(module.rejector.gate, O2Gate)
+    assert isinstance(module.rejector.gate.act_0e, ScaledSiLU)
     assert isinstance(module.rejector.gate.act_0o, ScaledTanh)
+    assert isinstance(module.rejector.gate.act_lm, ScaledSigmoid)
     assert module.rejector.linear_out.path_mode == "uv"
     assert module.rejector.linear_out.internal_weights
     assert not isinstance(module.linear_down, torch.nn.Identity)
@@ -1103,6 +1106,9 @@ def test_o2_magnetic_interaction_parses_scalar_activations():
     assert isinstance(separate.rejector.gate.act_0e, ScaledSiLU)
     assert isinstance(separate.rejector.gate.act_0o, ScaledTanh)
 
+    tensor = _build_o2_magnetic_interaction(tensor_act="tanh")
+    assert isinstance(tensor.rejector.gate.act_lm, ScaledTanh)
+
 
 @pytest.mark.parametrize(
     "scalar_act",
@@ -1111,11 +1117,10 @@ def test_o2_magnetic_interaction_parses_scalar_activations():
         ["silu", "tanh", "sigmoid"],
         ("silu", "tanh"),
         1,
-        None,
     ],
 )
 def test_o2_magnetic_interaction_rejects_invalid_scalar_activations(scalar_act):
-    with pytest.raises(TypeError, match="string or a list of two strings"):
+    with pytest.raises(TypeError, match="None, a string, or a list of two strings"):
         _build_o2_magnetic_interaction(scalar_act=scalar_act)
 
 

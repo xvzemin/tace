@@ -125,7 +125,6 @@ magnetic interaction, and then returns the result to the global
 
        atomic_basis:
          type: o2_mag
-         scalar_act: silu
 
        universal_embedding:
          initial_noncollinear_magmoms:
