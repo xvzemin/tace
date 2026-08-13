@@ -370,6 +370,7 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
     output = module._compute_messages(
         node_feats,
         node_attrs,
+        None,
         edge_feats,
         edge_attrs,
         edge_index,

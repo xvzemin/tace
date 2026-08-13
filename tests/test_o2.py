@@ -721,6 +721,7 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
     return module._compute_messages(
         node_feats,
         node_attrs,
+        None,
         edge_feats,
         None,
         edge_index,
