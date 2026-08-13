@@ -48,20 +48,6 @@ class O3CgtpInteraction(Interaction):
     def _linear_down_irreps_in(self) -> o3.Irreps:
         return self.rejector.irreps_out.simplify()
 
-    def _uses_edge_density(self) -> bool:
-        return self.scatter_norm in {"density", "no_cutoff_density"}
-
-    def _normalize_messages(
-        self,
-        messages: torch.Tensor,
-        density: Union[torch.Tensor, None],
-    ) -> torch.Tensor:
-        if self.scatter_norm is None:
-            return messages
-        if self.scatter_norm == "avg_num_neighbors":
-            return messages / self.avg_num_neighbors
-        return messages / density
-
     def _setup(self) -> None:
         self._prepare_setup()
 
@@ -285,6 +271,7 @@ class O3CgtpInteraction(Interaction):
         return m_i, self.truncate_ghosts(sc, nlocal)
 
 
+# It will be covered by future O2 version
 class uuSO2Interaction(O3CgtpInteraction):
     """
     An interaction module based on uuSO2Linear.
@@ -304,7 +291,6 @@ class uuSO2Interaction(O3CgtpInteraction):
             "use uuSO2InteractionArchitecture1 from the second layer or use other node_embedding with l > 0"
         )
         assert self.edge_nonlinear == None
-        self.apply_density_cutoff = True
 
     def _build_rejector(self) -> torch.nn.Module:
         return uuSO2ScatterTensorProduct(
@@ -319,9 +305,6 @@ class uuSO2Interaction(O3CgtpInteraction):
 
     def _linear_down_irreps_in(self) -> o3.Irreps:
         return self.irreps_in
-
-    def _uses_edge_density(self) -> bool:
-        return self.scatter_norm == "density"
 
     def _compute_messages(
         self,
@@ -370,7 +353,7 @@ class uvSO2Interaction(O3CgtpInteraction):
             self.edge_nonlinear == "so2_sigmoid_gate"
             or self.edge_nonlinear == "so2_silu_gate"
         )
-        self.scatter_norm = None if self.use_graph_softmax else self.scatter_norm
+        self.scatter_norm = None
 
     def _build_rejector(self) -> torch.nn.Module:
         edge_act = self.edge_nonlinear.split("_")[1]
@@ -403,16 +386,6 @@ class uvSO2Interaction(O3CgtpInteraction):
             [(self.edge_wise_hidden, ir) for _, ir in self.irreps_out]
         )
 
-    def _uses_edge_density(self) -> bool:
-        return False
-
-    def _normalize_messages(
-        self,
-        messages: torch.Tensor,
-        density: Union[torch.Tensor, None],
-    ) -> torch.Tensor:
-        return messages
-
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
@@ -438,6 +411,7 @@ class uvSO2Interaction(O3CgtpInteraction):
         )
 
 
+# In dev TODO
 class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
     """O(3) magnetic interaction evaluated in a Wigner-6j recoupled tree.
 
@@ -644,6 +618,7 @@ class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
         )
 
 
+# In dev TODO
 class O2MagneticInteraction(O3CgtpInteraction):
     """Full-O3 magnetic interaction executed with local O2 linears."""
 

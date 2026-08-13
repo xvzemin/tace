@@ -22,6 +22,7 @@ and `Hydra <https://hydra.cc/>`_.
    :caption: Contents
 
    training.rst
+   checkpoint.rst
    acceleration.rst
    foundation.rst
    finetune.rst

@@ -242,6 +242,19 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
     def _setup(self) -> None:
         raise NotImplementedError
 
+    def _uses_edge_density(self) -> bool:
+        return self.scatter_norm in {"density", "no_cutoff_density"}
+
+    def _normalize_messages(
+        self,
+        messages: torch.Tensor,
+        density: Union[torch.Tensor, None],
+    ) -> torch.Tensor:
+        if self.scatter_norm is None:
+            return messages
+        if self.scatter_norm == "avg_num_neighbors":
+            return messages / self.avg_num_neighbors
+        return messages / density
 
 class Product(torch.nn.Module):
     def __init__(
