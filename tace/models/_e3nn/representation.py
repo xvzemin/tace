@@ -206,7 +206,6 @@ class Representation(torch.nn.Module):
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
             "use_so2_edge_ace": atomic_basis["use_so2_edge_ace"],
-            "so2_l1l3": atomic_basis["so2_l1l3"],
             "gate_m0": atomic_basis["gate_m0"],
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],

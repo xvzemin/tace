@@ -31,7 +31,7 @@ class uuSO2Linear(torch.nn.Module):
         weight_type: str = "w1",
         path_mode: str = "sum",  # TODO, concat may be have bug
         path_norm: bool = True,
-        l1l3: Union[str, None] = None,
+        l1l2: Union[str, None] = None,
     ) -> None:
         super().__init__()
         self.mmax = mmax
@@ -84,14 +84,14 @@ class uuSO2Linear(torch.nn.Module):
 
         for lout in range(self.lmax + 1):
             for lin in range(self.lmax + 1):
-                if satisfy(lin, lout, l1l3):
+                if satisfy(lin, lout, l1l2):
                     for m in range(min(lout, lin, self.mmax) + 1):
                         path_count[(lout, m)] = path_count.get((lout, m), 0) + 1
 
         for m in range(self.mmax + 1):
             for lout in range(m, self.lmax + 1):
                 for lin in range(m, self.lmax + 1):
-                    if satisfy(lin, lout, l1l3):
+                    if satisfy(lin, lout, l1l2):
                         if m == 0:
                             path_weight = (
                                 1.0 / math.sqrt(path_count[(lout, 0)])

@@ -149,7 +149,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         use_graph_softmax: bool = False,
         node_wise_hidden: Union[int, None] = None,
         edge_wise_hidden: Union[int, None] = None,
-        so2_l1l3: Union[str, None] = None,  # TODO
         gate_m0: bool = True,
         use_radial_phase: bool = True,
         num_mag_radial_basis: int = 8,
@@ -207,7 +206,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.use_graph_softmax = use_graph_softmax
         self.node_wise_hidden = node_wise_hidden or num_channel
         self.edge_wise_hidden = edge_wise_hidden or num_channel
-        self.so2_l1l3 = so2_l1l3
         self.num_mag_radial_basis = num_mag_radial_basis
         self.magnetic_irreps = magnetic_irreps
         self.mag_Lmax = mag_Lmax

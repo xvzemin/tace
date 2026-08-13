@@ -292,7 +292,7 @@ class uuSO2ScatterTensorProduct(torch.nn.Module):
         mmax: int,
         lmax: int,
         num_channel: int,
-        l1l3: Union[str, None],
+        l1l2: Union[str, None],
         weight_type: str,
         reshape_in: LayoutTransform,
         reshape_out: LayoutTransform,
@@ -306,7 +306,7 @@ class uuSO2ScatterTensorProduct(torch.nn.Module):
         self.reshape_out = reshape_out
         self.weight_type = weight_type
         self.path_mode = "sum"
-        self.l1l3 = l1l3
+        self.l1l2 = l1l2
         self.linear_up = uuSO2Linear(
             self.mmax,
             self.lmax,
@@ -314,7 +314,7 @@ class uuSO2ScatterTensorProduct(torch.nn.Module):
             weight_type=self.weight_type,
             path_mode=self.path_mode,
             path_norm=self.path_mode == "sum",
-            l1l3=self.l1l3,
+            l1l2=self.l1l2,
         )
         self.weight_numel = self.linear_up.weight_numel
         if acceleration_enabled("eqx"):

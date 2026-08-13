@@ -335,7 +335,7 @@ model:
       use_first_pre_norm: false 
           
     atomic_basis:
-      type: [cgtp, uv_so2, uv_so2] # (str or list[str]) [cgtp, uu_so2, uv_so2, o3_w6j_mag] 
+      type: [cgtp, uv_so2, uv_so2] # (str or list[str]) [cgtp, uu_so2, uv_so2, o3_w6j_mag, o2_mag]
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, density] density are from mace
       nonlinear: sigmoid_gate # [null, sigmoid_gate]
@@ -348,7 +348,6 @@ model:
       num_head: 4
       use_graph_softmax: true
       use_so2_edge_ace: true
-      so2_l1l3: null
       gate_m0: false
       scalar_act: null
       tensor_act: null

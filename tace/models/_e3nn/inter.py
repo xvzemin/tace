@@ -300,7 +300,7 @@ class uuSO2Interaction(O3CgtpInteraction):
             lmax=self.lmax,
             num_channel=self.num_channel,
             weight_type=self.so2_linear_type,
-            l1l3=self.so2_l1l3,
+            l1l2=self.l1l2,
             reshape_in=LayoutTransform(self.irreps_in),
             reshape_out=LayoutTransform(self.irreps_out),
         )

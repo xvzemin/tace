@@ -102,7 +102,6 @@ Example
         num_head: null
         use_graph_softmax: false
         use_so2_edge_ace: false
-        so2_l1l3: None,
         gate_m0: false
         scalar_act: null
         tensor_act: null
