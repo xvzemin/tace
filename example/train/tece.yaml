@@ -349,9 +349,6 @@ model:
       use_graph_softmax: true
       use_so2_edge_ace: true
       so2_l1l3: null
-      so2_linear_type: w1 # [w1, w1_w1, w1_w2], always use w1
-      so2_agnostic: true
-      use_temperature: true
       gate_m0: false
       scalar_act: null
       tensor_act: null

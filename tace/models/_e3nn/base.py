@@ -122,7 +122,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         lmax: int,
         correlation: list[int],
         num_channel: int,
-        use_temperature: bool,
         edge_feats_channel: int,
         target_irreps: list[str],
         num_radial_basis: int,
@@ -150,7 +149,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         use_graph_softmax: bool = False,
         node_wise_hidden: Union[int, None] = None,
         edge_wise_hidden: Union[int, None] = None,
-        so2_linear_type: str = "w1",
         so2_l1l3: Union[str, None] = None,  # TODO
         gate_m0: bool = True,
         use_radial_phase: bool = True,
@@ -191,7 +189,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.nonlinear_act = None
         if nonlinear is not None:
             self.nonlinear_act, self.nonlinear_type = nonlinear.split("_")
-        self.use_temperature = use_temperature
         self.gate_m0 = gate_m0
         self.use_radial_phase = use_radial_phase
 
@@ -210,7 +207,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.use_graph_softmax = use_graph_softmax
         self.node_wise_hidden = node_wise_hidden or num_channel
         self.edge_wise_hidden = edge_wise_hidden or num_channel
-        self.so2_linear_type = so2_linear_type
         self.so2_l1l3 = so2_l1l3
         self.num_mag_radial_basis = num_mag_radial_basis
         self.magnetic_irreps = magnetic_irreps

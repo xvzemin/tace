@@ -282,6 +282,8 @@ class uuSO2Interaction(O3CgtpInteraction):
     This interaction block does not directly add nonlinearity to the message.
     """
 
+    so2_linear_type = "w1"
+
     def _prepare_setup(self) -> None:
         assert self.parity == False, (
             "uuSO2InteractionArchitecture1 not support O(3) group"
@@ -342,6 +344,9 @@ class uvSO2Interaction(O3CgtpInteraction):
 
     This interaction block add nonlinearity to the message.
     """
+
+    so2_linear_type = "w1"
+    use_temperature = True
 
     def _prepare_setup(self) -> None:
         assert self.parity == False, "uvSO2Interaction not support O(3) group"

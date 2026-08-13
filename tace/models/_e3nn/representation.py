@@ -206,9 +206,7 @@ class Representation(torch.nn.Module):
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
             "use_so2_edge_ace": atomic_basis["use_so2_edge_ace"],
-            "so2_linear_type": atomic_basis["so2_linear_type"],
             "so2_l1l3": atomic_basis["so2_l1l3"],
-            "use_temperature": atomic_basis["use_temperature"],
             "gate_m0": atomic_basis["gate_m0"],
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
@@ -422,17 +420,12 @@ class Representation(torch.nn.Module):
                 )
             prev_feats.append(node_feats)
 
-        decouple_node_feats1 = None
-        decouple_node_feats2 = None
-
         return {
             "descriptors": prev_feats,
             # "edge_descriptors": edge_descriptors,
             "uie_feats": uie_feats,
             "noise_mask_tensor": noise_mask_tensor,
             "dens_batch_mask_tensor": dens_batch_mask_tensor,
-            "decouple_node_feats1": decouple_node_feats1,
-            "decouple_node_feats2": decouple_node_feats2,
         }
 
     def _generate_dens_data(self, data: Dict[str, torch.Tensor]):

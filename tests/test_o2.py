@@ -628,7 +628,6 @@ def _build_o2_magnetic_interaction(
         mag_Lmax=mag_Lmax,
         correlation=[1],
         num_channel=2,
-        use_temperature=False,
         edge_feats_channel=4,
         target_irreps=o3.Irreps("0e"),
         num_radial_basis=4,

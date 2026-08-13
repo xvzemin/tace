@@ -4,7 +4,7 @@ Checkpoint
 ==========
 
 Every TACE or TECE model path must end with one of the following suffixes:
-``.ckpt``, ``.pt``, ``.pth``, or ``.pt2``. The suffix determines how TACE
+``.ckpt``, ``.pt``, or ``.pt2``. The suffix determines how TACE
 loads the model and which workflows the file supports.
 
 .. list-table:: Model formats
@@ -54,8 +54,8 @@ After training, export the checkpoint to the state-dictionary ``.pt`` format:
 Keep the original ``.ckpt`` while training may still need to be resumed, but
 use the exported ``.pt`` file for evaluation, deployment, and archival.
 
-Portable Models: ``.pt`` and ``.pth``
--------------------------------------
+Portable Models: ``.pt``
+------------------------
 
 The recommended TACE ``.pt`` model is a state-dictionary package containing:
 
@@ -126,6 +126,11 @@ Use the formats in the following order:
 * always export a final state-dictionary ``.pt`` model for long-term storage;
 * regenerate ``.pt2`` packages from the ``.pt`` model for each deployment
   environment that requires AOTI acceleration.
+
+All three formats---``.ckpt``, ``.pt``, and ``.pt2``---can be used directly
+for inference. A ``.pt2`` package is optional and is only needed when AOTI
+acceleration is desired. If compiling and managing a hardware-specific
+``.pt2`` package is inconvenient, use the portable ``.pt`` model directly.
 
 For additional backend and export options, see the
 :ref:`TACE Export Tutorial <tace-export-tutorial>`.

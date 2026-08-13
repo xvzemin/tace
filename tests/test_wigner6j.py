@@ -274,7 +274,6 @@ def _build_interaction():
         lmax=2,
         correlation=[1],
         num_channel=2,
-        use_temperature=False,
         edge_feats_channel=4,
         target_irreps=o3.Irreps("0e"),
         num_radial_basis=4,
