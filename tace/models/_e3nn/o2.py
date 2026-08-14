@@ -25,8 +25,8 @@ def _common_multiplicity(irreps: o3.Irreps, name: str) -> int:
 class O2MagneticScatterLinear(torch.nn.Module):
     """Edge-aligned O2 magnetic gated convolution.
 
-    The source node and source magnetic solid harmonics are concatenated in
-    the local representation. Edge weights first apply a diagonal
+    The source and target node features and magnetic solid harmonics are
+    concatenated in the local representation. Edge weights first apply a diagonal
     channel-wise radial map. Two internal ``uv`` linears surround an
     :class:`O2Gate`, giving the local ``uv -> gate -> uv`` pattern.
     """
@@ -59,6 +59,8 @@ class O2MagneticScatterLinear(torch.nn.Module):
         self.output_layout = o2.O3O2Layout(self.irreps_out, lmax)
         self.irreps_in_local = o2.Irreps(
             self.node_layout.local_irreps.groups
+            + self.node_layout.local_irreps.groups
+            + self.magnetic_layout.local_irreps.groups
             + self.magnetic_layout.local_irreps.groups
         ).regroup()
         self.irreps_out_local = self.output_layout.local_irreps
@@ -107,17 +109,28 @@ class O2MagneticScatterLinear(torch.nn.Module):
         if wigner is None or wigner_inv is None:
             raise ValueError("O2 magnetic convolution requires edge Wigner matrices.")
 
-        source = edge_index[0]
-        node_blocks = self.node_layout(node_feats[source], wigner)
-        magnetic_blocks = self.magnetic_layout(
+        source, target = edge_index
+        source_node_blocks = self.node_layout(node_feats[source], wigner)
+        target_node_blocks = self.node_layout(node_feats[target], wigner)
+        source_magnetic_blocks = self.magnetic_layout(
             magnetic_node_attrs[source].unsqueeze(-1),
             wigner,
         )
-        magnetic_blocks = tuple(
+        target_magnetic_blocks = self.magnetic_layout(
+            magnetic_node_attrs[target].unsqueeze(-1),
+            wigner,
+        )
+        source_magnetic_blocks = tuple(
             block.reshape(*block.shape, 1)
             .expand(*block.shape, self.num_channel)
             .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
-            for block in magnetic_blocks
+            for block in source_magnetic_blocks
+        )
+        target_magnetic_blocks = tuple(
+            block.reshape(*block.shape, 1)
+            .expand(*block.shape, self.num_channel)
+            .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
+            for block in target_magnetic_blocks
         )
 
         input_blocks = []
@@ -125,10 +138,12 @@ class O2MagneticScatterLinear(torch.nn.Module):
             parts = []
             node_index = self.node_block_indices.get(irrep)
             if node_index is not None:
-                parts.append(node_blocks[node_index])
+                parts.append(target_node_blocks[node_index])
+                parts.append(source_node_blocks[node_index])
             magnetic_index = self.magnetic_block_indices.get(irrep)
             if magnetic_index is not None:
-                parts.append(magnetic_blocks[magnetic_index])
+                parts.append(target_magnetic_blocks[magnetic_index])
+                parts.append(source_magnetic_blocks[magnetic_index])
             input_blocks.append(torch.cat(parts, dim=-1))
         input_blocks = tuple(input_blocks)
 
