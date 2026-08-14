@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from e3nn import o3
 
-from .legacy_so2 import CoefficientMappingModule
+from .o2 import CoefficientMappingModule
 
 
 class FibonacciLattice:

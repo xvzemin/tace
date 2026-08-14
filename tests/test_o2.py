@@ -5,7 +5,6 @@ from e3nn import o3
 from tace.models import o2
 from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models.angular import SolidHarmonics
-from tace.models.legacy_so2 import WignerD
 from tace.models.mag import MagmomsNormalizer
 from tace.models.mlp import (
     ACTIVATION,
@@ -19,6 +18,7 @@ from tace.models.o2 import (
     Irrep,
     Irreps,
     O2Gate,
+    WignerD,
     o2_irreps_representation,
     o2_representation,
     restrict_o3_irrep,

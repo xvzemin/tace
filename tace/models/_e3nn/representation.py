@@ -13,9 +13,9 @@ from e3nn import o3
 from ...utils.env import get_tace_use_dens
 from ..angular import SolidHarmonics, SphericalHarmonics
 from ..layout import LayoutTransform
-from ..legacy_so2 import WignerD
 from ..linear import e3nnLinear
 from ..mag import MagmomsNormalizer
+from ..o2 import WignerD
 from ..radial import MagneticChebyshevBasis, RadialBasis
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import INTERACTION  # , SO2EdgeInteraction

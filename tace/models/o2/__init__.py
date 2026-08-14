@@ -16,7 +16,9 @@ from .irreps import (
 )
 from .layout import O3O2Layout
 from .linear import Linear
+from .rotation_matrix import init_edge_rot_mat_quaternion
 from .tensor_product import TensorProduct
+from .wigner import CoefficientMappingModule, WignerD
 
 __all__ = [
     "Irrep",
@@ -26,10 +28,13 @@ __all__ = [
     "O2AsymmetricContraction",
     "O3O2Layout",
     "CircularHarmonics",
+    "CoefficientMappingModule",
     "TensorProduct",
+    "WignerD",
     "check_o2_irrep",
     "check_o2_irreps",
     "circular_harmonics",
+    "init_edge_rot_mat_quaternion",
     "o2_irreps_representation",
     "o2_representation",
     "restrict_o3_irrep",

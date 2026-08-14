@@ -12,7 +12,7 @@ from typing import Union
 
 import torch
 
-from ..legacy_so2 import satisfy
+from ..o2.legacy import satisfy
 
 
 def so2_dim(m: int) -> int:

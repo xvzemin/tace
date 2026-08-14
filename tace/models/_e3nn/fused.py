@@ -16,14 +16,14 @@ from tace.utils.env import (
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
-from ..legacy_so2 import (
+from ..linear import torchLinear
+from ..o2.legacy import (
     SO2Gate,
     so2_expand_index,
     so3_expand_index,
     uuSO2Linear,
     uvSO2Linear,
 )
-from ..linear import torchLinear
 from ..softmax import GraphSoftmax
 from .asymmetric_contraction import ComplexProductBasis, SO2ASymmetricContraction
 from .paths import generate_paths
