@@ -125,6 +125,31 @@ the scatter calculation in ``uuSO2Interaction`` now. Internally it calls
 ``tace.models.triton_ops``; that module is a temporary placeholder until the
 operators move into independent EQX package.
 
+
+Latent Ewald Summation (LES)
+----------------------------
+
+LES is an optional external dependency used by TACE-LES for long-range
+interactions.  Install TACE first, then install the upstream LES backend from
+source in the same Python environment:
+
+.. code-block:: bash
+
+   git clone https://github.com/ChengUCB/les.git
+   python -m pip install -e ./les
+
+Verify that TACE can import the backend:
+
+.. code-block:: bash
+
+   python -c "from les import Les; print('LES is available')"
+
+Ordinary TACE models do not require LES.  The backend is imported only when
+``long_range.les.enable: true`` is selected.  See the :doc:`../guide/les`
+tutorial for model configuration, supported latent sources, outputs, and
+current compatibility limitations.
+
+
 TorchSim
 --------
 
@@ -173,6 +198,7 @@ The two upstream NVIDIA repositories are provided for reference:
 
 - `nvalchemi-toolkit <https://github.com/NVIDIA/nvalchemi-toolkit>`_
 - `nvalchemi-toolkit-ops <https://github.com/NVIDIA/nvalchemi-toolkit-ops>`_
+
 
 Acceleration Selection
 ----------------------
