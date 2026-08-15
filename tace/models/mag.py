@@ -69,8 +69,8 @@ class MagmomsNormalizer(torch.nn.Module):
     See https://arxiv.org/abs/2604.08143.
     """
 
-    max_scale = 1.2
-    max_shift = 0.1
+    a = 1.2
+    b = 0.1
 
     def __init__(
         self,
@@ -94,7 +94,7 @@ class MagmomsNormalizer(torch.nn.Module):
         node_attrs: torch.Tensor,
     ) -> torch.Tensor:
         magnetic_norm = initial_noncollinear_magmoms.norm(dim=-1, keepdim=True)
-        effective_max = self.max_scale * self.magmoms_norm_by_element + self.max_shift
+        effective_max = self.a * self.magmoms_norm_by_element + self.b
         element_max = effective_max[node_attrs.argmax(dim=-1)].unsqueeze(-1)
         return (
             1.0
@@ -110,5 +110,5 @@ class MagmomsNormalizer(torch.nn.Module):
         return (
             f"{self.__class__.__name__}("
             f"magmoms_norm_by_element={self.magmoms_norm_by_element.tolist()}, "
-            f"max_scale={self.max_scale}, max_shift={self.max_shift})"
+            f"a={self.a}, b={self.b})"
         )

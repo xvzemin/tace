@@ -130,13 +130,13 @@ Latent Ewald Summation (LES)
 ----------------------------
 
 LES is an optional external dependency used by TACE-LES for long-range
-interactions.  Install TACE first, then install the upstream LES backend from
-source in the same Python environment:
+interactions.  Install TACE first, then install the upstream LES.
 
 .. code-block:: bash
 
    git clone https://github.com/ChengUCB/les.git
-   python -m pip install -e ./les
+   cd les
+   pip install .
 
 Verify that TACE can import the backend:
 
@@ -144,8 +144,7 @@ Verify that TACE can import the backend:
 
    python -c "from les import Les; print('LES is available')"
 
-Ordinary TACE models do not require LES.  The backend is imported only when
-``long_range.les.enable: true`` is selected.  See the :doc:`../guide/les`
+See the :doc:`../guide/les`
 tutorial for model configuration, supported latent sources, outputs, and
 current compatibility limitations.
 

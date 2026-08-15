@@ -18,5 +18,9 @@ are therefore not the default recommendation.
    :show-inheritance:
 
 .. autoclass:: tace.models._e3nn.inter.uvSO2Interaction
+
+.. autoclass:: tace.models._e3nn.inter.O2Interaction
+
+.. autoclass:: tace.models._e3nn.inter.O2MagneticInteraction
    :no-members:
    :show-inheritance:

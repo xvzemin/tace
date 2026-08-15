@@ -100,12 +100,9 @@ Example
         edge_wise_hidden: null
         edge_ace_hidden: null
         num_head: null
-        use_graph_softmax: false
-        use_so2_edge_ace: false
         gate_m0: false
         scalar_act: null
         tensor_act: null
-        use_radial_phase: false # false is recommend
 
         product_basis:
         type: cgtp  # [cgtp, gtp]

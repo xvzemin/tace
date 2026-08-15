@@ -141,16 +141,15 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         use_first_resnet: bool = False,
         pre_norm_type: Union[str, None] = None,
         use_first_pre_norm: bool = False,
-        use_so2_edge_ace: bool = False,
         stochastic_depth: float = 0.0,
         use_first_dropout: bool = False,
         parity: bool = False,
         num_head: Union[int, None] = None,
-        use_graph_softmax: bool = False,
         node_wise_hidden: Union[int, None] = None,
         edge_wise_hidden: Union[int, None] = None,
         gate_m0: bool = True,
-        use_radial_phase: bool = True,
+        use_o2_asymmetric_contraction: bool = False,
+        use_radial_rotary_attention: bool = False,
         num_mag_radial_basis: int = 8,
         magnetic_irreps: o3.Irreps = None,
         mag_Lmax: int = 1,
@@ -189,11 +188,11 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         if nonlinear is not None:
             self.nonlinear_act, self.nonlinear_type = nonlinear.split("_")
         self.gate_m0 = gate_m0
-        self.use_radial_phase = use_radial_phase
+        self.use_o2_asymmetric_contraction = use_o2_asymmetric_contraction
+        self.use_radial_rotary_attention = use_radial_rotary_attention
 
         self.use_first_resnet = use_first_resnet
         self.resnet_type = resnet_type
-        self.use_so2_edge_ace = use_so2_edge_ace
         self.use_first_dropout = use_first_dropout
         self.resnet_linear_type = resnet_linear_type
         self.pre_norm_type = pre_norm_type
@@ -203,7 +202,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.stochastic_depth_p = stochastic_depth
         self.parity = parity
         self.num_head = num_head or 1
-        self.use_graph_softmax = use_graph_softmax
         self.node_wise_hidden = node_wise_hidden or num_channel
         self.edge_wise_hidden = edge_wise_hidden or num_channel
         self.num_mag_radial_basis = num_mag_radial_basis

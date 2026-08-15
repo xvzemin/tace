@@ -196,7 +196,7 @@ class e3nnTACE(torch.nn.Module):
                     parity=cfg["parity"],
                     irreps_in=[
                         o3.Irreps(
-                            f"{cfg['radial_basis']['num_mag_radial_basis']}x0e"
+                            f"{self.representation.magnetic_radial_basis.num_basis}x0e"
                         )
                     ],
                     irreps_out="0e",

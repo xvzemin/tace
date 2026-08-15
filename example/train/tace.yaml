@@ -310,7 +310,7 @@ model:
     radial_basis:
       radial_basis: j0   # [j0, jn, gaussian]
       num_radial_basis: 8 # (int) 8-10 for j0 and jn, 8-64 for gaussian
-      num_mag_radial_basis: 8 # magnetic Chebyshev basis for o3_w6j_mag and o2_mag
+      num_mag_radial_basis: 10 # magnetic Chebyshev basis including the constant term
       distance_transform: null # [null, Agnesi, Soft], this plug-in from mace, if you do not know what it means, never use
       cutoff_fn: c2poly # [c2poly, c3poly, mollifier, cosine]
       polynomial_cutoff: 5 # (int)
@@ -335,7 +335,7 @@ model:
       use_first_pre_norm: false 
           
     atomic_basis:
-      type: cgtp # (str or list[str]) [cgtp, uu_so2, uv_so2, o3_w6j_mag, o2_mag] 
+      type: cgtp # (str or list[str]) [cgtp, o2, uu_so2, uv_so2, o3_w6j_mag, o2_mag]
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, density] density are from mace
       nonlinear: sigmoid_gate # [null, sigmoid_gate]
@@ -346,12 +346,11 @@ model:
       edge_wise_hidden: null
       edge_ace_hidden: null
       num_head: null
-      use_graph_softmax: false
-      use_so2_edge_ace: false
+      use_o2_asymmetric_contraction: false
+      use_radial_rotary_attention: false
       gate_m0: false
       scalar_act: null
       tensor_act: null
-      use_radial_phase: false # false is recommend
 
     product_basis:
       type: cgtp  # (str or list[str]) [cgtp]

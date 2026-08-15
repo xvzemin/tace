@@ -85,7 +85,7 @@ universal magnetic embedding disabled when testing this method in isolation:
        mag_Lmax: 1
 
        radial_basis:
-         num_mag_radial_basis: 8
+         num_mag_radial_basis: 10
 
        atomic_basis:
          type: o3_w6j_mag
@@ -121,14 +121,25 @@ magnetic interaction, and then returns the result to the global
        mag_Lmax: 1
 
        radial_basis:
-         num_mag_radial_basis: 8
+         num_mag_radial_basis: 10
 
        atomic_basis:
          type: o2_mag
+         use_o2_asymmetric_contraction: false
+         use_radial_rotary_attention: false
 
        universal_embedding:
          initial_noncollinear_magmoms:
            enable: false
+
+The asymmetric-contraction correlation order follows
+``product_basis.correlation``. It replaces the O(2) gate rather than following
+it. The first O(2) linear jointly generates its independent features and
+``0e`` path coefficients, which use ``scalar_act`` (``scaled_silu`` by
+default). The gated path uses the same first linear to generate its ``0e`` gate
+scalars. Radial rotary attention uses ``atomic_basis.num_head``, one joint O(2)
+query-key projection, and a real sigmoid radial scale; no complex phase is
+applied.
 
 This path is also experimental; its theoretical and implementation
 details will be documented with the formal paper.

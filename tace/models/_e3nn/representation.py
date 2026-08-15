@@ -89,6 +89,7 @@ class Representation(torch.nn.Module):
         self.use_so2 = (
             any(t.endswith("so2") for t in atomic_basis["type"])
             or any(t.endswith("attn") for t in atomic_basis["type"])
+            or any(t == "o2" for t in atomic_basis["type"])
             or any(t == "o2_mag" for t in atomic_basis["type"])
             or node_embedding["type"] == "so2_tensor"
         )
@@ -108,7 +109,7 @@ class Representation(torch.nn.Module):
                 num_elements=self.num_elements,
             )
             self.magnetic_radial_basis = MagneticChebyshevBasis(
-                num_basis=radial_basis["num_mag_radial_basis"] + 1,
+                num_basis=radial_basis["num_mag_radial_basis"],
                 include_constant=True,
             )
         self.use_magnetic_node_attrs = any(
@@ -190,7 +191,7 @@ class Representation(torch.nn.Module):
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "num_radial_basis": radial_basis["num_radial_basis"],
-            "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
+            "num_mag_radial_basis": radial_basis["num_mag_radial_basis"] - 1,
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
             "l1l2": atomic_basis["l1l2"],
@@ -207,7 +208,12 @@ class Representation(torch.nn.Module):
             "edge_wise_hidden": atomic_basis["edge_wise_hidden"],
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
-            "use_so2_edge_ace": atomic_basis["use_so2_edge_ace"],
+            "use_o2_asymmetric_contraction": atomic_basis[
+                "use_o2_asymmetric_contraction"
+            ],
+            "use_radial_rotary_attention": atomic_basis[
+                "use_radial_rotary_attention"
+            ],
             "gate_m0": atomic_basis["gate_m0"],
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
@@ -234,7 +240,6 @@ class Representation(torch.nn.Module):
                     irreps_in=self.node_embedding.irreps_out
                     if layer == 0
                     else self.products[layer - 1].irreps_out,
-                    use_graph_softmax=atomic_basis["use_graph_softmax"][layer],
                 )
             )
             inter_irreps_out = self.interactions[layer].irreps_out
@@ -373,7 +378,7 @@ class Representation(torch.nn.Module):
         if self.use_magnetic_radial_basis:
             magnetic_radial_basis = magnetic_basis[..., 1:]
         if self.use_one_body_magmoms:
-            one_body_magmoms_basis = magnetic_basis[..., :-1]
+            one_body_magmoms_basis = magnetic_basis
 
         if self.use_magnetic_node_attrs:
             magnetic_node_attrs = self.magnetic_angular_basis(

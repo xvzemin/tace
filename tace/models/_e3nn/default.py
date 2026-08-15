@@ -35,7 +35,7 @@ DEFAULT_MODEL_CONFIG = {
         "r_min": 0.0,
         "radial_basis": "j0",
         "num_radial_basis": 8,
-        "num_mag_radial_basis": 8,
+        "num_mag_radial_basis": 10,
         "distance_transform": None,
         "cutoff_fn": "c2poly",
         "polynomial_cutoff": 5,
@@ -54,10 +54,9 @@ DEFAULT_MODEL_CONFIG = {
         "scatter_norm": "avg_num_neighbors",
         "nonlinear": "sigmoid_gate",
         "edge_nonlinear": "so2_sigmoid_gate",
-        "use_graph_softmax": False,
-        "use_radial_phase": True,
+        "use_o2_asymmetric_contraction": False,
+        "use_radial_rotary_attention": False,
         "num_head": None,
-        "use_so2_edge_ace": False,
         "node_wise_hidden": None,
         "edge_ace_hidden": None,
         "edge_wise_hidden": None,
@@ -298,9 +297,6 @@ def check_model_config(cfg: dict[str, Any]):
     cfg["atomic_basis"]["nonlinear"] = _to_list(cfg["atomic_basis"]["nonlinear"])
     cfg["atomic_basis"]["edge_nonlinear"] = _to_list(
         cfg["atomic_basis"]["edge_nonlinear"]
-    )
-    cfg["atomic_basis"]["use_graph_softmax"] = _to_list(
-        cfg["atomic_basis"]["use_graph_softmax"]
     )
     # cfg['product_basis']['nonlinear'] = _to_list(cfg['product_basis']['nonlinear'])
 

@@ -3,7 +3,16 @@ import torch
 from e3nn import o3
 
 from tace.models import o2
-from tace.models._e3nn.inter import O2MagneticInteraction
+from tace.models._e3nn.inter import (
+    INTERACTION,
+    O2Interaction,
+    O2MagneticInteraction,
+)
+from tace.models._e3nn.o2 import (
+    O2MagneticScatterLinear,
+    O2ScatterLinear,
+    RadialRotaryComplexAttention,
+)
 from tace.models.angular import SolidHarmonics
 from tace.models.mag import MagmomsNormalizer
 from tace.models.mlp import (
@@ -1141,6 +1150,9 @@ def _build_o2_magnetic_interaction(
     nonlinear=None,
     scalar_act=None,
     tensor_act=None,
+    correlation=1,
+    use_asymmetric_contraction=False,
+    use_radial_rotary_attention=False,
 ):
     angular_max = mag_Lmax if angular_max is None else angular_max
     module = O2MagneticInteraction(
@@ -1152,7 +1164,7 @@ def _build_o2_magnetic_interaction(
         Lmax=angular_max,
         lmax=angular_max,
         mag_Lmax=mag_Lmax,
-        correlation=[1],
+        correlation=[correlation],
         num_channel=2,
         edge_feats_channel=4,
         target_irreps=o3.Irreps("0e"),
@@ -1167,6 +1179,42 @@ def _build_o2_magnetic_interaction(
         edge_ace_hidden=None,
         parity=True,
         nonlinear=nonlinear,
+        num_head=2,
+        use_o2_asymmetric_contraction=use_asymmetric_contraction,
+        use_radial_rotary_attention=use_radial_rotary_attention,
+    )
+    return module.to(device=DEVICE, dtype=DTYPE)
+
+
+def _build_o2_interaction(
+    *,
+    correlation=1,
+    use_asymmetric_contraction=False,
+    use_radial_rotary_attention=False,
+):
+    module = O2Interaction(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        avg_num_neighbors=4.0,
+        mmax=1,
+        Lmax=1,
+        lmax=1,
+        correlation=[correlation],
+        num_channel=2,
+        edge_feats_channel=4,
+        target_irreps=o3.Irreps("0e"),
+        num_radial_basis=4,
+        radial_mlp=[8],
+        radial_bias=True,
+        irreps_in=o3.Irreps("2x0e + 2x1o"),
+        scalar_act=None,
+        tensor_act=None,
+        edge_ace_hidden=None,
+        parity=True,
+        num_head=2,
+        use_o2_asymmetric_contraction=use_asymmetric_contraction,
+        use_radial_rotary_attention=use_radial_rotary_attention,
     )
     return module.to(device=DEVICE, dtype=DTYPE)
 
@@ -1246,7 +1294,7 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
     return module._compute_messages(
         node_feats,
         node_attrs,
-        None,
+        edge_feats,
         edge_feats,
         None,
         edge_index,
@@ -1255,6 +1303,96 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
         wigner_inv,
         magnetic_radial_basis,
         magnetic_node_attrs,
+    )
+
+
+def _evaluate_o2_interaction(module, inputs):
+    node_feats, node_attrs, edge_feats, edge_vectors, edge_index, cutoff, _ = inputs
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        wigner_module = WignerD(module.mmax, module.Lmax)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    wigner, wigner_inv = wigner_module.to(device=DEVICE).get_wigner(edge_vectors)
+    return module._compute_messages(
+        node_feats,
+        node_attrs,
+        edge_feats,
+        edge_feats,
+        None,
+        edge_index,
+        cutoff,
+        wigner,
+        wigner_inv,
+    )
+
+
+def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
+    module = _build_o2_interaction(
+        correlation=2,
+        use_asymmetric_contraction=True,
+        use_radial_rotary_attention=True,
+    )
+    assert INTERACTION["o2"] is O2Interaction
+    assert issubclass(O2MagneticInteraction, O2Interaction)
+    assert type(module.rejector) is O2ScatterLinear
+    assert not isinstance(module.rejector, O2MagneticScatterLinear)
+    assert module.edge_info.dims[0] == module.edge_feats_channel
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_interaction(module, inputs)
+    parameters = (
+        *module.rejector.parameters(),
+        *module.edge_info.parameters(),
+    )
+    gradients = torch.autograd.grad(
+        output.square().sum(),
+        (inputs[0], inputs[2], *parameters),
+        create_graph=True,
+    )
+    assert all(gradient.isfinite().all() for gradient in gradients)
+
+
+@pytest.mark.parametrize("improper", [False, True])
+def test_o2_interaction_is_globally_o3_equivariant(improper):
+    torch.manual_seed(16)
+    module = _build_o2_interaction(
+        correlation=2,
+        use_asymmetric_contraction=True,
+        use_radial_rotary_attention=True,
+    )
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_interaction(module, inputs)
+
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        rotation = o3.rand_matrix(dtype=DTYPE)
+        if improper:
+            rotation = -rotation
+        node_rotation = module.irreps_in.D_from_matrix(rotation)
+        output_rotation = module.rejector.irreps_out.D_from_matrix(rotation)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    rotation = rotation.to(DEVICE)
+    node_rotation = node_rotation.to(DEVICE)
+    output_rotation = output_rotation.to(DEVICE)
+    rotated_inputs = (
+        inputs[0] @ node_rotation.T,
+        inputs[1],
+        inputs[2],
+        inputs[3] @ rotation.T,
+        inputs[4],
+        inputs[5],
+        inputs[6],
+    )
+    rotated_output = _evaluate_o2_interaction(module, rotated_inputs)
+    torch.testing.assert_close(
+        rotated_output,
+        output @ output_rotation.T,
+        atol=5.0e-10,
+        rtol=5.0e-10,
     )
 
 
@@ -1267,7 +1405,7 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert isinstance(module.rejector.gate, O2Gate)
     assert isinstance(module.rejector.gate.act_0e, ScaledSiLU)
     assert isinstance(module.rejector.gate.act_0o, ScaledTanh)
-    assert isinstance(module.rejector.gate.act_lm, ScaledSigmoid)
+    assert isinstance(module.rejector.gate.act_lm, ScaledSiLU)
     assert module.rejector.linear_out.path_mode == "uv"
     assert module.rejector.linear_out.internal_weights
     assert not isinstance(module.linear_down, torch.nn.Identity)
@@ -1286,6 +1424,66 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert all(gradient.isfinite().all() for gradient in gradients)
 
 
+def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
+    torch.manual_seed(13)
+    module = _build_o2_magnetic_interaction(
+        correlation=2,
+        use_asymmetric_contraction=True,
+    )
+    assert isinstance(
+        module.rejector.asymmetric_contraction,
+        o2.O2AsymmetricContraction,
+    )
+    assert module.rejector.asymmetric_contraction.algorithm == "edge"
+    assert module.rejector.contraction_weight_numel > 0
+    assert module.rejector.gate is None
+    assert not hasattr(module, "contraction_info")
+    assert isinstance(module.rejector.scalar_act, ScaledSiLU)
+    assert module.rejector.projection_irreps.count("0e") == (
+        module.rejector.irreps_out_local.count("0e") * module.correlation
+        + module.rejector.asymmetric_contraction.num_paths
+    )
+    assert not tuple(module.rejector.asymmetric_contraction.parameters())
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_magnetic_interaction(module, inputs)
+    parameters = tuple(module.rejector.linear_in.parameters())
+    gradients = torch.autograd.grad(
+        output.square().sum(),
+        (inputs[0], inputs[2], inputs[-1], *parameters),
+        create_graph=True,
+    )
+    assert all(gradient.isfinite().all() for gradient in gradients)
+
+
+def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
+    torch.manual_seed(14)
+    module = _build_o2_magnetic_interaction(use_radial_rotary_attention=True)
+    assert module.rejector.use_radial_rotary_attention
+    assert not hasattr(module.rejector, "radial_phase")
+    assert isinstance(module.rejector.attention, RadialRotaryComplexAttention)
+    assert sum(
+        isinstance(child, o2.Linear)
+        for child in module.rejector.attention.modules()
+    ) == 1
+    radial_basis = torch.randn(7, module.num_radial_basis, device=DEVICE, dtype=DTYPE)
+    radial_scale = torch.sigmoid(
+        module.rejector.attention.radial_scale(radial_basis)
+    )
+    assert torch.all(radial_scale > 0.0)
+    assert torch.all(radial_scale < 1.0)
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_magnetic_interaction(module, inputs)
+    parameters = tuple(module.rejector.attention.radial_scale.parameters())
+    gradients = torch.autograd.grad(
+        output.square().sum(),
+        (inputs[0], inputs[2], inputs[-1], *parameters),
+        create_graph=True,
+    )
+    assert all(gradient.isfinite().all() for gradient in gradients)
+
+
 def test_o2_magnetic_interaction_parses_scalar_activations():
     single = _build_o2_magnetic_interaction(scalar_act="scaled_silu")
     assert isinstance(single.rejector.gate.act_0e, ScaledSiLU)
@@ -1296,7 +1494,7 @@ def test_o2_magnetic_interaction_parses_scalar_activations():
     assert isinstance(separate.rejector.gate.act_0o, ScaledTanh)
 
     tensor = _build_o2_magnetic_interaction(tensor_act="tanh")
-    assert isinstance(tensor.rejector.gate.act_lm, ScaledTanh)
+    assert isinstance(tensor.rejector.gate.act_lm, ScaledSiLU)
 
 
 @pytest.mark.parametrize(
@@ -1383,6 +1581,52 @@ def test_o2_magnetic_interaction_is_globally_o3_equivariant(
         output @ output_rotation.T,
         atol=3.0e-10,
         rtol=3.0e-10,
+    )
+
+
+@pytest.mark.parametrize("improper", [False, True])
+def test_o2_magnetic_optional_contraction_and_attention_are_o3_equivariant(
+    improper,
+):
+    torch.manual_seed(15)
+    module = _build_o2_magnetic_interaction(
+        correlation=2,
+        use_asymmetric_contraction=True,
+        use_radial_rotary_attention=True,
+    )
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_magnetic_interaction(module, inputs)
+
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        rotation = o3.rand_matrix(dtype=DTYPE)
+        if improper:
+            rotation = -rotation
+        node_rotation = module.irreps_in.D_from_matrix(rotation)
+        magnetic_rotation = o3.Irreps("1e").D_from_matrix(rotation)
+        output_rotation = module.rejector.irreps_out.D_from_matrix(rotation)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    rotation = rotation.to(DEVICE)
+    node_rotation = node_rotation.to(DEVICE)
+    magnetic_rotation = magnetic_rotation.to(DEVICE)
+    output_rotation = output_rotation.to(DEVICE)
+    rotated_inputs = (
+        inputs[0] @ node_rotation.T,
+        inputs[1],
+        inputs[2],
+        inputs[3] @ rotation.T,
+        inputs[4],
+        inputs[5],
+        inputs[6] @ magnetic_rotation.T,
+    )
+    rotated_output = _evaluate_o2_magnetic_interaction(module, rotated_inputs)
+    torch.testing.assert_close(
+        rotated_output,
+        output @ output_rotation.T,
+        atol=5.0e-10,
+        rtol=5.0e-10,
     )
 
 
