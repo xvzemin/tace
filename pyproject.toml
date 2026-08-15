@@ -10,7 +10,7 @@ authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
 
 requires-python = ">=3.9"
 dependencies = [
-    "torch>=2.4,<=2.13",
+    "torch>=2.4",
     "torch_geometric>=2.4",
     "lightning",
     "omegaconf",

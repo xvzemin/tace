@@ -6,7 +6,7 @@ Installation
 Requirements
 ------------
 
-TACE requires Python 3.9 or newer and PyTorch 2.4 through 2.13. AOTInductor
+TACE requires Python 3.9 or newer and PyTorch 2.4 or newer. AOTInductor
 export additionally requires ``torch>=2.13``. We recommend installing
 TACE in a clean environment:
 
@@ -121,9 +121,9 @@ extra:
    export TACE_USE_EQX=1
 
 The preview is independent of OEQ, CUEQ, and EQT and currently applies only to
-the scatter calculation in ``uuSO2Interaction``. Internally it calls
+the scatter calculation in ``uuSO2Interaction`` now. Internally it calls
 ``tace.models.triton_ops``; that module is a temporary placeholder until the
-operators move into EQX and is not a separate public backend.
+operators move into independent EQX package.
 
 TorchSim
 --------
@@ -167,8 +167,7 @@ For a source checkout, use:
    pip install ".[nvalchemi]"
 
 The extra installs ``nvalchemi-toolkit`` and its required
-``nvalchemi-toolkit-ops`` dependency. Other TACE interfaces and workflows do
-not require either package.
+``nvalchemi-toolkit-ops`` dependency.
 
 The two upstream NVIDIA repositories are provided for reference:
 
