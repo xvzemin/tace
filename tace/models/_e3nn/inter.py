@@ -15,7 +15,8 @@ from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import MLP, ScaledSigmoid, ScaledSiLU, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
-from .fused import O3ScatterTensorProduct, uuSO2ScatterTensorProduct, uvSO2TensorProduct
+from .fused import O3ScatterTensorProduct
+from .archive import OAM20270705
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2MagneticScatterLinear, O2ScatterLinear
@@ -271,71 +272,7 @@ class O3CgtpInteraction(Interaction):
         return m_i, self.truncate_ghosts(sc, nlocal)
 
 
-# It will be covered by future O2 version
-class uuSO2Interaction(O3CgtpInteraction):
-    """
-    An interaction module based on uuSO2Linear.
-
-    It achieves the same accuracy and extrapolation capability as CGTP.
-    Set `export TACE_USE_EQX=1` to use the current EQX preview operator.
-
-    This interaction block does not directly add nonlinearity to the message.
-    """
-
-    so2_linear_type = "w1"
-
-    def _prepare_setup(self) -> None:
-        assert self.parity == False, (
-            "uuSO2InteractionArchitecture1 not support O(3) group"
-        )
-        assert self.irreps_in.lmax > 0, (
-            "uuSO2InteractionArchitecture1's irreps_in.lmax must > 0, "
-            "use uuSO2InteractionArchitecture1 from the second layer or use other node_embedding with l > 0"
-        )
-        assert self.edge_nonlinear == None
-
-    def _build_rejector(self) -> torch.nn.Module:
-        return uuSO2ScatterTensorProduct(
-            mmax=self.mmax,
-            lmax=self.lmax,
-            num_channel=self.num_channel,
-            weight_type=self.so2_linear_type,
-            l1l2=self.l1l2,
-            reshape_in=LayoutTransform(self.irreps_in),
-            reshape_out=LayoutTransform(self.irreps_out),
-        )
-
-    def _linear_down_irreps_in(self) -> o3.Irreps:
-        return self.irreps_in
-
-    def _compute_messages(
-        self,
-        node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
-        edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_cutoff: Union[torch.Tensor, None],
-        edge_wigner: Union[torch.Tensor, None] = None,
-        edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
-    ) -> torch.Tensor:
-        conv_weights = self.edge_info(edge_feats)
-        if edge_cutoff is not None:
-            conv_weights = conv_weights * edge_cutoff
-        return self.rejector(
-            node_feats,
-            conv_weights,
-            edge_index,
-            edge_wigner,
-            edge_wigner_inv,
-        )
-
-
-# A little BUG
-class uvSO2Interaction(O3CgtpInteraction):
+class OAM20270705Interaction(O3CgtpInteraction):
     """
     An interaction module based on uvSO2Linear,
     Edge Cluster Expansion and Radial Rotary Attention.
@@ -367,7 +304,7 @@ class uvSO2Interaction(O3CgtpInteraction):
         edge_act = self.edge_nonlinear.split("_")[1]
         scalar_act = self.scalar_act or edge_act
         tensor_act = self.tensor_act or edge_act
-        return uvSO2TensorProduct(
+        return OAM20270705(
             mmax=self.mmax,
             lmax=self.lmax,
             num_channel=self.num_channel,
@@ -417,7 +354,6 @@ class uvSO2Interaction(O3CgtpInteraction):
         )
 
 
-# In dev TODO
 class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
     """O(3) magnetic interaction evaluated in a Wigner-6j recoupled tree.
 
@@ -751,7 +687,6 @@ class O2Interaction(O3CgtpInteraction):
         )
 
 
-# In dev TODO
 class O2MagneticInteraction(O2Interaction):
     """Local-O2 interaction augmented by magnetic solid harmonics."""
 
@@ -836,10 +771,9 @@ INTERACTION: Dict[str, type[Interaction]] = {
     "normal": O3CgtpInteraction,
     "spectral": O3CgtpInteraction,
     "cgtp": O3CgtpInteraction,
-    "uu_so2": uuSO2Interaction,
-    "so2": uvSO2Interaction,
-    "uv_so2": uvSO2Interaction,
-    "attn": uvSO2Interaction,
+    "so2": OAM20270705Interaction,
+    "uv_so2": OAM20270705Interaction,
+    "attn": OAM20270705Interaction,
     "o3_w6j_mag": O3Wigner6jMagneticInteraction,
     "o2": O2Interaction,
     "o2_mag": O2MagneticInteraction,
