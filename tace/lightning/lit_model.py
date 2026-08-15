@@ -601,7 +601,8 @@ def _load_tace(
                 )
                 with torch_default_dtype(model_dtype):
                     model = create_model(
-                        **{k: v for k, v in obj.items() if k != "state_dict"}
+                        **{k: v for k, v in obj.items() if k != "state_dict"},
+                        prune_removed_keys=True,
                     )
                 model.load_state_dict(state_dict, strict=strict)
             elif isinstance(obj, torch.nn.Module):
