@@ -16,7 +16,7 @@ from ..linear import e3nnLinear
 from ..mlp import MLP, ScaledSigmoid, ScaledSiLU, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct
-from .archive import OAM20270705
+from .archive import OAM20260705Convolution
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2MagneticScatterLinear, O2ScatterLinear
@@ -304,7 +304,7 @@ class OAM20270705Interaction(O3CgtpInteraction):
         edge_act = self.edge_nonlinear.split("_")[1]
         scalar_act = self.scalar_act or edge_act
         tensor_act = self.tensor_act or edge_act
-        return OAM20270705(
+        return OAM20260705Convolution(
             mmax=self.mmax,
             lmax=self.lmax,
             num_channel=self.num_channel,
