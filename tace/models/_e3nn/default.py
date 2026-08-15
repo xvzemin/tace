@@ -91,6 +91,7 @@ DEFAULT_MODEL_CONFIG = {
         "hidden": [16],
         "use_alllayer": False,
         "use_uie": False,
+        "use_one_body_magmoms": True,
     },
     "scale_shift": {
         "enable": True,

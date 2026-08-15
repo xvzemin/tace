@@ -9,7 +9,7 @@ import torch
 from e3nn import o3
 from e3nn.nn import Activation
 
-from ..linear import e3nnLinear
+from ..linear import e3nnLinear, e3nnElementLinear
 from ..mlp import ACTIVATION
 from .base import ReadOut
 from .nonlinear import O3Gate
@@ -34,6 +34,21 @@ def mh_mask(
 
 
 class ScalarReadOut(ReadOut):
+    def _make_linear(self, irreps_in: o3.Irreps, irreps_out: o3.Irreps):
+        return e3nnLinear(
+            irreps_in,
+            irreps_out,
+            bias=self.use_bias,
+        )
+
+    def _apply_linear(
+        self,
+        linear: torch.nn.Module,
+        x: torch.Tensor,
+        node_attrs: Union[torch.Tensor, None],
+    ) -> torch.Tensor:
+        return linear(x)
+
     def _setup(self):
 
         if self.layer == self.num_layers - 1:
@@ -46,39 +61,45 @@ class ScalarReadOut(ReadOut):
                 ([self.irreps_in] + self.irreps_hidden + [self.irreps_out])[:-1],
                 ([self.irreps_in] + self.irreps_hidden + [self.irreps_out])[1:],
             ):
-                self.linear2.append(
-                    e3nnLinear(
-                        irreps_in,
-                        irreps_out,
-                        bias=self.use_bias,
-                    )
-                )
+                self.linear2.append(self._make_linear(irreps_in, irreps_out))
             self.last_layer = True
         else:
             self.linear1 = torch.nn.ModuleList(
-                [
-                    e3nnLinear(
-                        irreps_in=self.irreps_in,
-                        irreps_out=self.irreps_out,
-                        bias=self.use_bias,
-                    )
-                ]
+                [self._make_linear(self.irreps_in, self.irreps_out)]
             )
             self.last_layer = False
 
     def forward(
-        self, x: torch.Tensor, node_fidelity: Union[torch.Tensor, None] = None
+        self,
+        x: torch.Tensor,
+        node_fidelity: Union[torch.Tensor, None] = None,
+        node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         if not self.last_layer:
-            return self.linear1[0](x)
+            return self._apply_linear(self.linear1[0], x, node_attrs)
         for idx, linear in enumerate(self.linear2[:-1]):
-            x = self.acts[idx](linear(x))
+            x = self.acts[idx](self._apply_linear(linear, x, node_attrs))
             if self.num_fidelities > 1:
                 x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
-        return self.linear2[-1](x)
+        return self._apply_linear(self.linear2[-1], x, node_attrs)
 
 
 class TensorReadOut(ReadOut):
+    def _make_linear(self, irreps_in: o3.Irreps, irreps_out: o3.Irreps):
+        return e3nnLinear(
+            irreps_in,
+            irreps_out,
+            bias=self.use_bias,
+        )
+
+    def _apply_linear(
+        self,
+        linear: torch.nn.Module,
+        x: torch.Tensor,
+        node_attrs: Union[torch.Tensor, None],
+    ) -> torch.Tensor:
+        return linear(x)
+
     def _setup(self):
 
         if self.layer == self.num_layers - 1:
@@ -101,48 +122,78 @@ class TensorReadOut(ReadOut):
                 )
             ):
                 self.linear2.append(
-                    e3nnLinear(
-                        irreps_in=irreps_in,
-                        irreps_out=self.acts[idx].irreps_in,
-                        bias=self.use_bias,
-                    )
+                    self._make_linear(irreps_in, self.acts[idx].irreps_in)
                 )
             self.linear2.append(
-                e3nnLinear(
-                    irreps_in=self.irreps_hidden[-1],
-                    irreps_out=self.irreps_out,
-                    bias=self.use_bias,
-                )
+                self._make_linear(self.irreps_hidden[-1], self.irreps_out)
             )
             self.last_layer = True
         else:
             self.linear1 = torch.nn.ModuleList(
-                [
-                    e3nnLinear(
-                        irreps_in=self.irreps_in,
-                        irreps_out=self.irreps_out,
-                        bias=self.use_bias,
-                    )
-                ]
+                [self._make_linear(self.irreps_in, self.irreps_out)]
             )
             self.last_layer = False
 
     def forward(
-        self, x: torch.Tensor, node_fidelity: Union[torch.Tensor, None] = None
+        self,
+        x: torch.Tensor,
+        node_fidelity: Union[torch.Tensor, None] = None,
+        node_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         if not self.last_layer:
-            return self.linear1[0](x)
+            return self._apply_linear(self.linear1[0], x, node_attrs)
         for idx, linear in enumerate(self.linear2[:-1]):
-            x = self.acts[idx](linear(x))
+            x = self.acts[idx](self._apply_linear(linear, x, node_attrs))
             if self.num_fidelities > 1:
                 x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
-        return self.linear2[-1](x)
+        return self._apply_linear(self.linear2[-1], x, node_attrs)
+
+
+class ElementScalarReadOut(ScalarReadOut):
+    def _make_linear(self, irreps_in: o3.Irreps, irreps_out: o3.Irreps):
+        return e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            bias=self.use_bias,
+            num_elements=self.num_elements,
+        )
+
+    def _apply_linear(
+        self,
+        linear: torch.nn.Module,
+        x: torch.Tensor,
+        node_attrs: Union[torch.Tensor, None],
+    ) -> torch.Tensor:
+        if node_attrs is None:
+            raise ValueError("element readout requires node_attrs")
+        return linear(x, node_attrs)
+
+
+class ElementTensorReadOut(TensorReadOut):
+    def _make_linear(self, irreps_in: o3.Irreps, irreps_out: o3.Irreps):
+        return e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            bias=self.use_bias,
+            num_elements=self.num_elements,
+        )
+
+    def _apply_linear(
+        self,
+        linear: torch.nn.Module,
+        x: torch.Tensor,
+        node_attrs: Union[torch.Tensor, None],
+    ) -> torch.Tensor:
+        if node_attrs is None:
+            raise ValueError("element readout requires node_attrs")
+        return linear(x, node_attrs)
 
 
 def build_scalar_readout(
     num_layers: int,
     hidden_channel: List[int],
     bias: bool,
+    num_elements: int,
     num_fidelities: int,
     use_alllayer: bool,
     parity: bool,
@@ -157,6 +208,7 @@ def build_scalar_readout(
                 num_layers=num_layers,
                 hidden_channel=hidden_channel,
                 bias=bias,
+                num_elements=num_elements,
                 num_fidelities=num_fidelities,
                 parity=parity,
                 irreps_in=irreps_in[layer],
@@ -173,6 +225,7 @@ def build_tensor_readout(
     num_layers: int,
     hidden_channel: int,
     bias: bool,
+    num_elements: int,
     num_fidelities: int,
     use_alllayer: bool,
     parity: bool,
@@ -187,6 +240,7 @@ def build_tensor_readout(
                 num_layers=num_layers,
                 hidden_channel=hidden_channel,
                 bias=bias,
+                num_elements=num_elements,
                 num_fidelities=num_fidelities,
                 parity=parity,
                 irreps_in=irreps_in[layer],
@@ -197,3 +251,59 @@ def build_tensor_readout(
         return torch.nn.ModuleList(readouts)
     else:
         return torch.nn.ModuleList([readouts[-1]])
+
+
+def build_element_scalar_readout(
+    num_layers: int,
+    hidden_channel: List[int],
+    bias: bool,
+    num_fidelities: int,
+    use_alllayer: bool,
+    parity: bool,
+    irreps_in: list[o3.Irreps],
+    irreps_out: Union[str, o3.Irreps],
+    num_elements: int,
+):
+    readouts = torch.nn.ModuleList(
+        ElementScalarReadOut(
+            layer=layer,
+            num_layers=num_layers,
+            hidden_channel=hidden_channel,
+            bias=bias,
+            num_fidelities=num_fidelities,
+            parity=parity,
+            irreps_in=irreps_in[layer],
+            irreps_out=o3.Irreps(irreps_out),
+            num_elements=num_elements,
+        )
+        for layer in range(num_layers)
+    )
+    return readouts if use_alllayer else torch.nn.ModuleList([readouts[-1]])
+
+
+def build_element_tensor_readout(
+    num_layers: int,
+    hidden_channel: List[int],
+    bias: bool,
+    num_fidelities: int,
+    use_alllayer: bool,
+    parity: bool,
+    irreps_in: list[o3.Irreps],
+    irreps_out: Union[str, o3.Irreps],
+    num_elements: int,
+):
+    readouts = torch.nn.ModuleList(
+        ElementTensorReadOut(
+            layer=layer,
+            num_layers=num_layers,
+            hidden_channel=hidden_channel,
+            bias=bias,
+            num_fidelities=num_fidelities,
+            parity=parity,
+            irreps_in=irreps_in[layer],
+            irreps_out=o3.Irreps(irreps_out),
+            num_elements=num_elements,
+        )
+        for layer in range(num_layers)
+    )
+    return readouts if use_alllayer else torch.nn.ModuleList([readouts[-1]])

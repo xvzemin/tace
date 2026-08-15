@@ -369,6 +369,7 @@ class ReadOut(torch.nn.Module):
         num_layers: int,
         hidden_channel: list[int],
         bias: bool,
+        num_elements: int,
         num_fidelities: int,
         parity: bool,
         irreps_in: o3.Irreps,
@@ -381,6 +382,7 @@ class ReadOut(torch.nn.Module):
         self.layer = layer
         self.num_layers = num_layers
         self.use_bias = bias
+        self.num_elements = num_elements
         self.num_fidelities = num_fidelities
         self.parity = parity
 

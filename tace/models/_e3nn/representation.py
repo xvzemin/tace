@@ -52,6 +52,7 @@ class Representation(torch.nn.Module):
         layer_norm: Dict,
         dropout: Dict,
         parity: bool,
+        use_one_body_magmoms: bool,
     ):
         super().__init__()
 
@@ -99,15 +100,16 @@ class Representation(torch.nn.Module):
             interaction in {"o3_w6j_mag", "o2_mag"}
             for interaction in atomic_basis["type"]
         )
-        if self.use_magnetic_radial_basis:
+        self.use_one_body_magmoms = use_one_body_magmoms
+        if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             self.magmom_normalizer = MagmomsNormalizer(
                 magmoms_norm_by_element,
                 atomic_numbers=atomic_numbers,
                 num_elements=self.num_elements,
             )
             self.magnetic_radial_basis = MagneticChebyshevBasis(
-                num_basis=radial_basis["num_mag_radial_basis"],
-                include_constant=False,
+                num_basis=radial_basis["num_mag_radial_basis"] + 1,
+                include_constant=True,
             )
         self.use_magnetic_node_attrs = any(
             interaction in {"o3_w6j_mag", "o2_mag"}
@@ -357,16 +359,21 @@ class Representation(torch.nn.Module):
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
         magnetic_node_attrs = None
-        if self.use_magnetic_radial_basis:
+        one_body_magmoms_basis = None
+        if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             if initial_noncollinear_magmoms is None:
                 raise ValueError(
-                    "A magnetic interaction requires initial_noncollinear_magmoms"
+                    "A magnetic model requires initial_noncollinear_magmoms"
                 )
             scaled_magnetic_norm = self.magmom_normalizer(
                 initial_noncollinear_magmoms,
                 data["node_attrs"],
             )
-            magnetic_radial_basis = self.magnetic_radial_basis(scaled_magnetic_norm)
+            magnetic_basis = self.magnetic_radial_basis(scaled_magnetic_norm)
+        if self.use_magnetic_radial_basis:
+            magnetic_radial_basis = magnetic_basis[..., 1:]
+        if self.use_one_body_magmoms:
+            one_body_magmoms_basis = magnetic_basis[..., :-1]
 
         if self.use_magnetic_node_attrs:
             magnetic_node_attrs = self.magnetic_angular_basis(
@@ -425,6 +432,7 @@ class Representation(torch.nn.Module):
             "uie_feats": uie_feats,
             "noise_mask_tensor": noise_mask_tensor,
             "dens_batch_mask_tensor": dens_batch_mask_tensor,
+            "one_body_magmoms_basis": one_body_magmoms_basis,
         }
 
     def _generate_dens_data(self, data: Dict[str, torch.Tensor]):

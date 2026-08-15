@@ -68,6 +68,7 @@ def test_complete_les_readout_with_upstream_backend():
         num_layers=1,
         hidden_channel=[8],
         bias=True,
+        num_elements=2,
         num_fidelities=2,
         use_alllayer=False,
         parity=True,

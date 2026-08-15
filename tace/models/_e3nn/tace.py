@@ -17,7 +17,11 @@ from ..utils import compute_fixed_charge_dipole, get_target_irreps
 from .basis_change import PropertyBasisChange
 from .default import check_model_config
 from .les import TACELes, required_les_irreps
-from .readout import build_scalar_readout, build_tensor_readout
+from .readout import (
+    build_element_scalar_readout,
+    build_scalar_readout,
+    build_tensor_readout,
+)
 from .representation import Representation
 
 
@@ -78,6 +82,25 @@ class e3nnTACE(torch.nn.Module):
         self.embedding_property = (
             cfg["invariant_property"] + cfg["equivariant_property"]
         )
+        magnetic_interactions = {"o3_w6j_mag", "o2_mag"}
+        self.use_one_body_magmoms = bool(
+            cfg["readout_emlp"]["use_one_body_magmoms"]
+            and "energy" in cfg["target_property"]
+            and (
+                "initial_noncollinear_magmoms" in cfg["embedding_property"]
+                or "initial_noncollinear_magmoms" in self.embedding_property
+                or any(
+                    interaction in magnetic_interactions
+                    for interaction in cfg["atomic_basis"]["type"]
+                )
+            )
+        )
+        if self.use_one_body_magmoms:
+            self.embedding_property = list(
+                dict.fromkeys(
+                    self.embedding_property + ["initial_noncollinear_magmoms"]
+                )
+            )
         self.register_buffer(
             "cutoff", torch.tensor(cfg["cutoff"], dtype=torch.get_default_dtype())
         )
@@ -87,6 +110,7 @@ class e3nnTACE(torch.nn.Module):
 
         # === Will be called by in this module ===
         self.use_alllayer = cfg["readout_emlp"]["use_alllayer"]
+        self.num_elements = len(cfg["atomic_numbers"])
         self.num_channel = cfg["num_channel"]
         self.scale_zbl = cfg["scale_shift"]["scale_zbl"]
 
@@ -129,6 +153,7 @@ class e3nnTACE(torch.nn.Module):
             layer_norm=cfg["layer_norm"],
             dropout=cfg["dropout"],
             parity=cfg["parity"],
+            use_one_body_magmoms=self.use_one_body_magmoms,
         )
 
         # === Readout ===
@@ -138,6 +163,7 @@ class e3nnTACE(torch.nn.Module):
             "num_layers": cfg["num_layers"],
             "hidden_channel": cfg["readout_emlp"]["hidden"],
             "bias": cfg["readout_emlp"]["bias"],
+            "num_elements": self.num_elements,
             "num_fidelities": len(cfg["fidelity"]),
             "use_alllayer": self.use_alllayer,
             "parity": cfg["parity"],
@@ -147,6 +173,7 @@ class e3nnTACE(torch.nn.Module):
             "num_layers": cfg["num_layers"],
             "hidden_channel": cfg["readout_emlp"]["hidden"],
             "bias": cfg["readout_emlp"]["bias"],
+            "num_elements": self.num_elements,
             "num_fidelities": len(cfg["fidelity"]),
             "use_alllayer": self.use_alllayer,
             "parity": cfg["parity"],
@@ -158,6 +185,22 @@ class e3nnTACE(torch.nn.Module):
             self.energy_readouts = build_scalar_readout(
                 irreps_out="0e", **for_scalar_readout
             )
+            if self.use_one_body_magmoms:
+                self.one_body_magmoms_readout = build_element_scalar_readout(
+                    num_layers=1,
+                    hidden_channel=[],
+                    bias=False,
+                    num_elements=self.num_elements,
+                    num_fidelities=len(cfg["fidelity"]),
+                    use_alllayer=False,
+                    parity=cfg["parity"],
+                    irreps_in=[
+                        o3.Irreps(
+                            f"{cfg['radial_basis']['num_mag_radial_basis']}x0e"
+                        )
+                    ],
+                    irreps_out="0e",
+                )[0]
             self.atomic_energy_layer = OneHotToAtomicEnergy(
                 cfg["atomic_energies"], cfg["atomic_numbers"]
             )
@@ -198,6 +241,7 @@ class e3nnTACE(torch.nn.Module):
                 num_layers=cfg["num_layers"],
                 hidden_channel=cfg["readout_emlp"]["hidden"],
                 bias=cfg["readout_emlp"]["bias"],
+                num_elements=self.num_elements,
                 num_fidelities=len(cfg["fidelity"]),
                 use_alllayer=self.use_alllayer,
                 parity=cfg["parity"],
@@ -319,6 +363,7 @@ class e3nnTACE(torch.nn.Module):
             ]
             e_base_graph = scatter_sum(e_base_node, batch, dim=-1, dim_size=num_graphs)
             e_list = []
+            e_one_body_magmoms_node = None
             for ii, energy_readout in enumerate(self.energy_readouts):
                 if not self.use_alllayer:
                     ii = -1
@@ -327,6 +372,17 @@ class e3nnTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity
                     ]
                 )
+            if self.use_one_body_magmoms:
+                one_body_magmoms_basis = from_representation[
+                    "one_body_magmoms_basis"
+                ]
+                if one_body_magmoms_basis is None:
+                    raise RuntimeError("one-body magnetic-moment basis is unavailable")
+                e_one_body_magmoms_node = self.one_body_magmoms_readout(
+                    one_body_magmoms_basis,
+                    node_fidelity=node_fidelity,
+                    node_attrs=data["node_attrs"],
+                )[num_atoms_arange, node_fidelity]
             e_node = torch.sum(torch.stack(e_list, dim=0), dim=0)
             # === ZBL ===
             if hasattr(self, "zbl"):
@@ -350,6 +406,8 @@ class e3nnTACE(torch.nn.Module):
                 )
             if hasattr(self, "zbl") and not self.scale_zbl:
                 e_node = e_node + e_zbl_node
+            if e_one_body_magmoms_node is not None:
+                e_node = e_node + e_one_body_magmoms_node
             # === uie ===
             if hasattr(self, "uie_readout"):
                 e_uie_node = self.uie_readout(from_representation["uie_feats"])

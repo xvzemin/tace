@@ -27,6 +27,7 @@ and `Hydra <https://hydra.cc/>`_.
    foundation.rst
    finetune.rst
    qeq.rst
+   les.rst
    soc.rst
    ase.rst
    magnetic_relax.rst

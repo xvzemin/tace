@@ -54,7 +54,7 @@ Plugins
 
 TACE currently supports the following plugin:
 
-- **LES** (Latent Ewald Summation)
+- :doc:`TACE-LES <guide/les>` (Latent Ewald Summation)
 
 
 Interfaces

@@ -369,6 +369,7 @@ model:
       hidden: [16]
       use_alllayer: false # (bool) recommended true, if true, evergy layer has readout, else, only last layer has
       use_uie: false # (bool) whether use uie readout
+      use_one_body_magmoms: true
     
     scale_shift:
       enable: true
