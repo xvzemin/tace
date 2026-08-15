@@ -167,7 +167,7 @@ def parse_args():
     parser.add_argument(
         "-i",
         "--input",
-        default="/home/xuzemin/mag-o2/Fe-Fmag.xyz",
+        default="/home/xuzemin/mag-o2-botch-source-target/Fe/lcao_test.xyz",
         help="ASE-readable magnetic structures.",
     )
     parser.add_argument(
@@ -180,7 +180,7 @@ def parse_args():
     parser.add_argument(
         "-k",
         "--magmom_key",
-        default="spin",
+        default="initial_noncollinear_magmoms",
         help="ASE per-atom array containing non-collinear magnetic moments.",
     )
     return parser.parse_args()

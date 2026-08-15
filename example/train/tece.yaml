@@ -400,6 +400,19 @@ model:
           use_atomwise: false
           compute_bec: false
           bec_output_index: null
+          use_dipole: false
+          use_quad: false
+          use_induced_charge: false
+          use_induced_dipole: false
+          use_anisotropic_polarizability: false
+          alpha_irreps: 0e+1o+2e
+          alpha_1o_nonlinear_readout: false
+          alpha_1o_linear_w_pos: true
+          make_alpha_positive: false
+          make_kappa_positive: false
+          output_scale: 0.1
+          kappa_scale: 0.01
+          alpha_scale: 0.01
 
     universal_embedding: 
       charges:

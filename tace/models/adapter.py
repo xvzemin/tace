@@ -311,6 +311,9 @@ class TensorModel(torch.nn.Module):
                 nlocal, device=positions.device, dtype=torch.int64
             )
         else:
+            les_module = getattr(self.readout_fn, "les", None)
+            if les_module is not None and getattr(les_module, "compute_bec", False):
+                data["positions"].requires_grad_(True)
             requires_grad_p_list = []
             for p in self.get_target_property():
                 for requires_grad_p in PROPERTY[p]["requires_grad_with"]:

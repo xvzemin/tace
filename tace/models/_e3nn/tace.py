@@ -16,6 +16,7 @@ from ..radial import ZBLBasis
 from ..utils import compute_fixed_charge_dipole, get_target_irreps
 from .basis_change import PropertyBasisChange
 from .default import check_model_config
+from .les import TACELes, required_les_irreps
 from .readout import build_scalar_readout, build_tensor_readout
 from .representation import Representation
 
@@ -91,10 +92,15 @@ class e3nnTACE(torch.nn.Module):
 
         # === Will be used in __init__ ===
         target_irreps = get_target_irreps(self.target_property)
+        les_cfg = cfg["long_range"]["les"]
+        if les_cfg["enable"]:
+            if "energy" not in self.target_property:
+                raise ValueError("LES requires energy in target_property")
+            les_arguments = les_cfg["les_arguments"] or {"use_atomwise": False}
+            target_irreps.extend(required_les_irreps(les_arguments))
         if cfg["product_basis"]["return_components"] is not None:
-            target_irreps = list(
-                set(target_irreps + cfg["product_basis"]["return_components"])
-            )
+            target_irreps.extend(cfg["product_basis"]["return_components"])
+        target_irreps = list(set(target_irreps))
         self.target_irreps = o3.Irreps(target_irreps).regroup()
 
         # === Representation/Descriptor ===
@@ -179,21 +185,23 @@ class e3nnTACE(torch.nn.Module):
                 )
 
         # === Long range ===
-        if cfg["long_range"]["les"]["enable"]:
+        if les_cfg["enable"]:
             try:
                 from les import Les
             except ImportError as e:
                 raise ImportError(
                     "Please install les from https://github.com/ChengUCB/les."
                 ) from e
-            les_arguments = cfg["long_range"]["les"]["les_arguments"]
-            if les_arguments is None:
-                les_arguments = {"use_atomwise": False}
-            self.compute_bec = les_arguments.get("compute_bec", False)
-            self.bec_output_index = les_arguments.get("bec_output_index", None)
-            self.les = Les(les_arguments=les_arguments)
-            self.les_readouts = build_scalar_readout(
-                irreps_out="0e", **for_scalar_readout
+            self.les = TACELes(
+                backend=Les(les_arguments=les_arguments),
+                les_arguments=les_arguments,
+                num_layers=cfg["num_layers"],
+                hidden_channel=cfg["readout_emlp"]["hidden"],
+                bias=cfg["readout_emlp"]["bias"],
+                num_fidelities=len(cfg["fidelity"]),
+                use_alllayer=self.use_alllayer,
+                parity=cfg["parity"],
+                irreps_in=[prod.irreps_out for prod in self.representation.products],
             )
 
         # === Direct Dipolet ===
@@ -629,32 +637,32 @@ class e3nnTACE(torch.nn.Module):
             ABS_F_C_MAG = torch.sum(torch.stack(mag_list, dim=-1), dim=-1)
 
         if hasattr(self, "les"):
-            les_lq_list = []
-            for ii, les_readout in enumerate(self.les_readouts):
-                if not self.use_alllayer:
-                    ii = -1
-                les_lq_list.append(
-                    les_readout(descriptors[ii])[num_atoms_arange, node_fidelity]
-                )
-            LES_LQ = torch.sum(torch.stack(les_lq_list, dim=0), dim=0)
             les_results = self.les(
-                latent_charges=LES_LQ,
-                positions=graph.positions,
+                descriptors=descriptors,
+                node_fidelity=node_fidelity,
+                atom_indices=num_atoms_arange,
+                positions=data["positions"],
                 cell=graph.lattice,
                 batch=batch,
-                compute_energy=True,
-                compute_bec=self.compute_bec,
-                bec_output_index=self.bec_output_index,
+                atomic_numbers=data["atomic_numbers"],
+                external_field=data.get("electric_field"),
+                pbc=data.get("pbc"),
             )
-            LES_E = les_results["E_lr"]
+            LES_E = les_results["les_energy"]
             if LES_E is None:
                 LES_E = torch.zeros_like(E)
             E += LES_E
-            LES_BEC = les_results["BEC"]
         else:
+            les_results = {
+                "les_energy": None,
+                "les_latent_charges": None,
+                "les_latent_dipoles": None,
+                "les_latent_quadrupoles": None,
+                "les_latent_polarizabilities": None,
+                "les_latent_kappas": None,
+                "les_born_effective_charges": None,
+            }
             LES_E = None
-            LES_LQ = None
-            LES_BEC = None
 
         scalar_descriptor = None
         if "0e" in self.target_irreps:
@@ -708,8 +716,12 @@ class e3nnTACE(torch.nn.Module):
             # "direct_hessian": D_H,
             "charges": CHARGES,
             "les_energy": LES_E,
-            "les_latent_charges": LES_LQ,
-            "les_born_effective_charges": LES_BEC,
+            "les_latent_charges": les_results["les_latent_charges"],
+            "les_latent_dipoles": les_results["les_latent_dipoles"],
+            "les_latent_quadrupoles": les_results["les_latent_quadrupoles"],
+            "les_latent_polarizabilities": les_results["les_latent_polarizabilities"],
+            "les_latent_kappas": les_results["les_latent_kappas"],
+            "les_born_effective_charges": les_results["les_born_effective_charges"],
             "scalar_descriptor": scalar_descriptor,
             "abs_final_collinear_magmoms": ABS_F_C_MAG,
             "noise_vec": dens_noise,
