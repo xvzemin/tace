@@ -1,9 +1,14 @@
+import inspect
+
 import pytest
 import torch
 from e3nn import o3
 
 from tace.models._e3nn.fused import O3ScatterTensorProduct, uvuTensorProduct
-from tace.models._e3nn.inter import O3Wigner6jMagneticInteraction
+from tace.models._e3nn.inter import (
+    O3GeneralizedWigner6jInteraction,
+    O3Wigner6jMagneticInteraction,
+)
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
     sympy_wigner_6j,
@@ -263,6 +268,14 @@ def test_wigner6j_rejects_unknown_weight_level():
         _build_tensor_product(weight_level="graph")
 
 
+def test_generalized_wigner6j_interaction_is_abstract():
+    assert inspect.isabstract(O3GeneralizedWigner6jInteraction)
+    assert issubclass(
+        O3Wigner6jMagneticInteraction,
+        O3GeneralizedWigner6jInteraction,
+    )
+
+
 def _build_interaction():
     module = O3Wigner6jMagneticInteraction(
         layer=0,
@@ -291,28 +304,14 @@ def _build_interaction():
     return module.to(DEVICE)
 
 
-@pytest.mark.parametrize(
-    "options",
-    [
-        {},
-        {"weight_level": "node"},
-        {"use_magnetic_edge_feats": False},
-        {"use_message_magnetic_tensor_product": False},
-        {
-            "use_message_magnetic_tensor_product": False,
-            "use_magnetic_edge_feats": False,
-        },
-    ],
-)
-def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
+@pytest.mark.parametrize("weight_level", ["edge", "node"])
+def test_wigner6j_interaction_weight_levels(weight_level, monkeypatch):
     torch.manual_seed(2)
-    for name, value in options.items():
-        monkeypatch.setattr(O3Wigner6jMagneticInteraction, name, value)
+    monkeypatch.setattr(O3Wigner6jMagneticInteraction, "weight_level", weight_level)
     module = _build_interaction()
+    assert module.extra_irreps_node_attrs == module.magnetic_irreps
     assert not hasattr(module, "magnetic_angular_basis")
-    expected_edge_input = module.edge_feats_channel
-    if module.use_magnetic_edge_feats:
-        expected_edge_input += module.num_mag_radial_basis
+    expected_edge_input = module.edge_feats_channel + module.num_mag_radial_basis
     assert module.edge_info.dims[0] == expected_edge_input
     num_nodes = 5
     num_edges = 9
@@ -345,26 +344,17 @@ def test_wigner6j_interaction_magnetic_options(options, monkeypatch):
         device=DEVICE,
         requires_grad=True,
     )
-    if (
-        not module.use_message_magnetic_tensor_product
-        and not module.use_magnetic_edge_feats
-    ):
-        initial_noncollinear_magmoms = None
-        magnetic_radial_basis = None
-    else:
-        magnetic_radial_basis = MagneticChebyshevBasis(num_basis=3).to(DEVICE)(
-            MagmomsNormalizer([4.0, 4.0], num_elements=2).to(DEVICE)(
-                initial_noncollinear_magmoms,
-                node_attrs,
-            )
+    magnetic_radial_basis = MagneticChebyshevBasis(num_basis=3).to(DEVICE)(
+        MagmomsNormalizer([4.0, 4.0], num_elements=2).to(DEVICE)(
+            initial_noncollinear_magmoms,
+            node_attrs,
         )
-    magnetic_node_attrs = None
-    if module.use_message_magnetic_tensor_product:
-        magnetic_node_attrs = SolidHarmonics(
-            module.magnetic_irreps,
-            normalization="component",
-            irreps_in=o3.Irreps("1e"),
-        ).to(DEVICE)(initial_noncollinear_magmoms)
+    )
+    magnetic_node_attrs = SolidHarmonics(
+        module.magnetic_irreps,
+        normalization="component",
+        irreps_in=o3.Irreps("1e"),
+    ).to(DEVICE)(initial_noncollinear_magmoms)
 
     output = module._compute_messages(
         node_feats,
