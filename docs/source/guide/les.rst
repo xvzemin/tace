@@ -22,7 +22,8 @@ backend evaluates their global interaction:
    E(\mathcal X)
    = E_{\mathrm{TACE}}(\mathcal X)
    + E_{\mathrm{LES}}\!\left(
-       \{q_i,\bm u_i,\bm Q_i,\kappa_i,\bm\alpha_i,\bm r_i\}
+       \{q_i,\boldsymbol{u}_i,\boldsymbol{Q}_i,\kappa_i,
+       \boldsymbol{\alpha}_i,\boldsymbol{r}_i\}
      \right).
 
 The latent sources are learned from the configured energy-derived objectives;
@@ -44,16 +45,16 @@ Supported latent sources
    * - ``latent_charges`` :math:`q_i`
      - ``0e``
      - Permanent scalar source used by every TACE-LES model.
-   * - ``latent_dipoles`` :math:`\bm u_i`
+   * - ``latent_dipoles`` :math:`\boldsymbol{u}_i`
      - ``1o``
      - Permanent latent atomic dipole.
-   * - ``latent_quadrupoles`` :math:`\bm Q_i`
+   * - ``latent_quadrupoles`` :math:`\boldsymbol{Q}_i`
      - ``2e`` and vector dyadics
      - Symmetric traceless atomic quadrupole.
    * - ``latent_kappas`` :math:`\kappa_i`
      - ``0e``
      - Local charge-response coefficient used to generate induced charges.
-   * - ``latent_polarizabilities`` :math:`\bm\alpha_i`
+   * - ``latent_polarizabilities`` :math:`\boldsymbol{\alpha}_i`
      - ``0e``, ``2e``, and vector dyadics
      - Isotropic scalar or anisotropic symmetric polarizability used to
        generate induced dipoles.
@@ -74,10 +75,12 @@ For the linear LES tensor readout,
 
 .. math::
 
-   \bm A_i
-   = \sum_c w_c(s_i)\,\bm v_{ic}\bm v_{ic}^{\mathsf T},
+   \boldsymbol{A}_i
+   = \sum_c w_c(s_i)\,\boldsymbol{v}_{ic}
+     \boldsymbol{v}_{ic}^{\mathsf T},
 
-where :math:`s_i` denotes ``0e`` features and :math:`\bm v_{ic}` denotes
+where :math:`s_i` denotes ``0e`` features and
+:math:`\boldsymbol{v}_{ic}` denotes
 ``1o`` or ``1e`` channels.  ``alpha_1o_linear_w_pos: true`` squares the
 ``1o`` channel weights before forming the dyadics.
 
@@ -86,9 +89,9 @@ matrix,
 
 .. math::
 
-   \bm A_i
+   \boldsymbol{A}_i
    = \sum_{c,d} M_{cd}(s_i)\,
-     \bm v_{ic}\bm v_{id}^{\mathsf T}.
+     \boldsymbol{v}_{ic}\boldsymbol{v}_{id}^{\mathsf T}.
 
 It includes cross-channel dyadics and is therefore more expressive, but it is
 more expensive and currently uses ``1o`` channels only.  Quadrupoles are made
