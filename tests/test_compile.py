@@ -7,7 +7,10 @@ import pytest
 import torch
 
 from tace.dataset.quantity import get_need_property
-from tace.lightning.torch_model import _prune_removed_basis_keys
+from tace.lightning.torch_model import (
+    _prune_removed_keys,
+    _should_warn_without_aoti,
+)
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models.compile.aot import _export_metadata, _graph_aoti_input_keys
 from tace.models.compile.compile import trace_to_fx
@@ -20,13 +23,30 @@ def test_model_loading_prunes_removed_architecture_keys():
     config["product_basis"]["removed_product_option"] = True
     config["radial_basis"]["unrelated_option"] = True
 
-    cleaned = _prune_removed_basis_keys(config)
+    cleaned = _prune_removed_keys(config)
 
     assert "removed_atomic_option" not in cleaned["atomic_basis"]
     assert "removed_product_option" not in cleaned["product_basis"]
     assert cleaned["radial_basis"]["unrelated_option"] is True
     assert "removed_atomic_option" in config["atomic_basis"]
     assert "removed_product_option" in config["product_basis"]
+
+
+@pytest.mark.parametrize(
+    ("target_property", "expected"),
+    [
+        (["energy", "forces"], True),
+        (["noncollinear_magnetic_forces"], True),
+        (["energy", "dipole"], False),
+        (["dipole"], False),
+        ([], False),
+    ],
+)
+def test_should_warn_without_aoti_requires_supported_target_subset(
+    target_property,
+    expected,
+):
+    assert _should_warn_without_aoti(target_property) is expected
 
 
 class _MagneticEmbeddingReadout(torch.nn.Module):

@@ -26,7 +26,7 @@ from tace.utils.utils import torch_default_dtype
 
 from ..utils.loss.dens import add_gaussian_noise_to_position
 from .lora import to_lora_model
-from .los_skip import LossSkipController
+from .loss_skip import LossSkipController
 from .torch_model import create_model
 from .u_shift import apply_u_shift
 

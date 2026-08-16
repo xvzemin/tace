@@ -5,39 +5,12 @@
 
 import importlib
 import logging
-from copy import deepcopy
 from typing import Any, Dict, List
 
 import torch
 
 from tace.utils.env import acceleration_enabled
 from tace.utils.utils import deep_convert
-
-
-_E3NN_MODEL_PATHS = {
-    "tace.models.e3nnTACE",
-    "tace.models._e3nn.e3nnTACE",
-}
-
-
-def _prune_removed_basis_keys(model_config: Dict) -> Dict:
-    """Remove obsolete e3nn architecture keys from a saved model config."""
-    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-
-    model_config = deepcopy(model_config)
-    if "kwargs" in model_config:
-        architecture_config = model_config["kwargs"]
-    else:
-        architecture_config = model_config
-    for section in ("atomic_basis", "product_basis"):
-        saved_section = architecture_config.get(section)
-        if not isinstance(saved_section, dict):
-            continue
-        current_keys = DEFAULT_MODEL_CONFIG[section]
-        for key in tuple(saved_section):
-            if key not in current_keys:
-                saved_section.pop(key)
-    return model_config
 
 
 def _should_warn_without_aoti(target_property: List[str]) -> bool:
@@ -51,18 +24,30 @@ def _should_warn_without_aoti(target_property: List[str]) -> bool:
         "direct_virials",
         "noncollinear_magnetic_forces",
     }
-    return any(prop in aoti_properties for prop in target_property)
+    return bool(target_property) and set(target_property).issubset(aoti_properties)
 
 
-def select_wrapper(model_config: Dict, wrapper_path: str = None) -> Any:
-    if wrapper_path is None:
-        wrapper_path = model_config.get("wrapper", {}).get(
-            "_target_", "tace.models.TensorModel"
-        )
+def _prune_removed_keys(model_config: Dict) -> Dict:
+    """Remove legacy architecture keys from a saved model config."""
+    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+
+    pruned_config = model_config.copy()
+    for section in ("atomic_basis", "product_basis"):
+        saved_section = model_config.get(section)
+        if isinstance(saved_section, dict):
+            allowed_keys = DEFAULT_MODEL_CONFIG[section].keys()
+            pruned_config[section] = {
+                key: value
+                for key, value in saved_section.items()
+                if key in allowed_keys
+            }
+    return pruned_config
+
+
+def select_wrapper(wrapper_path: str) -> Any:
+    """Import a model wrapper from its fully qualified class path."""
     module_name, class_name = wrapper_path.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    wrap_cls = getattr(module, class_name)
-    return wrap_cls
+    return getattr(importlib.import_module(module_name), class_name)
 
 
 def create_model(
@@ -72,16 +57,15 @@ def create_model(
     embedding_property: List[str],
     prune_removed_keys: bool = False,
 ) -> torch.nn.Module:
-    # === model cls ===
-    if "kwargs" in model_config:
-        model_path = model_config["kwargs"].get("_target_", "tace.models.e3nnTACE")
-    else:
-        model_path = model_config.get("_target_", "tace.models.e3nnTACE")
-    is_e3nn_model = model_path in _E3NN_MODEL_PATHS
 
-    wrapper_path = model_config.get("wrapper", {}).get(
-        "_target_", "tace.models.TensorModel"
-    )
+    # === model cls ===
+    model_path = model_config.get("_target_", "tace.models.e3nnTACE")
+    is_e3nn_model = model_path in {
+        "tace.models.e3nnTACE",
+        "tace.models._e3nn.e3nnTACE",
+    }
+    wrapper_config = model_config.get("wrapper") or {}
+    wrapper_path = wrapper_config.get("_target_", "tace.models.TensorModel")
 
     use_aoti = acceleration_enabled("compile") and is_e3nn_model
     if use_aoti:
@@ -99,14 +83,14 @@ def create_model(
         )
 
     # === wrapper cls ===
-    WRAPPER_CLS = select_wrapper(model_config, wrapper_path)
+    WRAPPER_CLS = select_wrapper(wrapper_path)
 
     module_name, class_name = model_path.rsplit(".", 1)
     module = importlib.import_module(module_name)
     MODEL_CLS = getattr(module, class_name)
     model_config = deep_convert(model_config)
     if prune_removed_keys and is_e3nn_model:
-        model_config = _prune_removed_basis_keys(model_config)
+        model_config = _prune_removed_keys(model_config)
     if "statistics" not in model_config:
         model_config["statistics"] = statistics
     if "target_property" not in model_config:
