@@ -1189,6 +1189,8 @@ def _build_o2_magnetic_interaction(
 def _build_o2_interaction(
     *,
     correlation=1,
+    scalar_act=None,
+    tensor_act=None,
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
 ):
@@ -1208,8 +1210,8 @@ def _build_o2_interaction(
         radial_mlp=[8],
         radial_bias=True,
         irreps_in=o3.Irreps("2x0e + 2x1o"),
-        scalar_act=None,
-        tensor_act=None,
+        scalar_act=scalar_act,
+        tensor_act=tensor_act,
         edge_ace_hidden=None,
         parity=True,
         num_head=2,
@@ -1405,7 +1407,7 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert isinstance(module.rejector.gate, O2Gate)
     assert isinstance(module.rejector.gate.act_0e, ScaledSiLU)
     assert isinstance(module.rejector.gate.act_0o, ScaledTanh)
-    assert isinstance(module.rejector.gate.act_lm, ScaledSiLU)
+    assert isinstance(module.rejector.gate.act_lm, ScaledSigmoid)
     assert module.rejector.linear_out.path_mode == "uv"
     assert module.rejector.linear_out.internal_weights
     assert not isinstance(module.linear_down, torch.nn.Identity)
@@ -1494,7 +1496,32 @@ def test_o2_magnetic_interaction_parses_scalar_activations():
     assert isinstance(separate.rejector.gate.act_0o, ScaledTanh)
 
     tensor = _build_o2_magnetic_interaction(tensor_act="tanh")
-    assert isinstance(tensor.rejector.gate.act_lm, ScaledSiLU)
+    assert isinstance(tensor.rejector.gate.act_lm, ScaledTanh)
+
+
+def test_o2_magnetic_interaction_rejects_invalid_tensor_activation():
+    with pytest.raises(TypeError, match="tensor_act must be None or a string"):
+        _build_o2_magnetic_interaction(tensor_act=["scaled_sigmoid"])
+
+
+def test_o2_asymmetric_contraction_defaults_to_scaled_silu():
+    module = _build_o2_magnetic_interaction(
+        correlation=2,
+        use_asymmetric_contraction=True,
+    )
+    assert module._o2_act_0e_name == "scaled_silu"
+    assert module._o2_act_0o_name == "scaled_silu"
+    assert module._o2_act_lm_name == "scaled_silu"
+
+
+def test_o2_asymmetric_contraction_requires_identical_activations():
+    with pytest.raises(ValueError, match="act_0e, act_0o, and act_lm"):
+        _build_o2_magnetic_interaction(
+            correlation=2,
+            scalar_act=["scaled_silu", "scaled_tanh"],
+            tensor_act="scaled_silu",
+            use_asymmetric_contraction=True,
+        )
 
 
 @pytest.mark.parametrize(

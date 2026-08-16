@@ -188,9 +188,10 @@ class O2ScatterLinear(torch.nn.Module):
     construction. Edge weights first apply a diagonal channel-wise radial map.
     Two internal ``uv`` linears use either a gate or an asymmetric contraction
     between them. These nonlinear paths are mutually exclusive. The first O2
-    linear also generates their auxiliary ``0e`` scalars, which use the scalar
-    activation. The optional attention uses real O2-invariant query-key products
-    and a sigmoid radial scale; it never applies a complex phase.
+    linear also generates auxiliary ``0e`` gates for the positive-order
+    representations. Those gates use the tensor activation. The optional
+    attention uses real O2-invariant query-key products and a sigmoid radial
+    scale; it never applies a complex phase.
     """
 
     def __init__(
@@ -203,6 +204,7 @@ class O2ScatterLinear(torch.nn.Module):
         lmax: int,
         act_0e: torch.nn.Module,
         act_0o: Union[torch.nn.Module, None],
+        act_lm: torch.nn.Module,
         correlation: int,
         num_head: int,
         num_radial_basis: int,
@@ -301,7 +303,7 @@ class O2ScatterLinear(torch.nn.Module):
                 self.irreps_out_local,
                 act_0e=act_0e,
                 act_0o=act_0o,
-                act_lm=act_0e,
+                act_lm=act_lm,
             )
             self.projection_irreps = self.gate.irreps_in
             self.linear_in = o2.Linear(

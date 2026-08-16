@@ -285,88 +285,6 @@ class O3CgtpInteraction(Interaction):
         return m_i, self.truncate_ghosts(sc, nlocal)
 
 
-class OAM20260705Interaction(O3CgtpInteraction):
-    """
-    An interaction module based on uvSO2Linear,
-    Edge Cluster Expansion and Radial Rotary Attention.
-
-    It achieves highest accuracy at the expanse of computational efficiency.
-
-    This interaction block add nonlinearity to the message.
-    """
-
-    so2_linear_type = "w1"
-    use_temperature = True
-    use_so2_edge_ace = True
-    use_graph_softmax = True
-    use_radial_phase = True
-
-    def _prepare_setup(self) -> None:
-        assert self.parity == False, "uvSO2Interaction not support O(3) group"
-        assert self.irreps_in.lmax > 0, (
-            "uvSO2Interaction's irreps_in.lmax must > 0, "
-            "use uvSO2Interaction from the second layer or use other node_embedding with l > 0"
-        )
-        assert (
-            self.edge_nonlinear == "so2_sigmoid_gate"
-            or self.edge_nonlinear == "so2_silu_gate"
-        )
-        self.scatter_norm = None
-
-    def _build_rejector(self) -> torch.nn.Module:
-        edge_act = self.edge_nonlinear.split("_")[1]
-        scalar_act = self.scalar_act or edge_act
-        tensor_act = self.tensor_act or edge_act
-        return OAM20260705Convolution(
-            mmax=self.mmax,
-            lmax=self.lmax,
-            num_channel=self.num_channel,
-            num_radial_basis=self.num_radial_basis,
-            num_head=self.num_head,
-            use_temperature=self.use_temperature,
-            edge_ace_hidden=self.edge_ace_hidden,
-            edge_wise_hidden=self.edge_wise_hidden,
-            so2_linear_type=self.so2_linear_type,
-            gate_m0=self.gate_m0,
-            use_so2_edge_ace=self.use_so2_edge_ace,
-            use_graph_softmax=self.use_graph_softmax,
-            reshape_in=LayoutTransform(self.irreps_in),
-            reshape_out=LayoutTransform(
-                o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
-            ),
-            scalar_act=ScaledSigmoid() if scalar_act == "sigmoid" else ScaledSiLU(),
-            tensor_act=ScaledSigmoid() if tensor_act == "sigmoid" else ScaledSiLU(),
-            use_radial_phase=self.use_radial_phase,
-        )
-
-    def _linear_down_irreps_in(self) -> o3.Irreps:
-        return o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
-
-    def _compute_messages(
-        self,
-        node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
-        edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_cutoff: Union[torch.Tensor, None],
-        edge_wigner: Union[torch.Tensor, None] = None,
-        edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
-    ) -> torch.Tensor:
-        return self.rejector(
-            node_feats,
-            self.edge_info(edge_feats),
-            edge_index,
-            edge_cutoff,
-            edge_wigner,
-            edge_wigner_inv,
-            edge_radial_basis,
-        )
-
-
 class O3GeneralizedWigner6jInteraction(O3CgtpInteraction, abc.ABC):
     """Abstract three-factor O(3) interaction using Wigner-6j recoupling.
 
@@ -519,36 +437,96 @@ class O3GeneralizedWigner6jInteraction(O3CgtpInteraction, abc.ABC):
         )
 
 
-class O3Wigner6jMagneticInteraction(O3GeneralizedWigner6jInteraction):
-    """Generalized Wigner-6j interaction for magnetic solid harmonics."""
+class OAM20260705Interaction(O3CgtpInteraction):
+    """
+    An interaction module based on uvSO2Linear,
+    Edge Cluster Expansion and Radial Rotary Attention.
 
-    @property
-    def extra_irreps_node_attrs(self) -> o3.Irreps:
-        return self.magnetic_irreps
+    It achieves highest accuracy at the expanse of computational efficiency.
 
-    def _validate_extra_setup(self) -> None:
-        if self.magnetic_irreps is None:
-            raise ValueError("o3_w6j_mag requires magnetic_irreps.")
-        if not 1 <= self.mag_Lmax <= self.Lmax:
-            raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
-        if self.magnetic_irreps.lmax != self.mag_Lmax:
-            raise ValueError("magnetic_irreps must end at mag_Lmax.")
-        if any(irrep.p != 1 for _, irrep in self.magnetic_irreps):
-            raise ValueError("A 1e magnetic vector only generates le solid harmonics")
-        if not self.parity:
-            raise ValueError(
-                "wigner6j_magnetic_conv requires parity: true for full O(3)"
-            )
+    This interaction block add nonlinearity to the message.
+    """
+
+    so2_linear_type = "w1"
+    use_temperature = True
+    use_so2_edge_ace = True
+    use_graph_softmax = True
+    use_radial_phase = True
+
+    def _prepare_setup(self) -> None:
+        assert self.parity == False, "uvSO2Interaction not support O(3) group"
+        assert self.irreps_in.lmax > 0, (
+            "uvSO2Interaction's irreps_in.lmax must > 0, "
+            "use uvSO2Interaction from the second layer or use other node_embedding with l > 0"
+        )
+        assert (
+            self.edge_nonlinear == "so2_sigmoid_gate"
+            or self.edge_nonlinear == "so2_silu_gate"
+        )
+        self.scatter_norm = None
+
+    def _build_rejector(self) -> torch.nn.Module:
+        edge_act = self.edge_nonlinear.split("_")[1]
+        scalar_act = self.scalar_act or edge_act
+        tensor_act = self.tensor_act or edge_act
+        return OAM20260705Convolution(
+            mmax=self.mmax,
+            lmax=self.lmax,
+            num_channel=self.num_channel,
+            num_radial_basis=self.num_radial_basis,
+            num_head=self.num_head,
+            use_temperature=self.use_temperature,
+            edge_ace_hidden=self.edge_ace_hidden,
+            edge_wise_hidden=self.edge_wise_hidden,
+            so2_linear_type=self.so2_linear_type,
+            gate_m0=self.gate_m0,
+            use_so2_edge_ace=self.use_so2_edge_ace,
+            use_graph_softmax=self.use_graph_softmax,
+            reshape_in=LayoutTransform(self.irreps_in),
+            reshape_out=LayoutTransform(
+                o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
+            ),
+            scalar_act=ScaledSigmoid() if scalar_act == "sigmoid" else ScaledSiLU(),
+            tensor_act=ScaledSigmoid() if tensor_act == "sigmoid" else ScaledSiLU(),
+            use_radial_phase=self.use_radial_phase,
+        )
+
+    def _linear_down_irreps_in(self) -> o3.Irreps:
+        return o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
+
+    def _compute_messages(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs_total: torch.Tensor,
+        edge_radial_basis: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None] = None,
+        edge_wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+    ) -> torch.Tensor:
+        return self.rejector(
+            node_feats,
+            self.edge_info(edge_feats),
+            edge_index,
+            edge_cutoff,
+            edge_wigner,
+            edge_wigner_inv,
+            edge_radial_basis,
+        )
 
 
 class O2Interaction(O3CgtpInteraction):
-    """Potential interaction evaluated in an edge-aligned local O2 frame.
+    """Global O(3) interaction evaluated in an edge-aligned local O2 frame.
 
     The default path concatenates source and target node features and applies
     ``uv -> gate -> uv`` before inverse rotation and scatter. The optional O2
     asymmetric contraction replaces the gate, with its scalar coefficients
-    generated by the first O2 linear. Optional radial rotary attention uses a
-    real sigmoid radial scale without a complex phase.
+    generated by the first O2 linear. Optional radial rotary attention uses
+    radial basis as scale and shift.
     """
 
     def _validate_o2_setup(self) -> None:
@@ -563,6 +541,7 @@ class O2Interaction(O3CgtpInteraction):
             lmax=self.lmax,
             act_0e=get_scaled_activation(self._o2_act_0e_name),
             act_0o=get_scaled_activation(self._o2_act_0o_name),
+            act_lm=get_scaled_activation(self._o2_act_lm_name),
             correlation=self.correlation,
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
@@ -608,10 +587,18 @@ class O2Interaction(O3CgtpInteraction):
         scalar_act = self.scalar_act
         if scalar_act is None:
             act_0e_name = "scaled_silu"
-            act_0o_name = "scaled_tanh"
+            act_0o_name = (
+                "scaled_silu"
+                if self.use_o2_asymmetric_contraction
+                else "scaled_tanh"
+            )
         elif isinstance(scalar_act, str):
             act_0e_name = scalar_act
-            act_0o_name = "scaled_tanh"
+            act_0o_name = (
+                "scaled_silu"
+                if self.use_o2_asymmetric_contraction
+                else "scaled_tanh"
+            )
         elif isinstance(scalar_act, list) and len(scalar_act) == 2:
             act_0e_name, act_0o_name = scalar_act
             if not isinstance(act_0e_name, str) or not isinstance(act_0o_name, str):
@@ -621,10 +608,25 @@ class O2Interaction(O3CgtpInteraction):
                 "O2 scalar_act must be None, a string, or a list of two strings "
                 "for 0e and 0o."
             )
+        act_lm_name = self.tensor_act or (
+            "scaled_silu"
+            if self.use_o2_asymmetric_contraction
+            else "scaled_sigmoid"
+        )
+        if not isinstance(act_lm_name, str):
+            raise TypeError("O2 tensor_act must be None or a string for lm gates.")
+        if self.use_o2_asymmetric_contraction and not (
+            act_0e_name == act_0o_name == act_lm_name
+        ):
+            raise ValueError(
+                "O2AsymmetricContraction requires act_0e, act_0o, and act_lm "
+                "to be identical."
+            )
 
         self.scalar_act = act_0e_name
         self._o2_act_0e_name = act_0e_name
         self._o2_act_0o_name = act_0o_name
+        self._o2_act_lm_name = act_lm_name
         super()._setup()
 
     def _compute_messages(
@@ -661,6 +663,28 @@ class O2Interaction(O3CgtpInteraction):
         )
 
 
+class O3Wigner6jMagneticInteraction(O3GeneralizedWigner6jInteraction):
+    """Generalized Wigner-6j interaction for magnetic solid harmonics."""
+
+    @property
+    def extra_irreps_node_attrs(self) -> o3.Irreps:
+        return self.magnetic_irreps
+
+    def _validate_extra_setup(self) -> None:
+        if self.magnetic_irreps is None:
+            raise ValueError("o3_w6j_mag requires magnetic_irreps.")
+        if not 1 <= self.mag_Lmax <= self.Lmax:
+            raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
+        if self.magnetic_irreps.lmax != self.mag_Lmax:
+            raise ValueError("magnetic_irreps must end at mag_Lmax.")
+        if any(irrep.p != 1 for _, irrep in self.magnetic_irreps):
+            raise ValueError("A 1e magnetic vector only generates le solid harmonics")
+        if not self.parity:
+            raise ValueError(
+                "wigner6j_magnetic_conv requires parity: true for full O(3)"
+            )
+
+
 class O2MagneticInteraction(O2Interaction):
     """Local-O2 interaction augmented by magnetic solid harmonics."""
 
@@ -684,6 +708,7 @@ class O2MagneticInteraction(O2Interaction):
             lmax=self.lmax,
             act_0e=get_scaled_activation(self._o2_act_0e_name),
             act_0o=get_scaled_activation(self._o2_act_0o_name),
+            act_lm=get_scaled_activation(self._o2_act_lm_name),
             correlation=self.correlation,
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
@@ -742,13 +767,15 @@ class O2MagneticInteraction(O2Interaction):
 
 
 INTERACTION: Dict[str, type[Interaction]] = {
-    "normal": O3CgtpInteraction,
-    "spectral": O3CgtpInteraction,
     "cgtp": O3CgtpInteraction,
     "so2": OAM20260705Interaction,
+    "o2": O2Interaction,
+    "o3_w6j_mag": O3Wigner6jMagneticInteraction,
+    "o2_mag": O2MagneticInteraction,
+
+    # TODO, legacy
+    "normal": O3CgtpInteraction,
+    "spectral": O3CgtpInteraction,
     "uv_so2": OAM20260705Interaction,
     "attn": OAM20260705Interaction,
-    "o3_w6j_mag": O3Wigner6jMagneticInteraction,
-    "o2": O2Interaction,
-    "o2_mag": O2MagneticInteraction,
 }
