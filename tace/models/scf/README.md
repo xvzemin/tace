@@ -52,3 +52,65 @@ SCF-only dependencies.
 For small non-periodic monopole tests, `backend: pairwise` provides a native
 PyTorch Gaussian-charge implementation. It is not a replacement for the
 multipolar periodic backend.
+
+## Workflow
+
+`SCFTACE` keeps the standard `e3nnTACE` representation backbone. The backbone
+first computes the short-range energy and layer-wise node descriptors. The
+selected SCF method then reads those descriptors to construct charges or atomic
+multipoles, optionally solves a constrained or self-consistent problem, and
+adds the electrostatic and field contributions to the short-range energy.
+
+1. Build the graph and evaluate the normal TACE representation.
+2. Select one of the local, constrained, or self-consistent density methods.
+3. Construct atomic density coefficients; their first `0e` component is the
+   atomic charge.
+4. Evaluate electrostatic energies and, when required, electrostatic features.
+5. Return the total energy together with charges, multipoles, dipoles, and SCF
+   diagnostics.
+
+```mermaid
+flowchart TB
+    input["Structure, elements, total charge, and external field"] --> backbone["e3nnTACE backbone"]
+    backbone --> base["Short-range energy and node descriptors"]
+    base --> method{"scf.method"}
+
+    method --> local["local_charges<br/>Direct local multipoles"]
+    method --> split["local_split_charges<br/>Formal charges and edge charge transfer"]
+    method --> fixed["fixed_charge_baseline<br/>Fixed formal monopoles"]
+    method --> qeq["qeq<br/>Electronegativity, hardness, and KKT solve"]
+    method --> fp["fixed_point<br/>Learned density-response iteration"]
+    method --> functional["energy_functional<br/>Variational density minimization"]
+
+    local --> density["Atomic density coefficients"]
+    split --> density
+    fixed --> density
+    qeq --> density
+    fp --> density
+    functional --> density
+
+    density --> backend{"Electrostatics backend"}
+    backend --> pairwise["pairwise<br/>Non-periodic monopoles"]
+    backend --> longrange["graph_longrange<br/>Periodic, non-periodic, and slab multipoles"]
+
+    pairwise --> output["Total energy, charges, total charge, dipole,<br/>and available SCF diagnostics"]
+    longrange --> output
+```
+
+The two iterative methods differ in what is optimized. `fixed_point` repeatedly
+maps the current electrostatic field to a learned density response, mixes the
+new density with the previous iterate, and stops when the residual converges.
+`energy_functional` instead differentiates a learned density functional and
+updates the density along its projected energy gradient. Both methods can
+enforce the requested total charge throughout the iteration.
+
+```mermaid
+flowchart LR
+    guess["Initial density"] --> field["Electrostatic field features"]
+    field --> response["Learned density response"]
+    response --> constraint["Total-charge constraint"]
+    constraint --> mixing["Density mixing"]
+    mixing --> check{"Residual converged?"}
+    check -- "No" --> field
+    check -- "Yes" --> result["Self-consistent density"]
+```

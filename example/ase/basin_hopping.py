@@ -23,7 +23,7 @@ dispersion = False
 filter = "frechet"
 atoms = read('../data/BaTiO3.xyz', index=0)
 
-calc = TACEAseCalc(
+atoms.calc = TACEAseCalc(
     model=model,
     dtype=dtype,
     device=device,
