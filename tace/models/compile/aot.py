@@ -93,6 +93,7 @@ class AOTICompiledTensorModel(torch.nn.Module):
             "direct_virials": None,
             "direct_stress": None,
             "noncollinear_magnetic_forces": None,
+            "charges": None,
         }
         result.update(zip(self.output_keys, outputs))
         return result
@@ -436,6 +437,8 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
             dtype=dtype,
             device=device,
         )
+    if model._requires_total_charge():
+        sample["total_charge"] = torch.zeros(2, dtype=dtype, device=device)
     return sample
 
 
@@ -502,6 +505,8 @@ def _graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
     keys = list(TACE_AOTI_INPUT_KEYS)
     if model._requires_noncollinear_magmoms():
         keys.append("initial_noncollinear_magmoms")
+    if model._requires_total_charge():
+        keys.append("total_charge")
     return tuple(keys)
 
 
@@ -522,6 +527,7 @@ def _graph_dynamic_shapes(
         "ptr": {} if num_graphs_dim is None else {0: num_graphs_dim + 1},
         "fidelity_idx": {} if num_graphs_dim is None else {0: num_graphs_dim},
         "initial_noncollinear_magmoms": {0: num_nodes},
+        "total_charge": {} if num_graphs_dim is None else {0: num_graphs_dim},
     }
     return tuple(shapes[key] for key in input_keys)
 
@@ -562,6 +568,8 @@ def _export_metadata(
         and "initial_noncollinear_magmoms" not in embedding_property
     ):
         embedding_property.append("initial_noncollinear_magmoms")
+    if model._requires_total_charge() and "total_charge" not in embedding_property:
+        embedding_property.append("total_charge")
     metadata = {
         "tace_format": aoti_format,
         "tace_aoti_target": target,

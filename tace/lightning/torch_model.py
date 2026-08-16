@@ -23,6 +23,7 @@ def _should_warn_without_aoti(target_property: List[str]) -> bool:
         "direct_stress",
         "direct_virials",
         "noncollinear_magnetic_forces",
+        "charges",
     }
     return bool(target_property) and set(target_property).issubset(aoti_properties)
 

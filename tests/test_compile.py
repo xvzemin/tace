@@ -12,7 +12,12 @@ from tace.lightning.torch_model import (
     _should_warn_without_aoti,
 )
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-from tace.models.compile.aot import _export_metadata, _graph_aoti_input_keys
+from tace.models.compile.aot import (
+    _ensure_sample_inputs,
+    _export_metadata,
+    _graph_aoti_input_keys,
+    _synthetic_graph_sample,
+)
 from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
 
@@ -37,6 +42,7 @@ def test_model_loading_prunes_removed_architecture_keys():
     [
         (["energy", "forces"], True),
         (["noncollinear_magnetic_forces"], True),
+        (["charges"], True),
         (["energy", "dipole"], False),
         (["dipole"], False),
         ([], False),
@@ -81,6 +87,29 @@ class _MagneticEmbeddingReadout(torch.nn.Module):
         return {"energy": energy, "node_energy": node_energy}
 
 
+class _ChargeReadout(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=False)
+        self.register_buffer("cutoff", torch.tensor(4.0))
+        self.register_buffer("atomic_numbers", torch.tensor([1], dtype=torch.int64))
+        self.target_property = ["charges"]
+        self.embedding_property = []
+        self.model_config = {}
+        self.max_neighbors = None
+
+    def forward(self, data, graph):
+        raw_charges = self.scale * graph.positions[:, 0]
+        graph_charges = torch.zeros_like(data["total_charge"]).index_add(
+            0,
+            data["batch"],
+            raw_charges,
+        )
+        num_atoms = data["ptr"][1:] - data["ptr"][:-1]
+        correction = (data["total_charge"] - graph_charges) / num_atoms
+        return {"charges": raw_charges + correction[data["batch"]]}
+
+
 def _magnetic_embedding_sample() -> dict[str, torch.Tensor]:
     return {
         "positions": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
@@ -95,6 +124,39 @@ def _magnetic_embedding_sample() -> dict[str, torch.Tensor]:
             [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]
         ),
     }
+
+
+def test_aoti_charges_requires_total_charge_input():
+    model = CompileTensorModel(_ChargeReadout()).eval()
+    sample = _magnetic_embedding_sample()
+    sample.pop("initial_noncollinear_magmoms")
+
+    with pytest.raises(KeyError, match="total_charge"):
+        model._input_keys(sample)
+
+    input_keys = _graph_aoti_input_keys(model)
+    assert input_keys[-1] == "total_charge"
+    with pytest.raises(KeyError, match="total_charge"):
+        _ensure_sample_inputs(dict(sample), input_keys, model)
+
+    sample["total_charge"] = torch.tensor([1.5])
+    assert model._input_keys(sample)[-1] == "total_charge"
+    output_keys = model._output_keys()
+    assert output_keys == ("charges",)
+    flat_model = _FlatE3nnCompileModel(model, input_keys, output_keys).eval()
+    inputs = tuple(sample[key] for key in input_keys)
+    (charges,) = flat_model(*inputs)
+    torch.testing.assert_close(charges.sum(), sample["total_charge"].sum())
+    traced_model = trace_to_fx(flat_model, inputs)
+    (traced_charges,) = traced_model(*inputs)
+    torch.testing.assert_close(traced_charges, charges)
+
+    synthetic = _synthetic_graph_sample(model)
+    assert synthetic["total_charge"].shape == (2,)
+    metadata = _export_metadata(model, input_keys, output_keys)
+    assert "total_charge" in json.loads(metadata["tace_input_keys"])
+    assert "total_charge" in json.loads(metadata["tace_embedding_property"])
+    assert json.loads(metadata["tace_output_keys"]) == ["charges"]
 
 
 def _slice_update(x: torch.Tensor, value: torch.Tensor) -> torch.Tensor:

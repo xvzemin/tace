@@ -19,6 +19,7 @@ class CompileTensorModel(TensorModel):
             "direct_stress",
             "direct_virials",
             "noncollinear_magnetic_forces",
+            "charges",
         }
     )
 
@@ -98,6 +99,7 @@ class CompileTensorModel(TensorModel):
             "direct_virials": None,
             "direct_stress": None,
             "noncollinear_magnetic_forces": None,
+            "charges": None,
         }
         result.update(zip(output_keys, outputs))
         return result
@@ -116,6 +118,8 @@ class CompileTensorModel(TensorModel):
             required.append("fidelity_idx")
         if self._requires_noncollinear_magmoms():
             required.append("initial_noncollinear_magmoms")
+        if self._requires_total_charge():
+            required.append("total_charge")
         missing = [key for key in required if key not in data]
         if missing:
             raise KeyError(f"missing e3nn compile inputs: {missing}")
@@ -136,6 +140,8 @@ class CompileTensorModel(TensorModel):
         )
         if "noncollinear_magnetic_forces" in target_property:
             keys.append("noncollinear_magnetic_forces")
+        if "charges" in target_property:
+            keys.append("charges")
         return tuple(keys)
 
     def _requires_noncollinear_magmoms(self) -> bool:
@@ -143,6 +149,9 @@ class CompileTensorModel(TensorModel):
             "initial_noncollinear_magmoms" in self.get_embedding_property()
             or "noncollinear_magnetic_forces" in self.get_target_property()
         )
+
+    def _requires_total_charge(self) -> bool:
+        return "charges" in self.get_target_property()
 
     @classmethod
     def _validate_compile_properties(cls, readout_fn: torch.nn.Module) -> None:
@@ -161,7 +170,7 @@ class CompileTensorModel(TensorModel):
             raise ValueError(
                 "TACE_USE_COMPILE only supports energy, direct_forces, "
                 "direct_stress, direct_virials, forces, stress, virials and "
-                "noncollinear_magnetic_forces; "
+                "noncollinear_magnetic_forces, and charges; "
                 f"got {sorted(invalid)}"
             )
         if {
