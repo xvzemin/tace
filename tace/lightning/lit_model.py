@@ -513,7 +513,7 @@ class LightningWrapperModel(L.LightningModule):
         statistics = checkpoint["hyper_parameters"]["statistics"]
         with torch_default_dtype(model_dtype):
             model = create_model(
-                cfg,
+                cfg["model"]["config"],
                 statistics,
                 target_property,
                 embedding_property,
@@ -601,7 +601,10 @@ def _load_tace(
                 )
                 with torch_default_dtype(model_dtype):
                     model = create_model(
-                        **{k: v for k, v in obj.items() if k != "state_dict"},
+                        model_config=obj["cfg"],
+                        statistics=obj["statistics"],
+                        target_property=obj["target_property"],
+                        embedding_property=obj["embedding_property"],
                         prune_removed_keys=True,
                     )
                 model.load_state_dict(state_dict, strict=strict)

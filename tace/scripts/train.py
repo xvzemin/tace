@@ -37,9 +37,6 @@ from tace.utils.utils import (
 
 register_resolvers()
 
-TRANSFORMER_TACE_TARGET = "tace.models._transformer.TransformerTACE"
-SINGLE_LEVEL_DATA_CONFIG = [{"name": "default", "atomic_energy": None}]
-
 
 def initialize(cfg):
     cfg = deep_convert(cfg)
@@ -59,52 +56,11 @@ def initialize(cfg):
     return cfg
 
 
-def _model_config(cfg):
-    return cfg["model"]["config"]
-
-
-def _is_transformer_tace(cfg) -> bool:
-    return _model_config(cfg).get("_target_") == TRANSFORMER_TACE_TARGET
-
-
-def _prepare_data_fidelity(cfg):
-    """Adapt the shared data/statistics pipeline to a single-task TransformerTACE."""
-    model_config = _model_config(cfg)
-    if _is_transformer_tace(cfg):
-        if "fidelity" in model_config:
-            raise ValueError(
-                "TransformerTACE is single-task; remove `fidelity` from its model config"
-            )
-        model_config["fidelity"] = copy.deepcopy(SINGLE_LEVEL_DATA_CONFIG)
-    return model_config["fidelity"]
-
-
-def _create_model(cfg, statistics, target_property, embedding_property):
-    """Instantiate a model while hiding data-pipeline-only Transformer fields."""
-    model_config = _model_config(cfg)
-    if not _is_transformer_tace(cfg):
-        return create_model(cfg, statistics, target_property, embedding_property)
-
-    data_fidelity = model_config.pop("fidelity")
-    try:
-        return create_model(cfg, statistics, target_property, embedding_property)
-    finally:
-        model_config["fidelity"] = data_fidelity
-
-
-def _remove_data_fidelity(cfg):
-    """Remove the temporary shared-pipeline adapter before training/checkpointing."""
-    if _is_transformer_tace(cfg):
-        _model_config(cfg).pop("fidelity", None)
-
-
 def _restore_loaded_model_config(cfg, model):
-    """Preserve the legacy checkpoint flow without requiring Transformer model_config."""
+    """Use the loaded model configuration for finetuning or resumed training."""
     loaded_config = getattr(model.readout_fn, "model_config", None)
     if loaded_config is not None:
         cfg["model"]["config"] = loaded_config
-    if _is_transformer_tace(cfg):
-        _model_config(cfg)["fidelity"] = copy.deepcopy(SINGLE_LEVEL_DATA_CONFIG)
 
 
 def build(cfg: DictConfig):
@@ -122,7 +78,7 @@ def build(cfg: DictConfig):
     userKeys.update(cfg["dataset"].get("keys", {}))
     keyspec = KeySpecification()
     update_keyspec_from_kwargs(keyspec, userKeys)
-    fidelity = _prepare_data_fidelity(cfg)
+    fidelity = cfg["model"]["config"]["fidelity"]
 
     # train from scratch, calculate statistics
     statistics = None
@@ -215,7 +171,12 @@ def build(cfg: DictConfig):
         _restore_loaded_model_config(cfg, model)
         cfg["finetune"] = cfg.get("finetune", {})
     else:  # From scratch
-        model = _create_model(cfg, statistics, target_property, embedding_property)
+        model = create_model(
+            cfg["model"]["config"],
+            statistics,
+            target_property,
+            embedding_property,
+        )
 
     if datamodule is None:
         datamodule = build_datamodule(
@@ -226,8 +187,6 @@ def build(cfg: DictConfig):
             keyspec,
             threeAtomsList,
         )
-    _remove_data_fidelity(cfg)
-
     return cfg, statistics, target_property, embedding_property, model, datamodule
 
 

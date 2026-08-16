@@ -3,9 +3,6 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-# TODO, refactor code
-
-
 import importlib
 import logging
 from copy import deepcopy
@@ -69,19 +66,12 @@ def select_wrapper(model_config: Dict, wrapper_path: str = None) -> Any:
 
 
 def create_model(
-    cfg: Dict,
+    model_config: Dict,
     statistics: Dict,
     target_property: List[str],
     embedding_property: List[str],
     prune_removed_keys: bool = False,
-    **kwargs,
 ) -> torch.nn.Module:
-
-    if "model" in cfg:
-        model_config = cfg["model"]["config"]
-    else:
-        model_config = cfg
-
     # === model cls ===
     if "kwargs" in model_config:
         model_path = model_config["kwargs"].get("_target_", "tace.models.e3nnTACE")
