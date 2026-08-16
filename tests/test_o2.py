@@ -14,7 +14,7 @@ from tace.models._e3nn.o2 import (
     RadialRotaryComplexAttention,
 )
 from tace.models.angular import SolidHarmonics
-from tace.models.mag import MagmomsNormalizer
+from tace.models.mag import MagneticBasis
 from tace.models.mlp import (
     ACTIVATION,
     ScaledSigmoid,
@@ -33,11 +33,7 @@ from tace.models.o2 import (
     restrict_o3_irrep,
     restrict_o3_irreps,
 )
-from tace.models.radial import (
-    MagneticChebyshevBasis,
-    j0SincSphericalBesselBasis,
-    j0SphericalBesselBasis,
-)
+from tace.models.radial import j0SincSphericalBesselBasis, j0SphericalBesselBasis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
@@ -1144,6 +1140,63 @@ def test_o2_linear_rejects_complex_input_and_weight():
         )
 
 
+def test_magnetic_basis_keeps_radial_scaling_formula():
+    magmoms = torch.tensor(
+        [[3.0, 4.0, 0.0], [0.0, 0.0, 1.0]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)
+    basis = MagneticBasis([4.0, 2.0], num_basis=4, num_elements=2).to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    observed = basis.normalize_magnitude(magmoms, node_attrs)
+    element_max = torch.tensor(
+        [[1.2 * 4.0 + 0.1], [1.2 * 2.0 + 0.1]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    expected = 1.0 - 2.0 * torch.clamp(
+        magmoms.norm(dim=-1, keepdim=True) / element_max,
+        min=0.0,
+        max=1.0,
+    ).square()
+    torch.testing.assert_close(observed, expected)
+
+
+def test_magnetic_basis_normalizes_solid_harmonics_by_element_scale():
+    irreps = o3.Irreps("0e + 1e + 2e")
+    magmoms = torch.tensor(
+        [[1.0, 2.0, 3.0], [-2.0, 1.0, 0.5]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)
+    magnetic_basis = MagneticBasis(
+        [4.0, 2.0],
+        num_basis=4,
+        magnetic_irreps=irreps,
+        num_elements=2,
+    ).to(device=DEVICE, dtype=DTYPE)
+    _, observed = magnetic_basis(magmoms, node_attrs)
+
+    element_scale = torch.tensor(
+        [[1.2 * 4.0 + 0.1], [1.2 * 2.0 + 0.1]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    solid_harmonics = SolidHarmonics(
+        irreps,
+        irreps_in=o3.Irreps("1e"),
+    ).to(device=DEVICE, dtype=DTYPE)
+    assert not solid_harmonics.normalize
+    torch.testing.assert_close(
+        observed,
+        solid_harmonics(magmoms / element_scale),
+    )
+
+
 def _build_o2_magnetic_interaction(
     mag_Lmax=1,
     angular_max=None,
@@ -1280,19 +1333,20 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
     finally:
         torch.set_default_dtype(previous_dtype)
     wigner, wigner_inv = wigner_module.to(device=DEVICE).get_wigner(edge_vectors)
-    magnetic_radial_basis = MagneticChebyshevBasis(num_basis=3).to(
+    magnetic_basis = MagneticBasis(
+        [4.0, 4.0],
+        num_basis=4,
+        magnetic_irreps=module.magnetic_irreps,
+        num_elements=2,
+    ).to(
         device=DEVICE,
         dtype=DTYPE,
-    )(
-        MagmomsNormalizer([4.0, 4.0], num_elements=2).to(device=DEVICE, dtype=DTYPE)(
-            initial_noncollinear_magmoms, node_attrs
-        )
     )
-    magnetic_node_attrs = SolidHarmonics(
-        module.magnetic_irreps,
-        normalization="integral",
-        irreps_in=o3.Irreps("1e"),
-    ).to(device=DEVICE, dtype=DTYPE)(initial_noncollinear_magmoms)
+    magnetic_radial_basis, magnetic_node_attrs = magnetic_basis(
+        initial_noncollinear_magmoms,
+        node_attrs,
+    )
+    magnetic_radial_basis = magnetic_radial_basis[..., 1:]
     return module._compute_messages(
         node_feats,
         node_attrs,

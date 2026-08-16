@@ -14,9 +14,7 @@ from tace.models._e3nn.wigner6j import (
     sympy_wigner_6j,
     wigner_6j,
 )
-from tace.models.angular import SolidHarmonics
-from tace.models.mag import MagmomsNormalizer
-from tace.models.radial import MagneticChebyshevBasis
+from tace.models.mag import MagneticBasis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -344,17 +342,17 @@ def test_wigner6j_interaction_weight_levels(weight_level, monkeypatch):
         device=DEVICE,
         requires_grad=True,
     )
-    magnetic_radial_basis = MagneticChebyshevBasis(num_basis=3).to(DEVICE)(
-        MagmomsNormalizer([4.0, 4.0], num_elements=2).to(DEVICE)(
-            initial_noncollinear_magmoms,
-            node_attrs,
-        )
+    magnetic_basis = MagneticBasis(
+        [4.0, 4.0],
+        num_basis=4,
+        magnetic_irreps=module.magnetic_irreps,
+        num_elements=2,
+    ).to(DEVICE)
+    magnetic_radial_basis, magnetic_node_attrs = magnetic_basis(
+        initial_noncollinear_magmoms,
+        node_attrs,
     )
-    magnetic_node_attrs = SolidHarmonics(
-        module.magnetic_irreps,
-        normalization="component",
-        irreps_in=o3.Irreps("1e"),
-    ).to(DEVICE)(initial_noncollinear_magmoms)
+    magnetic_radial_basis = magnetic_radial_basis[..., 1:]
 
     output = module._compute_messages(
         node_feats,

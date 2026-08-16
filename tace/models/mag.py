@@ -8,6 +8,10 @@ from numbers import Real
 from typing import Union
 
 import torch
+from e3nn import o3
+
+from .angular import SolidHarmonics
+from .radial import MagneticChebyshevBasis
 
 
 def _resolve_magmoms_norm_by_element(
@@ -64,9 +68,9 @@ def _resolve_magmoms_norm_by_element(
     return magmoms_norm_by_element_tensor
 
 
-class MagmomsNormalizer(torch.nn.Module):
+class MagneticBasis(torch.nn.Module):
     """
-    See https://arxiv.org/abs/2604.08143.
+    Radial part See https://arxiv.org/abs/2604.08143.
     """
 
     a = 1.2
@@ -75,10 +79,15 @@ class MagmomsNormalizer(torch.nn.Module):
     def __init__(
         self,
         magmoms_norm_by_element,
-        atomic_numbers: Union[list[int], None] = None,
-        num_elements: Union[int, None] = None,
+        num_basis: int,
+        magnetic_irreps: o3.Irreps,
+        atomic_numbers: list[int],
+        num_elements: int,
+        normalize: bool = True,
     ) -> None:
         super().__init__()
+        self.num_basis = num_basis
+        self.normalize = normalize
         self.register_buffer(
             "magmoms_norm_by_element",
             _resolve_magmoms_norm_by_element(
@@ -87,15 +96,34 @@ class MagmomsNormalizer(torch.nn.Module):
                 num_elements=num_elements,
             ),
         )
+        self.radial_basis = MagneticChebyshevBasis(
+            num_basis=num_basis,
+            include_constant=True,
+        )
+        self.magnetic_irreps = (
+            None if magnetic_irreps is None else o3.Irreps(magnetic_irreps)
+        )
+        self.angular_basis = (
+            None
+            if self.magnetic_irreps is None
+            else SolidHarmonics(
+                self.magnetic_irreps,
+                normalization="norm",
+                irreps_in=o3.Irreps("1e"),
+            )
+        )
 
-    def forward(
+    def _normalization_scale(self, node_attrs: torch.Tensor) -> torch.Tensor:
+        effective_max = self.a * self.magmoms_norm_by_element + self.b
+        return effective_max[node_attrs.argmax(dim=-1)].unsqueeze(-1)
+
+    def normalize_magnitude(
         self,
         initial_noncollinear_magmoms: torch.Tensor,
         node_attrs: torch.Tensor,
     ) -> torch.Tensor:
         magnetic_norm = initial_noncollinear_magmoms.norm(dim=-1, keepdim=True)
-        effective_max = self.a * self.magmoms_norm_by_element + self.b
-        element_max = effective_max[node_attrs.argmax(dim=-1)].unsqueeze(-1)
+        element_max = self._normalization_scale(node_attrs)
         return (
             1.0
             - 2.0
@@ -106,9 +134,32 @@ class MagmomsNormalizer(torch.nn.Module):
             ).square()
         )
 
+    def forward(
+        self,
+        initial_noncollinear_magmoms: torch.Tensor,
+        node_attrs: torch.Tensor,
+    ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
+        radial_input = self.normalize_magnitude(
+            initial_noncollinear_magmoms,
+            node_attrs,
+        )
+        magnetic_radial_basis = self.radial_basis(radial_input)
+        magnetic_node_attrs = (
+            None
+            if self.angular_basis is None
+            else self.angular_basis(
+                initial_noncollinear_magmoms
+                / self._normalization_scale(node_attrs)
+                if self.normalize
+                else initial_noncollinear_magmoms
+            )
+        )
+        return magnetic_radial_basis, magnetic_node_attrs
+
     def __repr__(self):
         return (
             f"{self.__class__.__name__}("
             f"magmoms_norm_by_element={self.magmoms_norm_by_element.tolist()}, "
-            f"a={self.a}, b={self.b})"
+            f"num_basis={self.num_basis}, magnetic_irreps={self.magnetic_irreps}, "
+            f"normalize={self.normalize}, a={self.a}, b={self.b})"
         )
