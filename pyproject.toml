@@ -46,6 +46,8 @@ nvalchemi = [
     "nvalchemi-toolkit>=0.1.0",
     "nvalchemi-toolkit-ops",
 ]
+
+scf = []
  
 cueq12 = [
     "cuequivariance",
@@ -112,6 +114,7 @@ include = [
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
+"tace.models.scf" = ["*.md", "longrange/*.md"]
 
 [tool.ruff]
 target-version = "py39"
