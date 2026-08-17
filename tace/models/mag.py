@@ -83,31 +83,34 @@ class MagneticBasis(torch.nn.Module):
         magnetic_irreps: o3.Irreps,
         atomic_numbers: list[int],
         num_elements: int,
-        normalize: bool = True,
-        trainable: bool = True,
+        normalize: bool = False,
+        trainable: bool = False,
     ) -> None:
         super().__init__()
         self.num_basis = num_basis
         self.normalize = normalize
-        # self.scale = torch.nn.Parameter(
-        #     1.0 / (
-        #         self.a * _resolve_magmoms_norm_by_element(
-        #             magmoms_norm_by_element,
-        #             atomic_numbers=atomic_numbers,
-        #             num_elements=num_elements,
-        #         ) + self.b
-        #     )
-        # )
-        self.register_buffer(
-            "scale",
-            1.0 / (
-                self.a * _resolve_magmoms_norm_by_element(
-                    magmoms_norm_by_element,
-                    atomic_numbers=atomic_numbers,
-                    num_elements=num_elements,
-                ) + self.b
+
+        if trainable:
+            self.scale = torch.nn.Parameter(
+                1.0 / (
+                    self.a * _resolve_magmoms_norm_by_element(
+                        magmoms_norm_by_element,
+                        atomic_numbers=atomic_numbers,
+                        num_elements=num_elements,
+                    ) + self.b
+                )
             )
-        )
+        else:
+            self.register_buffer(
+                "scale",
+                1.0 / (
+                    self.a * _resolve_magmoms_norm_by_element(
+                        magmoms_norm_by_element,
+                        atomic_numbers=atomic_numbers,
+                        num_elements=num_elements,
+                    ) + self.b
+                )
+            )
         self.radial_basis = MagneticChebyshevBasis(
             num_basis=num_basis,
             include_constant=True,

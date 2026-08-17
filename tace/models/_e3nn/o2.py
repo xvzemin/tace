@@ -25,13 +25,6 @@ def _common_multiplicity(irreps: o3.Irreps, name: str) -> int:
 
 
 class RadialRotaryComplexAttention(torch.nn.Module):
-    """Real O2-compatible radial rotary attention.
-
-    One batched O2 linear jointly produces target queries and source keys.
-    Their complete real O2 inner product is scaled by a sigmoid radial
-    projection. No complex weight or phase is used.
-    """
-
     def __init__(
         self,
         irreps: o2.Irreps,
@@ -152,8 +145,6 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             self.radial_scale(edge_radial_basis)
         )
 
-        if edge_cutoff is not None and edge_cutoff.ndim == 1:
-            edge_cutoff = edge_cutoff.unsqueeze(-1)
         attention = self.graph_softmax(
             score,
             edge_index[1],
@@ -223,8 +214,8 @@ class O2ScatterLinear(torch.nn.Module):
         self.num_channel = num_channel
         self.correlation = correlation
         self.num_head = num_head
-        self.use_asymmetric_contraction = bool(use_asymmetric_contraction)
-        self.use_radial_rotary_attention = bool(use_radial_rotary_attention)
+        self.use_asymmetric_contraction = use_asymmetric_contraction
+        self.use_radial_rotary_attention = use_radial_rotary_attention
         if _common_multiplicity(self.irreps_node, "irreps_node") != num_channel:
             raise ValueError("irreps_node multiplicity must equal num_channel.")
         if _common_multiplicity(self.irreps_out, "irreps_out") != num_channel:
@@ -254,6 +245,7 @@ class O2ScatterLinear(torch.nn.Module):
         self.irreps_in_local = o2.Irreps(input_groups).regroup()
         self.irreps_out_local = self.output_layout.local_irreps
 
+        # TODO start from here
         self.input_block_irreps = tuple(irrep for _, irrep in self.irreps_in_local)
         self.node_block_indices = {
             irrep: index
