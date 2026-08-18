@@ -105,8 +105,7 @@ implementation in the environment used to run TACE:
 
 .. code-block:: bash
 
-   git clone https://github.com/ChengUCB/les.git
-   pip install -e ./les
+  pip install git+https://github.com/ChengUCB/les.git@v0.2.0
 
 TACE imports LES only when ``long_range.les.enable`` is true, so ordinary TACE
 models do not require this package.

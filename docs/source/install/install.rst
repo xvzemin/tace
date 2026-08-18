@@ -130,13 +130,11 @@ Latent Ewald Summation (LES)
 ----------------------------
 
 LES is an optional external dependency used by TACE-LES for long-range
-interactions.  Install TACE first, then install the upstream LES.
+interactions.  Install TACE first, then install the upstream LES (v0.2.0).
 
 .. code-block:: bash
 
-   git clone https://github.com/ChengUCB/les.git
-   cd les
-   pip install .
+   pip install git+https://github.com/ChengUCB/les.git@v0.2.0
 
 Verify that TACE can import the backend:
 

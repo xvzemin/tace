@@ -139,13 +139,13 @@ If you use Local O(2) Frame or Generalized Wigner-6j Convlution, please cite our
 
 ```bibtex
 @misc{xu2026completeo3interactionswigner6j,
-      title={Complete O(3) Interactions from Wigner-6j Recoupling to Local O(2) Frames}, 
-      author={Zemin Xu and Peijun Hu and Wenbo Xie},
-      year={2026},
-      eprint={2608.16592},
-      archivePrefix={arXiv},
-      primaryClass={physics.chem-ph},
-      url={https://arxiv.org/abs/2608.16592}, 
+   title={Complete O(3) Interactions from Wigner-6j Recoupling to Local O(2) Frames}, 
+   author={Zemin Xu and Peijun Hu and Wenbo Xie},
+   year={2026},
+   eprint={2608.16592},
+   archivePrefix={arXiv},
+   primaryClass={physics.chem-ph},
+   url={https://arxiv.org/abs/2608.16592}, 
 }
 ```
 
