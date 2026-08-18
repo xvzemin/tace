@@ -22,11 +22,13 @@ For details on the SO(2) component, please refer to our paper and code.
 
 The current implementation is still subject to change, and backward compatibility is not guaranteed. Please refer to our paper and code for details.
 
-## [TACE documentation](https://tace.readthedocs.io/en/latest/index.html)
+## Documentation
 
+[TACE DOCS](https://tace.readthedocs.io/en/latest/index.html)
 
+## SOTA Foundation Model
 
-## [SOTA Foundation Model](https://github.com/xvzemin/tace-foundations)
+[TACE FOUNDATION](https://github.com/xvzemin/tace-foundations)
 
 Default Ranking on Matbench as of July 8, 2026
 
