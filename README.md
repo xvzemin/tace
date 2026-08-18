@@ -1,7 +1,7 @@
 [![TACE](https://img.shields.io/pypi/v/tace?style=for-the-badge&label=TACE)](https://pypi.org/project/tace/)
-[![Docs](https://img.shields.io/readthedocs/tace?style=for-the-badge&label=docs)](https://tace.readthedocs.io/en/stable/)
-[![Matbench Discovery](https://img.shields.io/badge/Matbench%20Discovery-SOTA-brightgreen?style=for-the-badge)](https://matbench-discovery.materialsproject.org/)
+[![Docs](https://img.shields.io/readthedocs/tace?style=for-the-badge&label=docs)](https://tace.readthedocs.io/en/latest/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![Matbench Discovery](https://img.shields.io/badge/Matbench%20Discovery-SOTA-brightgreen?style=for-the-badge)](https://matbench-discovery.materialsproject.org/)
 
 # Tensor Atomic/Edge Cluster Expansion (TACE/TECE)
 
