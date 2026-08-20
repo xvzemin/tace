@@ -778,8 +778,6 @@ class ZBLBasis(torch.nn.Module):
             self.cutoff_fn = MollifierCutoff.calculate_envelope
         elif cutoff_fn == "cosine":
             self.cutoff_fn = CosineCutoff.calculate_envelope
-        elif cutoff_fn == "xplor":
-            self.cutoff_fn = XPLORCutoff.calculate_envelope  # TODO
         elif cutoff_fn == "c3poly":
             self.is_polynomial_cutoff = True
             self.cutoff_fn = C3PolynomialCutoff.calculate_envelope

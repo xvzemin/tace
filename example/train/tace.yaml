@@ -1,6 +1,6 @@
 # support resolver like add, sub, mul, float, ceil, floor
 defaults:
-  - _self_ 
+  - _self_
   # # Specify the logger backlend
   # - config/logger@_here_: wandb
   # # Specify the model architecture
@@ -10,22 +10,22 @@ defaults:
 resume_from_model: null
 
 # Specify the model to be fine-tuned. Files must be end with .ckpt, .pt, or .pth
-finetune_from_model: null 
+finetune_from_model: null
 
 finetune: null # this field equals ./finetune_config.yaml, auto read or write directly here
 
 misc:
   project_name: Example
-  global_seed: 42 
+  global_seed: 42
   device: cuda # cpu or cuda
   allow_tf32: true
-  ignore_warning: true 
+  ignore_warning: true
   log_level: debug # info or debug
   env: # You can specify here the environment variables that should always be used.
     WANDB_MODE: offline # For the convenience of Chinese users
   # Generally, there is no need to enable it. If training is unstable, prioritize using Layer Norm.
   LossSkipController:
-    enable: false 
+    enable: false
     manual_threshold: 1e6
     start_step: 1000
     ema_window: 1000
@@ -33,23 +33,23 @@ misc:
     skip_nan: true
     skip_large: true
 
-# # You can specify the logger here, for example, the built-in logger provided 
-# # by Lightning or a third-party logger such as WandB. 
+# # You can specify the logger here, for example, the built-in logger provided
+# # by Lightning or a third-party logger such as WandB.
 # logger:
 #   _target_: pytorch_lightning.loggers.WandbLogger
-#   project: ${misc.project_name} 
-#   name: ${misc.project_name} 
-#   # entity: xuzemin-nanjing-university 
+#   project: ${misc.project_name}
+#   name: ${misc.project_name}
+#   # entity: xuzemin-nanjing-university
 #   log_model: final  # all, final
 #   # tags: ["baseline", "v0.0.1"]
 #   # group: "experiments"
-#   save_dir: wandb_logs  
+#   save_dir: wandb_logs
 
 trainer:
   # As long as your system has NVIDIA GPUs, the following configuration will automatically detect and use all available GPUs for training.
-  # If you wish to control which GPUs are visible, you can do so by setting the environment variable like export CUDA_VISIBLE_DEVICES=0,2. 
+  # If you wish to control which GPUs are visible, you can do so by setting the environment variable like export CUDA_VISIBLE_DEVICES=0,2.
   _target_: lightning.Trainer
-  num_nodes: 1   
+  num_nodes: 1
   accelerator: auto
   devices: auto        # auto or list
   max_time: '90:00:00:00' # 90 days
@@ -57,20 +57,20 @@ trainer:
   min_epochs: 1        # null or int > 1
   precision: 32        # only 32 or 64 are allowed, not allow bf16, fp16 ....
   strategy: auto # For single-GPU/multi-node training, use auto
-  # strategy: # Recommended for single-node training. 
-  #   _target_: tace.utils.strategy.SimpleDDPStrategy                                                  
-  gradient_clip_val: 10.0 
+  # strategy: # Recommended for single-node training.
+  #   _target_: tace.utils.strategy.SimpleDDPStrategy
+  gradient_clip_val: 10.0
   enable_progress_bar: true # always set this to true to show progress_bar
   log_every_n_steps: 1000
 
   # Generally, no modification is required
   enable_model_summary: true
-  enable_checkpointing: true 
+  enable_checkpointing: true
   check_val_every_n_epoch: 1
   detect_anomaly: false
   inference_mode: false
-  deterministic: false  
-  # benchmark: true  
+  deterministic: false
+  # benchmark: true
 
 callbacks:
   early_stopping:
@@ -78,7 +78,7 @@ callbacks:
     verbose: true
     log_rank_zero_only: true
     monitor: ${synth_metric.monitor_metric_name}
-    # min_delta: 1e-5 
+    # min_delta: 1e-5
     patience: 50
 
   ema: # ema is always recommended
@@ -100,7 +100,7 @@ callbacks:
     verbose: false
 
   # # If you also need to save checkpoints based on training steps, you can uncomment this section.
-  # checkpoint_step: 
+  # checkpoint_step:
   #   _target_: lightning.pytorch.callbacks.ModelCheckpoint
   #   dirpath: checkpoints_step
   #   filename: TACE-{${misc.project_name}-{epoch}-{step}
@@ -115,7 +115,7 @@ dataset:
   type: ase # ase or ase-db
   split_seed: ${misc.global_seed} # this random seed is useful if auto split
   train_file: ../data/BaTiO3.xyz
-  valid_file: null                
+  valid_file: null
   # test_files: # (null, str, list) recoomend to use tace-eval --test 1 to print test errors to avoild possible bugs
   #   - dataset/test_300K.xyz
   #   - dataset/test_600K.xyz
@@ -125,10 +125,10 @@ dataset:
   valid_from_index: false # split train and val from train.index and valid.index in current directory
   no_valid_set: false # The prerequisite for enabling this is that you are using a learning rate scheduler that does not depend on the validation set.
   neighborlist_backend: matscipy # [ase, matscipy, vesin, alchemiops] recommend matscipy
-  storage_mode: memory # [memory, lmdb], if your dataset is large (> 100w), the recommended approach is to use lmdb, as this avoids repeatedly constructing the graph.  
+  storage_mode: memory # [memory, lmdb], if your dataset is large (> 100w), the recommended approach is to use lmdb, as this avoids repeatedly constructing the graph.
   shard_dirs: # if lmdb model, specify a list of path where you save you graph
     - graphCache
-  # If using LMDB mode, you must allocate a reasonable pre-storage size.  
+  # If using LMDB mode, you must allocate a reasonable pre-storage size.
   # Generally, if the number of neighboring atoms is around 60, about 200 KB per graph is sufficient.
   shard_size: 100000 # number of graphs stored per file in LMDB mode, should be large, here is just an example, if small, it will be slow and may be error
   cache_size: 1024 # cache for faster load data from dataloader
@@ -183,7 +183,7 @@ optimizer:
   _target_: torch.optim.AdamW
   lr: 1e-3
   weight_decay: 1e-8
- 
+
   # _target_: torch.optim.Adam
   # lr: 1e-3
   # weight_decay: 1e-8
@@ -212,7 +212,7 @@ scheduler:
   factor: 0.5
   # min_lr: 1e-6
   patience: 25
-  # threshold: 1e-4 
+  # threshold: 1e-4
   extra:
     monitor: ${synth_metric.monitor_metric_name}
     interval: epoch
@@ -221,7 +221,7 @@ scheduler:
   # _target_: tace.utils.lr_scheduler.CosineAnnealingWarmupRestarts
   # first_cycle_steps: 400000 # total step, one batch = one step
   # cycle_mult: 1.0 # restart factor
-  # max_lr: 2e-4 
+  # max_lr: 2e-4
   # min_lr: 2e-6
   # warmup_steps: ${floor:${mul:${scheduler.first_cycle_steps}, 0.05}} # 5 % first step (total here)
   # gamma: 1.0 # decay factor
@@ -242,7 +242,7 @@ scheduler:
   #   interval: step
   #   frequency: 1
 
-synth_metric: 
+synth_metric:
   # All metrics can be accessed by combining the stage (train | val) with the property name and the metric type (mae or rmse), for example:
   # val/energy_mae, val/energy_per_atom_rmse, val/forces_mae, val/stress_rmse, val/loss, train/loss ...
   # Specifically, we have a composite metric, val/synth_metric, for which we can specify a mixing ratio. This is particularly useful when training on large datasets with outliers.
@@ -276,24 +276,24 @@ model:
   # export TACE_USE_COMPILE=1 to use aoti, 0 to disable
   config:
 
-    _target_: tace.models.e3nnTACE # [e3nnTACE] 
+    _target_: tace.models.e3nnTACE # [e3nnTACE]
     wrapper:
       _target_: tace.models.TensorModel # [TensorModel]
 
     cutoff: 6.0 # (float), recommend 6.0
     max_neighbors: null # always null, we disable max_neighbors
     atomic_numbers: null # (null, list), null = read from dataset.
-    
+
     fidelity:
       - {
         name: PBE, # (str) custom name
-        atomic_energy: null # (null, Dict[int, float]), {1: -13.587222780835477, 6: -1029.4889999855063, 7: -1484.9814568572233, 8: -2041.9816003861047} 
+        atomic_energy: null # (null, Dict[int, float]), {1: -13.587222780835477, 6: -1029.4889999855063, 7: -1484.9814568572233, 8: -2041.9816003861047}
       }
 
-    node_embedding: 
+    node_embedding:
       type: linear    # [linear, nonlinear, tensor, so2_tensor], linear is safer
 
-    edge_embedding: 
+    edge_embedding:
       type: identity # identity  # [identity, linear, nonlinear, element2], identity is safer
 
     edge_update:
@@ -329,15 +329,15 @@ model:
     layer_norm: # If training is unstable, prioritize specifying pre_norm_type. If it is still unstable, specify final_norm_type.
       pre_norm_type: null     # [merge_rms_norm, merge_layer_norm]
       final_norm_type: null   # [merge_rms_norm, merge_layer_norm]
-      use_first_pre_norm: false 
-          
+      use_first_pre_norm: false
+
     atomic_basis:
-      type: cgtp # (str or list[str]) [cgtp, o2, uu_so2, uv_so2, o3_w6j_mag, o2_mag]
+      type: cgtp # (str or list[str]) [cgtp, o2, so2, o3_w6j_mag, o2_mag]
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, density] density are from mace
       nonlinear: sigmoid_gate # [null, sigmoid_gate]
       edge_nonlinear: so2_sigmoid_gate # [null, so2_sigmoid_gate]
-        
+
       # in test, not use
       node_wise_hidden: null
       edge_wise_hidden: null
@@ -366,13 +366,13 @@ model:
       use_alllayer: false # (bool) recommended true, if true, evergy layer has readout, else, only last layer has
       use_uie: false # (bool) whether use uie readout
       use_one_body_magmoms: true
-    
+
     scale_shift:
       enable: true
       scale_type: rms_forces # [null, rms_forces, rms_forcesrms_forces_by_element]
       shift_type: null # [null, mean_delta_energy_per_atom, forces, mean_delta_energy_per_atom_by_element]
-      scale_trainable: false # (bool) 
-      shift_trainable: false # (bool) 
+      scale_trainable: false # (bool)
+      shift_trainable: false # (bool)
       all_atoms: false
       scale_zbl: false
 
@@ -401,7 +401,7 @@ model:
           kappa_scale: 0.01
           alpha_scale: 0.01
 
-    universal_embedding: 
+    universal_embedding:
       charges:
         enable: false
 
@@ -421,12 +421,12 @@ model:
         normalizer: 1.0 # (float)
 
     special: # this field can be thoroughly ignored if you only interested in E/F/S training
-    
+
       charges:
         method: lagrangian # [lagrangian, uniform_distribution]
 
     # Unless you are traing foundation model, never use dropout
     # This is designed for direct pre-training
-    dropout:  
+    dropout:
       use_first_dropout: false
       stochastic_depth: 0.0
