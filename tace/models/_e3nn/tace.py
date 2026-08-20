@@ -14,9 +14,9 @@ from ..blocks import OneHotToAtomicEnergy, ScaleShift
 from ..linear import e3nnLinear
 from ..radial import ZBLBasis
 from ..utils import compute_fixed_charge_dipole, get_target_irreps
-from .basis_change import PropertyBasisChange
+from .basis_change import DirectPolarizability, DirectVirials
 from .default import check_model_config
-from .les import TACELes, required_les_irreps
+from .les import TACELES, required_les_irreps
 from .readout import (
     build_element_scalar_readout,
     build_scalar_readout,
@@ -120,7 +120,7 @@ class e3nnTACE(torch.nn.Module):
         if les_cfg["enable"]:
             if "energy" not in self.target_property:
                 raise ValueError("LES requires energy in target_property")
-            les_arguments = les_cfg["les_arguments"] or {"use_atomwise": False}
+            les_arguments = les_cfg["les_arguments"] or {}
             target_irreps.extend(required_les_irreps(les_arguments))
         if cfg["product_basis"]["return_components"] is not None:
             target_irreps.extend(cfg["product_basis"]["return_components"])
@@ -229,24 +229,7 @@ class e3nnTACE(torch.nn.Module):
 
         # === Long range ===
         if les_cfg["enable"]:
-            try:
-                from les import Les
-            except ImportError as e:
-                raise ImportError(
-                    "Please install les from https://github.com/ChengUCB/les."
-                ) from e
-            self.les = TACELes(
-                backend=Les(les_arguments=les_arguments),
-                les_arguments=les_arguments,
-                num_layers=cfg["num_layers"],
-                hidden_channel=cfg["readout_emlp"]["hidden"],
-                bias=cfg["readout_emlp"]["bias"],
-                num_elements=self.num_elements,
-                num_fidelities=len(cfg["fidelity"]),
-                use_alllayer=self.use_alllayer,
-                parity=cfg["parity"],
-                irreps_in=[prod.irreps_out for prod in self.representation.products],
-            )
+            self.les = TACELES(les_arguments, **for_scalar_readout)
 
         # === Direct Dipolet ===
         if "direct_dipole" in self.target_property:
@@ -268,9 +251,7 @@ class e3nnTACE(torch.nn.Module):
             self.direct_polarizability_readout2s = build_tensor_readout(
                 irreps_out="2e", **for_tensor_readout
             )
-            self.direct_polarizability_basis_change = PropertyBasisChange[
-                "direct_polarizability"
-            ]()
+            self.direct_polarizability_basis_change = DirectPolarizability()
 
         # === Direct Virials ===
         if (
@@ -283,7 +264,7 @@ class e3nnTACE(torch.nn.Module):
             self.direct_virials_readout2s = build_tensor_readout(
                 irreps_out="2e", **for_tensor_readout
             )
-            self.direct_virials_basis_change = PropertyBasisChange["direct_virials"]()
+            self.direct_virials_basis_change = DirectVirials()
 
         # === Charges ===
         if "charges" in self.target_property:
@@ -304,18 +285,6 @@ class e3nnTACE(torch.nn.Module):
                     f"Unknown predict_charges_method: {self.predict_charges_method}. "
                     "Supported methods are ['lagrangian', 'uniform_distribution']."
                 )
-
-        # # === Direct Diagonal Hessian ===
-        # if "direct_diagonal_hessian" in self.target_property:
-        #     self.direct_diagonal_hessian_readout0s = build_scalar_readout(irreps_out='0e',**for_scalar_readout)
-        #     self.direct_diagonal_hessian_readout2s = build_tensor_readout(irreps_out='2e',**for_tensor_readout)
-        #     self.direct_diagonal_hessian_basis_change = PropertyBasisChange["direct_diagonal_hessian"]()
-
-        # # # === Direct Hessian ===
-        # # if "direct_hessian" in self.target_property:
-        # #     self.direct_hessian_readout0s = build_scalar_readout(l=0,**for_scalar_readout)
-        # #     self.direct_hessian_readout2s = build_tensor_readout(l=2,**for_tensor_readout)
-        # #     self.direct_hessian_basis_change = PropertyBasisChange["direct_hessian"]()
 
         # === abs_final_collinear_magmoms ===
         if "abs_final_collinear_magmoms" in self.target_property:
@@ -618,64 +587,6 @@ class e3nnTACE(torch.nn.Module):
                 )
                 CHARGES = c_node + c_delta_node[batch]
 
-        # === Direct Diagonal Hessian ===
-        D_DIAG_H = None
-        if "direct_diagonal_hessian" in self.target_property:
-            d_diag_h0_list = []
-            d_diag_h2_list = []
-            for ii, (
-                direct_diagonal_hessian_readout0,
-                direct_diagonal_hessian_readout2,
-            ) in enumerate(
-                zip(
-                    self.direct_diagonal_hessian_readout0s,
-                    self.direct_diagonal_hessian_readout2s,
-                )
-            ):
-                if not self.use_alllayer:
-                    ii = -1
-                d_diag_h0_list.append(
-                    direct_diagonal_hessian_readout0(
-                        descriptors[ii],
-                    )[num_atoms_arange, node_fidelity]
-                )
-                d_diag_h2_list.append(
-                    direct_diagonal_hessian_readout2(
-                        descriptors[ii],
-                    ).reshape(-1, self.num_fidelities, 5)[
-                        num_atoms_arange, node_fidelity, :
-                    ]
-                )
-            d_diag_h0_node = torch.sum(torch.stack(d_diag_h0_list, dim=-1), dim=-1)
-            d_diag_h2_node = torch.sum(torch.stack(d_diag_h2_list, dim=-1), dim=-1)
-            D_DIAG_H = self.direct_diagonal_hessian_basis_change(
-                d_diag_h0_node, d_diag_h2_node
-            )
-
-        # # === Direct Hessian ===
-        # D_H = None
-        # if 'direct_hessian' in self.target_property:
-        #     d_h0_list = []; d_h2_list = []
-        #     for ii, (direct_hessian_readout0, direct_hessian_readout2) in enumerate(
-        #         zip(self.direct_hessian_readout0s, self.direct_hessian_readout2s)
-        #     ):
-        #         # if not self.use_alllayer:
-        #         #     ii = -1
-        #         ii = -1
-        #         d_h0_list.append(
-        #             direct_hessian_readout0(
-        #                 descriptors[ii],
-        #             )[num_atoms_arange, node_fidelity]
-        #         )
-        #         d_h2_list.append(
-        #             direct_hessian_readout2(
-        #                 descriptors[ii],
-        #             ).reshape(-1, self.num_fidelities, 5)[num_atoms_arange, node_fidelity, :]
-        #         )
-        #     d_h0_node = torch.sum(torch.stack(d_h0_list, dim=-1), dim=-1)
-        #     d_h2_node = torch.sum(torch.stack(d_h2_list, dim=-1), dim=-1)
-        #     D_H  = self.direct_hessian_basis_change(d_h0_node, d_h2_node)
-
         # === ABS_F_C_MAG ===
         ABS_F_C_MAG = None
         if "abs_final_collinear_magmoms" in self.target_property:
@@ -770,8 +681,6 @@ class e3nnTACE(torch.nn.Module):
             "direct_forces": D_F,
             "direct_virials": D_V,
             "direct_stress": D_S,
-            "direct_diagonal_hessian": D_DIAG_H,
-            # "direct_hessian": D_H,
             "charges": CHARGES,
             "les_energy": LES_E,
             "les_latent_charges": les_results["les_latent_charges"],

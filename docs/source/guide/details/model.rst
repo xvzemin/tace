@@ -140,29 +140,19 @@ Example
         les: # for introduction to the arguments, see the official repo: https://github.com/ChengUCB/les
             enable: false
             les_arguments:
-            n_layers: 3
-            n_hidden: [32, 16]
-            add_linear_nn: true
             output_scaling_factor: 0.1
             sigma: 1.0
             dl: 2.0
             remove_self_interaction: true
             remove_mean: true
             epsilon_factor: 1.0
-            use_atomwise: false
-            compute_bec: false
-            bec_output_index: null
             use_dipole: false
             use_quad: false
             use_induced_charge: false
             use_induced_dipole: false
             use_anisotropic_polarizability: false
-            alpha_irreps: 0e+1o+2e
-            alpha_1o_nonlinear_readout: false
-            alpha_1o_linear_w_pos: true
             make_alpha_positive: false
             make_kappa_positive: false
-            output_scale: 0.1
             kappa_scale: 0.01
             alpha_scale: 0.01
 

@@ -49,53 +49,29 @@ Supported latent sources
      - ``1o``
      - Permanent latent atomic dipole.
    * - ``latent_quadrupoles`` :math:`\boldsymbol{Q}_i`
-     - ``2e`` and vector dyadics
+     - ``2e``
      - Symmetric traceless atomic quadrupole.
    * - ``latent_kappas`` :math:`\kappa_i`
      - ``0e``
      - Local charge-response coefficient used to generate induced charges.
    * - ``latent_polarizabilities`` :math:`\boldsymbol{\alpha}_i`
-     - ``0e``, ``2e``, and vector dyadics
+     - ``0e`` or ``0e+2e``
      - Isotropic scalar or anisotropic symmetric polarizability used to
        generate induced dipoles.
 
 TACE automatically adds the irreps required by the enabled LES sources to the
-last descriptor layer.  Charge, induced charge, and isotropic polarizability
-require ``0e``; permanent dipoles require ``1o``; quadrupoles request ``1o``
-and ``2e``.  An anisotropic polarizability requests the entries listed in
-``alpha_irreps``.  Selecting ``1e`` requires a full-O(3) TACE model with
-``parity: true``.
+last descriptor layer. Charge, induced charge, and isotropic polarizability
+require ``0e``; permanent dipoles require ``1o``; quadrupoles and anisotropic
+polarizabilities require ``2e``.
 
-Tensor readouts
----------------
+Readouts
+--------
 
-The direct ``2e`` path is converted to a Cartesian symmetric tensor.  The
-vector path constructs a Cartesian tensor from equivariant vector channels.
-For the linear LES tensor readout,
-
-.. math::
-
-   \boldsymbol{A}_i
-   = \sum_c w_c(s_i)\,\boldsymbol{v}_{ic}
-     \boldsymbol{v}_{ic}^{\mathsf T},
-
-where :math:`s_i` denotes ``0e`` features and
-:math:`\boldsymbol{v}_{ic}` denotes
-``1o`` or ``1e`` channels.  ``alpha_1o_linear_w_pos: true`` squares the
-``1o`` channel weights before forming the dyadics.
-
-The nonlinear variant uses a scalar-conditioned, symmetric channel-mixing
-matrix,
-
-.. math::
-
-   \boldsymbol{A}_i
-   = \sum_{c,d} M_{cd}(s_i)\,
-     \boldsymbol{v}_{ic}\boldsymbol{v}_{id}^{\mathsf T}.
-
-It includes cross-channel dyadics and is therefore more expressive, but it is
-more expensive and currently uses ``1o`` channels only.  Quadrupoles are made
-traceless after all enabled ``2e`` and dyadic paths are summed.
+All latent sources use the same TACE readout builders as ordinary predicted
+properties. Charges, hardnesses and isotropic polarizabilities are read from
+``0e``; dipoles from ``1o``; quadrupoles and anisotropic polarizabilities from
+``2e``. TACE then converts the directly read out irreps to the Cartesian
+tensors expected by LES. There is no separate vector-dyadic readout path.
 
 Installation
 ------------
@@ -127,15 +103,13 @@ The smallest TACE-LES model predicts only one scalar latent charge per atom:
              dl: 2.0
              remove_self_interaction: true
              remove_mean: true
-             use_atomwise: false
-             output_scale: 0.1
+             output_scaling_factor: 0.1
 
-``use_atomwise`` should remain false.  TACE always supplies
-``latent_charges`` from its own equivariant readout; consequently the external
-LES ``Atomwise`` options ``n_layers``, ``n_hidden``, ``add_linear_nn``,
-``output_scaling_factor``, and ``use_atomwise`` are not part of the normal
-TACE-LES data path.  ``output_scale`` is the TACE-side scale applied to the
-learned charge, dipole, and quadrupole sources.
+TACE always supplies ``latent_charges`` and all optional latent sources from
+its own readouts. The external LES ``Atomwise`` network is therefore not part
+of the TACE-LES data path. TACE reads ``output_scaling_factor`` directly from
+the LES module and applies it to the learned charge, dipole, and quadrupole
+sources.
 
 The training ``loss_property`` must explicitly include ``energy``.  TACE
 rejects an LES configuration whose model target list has no energy; listing
@@ -169,7 +143,6 @@ response coefficients:
              fixed_atomic_charges_scaling_factor: 0.5
              use_atomic_alpha: false
              use_epsilon_r_scaling: false
-             use_atomwise: false
 
              # Permanent multipoles
              use_dipole: true
@@ -179,22 +152,15 @@ response coefficients:
              use_induced_charge: true
              use_induced_dipole: true
              use_anisotropic_polarizability: true
-             alpha_irreps: 0e+1o+2e
 
-             # Tensor readout
-             alpha_1o_nonlinear_readout: false
-             alpha_1o_linear_w_pos: true
+             # TACE readout
              make_alpha_positive: true
              make_kappa_positive: true
 
              # TACE readout scales
-             output_scale: 0.1
+             output_scaling_factor: 0.1
              kappa_scale: 0.01
              alpha_scale: 0.01
-
-             # Electrical response output
-             compute_bec: false
-             bec_output_index: null
 
 ``make_kappa_positive`` squares the scaled :math:`\kappa_i` values.
 ``make_alpha_positive`` squares a scalar polarizability, or maps an
@@ -210,11 +176,12 @@ TACE descriptor.
 Born effective charges and external fields
 ------------------------------------------
 
-Set ``compute_bec: true`` to ask LES for its Born effective charge response.
-TACE enables coordinate autograd before constructing the representation, so
-the result includes both explicit position dependence and the environment
-dependence of the latent sources.  ``bec_output_index`` can be ``0``, ``1``,
-or ``2`` to request only one polarization component.
+BEC selection is a runtime property of the external LES instance rather than
+a persistent TACE model option. For a normal wrapped eager model, access it as
+``les = model.readout_fn.les.les`` and set ``les.compute_bec = True``.
+Optionally set ``les.bec_output_index`` to ``0``, ``1``, or ``2`` to request
+one polarization component. TACE reads these properties directly from LES and
+enables coordinate autograd accordingly.
 
 When ``electric_field`` is present, TACE passes it to LES.  A batch may contain
 different fields for different structures: the long-range response is
