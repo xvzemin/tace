@@ -70,7 +70,6 @@ class Representation(torch.nn.Module):
         # === radial basis ===
         self.radial_basis = RadialBasis(
             cutoff=cutoff,
-            r_min=radial_basis["r_min"],
             num_basis=radial_basis["num_radial_basis"],
             cutoff_fn=radial_basis["cutoff_fn"],
             polynomial_cutoff=radial_basis["polynomial_cutoff"],

@@ -32,7 +32,6 @@ DEFAULT_MODEL_CONFIG = {
     },
     "radial_basis": {
         "bias": False,
-        "r_min": 0.0,
         "radial_basis": "j0",
         "num_radial_basis": 8,
         "num_mag_radial_basis": 10,

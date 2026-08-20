@@ -72,7 +72,6 @@ Example
         apply_cutoff: false # # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
         hidden: [64, 64] # list(int)
         bias: true  # (bool)
-        r_min: 0.0                  # in test, not for users
 
         resnet: 
         type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect

@@ -831,7 +831,6 @@ class RadialBasis(torch.nn.Module):
     def __init__(
         self,
         cutoff: float = 6.0,
-        r_min: float = 0.0,
         num_basis: int = 8,
         polynomial_cutoff: int = 5,
         radial_basis: str = "j0",
