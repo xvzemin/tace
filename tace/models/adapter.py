@@ -353,20 +353,6 @@ class TensorModel(torch.nn.Module):
                 positions.shape[0], device=positions.device, dtype=torch.int64
             )
 
-        # if self.readout_fn.representation.radial_basis.use_dydynamic_cutoff:
-        #     dcutoff = self.readout_fn.representation.radial_basis.dydynamic_cutoff_fn(
-        #         edge_length,
-        #         data["edge_index"],
-        #         data['node_attrs'].size(0),
-        #     )
-        #     mask = edge_length.squeeze(-1) < dcutoff.squeeze(-1)
-        #     data['edge_index'] = data['edge_index'][:, mask]
-        #     edge_length=edge_length[mask, :]
-        #     edge_vector=edge_vector[mask, :]
-        #     dcutoff=dcutoff[mask, :]
-        # else:
-        #     dcutoff = None
-
         return Graph(
             lmp=self.lmp,
             lmp_data=lmp_data,
@@ -379,9 +365,6 @@ class TensorModel(torch.nn.Module):
             lattice=lattice,
             node_fidelity=node_fidelity,
             num_atoms_arange=num_atoms_arange,
-            # dcutoff=dcutoff,
-            dcutoff=None,
-            # node_radius=(data["positions"]**2).sum(dim=1, keepdim=True).sqrt() + 1e-9 # TODO
         )
 
     def get_fidelity_idx(self) -> int:

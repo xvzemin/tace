@@ -573,10 +573,6 @@ class SmoothDynamicCutoff(torch.nn.Module):
         )
 
         node_length[target, local_idx] = edge_length
-        # for e in range(E):
-        #     i = target[e]
-        #     j = local_idx[e]
-        #     r_grouped[i, j] = edge_length[e]
 
         mask = node_length > 0
         return node_length, mask, target, perm
@@ -632,49 +628,6 @@ class SmoothDynamicCutoff(torch.nn.Module):
         dcutoff = dcutoff[inv_perm]
 
         return dcutoff.unsqueeze(-1)
-
-
-class XPLORCutoff(torch.nn.Module):
-    """
-    https://hoomd-blue.readthedocs.io/en/latest/module-md-pair.html
-    """
-
-    def __init__(
-        self,
-        cutoff: float,
-        cutoff_on: float,
-    ):
-        super().__init__()
-        self.r_on = cutoff_on
-        self.r_cut = cutoff
-        assert self.r_on < self.r_cut
-
-    def forward(
-        self, r: torch.Tensor, cutoff: Union[torch.Tensor, None] = None
-    ) -> torch.Tensor:
-        if cutoff is None:
-            cutoff = self.r_cut
-        return self.calculate_envelope(r, cutoff, self.r_on)
-
-    @staticmethod
-    def calculate_envelope(
-        r: torch.Tensor,
-        r_cut: Union[torch.Tensor, float],
-        r_on: Union[torch.Tensor, float] = 0.0,
-    ) -> torch.Tensor:
-        r_sq = r * r
-        r_on_sq = r_on * r_on
-        r_cut_sq = r_cut * r_cut
-        return torch.where(
-            r < r_on,
-            1.0,
-            (r_cut_sq - r_sq) ** 2
-            * (r_cut_sq + 2 * r_sq - 3 * r_on_sq)
-            / (r_cut_sq - r_on_sq) ** 3,
-        )
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(r_on={self.r_on}, r_cut={self.r_cut})"
 
 
 class AgnesiTransform(torch.nn.Module):
@@ -888,9 +841,6 @@ class RadialBasis(torch.nn.Module):
         apply_cutoff: bool = True,
         cutoff_fn: str = "mollifier",  # ['cosine', 'mollifier', 'polynomial']
         gaussian_width: float = 2.0,
-        use_dydynamic_cutoff: bool = False,
-        dydynamic_cutoff_mu: float = 40,
-        num_elements: int = -1,
     ):
         super().__init__()
 
@@ -903,20 +853,8 @@ class RadialBasis(torch.nn.Module):
             self.cutoff_fn = CosineCutoff(cutoff=cutoff)
         elif cutoff_fn == "c3poly":
             self.cutoff_fn = C3PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
-        elif cutoff_fn == "xplor":
-            self.cutoff_fn = XPLORCutoff(cutoff=cutoff, cutoff_on=r_min)
         else:
             self.cutoff_fn = C2PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
-
-        if use_dydynamic_cutoff:
-            self.dydynamic_cutoff_fn = SmoothDynamicCutoff(
-                r_max=cutoff,
-                cutoff_fn=self.cutoff_fn,
-                mu=dydynamic_cutoff_mu,
-            )
-            assert isinstance(self.cutoff_fn, C2PolynomialCutoff) or isinstance(
-                self.cutoff_fn, C3PolynomialCutoff
-            )
 
         if radial_basis == "bessel" or radial_basis == "j0":
             self.radial_fn = j0SphericalBesselBasis(
@@ -969,7 +907,6 @@ class RadialBasis(torch.nn.Module):
             self.num_basis = num_basis
         # self.num_basis = self.radial_fn.num_basis
         self.apply_cutoff = apply_cutoff
-        self.use_dydynamic_cutoff = use_dydynamic_cutoff
 
     def forward(
         self,
@@ -977,10 +914,9 @@ class RadialBasis(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
-        dcutoff: torch.Tensor,
     ) -> torch.Tensor:
-        cutoff = self.cutoff_fn(edge_length, dcutoff)
-        if self.use_distance_transform:  # TODO, dynamic cutoff, may be BUG
+        cutoff = self.cutoff_fn(edge_length)
+        if self.use_distance_transform:
             edge_length = self.distance_transform(
                 edge_length, node_attrs, edge_index, atomic_numbers
             )
@@ -991,42 +927,3 @@ class RadialBasis(torch.nn.Module):
             return radial * cutoff, None
         else:
             return radial, cutoff
-
-
-# # draw
-# import torch
-# import matplotlib.pyplot as plt
-# import numpy as np
-
-# torch.set_default_dtype(torch.float64)
-# cutoff = 6.0
-# num_basis = 8
-# num_basis_list = [15] # [8, 9, 10]
-
-# j0 = j0SphericalBesselBasis(cutoff=cutoff, num_basis=num_basis)
-# jn = jnSphericalBesselBasis(cutoff=cutoff, order=8, num_basis=num_basis_list)
-
-# x = torch.linspace(0, cutoff, 200).unsqueeze(-1)
-
-# a = j0(x)  # shape: [200, 8]
-# b = jn(x)  # shape: [200, 8]
-
-
-# x_np = x.squeeze().numpy()        # shape: [200]
-# a = a.detach().numpy()         # shape: [200, 8]
-# b = b.detach().numpy()         # shape: [200, 8]
-
-
-# plt.figure(figsize=(10, 5))
-
-# for i in range(a.shape[1]):
-#     # plt.plot(x_np, a[:, i], label=f'j0_basis_{i}', linestyle='-')
-#     plt.plot(x_np, b[:, i], label=f'jn_basis_{i}', linestyle='--')
-
-# plt.xlabel("x")
-# plt.ylabel("Basis value")
-# plt.title("Comparison of j0 vs jn spherical Bessel basis")
-# plt.legend(fontsize='small', ncol=2)
-# plt.grid(True)
-# plt.tight_layout()
-# plt.show()

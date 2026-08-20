@@ -262,7 +262,6 @@ class _FlatE3nnCompileModel(torch.nn.Module):
             lattice=data["lattice"],
             node_fidelity=node_fidelity,
             num_atoms_arange=num_atoms_arange,
-            dcutoff=None,
         )
 
     def _first_derivatives(
@@ -370,5 +369,4 @@ class _FlatE3nnLammpsCompileModel(torch.nn.Module):
             lattice=torch.zeros((2, 3, 3), dtype=dtype, device=device),
             node_fidelity=node_fidelity,
             num_atoms_arange=torch.arange(nlocal, device=device, dtype=torch.int64),
-            dcutoff=None,
         )

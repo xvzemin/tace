@@ -44,8 +44,6 @@ DEFAULT_MODEL_CONFIG = {
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
         "gaussian_width": 2.0,
-        "use_dydynamic_cutoff": False,
-        "dydynamic_cutoff_mu": 40,
     },
     "angular_basis": {},
     "atomic_basis": {

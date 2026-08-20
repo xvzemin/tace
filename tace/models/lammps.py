@@ -154,5 +154,3 @@ class Graph(NamedTuple):
     lattice: torch.Tensor
     node_fidelity: torch.Tensor
     num_atoms_arange: torch.Tensor
-    dcutoff: Union[torch.Tensor, None]  # [E,]
-    # node_radius: Union[torch.Tensor, None] # [N,]

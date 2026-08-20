@@ -80,9 +80,6 @@ class Representation(torch.nn.Module):
             trainable=radial_basis["trainable"],
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],
-            use_dydynamic_cutoff=radial_basis["use_dydynamic_cutoff"],
-            dydynamic_cutoff_mu=radial_basis["dydynamic_cutoff_mu"],
-            num_elements=len(atomic_numbers),
         )
 
         # === angular basis ===
@@ -307,7 +304,6 @@ class Representation(torch.nn.Module):
             data["node_attrs"],
             data["edge_index"],
             self.atomic_numbers,
-            graph.dcutoff,
         )
 
         # === angular basis ===
