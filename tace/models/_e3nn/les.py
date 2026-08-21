@@ -7,12 +7,11 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from .basis_change import LESPolarizability, LESQuadrupoles
+from .basis_change import LESLatentAlphas, LESLatentQuads
 from .readout import build_scalar_readout, build_tensor_readout
 
 
 def required_les_irreps(les_arguments: Dict[str, Any]) -> List[str]:
-    """Return descriptor irreps required by the enabled LES source terms."""
     required = {"0e"}
     if les_arguments.get("use_dipole", False):
         required.add("1o")
@@ -25,7 +24,16 @@ def required_les_irreps(les_arguments: Dict[str, Any]) -> List[str]:
 
 
 class TACELES(torch.nn.Module):
-    """Read out TACE latent sources and pass them to the LES solver."""
+    """Predict latent quantities with TACE readouts and pass them to LES."""
+
+    batch_external_field = True
+    scale = {
+        "latent_charges": 0.1,
+        "latent_dipoles": 0.1,
+        "latent_quads": 0.1,
+        "latent_kappas": 0.01,
+        "latent_alphas": 0.01,
+    }
 
     def __init__(
         self,
@@ -65,57 +73,47 @@ class TACELES(torch.nn.Module):
         self.num_layers = num_layers
         self.num_fidelities = num_fidelities
         self.use_alllayer = use_alllayer
-        self.charge_readouts = build_scalar_readout(
+        self.latent_charges_readouts = build_scalar_readout(
             irreps_out="0e", **readout_kwargs
         )
-        self.dipole_readouts = torch.nn.ModuleList()
-        self.quad_readouts = torch.nn.ModuleList()
-        self.kappa_readouts = torch.nn.ModuleList()
-        self.alpha_scalar_readouts = torch.nn.ModuleList()
-        self.alpha_tensor_readouts = torch.nn.ModuleList()
 
         if les_arguments.get("use_dipole", False):
-            self.dipole_readouts = build_tensor_readout(
+            self.latent_dipoles_readouts = build_tensor_readout(
                 irreps_out="1o", **readout_kwargs
             )
         if les_arguments.get("use_quad", False):
-            self.quad_readouts = build_tensor_readout(
+            self.latent_quads_readouts = build_tensor_readout(
                 irreps_out="2e", **readout_kwargs
             )
-            self.quad_basis_change = LESQuadrupoles()
+            self.latent_quads_basis_change = LESLatentQuads()
         if les_arguments.get("use_induced_charge", False):
-            self.kappa_readouts = build_scalar_readout(
+            self.latent_kappas_readouts = build_scalar_readout(
                 irreps_out="0e", **readout_kwargs
             )
         if les_arguments.get("use_induced_dipole", False):
-            self.alpha_scalar_readouts = build_scalar_readout(
+            self.latent_alphas_readout0s = build_scalar_readout(
                 irreps_out="0e", **readout_kwargs
             )
             if les_arguments.get("use_anisotropic_polarizability", False):
-                self.alpha_tensor_readouts = build_tensor_readout(
+                self.latent_alphas_readout2s = build_tensor_readout(
                     irreps_out="2e", **readout_kwargs
                 )
-                self.alpha_basis_change = LESPolarizability()
+                self.latent_alphas_basis_change = LESLatentAlphas()
 
-        self.make_alpha_positive = bool(
+        self.make_latent_alphas_positive = bool(
             les_arguments.get("make_alpha_positive", False)
         )
-        self.make_kappa_positive = bool(
+        self.make_latent_kappas_positive = bool(
             les_arguments.get("make_kappa_positive", False)
         )
-        self.kappa_scale = float(les_arguments.get("kappa_scale", 0.01))
-        self.alpha_scale = float(les_arguments.get("alpha_scale", 0.01))
-
     def _sum_readouts(
         self,
         readouts: torch.nn.ModuleList,
         descriptors: List[torch.Tensor],
-        atom_indices: torch.Tensor,
+        num_atoms_arange: torch.Tensor,
         node_fidelity: torch.Tensor,
         irrep_dim: int,
-    ) -> Optional[torch.Tensor]:
-        if len(readouts) == 0:
-            return None
+    ) -> torch.Tensor:
         values = []
         descriptor_indices = range(self.num_layers) if self.use_alllayer else [-1]
         for readout, descriptor_index in zip(readouts, descriptor_indices):
@@ -126,20 +124,22 @@ class TACELES(torch.nn.Module):
                 self.num_fidelities,
                 irrep_dim,
             )
-            local_output = output.index_select(0, atom_indices)
-            local_fidelity = node_fidelity.index_select(0, atom_indices)
+            local_output = output.index_select(0, num_atoms_arange)
+            local_fidelity = node_fidelity.index_select(0, num_atoms_arange)
             local_indices = torch.arange(
-                atom_indices.numel(), device=atom_indices.device, dtype=torch.int64
+                num_atoms_arange.numel(),
+                device=num_atoms_arange.device,
+                dtype=torch.int64,
             )
             values.append(local_output[local_indices, local_fidelity])
         output = torch.stack(values, dim=0).sum(dim=0)
         return output.squeeze(-1) if irrep_dim == 1 else output
 
-    def _readout_sources(
+    def _readout_latent_quantities(
         self,
         descriptors: List[torch.Tensor],
         node_fidelity: torch.Tensor,
-        atom_indices: torch.Tensor,
+        num_atoms_arange: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
         Optional[torch.Tensor],
@@ -148,48 +148,74 @@ class TACELES(torch.nn.Module):
         Optional[torch.Tensor],
     ]:
         latent_charges = self._sum_readouts(
-            self.charge_readouts, descriptors, atom_indices, node_fidelity, 1
+            self.latent_charges_readouts,
+            descriptors,
+            num_atoms_arange,
+            node_fidelity,
+            1,
         )
-        latent_charges = latent_charges * self.les.output_scaling_factor
+        latent_charges = latent_charges * self.scale["latent_charges"]
 
-        latent_dipoles = self._sum_readouts(
-            self.dipole_readouts, descriptors, atom_indices, node_fidelity, 3
-        )
-        if latent_dipoles is not None:
-            latent_dipoles = latent_dipoles * self.les.output_scaling_factor
+        latent_dipoles = None
+        if hasattr(self, "latent_dipoles_readouts"):
+            latent_dipoles = self._sum_readouts(
+                self.latent_dipoles_readouts,
+                descriptors,
+                num_atoms_arange,
+                node_fidelity,
+                3,
+            )
+            latent_dipoles = latent_dipoles * self.scale["latent_dipoles"]
 
-        latent_quads = self._sum_readouts(
-            self.quad_readouts, descriptors, atom_indices, node_fidelity, 5
-        )
-        if latent_quads is not None:
-            latent_quads = self.quad_basis_change(
+        latent_quads = None
+        if hasattr(self, "latent_quads_readouts"):
+            latent_quads = self._sum_readouts(
+                self.latent_quads_readouts,
+                descriptors,
+                num_atoms_arange,
+                node_fidelity,
+                5,
+            )
+            latent_quads = self.latent_quads_basis_change(
                 latent_quads.new_zeros(latent_quads.shape[0]), latent_quads
             )
-            latent_quads = latent_quads * self.les.output_scaling_factor
+            latent_quads = latent_quads * self.scale["latent_quads"]
 
-        latent_kappas = self._sum_readouts(
-            self.kappa_readouts, descriptors, atom_indices, node_fidelity, 1
-        )
-        if latent_kappas is not None:
-            latent_kappas = latent_kappas * self.kappa_scale
-            if self.make_kappa_positive:
+        latent_kappas = None
+        if hasattr(self, "latent_kappas_readouts"):
+            latent_kappas = self._sum_readouts(
+                self.latent_kappas_readouts,
+                descriptors,
+                num_atoms_arange,
+                node_fidelity,
+                1,
+            )
+            latent_kappas = latent_kappas * self.scale["latent_kappas"]
+            if self.make_latent_kappas_positive:
                 latent_kappas = latent_kappas.square()
 
-        latent_alpha_scalar = self._sum_readouts(
-            self.alpha_scalar_readouts, descriptors, atom_indices, node_fidelity, 1
-        )
-        latent_alpha_tensor = self._sum_readouts(
-            self.alpha_tensor_readouts, descriptors, atom_indices, node_fidelity, 5
-        )
-        if latent_alpha_tensor is not None:
-            latent_alphas = self.alpha_basis_change(
-                latent_alpha_scalar, latent_alpha_tensor
+        latent_alphas = None
+        if hasattr(self, "latent_alphas_readout0s"):
+            latent_alphas = self._sum_readouts(
+                self.latent_alphas_readout0s,
+                descriptors,
+                num_atoms_arange,
+                node_fidelity,
+                1,
             )
-        else:
-            latent_alphas = latent_alpha_scalar
-        if latent_alphas is not None:
-            latent_alphas = latent_alphas * self.alpha_scale
-            if self.make_alpha_positive:
+            if hasattr(self, "latent_alphas_readout2s"):
+                latent_alpha2 = self._sum_readouts(
+                    self.latent_alphas_readout2s,
+                    descriptors,
+                    num_atoms_arange,
+                    node_fidelity,
+                    5,
+                )
+                latent_alphas = self.latent_alphas_basis_change(
+                    latent_alphas, latent_alpha2
+                )
+            latent_alphas = latent_alphas * self.scale["latent_alphas"]
+            if self.make_latent_alphas_positive:
                 if latent_alphas.ndim == 1:
                     latent_alphas = latent_alphas.square()
                 else:
@@ -225,12 +251,12 @@ class TACELES(torch.nn.Module):
         latent_alphas: Optional[torch.Tensor],
         latent_kappas: Optional[torch.Tensor],
         positions: torch.Tensor,
-        cell: torch.Tensor,
+        lattice: torch.Tensor,
         batch: torch.Tensor,
         external_field: Optional[torch.Tensor],
     ) -> Dict[str, Optional[torch.Tensor]]:
         common = self._les_options()
-        if external_field is None or external_field.ndim == 1:
+        if external_field is None or not self.batch_external_field:
             return self._solve(
                 atomic_numbers=atomic_numbers,
                 latent_charges=latent_charges,
@@ -239,35 +265,16 @@ class TACELES(torch.nn.Module):
                 latent_alphas=latent_alphas,
                 latent_kappas=latent_kappas,
                 positions=positions,
-                cell=cell,
+                cell=lattice,
                 batch=batch,
-                e_ext=external_field,
-                **common,
-            )
-
-        if external_field.ndim != 2 or external_field.shape != (cell.shape[0], 3):
-            raise ValueError(
-                "electric_field must have shape [3] or [num_graphs, 3] for LES"
-            )
-        if torch.equal(external_field, external_field[:1].expand_as(external_field)):
-            return self._solve(
-                atomic_numbers=atomic_numbers,
-                latent_charges=latent_charges,
-                latent_dipoles=latent_dipoles,
-                latent_quads=latent_quads,
-                latent_alphas=latent_alphas,
-                latent_kappas=latent_kappas,
-                positions=positions,
-                cell=cell,
-                batch=batch,
-                e_ext=external_field[0],
+                e_ext=None if external_field is None else external_field[0],
                 **common,
             )
 
         split_common = dict(common)
         split_common["compute_bec"] = False
         graph_results: List[tuple[torch.Tensor, Dict[str, Optional[torch.Tensor]]]] = []
-        for graph_index in range(cell.shape[0]):
+        for graph_index in range(lattice.shape[0]):
             mask = batch == graph_index
             local_batch = torch.zeros(
                 int(mask.sum()), device=batch.device, dtype=torch.int64
@@ -286,7 +293,7 @@ class TACELES(torch.nn.Module):
                     latent_kappas[mask] if latent_kappas is not None else None
                 ),
                 positions=positions[mask],
-                cell=cell[graph_index : graph_index + 1],
+                cell=lattice[graph_index : graph_index + 1],
                 batch=local_batch,
                 e_ext=external_field[graph_index],
                 **split_common,
@@ -323,7 +330,7 @@ class TACELES(torch.nn.Module):
                 q=output["latent_charges"],
                 u=output["latent_dipoles"],
                 r=positions,
-                cell=cell,
+                cell=lattice,
                 batch=batch,
                 output_index=common["bec_output_index"],
             )
@@ -334,9 +341,9 @@ class TACELES(torch.nn.Module):
         *,
         descriptors: List[torch.Tensor],
         node_fidelity: torch.Tensor,
-        atom_indices: torch.Tensor,
+        num_atoms_arange: torch.Tensor,
         positions: torch.Tensor,
-        cell: torch.Tensor,
+        lattice: torch.Tensor,
         batch: torch.Tensor,
         atomic_numbers: torch.Tensor,
         external_field: Optional[torch.Tensor] = None,
@@ -348,20 +355,22 @@ class TACELES(torch.nn.Module):
             latent_quads,
             latent_alphas,
             latent_kappas,
-        ) = self._readout_sources(descriptors, node_fidelity, atom_indices)
-        positions = positions.index_select(0, atom_indices)
-        batch = batch.index_select(0, atom_indices)
-        atomic_numbers = atomic_numbers.index_select(0, atom_indices)
+        ) = self._readout_latent_quantities(
+            descriptors, node_fidelity, num_atoms_arange
+        )
+        positions = positions.index_select(0, num_atoms_arange)
+        batch = batch.index_select(0, num_atoms_arange)
+        atomic_numbers = atomic_numbers.index_select(0, num_atoms_arange)
         if (
             bool(getattr(self.les, "compute_bec", False))
             and latent_dipoles is not None
         ):
             latent_dipoles = latent_dipoles + 0.0 * positions.sum()
 
-        cell_les = cell.clone()
+        lattice_les = lattice.clone()
         if pbc is not None:
             nonperiodic = ~pbc.to(torch.bool).any(dim=-1)
-            cell_les[nonperiodic] = 0.0
+            lattice_les[nonperiodic] = 0.0
 
         result = self._run_les(
             atomic_numbers=atomic_numbers,
@@ -371,7 +380,7 @@ class TACELES(torch.nn.Module):
             latent_alphas=latent_alphas,
             latent_kappas=latent_kappas,
             positions=positions,
-            cell=cell_les,
+            lattice=lattice_les,
             batch=batch,
             external_field=external_field,
         )
@@ -379,8 +388,8 @@ class TACELES(torch.nn.Module):
             "les_energy": result["E_lr"],
             "les_latent_charges": result["latent_charges"],
             "les_latent_dipoles": result["latent_dipoles"],
-            "les_latent_quadrupoles": result["latent_quads"],
-            "les_latent_polarizabilities": result["latent_alphas"],
+            "les_latent_quads": result["latent_quads"],
+            "les_latent_alphas": result["latent_alphas"],
             "les_latent_kappas": latent_kappas,
             "les_born_effective_charges": result["BEC"],
         }

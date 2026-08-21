@@ -137,21 +137,17 @@ Example
         les: # for introduction to the arguments, see the official repo: https://github.com/ChengUCB/les
             enable: false
             les_arguments:
-            output_scaling_factor: 0.1
-            sigma: 1.0
-            dl: 2.0
-            remove_self_interaction: true
-            remove_mean: true
-            epsilon_factor: 1.0
-            use_dipole: false
-            use_quad: false
-            use_induced_charge: false
-            use_induced_dipole: false
-            use_anisotropic_polarizability: false
-            make_alpha_positive: false
-            make_kappa_positive: false
-            kappa_scale: 0.01
-            alpha_scale: 0.01
+              use_dipole: false
+              use_quad: false
+              use_induced_charge: false
+              use_induced_dipole: false
+              use_anisotropic_polarizability: false
+              sigma: 1.0
+              dl: 2.0
+              remove_self_interaction: true
+              is_periodic: true # [null, true, false]
+              N_max: 10
+              use_epsilon_r_scaling: false
 
         universal_embedding: 
         charges:

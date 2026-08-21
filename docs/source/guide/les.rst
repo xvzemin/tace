@@ -4,16 +4,32 @@ TACE-LES
 Using LES in TACE
 -----------------
 
+A configuration is specified by the atomic positions :math:`\boldsymbol r_i`,
+elements :math:`z_i`, and magnetic moments :math:`\boldsymbol m_i`:
+
+.. math::
+
+   \mathcal X
+   =\left\{
+      \boldsymbol r_i,z_i,\boldsymbol m_i
+    \right\}_{i=1}^{N}.
+
+
 TACE-LES augments the short-range TACE energy with long-range interactions
-computed by `Latent Ewald Summation <https://github.com/ChengUCB/les>`_ :
+computed by `Latent Ewald Summation <https://github.com/ChengUCB/les>`_.
+
+
+The LES contribution additionally receives the atomic positions together with
+the latent quantities predicted by TACE:
 
 .. math::
 
    E(\mathcal X)
    =E_{\mathrm{TACE}}^{\mathrm{sr}}(\mathcal X)
    +E_{\mathrm{LES}}^{\mathrm{lr}}\!\left(
-       \{q_i,\boldsymbol u_i,\boldsymbol Q_i,\kappa_i,
-       \boldsymbol\alpha_i,\boldsymbol r_i\}
+       \left\{\boldsymbol r_i\right\}_{i=1}^{N}\,;
+       \left\{q_i,\boldsymbol u_i,\boldsymbol Q_i,\kappa_i,
+       \boldsymbol\alpha_i\right\}_{i=1}^{N}
      \right).
 
 
@@ -24,8 +40,43 @@ Installation
 
    pip install git+https://github.com/ChengUCB/les.git@v0.2.0
 
-Supported latent sources
-~~~~~~~~~~~~~~~~~~~~~~~~
+Training configuration
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+   loss:
+     loss_property: [energy, forces, stress] # at least energy
+
+   model:
+     config:
+       # Natural parity already contains the 1o and 2e needed by LES.
+       parity: false
+
+      long_range:
+        les: # for introduction to the arguments, see the official repo: https://github.com/ChengUCB/les
+          enable: false
+          les_arguments:
+            # Latent quantities predicted by TACE and evaluated by LES.
+            use_dipole: false
+            use_quad: false
+            use_induced_charge: false
+            use_induced_dipole: false
+            use_anisotropic_polarizability: false
+
+            # Ewald backend. See https://github.com/ChengUCB/les for all options.
+            sigma: 1.0
+            dl: 2.0
+            remove_self_interaction: true
+            # null supports mixed boundary conditions but evaluates structures
+            # individually. true/false enables the vectorized fixed-grid path.
+            is_periodic: true # [null, true, false]
+            N_max: 10
+            use_epsilon_r_scaling: false
+
+
+Latent quantities used in TACE-LES
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. list-table::
    :header-rows: 1
@@ -40,91 +91,16 @@ Supported latent sources
    * - ``les_latent_dipoles``
      - ``1o``
      - Permanent dipole plus an optional induced-dipole contribution.
-   * - ``les_latent_quadrupoles``
+   * - ``les_latent_quads``
      - ``2e``
      - Permanent symmetric traceless Cartesian quadrupole.
    * - ``les_latent_kappas``
      - ``0e``
      - Local induced-charge response coefficient.
-   * - ``les_latent_polarizabilities``
+   * - ``les_latent_alphas``
      - ``0e`` or ``0e+2e``
-     - Per-atom scalar or symmetric Cartesian polarizability used to produce
+     - Per-atom scalar or polarizability used to produce
        the induced dipole.
-
-
-Complete configuration
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: yaml
-
-   loss:
-     loss_property: [energy, forces]
-
-   model:
-     config:
-       # Natural parity already contains the 1o and 2e needed by LES.
-       parity: false
-
-       long_range:
-         les:
-           enable: true
-           les_arguments:
-             # Scale applied by TACE to permanent q, u, and Q readouts.
-             output_scaling_factor: 0.1
-
-             # Ewald backend.
-             sigma: 1.0
-             dl: 2.0
-             remove_self_interaction: true
-             is_periodic: true # change if needed
-             N_max: 10
-             use_epsilon_r_scaling: false
-
-             # BEC construction.
-             remove_mean: true
-             epsilon_factor: 1.0
-
-             # Optional element-dependent upstream baselines.
-             use_fixed_atomic_charges: false
-             fixed_atomic_charges_scaling_factor: 0.5
-             use_atomic_alpha: false
-
-             # Permanent latent multipoles predicted by TACE.
-             use_dipole: false
-             use_quad: false
-
-             # Non-self-consistent induced response predicted by TACE.
-             use_induced_charge: false
-             use_induced_dipole: false
-             use_anisotropic_polarizability: false
-
-             # Constraints and scales applied by the TACE readouts.
-             make_kappa_positive: false
-             make_alpha_positive: false
-             kappa_scale: 0.01
-             alpha_scale: 0.01
-
-Born effective charges
-~~~~~~~~~~~~~~~~~~~~~~
-
-BEC is an evaluation-time derived response and is not normally used as a
-training target. Load a normal eager model, enable BEC on the registered
-upstream LES instance, and then run the usual TACE forward pass:
-
-.. code-block:: python
-
-   from tace.lightning import load_tace
-
-   model = load_tace("model.pt", device="cuda", dtype="float64")
-   model.eval()
-
-   upstream_les = model.readout_fn.les.les
-   upstream_les.compute_bec = True
-   upstream_les.bec_output_index = None
-
-   output = model(batch)
-   bec = output["les_born_effective_charges"]
-
 
 Outputs
 ~~~~~~~
@@ -144,9 +120,9 @@ An enabled TACE-LES model adds these entries to the normal output dictionary:
      - Per-atom permanent plus optional induced latent charge.
    * - ``les_latent_dipoles``
      - Per-atom permanent plus optional induced latent dipole.
-   * - ``les_latent_quadrupoles``
+   * - ``les_latent_quads``
      - Per-atom Cartesian quadrupole supplied to LES.
-   * - ``les_latent_polarizabilities``
+   * - ``les_latent_alphas``
      - Per-atom scalar or Cartesian polarizability supplied to LES.
    * - ``les_latent_kappas``
      - Per-atom induced-charge coefficient supplied to LES.
@@ -156,18 +132,38 @@ An enabled TACE-LES model adds these entries to the normal output dictionary:
 ``node_energy`` remains only the short-range atomic contribution.
 A global Ewald energy has no unique atomic partition in this interface.
 
+Electric fields are supplied with shape ``[num_graphs, 3]``. By default,
+``batch_external_field`` is ``True`` and each graph uses its own field. Set it
+to ``False`` when every graph shares one field; TACE-LES then uses the first
+row and evaluates the batch in parallel:
+
+.. code-block:: python
+
+  model.readout_fn.les.batch_external_field = False
+
+If you need to export Born effective charges (BECs) using LES during the 
+``val/test`` stage, you can access the LES module through interfaces 
+such as ASE or TorchSim and modify the BEC-related parameters within the module.
+
+.. code-block:: python
+
+  from tace.lightning import load_tace
+
+  model = load_tace("model.pt", device="cuda")
+  model.eval()
+
+  upstream_les = model.readout_fn.les.les
+  upstream_les.compute_bec = True
+  upstream_les.bec_output_index = None
+
+  output = model(batch)
+  bec = output["les_born_effective_charges"]
 
 Compatibility in TACE
 ---------------------
 
 * ``TACE_USE_COMPILE`` and current AOTI export paths do not support LES because
   the external global solver is not part of the flattened TACE graph.
-* Select ``sigma``, ``dl``, ``N_max``, boundary conditions, and self-interaction
-  treatment consistently with the upstream LES recommendations and the
-  intended physical system.
-* ``is_periodic=true`` or ``false`` fixes one boundary condition for the entire
-  vectorized LES instance. Use ``null`` for batches that mix periodic and
-  non-periodic structures.
 
 
 How LES works
@@ -421,4 +417,3 @@ Two limitations are important:
   explicit metallic-boundary model is the current remedy.
 * Forces are autograd derivatives of a **global** energy. Distributing force
   evaluation across GPUs or MPI ranks is therefore not straightforward.
-

@@ -40,9 +40,9 @@ class DirectVirials(_SymmetricRankTwoBasisChange):
     """Convert direct virial irreps to a Cartesian tensor."""
 
 
-class LESQuadrupoles(_SymmetricRankTwoBasisChange):
-    """Convert LES latent quadrupole irreps to a Cartesian tensor."""
+class LESLatentQuads(_SymmetricRankTwoBasisChange):
+    """Convert LES ``latent_quads`` irreps to a Cartesian tensor."""
 
 
-class LESPolarizability(_SymmetricRankTwoBasisChange):
-    """Convert LES latent polarizability irreps to a Cartesian tensor."""
+class LESLatentAlphas(_SymmetricRankTwoBasisChange):
+    """Convert LES ``latent_alphas`` irreps to a Cartesian tensor."""
