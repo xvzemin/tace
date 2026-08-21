@@ -26,8 +26,6 @@ and `Hydra <https://hydra.cc/>`_.
    acceleration.rst
    foundation.rst
    finetune.rst
-
-   les.rst
    ase.rst
    lammps.rst
    openmm.rst
@@ -35,6 +33,7 @@ and `Hydra <https://hydra.cc/>`_.
    nvalchemi.rst
    torchSim.rst
    scripts.rst
+   les.rst
    soc.rst
    magnetic_relax.rst
    qeq.rst

@@ -1,4 +1,4 @@
-TACE-QEq (Under reconstruction)
+TACE-QEq (Under Reconstruction)
 ===============================
 
 TACE-QEq predicts atomic charges with the Lagrangian charge-equilibration
