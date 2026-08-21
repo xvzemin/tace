@@ -1,4 +1,7 @@
-"""Real irreducible representations and layout helpers for complete O(2)."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import re
 from dataclasses import dataclass

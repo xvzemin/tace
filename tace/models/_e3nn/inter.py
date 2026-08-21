@@ -17,7 +17,7 @@ from ..linear import e3nnLinear
 from ..mlp import MLP, ScaledSigmoid, ScaledSiLU, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct
-from .archive import OAM20260705Convolution
+from .legacy import OAM20260705Convolution
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2MagneticScatterLinear, O2ScatterLinear

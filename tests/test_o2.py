@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 from e3nn import o3
@@ -37,6 +41,28 @@ from tace.models.radial import j0SincSphericalBesselBasis, j0SphericalBesselBasi
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+def test_o2_import_does_not_load_other_tace_model_modules():
+    code = """
+import sys
+import tace.models.o2
+
+unexpected = sorted(
+    name
+    for name in sys.modules
+    if name.startswith("tace.models.")
+    and name != "tace.models.o2"
+    and not name.startswith("tace.models.o2.")
+)
+if unexpected:
+    raise SystemExit("unexpected TACE model imports: " + ", ".join(unexpected))
+"""
+    subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
 
 
 def test_j0_sinc_preserves_nonzero_values_and_defines_origin():

@@ -1,10 +1,44 @@
-"""Layout conversion between global O(3) and contiguous local O(2)."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import torch
 from e3nn import o3
 
-from ..layout import LayoutTransform
 from .irreps import Irrep, Irreps, restrict_o3_irrep
+
+
+class _O3LayoutTransform(torch.nn.Module):
+    """Convert MulIr to IrMul Layout."""
+
+    def __init__(self, irreps: o3.Irreps) -> None:
+        super().__init__()
+        self.irreps = o3.Irreps(irreps)
+        self.multiplicities = tuple(multiplicity for multiplicity, _ in self.irreps)
+        self.dimensions = tuple(irrep.dim for _, irrep in self.irreps)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        offset = 0
+        blocks = []
+        batch = input.size(0)
+        for multiplicity, dimension in zip(self.multiplicities, self.dimensions):
+            width = multiplicity * dimension
+            block = input[:, offset : offset + width]
+            blocks.append(block.reshape(batch, multiplicity, dimension))
+            offset += width
+        return torch.cat(blocks, dim=-1).transpose(-1, -2).contiguous()
+
+    def inverse(self, input: torch.Tensor) -> torch.Tensor:
+        input = input.transpose(-1, -2).contiguous()
+        offset = 0
+        blocks = []
+        batch = input.size(0)
+        for dimension in self.dimensions:
+            block = input[:, :, offset : offset + dimension]
+            blocks.append(block.reshape(batch, -1))
+            offset += dimension
+        return torch.cat(blocks, dim=-1)
 
 
 def _restrict_irreps(irreps: o3.Irreps) -> Irreps:
@@ -30,7 +64,7 @@ class O3O2Layout(torch.nn.Module):
         if self.irreps.lmax > lmax:
             raise ValueError("lmax must cover every O(3) irrep.")
         self.local_irreps = _restrict_irreps(self.irreps)
-        self.layout = LayoutTransform(self.irreps)
+        self.layout = _O3LayoutTransform(self.irreps)
 
         group_slices = []
         offset = 0

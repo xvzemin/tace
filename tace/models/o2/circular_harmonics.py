@@ -1,4 +1,7 @@
-"""Torch-native circular harmonics for two-dimensional vectors."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import torch
 

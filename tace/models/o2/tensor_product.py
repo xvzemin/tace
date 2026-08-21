@@ -1,4 +1,7 @@
-"""Torch-native tensor products for complete real O(2) representations."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import math
 from collections import Counter

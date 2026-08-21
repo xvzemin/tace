@@ -1,6 +1,8 @@
-"""Asymmetric many-body contractions for complete real O(2) features."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
-import math
 from dataclasses import dataclass
 from typing import Sequence
 

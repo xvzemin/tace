@@ -1,4 +1,7 @@
-"""Equivariant gated nonlinearities for complete real O(2) features."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 from typing import Sequence, Union
 
