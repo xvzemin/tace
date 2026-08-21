@@ -1,5 +1,5 @@
-TACE-QEq
-========
+TACE-QEq (Under reconstruction)
+===============================
 
 TACE-QEq predicts atomic charges with the Lagrangian charge-equilibration
 readout while enforcing the total charge of each structure. Enable it by

@@ -26,14 +26,16 @@ and `Hydra <https://hydra.cc/>`_.
    acceleration.rst
    foundation.rst
    finetune.rst
-   qeq.rst
+
    les.rst
-   soc.rst
    ase.rst
-   magnetic_relax.rst
    lammps.rst
    openmm.rst
    uspex.rst
    nvalchemi.rst
    torchSim.rst
    scripts.rst
+   soc.rst
+   magnetic_relax.rst
+   qeq.rst
+   scf.rst

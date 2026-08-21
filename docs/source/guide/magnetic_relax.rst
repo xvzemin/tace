@@ -1,5 +1,5 @@
-Magnetic Relaxation
-===================
+Magnetic Relaxation (Experimental)
+==================================
 
 TACE provides a development-stage ASE optimizer for self-consistent magnetic
 and structural relaxation.  The workflow is fixed rather than a simultaneous
