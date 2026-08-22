@@ -147,6 +147,32 @@ def test_o3_o2_layout_mmax_restricts_local_blocks():
     assert layout.inverse(blocks, wigner_inv).shape == input.shape
 
 
+def test_o3_o2_layout_inverse_rescales_shared_higher_mmax_wigner():
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        irreps = o3.Irreps("2x0e+2x1o+2x2e+2x3o")
+        layout = o2.O3O2Layout(irreps, lmax=3, mmax=0).to(device=DEVICE)
+        active_wigner = WignerD(0, 3).to(device=DEVICE)
+        shared_wigner = WignerD(3, 3).to(device=DEVICE)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+    edge_vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
+    wigner_active, wigner_inv_active = active_wigner.get_wigner(edge_vectors)
+    wigner_shared, wigner_inv_shared = shared_wigner.get_wigner(edge_vectors)
+    input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+
+    active_blocks = layout(input, wigner_active)
+    shared_blocks = layout(input, wigner_shared)
+    for active_block, shared_block in zip(active_blocks, shared_blocks):
+        torch.testing.assert_close(shared_block, active_block)
+    torch.testing.assert_close(
+        layout.inverse(shared_blocks, wigner_inv_shared),
+        layout.inverse(active_blocks, wigner_inv_active),
+    )
+
+
 def test_o3_o2_layout_repr_shows_irreps_conversion():
     layout = o2.O3O2Layout(
         o3.Irreps("2x0e+2x1o+2x1e+2x2e"),
@@ -1200,6 +1226,7 @@ def test_o2_linear_zero_pads_missing_output_irreps(path_mode):
     )
     weight = torch.randn(*module.weight_shape, dtype=DTYPE, device=DEVICE)
     output = module(input, weight)
+    assert module.path == ((0, 0),)
 
     if path_mode == "uv":
         expected_scalar = torch.matmul(input[:, :1], weight[0])
@@ -1380,12 +1407,14 @@ def _build_o2_interaction(
     angular_max=1,
     mmax=None,
     correlation=1,
+    irreps_in=None,
     scalar_act=None,
     tensor_act=None,
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
 ):
     mmax = angular_max if mmax is None else mmax
+    irreps_in = o3.Irreps("2x0e + 2x1o") if irreps_in is None else irreps_in
     module = O2Interaction(
         layer=0,
         num_layers=1,
@@ -1401,7 +1430,7 @@ def _build_o2_interaction(
         num_radial_basis=4,
         radial_mlp=[8],
         radial_bias=True,
-        irreps_in=o3.Irreps("2x0e + 2x1o"),
+        irreps_in=irreps_in,
         scalar_act=scalar_act,
         tensor_act=tensor_act,
         edge_ace_hidden=None,
@@ -1551,8 +1580,17 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
 
 
 def test_o2_interaction_mmax_restricts_internal_paths():
-    truncated = _build_o2_interaction(angular_max=2, mmax=1)
-    complete = _build_o2_interaction(angular_max=2, mmax=2)
+    irreps_in = o3.Irreps("2x0e+2x1o+2x2e")
+    truncated = _build_o2_interaction(
+        angular_max=2,
+        mmax=1,
+        irreps_in=irreps_in,
+    )
+    complete = _build_o2_interaction(
+        angular_max=2,
+        mmax=2,
+        irreps_in=irreps_in,
+    )
 
     assert truncated.rejector.irreps_out_local.m_max == 1
     assert complete.rejector.irreps_out_local.m_max == 2
@@ -1561,6 +1599,60 @@ def test_o2_interaction_mmax_restricts_internal_paths():
     )
     assert truncated.rejector.linear_down.weight_numel < (
         complete.rejector.linear_down.weight_numel
+    )
+
+
+@pytest.mark.parametrize("improper", [False, True])
+def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper):
+    module = _build_o2_interaction(
+        angular_max=3,
+        mmax=3,
+        irreps_in=o3.Irreps("2x0e"),
+    )
+
+    assert module.rejector.active_mmax == 0
+    assert module.rejector.reshape_in.mmax == 0
+    assert module.rejector.reshape_out.mmax == 0
+    assert module.rejector.irreps_out_local.m_max == 0
+    assert module.rejector.irreps_hidden_local.m_max == 0
+    assert module.rejector.nonlinearity.irreps_out.m_max == 0
+    assert module.rejector.linear_up.irreps_out.m_max == 0
+    assert module.rejector.linear_down.irreps_in.m_max == 0
+    assert module.rejector.linear_down.irreps_out.m_max == 0
+    assert module.rejector.irreps_out.lmax == 3
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_interaction(module, inputs)
+    assert output.isfinite().all()
+
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        rotation = o3.rand_matrix(dtype=DTYPE)
+        if improper:
+            rotation = -rotation
+        input_rotation = module.irreps_in.D_from_matrix(rotation)
+        output_rotation = module.rejector.irreps_out.D_from_matrix(rotation)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    rotation = rotation.to(DEVICE)
+    input_rotation = input_rotation.to(DEVICE)
+    output_rotation = output_rotation.to(DEVICE)
+    rotated_inputs = (
+        inputs[0] @ input_rotation.T,
+        inputs[1],
+        inputs[2],
+        inputs[3] @ rotation.T,
+        inputs[4],
+        inputs[5],
+        inputs[6],
+    )
+    rotated_output = _evaluate_o2_interaction(module, rotated_inputs)
+    torch.testing.assert_close(
+        rotated_output,
+        output @ output_rotation.T,
+        atol=3.0e-10,
+        rtol=3.0e-10,
     )
 
 
@@ -1625,6 +1717,9 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert isinstance(module.rejector.nonlinearity.act_0e, ScaledSiLU)
     assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
     assert isinstance(module.rejector.nonlinearity.act_lm, ScaledSigmoid)
+    assert module.rejector.nonlinearity.irreps_out == (
+        module.num_channel * module.rejector.irreps_hidden_local
+    )
     assert module.rejector.linear_down.path_mode == "uv"
     assert module.rejector.linear_down.internal_weights
     assert not isinstance(module.linear_down, torch.nn.Identity)

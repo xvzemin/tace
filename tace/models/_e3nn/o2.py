@@ -231,8 +231,21 @@ class O2ScatterLinear(torch.nn.Module):
         ):
             raise ValueError("num_head must divide num_channel.")
 
-        self.reshape_in = o2.O3O2Layout(self.irreps_node, lmax, mmax)
-        self.reshape_out = o2.O3O2Layout(self.irreps_out, lmax, mmax)
+        input_lmax = self.irreps_node.lmax
+        if self.extra_node_attrs_irreps is not None:
+            input_lmax = max(input_lmax, self.extra_node_attrs_irreps.lmax)
+        self.active_mmax = min(input_lmax, mmax)
+
+        self.reshape_in = o2.O3O2Layout(
+            self.irreps_node,
+            lmax,
+            self.active_mmax,
+        )
+        self.reshape_out = o2.O3O2Layout(
+            self.irreps_out,
+            lmax,
+            self.active_mmax,
+        )
         input_groups = (
             tuple(self.reshape_in.local_irreps)
             + tuple(self.reshape_in.local_irreps)
@@ -241,7 +254,7 @@ class O2ScatterLinear(torch.nn.Module):
             self.extra_node_attrs_layout = o2.O3O2Layout(
                 self.extra_node_attrs_irreps,
                 lmax,
-                mmax,
+                self.active_mmax,
             )
             input_groups += (
                 tuple(self.extra_node_attrs_layout.local_irreps)
@@ -296,13 +309,25 @@ class O2ScatterLinear(torch.nn.Module):
         else:
             self.asymmetric_contraction = None
             self.contraction_weight_numel = 0
+            self.irreps_hidden_local = o2.Irreps(
+                [
+                    (multiplicity, irrep)
+                    for multiplicity, irrep in self.irreps_out_local
+                    if self.irreps_in_local.count(irrep) > 0
+                ]
+            )
             self.nonlinearity = o2.O2Gate(
-                self.irreps_out_local,
+                num_channel * self.irreps_hidden_local,
                 act_0e=act_0e,
                 act_0o=act_0o,
                 act_lm=act_lm,
             )
-            self.projection_irreps = self.nonlinearity.irreps_in
+            self.projection_irreps = o2.Irreps(
+                [
+                    (multiplicity // num_channel, irrep)
+                    for multiplicity, irrep in self.nonlinearity.irreps_in
+                ]
+            )
             self.linear_up = o2.Linear(
                 self.irreps_in_local,
                 self.projection_irreps,
@@ -311,7 +336,11 @@ class O2ScatterLinear(torch.nn.Module):
                 bias=False,
             )
         self.linear_down = o2.Linear(
-            self.irreps_out_local,
+            (
+                self.irreps_out_local
+                if self.use_asymmetric_contraction
+                else self.irreps_hidden_local
+            ),
             self.irreps_out_local,
             num_channel,
             path_mode="uv",

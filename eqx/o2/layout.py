@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import math
 from typing import Optional
 
 import torch
@@ -263,6 +264,24 @@ class O3O2Layout(torch.nn.Module):
             f"{self.channels * self.local_irreps})(mmax={self.mmax})"
         )
 
+    def _wigner_mmax(self, wigner_inv: torch.Tensor) -> int:
+        if wigner_inv.size(-2) != (self.lmax + 1) ** 2:
+            raise ValueError("Wigner inverse has an incompatible global dimension.")
+        local_dim = wigner_inv.size(-1)
+        for wigner_mmax in range(self.mmax, self.lmax + 1):
+            expected = self.lmax + 1 + sum(
+                2 * (self.lmax + 1 - order)
+                for order in range(1, wigner_mmax + 1)
+            )
+            if local_dim == expected:
+                return wigner_mmax
+        raise ValueError("Wigner inverse has an incompatible local dimension.")
+
+    def _inverse_scale(self, degree: int, wigner_mmax: int) -> float:
+        source_components = 2 * min(degree, wigner_mmax) + 1
+        retained_components = 2 * min(degree, self.mmax) + 1
+        return math.sqrt(source_components / retained_components)
+
     def _rotate_towers(
         self,
         input: torch.Tensor,
@@ -360,6 +379,7 @@ class O3O2Layout(torch.nn.Module):
         if len(set(block_channels)) != 1:
             raise ValueError("Grouped O(2) blocks must share channel counts.")
 
+        wigner_mmax = self._wigner_mmax(wigner_inv)
         output_by_group = [None] * len(self.irreps)
         for tower_index, (groups, inverse_specs) in enumerate(
             zip(self.tower_groups, self.tower_inverse_specs)
@@ -387,8 +407,11 @@ class O3O2Layout(torch.nn.Module):
 
             offset = 0
             for group_index in groups:
-                width = self.irreps[group_index][1].dim
-                output_by_group[group_index] = tower_output[:, offset : offset + width]
+                irrep = self.irreps[group_index][1]
+                width = irrep.dim
+                output_by_group[group_index] = tower_output[
+                    :, offset : offset + width
+                ] * self._inverse_scale(irrep.l, wigner_mmax)
                 offset += width
         return self.layout.inverse(torch.cat(output_by_group, dim=1))
 
@@ -414,6 +437,7 @@ class O3O2Layout(torch.nn.Module):
             if multiplicity != len(sources):
                 raise RuntimeError("Local O(2) multiplicity resolution failed.")
 
+        wigner_mmax = self._wigner_mmax(wigner_inv)
         output_by_group = [None] * len(self.irreps)
         for tower_index, (groups, inverse_specs) in enumerate(
             zip(self.tower_groups, self.tower_inverse_specs)
@@ -440,7 +464,10 @@ class O3O2Layout(torch.nn.Module):
 
             offset = 0
             for group_index in groups:
-                width = self.irreps[group_index][1].dim
-                output_by_group[group_index] = tower_output[:, offset : offset + width]
+                irrep = self.irreps[group_index][1]
+                width = irrep.dim
+                output_by_group[group_index] = tower_output[
+                    :, offset : offset + width
+                ] * self._inverse_scale(irrep.l, wigner_mmax)
                 offset += width
         return self.layout.inverse(torch.cat(output_by_group, dim=1))
