@@ -244,7 +244,7 @@ def test_o3_o2_layout_validates_mmax():
 
 @pytest.mark.parametrize("lmax,mmax", [(0, 0), (2, 0), (3, 1), (4, 2), (4, 4)])
 def test_o2_wigner_layout_matches_legacy_so2_mapping(lmax, mmax):
-    from tace.models._e3nn.legacy.oam_2026_07_05 import (
+    from tace.models._e3nn.oam_2026_07_05 import (
         CoefficientMappingModule as LegacyCoefficientMappingModule,
     )
 

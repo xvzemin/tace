@@ -17,7 +17,7 @@ from ..linear import e3nnLinear
 from ..mlp import MLP, ScaledSigmoid, ScaledSiLU, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct
-from .legacy import OAM20260705Convolution
+from .legacy_so2 import uvSO2Convolution
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2MagneticScatterLinear, O2ScatterLinear
@@ -437,7 +437,7 @@ class O3GeneralizedWigner6jInteraction(O3CgtpInteraction, abc.ABC):
         )
 
 
-class OAM20260705Interaction(O3CgtpInteraction):
+class uvSO2Interaction(O3CgtpInteraction):
     """
     An interaction module based on uvSO2Linear,
     Edge Cluster Expansion and Radial Rotary Attention.
@@ -469,7 +469,7 @@ class OAM20260705Interaction(O3CgtpInteraction):
         edge_act = self.edge_nonlinear.split("_")[1]
         scalar_act = self.scalar_act or edge_act
         tensor_act = self.tensor_act or edge_act
-        return OAM20260705Convolution(
+        return uvSO2Convolution(
             mmax=self.mmax,
             lmax=self.lmax,
             num_channel=self.num_channel,
@@ -774,14 +774,23 @@ class O2MagneticInteraction(O2Interaction):
 
 INTERACTION: Dict[str, type[Interaction]] = {
     "cgtp": O3CgtpInteraction,
-    "so2": OAM20260705Interaction,
+    "so2": uvSO2Interaction,
+    # below in dev, not stable
     "o2": O2Interaction,
     "o3_w6j_mag": O3Wigner6jMagneticInteraction,
     "o2_mag": O2MagneticInteraction,
-
-    # TODO, legacy
-    "normal": O3CgtpInteraction,
-    "spectral": O3CgtpInteraction,
-    "uv_so2": OAM20260705Interaction,
-    "attn": OAM20260705Interaction,
 }
+
+interaction_aliases = {
+    "normal": "cgtp",
+    "spectral": "cgtp",
+    "uv_so2": "so2",
+    "attn": "so2",
+}
+
+INTERACTION.update(
+    {
+        alias: INTERACTION[target]
+        for alias, target in interaction_aliases.items()
+    }
+)

@@ -9,10 +9,10 @@ from typing import Union
 import torch
 
 from tace.utils.torch_scatter import scatter_sum
-from ...layout import LayoutTransform
-from ...linear import torchLinear
-from ...softmax import GraphSoftmax
-from ..paths import satisfy
+from ..layout import LayoutTransform
+from ..linear import torchLinear
+from ..softmax import GraphSoftmax
+from .paths import satisfy
 
 
 def so2_expand_index(mmax: int, lmax: int, start: int = 0) -> tuple[int, torch.Tensor]:
@@ -698,7 +698,7 @@ class ComplexProductBasis(torch.nn.Module):
         return self.tp(x, y, ws)
 
 
-class OAM20260705Convolution(torch.nn.Module):
+class uvSO2Convolution(torch.nn.Module):
     def __init__(
         self,
         mmax: int,
