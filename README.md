@@ -179,6 +179,26 @@ ruff check tace
 ruff format --check tace
 ```
 
+## Community
+
+For questions, usage discussions, and community updates, you can join the TACE
+community through either QQ or Discord by scanning the corresponding QR code.
+
+<table>
+  <tr>
+    <th>QQ</th>
+    <th>Discord</th>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="fig/qq.jpg" alt="TACE QQ QR code" width="260">
+    </td>
+    <td align="center">
+      <img src="fig/discord.jpg" alt="TACE Discord QR code" width="260">
+    </td>
+  </tr>
+</table>
+
 ## License
 
 The TACE code is published and distributed under the MIT License.
