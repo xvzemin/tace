@@ -36,11 +36,19 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         self.channels = channels
         self.num_head = num_head
         self.channels_per_head = channels // num_head
-        self.qk_proj = o2.Linear(
+        self.q_proj = o2.Linear(
             self.irreps,
             self.irreps,
             channels,
-            2 * channels,
+            channels,
+            path_mode="uv",
+            bias=False,
+        )
+        self.k_proj = o2.Linear(
+            self.irreps,
+            self.irreps,
+            channels,
+            channels,
             path_mode="uv",
             bias=False,
         )
@@ -63,46 +71,9 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             self.irreps
         ):
             raise ValueError("Expected one source and target block per O2 group.")
-        num_edges = source_blocks[0].size(0)
-        combined_blocks = tuple(
-            torch.cat((target, source), dim=0)
-            for source, target in zip(source_blocks, target_blocks)
-        )
-        projected_blocks = self.qk_proj.forward_grouped(combined_blocks)
-        query_blocks = []
-        key_blocks = []
-        for projected, (multiplicity, irrep) in zip(projected_blocks, self.irreps):
-            target_projected, source_projected = projected.split(num_edges, dim=0)
-            leading_shape = target_projected.shape[:-2]
-            target_projected = target_projected.reshape(
-                *leading_shape,
-                irrep.dim,
-                multiplicity,
-                2 * self.channels,
-            )
-            source_projected = source_projected.reshape(
-                *leading_shape,
-                irrep.dim,
-                multiplicity,
-                2 * self.channels,
-            )
-            query = target_projected[..., : self.channels]
-            key = source_projected[..., self.channels :]
-            query_blocks.append(
-                query.reshape(
-                    *leading_shape,
-                    irrep.dim,
-                    multiplicity * self.channels,
-                )
-            )
-            key_blocks.append(
-                key.reshape(
-                    *leading_shape,
-                    irrep.dim,
-                    multiplicity * self.channels,
-                )
-            )
-        return tuple(query_blocks), tuple(key_blocks)
+        query_blocks = self.q_proj.forward_grouped(target_blocks)
+        key_blocks = self.k_proj.forward_grouped(source_blocks)
+        return query_blocks, key_blocks
 
     def forward(
         self,
@@ -142,9 +113,8 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         radial_scale, radial_shift = self.radial_scale_shift(
             edge_radial_basis
         ).chunk(2, dim=-1)
-        score = (
-            score * self.scale * torch.sigmoid(radial_scale) + radial_shift
-        )
+        radial_scale = 2.0 * torch.sigmoid(radial_scale)
+        score = score * self.scale * radial_scale + radial_shift
 
         attention = self.graph_softmax(
             score,
@@ -182,7 +152,8 @@ class O2ScatterLinear(torch.nn.Module):
     linear also generates auxiliary ``0e`` gates for the positive-order
     representations. Those gates use the tensor activation. The optional
     attention uses real O2-invariant query-key products and a zero-initialized
-    radial scale-and-shift projection; it never applies a complex phase.
+    radial scale-and-shift projection whose sigmoid scale starts at one; it
+    never applies a complex phase.
     Radial weights never contain the cutoff. Without attention, the cutoff is
     applied to the global O3 edge message; with attention, it is applied before
     the inverse local-to-global transformation.

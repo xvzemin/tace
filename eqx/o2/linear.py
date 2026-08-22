@@ -30,8 +30,7 @@ class Linear(torch.nn.Module):
             uses one channel-wise weight per path.
         internal_weights: Store trainable weights in the module. If ``False``,
             weights must be passed to :meth:`forward`.
-        bias: Add a trainable bias to every output ``0e`` copy. Complete O(2)
-            symmetry forbids bias on ``0o`` and positive-order blocks.
+        bias: Add a trainable bias to every output ``0e`` copy.
         path_norm: Divide paths entering each output irrep copy by the square
             root of their count.
         path: Optional ``(output_index, input_index)`` entries indexing the
@@ -73,6 +72,11 @@ class Linear(torch.nn.Module):
         self.path_mode = path_mode
         self.internal_weights = bool(internal_weights)
         self.path_norm = bool(path_norm)
+        self.alpha = (
+            1.0 / math.sqrt(self.channels_in)
+            if self.path_mode == "uv"
+            else 1.0
+        )
 
         inputs = self.irreps_in.expanded()
         outputs = self.irreps_out.expanded()
@@ -204,8 +208,7 @@ class Linear(torch.nn.Module):
 
     def reset_parameters(self) -> None:
         if self.weight is not None and self.weight.numel() > 0:
-            bound = 1.0 / math.sqrt(self.channels_in) if self.path_mode == "uv" else 1.0
-            torch.nn.init.uniform_(self.weight, -bound, bound)
+            torch.nn.init.normal_(self.weight)
         if self.bias is not None:
             torch.nn.init.zeros_(self.bias)
 
@@ -249,7 +252,7 @@ class Linear(torch.nn.Module):
                 "Linear input trailing shape must be "
                 f"{expected_input_shape}, got {tuple(input.shape)}."
             )
-        weight = self._resolve_weight(weight)
+        weight = self._resolve_weight(weight) * self.alpha
         weight_ndim = len(self.weight_shape)
         try:
             leading_shape = torch.broadcast_shapes(
@@ -317,7 +320,7 @@ class Linear(torch.nn.Module):
                 "Grouped Linear requires regrouped irreps and fully connected paths."
             )
 
-        weight = self._resolve_weight(weight)
+        weight = self._resolve_weight(weight) * self.alpha
         input_by_irrep = {
             irrep: (multiplicity, block)
             for (multiplicity, irrep), block in zip(self.irreps_in, input_blocks)

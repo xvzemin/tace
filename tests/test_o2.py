@@ -1,4 +1,5 @@
 import ast
+import math
 from copy import deepcopy
 from pathlib import Path
 
@@ -1056,6 +1057,40 @@ def test_o2_linear_defaults_to_uv_path_mode():
     assert module.weight_shape == (2, 2, 3)
 
 
+def test_o2_linear_uses_normal_weights_and_fixed_alpha():
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        module = o2.Linear(
+            "8x0e",
+            "8x0e",
+            channels_in=64,
+            channels_out=64,
+            bias=False,
+        )
+        assert module.alpha == pytest.approx(1.0 / math.sqrt(64))
+        torch.testing.assert_close(
+            module.weight.mean(),
+            torch.zeros(()),
+            rtol=0.0,
+            atol=0.01,
+        )
+        torch.testing.assert_close(
+            module.weight.std(unbiased=False),
+            torch.ones(()),
+            rtol=0.0,
+            atol=0.01,
+        )
+
+        channelwise = o2.Linear(
+            "0e",
+            "0e",
+            channels_in=64,
+            path_mode="uu",
+            bias=False,
+        )
+        assert channelwise.alpha == 1.0
+
+
 @pytest.mark.parametrize("reflected", [False, True])
 @pytest.mark.parametrize("path_mode", ["uv", "uu"])
 def test_o2_linear_is_equivariant_with_complete_irreps(reflected, path_mode):
@@ -1094,7 +1129,7 @@ def test_o2_linear_positive_order_components_share_one_real_matrix():
     input = torch.randn(4, 2, 2, dtype=DTYPE, device=DEVICE)
     weight = torch.randn(*module.weight_shape, dtype=DTYPE, device=DEVICE)
     actual = module(input, weight)
-    expected = torch.matmul(input, weight[0])
+    expected = torch.matmul(input, weight[0] * module.alpha)
     torch.testing.assert_close(actual, expected)
 
 
@@ -1332,7 +1367,10 @@ def test_o2_linear_zero_pads_missing_output_irreps(path_mode):
     assert module.path == ((0, 0),)
 
     if path_mode == "uv":
-        expected_scalar = torch.matmul(input[:, :1], weight[0])
+        expected_scalar = torch.matmul(
+            input[:, :1],
+            weight[0] * module.alpha,
+        )
     else:
         expected_scalar = input[:, :1] * weight[0]
     torch.testing.assert_close(output[:, :1], expected_scalar)
@@ -1861,7 +1899,7 @@ def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper
     torch.testing.assert_close(
         rotated_output,
         output @ output_rotation.T,
-        atol=3.0e-10,
+        atol=1.0e-9,
         rtol=3.0e-10,
     )
 
@@ -1989,7 +2027,12 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
     assert sum(
         isinstance(child, o2.Linear)
         for child in module.rejector.attention.modules()
-    ) == 1
+    ) == 2
+    assert not hasattr(module.rejector.attention, "qk_proj")
+    assert module.rejector.attention.q_proj.channels_in == module.num_channel
+    assert module.rejector.attention.q_proj.channels_out == module.num_channel
+    assert module.rejector.attention.k_proj.channels_in == module.num_channel
+    assert module.rejector.attention.k_proj.channels_out == module.num_channel
     radial_basis = torch.randn(
         7,
         module.num_radial_basis,
@@ -2005,7 +2048,7 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
         2,
         dim=-1,
     )
-    assert torch.all(torch.sigmoid(radial_scale) == 0.5)
+    assert torch.all(2.0 * torch.sigmoid(radial_scale) == 1.0)
     assert torch.count_nonzero(radial_shift) == 0
 
     inputs = _o2_magnetic_inputs(module)
