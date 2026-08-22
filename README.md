@@ -114,8 +114,7 @@ TACE currently supports the following plugin:
 For bugs or feature requests, please use the
 [TACE issue](https://github.com/xvzemin/tace/issues).
 
-For usage discussions, and community updates, you can join the TACE
-community through either QQ or Discord by scanning the corresponding QR code.
+For usage discussions, you can join the TACE community through QQ or Discord.
 
 <table>
   <tr>
