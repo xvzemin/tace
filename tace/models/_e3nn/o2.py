@@ -11,9 +11,10 @@ from typing import Union
 import torch
 from e3nn import o3
 
+from eqx import o2
+
 from tace.utils.torch_scatter import scatter_sum
 
-from .. import o2
 from ..softmax import GraphSoftmax
 
 

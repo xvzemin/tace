@@ -108,13 +108,16 @@ tace-uspex-relax = "tace.interface.uspex.relax:main"
 
 [tool.setuptools.packages.find]
 include = [
-    "tace", 
-    "tace.*", 
+    "tace",
+    "tace.*",
+    "eqx",
+    "eqx.*",
 ]
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
 "tace.models.scf" = ["*.md", "longrange/*.md"]
+"eqx.o2" = ["README.md"]
 
 [tool.ruff]
 target-version = "py39"
@@ -136,7 +139,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tace"]
+known-first-party = ["eqx", "tace"]
 
 [tool.ruff.format]
 line-ending = "lf"

@@ -5,7 +5,14 @@ import pytest
 import torch
 from e3nn import o3
 
-from tace.models import o2
+from eqx import o2
+from eqx.o2 import (
+    Irrep,
+    Irreps,
+    O2Gate,
+    WignerD,
+)
+
 from tace.models._e3nn.inter import (
     INTERACTION,
     O2Interaction,
@@ -26,12 +33,6 @@ from tace.models.mlp import (
     get_activation_scale_factor,
     get_scaled_activation,
 )
-from tace.models.o2 import (
-    Irrep,
-    Irreps,
-    O2Gate,
-    WignerD,
-)
 from tace.models.radial import j0SincSphericalBesselBasis, j0SphericalBesselBasis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,7 +40,7 @@ DTYPE = torch.float64
 
 
 def test_o2_does_not_import_other_tace_model_modules():
-    o2_directory = Path(__file__).resolve().parents[1] / "tace" / "models" / "o2"
+    o2_directory = Path(__file__).resolve().parents[1] / "eqx" / "o2"
     for source_path in o2_directory.glob("*.py"):
         tree = ast.parse(source_path.read_text(), filename=str(source_path))
         absolute_imports = {

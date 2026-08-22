@@ -10,12 +10,13 @@ from typing import Dict, List
 import torch
 from e3nn import o3
 
+from eqx.o2 import WignerD
+
 from ...utils.env import get_tace_use_dens
 from ..angular import SphericalHarmonics
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mag import MagneticBasis
-from ..o2 import WignerD
 from ..radial import RadialBasis
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import INTERACTION  # , SO2EdgeInteraction
