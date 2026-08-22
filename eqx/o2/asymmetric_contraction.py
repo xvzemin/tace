@@ -26,7 +26,7 @@ def _cg_tensor(irrep1: Irrep, irrep2: Irrep, irrep_out: Irrep) -> torch.Tensor:
     return product.permute(1, 2, 0).contiguous()
 
 
-class O2AsymmetricContraction(torch.nn.Module):
+class AsymmetricContraction(torch.nn.Module):
     """Contract independent complete-O(2) features to increasing correlation.
 
     ``correlation`` input tensors are required. The contribution of order
@@ -197,7 +197,7 @@ class O2AsymmetricContraction(torch.nn.Module):
             if not isinstance(input, torch.Tensor):
                 raise TypeError("Every contraction input must be a torch.Tensor.")
             if input.is_complex():
-                raise TypeError("O2AsymmetricContraction supports real inputs only.")
+                raise TypeError("AsymmetricContraction supports real inputs only.")
             if input.ndim < 2 or tuple(input.shape[-2:]) != expected:
                 raise ValueError(
                     "Contraction input trailing shape must be "
@@ -206,7 +206,7 @@ class O2AsymmetricContraction(torch.nn.Module):
         if not isinstance(weights, torch.Tensor):
             raise TypeError("External weights must be a torch.Tensor.")
         if weights.is_complex():
-            raise TypeError("O2AsymmetricContraction supports real weights only.")
+            raise TypeError("AsymmetricContraction supports real weights only.")
         if weights.ndim < 1 or weights.shape[-1] != self.weight_numel:
             raise ValueError(
                 "External weights must have trailing dimension "
@@ -311,7 +311,7 @@ class O2AsymmetricContraction(torch.nn.Module):
             output = contribution if output is None else output + contribution
         if output is None:
             raise RuntimeError(
-                "O2AsymmetricContraction produced no correlation orders."
+                "AsymmetricContraction produced no correlation orders."
             )
         return output
 

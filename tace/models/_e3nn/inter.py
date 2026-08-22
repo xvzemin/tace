@@ -623,7 +623,7 @@ class O2Interaction(O3CgtpInteraction):
             act_0e_name == act_0o_name == act_lm_name
         ):
             raise ValueError(
-                "O2AsymmetricContraction requires act_0e, act_0o, and act_lm "
+                "AsymmetricContraction requires act_0e, act_0o, and act_lm "
                 "to be identical."
             )
 

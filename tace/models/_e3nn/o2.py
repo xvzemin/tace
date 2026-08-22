@@ -290,7 +290,7 @@ class O2ScatterLinear(torch.nn.Module):
 
         if self.use_asymmetric_contraction:
             self.nonlinearity = None
-            self.asymmetric_contraction = o2.O2AsymmetricContraction(
+            self.asymmetric_contraction = o2.AsymmetricContraction(
                 self.irreps_out_local,
                 self.irreps_out_local,
                 num_channel,

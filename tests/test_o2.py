@@ -475,7 +475,8 @@ def test_circular_harmonics_gradcheck():
     assert torch.autograd.gradcheck(module, (vectors,))
 
 
-def test_o2_linear_is_exported_without_prefixed_class_name():
+def test_o2_classes_are_exported_without_prefixed_names():
+    assert o2.AsymmetricContraction.__name__ == "AsymmetricContraction"
     assert o2.CircularHarmonics.__name__ == "CircularHarmonics"
     assert o2.Linear.__name__ == "Linear"
     assert o2.Gate.__name__ == "Gate"
@@ -693,11 +694,11 @@ def _build_o2_asymmetric_contractions(correlation=3, channels=2):
         "channels": channels,
         "correlation": correlation,
     }
-    edge = o2.O2AsymmetricContraction(**kwargs, algorithm="edge").to(
+    edge = o2.AsymmetricContraction(**kwargs, algorithm="edge").to(
         device=DEVICE,
         dtype=DTYPE,
     )
-    node = o2.O2AsymmetricContraction(**kwargs, algorithm="node").to(
+    node = o2.AsymmetricContraction(**kwargs, algorithm="node").to(
         device=DEVICE,
         dtype=DTYPE,
     )
@@ -740,7 +741,7 @@ def test_o2_asymmetric_contraction_algorithms_match_with_batch_weights():
 @pytest.mark.parametrize("algorithm", ["edge", "node"])
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
-    module = o2.O2AsymmetricContraction(
+    module = o2.AsymmetricContraction(
         "0e+0o+1m",
         "0e+0o+1m+2m",
         channels=2,
@@ -836,7 +837,7 @@ def test_o2_asymmetric_contraction_algorithms_match_first_and_second_derivatives
 def test_o2_asymmetric_contraction_has_stable_variance_for_independent_inputs():
     torch.manual_seed(19)
     batch = 20_000
-    module = o2.O2AsymmetricContraction(
+    module = o2.AsymmetricContraction(
         "0e+0o+1m",
         "0e+0o+1m",
         channels=1,
@@ -856,9 +857,9 @@ def test_o2_asymmetric_contraction_has_stable_variance_for_independent_inputs():
 
 def test_o2_asymmetric_contraction_validates_algorithm_inputs_and_weights():
     with pytest.raises(ValueError, match="algorithm"):
-        o2.O2AsymmetricContraction("0e", "0e", 1, 2, algorithm="invalid")
+        o2.AsymmetricContraction("0e", "0e", 1, 2, algorithm="invalid")
 
-    module = o2.O2AsymmetricContraction("0e", "0e", 1, 2, algorithm="edge")
+    module = o2.AsymmetricContraction("0e", "0e", 1, 2, algorithm="edge")
     input = torch.randn(3, 1, 1)
     weights = torch.randn(3, module.weight_numel)
     with pytest.raises(ValueError, match="Expected 2 independent"):
@@ -1955,7 +1956,7 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     )
     assert isinstance(
         module.rejector.asymmetric_contraction,
-        o2.O2AsymmetricContraction,
+        o2.AsymmetricContraction,
     )
     assert module.rejector.asymmetric_contraction.algorithm == "edge"
     assert module.rejector.contraction_weight_numel > 0
