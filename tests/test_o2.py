@@ -1,4 +1,5 @@
 import ast
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,13 @@ from tace.models._e3nn.inter import (
     O2Interaction,
     O2MagneticInteraction,
 )
+from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.o2 import (
     O2MagneticScatterLinear,
     O2ScatterLinear,
     RadialRotaryComplexAttention,
 )
+from tace.models._e3nn.representation import Representation
 from tace.models.angular import SolidHarmonics
 from tace.models.mag import MagneticBasis
 from tace.models.mlp import (
@@ -37,6 +40,52 @@ from tace.models.radial import j0SincSphericalBesselBasis, j0SphericalBesselBasi
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+@pytest.mark.parametrize(("Lmax", "lmax"), [(2, 3), (3, 2)])
+def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config["node_embedding"]["type"] = "linear"
+    config["atomic_basis"]["type"] = ["o2"]
+    config["atomic_basis"]["nonlinear"] = ["sigmoid_gate"]
+    config["product_basis"]["type"] = ["cgtp"]
+    config["product_basis"]["correlation"] = [2]
+
+    representation = Representation(
+        num_layers=1,
+        atomic_numbers=[1],
+        cutoff=3.0,
+        avg_num_neighbors=2.0,
+        magmoms_norm_by_element=None,
+        mmax=2,
+        Lmax=Lmax,
+        lmax=lmax,
+        mag_Lmax=1,
+        num_channel=2,
+        target_irreps=o3.Irreps("0e"),
+        node_embedding=config["node_embedding"],
+        edge_embedding=config["edge_embedding"],
+        edge_update=config["edge_update"],
+        radial_basis=config["radial_basis"],
+        atomic_basis=config["atomic_basis"],
+        resnet=config["resnet"],
+        product_basis=config["product_basis"],
+        invariant_property=[],
+        equivariant_property=[],
+        universal_embedding=config["universal_embedding"],
+        layer_norm=config["layer_norm"],
+        dropout=config["dropout"],
+        parity=False,
+        use_one_body_magmoms=False,
+    )
+
+    common_lmax = max(Lmax, lmax)
+    assert representation.use_o2
+    assert not representation.use_legacy_so2
+    assert representation.so2_angular_basis.lmax == common_lmax
+    rejector = representation.interactions[0].rejector
+    assert rejector.reshape_in.lmax == common_lmax
+    assert rejector.reshape_out.lmax == common_lmax
 
 
 def test_o2_does_not_import_other_tace_model_modules():
@@ -1361,6 +1410,7 @@ def test_magnetic_basis_normalizes_solid_harmonics_by_element_scale():
 def _build_o2_magnetic_interaction(
     mag_Lmax=1,
     angular_max=None,
+    edge_lmax=None,
     mmax=None,
     nonlinear=None,
     scalar_act=None,
@@ -1370,7 +1420,8 @@ def _build_o2_magnetic_interaction(
     use_radial_rotary_attention=False,
 ):
     angular_max = mag_Lmax if angular_max is None else angular_max
-    mmax = angular_max if mmax is None else mmax
+    edge_lmax = angular_max if edge_lmax is None else edge_lmax
+    mmax = max(angular_max, edge_lmax) if mmax is None else mmax
     module = O2MagneticInteraction(
         layer=0,
         num_layers=1,
@@ -1378,7 +1429,7 @@ def _build_o2_magnetic_interaction(
         avg_num_neighbors=4.0,
         mmax=mmax,
         Lmax=angular_max,
-        lmax=angular_max,
+        lmax=edge_lmax,
         mag_Lmax=mag_Lmax,
         correlation=[correlation],
         num_channel=2,
@@ -1405,6 +1456,7 @@ def _build_o2_magnetic_interaction(
 def _build_o2_interaction(
     *,
     angular_max=1,
+    edge_lmax=None,
     mmax=None,
     correlation=1,
     irreps_in=None,
@@ -1413,7 +1465,8 @@ def _build_o2_interaction(
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
 ):
-    mmax = angular_max if mmax is None else mmax
+    edge_lmax = angular_max if edge_lmax is None else edge_lmax
+    mmax = max(angular_max, edge_lmax) if mmax is None else mmax
     irreps_in = o3.Irreps("2x0e + 2x1o") if irreps_in is None else irreps_in
     module = O2Interaction(
         layer=0,
@@ -1422,7 +1475,7 @@ def _build_o2_interaction(
         avg_num_neighbors=4.0,
         mmax=mmax,
         Lmax=angular_max,
-        lmax=angular_max,
+        lmax=edge_lmax,
         correlation=[correlation],
         num_channel=2,
         edge_feats_channel=4,
@@ -1497,7 +1550,7 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
-        wigner_module = WignerD(module.mmax, module.Lmax)
+        wigner_module = WignerD(module.mmax, max(module.Lmax, module.lmax))
     finally:
         torch.set_default_dtype(previous_dtype)
     wigner, wigner_inv = wigner_module.to(device=DEVICE).get_wigner(edge_vectors)
@@ -1536,7 +1589,7 @@ def _evaluate_o2_interaction(module, inputs):
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
-        wigner_module = WignerD(module.mmax, module.Lmax)
+        wigner_module = WignerD(module.mmax, max(module.Lmax, module.lmax))
     finally:
         torch.set_default_dtype(previous_dtype)
     wigner, wigner_inv = wigner_module.to(device=DEVICE).get_wigner(edge_vectors)
@@ -1600,6 +1653,38 @@ def test_o2_interaction_mmax_restricts_internal_paths():
     assert truncated.rejector.linear_down.weight_numel < (
         complete.rejector.linear_down.weight_numel
     )
+
+
+@pytest.mark.parametrize(("Lmax", "lmax"), [(2, 1), (1, 2)])
+@pytest.mark.parametrize("magnetic", [False, True])
+def test_o2_interaction_allows_Lmax_and_lmax_to_differ(magnetic, Lmax, lmax):
+    common_lmax = max(Lmax, lmax)
+    if magnetic:
+        module = _build_o2_magnetic_interaction(
+            mag_Lmax=1,
+            angular_max=Lmax,
+            edge_lmax=lmax,
+            mmax=common_lmax,
+            correlation=2,
+        )
+        inputs = _o2_magnetic_inputs(module)
+        output = _evaluate_o2_magnetic_interaction(module, inputs)
+    else:
+        module = _build_o2_interaction(
+            angular_max=Lmax,
+            edge_lmax=lmax,
+            mmax=common_lmax,
+            correlation=2,
+        )
+        inputs = _o2_magnetic_inputs(module)
+        output = _evaluate_o2_interaction(module, inputs)
+
+    assert module.Lmax == Lmax
+    assert module.lmax == lmax
+    assert module.rejector.lmax == common_lmax
+    assert module.rejector.reshape_in.lmax == common_lmax
+    assert module.rejector.reshape_out.lmax == common_lmax
+    assert output.shape == (inputs[0].size(0), module.rejector.irreps_out.dim)
 
 
 @pytest.mark.parametrize("improper", [False, True])

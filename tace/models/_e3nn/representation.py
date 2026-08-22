@@ -83,13 +83,15 @@ class Representation(torch.nn.Module):
         )
 
         # === angular basis ===
-        self.use_so2 = (
+        self.use_o2 = any(
+            interaction in ("o2", "o2_mag") for interaction in atomic_basis["type"]
+        )
+        self.use_legacy_so2 = (
             any(t.endswith("so2") for t in atomic_basis["type"])
             or any(t.endswith("attn") for t in atomic_basis["type"])
-            or any(t == "o2" for t in atomic_basis["type"])
-            or any(t == "o2_mag" for t in atomic_basis["type"])
             or node_embedding["type"] == "so2_tensor"
         )
+        self.use_so2 = self.use_legacy_so2 or self.use_o2
         self.use_o3 = (
             any(t != "so2" for t in atomic_basis["type"])
             or node_embedding["type"] == "tensor"
@@ -115,8 +117,9 @@ class Representation(torch.nn.Module):
                 num_elements=self.num_elements,
             )
         if self.use_so2:
-            assert Lmax == lmax, "SO2Interaciton require Lmax == lmax in TACE"
-            self.so2_angular_basis = WignerD(mmax, Lmax)
+            if self.use_legacy_so2 and Lmax != lmax:
+                raise ValueError("Legacy SO2 interactions require Lmax == lmax.")
+            self.so2_angular_basis = WignerD(mmax, max(Lmax, lmax))
         else:
             self.so2_angular_basis = None
         if self.use_o3:
