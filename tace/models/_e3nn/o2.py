@@ -193,6 +193,7 @@ class O2ScatterLinear(torch.nn.Module):
         extra_node_attrs_irreps: Union[o3.Irreps, None] = None,
         num_channel: int,
         lmax: int,
+        mmax: int,
         act_0e: torch.nn.Module,
         act_0o: Union[torch.nn.Module, None],
         act_lm: torch.nn.Module,
@@ -212,6 +213,8 @@ class O2ScatterLinear(torch.nn.Module):
             else o3.Irreps(extra_node_attrs_irreps)
         )
         self.num_channel = num_channel
+        self.lmax = lmax
+        self.mmax = mmax
         self.correlation = correlation
         self.num_head = num_head
         self.use_asymmetric_contraction = use_asymmetric_contraction
@@ -227,8 +230,8 @@ class O2ScatterLinear(torch.nn.Module):
         ):
             raise ValueError("num_head must divide num_channel.")
 
-        self.node_layout = o2.O3O2Layout(self.irreps_node, lmax)
-        self.output_layout = o2.O3O2Layout(self.irreps_out, lmax)
+        self.node_layout = o2.O3O2Layout(self.irreps_node, lmax, mmax)
+        self.output_layout = o2.O3O2Layout(self.irreps_out, lmax, mmax)
         input_groups = (
             tuple(self.node_layout.local_irreps)
             + tuple(self.node_layout.local_irreps)
@@ -237,6 +240,7 @@ class O2ScatterLinear(torch.nn.Module):
             self.extra_node_attrs_layout = o2.O3O2Layout(
                 self.extra_node_attrs_irreps,
                 lmax,
+                mmax,
             )
             input_groups += (
                 tuple(self.extra_node_attrs_layout.local_irreps)

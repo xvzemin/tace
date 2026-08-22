@@ -530,8 +530,10 @@ class O2Interaction(O3CgtpInteraction):
     """
 
     def _validate_o2_setup(self) -> None:
-        if not self.mmax == self.Lmax == self.lmax:
-            raise ValueError("o2 requires mmax == Lmax == lmax.")
+        if self.Lmax != self.lmax:
+            raise ValueError("o2 requires Lmax == lmax.")
+        if not 0 <= self.mmax <= self.lmax:
+            raise ValueError("o2 requires 0 <= mmax <= lmax.")
 
     def _build_rejector(self) -> torch.nn.Module:
         return O2ScatterLinear(
@@ -539,6 +541,7 @@ class O2Interaction(O3CgtpInteraction):
             self.irreps_out,
             num_channel=self.num_channel,
             lmax=self.lmax,
+            mmax=self.mmax,
             act_0e=get_scaled_activation(self._o2_act_0e_name),
             act_0o=get_scaled_activation(self._o2_act_0o_name),
             act_lm=get_scaled_activation(self._o2_act_lm_name),
@@ -706,6 +709,7 @@ class O2MagneticInteraction(O2Interaction):
             self.magnetic_irreps,
             num_channel=self.num_channel,
             lmax=self.lmax,
+            mmax=self.mmax,
             act_0e=get_scaled_activation(self._o2_act_0e_name),
             act_0o=get_scaled_activation(self._o2_act_0o_name),
             act_lm=get_scaled_activation(self._o2_act_lm_name),

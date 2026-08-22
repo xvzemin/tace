@@ -124,6 +124,36 @@ def test_o3_o2_layout_roundtrip_supports_both_parities_per_degree():
     )
 
 
+def test_o3_o2_layout_mmax_restricts_local_blocks():
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
+        layout = o2.O3O2Layout(irreps, lmax=2, mmax=1).to(device=DEVICE)
+        wigner_module = WignerD(1, 2).to(device=DEVICE)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+    edge_vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
+    wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
+    input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+    blocks = layout(input, wigner)
+
+    assert layout.local_irreps == o2.Irreps("3x0e+3x0o+4x1m")
+    assert tuple(block.shape for block in blocks) == (
+        (7, 1, 6),
+        (7, 1, 6),
+        (7, 2, 8),
+    )
+    assert layout.inverse(blocks, wigner_inv).shape == input.shape
+
+
+def test_o3_o2_layout_validates_mmax():
+    irreps = o3.Irreps("0e+1o+2e")
+    with pytest.raises(ValueError, match="0 <= mmax <= lmax"):
+        o2.O3O2Layout(irreps, lmax=2, mmax=3)
+
+
 def test_o2_irrep_and_irreps_metadata():
     assert Irrep("0e") == Irrep(0, 1)
     assert Irrep("0o") == Irrep((0, -1))
@@ -1174,6 +1204,7 @@ def test_magnetic_basis_normalizes_solid_harmonics_by_element_scale():
 def _build_o2_magnetic_interaction(
     mag_Lmax=1,
     angular_max=None,
+    mmax=None,
     nonlinear=None,
     scalar_act=None,
     tensor_act=None,
@@ -1182,12 +1213,13 @@ def _build_o2_magnetic_interaction(
     use_radial_rotary_attention=False,
 ):
     angular_max = mag_Lmax if angular_max is None else angular_max
+    mmax = angular_max if mmax is None else mmax
     module = O2MagneticInteraction(
         layer=0,
         num_layers=1,
         num_elements=2,
         avg_num_neighbors=4.0,
-        mmax=angular_max,
+        mmax=mmax,
         Lmax=angular_max,
         lmax=angular_max,
         mag_Lmax=mag_Lmax,
@@ -1215,20 +1247,23 @@ def _build_o2_magnetic_interaction(
 
 def _build_o2_interaction(
     *,
+    angular_max=1,
+    mmax=None,
     correlation=1,
     scalar_act=None,
     tensor_act=None,
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
 ):
+    mmax = angular_max if mmax is None else mmax
     module = O2Interaction(
         layer=0,
         num_layers=1,
         num_elements=2,
         avg_num_neighbors=4.0,
-        mmax=1,
-        Lmax=1,
-        lmax=1,
+        mmax=mmax,
+        Lmax=angular_max,
+        lmax=angular_max,
         correlation=[correlation],
         num_channel=2,
         edge_feats_channel=4,
@@ -1384,14 +1419,37 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
     assert all(gradient.isfinite().all() for gradient in gradients)
 
 
+def test_o2_interaction_mmax_restricts_internal_paths():
+    truncated = _build_o2_interaction(angular_max=2, mmax=1)
+    complete = _build_o2_interaction(angular_max=2, mmax=2)
+
+    assert truncated.rejector.irreps_out_local.m_max == 1
+    assert complete.rejector.irreps_out_local.m_max == 2
+    assert len(truncated.rejector.linear_out.path) < len(
+        complete.rejector.linear_out.path
+    )
+    assert truncated.rejector.linear_out.weight_numel < (
+        complete.rejector.linear_out.weight_numel
+    )
+
+
+@pytest.mark.parametrize(("angular_max", "mmax"), [(1, 1), (2, 1), (2, 0)])
 @pytest.mark.parametrize("improper", [False, True])
-def test_o2_interaction_is_globally_o3_equivariant(improper):
+def test_o2_interaction_is_globally_o3_equivariant(
+    improper,
+    angular_max,
+    mmax,
+):
     torch.manual_seed(16)
     module = _build_o2_interaction(
         correlation=2,
+        angular_max=angular_max,
+        mmax=mmax,
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
+    assert module.rejector.node_layout.local_irreps.m_max == mmax
+    assert module.rejector.output_layout.local_irreps.m_max == mmax
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_interaction(module, inputs)
 
@@ -1690,6 +1748,11 @@ def test_o2_magnetic_interaction_restricts_all_magnetic_degrees():
     assert module.magnetic_irreps == o3.Irreps("0e + 1e + 2e")
     assert module.rejector.magnetic_layout.local_irreps == o2.Irreps(
         "2x0e + 0o + 2x1m + 2m"
+    )
+
+    truncated = _build_o2_magnetic_interaction(mag_Lmax=2, mmax=1)
+    assert truncated.rejector.magnetic_layout.local_irreps == o2.Irreps(
+        "2x0e + 0o + 2x1m"
     )
 
 

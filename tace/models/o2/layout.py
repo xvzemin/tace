@@ -3,6 +3,8 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from typing import Optional
+
 import torch
 from e3nn import o3
 
@@ -47,28 +49,52 @@ class O3O2Layout(torch.nn.Module):
     This is the specialized bridge between global O(3) features and the
     otherwise standalone O(2) layers. Calling the module maps global features
     to grouped local blocks; :meth:`inverse` maps those blocks back to the
-    global layout.
+    global layout. ``mmax`` optionally retains only local orders
+    ``0 <= m <= mmax`` while leaving the global O(3) layout unchanged.
     """
 
     @staticmethod
-    def restrict(irreps: o3.Irreps) -> Irreps:
+    def restrict(irreps: o3.Irreps, mmax: Optional[int] = None) -> Irreps:
         """Return the local O(2) block metadata for an O(3) layout."""
+        irreps = o3.Irreps(irreps)
+        if mmax is None:
+            mmax = irreps.lmax
+        if not isinstance(mmax, int) or isinstance(mmax, bool):
+            raise TypeError("mmax must be an integer.")
+        if mmax < 0:
+            raise ValueError("mmax must be non-negative.")
         groups = []
-        for _, irrep in o3.Irreps(irreps):
+        for _, irrep in irreps:
             zero_parity = irrep.p * ((-1) ** irrep.l)
             groups.append((1, Irrep(0, zero_parity)))
             groups.extend(
-                (1, Irrep(order, 0)) for order in range(1, irrep.l + 1)
+                (1, Irrep(order, 0))
+                for order in range(1, min(irrep.l, mmax) + 1)
             )
         return Irreps(groups).regroup()
 
-    def __init__(self, irreps: o3.Irreps, lmax: int) -> None:
+    def __init__(
+        self,
+        irreps: o3.Irreps,
+        lmax: int,
+        mmax: Optional[int] = None,
+    ) -> None:
         super().__init__()
 
         self.irreps = o3.Irreps(irreps)
+        if not isinstance(lmax, int) or isinstance(lmax, bool):
+            raise TypeError("lmax must be an integer.")
         if self.irreps.lmax > lmax:
             raise ValueError("lmax must cover every O(3) irrep.")
-        self.local_irreps = self.restrict(self.irreps)
+        if mmax is None:
+            mmax = lmax
+        if not isinstance(mmax, int) or isinstance(mmax, bool):
+            raise TypeError("mmax must be an integer.")
+        if not 0 <= mmax <= lmax:
+            raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
+        self.lmax = lmax
+        self.mmax = mmax
+        self.local_irreps = self.restrict(self.irreps, mmax)
         self.layout = _O3LayoutTransform(self.irreps)
 
         group_slices = []
@@ -82,7 +108,7 @@ class O3O2Layout(torch.nn.Module):
         for group_index, (_, irrep) in enumerate(self.irreps):
             zero_irrep = Irrep(0, irrep.p * ((-1) ** irrep.l))
             sources_by_irrep[zero_irrep].append(group_index)
-            for order in range(1, irrep.l + 1):
+            for order in range(1, min(irrep.l, mmax) + 1):
                 sources_by_irrep[Irrep(order, 0)].append(group_index)
         self.block_sources = tuple(
             tuple(sources_by_irrep[irrep]) for _, irrep in self.local_irreps
@@ -123,7 +149,7 @@ class O3O2Layout(torch.nn.Module):
 
             rows = []
             row_locations = {}
-            for order in range(lmax + 1):
+            for order in range(mmax + 1):
                 active = [
                     group_index
                     for group_index in groups
@@ -171,7 +197,7 @@ class O3O2Layout(torch.nn.Module):
             tower_uses_input.append(groups == tuple(range(len(self.irreps))))
 
             inverse_specs = []
-            for order in range(lmax + 1):
+            for order in range(mmax + 1):
                 active = [
                     group_index
                     for group_index in groups
@@ -212,7 +238,7 @@ class O3O2Layout(torch.nn.Module):
             for group_index in groups:
                 irrep = self.irreps[group_index][1]
                 odd = irrep.p * ((-1) ** irrep.l) == -1
-                for order in range(irrep.l + 1):
+                for order in range(min(irrep.l, mmax) + 1):
                     source_locations[(group_index, order)] = (
                         tower_index,
                         *row_locations[(group_index, order)],
