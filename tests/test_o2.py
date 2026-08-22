@@ -10,7 +10,7 @@ from eqx import o2
 from eqx.o2 import (
     Irrep,
     Irreps,
-    O2Gate,
+    Gate,
     WignerD,
 )
 
@@ -85,8 +85,8 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     assert not representation.use_legacy_so2
     assert representation.so2_angular_basis.lmax == common_lmax
     rejector = representation.interactions[0].rejector
-    assert rejector.reshape_in.lmax == common_lmax
-    assert rejector.reshape_out.lmax == common_lmax
+    assert rejector.input_frame.lmax == common_lmax
+    assert rejector.output_frame.lmax == common_lmax
 
 
 def test_o2_does_not_import_other_tace_model_modules():
@@ -130,12 +130,12 @@ def test_j0_sinc_preserves_nonzero_values_and_defines_origin():
     assert torch.isfinite(at_origin).all()
 
 
-def test_o3_o2_layout_roundtrip_supports_both_parities_per_degree():
+def test_local_frame_roundtrip_supports_both_parities_per_degree():
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
         irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
-        layout = o2.O3O2Layout(irreps, 2).to(device=DEVICE)
+        layout = o2.LocalFrame(irreps, 2).to(device=DEVICE)
         wigner_module = WignerD(2, 2).to(device=DEVICE)
     finally:
         torch.set_default_dtype(previous_dtype)
@@ -144,7 +144,7 @@ def test_o3_o2_layout_roundtrip_supports_both_parities_per_degree():
     input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
 
     blocks = layout(input, wigner)
-    channel_major_blocks = layout.forward_channel_major(input, wigner)
+    channel_major_blocks = layout.to_local_channel_major(input, wigner)
     assert layout.local_irreps == o2.Irreps("3x0e+3x0o+4x1m+2x2m")
     assert tuple(block.shape for block in blocks) == (
         (7, 1, 6),
@@ -166,19 +166,19 @@ def test_o3_o2_layout_roundtrip_supports_both_parities_per_degree():
             ),
             block,
         )
-    torch.testing.assert_close(layout.inverse(blocks, wigner_inv), input)
+    torch.testing.assert_close(layout.to_global(blocks, wigner_inv), input)
     torch.testing.assert_close(
-        layout.inverse_channel_major(channel_major_blocks, wigner_inv),
+        layout.to_global_channel_major(channel_major_blocks, wigner_inv),
         input,
     )
 
 
-def test_o3_o2_layout_mmax_restricts_local_blocks():
+def test_local_frame_mmax_restricts_local_blocks():
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
         irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
-        layout = o2.O3O2Layout(irreps, lmax=2, mmax=1).to(device=DEVICE)
+        layout = o2.LocalFrame(irreps, lmax=2, mmax=1).to(device=DEVICE)
         wigner_module = WignerD(1, 2).to(device=DEVICE)
     finally:
         torch.set_default_dtype(previous_dtype)
@@ -194,15 +194,15 @@ def test_o3_o2_layout_mmax_restricts_local_blocks():
         (7, 1, 6),
         (7, 2, 8),
     )
-    assert layout.inverse(blocks, wigner_inv).shape == input.shape
+    assert layout.to_global(blocks, wigner_inv).shape == input.shape
 
 
-def test_o3_o2_layout_inverse_rescales_shared_higher_mmax_wigner():
+def test_local_frame_to_global_rescales_shared_higher_mmax_wigner():
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
         irreps = o3.Irreps("2x0e+2x1o+2x2e+2x3o")
-        layout = o2.O3O2Layout(irreps, lmax=3, mmax=0).to(device=DEVICE)
+        layout = o2.LocalFrame(irreps, lmax=3, mmax=0).to(device=DEVICE)
         active_wigner = WignerD(0, 3).to(device=DEVICE)
         shared_wigner = WignerD(3, 3).to(device=DEVICE)
     finally:
@@ -218,33 +218,83 @@ def test_o3_o2_layout_inverse_rescales_shared_higher_mmax_wigner():
     for active_block, shared_block in zip(active_blocks, shared_blocks):
         torch.testing.assert_close(shared_block, active_block)
     torch.testing.assert_close(
-        layout.inverse(shared_blocks, wigner_inv_shared),
-        layout.inverse(active_blocks, wigner_inv_active),
+        layout.to_global(shared_blocks, wigner_inv_shared),
+        layout.to_global(active_blocks, wigner_inv_active),
     )
 
 
-def test_o3_o2_layout_repr_shows_irreps_conversion():
-    layout = o2.O3O2Layout(
+def test_local_frame_repr_shows_irreps_conversion():
+    layout = o2.LocalFrame(
         o3.Irreps("2x0e+2x1o+2x1e+2x2e"),
         lmax=2,
         mmax=1,
     )
 
     assert repr(layout) == (
-        f"O3O2Layout({layout.irreps} -> "
-        f"{layout.channels * layout.local_irreps})(mmax=1)"
+        f"LocalFrame({layout.global_irreps} -> "
+        f"{layout.channels * layout.local_irreps})"
+        "(mmax=1, layout='mul_ir')"
     )
+    assert not tuple(layout.children())
 
 
-def test_o3_o2_layout_validates_mmax():
+def test_local_frame_validates_mmax_and_layout():
     irreps = o3.Irreps("0e+1o+2e")
     with pytest.raises(ValueError, match="0 <= mmax <= lmax"):
-        o2.O3O2Layout(irreps, lmax=2, mmax=3)
+        o2.LocalFrame(irreps, lmax=2, mmax=3)
+    with pytest.raises(ValueError, match="mul_ir.*ir_mul"):
+        o2.LocalFrame(irreps, lmax=2, layout="invalid")
+
+
+def test_local_frame_supports_mul_ir_and_ir_mul_global_layouts():
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        irreps = o3.Irreps("2x0e+2x1o+2x2e")
+        mul_ir_frame = o2.LocalFrame(irreps, lmax=2, layout="mul_ir").to(
+            device=DEVICE
+        )
+        ir_mul_frame = o2.LocalFrame(irreps, lmax=2, layout="ir_mul").to(
+            device=DEVICE
+        )
+        wigner_module = WignerD(2, 2).to(device=DEVICE)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+    edge_vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
+    wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
+    mul_ir_input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+    ir_mul_parts = []
+    offset = 0
+    for multiplicity, irrep in irreps:
+        width = multiplicity * irrep.dim
+        ir_mul_parts.append(
+            mul_ir_input[:, offset : offset + width]
+            .reshape(7, multiplicity, irrep.dim)
+            .transpose(1, 2)
+            .reshape(7, width)
+        )
+        offset += width
+    ir_mul_input = torch.cat(ir_mul_parts, dim=-1).contiguous()
+    assert ir_mul_input.shape == mul_ir_input.shape
+
+    mul_ir_blocks = mul_ir_frame.to_local(mul_ir_input, wigner)
+    ir_mul_blocks = ir_mul_frame.to_local(ir_mul_input, wigner)
+    for mul_ir_block, ir_mul_block in zip(mul_ir_blocks, ir_mul_blocks):
+        torch.testing.assert_close(ir_mul_block, mul_ir_block)
+    torch.testing.assert_close(
+        mul_ir_frame.to_global(mul_ir_blocks, wigner_inv),
+        mul_ir_input,
+    )
+    torch.testing.assert_close(
+        ir_mul_frame.to_global(ir_mul_blocks, wigner_inv),
+        ir_mul_input,
+    )
 
 
 @pytest.mark.parametrize("lmax,mmax", [(0, 0), (2, 0), (3, 1), (4, 2), (4, 4)])
 def test_o2_wigner_layout_matches_legacy_so2_mapping(lmax, mmax):
-    from tace.models._e3nn.oam_2026_07_05 import (
+    from tace.models._e3nn.legacy_so2 import (
         CoefficientMappingModule as LegacyCoefficientMappingModule,
     )
 
@@ -352,11 +402,13 @@ def test_o2_irrep_rejects_invalid_labels(value):
 
 
 def test_o3_restriction_is_complete_and_parity_aware():
-    assert o2.O3O2Layout.restrict(o3.Irreps("1o")) == Irreps("0e+1m")
-    assert o2.O3O2Layout.restrict(o3.Irreps("1e")) == Irreps("0o+1m")
-    assert o2.O3O2Layout.restrict(o3.Irreps("2e")) == Irreps("0e+1m+2m")
-    assert o2.O3O2Layout.restrict(o3.Irreps("2o")) == Irreps("0o+1m+2m")
-    assert o2.O3O2Layout.restrict(o3.Irreps("2x1e+0o")) == Irreps("2x0o+1m")
+    assert o2.LocalFrame.restrict(o3.Irreps("1o")) == Irreps("0e+1m")
+    assert o2.LocalFrame.restrict(o3.Irreps("1e")) == Irreps("0o+1m")
+    assert o2.LocalFrame.restrict(o3.Irreps("2e")) == Irreps("0e+1m+2m")
+    assert o2.LocalFrame.restrict(o3.Irreps("2o")) == Irreps("0o+1m+2m")
+    assert o2.LocalFrame.restrict(o3.Irreps("2x1e+0o")) == Irreps(
+        "2x0o+1m"
+    )
 
 
 def test_o2_direct_sum_representation_uses_complete_layout():
@@ -426,8 +478,8 @@ def test_circular_harmonics_gradcheck():
 def test_o2_linear_is_exported_without_prefixed_class_name():
     assert o2.CircularHarmonics.__name__ == "CircularHarmonics"
     assert o2.Linear.__name__ == "Linear"
-    assert o2.O2Gate.__name__ == "O2Gate"
-    assert o2.O3O2Layout.__name__ == "O3O2Layout"
+    assert o2.Gate.__name__ == "Gate"
+    assert o2.LocalFrame.__name__ == "LocalFrame"
     assert o2.TensorProduct.__name__ == "TensorProduct"
     assert o2.Irrep.__name__ == "Irrep"
     assert o2.Irreps.__name__ == "Irreps"
@@ -455,7 +507,7 @@ def test_o2_linear_repr_only_shows_shape_bias_and_weight_count(path_mode):
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
     irreps_out = o2.Irreps("2x0e+0o+2x1m+2m")
-    module = O2Gate(
+    module = Gate(
         irreps_out,
         act_0e=torch.nn.SiLU(),
         act_0o=None,
@@ -485,19 +537,19 @@ def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
 
 
 def test_o2_gate_repr_uses_its_own_irreps():
-    module = O2Gate(
+    module = Gate(
         "2x0e+0o+2x1m",
         act_0e=torch.nn.SiLU(),
         act_0o=None,
         act_lm=torch.nn.Sigmoid(),
     )
 
-    assert repr(module) == f"O2Gate({module.irreps_in} -> {module.irreps_out})"
+    assert repr(module) == f"Gate({module.irreps_in} -> {module.irreps_out})"
 
 
 @pytest.mark.parametrize("direct_0o", [False, True])
 def test_o2_gate_gradcheck_and_gradgradcheck(direct_0o):
-    module = O2Gate(
+    module = Gate(
         "0e+0o+1m",
         act_0e=torch.nn.SiLU(),
         act_0o=torch.nn.Tanh() if direct_0o else None,
@@ -518,7 +570,7 @@ def test_o2_gate_gradcheck_and_gradgradcheck(direct_0o):
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_gate_direct_0o_activation_is_equivariant(reflected):
     irreps_out = o2.Irreps("2x0e+0o+2x1m+2m")
-    module = O2Gate(
+    module = Gate(
         irreps_out,
         act_0e=torch.nn.SiLU(),
         act_0o=torch.nn.Tanh(),
@@ -551,7 +603,7 @@ def test_o2_gate_direct_0o_activation_is_equivariant(reflected):
 
 def test_o2_gate_rejects_nonodd_direct_0o_activation():
     with pytest.raises(ValueError, match="act_0o must be an odd function"):
-        O2Gate(
+        Gate(
             "0e+0o+1m",
             act_0e=torch.nn.SiLU(),
             act_0o=torch.nn.SiLU(),
@@ -560,7 +612,7 @@ def test_o2_gate_rejects_nonodd_direct_0o_activation():
 
 
 def test_o2_gate_accepts_passed_scaled_tanh_for_0o():
-    module = O2Gate(
+    module = Gate(
         "0e+0o+1m",
         act_0e=torch.nn.SiLU(),
         act_0o=ScaledTanh(),
@@ -569,7 +621,7 @@ def test_o2_gate_accepts_passed_scaled_tanh_for_0o():
     assert isinstance(module.act_0o, ScaledTanh)
     assert module.num_gates == 1
 
-    gated_0o = O2Gate(
+    gated_0o = Gate(
         "0e+0o+1m",
         act_0e=torch.nn.SiLU(),
         act_0o=None,
@@ -1754,8 +1806,8 @@ def test_o2_interaction_allows_Lmax_and_lmax_to_differ(magnetic, Lmax, lmax):
     assert module.Lmax == Lmax
     assert module.lmax == lmax
     assert module.rejector.lmax == common_lmax
-    assert module.rejector.reshape_in.lmax == common_lmax
-    assert module.rejector.reshape_out.lmax == common_lmax
+    assert module.rejector.input_frame.lmax == common_lmax
+    assert module.rejector.output_frame.lmax == common_lmax
     assert output.shape == (inputs[0].size(0), module.rejector.irreps_out.dim)
 
 
@@ -1768,8 +1820,8 @@ def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper
     )
 
     assert module.rejector.active_mmax == 0
-    assert module.rejector.reshape_in.mmax == 0
-    assert module.rejector.reshape_out.mmax == 0
+    assert module.rejector.input_frame.mmax == 0
+    assert module.rejector.output_frame.mmax == 0
     assert module.rejector.irreps_out_local.m_max == 0
     assert module.rejector.irreps_hidden_local.m_max == 0
     assert module.rejector.nonlinearity.irreps_out.m_max == 0
@@ -1828,8 +1880,8 @@ def test_o2_interaction_is_globally_o3_equivariant(
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
-    assert module.rejector.reshape_in.local_irreps.m_max == mmax
-    assert module.rejector.reshape_out.local_irreps.m_max == mmax
+    assert module.rejector.input_frame.local_irreps.m_max == mmax
+    assert module.rejector.output_frame.local_irreps.m_max == mmax
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_interaction(module, inputs)
 
@@ -1870,7 +1922,7 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert module.edge_info.dims[0] == module.edge_feats_channel + 2 * 3
     assert module.rejector.linear_up.path_mode == "uv"
     assert module.rejector.linear_up.internal_weights
-    assert isinstance(module.rejector.nonlinearity, O2Gate)
+    assert isinstance(module.rejector.nonlinearity, Gate)
     assert isinstance(module.rejector.nonlinearity.act_0e, ScaledSiLU)
     assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
     assert isinstance(module.rejector.nonlinearity.act_lm, ScaledSigmoid)
@@ -2140,12 +2192,12 @@ def test_o2_magnetic_optional_contraction_and_attention_are_o3_equivariant(
 def test_o2_magnetic_interaction_restricts_all_magnetic_degrees():
     module = _build_o2_magnetic_interaction(mag_Lmax=2)
     assert module.magnetic_irreps == o3.Irreps("0e + 1e + 2e")
-    assert module.rejector.magnetic_layout.local_irreps == o2.Irreps(
+    assert module.rejector.magnetic_frame.local_irreps == o2.Irreps(
         "2x0e + 0o + 2x1m + 2m"
     )
 
     truncated = _build_o2_magnetic_interaction(mag_Lmax=2, mmax=1)
-    assert truncated.rejector.magnetic_layout.local_irreps == o2.Irreps(
+    assert truncated.rejector.magnetic_frame.local_irreps == o2.Irreps(
         "2x0e + 0o + 2x1m"
     )
 

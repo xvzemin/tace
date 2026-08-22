@@ -40,7 +40,7 @@ def _check_odd_activation(activation: torch.nn.Module) -> None:
         )
 
 
-class O2Gate(torch.nn.Module):
+class Gate(torch.nn.Module):
     """Apply equivariant nonlinearities to complete O(2) features.
 
     ``0e`` outputs are passed directly through ``act_0e``. If ``act_0o`` is
@@ -55,8 +55,7 @@ class O2Gate(torch.nn.Module):
     irreps. The output is restored to ``irreps_out`` order.
 
     An odd ``act_0o`` commutes with the sign change of ``0o`` under
-    reflections, making this a general O(2)-equivariant operation. When used
-    through :class:`O3O2Layout`, it also preserves global O(3) equivariance.
+    reflections, making this a general O(2)-equivariant operation
     """
 
     def __init__(
@@ -137,10 +136,10 @@ class O2Gate(torch.nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Apply the gate to ``(..., irreps_in.dim, channels)`` input."""
         if input.is_complex():
-            raise TypeError("O2Gate supports real inputs only.")
+            raise TypeError("Gate supports real inputs only.")
         if input.ndim < 2 or input.shape[-2] != self.irreps_in.dim:
             raise ValueError(
-                "O2Gate input O(2) dimension must be "
+                "Gate input O(2) dimension must be "
                 f"{self.irreps_in.dim}, got {tuple(input.shape)}."
             )
 
@@ -175,15 +174,15 @@ class O2Gate(torch.nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         """Apply the gate to grouped ``(..., irrep.dim, mul * channels)`` blocks."""
         if len(input_blocks) != len(self.irreps_in):
-            raise ValueError("Expected one input block per O2Gate input group.")
+            raise ValueError("Expected one input block per Gate input group.")
         if not input_blocks:
             return ()
         if self.irreps_out != self.irreps_out.regroup():
-            raise ValueError("Grouped O2Gate requires regrouped output irreps.")
+            raise ValueError("Grouped Gate requires regrouped output irreps.")
 
         first_multiplicity = self.irreps_in[0][0]
         if input_blocks[0].shape[-1] % first_multiplicity != 0:
-            raise ValueError("Invalid grouped O2Gate channel width.")
+            raise ValueError("Invalid grouped Gate channel width.")
         channels = input_blocks[0].shape[-1] // first_multiplicity
         input_by_irrep = {
             irrep: block for (_, irrep), block in zip(self.irreps_in, input_blocks)
@@ -193,7 +192,7 @@ class O2Gate(torch.nn.Module):
         gate_width = self.num_gates * channels
         if even_width + gate_width > 0:
             if even_block is None or even_block.shape[-1] != even_width + gate_width:
-                raise ValueError("Invalid grouped O2Gate 0e block width.")
+                raise ValueError("Invalid grouped Gate 0e block width.")
         else:
             even_block = input_blocks[0].new_empty(
                 *input_blocks[0].shape[:-2],

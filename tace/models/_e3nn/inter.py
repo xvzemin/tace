@@ -520,7 +520,7 @@ class uvSO2Interaction(O3CgtpInteraction):
 
 
 class O2Interaction(O3CgtpInteraction):
-    """Global O(3) interaction evaluated in an edge-aligned local O2 frame.
+    """Global O3 interaction evaluated through local O2 irreps.
 
     The default path concatenates source and target node features and applies
     ``uv -> gate -> uv`` before inverse rotation and scatter. The optional O2

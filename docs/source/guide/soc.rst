@@ -104,10 +104,10 @@ axial magnetic-moment input. Its default value is ``1`` and it must satisfy
 Local O(2) frame (experimental)
 -------------------------------
 
-The local-:math:`O(2)` interaction evaluates each edge in an edge-aligned local
-frame, uses the complete local :math:`O(2)` representation to modulate the
-magnetic interaction, and then returns the result to the global
-:math:`O(3)` frame.  The angular cutoffs must currently satisfy
+The local-:math:`O(2)` interaction converts global :math:`O(3)` irreps to local
+:math:`O(2)` irreps, uses the complete local representation to modulate the
+magnetic interaction, and then converts the result back to global
+:math:`O(3)` irreps. The angular cutoffs must currently satisfy
 ``mmax = Lmax = lmax``:
 
 .. code-block:: yaml

@@ -26,18 +26,18 @@ assert output.shape == (8, irreps.dim, 32)
 
 ## Global O(3) and local O(2)
 
-`WignerD` constructs an edge-aligned real Wigner-D transform directly from a
-three-dimensional edge vector. `O3O2Layout` then rotates global O(3) features,
-groups equal local O(2) irreps into contiguous blocks, and keeps the parent O(3)
-degree and parity metadata required by the inverse transform.
+`WignerD` constructs a real Wigner-D transform from a nonzero three-dimensional
+vector. `LocalFrame` converts global O(3) irreps to and from local O(2) irreps,
+groups equal local irreps into contiguous blocks, and keeps the parent O(3)
+degree and parity metadata needed by the inverse transform.
 
 For an O(3) irrep of degree `l` and parity `p`, restriction to the local frame
 produces orders `0, 1, ..., l`. Its order-zero block is `0e` when
 `p * (-1)**l == 1` and `0o` otherwise. Positive orders use `1m`, `2m`, and so
 on.
 
-The following example performs an O(2)-equivariant linear operation in each
-edge frame and converts the result back to the global O(3) layout:
+The following example performs an O(2)-equivariant linear operation in a local
+frame and converts the result back to the global O(3) layout:
 
 ```python
 import torch
@@ -45,31 +45,31 @@ from e3nn import o3
 
 from eqx import o2
 
-num_edges = 8
+num_samples = 8
 channels = 2
 lmax = 2
 mmax = 2
 
 # Every O(3) irrep uses the same channel multiplicity in this example.
 irreps_o3 = o3.Irreps("2x0e + 2x1o + 2x2e")
-edge_features = torch.randn(num_edges, irreps_o3.dim)
-edge_vectors = torch.randn(num_edges, 3)
+global_features = torch.randn(num_samples, irreps_o3.dim)
+vectors = torch.randn(num_samples, 3)
 
 wigner_d = o2.WignerD(lmax=lmax, mmax=mmax)
-D, D_inv = wigner_d.get_wigner(edge_vectors)
+D, D_inv = wigner_d.get_wigner(vectors)
 
-layout = o2.O3O2Layout(irreps_o3, lmax=lmax, mmax=mmax)
-local_blocks = layout(edge_features, D)
+frame = o2.LocalFrame(irreps_o3, lmax=lmax, mmax=mmax)
+local_blocks = frame.to_local(global_features, D)
 
 local_linear = o2.Linear(
-    layout.local_irreps,
-    layout.local_irreps,
+    frame.local_irreps,
+    frame.local_irreps,
     channels_in=channels,
 )
 local_output = local_linear.forward_grouped(local_blocks)
-global_output = layout.inverse(local_output, D_inv)
+global_output = frame.to_global(local_output, D_inv)
 
-assert global_output.shape == edge_features.shape
+assert global_output.shape == global_features.shape
 ```
 
 Setting `mmax < lmax` retains only local orders `0 <= m <= mmax`. The inverse

@@ -1,22 +1,23 @@
 """Standalone real O(2) layers with optional global-O(3)/local-O(2) layouts."""
 
-from .asymmetric_contraction import O2AsymmetricContraction
-from .circular_harmonics import CircularHarmonics, circular_harmonics
-from .gate import O2Gate
 from .irreps import Irrep, Irreps
-from .layout import O3O2Layout
 from .linear import Linear
-from .rotation_matrix import init_edge_rot_mat_quaternion
 from .tensor_product import TensorProduct
+from .gate import Gate
+from .circular_harmonics import CircularHarmonics, circular_harmonics
+from .rotation_matrix import init_edge_rot_mat_quaternion
 from .wigner import WignerD
+from .asymmetric_contraction import O2AsymmetricContraction
+from .local_frame import LocalFrame
+
 
 __all__ = [
     "Irrep",
     "Irreps",
     "Linear",
-    "O2Gate",
+    "Gate",
     "O2AsymmetricContraction",
-    "O3O2Layout",
+    "LocalFrame",
     "CircularHarmonics",
     "TensorProduct",
     "WignerD",

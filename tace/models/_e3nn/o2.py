@@ -172,7 +172,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
 
 
 class O2ScatterLinear(torch.nn.Module):
-    """Edge-aligned O2 gated convolution.
+    """Local O2 gated convolution.
 
     Source and target node features are concatenated in the local
     representation. Optional extra node attributes use the same source-target
@@ -244,44 +244,44 @@ class O2ScatterLinear(torch.nn.Module):
             input_lmax = max(input_lmax, self.extra_node_attrs_irreps.lmax)
         self.active_mmax = min(input_lmax, mmax)
 
-        self.reshape_in = o2.O3O2Layout(
+        self.input_frame = o2.LocalFrame(
             self.irreps_node,
             lmax,
             self.active_mmax,
         )
-        self.reshape_out = o2.O3O2Layout(
+        self.output_frame = o2.LocalFrame(
             self.irreps_out,
             lmax,
             self.active_mmax,
         )
         input_groups = (
-            tuple(self.reshape_in.local_irreps)
-            + tuple(self.reshape_in.local_irreps)
+            tuple(self.input_frame.local_irreps)
+            + tuple(self.input_frame.local_irreps)
         )
         if self.extra_node_attrs_irreps is not None:
-            self.extra_node_attrs_layout = o2.O3O2Layout(
+            self.extra_node_attrs_frame = o2.LocalFrame(
                 self.extra_node_attrs_irreps,
                 lmax,
                 self.active_mmax,
             )
             input_groups += (
-                tuple(self.extra_node_attrs_layout.local_irreps)
-                + tuple(self.extra_node_attrs_layout.local_irreps)
+                tuple(self.extra_node_attrs_frame.local_irreps)
+                + tuple(self.extra_node_attrs_frame.local_irreps)
             )
         self.irreps_in_local = o2.Irreps(input_groups).regroup()
-        self.irreps_out_local = self.reshape_out.local_irreps
+        self.irreps_out_local = self.output_frame.local_irreps
 
         # TODO start from here
         self.input_block_irreps = tuple(irrep for _, irrep in self.irreps_in_local)
         self.node_block_indices = {
             irrep: index
-            for index, (_, irrep) in enumerate(self.reshape_in.local_irreps)
+            for index, (_, irrep) in enumerate(self.input_frame.local_irreps)
         }
         self.extra_node_attrs_block_indices = (
             {
                 irrep: index
                 for index, (_, irrep) in enumerate(
-                    self.extra_node_attrs_layout.local_irreps
+                    self.extra_node_attrs_frame.local_irreps
                 )
             }
             if self.extra_node_attrs_irreps is not None
@@ -324,7 +324,7 @@ class O2ScatterLinear(torch.nn.Module):
                     if self.irreps_in_local.count(irrep) > 0
                 ]
             )
-            self.nonlinearity = o2.O2Gate(
+            self.nonlinearity = o2.Gate(
                 num_channel * self.irreps_hidden_local,
                 act_0e=act_0e,
                 act_0o=act_0o,
@@ -358,7 +358,7 @@ class O2ScatterLinear(torch.nn.Module):
 
         if self.use_radial_rotary_attention:
             self.attention = RadialRotaryComplexAttention(
-                self.reshape_in.local_irreps,
+                self.input_frame.local_irreps,
                 self.irreps_out_local,
                 num_channel,
                 self.num_head,
@@ -494,19 +494,25 @@ class O2ScatterLinear(torch.nn.Module):
             raise ValueError("O2 convolution requires edge Wigner matrices.")
 
         source, target = edge_index
-        source_node_blocks = self.reshape_in(node_feats[source], wigner)
-        target_node_blocks = self.reshape_in(node_feats[target], wigner)
+        source_node_blocks = self.input_frame.to_local(
+            node_feats[source],
+            wigner,
+        )
+        target_node_blocks = self.input_frame.to_local(
+            node_feats[target],
+            wigner,
+        )
         source_extra_blocks = None
         target_extra_blocks = None
         if self.extra_node_attrs_irreps is not None:
             if extra_node_attrs is None:
                 raise ValueError("O2 convolution requires extra_node_attrs.")
-            source_extra_blocks = self.extra_node_attrs_layout(
-                extra_node_attrs[source].unsqueeze(-1),
+            source_extra_blocks = self.extra_node_attrs_frame.to_local(
+                extra_node_attrs[source],
                 wigner,
             )
-            target_extra_blocks = self.extra_node_attrs_layout(
-                extra_node_attrs[target].unsqueeze(-1),
+            target_extra_blocks = self.extra_node_attrs_frame.to_local(
+                extra_node_attrs[target],
                 wigner,
             )
             source_extra_blocks = tuple(
@@ -573,7 +579,7 @@ class O2ScatterLinear(torch.nn.Module):
                 edge_cutoff,
                 node_feats.size(0),
             )
-        messages = self.reshape_out.inverse(output_blocks, wigner_inv)
+        messages = self.output_frame.to_global(output_blocks, wigner_inv)
         if self.attention is None:
             messages = messages * edge_cutoff
         return scatter_sum(
@@ -604,8 +610,8 @@ class O2MagneticScatterLinear(O2ScatterLinear):
         self.magnetic_irreps = magnetic_irreps
 
     @property
-    def magnetic_layout(self) -> o2.O3O2Layout:
-        return self.extra_node_attrs_layout
+    def magnetic_frame(self) -> o2.LocalFrame:
+        return self.extra_node_attrs_frame
 
     def forward(
         self,
