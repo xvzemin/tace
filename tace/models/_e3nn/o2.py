@@ -301,7 +301,6 @@ class O2ScatterLinear(torch.nn.Module):
                 act_0e=act_0e,
                 act_0o=act_0o,
                 act_lm=act_lm,
-                channels=num_channel,
             )
             self.projection_irreps = self.nonlinearity.irreps_in
             self.linear_up = o2.Linear(

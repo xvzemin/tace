@@ -66,18 +66,12 @@ class O2Gate(torch.nn.Module):
         act_0e: torch.nn.Module,
         act_0o: Union[torch.nn.Module, None],
         act_lm: torch.nn.Module,
-        channels: int = 1,
     ) -> None:
         super().__init__()
 
         if act_0o is not None and not isinstance(act_0o, torch.nn.Module):
             raise TypeError("act_0o must be a torch.nn.Module or None.")
-        if not isinstance(channels, int) or isinstance(channels, bool):
-            raise TypeError("channels must be an integer.")
-        if channels < 1:
-            raise ValueError("channels must be positive.")
 
-        self.channels = channels
         self.irreps_out = Irreps(irreps_out)
         even_groups = []
         odd_groups = []
@@ -225,7 +219,4 @@ class O2Gate(torch.nn.Module):
         return tuple(outputs)
 
     def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}({self.channels * self.irreps_in} -> "
-            f"{self.channels * self.irreps_out})"
-        )
+        return f"{self.__class__.__name__}({self.irreps_in} -> {self.irreps_out})"

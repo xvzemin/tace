@@ -408,19 +408,15 @@ def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
     torch.testing.assert_close(transformed_output, expected)
 
 
-def test_o2_gate_repr_merges_channels_into_irreps():
+def test_o2_gate_repr_uses_its_own_irreps():
     module = O2Gate(
         "2x0e+0o+2x1m",
         act_0e=torch.nn.SiLU(),
         act_0o=None,
         act_lm=torch.nn.Sigmoid(),
-        channels=3,
     )
 
-    assert repr(module) == (
-        f"O2Gate({module.channels * module.irreps_in} -> "
-        f"{module.channels * module.irreps_out})"
-    )
+    assert repr(module) == f"O2Gate({module.irreps_in} -> {module.irreps_out})"
 
 
 @pytest.mark.parametrize("direct_0o", [False, True])
