@@ -109,6 +109,29 @@ TACE currently supports the following plugin:
 - ✅ Supports integration with [USPEX](https://uspex-team.org/)
   (USPEX -> LAMMPS-ML-IAP -> TACE) (Python=3.9).
 
+## Contact
+
+For bugs or feature requests, please use the
+[TACE issue](https://github.com/xvzemin/tace/issues).
+
+For usage discussions, and community updates, you can join the TACE
+community through either QQ or Discord by scanning the corresponding QR code.
+
+<table>
+  <tr>
+    <th>QQ</th>
+    <th>Discord</th>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="fig/qq.jpg" alt="TACE QQ QR code" width="260">
+    </td>
+    <td align="center">
+      <img src="fig/discord.jpg" alt="TACE Discord QR code" width="260">
+    </td>
+  </tr>
+</table>
+
 ## Citing
 
 If you use TACE, please cite our papers:
@@ -161,11 +184,6 @@ If you use cartnn, Cartesian-3j, cMACE, cNequIP, cAllegro, please cite our paper
 }
 ```
 
-## Contact
-
-For bugs or feature requests, please use the
-[TACE issue](https://github.com/xvzemin/tace/issues).
-
 ## Development
 
 Install the development tools and run the same formatting and lint checks used by
@@ -178,26 +196,6 @@ ruff format tace
 ruff check tace
 ruff format --check tace
 ```
-
-## Community
-
-For questions, usage discussions, and community updates, you can join the TACE
-community through either QQ or Discord by scanning the corresponding QR code.
-
-<table>
-  <tr>
-    <th>QQ</th>
-    <th>Discord</th>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="fig/qq.jpg" alt="TACE QQ QR code" width="260">
-    </td>
-    <td align="center">
-      <img src="fig/discord.jpg" alt="TACE Discord QR code" width="260">
-    </td>
-  </tr>
-</table>
 
 ## License
 
