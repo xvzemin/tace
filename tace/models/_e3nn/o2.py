@@ -19,13 +19,6 @@ from ..linear import torchLinear
 from ..softmax import GraphSoftmax
 
 
-def _common_multiplicity(irreps: o3.Irreps, name: str) -> int:
-    multiplicities = {multiplicity for multiplicity, _ in irreps}
-    if len(multiplicities) != 1:
-        raise ValueError(f"{name} must use one common multiplicity per irrep.")
-    return next(iter(multiplicities))
-
-
 class RadialRotaryComplexAttention(torch.nn.Module):
     def __init__(
         self,
@@ -229,9 +222,15 @@ class O2ScatterLinear(torch.nn.Module):
         self.num_head = num_head
         self.use_asymmetric_contraction = use_asymmetric_contraction
         self.use_radial_rotary_attention = use_radial_rotary_attention
-        if _common_multiplicity(self.irreps_node, "irreps_node") != num_channel:
+        if (
+            o2.Irreps.common_multiplicity(self.irreps_node)
+            != num_channel
+        ):
             raise ValueError("irreps_node multiplicity must equal num_channel.")
-        if _common_multiplicity(self.irreps_out, "irreps_out") != num_channel:
+        if (
+            o2.Irreps.common_multiplicity(self.irreps_out)
+            != num_channel
+        ):
             raise ValueError("irreps_out multiplicity must equal num_channel.")
         if self.correlation < 1:
             raise ValueError("correlation must be positive.")

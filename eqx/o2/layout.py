@@ -83,10 +83,7 @@ class O3O2Layout(torch.nn.Module):
         super().__init__()
 
         self.irreps = o3.Irreps(irreps)
-        channels = {multiplicity for multiplicity, _ in self.irreps}
-        if len(channels) != 1:
-            raise ValueError("Every O(3) irrep must use the same channel count.")
-        self.channels = channels.pop()
+        self.channels = Irreps.common_multiplicity(self.irreps)
         if not isinstance(lmax, int) or isinstance(lmax, bool):
             raise TypeError("lmax must be an integer.")
         if self.irreps.lmax > lmax:

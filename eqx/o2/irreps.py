@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Iterator, Optional, Sequence, Tuple, Union
 
 import torch
+from e3nn import o3
 
 Parity = Union[int, str]
 IrrepLike = Union["Irrep", str, Tuple[int, Parity]]
@@ -215,6 +216,14 @@ class Irreps:
     def __setattr__(self, name, value) -> None:
         raise AttributeError("Irreps metadata is immutable.")
 
+    @staticmethod
+    def common_multiplicity(irreps: o3.Irreps) -> int:
+        """Return the multiplicity shared by all O(3) irrep groups."""
+        assert isinstance(irreps, o3.Irreps)
+        multiplicities = {multiplicity for multiplicity, _ in irreps}
+        assert len(multiplicities) == 1
+        return next(iter(multiplicities))
+    
     @property
     def dim(self) -> int:
         return sum(multiplicity * irrep.dim for multiplicity, irrep in self)
