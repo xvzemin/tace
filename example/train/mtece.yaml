@@ -1,0 +1,36 @@
+# Magnetic TECE inherits TECE and only overrides its magnetic architecture,
+# dataset keys, loss, and validation metric.
+defaults:
+  - tece
+  - _self_
+
+dataset:
+  keys:
+    initial_noncollinear_magmoms_key: initial_noncollinear_magmoms
+    noncollinear_magnetic_forces_key: noncollinear_magnetic_forces
+
+loss:
+  loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
+  loss_function_name:
+    - mse_energy_per_atom
+    - mse_forces
+    - mse_stress
+    - mse_noncollinear_magnetic_forces
+  loss_property_weights: [1.0, 5.0, 0.5, 5.0]
+  loss_huber_delta: [0.01, 0.01, 0.01, 0.01]
+
+synth_metric:
+  val/noncollinear_magnetic_forces_mae: 5.0
+  val/noncollinear_magnetic_forces_rmse: 1.0
+
+model:
+  config:
+    parity: true
+    mmax: 3
+
+    atomic_basis:
+      type: o2_mag
+
+    product_basis:
+      nonlinear: silu_bilineargate
+      agnostic: true

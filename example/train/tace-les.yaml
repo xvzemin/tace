@@ -1,0 +1,11 @@
+# TACE-LES shares the complete training workflow with TACE and only overrides
+# architecture parameters that differ from example/train/tace.yaml.
+defaults:
+  - tace
+  - _self_
+
+model:
+  config:
+    long_range:
+      les:
+        enable: true
