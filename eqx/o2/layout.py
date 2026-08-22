@@ -82,6 +82,10 @@ class O3O2Layout(torch.nn.Module):
         super().__init__()
 
         self.irreps = o3.Irreps(irreps)
+        channels = {multiplicity for multiplicity, _ in self.irreps}
+        if len(channels) != 1:
+            raise ValueError("Every O(3) irrep must use the same channel count.")
+        self.channels = channels.pop()
         if not isinstance(lmax, int) or isinstance(lmax, bool):
             raise TypeError("lmax must be an integer.")
         if self.irreps.lmax > lmax:
@@ -251,6 +255,12 @@ class O3O2Layout(torch.nn.Module):
         self.source_locations = tuple(
             tuple(source_locations[(group_index, irrep.m)] for group_index in sources)
             for (_, irrep), sources in zip(self.local_irreps, self.block_sources)
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}({self.irreps} -> "
+            f"{self.channels * self.local_irreps})(mmax={self.mmax})"
         )
 
     def _rotate_towers(

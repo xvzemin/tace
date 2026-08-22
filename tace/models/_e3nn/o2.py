@@ -231,11 +231,11 @@ class O2ScatterLinear(torch.nn.Module):
         ):
             raise ValueError("num_head must divide num_channel.")
 
-        self.node_layout = o2.O3O2Layout(self.irreps_node, lmax, mmax)
-        self.output_layout = o2.O3O2Layout(self.irreps_out, lmax, mmax)
+        self.reshape_in = o2.O3O2Layout(self.irreps_node, lmax, mmax)
+        self.reshape_out = o2.O3O2Layout(self.irreps_out, lmax, mmax)
         input_groups = (
-            tuple(self.node_layout.local_irreps)
-            + tuple(self.node_layout.local_irreps)
+            tuple(self.reshape_in.local_irreps)
+            + tuple(self.reshape_in.local_irreps)
         )
         if self.extra_node_attrs_irreps is not None:
             self.extra_node_attrs_layout = o2.O3O2Layout(
@@ -248,13 +248,13 @@ class O2ScatterLinear(torch.nn.Module):
                 + tuple(self.extra_node_attrs_layout.local_irreps)
             )
         self.irreps_in_local = o2.Irreps(input_groups).regroup()
-        self.irreps_out_local = self.output_layout.local_irreps
+        self.irreps_out_local = self.reshape_out.local_irreps
 
         # TODO start from here
         self.input_block_irreps = tuple(irrep for _, irrep in self.irreps_in_local)
         self.node_block_indices = {
             irrep: index
-            for index, (_, irrep) in enumerate(self.node_layout.local_irreps)
+            for index, (_, irrep) in enumerate(self.reshape_in.local_irreps)
         }
         self.extra_node_attrs_block_indices = (
             {
@@ -268,7 +268,7 @@ class O2ScatterLinear(torch.nn.Module):
         )
 
         if self.use_asymmetric_contraction:
-            self.gate = None
+            self.nonlinearity = None
             self.asymmetric_contraction = o2.O2AsymmetricContraction(
                 self.irreps_out_local,
                 self.irreps_out_local,
@@ -286,7 +286,7 @@ class O2ScatterLinear(torch.nn.Module):
                 (self.asymmetric_contraction.num_paths, o2.Irrep("0e"))
             )
             self.projection_irreps = o2.Irreps(projection_groups).regroup()
-            self.linear_in = o2.Linear(
+            self.linear_up = o2.Linear(
                 self.irreps_in_local,
                 self.projection_irreps,
                 num_channel,
@@ -296,21 +296,22 @@ class O2ScatterLinear(torch.nn.Module):
         else:
             self.asymmetric_contraction = None
             self.contraction_weight_numel = 0
-            self.gate = o2.O2Gate(
+            self.nonlinearity = o2.O2Gate(
                 self.irreps_out_local,
                 act_0e=act_0e,
                 act_0o=act_0o,
                 act_lm=act_lm,
+                channels=num_channel,
             )
-            self.projection_irreps = self.gate.irreps_in
-            self.linear_in = o2.Linear(
+            self.projection_irreps = self.nonlinearity.irreps_in
+            self.linear_up = o2.Linear(
                 self.irreps_in_local,
                 self.projection_irreps,
                 num_channel,
                 path_mode="uv",
                 bias=False,
             )
-        self.linear_out = o2.Linear(
+        self.linear_down = o2.Linear(
             self.irreps_out_local,
             self.irreps_out_local,
             num_channel,
@@ -321,7 +322,7 @@ class O2ScatterLinear(torch.nn.Module):
 
         if self.use_radial_rotary_attention:
             self.attention = RadialRotaryComplexAttention(
-                self.node_layout.local_irreps,
+                self.reshape_in.local_irreps,
                 self.irreps_out_local,
                 num_channel,
                 self.num_head,
@@ -455,8 +456,8 @@ class O2ScatterLinear(torch.nn.Module):
             raise ValueError("O2 convolution requires edge Wigner matrices.")
 
         source, target = edge_index
-        source_node_blocks = self.node_layout(node_feats[source], wigner)
-        target_node_blocks = self.node_layout(node_feats[target], wigner)
+        source_node_blocks = self.reshape_in(node_feats[source], wigner)
+        target_node_blocks = self.reshape_in(node_feats[target], wigner)
         source_extra_blocks = None
         target_extra_blocks = None
         if self.extra_node_attrs_irreps is not None:
@@ -512,14 +513,14 @@ class O2ScatterLinear(torch.nn.Module):
             raise ValueError("Invalid O2 radial weight size.")
 
         weighted_blocks = tuple(weighted_blocks)
-        projected_blocks = self.linear_in.forward_grouped(weighted_blocks)
+        projected_blocks = self.linear_up.forward_grouped(weighted_blocks)
         if self.use_asymmetric_contraction:
             hidden_blocks = self._apply_asymmetric_contraction(projected_blocks)
         else:
-            if self.gate is None:
-                raise RuntimeError("O2 gate is not configured.")
-            hidden_blocks = self.gate.forward_grouped(projected_blocks)
-        output_blocks = self.linear_out.forward_grouped(hidden_blocks)
+            if self.nonlinearity is None:
+                raise RuntimeError("O2 nonlinearity is not configured.")
+            hidden_blocks = self.nonlinearity.forward_grouped(projected_blocks)
+        output_blocks = self.linear_down.forward_grouped(hidden_blocks)
         if self.attention is not None:
             if edge_radial_basis is None:
                 raise ValueError(
@@ -534,7 +535,7 @@ class O2ScatterLinear(torch.nn.Module):
                 edge_cutoff,
                 node_feats.size(0),
             )
-        messages = self.output_layout.inverse(output_blocks, wigner_inv)
+        messages = self.reshape_out.inverse(output_blocks, wigner_inv)
         return scatter_sum(
             messages,
             edge_index[1],

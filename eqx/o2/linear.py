@@ -407,11 +407,10 @@ class Linear(torch.nn.Module):
             output_blocks.append(output_block)
         return tuple(output_blocks)
 
-    def extra_repr(self) -> str:
+    def __repr__(self) -> str:
         return (
-            f"irreps_in={self.irreps_in}, irreps_out={self.irreps_out}, "
-            f"channels_in={self.channels_in}, channels_out={self.channels_out}, "
-            f"path_mode={self.path_mode}, "
-            f"internal_weights={self.internal_weights}, "
-            f"bias={self.bias is not None}, num_paths={len(self.path)}"
+            f"{self.__class__.__name__}"
+            f"({self.channels_in * self.irreps_in} -> "
+            f"{self.channels_out * self.irreps_out} | {self.weight_numel} weights)"
+            f"(bias={self.bias is not None})"
         )

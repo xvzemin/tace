@@ -147,6 +147,19 @@ def test_o3_o2_layout_mmax_restricts_local_blocks():
     assert layout.inverse(blocks, wigner_inv).shape == input.shape
 
 
+def test_o3_o2_layout_repr_shows_irreps_conversion():
+    layout = o2.O3O2Layout(
+        o3.Irreps("2x0e+2x1o+2x1e+2x2e"),
+        lmax=2,
+        mmax=1,
+    )
+
+    assert repr(layout) == (
+        f"O3O2Layout({layout.irreps} -> "
+        f"{layout.channels * layout.local_irreps})(mmax=1)"
+    )
+
+
 def test_o3_o2_layout_validates_mmax():
     irreps = o3.Irreps("0e+1o+2e")
     with pytest.raises(ValueError, match="0 <= mmax <= lmax"):
@@ -344,6 +357,25 @@ def test_o2_linear_is_exported_without_prefixed_class_name():
     assert o2.Irreps.__name__ == "Irreps"
 
 
+@pytest.mark.parametrize("path_mode", ["uv", "uu"])
+def test_o2_linear_repr_only_shows_shape_bias_and_weight_count(path_mode):
+    channels_out = 5 if path_mode == "uv" else None
+    module = o2.Linear(
+        "2x0e+1m",
+        "0e+2x1m",
+        channels_in=3,
+        channels_out=channels_out,
+        path_mode=path_mode,
+        bias=True,
+    )
+
+    assert repr(module) == (
+        f"Linear({module.channels_in * module.irreps_in} -> "
+        f"{module.channels_out * module.irreps_out} | "
+        f"{module.weight_numel} weights)(bias=True)"
+    )
+
+
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
     irreps_out = o2.Irreps("2x0e+0o+2x1m+2m")
@@ -374,6 +406,21 @@ def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
     transformed_output = module(transformed_input)
     expected = torch.einsum("ij,bjc->bic", output_transform, output)
     torch.testing.assert_close(transformed_output, expected)
+
+
+def test_o2_gate_repr_merges_channels_into_irreps():
+    module = O2Gate(
+        "2x0e+0o+2x1m",
+        act_0e=torch.nn.SiLU(),
+        act_0o=None,
+        act_lm=torch.nn.Sigmoid(),
+        channels=3,
+    )
+
+    assert repr(module) == (
+        f"O2Gate({module.channels * module.irreps_in} -> "
+        f"{module.channels * module.irreps_out})"
+    )
 
 
 @pytest.mark.parametrize("direct_0o", [False, True])
@@ -1513,11 +1560,11 @@ def test_o2_interaction_mmax_restricts_internal_paths():
 
     assert truncated.rejector.irreps_out_local.m_max == 1
     assert complete.rejector.irreps_out_local.m_max == 2
-    assert len(truncated.rejector.linear_out.path) < len(
-        complete.rejector.linear_out.path
+    assert len(truncated.rejector.linear_down.path) < len(
+        complete.rejector.linear_down.path
     )
-    assert truncated.rejector.linear_out.weight_numel < (
-        complete.rejector.linear_out.weight_numel
+    assert truncated.rejector.linear_down.weight_numel < (
+        complete.rejector.linear_down.weight_numel
     )
 
 
@@ -1536,8 +1583,8 @@ def test_o2_interaction_is_globally_o3_equivariant(
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
-    assert module.rejector.node_layout.local_irreps.m_max == mmax
-    assert module.rejector.output_layout.local_irreps.m_max == mmax
+    assert module.rejector.reshape_in.local_irreps.m_max == mmax
+    assert module.rejector.reshape_out.local_irreps.m_max == mmax
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_interaction(module, inputs)
 
@@ -1576,14 +1623,14 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     torch.manual_seed(7)
     module = _build_o2_magnetic_interaction()
     assert module.edge_info.dims[0] == module.edge_feats_channel + 2 * 3
-    assert module.rejector.linear_in.path_mode == "uv"
-    assert module.rejector.linear_in.internal_weights
-    assert isinstance(module.rejector.gate, O2Gate)
-    assert isinstance(module.rejector.gate.act_0e, ScaledSiLU)
-    assert isinstance(module.rejector.gate.act_0o, ScaledTanh)
-    assert isinstance(module.rejector.gate.act_lm, ScaledSigmoid)
-    assert module.rejector.linear_out.path_mode == "uv"
-    assert module.rejector.linear_out.internal_weights
+    assert module.rejector.linear_up.path_mode == "uv"
+    assert module.rejector.linear_up.internal_weights
+    assert isinstance(module.rejector.nonlinearity, O2Gate)
+    assert isinstance(module.rejector.nonlinearity.act_0e, ScaledSiLU)
+    assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
+    assert isinstance(module.rejector.nonlinearity.act_lm, ScaledSigmoid)
+    assert module.rejector.linear_down.path_mode == "uv"
+    assert module.rejector.linear_down.internal_weights
     assert not isinstance(module.linear_down, torch.nn.Identity)
 
     inputs = _o2_magnetic_inputs(module)
@@ -1612,7 +1659,7 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     )
     assert module.rejector.asymmetric_contraction.algorithm == "edge"
     assert module.rejector.contraction_weight_numel > 0
-    assert module.rejector.gate is None
+    assert module.rejector.nonlinearity is None
     assert not hasattr(module, "contraction_info")
     assert isinstance(module.rejector.scalar_act, ScaledSiLU)
     assert module.rejector.projection_irreps.count("0e") == (
@@ -1623,7 +1670,7 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
 
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
-    parameters = tuple(module.rejector.linear_in.parameters())
+    parameters = tuple(module.rejector.linear_up.parameters())
     gradients = torch.autograd.grad(
         output.square().sum(),
         (inputs[0], inputs[2], inputs[-1], *parameters),
@@ -1662,15 +1709,15 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
 
 def test_o2_magnetic_interaction_parses_scalar_activations():
     single = _build_o2_magnetic_interaction(scalar_act="scaled_silu")
-    assert isinstance(single.rejector.gate.act_0e, ScaledSiLU)
-    assert isinstance(single.rejector.gate.act_0o, ScaledTanh)
+    assert isinstance(single.rejector.nonlinearity.act_0e, ScaledSiLU)
+    assert isinstance(single.rejector.nonlinearity.act_0o, ScaledTanh)
 
     separate = _build_o2_magnetic_interaction(scalar_act=["scaled_silu", "tanh"])
-    assert isinstance(separate.rejector.gate.act_0e, ScaledSiLU)
-    assert isinstance(separate.rejector.gate.act_0o, ScaledTanh)
+    assert isinstance(separate.rejector.nonlinearity.act_0e, ScaledSiLU)
+    assert isinstance(separate.rejector.nonlinearity.act_0o, ScaledTanh)
 
     tensor = _build_o2_magnetic_interaction(tensor_act="tanh")
-    assert isinstance(tensor.rejector.gate.act_lm, ScaledTanh)
+    assert isinstance(tensor.rejector.nonlinearity.act_lm, ScaledTanh)
 
 
 def test_o2_magnetic_interaction_rejects_invalid_tensor_activation():
