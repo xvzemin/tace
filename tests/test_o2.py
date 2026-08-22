@@ -154,6 +154,86 @@ def test_o3_o2_layout_validates_mmax():
         o2.O3O2Layout(irreps, lmax=2, mmax=3)
 
 
+@pytest.mark.parametrize("lmax,mmax", [(0, 0), (2, 0), (3, 1), (4, 2), (4, 4)])
+def test_o2_wigner_layout_matches_legacy_so2_mapping(lmax, mmax):
+    from tace.models._e3nn.legacy.oam_2026_07_05 import (
+        CoefficientMappingModule as LegacyCoefficientMappingModule,
+    )
+
+    full_mapping = LegacyCoefficientMappingModule(
+        lmax=lmax,
+        mmax=lmax,
+        use_rotate_inv_rescale=True,
+    )
+    retained = full_mapping.coefficient_idx(lmax, mmax)
+    expected_inverse_scale = full_mapping.get_rotate_inv_rescale(lmax, mmax)
+
+    truncated_mapping = LegacyCoefficientMappingModule(lmax=lmax, mmax=mmax)
+    to_m = truncated_mapping.to_m
+    expected_inverse_scale = torch.einsum(
+        "nia,ba->nib", expected_inverse_scale, to_m
+    )
+    expected_layout = torch.zeros(to_m.shape[0], (lmax + 1) ** 2)
+    expected_layout[:, retained] = to_m
+
+    wigner = WignerD(mmax=mmax, lmax=lmax)
+    torch.testing.assert_close(wigner.wigner_index_to_m_array, expected_layout)
+    torch.testing.assert_close(wigner.wigner_inv_rescale, expected_inverse_scale)
+
+
+@pytest.mark.parametrize("lmax,mmax", [(2, 0), (3, 1), (4, 2), (4, 4)])
+def test_o2_wigner_mmax_truncation_preserves_degree_variance(lmax, mmax):
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        module = WignerD(mmax=mmax, lmax=lmax)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    module = module.to(device=DEVICE, dtype=DTYPE)
+    edge_vectors = torch.randn(17, 3, device=DEVICE, dtype=DTYPE)
+    wigner, wigner_inv = module.get_wigner(edge_vectors)
+    raw_inverse = wigner.transpose(1, 2)
+
+    identity = torch.eye(wigner.shape[1], device=DEVICE, dtype=DTYPE).expand(
+        edge_vectors.shape[0], -1, -1
+    )
+    torch.testing.assert_close(
+        wigner @ wigner.transpose(1, 2),
+        identity,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+    for degree in range(lmax + 1):
+        degree_slice = slice(degree**2, (degree + 1) ** 2)
+        degree_dim = 2 * degree + 1
+        retained_dim = 2 * min(degree, mmax) + 1
+        raw_variance = raw_inverse[:, degree_slice].square().sum((1, 2)) / degree_dim
+        scaled_variance = wigner_inv[:, degree_slice].square().sum((1, 2)) / degree_dim
+        torch.testing.assert_close(
+            raw_variance,
+            torch.full_like(raw_variance, retained_dim / degree_dim),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        torch.testing.assert_close(
+            scaled_variance,
+            torch.ones_like(scaled_variance),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
+
+def test_o2_wigner_validates_limits_and_hides_legacy_mapping():
+    assert not hasattr(o2, "CoefficientMappingModule")
+    with pytest.raises(ValueError, match="0 <= mmax <= lmax"):
+        WignerD(mmax=3, lmax=2)
+    with pytest.raises(ValueError, match="non-negative"):
+        WignerD(mmax=0, lmax=-1)
+    with pytest.raises(TypeError, match="integer"):
+        WignerD(mmax=True, lmax=2)
+
+
 def test_o2_irrep_and_irreps_metadata():
     assert Irrep("0e") == Irrep(0, 1)
     assert Irrep("0o") == Irrep((0, -1))

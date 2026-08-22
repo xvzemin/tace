@@ -8,7 +8,7 @@ from .layout import O3O2Layout
 from .linear import Linear
 from .rotation_matrix import init_edge_rot_mat_quaternion
 from .tensor_product import TensorProduct
-from .wigner import CoefficientMappingModule, WignerD
+from .wigner import WignerD
 
 __all__ = [
     "Irrep",
@@ -18,7 +18,6 @@ __all__ = [
     "O2AsymmetricContraction",
     "O3O2Layout",
     "CircularHarmonics",
-    "CoefficientMappingModule",
     "TensorProduct",
     "WignerD",
     "circular_harmonics",
