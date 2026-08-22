@@ -10,8 +10,6 @@ TACE provides several composable acceleration layers:
   mutually exclusive;
 * EquiTorch (EQT) independently accelerates supported product-basis tensor
   products and can be combined with either OEQ or CUEQ;
-* the EQX preview backend currently accelerates only the scatter calculation
-  in ``uuSO2Interaction``;
 * PyTorch compilation accelerates a larger part of the model and can either
   run inside the current Python process or produce an AOTInductor package for
   later deployment. AOTI is independent of the kernel-backend selection.
@@ -43,9 +41,6 @@ The following kernel backends are available:
    * - EquiTorch
      - Independent product-basis acceleration
      - ``TACE_USE_EQT=1``
-   * - EQX preview
-     - Independent ``uuSO2Interaction`` scatter acceleration
-     - ``TACE_USE_EQX=1``
 
 For example:
 
