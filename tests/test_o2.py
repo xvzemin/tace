@@ -32,10 +32,6 @@ from tace.models.o2 import (
     Irreps,
     O2Gate,
     WignerD,
-    o2_irreps_representation,
-    o2_representation,
-    restrict_o3_irrep,
-    restrict_o3_irreps,
 )
 from tace.models.radial import j0SincSphericalBesselBasis, j0SphericalBesselBasis
 
@@ -158,21 +154,21 @@ def test_o2_irrep_rejects_invalid_labels(value):
 
 
 def test_o3_restriction_is_complete_and_parity_aware():
-    assert restrict_o3_irrep(1, "o") == Irreps("0e+1m")
-    assert restrict_o3_irrep(1, "e") == Irreps("0o+1m")
-    assert restrict_o3_irrep(2, "e") == Irreps("0e+1m+2m")
-    assert restrict_o3_irrep(2, "o") == Irreps("0o+1m+2m")
-    assert restrict_o3_irreps([(2, 1, "e"), (1, 0, "o")]) == Irreps("2x0o+2x1m+0o")
+    assert o2.O3O2Layout.restrict(o3.Irreps("1o")) == Irreps("0e+1m")
+    assert o2.O3O2Layout.restrict(o3.Irreps("1e")) == Irreps("0o+1m")
+    assert o2.O3O2Layout.restrict(o3.Irreps("2e")) == Irreps("0e+1m+2m")
+    assert o2.O3O2Layout.restrict(o3.Irreps("2o")) == Irreps("0o+1m+2m")
+    assert o2.O3O2Layout.restrict(o3.Irreps("2x1e+0o")) == Irreps("2x0o+1m")
 
 
 def test_o2_direct_sum_representation_uses_complete_layout():
     irreps = Irreps("0e+0o+2x1m")
     angle = torch.tensor([0.2, -0.7], dtype=DTYPE, device=DEVICE)
-    representation = o2_irreps_representation(irreps, angle, True)
+    representation = irreps.D_from_angle(angle, True)
     assert representation.shape == (2, irreps.dim, irreps.dim)
     torch.testing.assert_close(representation[:, 0, 0], torch.ones_like(angle))
     torch.testing.assert_close(representation[:, 1, 1], -torch.ones_like(angle))
-    expected = o2_representation("1m", angle, True)
+    expected = Irrep("1m").D_from_angle(angle, True)
     torch.testing.assert_close(representation[:, 2:4, 2:4], expected)
     torch.testing.assert_close(representation[:, 4:6, 4:6], expected)
 
@@ -186,12 +182,8 @@ def test_circular_harmonics_is_native_o2_equivariant(normalize, reflected):
     )
     vectors = torch.randn(9, 2, dtype=DTYPE, device=DEVICE)
     angle = torch.tensor(0.37, dtype=DTYPE, device=DEVICE)
-    input_transform = o2.o2_representation("1m", angle, reflected)
-    output_transform = o2.o2_irreps_representation(
-        module.irreps_out,
-        angle,
-        reflected,
-    )
+    input_transform = o2.Irrep("1m").D_from_angle(angle, reflected)
+    output_transform = module.irreps_out.D_from_angle(angle, reflected)
 
     transformed_vectors = torch.einsum("ij,bj->bi", input_transform, vectors)
     actual = module(transformed_vectors)
@@ -267,16 +259,8 @@ def test_o2_gate_is_equivariant_and_matches_grouped_forward(reflected):
     torch.testing.assert_close(grouped_output, output)
 
     angle = torch.tensor(0.41, dtype=DTYPE, device=DEVICE)
-    input_transform = o2.o2_irreps_representation(
-        module.irreps_in,
-        angle,
-        reflected,
-    )
-    output_transform = o2.o2_irreps_representation(
-        module.irreps_out,
-        angle,
-        reflected,
-    )
+    input_transform = module.irreps_in.D_from_angle(angle, reflected)
+    output_transform = module.irreps_out.D_from_angle(angle, reflected)
     transformed_input = torch.einsum("ij,bjc->bic", input_transform, input)
     transformed_output = module(transformed_input)
     expected = torch.einsum("ij,bjc->bic", output_transform, output)
@@ -329,16 +313,8 @@ def test_o2_gate_direct_0o_activation_is_equivariant(reflected):
     )
 
     angle = torch.tensor(0.41, dtype=DTYPE, device=DEVICE)
-    input_transform = o2.o2_irreps_representation(
-        module.irreps_in,
-        angle,
-        reflected,
-    )
-    output_transform = o2.o2_irreps_representation(
-        module.irreps_out,
-        angle,
-        reflected,
-    )
+    input_transform = module.irreps_in.D_from_angle(angle, reflected)
+    output_transform = module.irreps_out.D_from_angle(angle, reflected)
     transformed_input = torch.einsum("ij,bjc->bic", input_transform, input)
     transformed_output = module(transformed_input)
     expected = torch.einsum("ij,bjc->bic", output_transform, output)
@@ -502,16 +478,8 @@ def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
         device=DEVICE,
     )
     angle = torch.tensor(0.43, dtype=DTYPE, device=DEVICE)
-    input_representation = o2.o2_irreps_representation(
-        module.irreps_in,
-        angle,
-        reflected,
-    )
-    output_representation = o2.o2_irreps_representation(
-        module.irreps_out,
-        angle,
-        reflected,
-    )
+    input_representation = module.irreps_in.D_from_angle(angle, reflected)
+    output_representation = module.irreps_out.D_from_angle(angle, reflected)
     transformed_inputs = [
         torch.einsum("ij,bjc->bic", input_representation, input) for input in inputs
     ]
@@ -644,21 +612,9 @@ def test_o2_tensor_product_is_equivariant(reflected, path_mode):
         device=DEVICE,
     )
     angle = torch.tensor(0.37, dtype=DTYPE, device=DEVICE)
-    representation1 = o2.o2_irreps_representation(
-        irreps_in1,
-        angle,
-        reflected,
-    )
-    representation2 = o2.o2_irreps_representation(
-        irreps_in2,
-        angle,
-        reflected,
-    )
-    representation_out = o2.o2_irreps_representation(
-        irreps_out,
-        angle,
-        reflected,
-    )
+    representation1 = irreps_in1.D_from_angle(angle, reflected)
+    representation2 = irreps_in2.D_from_angle(angle, reflected)
+    representation_out = irreps_out.D_from_angle(angle, reflected)
 
     transformed1 = torch.einsum("ij,bjc->bic", representation1, input1)
     transformed2 = torch.einsum("ij,bjc->bic", representation2, input2)
@@ -835,16 +791,8 @@ def test_o2_linear_is_equivariant_with_complete_irreps(reflected, path_mode):
     ).to(device=DEVICE, dtype=DTYPE)
     input = torch.randn(5, irreps_in.dim, 2, dtype=DTYPE, device=DEVICE)
     angle = torch.tensor(0.41, dtype=DTYPE, device=DEVICE)
-    input_transform = o2.o2_irreps_representation(
-        irreps_in,
-        angle,
-        reflected,
-    )
-    output_transform = o2.o2_irreps_representation(
-        irreps_out,
-        angle,
-        reflected,
-    )
+    input_transform = irreps_in.D_from_angle(angle, reflected)
+    output_transform = irreps_out.D_from_angle(angle, reflected)
 
     transformed_input = torch.einsum("ij,bjc->bic", input_transform, input)
     actual = module(transformed_input)

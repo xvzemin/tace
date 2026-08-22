@@ -8,7 +8,7 @@ from typing import Sequence
 
 import torch
 
-from .irreps import Irrep, IrrepsLike, check_o2_irreps, tensor_product_irreps
+from .irreps import Irrep, Irreps, IrrepsLike
 from .tensor_product import _cg_product
 
 
@@ -58,8 +58,8 @@ class O2AsymmetricContraction(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.irreps_in = check_o2_irreps(irreps_in)
-        self.irreps_out = check_o2_irreps(irreps_out)
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
         if not isinstance(channels, int) or isinstance(channels, bool):
             raise TypeError("channels must be an integer.")
         if channels < 1:
@@ -124,10 +124,7 @@ class O2AsymmetricContraction(torch.nn.Module):
             current = []
             for leaves, intermediates in previous:
                 for input_index, input_irrep in enumerate(inputs):
-                    for output_irrep in tensor_product_irreps(
-                        intermediates[-1],
-                        input_irrep,
-                    ):
+                    for output_irrep in intermediates[-1] * input_irrep:
                         current.append(
                             (
                                 leaves + (input_index,),

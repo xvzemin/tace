@@ -230,8 +230,8 @@ class O2ScatterLinear(torch.nn.Module):
         self.node_layout = o2.O3O2Layout(self.irreps_node, lmax)
         self.output_layout = o2.O3O2Layout(self.irreps_out, lmax)
         input_groups = (
-            self.node_layout.local_irreps.groups
-            + self.node_layout.local_irreps.groups
+            tuple(self.node_layout.local_irreps)
+            + tuple(self.node_layout.local_irreps)
         )
         if self.extra_node_attrs_irreps is not None:
             self.extra_node_attrs_layout = o2.O3O2Layout(
@@ -239,8 +239,8 @@ class O2ScatterLinear(torch.nn.Module):
                 lmax,
             )
             input_groups += (
-                self.extra_node_attrs_layout.local_irreps.groups
-                + self.extra_node_attrs_layout.local_irreps.groups
+                tuple(self.extra_node_attrs_layout.local_irreps)
+                + tuple(self.extra_node_attrs_layout.local_irreps)
             )
         self.irreps_in_local = o2.Irreps(input_groups).regroup()
         self.irreps_out_local = self.output_layout.local_irreps

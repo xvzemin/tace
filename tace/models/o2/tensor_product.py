@@ -9,7 +9,7 @@ from typing import Optional, Sequence, Tuple
 
 import torch
 
-from .irreps import Irrep, IrrepsLike, check_o2_irreps, tensor_product_irreps
+from .irreps import Irrep, Irreps, IrrepsLike
 
 
 def _quarter_turn(input: torch.Tensor) -> torch.Tensor:
@@ -24,7 +24,7 @@ def _cg_product(
     irrep_out: Irrep,
 ) -> torch.Tensor:
     """Evaluate one orthonormal real O(2) Clebsch--Gordan map."""
-    if irrep_out not in tensor_product_irreps(irrep1, irrep2):
+    if irrep_out not in irrep1 * irrep2:
         raise ValueError(
             f"Illegal O(2) tensor-product path: {irrep1} x {irrep2} -> {irrep_out}."
         )
@@ -96,9 +96,9 @@ class TensorProduct(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.irreps_in1 = check_o2_irreps(irreps_in1)
-        self.irreps_in2 = check_o2_irreps(irreps_in2)
-        self.irreps_out = check_o2_irreps(irreps_out)
+        self.irreps_in1 = Irreps(irreps_in1)
+        self.irreps_in2 = Irreps(irreps_in2)
+        self.irreps_out = Irreps(irreps_out)
         if channels_in2 is None:
             channels_in2 = 1 if path_mode == "u1u" else channels_in1
         if channels_out is None:
@@ -137,7 +137,7 @@ class TensorProduct(torch.nn.Module):
                 for output_index, output in enumerate(outputs)
                 for input1_index, input1_irrep in enumerate(inputs1)
                 for input2_index, input2_irrep in enumerate(inputs2)
-                if output in tensor_product_irreps(input1_irrep, input2_irrep)
+                if output in input1_irrep * input2_irrep
             )
         else:
             paths = tuple(path)
@@ -158,8 +158,8 @@ class TensorProduct(torch.nn.Module):
                 raise ValueError(f"Invalid TensorProduct input1 index: {input1_index}.")
             if not 0 <= input2_index < len(inputs2):
                 raise ValueError(f"Invalid TensorProduct input2 index: {input2_index}.")
-            if outputs[output_index] not in tensor_product_irreps(
-                inputs1[input1_index], inputs2[input2_index]
+            if outputs[output_index] not in (
+                inputs1[input1_index] * inputs2[input2_index]
             ):
                 raise ValueError(
                     "Illegal complete O(2) TensorProduct path: "

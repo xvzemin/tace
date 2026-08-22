@@ -6,7 +6,7 @@
 import torch
 from e3nn import o3
 
-from .irreps import Irrep, Irreps, restrict_o3_irrep
+from .irreps import Irrep, Irreps
 
 
 class _O3LayoutTransform(torch.nn.Module):
@@ -41,13 +41,6 @@ class _O3LayoutTransform(torch.nn.Module):
         return torch.cat(blocks, dim=-1)
 
 
-def _restrict_irreps(irreps: o3.Irreps) -> Irreps:
-    groups = []
-    for _, irrep in irreps:
-        groups.extend(restrict_o3_irrep(irrep.l, irrep.p).groups)
-    return Irreps(groups).regroup()
-
-
 class O3O2Layout(torch.nn.Module):
     """Rotate O(3) towers directly into contiguous local O(2) blocks.
 
@@ -57,13 +50,25 @@ class O3O2Layout(torch.nn.Module):
     global layout.
     """
 
+    @staticmethod
+    def restrict(irreps: o3.Irreps) -> Irreps:
+        """Return the local O(2) block metadata for an O(3) layout."""
+        groups = []
+        for _, irrep in o3.Irreps(irreps):
+            zero_parity = irrep.p * ((-1) ** irrep.l)
+            groups.append((1, Irrep(0, zero_parity)))
+            groups.extend(
+                (1, Irrep(order, 0)) for order in range(1, irrep.l + 1)
+            )
+        return Irreps(groups).regroup()
+
     def __init__(self, irreps: o3.Irreps, lmax: int) -> None:
         super().__init__()
 
         self.irreps = o3.Irreps(irreps)
         if self.irreps.lmax > lmax:
             raise ValueError("lmax must cover every O(3) irrep.")
-        self.local_irreps = _restrict_irreps(self.irreps)
+        self.local_irreps = self.restrict(self.irreps)
         self.layout = _O3LayoutTransform(self.irreps)
 
         group_slices = []

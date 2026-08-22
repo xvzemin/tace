@@ -7,7 +7,7 @@ from typing import Sequence, Union
 
 import torch
 
-from .irreps import Irrep, Irreps, IrrepsLike, check_o2_irreps
+from .irreps import Irrep, Irreps, IrrepsLike
 
 
 def _check_odd_activation(activation: torch.nn.Module) -> None:
@@ -72,7 +72,7 @@ class O2Gate(torch.nn.Module):
         if act_0o is not None and not isinstance(act_0o, torch.nn.Module):
             raise TypeError("act_0o must be a torch.nn.Module or None.")
 
-        self.irreps_out = check_o2_irreps(irreps_out)
+        self.irreps_out = Irreps(irreps_out)
         even_groups = []
         odd_groups = []
         gated_groups = []
@@ -92,10 +92,10 @@ class O2Gate(torch.nn.Module):
             Irreps([(self.num_gates, Irrep("0e"))]) if self.num_gates > 0 else Irreps()
         )
         self.irreps_in = Irreps(
-            self.irreps_0e.groups
-            + self.irreps_gates.groups
-            + self.irreps_0o.groups
-            + self.irreps_gated.groups
+            tuple(self.irreps_0e)
+            + tuple(self.irreps_gates)
+            + tuple(self.irreps_0o)
+            + tuple(self.irreps_gated)
         ).simplify()
 
         if act_0o is not None:

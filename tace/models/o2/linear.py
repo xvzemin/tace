@@ -9,7 +9,7 @@ from typing import Optional, Sequence, Tuple
 
 import torch
 
-from .irreps import Irrep, IrrepsLike, check_o2_irreps
+from .irreps import Irrep, Irreps, IrrepsLike
 
 
 class Linear(torch.nn.Module):
@@ -54,8 +54,8 @@ class Linear(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.irreps_in = check_o2_irreps(irreps_in)
-        self.irreps_out = check_o2_irreps(irreps_out)
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
         if not isinstance(channels_in, int) or isinstance(channels_in, bool):
             raise TypeError("channels_in must be an integer.")
         if channels_out is None:
