@@ -15,6 +15,7 @@ from eqx import o2
 
 from tace.utils.torch_scatter import scatter_sum
 
+from ..linear import torchLinear
 from ..softmax import GraphSoftmax
 
 
@@ -50,9 +51,12 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             path_mode="uv",
             bias=False,
         )
-        self.radial_scale = torch.nn.Linear(num_radial_basis, num_head)
-        torch.nn.init.zeros_(self.radial_scale.weight)
-        torch.nn.init.zeros_(self.radial_scale.bias)
+        self.radial_scale_shift = torchLinear(
+            num_radial_basis,
+            2 * num_head,
+        )
+        torch.nn.init.zeros_(self.radial_scale_shift.weight)
+        torch.nn.init.zeros_(self.radial_scale_shift.bias)
         components_per_head = self.irreps.dim * channels // num_head
         self.scale = 1.0 / math.sqrt(components_per_head)
         self.graph_softmax = GraphSoftmax()
@@ -114,7 +118,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         target_blocks: tuple[torch.Tensor, ...],
         edge_radial_basis: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_cutoff: Union[torch.Tensor, None],
+        edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> tuple[torch.Tensor, ...]:
         if len(message_blocks) != len(self.message_irreps):
@@ -142,8 +146,11 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             score = score + (query.reshape(shape) * key.reshape(shape)).sum(
                 dim=(1, 2, 4)
             )
-        score = score * self.scale * torch.sigmoid(
-            self.radial_scale(edge_radial_basis)
+        radial_scale, radial_shift = self.radial_scale_shift(
+            edge_radial_basis
+        ).chunk(2, dim=-1)
+        score = (
+            score * self.scale * torch.sigmoid(radial_scale) + radial_shift
         )
 
         attention = self.graph_softmax(
@@ -152,8 +159,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             num_nodes=num_nodes,
             exp_rescale=edge_cutoff,
         )
-        if edge_cutoff is not None:
-            attention = attention * edge_cutoff
+        attention = attention * edge_cutoff
 
         outputs = []
         for block, (multiplicity, irrep) in zip(
@@ -182,8 +188,11 @@ class O2ScatterLinear(torch.nn.Module):
     between them. These nonlinear paths are mutually exclusive. The first O2
     linear also generates auxiliary ``0e`` gates for the positive-order
     representations. Those gates use the tensor activation. The optional
-    attention uses real O2-invariant query-key products and a sigmoid radial
-    scale; it never applies a complex phase.
+    attention uses real O2-invariant query-key products and a zero-initialized
+    radial scale-and-shift projection; it never applies a complex phase.
+    Radial weights never contain the cutoff. Without attention, the cutoff is
+    applied to the global O3 edge message; with attention, it is applied before
+    the inverse local-to-global transformation.
     """
 
     def __init__(
@@ -480,6 +489,8 @@ class O2ScatterLinear(torch.nn.Module):
         edge_radial_basis: Union[torch.Tensor, None] = None,
         edge_cutoff: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
+        if edge_cutoff is None:
+            raise ValueError("O2 convolution requires edge_cutoff.")
         if wigner is None or wigner_inv is None:
             raise ValueError("O2 convolution requires edge Wigner matrices.")
 
@@ -564,6 +575,8 @@ class O2ScatterLinear(torch.nn.Module):
                 node_feats.size(0),
             )
         messages = self.reshape_out.inverse(output_blocks, wigner_inv)
+        if self.attention is None:
+            messages = messages * edge_cutoff
         return scatter_sum(
             messages,
             edge_index[1],

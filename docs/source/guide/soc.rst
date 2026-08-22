@@ -138,8 +138,9 @@ it. The first O(2) linear jointly generates its independent features and
 ``0e`` path coefficients, which use ``scalar_act`` (``scaled_silu`` by
 default). The gated path uses the same first linear to generate its ``0e`` gate
 scalars. Radial rotary attention uses ``atomic_basis.num_head``, one joint O(2)
-query-key projection, and a real sigmoid radial scale; no complex phase is
-applied.
+query-key projection, and a zero-initialized real radial scale-and-shift
+projection. The scale uses a sigmoid and the shift is additive; no complex
+phase is applied.
 
 This path is also experimental; its theoretical and implementation
 details will be documented with the formal paper.

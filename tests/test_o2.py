@@ -1632,6 +1632,49 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
     assert all(gradient.isfinite().all() for gradient in gradients)
 
 
+def test_o2_scatter_requires_cutoff_before_wigner():
+    module = _build_o2_interaction()
+    inputs = _o2_magnetic_inputs(module)
+    radial_weights = module.edge_info(inputs[2])
+    with pytest.raises(ValueError, match="requires edge_cutoff"):
+        module.rejector(
+            inputs[0],
+            radial_weights,
+            inputs[4],
+            None,
+            None,
+            edge_cutoff=None,
+        )
+
+
+@pytest.mark.parametrize("use_radial_rotary_attention", [False, True])
+def test_o2_cutoff_scales_messages_not_radial_weights(
+    use_radial_rotary_attention,
+):
+    torch.manual_seed(17)
+    module = _build_o2_interaction(
+        use_radial_rotary_attention=use_radial_rotary_attention,
+    )
+    inputs = _o2_magnetic_inputs(module)
+    unit_cutoff = torch.ones_like(inputs[5])
+    scale = 0.37
+    scaled_cutoff = torch.full_like(inputs[5], scale)
+    unit_output = _evaluate_o2_interaction(
+        module,
+        (*inputs[:5], unit_cutoff, inputs[6]),
+    )
+    scaled_output = _evaluate_o2_interaction(
+        module,
+        (*inputs[:5], scaled_cutoff, inputs[6]),
+    )
+    torch.testing.assert_close(
+        scaled_output,
+        scale * unit_output,
+        atol=5.0e-10,
+        rtol=5.0e-10,
+    )
+
+
 def test_o2_interaction_mmax_restricts_internal_paths():
     irreps_in = o3.Irreps("2x0e+2x1o+2x2e")
     truncated = _build_o2_interaction(
@@ -1865,16 +1908,27 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
         isinstance(child, o2.Linear)
         for child in module.rejector.attention.modules()
     ) == 1
-    radial_basis = torch.randn(7, module.num_radial_basis, device=DEVICE, dtype=DTYPE)
-    radial_scale = torch.sigmoid(
-        module.rejector.attention.radial_scale(radial_basis)
+    radial_basis = torch.randn(
+        7,
+        module.num_radial_basis,
+        device=DEVICE,
+        dtype=DTYPE,
     )
-    assert torch.all(radial_scale > 0.0)
-    assert torch.all(radial_scale < 1.0)
+    radial_projection = module.rejector.attention.radial_scale_shift
+    assert isinstance(radial_projection, torch.nn.Linear)
+    assert radial_projection.out_features == 2 * module.num_head
+    assert torch.count_nonzero(radial_projection.weight) == 0
+    assert torch.count_nonzero(radial_projection.bias) == 0
+    radial_scale, radial_shift = radial_projection(radial_basis).chunk(
+        2,
+        dim=-1,
+    )
+    assert torch.all(torch.sigmoid(radial_scale) == 0.5)
+    assert torch.count_nonzero(radial_shift) == 0
 
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
-    parameters = tuple(module.rejector.attention.radial_scale.parameters())
+    parameters = tuple(radial_projection.parameters())
     gradients = torch.autograd.grad(
         output.square().sum(),
         (inputs[0], inputs[2], inputs[-1], *parameters),

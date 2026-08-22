@@ -650,8 +650,6 @@ class O2Interaction(O3CgtpInteraction):
             magnetic_radial_basis,
         )
         radial_weights = self.edge_info(edge_weight_inputs)
-        if edge_cutoff is not None and not self.use_radial_rotary_attention:
-            radial_weights = radial_weights * edge_cutoff
         return self._apply_o2_rejector(
             node_feats,
             magnetic_node_attrs,
