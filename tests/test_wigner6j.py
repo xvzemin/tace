@@ -346,6 +346,7 @@ def test_wigner6j_interaction_weight_levels(weight_level, monkeypatch):
         [4.0, 4.0],
         num_basis=4,
         magnetic_irreps=module.magnetic_irreps,
+        atomic_numbers=[1, 2],
         num_elements=2,
     ).to(DEVICE)
     magnetic_radial_basis, magnetic_node_attrs = magnetic_basis(

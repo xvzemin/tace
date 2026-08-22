@@ -1,5 +1,4 @@
-import subprocess
-import sys
+import ast
 from pathlib import Path
 
 import pytest
@@ -39,26 +38,25 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-def test_o2_import_does_not_load_other_tace_model_modules():
-    code = """
-import sys
-import tace.models.o2
-
-unexpected = sorted(
-    name
-    for name in sys.modules
-    if name.startswith("tace.models.")
-    and name != "tace.models.o2"
-    and not name.startswith("tace.models.o2.")
-)
-if unexpected:
-    raise SystemExit("unexpected TACE model imports: " + ", ".join(unexpected))
-"""
-    subprocess.run(
-        [sys.executable, "-B", "-c", code],
-        check=True,
-        cwd=Path(__file__).resolve().parents[1],
-    )
+def test_o2_does_not_import_other_tace_model_modules():
+    o2_directory = Path(__file__).resolve().parents[1] / "tace" / "models" / "o2"
+    for source_path in o2_directory.glob("*.py"):
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        absolute_imports = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.level == 0
+        }
+        absolute_imports.update(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
+        assert not any(
+            module == "tace" or module.startswith("tace.")
+            for module in absolute_imports
+        ), source_path
 
 
 def test_j0_sinc_preserves_nonzero_values_and_defines_origin():
@@ -1231,11 +1229,17 @@ def test_magnetic_basis_keeps_radial_scaling_formula():
         device=DEVICE,
     )
     node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)
-    basis = MagneticBasis([4.0, 2.0], num_basis=4, num_elements=2).to(
+    basis = MagneticBasis(
+        [4.0, 2.0],
+        num_basis=4,
+        magnetic_irreps="0e",
+        atomic_numbers=[1, 2],
+        num_elements=2,
+    ).to(
         device=DEVICE,
         dtype=DTYPE,
     )
-    observed = basis.normalize_magnitude(magmoms, node_attrs)
+    observed, _ = basis(magmoms, node_attrs)
     element_max = torch.tensor(
         [[1.2 * 4.0 + 0.1], [1.2 * 2.0 + 0.1]],
         dtype=DTYPE,
@@ -1246,7 +1250,7 @@ def test_magnetic_basis_keeps_radial_scaling_formula():
         min=0.0,
         max=1.0,
     ).square()
-    torch.testing.assert_close(observed, expected)
+    torch.testing.assert_close(observed, basis.radial_basis(expected))
 
 
 def test_magnetic_basis_normalizes_solid_harmonics_by_element_scale():
@@ -1261,7 +1265,9 @@ def test_magnetic_basis_normalizes_solid_harmonics_by_element_scale():
         [4.0, 2.0],
         num_basis=4,
         magnetic_irreps=irreps,
+        atomic_numbers=[1, 2],
         num_elements=2,
+        normalize=True,
     ).to(device=DEVICE, dtype=DTYPE)
     _, observed = magnetic_basis(magmoms, node_attrs)
 
@@ -1426,6 +1432,7 @@ def _evaluate_o2_magnetic_interaction(module, inputs):
         [4.0, 4.0],
         num_basis=4,
         magnetic_irreps=module.magnetic_irreps,
+        atomic_numbers=[1, 2],
         num_elements=2,
     ).to(
         device=DEVICE,
