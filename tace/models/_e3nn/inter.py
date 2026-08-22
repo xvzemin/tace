@@ -534,7 +534,7 @@ class O2Interaction(O3CgtpInteraction):
             raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
 
     def _build_rejector(self) -> torch.nn.Module:
-        return O2ScatterLinear(
+        rejector = O2ScatterLinear(
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
@@ -549,6 +549,9 @@ class O2Interaction(O3CgtpInteraction):
             use_asymmetric_contraction=self.use_o2_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
+        if rejector.attention is not None:
+            self.scatter_norm = None
+        return rejector
 
     def _edge_weight_input_dim(self) -> int:
         return self.edge_feats_channel
@@ -699,7 +702,7 @@ class O2MagneticInteraction(O2Interaction):
             raise ValueError("magnetic_irreps must end at mag_Lmax.")
 
     def _build_rejector(self) -> torch.nn.Module:
-        return O2MagneticScatterLinear(
+        rejector = O2MagneticScatterLinear(
             self.irreps_in,
             self.irreps_out,
             self.magnetic_irreps,
@@ -715,6 +718,9 @@ class O2MagneticInteraction(O2Interaction):
             use_asymmetric_contraction=self.use_o2_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
+        if rejector.attention is not None:
+            self.scatter_norm = None
+        return rejector
 
     def _edge_weight_input_dim(self) -> int:
         return self.edge_feats_channel + 2 * self.num_mag_radial_basis

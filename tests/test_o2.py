@@ -27,6 +27,7 @@ from tace.models._e3nn.o2 import (
 )
 from tace.models._e3nn.representation import Representation
 from tace.models.angular import SolidHarmonics
+from tace.models.linear import torchLinear
 from tace.models.mag import MagneticBasis
 from tace.models.mlp import (
     ACTIVATION,
@@ -1462,6 +1463,7 @@ def _build_o2_interaction(
     irreps_in=None,
     scalar_act=None,
     tensor_act=None,
+    scatter_norm="avg_num_neighbors",
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
 ):
@@ -1487,6 +1489,7 @@ def _build_o2_interaction(
         scalar_act=scalar_act,
         tensor_act=tensor_act,
         edge_ace_hidden=None,
+        scatter_norm=scatter_norm,
         parity=True,
         num_head=2,
         use_o2_asymmetric_contraction=use_asymmetric_contraction,
@@ -1673,6 +1676,32 @@ def test_o2_cutoff_scales_messages_not_radial_weights(
         atol=5.0e-10,
         rtol=5.0e-10,
     )
+
+
+def test_o2_radial_rotary_attention_skips_scatter_normalization():
+    torch.manual_seed(18)
+    module = _build_o2_interaction(
+        scatter_norm="density",
+        use_radial_rotary_attention=True,
+    )
+    assert module.rejector.attention is not None
+    assert module.scatter_norm is None
+    assert not hasattr(module, "edge_density")
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_interaction(module, inputs)
+    module.avg_num_neighbors *= 10.0
+    unnormalized_output = _evaluate_o2_interaction(module, inputs)
+    torch.testing.assert_close(
+        unnormalized_output,
+        output,
+        atol=5.0e-10,
+        rtol=5.0e-10,
+    )
+    assert not module._uses_edge_density()
+
+    module_without_attention = _build_o2_interaction(scatter_norm="density")
+    assert module_without_attention.scatter_norm == "density"
+    assert hasattr(module_without_attention, "edge_density")
 
 
 def test_o2_interaction_mmax_restricts_internal_paths():
@@ -1915,7 +1944,7 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
         dtype=DTYPE,
     )
     radial_projection = module.rejector.attention.radial_scale_shift
-    assert isinstance(radial_projection, torch.nn.Linear)
+    assert isinstance(radial_projection, torchLinear)
     assert radial_projection.out_features == 2 * module.num_head
     assert torch.count_nonzero(radial_projection.weight) == 0
     assert torch.count_nonzero(radial_projection.bias) == 0
