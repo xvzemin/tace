@@ -27,7 +27,6 @@ napoleon_use_rtype = True
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "torch": ("https://docs.pytorch.org/docs/stable/", None),
-    "e3nn": ("https://docs.e3nn.org/en/stable/", None),
 }
 
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]

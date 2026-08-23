@@ -1,13 +1,12 @@
-.. _equivariantx:
+.. _equivariantx-tutorials:
 
-EquivariantX
-============
+Tutorials
+=========
 
-EquivariantX (``eqx``) provides real PyTorch representations and layers for
-complete :math:`O(2)` and Cartesian :math:`O(3)` equivariance. Its public API
-follows the representation-first style of e3nn: an operator stores its input
-and output irreps, validates tensor layouts, enumerates allowed equivariant
-paths, and exposes ordinary :class:`torch.nn.Module` semantics.
+EquivariantX (``eqx``) provides PyTorch operators for
+:math:`O(2)` and Cartesian :math:`O(3)`. Each operator stores its input and
+output irreps, validates tensor layouts, enumerates allowed equivariant paths,
+and exposes ordinary :class:`torch.nn.Module` semantics.
 
 The two namespaces are independent:
 
@@ -210,16 +209,13 @@ rescaling preserves the intended variance.
 
 .. code-block:: python
 
-   from e3nn import o3
-
    channels = 64
    lmax = 3
    mmax = 2
-   irreps_o3 = o3.Irreps(
+   irreps_o3 = (
        "64x0e + 64x0o + 64x1o + 64x1e + "
        "64x2e + 64x2o + 64x3o + 64x3e"
    )
-   node_feats = torch.randn(16, irreps_o3.dim)
    edge_index = torch.randint(0, 16, (2, 48))
    edge_vectors = torch.randn(48, 3)
 
@@ -231,6 +227,7 @@ rescaling preserves the intended variance.
        mmax=mmax,
        layout="mul_ir",
    )
+   node_feats = torch.randn(16, frame.global_irreps.dim)
 
    local_blocks = frame.to_local(node_feats[edge_index[0]], D)
    global_messages = frame.to_global(local_blocks, D_inv)
@@ -456,87 +453,3 @@ A node-level many-body step uses immediate projection:
        path_mode="uuu",
    )
    node_product = node_tensor_product(node_feats, node_feats)
-
-API reference
--------------
-
-The following reference is generated from the installed implementation. Shape
-and representation conventions described above apply to every object.
-
-O(2) representations
-~~~~~~~~~~~~~~~~~~~~~
-
-.. autoclass:: eqx.o2.Irrep
-   :members:
-   :special-members: __mul__
-
-.. autoclass:: eqx.o2.Irreps
-   :members:
-
-O(2) layers
-~~~~~~~~~~~
-
-.. autoclass:: eqx.o2.Linear
-   :members: forward, forward_grouped
-
-.. autoclass:: eqx.o2.Gate
-   :members: forward, forward_grouped
-
-.. autoclass:: eqx.o2.TensorProduct
-   :members: forward
-
-.. autoclass:: eqx.o2.AsymmetricContraction
-   :members: forward
-
-O(2) angular and local-frame tools
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. autofunction:: eqx.o2.circular_harmonics
-
-.. autoclass:: eqx.o2.CircularHarmonics
-   :members: forward
-
-.. autofunction:: eqx.o2.init_edge_rot_mat_quaternion
-
-.. autoclass:: eqx.o2.WignerD
-   :members: get_wigner
-
-.. autoclass:: eqx.o2.LocalFrame
-   :members: restrict, to_local, to_global, to_local_channel_major, to_global_channel_major
-
-Cartesian O(3) representations
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. autoclass:: eqx.co3.Irrep
-   :members:
-   :special-members: __mul__
-
-.. autoclass:: eqx.co3.Irreps
-   :members:
-
-Cartesian O(3) layers
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. autoclass:: eqx.co3.Linear
-   :members: forward
-
-.. autoclass:: eqx.co3.Gate
-   :members: forward
-
-.. autoclass:: eqx.co3.TensorProduct
-   :members: forward, project_output
-
-.. autoclass:: eqx.co3.Layout
-   :members: to_grouped, from_grouped
-
-Cartesian O(3) harmonics and tensors
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. autoclass:: eqx.co3.CartesianHarmonics
-   :members: forward
-
-.. autofunction:: eqx.co3.project
-
-.. autofunction:: eqx.co3.delta
-
-.. autofunction:: eqx.co3.levi_civita

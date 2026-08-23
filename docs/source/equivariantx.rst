@@ -1,1 +1,8 @@
-.. include:: ../../eqx/docs/source/equivariantx.rst
+EquivariantX
+============
+
+.. toctree::
+   :maxdepth: 2
+
+   equivariantx/tutorials
+   equivariantx/api
