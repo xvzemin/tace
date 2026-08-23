@@ -4,7 +4,7 @@
 ################################################################################
 
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 ACCELERATION_ENV = {
     "oeq": "TACE_USE_OEQ",
@@ -53,7 +53,7 @@ def enable_acceleration(
             os.environ[ACCELERATION_ENV[name]] = "1" if enabled else "0"
 
 
-def acceleration_enabled(name: str) -> bool:
+def acceleration_enabled(name: str) -> Optional[bool]:
     try:
         env_name = ACCELERATION_ENV[name.lower()]
     except KeyError as e:
@@ -61,7 +61,10 @@ def acceleration_enabled(name: str) -> bool:
         raise ValueError(
             f"Unknown TACE acceleration {name!r}; expected one of: {options}"
         ) from e
-    return os.environ.get(env_name, "0") == "1"
+    value = os.environ.get(env_name)
+    if value is None:
+        return None
+    return value == "1"
 
 
 def get_tace_apply_u_shift():

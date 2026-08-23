@@ -1,12 +1,36 @@
+from typing import Optional
+
 import pytest
 import torch
+from e3nn import o3
 
 import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
+from tace.models._e3nn.prod import CgtpACE
 from tace.models.eqt.equitorch.nn import TensorProduct
+from tace.utils.env import acceleration_enabled
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+def _product(correlation: int) -> CgtpACE:
+    return CgtpACE(
+        layer=0,
+        num_layers=1,
+        num_elements=1,
+        Lmax=0,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[correlation],
+        l1l2=None,
+        bias=False,
+        nonlinear=None,
+    )
 
 
 def _reference_segment(
@@ -37,6 +61,48 @@ def _value_and_gradients(
         (input1, input2, tensor_product.weight),
     )
     return (output.detach(), *(gradient.detach() for gradient in gradients))
+
+
+@pytest.mark.parametrize(
+    ("setting", "correlation", "expected"),
+    [
+        (None, 2, False),
+        (None, 3, True),
+        ("0", 3, False),
+        ("1", 2, True),
+    ],
+)
+def test_product_eqt_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: Optional[str],
+    correlation: int,
+    expected: bool,
+) -> None:
+    if setting is None:
+        monkeypatch.delenv("TACE_USE_EQT", raising=False)
+    else:
+        monkeypatch.setenv("TACE_USE_EQT", setting)
+
+    product = _product(correlation)
+    assert all(ace.use_eqt is expected for ace in product.aces)
+    assert all(hasattr(ace, "fused_tp") is expected for ace in product.aces)
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [(None, None), ("0", False), ("1", True)],
+)
+def test_acceleration_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: Optional[str],
+    expected: Optional[bool],
+) -> None:
+    if setting is None:
+        monkeypatch.delenv("TACE_USE_EQT", raising=False)
+    else:
+        monkeypatch.setenv("TACE_USE_EQT", setting)
+
+    assert acceleration_enabled("eqt") is expected
 
 
 def test_eqt_native_scatter_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -87,7 +87,6 @@ class CgtpACE(Product):
             )
 
         product_in1 = self.irreps_hidden
-        warn_without_eqt = self.correlation >= 3 and not acceleration_enabled("eqt")
 
         for nu in range(2, self.correlation + 1):
             this_ace = uuuTensorProduct(
@@ -96,8 +95,9 @@ class CgtpACE(Product):
                 irreps_out=self.irreps_tp_out_list[nu - 2],
                 l1l2=self.l1l2,
                 trainable=self.use_bilinear_ace,
-                warning=warn_without_eqt and nu == 2,
                 identical_inputs=nu == 2 and not self.use_bilinear_ace,
+                warning=self.correlation > 2,
+                use_fused=self.correlation > 2,
             )
             self.aces.append(this_ace)
             self.coefs.append(

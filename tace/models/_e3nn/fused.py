@@ -24,8 +24,9 @@ class uuuTensorProduct(torch.nn.Module):
         l2l3: Union[str, None] = None,
         l3l1: Union[str, None] = None,
         trainable: bool = False,
-        warning: bool = False,
         identical_inputs: bool = False,
+        warning: bool = False,
+        use_fused: bool = False,
     ) -> None:
         super().__init__()
 
@@ -55,8 +56,14 @@ class uuuTensorProduct(torch.nn.Module):
         self.irreps_out = actual_irreps_out
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
-        self.use_eqt = acceleration_enabled("eqt")
-        self.use_cue = acceleration_enabled("cue")
+
+        use_eqt = acceleration_enabled("eqt")
+        if use_eqt is None:
+            self.use_eqt = use_fused
+        else:
+            self.use_eqt = use_eqt
+
+        # self.use_cue = acceleration_enabled("cue")
 
         if self.use_eqt:
             from ..eqt import e3nnEqtTensorProduct
