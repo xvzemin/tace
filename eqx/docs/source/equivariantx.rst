@@ -233,8 +233,8 @@ rescaling preserves the intended variance.
    global_messages = frame.to_global(local_blocks, D_inv)
 
 ``layout="mul_ir"`` and ``layout="ir_mul"`` are both flattened global
-layouts. ``to_local_channel_major`` and ``to_global_channel_major`` expose an
-alternative grouped layout with explicit channel and multiplicity axes.
+layouts. Local O(2) features are returned as grouped blocks with explicit
+representation and combined multiplicity-channel axes.
 
 Asymmetric contraction
 ~~~~~~~~~~~~~~~~~~~~~~

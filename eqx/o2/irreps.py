@@ -223,7 +223,7 @@ class Irreps:
         multiplicities = {multiplicity for multiplicity, _ in irreps}
         assert len(multiplicities) == 1
         return next(iter(multiplicities))
-    
+
     @property
     def dim(self) -> int:
         return sum(multiplicity * irrep.dim for multiplicity, irrep in self)
@@ -249,6 +249,7 @@ class Irreps:
         return tuple(slices)
 
     def simplify(self) -> "Irreps":
+        """Combine adjacent groups carrying the same irrep."""
         if not self._groups:
             return self
         groups = []
@@ -272,12 +273,70 @@ class Irreps:
         )
 
     def regroup(self) -> "Irreps":
+        """Collect equal irreps and return them in canonical order."""
         counts = {}
         for multiplicity, irrep in self:
             counts[irrep] = counts.get(irrep, 0) + multiplicity
         return Irreps(
             [(multiplicity, irrep) for irrep, multiplicity in counts.items()]
         ).sort()
+
+    def randn(
+        self,
+        *size: int,
+        normalization: str = "component",
+        requires_grad: bool = False,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        """Return a random tensor with ``-1`` replaced by ``self.dim``.
+
+        ``normalization="component"`` samples independent standard-normal
+        components. ``normalization="norm"`` normalizes every irrep copy to
+        unit norm along the representation axis. Additional dimensions, such
+        as the explicit channel dimension used by the O(2) layers, are kept
+        independent.
+        """
+        if size.count(-1) != 1:
+            raise ValueError("size must contain exactly one -1.")
+        if normalization not in ("component", "norm"):
+            raise ValueError("normalization must be 'component' or 'norm'.")
+
+        representation_axis = size.index(-1)
+        shape = (
+            *size[:representation_axis],
+            self.dim,
+            *size[representation_axis + 1 :],
+        )
+        if normalization == "component":
+            return torch.randn(
+                shape,
+                dtype=dtype,
+                device=device,
+                requires_grad=requires_grad,
+            )
+
+        output = torch.empty(
+            shape,
+            dtype=dtype,
+            device=device,
+            requires_grad=requires_grad,
+        )
+        with torch.no_grad():
+            for irrep, block_slice in zip(self.expanded(), self.expanded_slices()):
+                block_shape = list(shape)
+                block_shape[representation_axis] = irrep.dim
+                block = torch.randn(block_shape, dtype=dtype, device=device)
+                block /= block.norm(
+                    dim=representation_axis,
+                    keepdim=True,
+                )
+                output.narrow(
+                    representation_axis,
+                    block_slice.start,
+                    irrep.dim,
+                ).copy_(block)
+        return output
 
     def count(self, irrep: IrrepLike) -> int:
         irrep = Irrep(irrep)

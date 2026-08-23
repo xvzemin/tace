@@ -145,7 +145,6 @@ def test_local_frame_roundtrip_supports_both_parities_per_degree():
     input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
 
     blocks = layout(input, wigner)
-    channel_major_blocks = layout.to_local_channel_major(input, wigner)
     assert layout.local_irreps == o2.Irreps("3x0e+3x0o+4x1m+2x2m")
     assert tuple(block.shape for block in blocks) == (
         (7, 1, 6),
@@ -153,25 +152,7 @@ def test_local_frame_roundtrip_supports_both_parities_per_degree():
         (7, 2, 8),
         (7, 2, 4),
     )
-    for (multiplicity, irrep), block, channel_major_block in zip(
-        layout.local_irreps,
-        blocks,
-        channel_major_blocks,
-    ):
-        assert channel_major_block.shape == (7, 2, irrep.dim, multiplicity)
-        torch.testing.assert_close(
-            channel_major_block.permute(0, 2, 3, 1).reshape(
-                7,
-                irrep.dim,
-                multiplicity * 2,
-            ),
-            block,
-        )
     torch.testing.assert_close(layout.to_global(blocks, wigner_inv), input)
-    torch.testing.assert_close(
-        layout.to_global_channel_major(channel_major_blocks, wigner_inv),
-        input,
-    )
 
 
 def test_local_frame_mmax_restricts_local_blocks():
@@ -394,6 +375,49 @@ def test_o2_irrep_and_irreps_metadata():
     assert irreps.expanded_slices()[-1] == slice(9, 11)
     with pytest.raises(AttributeError, match="immutable"):
         irreps._groups = ()
+
+
+def test_o2_irreps_simplify_and_regroup():
+    irreps = Irreps("0e+2x0e+1m+0o+2x1m")
+
+    assert irreps.simplify() == Irreps("3x0e+1m+0o+2x1m")
+    assert irreps.regroup() == Irreps("3x0e+0o+3x1m")
+    assert irreps == Irreps("0e+2x0e+1m+0o+2x1m")
+
+
+@pytest.mark.parametrize("normalization", ["component", "norm"])
+def test_o2_irreps_randn_uses_representation_axis(normalization):
+    irreps = Irreps("2x0e+0o+3x1m+2m")
+    sample = irreps.randn(
+        5,
+        -1,
+        4,
+        normalization=normalization,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+
+    assert sample.shape == (5, irreps.dim, 4)
+    assert sample.dtype == DTYPE
+    assert sample.device == DEVICE
+    assert sample.requires_grad
+    if normalization == "norm":
+        for block_slice in irreps.expanded_slices():
+            torch.testing.assert_close(
+                sample[:, block_slice].norm(dim=1),
+                torch.ones(5, 4, dtype=DTYPE, device=DEVICE),
+            )
+
+
+def test_o2_irreps_randn_validates_arguments():
+    irreps = Irreps("0e+1m")
+    with pytest.raises(ValueError, match="exactly one -1"):
+        irreps.randn(2, irreps.dim)
+    with pytest.raises(ValueError, match="exactly one -1"):
+        irreps.randn(-1, -1)
+    with pytest.raises(ValueError, match="component.*norm"):
+        irreps.randn(2, -1, normalization="invalid")
 
 
 @pytest.mark.parametrize("value", ["0m", "1e", "1o", "-1m", "x"])

@@ -46,7 +46,7 @@ O(2) angular and local-frame tools
    :members: get_wigner
 
 .. autoclass:: eqx.o2.LocalFrame
-   :members: restrict, to_local, to_global, to_local_channel_major, to_global_channel_major
+   :members: restrict, to_local, to_global
 
 Cartesian O(3) representations
 -------------------------------

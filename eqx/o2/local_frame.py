@@ -364,34 +364,6 @@ class LocalFrame(torch.nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         return self.to_local(input, wigner)
 
-    def to_local_channel_major(
-        self,
-        input: torch.Tensor,
-        wigner: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        """Return ``(edge, channel, irrep_dim, multiplicity)`` blocks."""
-        rotated_groups = self._rotate_global_irreps(input, wigner)
-        output_blocks = []
-        for (_, irrep), locations in zip(self.local_irreps, self.source_locations):
-            parts = []
-            for location in locations:
-                rotation_index, first_position, *remainder = location
-                rotated = rotated_groups[rotation_index]
-                if irrep.m == 0:
-                    part = rotated[:, first_position : first_position + 1]
-                else:
-                    second_position, odd = remainder
-                    first = rotated[:, first_position : first_position + 1]
-                    second = rotated[:, second_position : second_position + 1]
-                    part = (
-                        torch.cat((-second, first), dim=1)
-                        if odd
-                        else torch.cat((first, second), dim=1)
-                    )
-                parts.append(part.transpose(1, 2))
-            output_blocks.append(torch.stack(parts, dim=-1))
-        return tuple(output_blocks)
-
     def to_global(
         self,
         input_blocks: tuple[torch.Tensor, ...],
@@ -421,69 +393,6 @@ class LocalFrame(torch.nn.Module):
                     component : component + 1,
                     source_position * channels : (source_position + 1) * channels,
                 ]
-                rows.append(row if sign == 1 else -row)
-            group_input = torch.cat(rows, dim=1)
-            if self.rotation_is_full[rotation_index]:
-                rotation = wigner_inv
-            else:
-                row_indices = getattr(
-                    self,
-                    f"rotation_rows_{rotation_index}",
-                )
-                column_indices = getattr(
-                    self,
-                    f"rotation_columns_{rotation_index}",
-                )
-                rotation = wigner_inv.index_select(1, column_indices).index_select(
-                    2, row_indices
-                )
-            rotated = torch.bmm(rotation, group_input)
-
-            offset = 0
-            for group_index in groups:
-                irrep = self.global_irreps[group_index][1]
-                width = irrep.dim
-                output_by_group[group_index] = rotated[
-                    :, offset : offset + width
-                ] * self._inverse_scale(irrep.l, wigner_mmax)
-                offset += width
-        return self._pack_global(torch.cat(output_by_group, dim=1))
-
-    def to_global_channel_major(
-        self,
-        input_blocks: tuple[torch.Tensor, ...],
-        wigner_inv: torch.Tensor,
-    ) -> torch.Tensor:
-        """Invert ``(edge, channel, irrep_dim, multiplicity)`` blocks."""
-        if len(input_blocks) != len(self.local_irreps):
-            raise ValueError("Expected one input block per local O(2) irrep group.")
-        channels = input_blocks[0].size(1)
-        for input_block, ((multiplicity, irrep), sources) in zip(
-            input_blocks,
-            zip(self.local_irreps, self.block_sources),
-        ):
-            expected_shape = (channels, irrep.dim, multiplicity)
-            if tuple(input_block.shape[-3:]) != expected_shape:
-                raise ValueError(
-                    "Channel-major O(2) block trailing shape must be "
-                    f"{expected_shape}, got {tuple(input_block.shape)}."
-                )
-            if multiplicity != len(sources):
-                raise RuntimeError("Local O(2) multiplicity resolution failed.")
-
-        wigner_mmax = self._wigner_mmax(wigner_inv)
-        output_by_group = [None] * len(self.global_irreps)
-        for rotation_index, (groups, inverse_specs) in enumerate(
-            zip(self.rotation_groups, self.rotation_inverse_specs)
-        ):
-            rows = []
-            for block_index, source_position, component, sign in inverse_specs:
-                row = input_blocks[block_index][
-                    :,
-                    :,
-                    component,
-                    source_position,
-                ].unsqueeze(1)
                 rows.append(row if sign == 1 else -row)
             group_input = torch.cat(rows, dim=1)
             if self.rotation_is_full[rotation_index]:
