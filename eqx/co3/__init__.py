@@ -15,7 +15,6 @@ __all__ = [
     "Linear",
     "Layout",
     "TensorProduct",
-    "cartesian_harmonics",
     "delta",
     "levi_civita",
     "project",

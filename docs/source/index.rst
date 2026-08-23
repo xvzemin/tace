@@ -11,6 +11,7 @@ Documentation Structure
 
    install/install
    guide/guide
+   equivariantx
    model/model
    
 .. toctree::

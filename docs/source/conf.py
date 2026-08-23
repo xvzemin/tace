@@ -22,6 +22,7 @@ myst_enable_extensions = [
 myst_heading_anchors = 3
 
 autodoc_member_order = "bysource"
+autodoc_typehints = "none"
 autosummary_generate = True
 source_suffix = {
     ".rst": "restructuredtext",
@@ -31,8 +32,6 @@ templates_path = ["_templates"]
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "torch": ("https://docs.pytorch.org/docs/stable/", None),
-    "lightning": ("https://lightning.ai/docs/pytorch/stable/", None),
-    "ase": ("https://wiki.fysik.dtu.dk/ase/", None),
     "e3nn": ("https://docs.e3nn.org/en/stable/", None),
 }
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
