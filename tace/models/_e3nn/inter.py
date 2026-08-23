@@ -543,7 +543,7 @@ class O2Interaction(O3CgtpInteraction):
             act_0e=get_scaled_activation(self._o2_act_0e_name),
             act_0o=get_scaled_activation(self._o2_act_0o_name),
             act_lm=get_scaled_activation(self._o2_act_lm_name),
-            correlation=self.correlation,
+            correlation=2, # hardcore 2 now for memory
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
             use_asymmetric_contraction=self.use_o2_asymmetric_contraction,
@@ -587,22 +587,33 @@ class O2Interaction(O3CgtpInteraction):
 
     def _setup(self) -> None:
         self._validate_o2_setup()
+        self.use_radial_rotary_attention = (
+            self.use_radial_rotary_attention
+            and min(self.irreps_in.lmax, self.mmax) > 0
+        )
+        contraction_input_lmax = self.irreps_in.lmax
+        if self.magnetic_irreps is not None:
+            contraction_input_lmax = max(
+                contraction_input_lmax,
+                self.magnetic_irreps.lmax,
+            )
+        contraction_mmax = min(
+            contraction_input_lmax,
+            self.irreps_out.lmax,
+            self.mmax,
+        )
+        self.use_o2_asymmetric_contraction = (
+            self.use_o2_asymmetric_contraction
+            and contraction_mmax > 0
+        )
 
         scalar_act = self.scalar_act
         if scalar_act is None:
             act_0e_name = "scaled_silu"
-            act_0o_name = (
-                "scaled_silu"
-                if self.use_o2_asymmetric_contraction
-                else "scaled_tanh"
-            )
+            act_0o_name = "scaled_tanh"
         elif isinstance(scalar_act, str):
             act_0e_name = scalar_act
-            act_0o_name = (
-                "scaled_silu"
-                if self.use_o2_asymmetric_contraction
-                else "scaled_tanh"
-            )
+            act_0o_name = "scaled_tanh"
         elif isinstance(scalar_act, list) and len(scalar_act) == 2:
             act_0e_name, act_0o_name = scalar_act
             if not isinstance(act_0e_name, str) or not isinstance(act_0o_name, str):
@@ -612,20 +623,9 @@ class O2Interaction(O3CgtpInteraction):
                 "O2 scalar_act must be None, a string, or a list of two strings "
                 "for 0e and 0o."
             )
-        act_lm_name = self.tensor_act or (
-            "scaled_silu"
-            if self.use_o2_asymmetric_contraction
-            else "scaled_sigmoid"
-        )
+        act_lm_name = self.tensor_act or "scaled_sigmoid"
         if not isinstance(act_lm_name, str):
             raise TypeError("O2 tensor_act must be None or a string for lm gates.")
-        if self.use_o2_asymmetric_contraction and not (
-            act_0e_name == act_0o_name == act_lm_name
-        ):
-            raise ValueError(
-                "AsymmetricContraction requires act_0e, act_0o, and act_lm "
-                "to be identical."
-            )
 
         self.scalar_act = act_0e_name
         self._o2_act_0e_name = act_0e_name

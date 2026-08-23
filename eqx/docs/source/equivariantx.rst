@@ -244,7 +244,11 @@ to a requested correlation order. All weights are supplied externally.
 ``algorithm="edge"`` recursively evaluates paths and minimizes coefficient
 storage. ``algorithm="node"`` stores generalized CG tensors and evaluates
 larger dense contractions, trading memory for node-level speed. Both
-algorithms enumerate the same paths and use the same normalization.
+algorithms enumerate the same paths. ``path_mode="sum"`` is the default and
+accumulates paths with the same output irrep using variance-preserving
+normalization. ``path_mode="expand"`` retains every path as an output
+multiplicity so that a following :class:`eqx.o2.Linear` performs the
+compression.
 
 Cartesian O(3)
 --------------

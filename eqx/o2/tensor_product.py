@@ -67,6 +67,58 @@ def _cg_product(
     return difference_imag.unsqueeze(-3) * scale
 
 
+def _cg_product_uuu(
+    input1: torch.Tensor,
+    irrep1: Irrep,
+    input2: torch.Tensor,
+    irrep2: Irrep,
+    irrep_out: Irrep,
+) -> torch.Tensor:
+    """Evaluate a channel-wise real O(2) Clebsch--Gordan map."""
+    if irrep_out not in irrep1 * irrep2:
+        raise ValueError(
+            f"Illegal O(2) tensor-product path: {irrep1} x {irrep2} -> {irrep_out}."
+        )
+    if input1.size(-1) != input2.size(-1):
+        raise ValueError("uuu tensor products require equal channel counts.")
+
+    if irrep1.m == 0 and irrep2.m == 0:
+        return (input1[..., 0, :] * input2[..., 0, :]).unsqueeze(-2)
+
+    if irrep1.m == 0:
+        vector = input2
+        if irrep1.p == -1:
+            vector = _quarter_turn(vector)
+        return input1[..., 0, :].unsqueeze(-2) * vector
+
+    if irrep2.m == 0:
+        vector = input1
+        if irrep2.p == -1:
+            vector = _quarter_turn(vector)
+        return vector * input2[..., 0, :].unsqueeze(-2)
+
+    first_real = input1[..., 0, :]
+    first_imag = input1[..., 1, :]
+    second_real = input2[..., 0, :]
+    second_imag = input2[..., 1, :]
+    scale = math.sqrt(0.5)
+
+    if irrep_out.m == irrep1.m + irrep2.m:
+        real = first_real * second_real - first_imag * second_imag
+        imag = first_real * second_imag + first_imag * second_real
+        return torch.stack((real, imag), dim=-2) * scale
+
+    difference_real = first_real * second_real + first_imag * second_imag
+    difference_imag = first_imag * second_real - first_real * second_imag
+    if irrep2.m > irrep1.m:
+        difference_imag = -difference_imag
+    if irrep_out.m > 0:
+        return torch.stack((difference_real, difference_imag), dim=-2) * scale
+    if irrep_out == Irrep("0e"):
+        return difference_real.unsqueeze(-2) * scale
+    return difference_imag.unsqueeze(-2) * scale
+
+
 class TensorProduct(torch.nn.Module):
     """A weighted tensor product between complete real O(2) representations.
 
@@ -279,29 +331,36 @@ class TensorProduct(torch.nn.Module):
             for path_index, input1_index, input2_index in self._paths_by_output[
                 output_index
             ]:
-                product = _cg_product(
-                    input1[..., self._input1_slices[input1_index], :],
-                    inputs1[input1_index],
-                    input2[..., self._input2_slices[input2_index], :],
-                    inputs2[input2_index],
-                    output_irrep,
-                )
                 if self.path_mode == "uuu":
-                    contribution = torch.diagonal(product, dim1=-2, dim2=-1)
-                    contribution = contribution * weight[..., path_index, :].unsqueeze(
-                        -2
+                    contribution = _cg_product_uuu(
+                        input1[..., self._input1_slices[input1_index], :],
+                        inputs1[input1_index],
+                        input2[..., self._input2_slices[input2_index], :],
+                        inputs2[input2_index],
+                        output_irrep,
                     )
-                elif self.path_mode == "u1u":
-                    contribution = product.squeeze(-1)
                     contribution = contribution * weight[..., path_index, :].unsqueeze(
                         -2
                     )
                 else:
-                    contribution = torch.einsum(
-                        "...duv,...uvc->...dc",
-                        product,
-                        weight[..., path_index, :, :, :],
+                    product = _cg_product(
+                        input1[..., self._input1_slices[input1_index], :],
+                        inputs1[input1_index],
+                        input2[..., self._input2_slices[input2_index], :],
+                        inputs2[input2_index],
+                        output_irrep,
                     )
+                    if self.path_mode == "u1u":
+                        contribution = product.squeeze(-1)
+                        contribution = contribution * weight[
+                            ..., path_index, :
+                        ].unsqueeze(-2)
+                    else:
+                        contribution = torch.einsum(
+                            "...duv,...uvc->...dc",
+                            product,
+                            weight[..., path_index, :, :, :],
+                        )
                 contributions.append(contribution * self.path_scales[path_index])
             if contributions:
                 output_block = sum(contributions[1:], contributions[0])

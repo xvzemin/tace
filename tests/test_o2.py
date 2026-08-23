@@ -763,6 +763,91 @@ def test_o2_asymmetric_contraction_algorithms_match_with_batch_weights():
     torch.testing.assert_close(node_output, sample_outputs)
 
 
+def test_o2_asymmetric_contraction_keeps_all_paths_without_channel_outer_products():
+    module = o2.AsymmetricContraction(
+        "0e+0e+0e+0e+1m+1m+1m+2m+2m",
+        "4x0e+3x1m+2x2m",
+        channels=64,
+        correlation=2,
+        algorithm="edge",
+    ).to(device=DEVICE, dtype=DTYPE)
+    inputs = [
+        torch.randn(
+            2,
+            module.irreps_in.dim,
+            module.channels,
+            dtype=DTYPE,
+            device=DEVICE,
+        )
+        for _ in range(module.correlation)
+    ]
+
+    assert module.path_mode == "sum"
+    assert module.irreps_out == o2.Irreps("0e+1m+2m")
+    assert module.order_num_paths == (9, 90)
+    assert module.num_paths == 99
+    for path in module._paths_by_order[1]:
+        value = module._contract_edge_path(tuple(inputs), path)
+        assert (
+            value.untyped_storage().nbytes()
+            == value.numel() * value.element_size()
+        )
+
+
+def test_o2_asymmetric_contraction_can_expand_paths_before_linear_compression():
+    kwargs = {
+        "irreps_in": "0e+0e+1m",
+        "irreps_out": "2x0e+1m",
+        "channels": 2,
+        "correlation": 2,
+        "algorithm": "edge",
+    }
+    summed = o2.AsymmetricContraction(**kwargs, path_mode="sum").to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    expanded = o2.AsymmetricContraction(**kwargs, path_mode="expand").to(
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    expanded_node = o2.AsymmetricContraction(
+        **{**kwargs, "algorithm": "node"},
+        path_mode="expand",
+    ).to(device=DEVICE, dtype=DTYPE)
+    inputs = [
+        torch.randn(3, summed.irreps_in.dim, 2, dtype=DTYPE, device=DEVICE)
+        for _ in range(summed.correlation)
+    ]
+    weights = torch.randn(
+        3,
+        summed.weight_numel,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+
+    assert summed.order_num_paths == expanded.order_num_paths == (3, 9)
+    assert summed.irreps_out == o2.Irreps("0e+1m")
+    assert expanded.irreps_out == o2.Irreps("7x0e+5x1m")
+    expanded_output = expanded(inputs, weights)
+    torch.testing.assert_close(expanded_output, expanded_node(inputs, weights))
+    expected_blocks = []
+    offset = 0
+    for multiplicity, irrep in expanded.irreps_out:
+        width = multiplicity * irrep.dim
+        block = expanded_output[:, offset : offset + width].reshape(
+            expanded_output.size(0),
+            multiplicity,
+            irrep.dim,
+            expanded_output.size(-1),
+        )
+        expected_blocks.append(block.sum(dim=1) / math.sqrt(multiplicity))
+        offset += width
+    torch.testing.assert_close(
+        summed(inputs, weights),
+        torch.cat(expected_blocks, dim=1),
+    )
+
+
 @pytest.mark.parametrize("algorithm", ["edge", "node"])
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
@@ -880,9 +965,61 @@ def test_o2_asymmetric_contraction_has_stable_variance_for_independent_inputs():
     )
 
 
+@pytest.mark.parametrize("path_mode", ["sum", "expand"])
+def test_o2_asymmetric_contraction_path_modes_preserve_variance(path_mode):
+    torch.manual_seed(23)
+    batch = 30_000
+    module = o2.AsymmetricContraction(
+        "0e+0e+1m",
+        "2x0e+1m",
+        channels=1,
+        correlation=2,
+        algorithm="edge",
+        path_mode=path_mode,
+    )
+    inputs = [
+        torch.randn(batch, module.irreps_in.dim, 1)
+        for _ in range(module.correlation)
+    ]
+    weights = torch.randn(batch, module.weight_numel)
+
+    variance = module(inputs, weights).squeeze(-1).var(dim=0, unbiased=False)
+    torch.testing.assert_close(
+        variance,
+        torch.ones_like(variance),
+        rtol=0.08,
+        atol=0.08,
+    )
+
+
 def test_o2_asymmetric_contraction_validates_algorithm_inputs_and_weights():
+    repeated = o2.AsymmetricContraction(
+        "0e+0e+1m+2m",
+        "0e+1m+2m",
+        1,
+        2,
+        algorithm="edge",
+    )
+    assert repeated.irreps_in == o2.Irreps("0e+0e+1m+2m")
+    with pytest.raises(ValueError, match="multiplicity one"):
+        o2.AsymmetricContraction(
+            "2x0e+1m+2m",
+            "0e+1m+2m",
+            1,
+            2,
+            algorithm="edge",
+        )
     with pytest.raises(ValueError, match="algorithm"):
         o2.AsymmetricContraction("0e", "0e", 1, 2, algorithm="invalid")
+    with pytest.raises(ValueError, match="path_mode"):
+        o2.AsymmetricContraction(
+            "0e",
+            "0e",
+            1,
+            2,
+            algorithm="edge",
+            path_mode="invalid",
+        )
 
     module = o2.AsymmetricContraction("0e", "0e", 1, 2, algorithm="edge")
     input = torch.randn(3, 1, 1)
@@ -1819,6 +1956,82 @@ def test_o2_radial_rotary_attention_skips_scatter_normalization():
     assert hasattr(module_without_attention, "edge_density")
 
 
+def test_o2_radial_rotary_attention_falls_back_without_positive_m():
+    module = _build_o2_interaction(
+        angular_max=3,
+        mmax=3,
+        irreps_in=o3.Irreps("2x0e"),
+        scatter_norm="density",
+        use_radial_rotary_attention=True,
+    )
+
+    assert module.rejector.input_frame.local_irreps.m_max == 0
+    assert not module.use_radial_rotary_attention
+    assert not module.rejector.use_radial_rotary_attention
+    assert module.rejector.attention is None
+    assert isinstance(module.rejector.nonlinearity, Gate)
+    assert module.scatter_norm == "density"
+    assert hasattr(module, "edge_density")
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_interaction(module, inputs)
+    assert output.isfinite().all()
+
+
+def test_o2_asymmetric_contraction_falls_back_to_gate_without_positive_m():
+    module = _build_o2_interaction(
+        angular_max=3,
+        mmax=3,
+        irreps_in=o3.Irreps("2x0e"),
+        scatter_norm="density",
+        use_asymmetric_contraction=True,
+    )
+
+    assert module.rejector.input_frame.local_irreps.m_max == 0
+    assert not module.use_o2_asymmetric_contraction
+    assert not module.rejector.use_asymmetric_contraction
+    assert module.rejector.asymmetric_contraction is None
+    assert isinstance(module.rejector.nonlinearity, Gate)
+    assert isinstance(module.rejector.nonlinearity.act_0e, ScaledSiLU)
+    assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
+    assert isinstance(module.rejector.nonlinearity.act_lm, ScaledSigmoid)
+    assert module.scatter_norm == "density"
+    assert hasattr(module, "edge_density")
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_interaction(module, inputs)
+    assert output.isfinite().all()
+
+
+def test_o2_asymmetric_contraction_and_attention_support_positive_m():
+    module = _build_o2_interaction(
+        correlation=2,
+        use_asymmetric_contraction=True,
+        use_radial_rotary_attention=True,
+    )
+
+    assert module.rejector.input_frame.local_irreps.m_max > 0
+    assert module.use_o2_asymmetric_contraction
+    assert module.rejector.use_asymmetric_contraction
+    assert module.rejector.asymmetric_contraction is not None
+    assert module.rejector.nonlinearity is None
+    assert module.rejector.use_radial_rotary_attention
+    assert module.rejector.attention is not None
+
+
+def test_o2_asymmetric_contraction_preserves_scatter_norm_without_attention():
+    module = _build_o2_interaction(
+        correlation=2,
+        scatter_norm="density",
+        use_asymmetric_contraction=True,
+    )
+
+    assert module.rejector.asymmetric_contraction is not None
+    assert module.rejector.attention is None
+    assert module.scatter_norm == "density"
+    assert hasattr(module, "edge_density")
+
+
 def test_o2_interaction_mmax_restricts_internal_paths():
     irreps_in = o3.Irreps("2x0e+2x1o+2x2e")
     truncated = _build_o2_interaction(
@@ -1832,8 +2045,8 @@ def test_o2_interaction_mmax_restricts_internal_paths():
         irreps_in=irreps_in,
     )
 
-    assert truncated.rejector.irreps_out_local.m_max == 1
-    assert complete.rejector.irreps_out_local.m_max == 2
+    assert truncated.rejector.linear_down.irreps_out.m_max == 1
+    assert complete.rejector.linear_down.irreps_out.m_max == 2
     assert len(truncated.rejector.linear_down.path) < len(
         complete.rejector.linear_down.path
     )
@@ -1885,8 +2098,6 @@ def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper
     assert module.rejector.active_mmax == 0
     assert module.rejector.input_frame.mmax == 0
     assert module.rejector.output_frame.mmax == 0
-    assert module.rejector.irreps_out_local.m_max == 0
-    assert module.rejector.irreps_hidden_local.m_max == 0
     assert module.rejector.nonlinearity.irreps_out.m_max == 0
     assert module.rejector.linear_up.irreps_out.m_max == 0
     assert module.rejector.linear_down.irreps_in.m_max == 0
@@ -1990,7 +2201,10 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
     assert isinstance(module.rejector.nonlinearity.act_lm, ScaledSigmoid)
     assert module.rejector.nonlinearity.irreps_out == (
-        module.num_channel * module.rejector.irreps_hidden_local
+        module.num_channel * module.rejector.linear_down.irreps_in
+    )
+    assert module.rejector.nonlinearity.irreps_in == (
+        module.num_channel * module.rejector.linear_up.irreps_out
     )
     assert module.rejector.linear_down.path_mode == "uv"
     assert module.rejector.linear_down.internal_weights
@@ -2021,14 +2235,25 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
         o2.AsymmetricContraction,
     )
     assert module.rejector.asymmetric_contraction.algorithm == "edge"
-    assert module.rejector.contraction_weight_numel > 0
+    assert module.rejector.asymmetric_contraction.weight_numel > 0
     assert module.rejector.nonlinearity is None
     assert not hasattr(module, "contraction_info")
     assert isinstance(module.rejector.scalar_act, ScaledSiLU)
-    assert module.rejector.projection_irreps.count("0e") == (
-        module.rejector.irreps_out_local.count("0e") * module.correlation
+    contraction = module.rejector.asymmetric_contraction
+    assert all(multiplicity == 1 for multiplicity, _ in contraction.irreps_in)
+    assert len(contraction.irreps_in.expanded()) == len(
+        set(contraction.irreps_in.expanded())
+    )
+    assert module.rejector.linear_up.irreps_out.count("0e") == (
+        contraction.irreps_in.count("0e") * module.correlation
         + module.rejector.asymmetric_contraction.num_paths
     )
+    assert module.rejector.linear_down.irreps_in == contraction.irreps_out
+    assert (
+        module.rejector.linear_down.irreps_out
+        == module.rejector.output_frame.local_irreps
+    )
+    assert not hasattr(module.rejector, "projection_irreps")
     assert not tuple(module.rejector.asymmetric_contraction.parameters())
 
     inputs = _o2_magnetic_inputs(module)
@@ -2110,18 +2335,22 @@ def test_o2_asymmetric_contraction_defaults_to_scaled_silu():
         use_asymmetric_contraction=True,
     )
     assert module._o2_act_0e_name == "scaled_silu"
-    assert module._o2_act_0o_name == "scaled_silu"
-    assert module._o2_act_lm_name == "scaled_silu"
+    assert module._o2_act_0o_name == "scaled_tanh"
+    assert module._o2_act_lm_name == "scaled_sigmoid"
+    assert isinstance(module.rejector.scalar_act, ScaledSiLU)
 
 
-def test_o2_asymmetric_contraction_requires_identical_activations():
-    with pytest.raises(ValueError, match="act_0e, act_0o, and act_lm"):
-        _build_o2_magnetic_interaction(
-            correlation=2,
-            scalar_act=["scaled_silu", "scaled_tanh"],
-            tensor_act="scaled_silu",
-            use_asymmetric_contraction=True,
-        )
+def test_o2_asymmetric_contraction_uses_only_0e_activation():
+    module = _build_o2_magnetic_interaction(
+        correlation=2,
+        scalar_act=["scaled_silu", "scaled_tanh"],
+        tensor_act="scaled_sigmoid",
+        use_asymmetric_contraction=True,
+    )
+
+    assert module.rejector.asymmetric_contraction is not None
+    assert module.rejector.nonlinearity is None
+    assert isinstance(module.rejector.scalar_act, ScaledSiLU)
 
 
 @pytest.mark.parametrize(
@@ -2212,7 +2441,7 @@ def test_o2_magnetic_interaction_is_globally_o3_equivariant(
 
 
 @pytest.mark.parametrize("improper", [False, True])
-def test_o2_magnetic_optional_contraction_and_attention_are_o3_equivariant(
+def test_o2_magnetic_contraction_and_attention_are_o3_equivariant(
     improper,
 ):
     torch.manual_seed(15)
@@ -2221,6 +2450,10 @@ def test_o2_magnetic_optional_contraction_and_attention_are_o3_equivariant(
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
+    assert module.use_o2_asymmetric_contraction
+    assert module.rejector.asymmetric_contraction is not None
+    assert module.rejector.nonlinearity is None
+    assert module.rejector.attention is not None
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
 
