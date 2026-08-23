@@ -150,43 +150,38 @@ tensor with `3**l` stored components. Both polar tensors and pseudotensors are
 supported through the explicit parity label `p` in `0e`, `0o`, `1o`, `1e`,
 and so on. For an orthogonal matrix $Q\in O(3)$, the representation acts as
 
-\[
+$$
 \eta_{l,p}=\frac{1-p(-1)^l}{2},\qquad
 T'=[\det(Q)]^{\eta_{l,p}}Q^{\otimes l}T.
-\]
+$$
 
 The tensor product contains the two Cartesian coupling branches. The
 Kronecker-delta branch contracts `k` index pairs,
 
-\[
+$$
 (A\otimes_k^\delta B)_{\boldsymbol i\boldsymbol j}
 =3^{-k/2}\sum_{\boldsymbol a}
 A_{\boldsymbol i\boldsymbol a}B_{\boldsymbol a\boldsymbol j},
 \qquad l_3=l_1+l_2-2k,
-\]
+$$
 
 while the Levi-Civita branch additionally couples one index from each input,
 
-\[
+$$
 (A\otimes_k^\epsilon B)_{\boldsymbol i w\boldsymbol j}
 =(2\,3^k)^{-1/2}\sum_{\boldsymbol a,u,v}
 A_{\boldsymbol i u\boldsymbol a}\epsilon_{wuv}
 B_{\boldsymbol a v\boldsymbol j},
 \qquad l_3=l_1+l_2-2k-1.
-\]
+$$
 
-Both branches obey `p3 = p1 * p2`. `Linear` uses dense UV channel mixing,
-`Gate` uses invariant `0e` gates for Cartesian tensors, and
-`CartesianHarmonics` constructs symmetric traceless Cartesian features.
-The fixed tensors are also available as `co3.delta()` and
-`co3.levi_civita()`.
 
 ### Cartesian convolution
 
 A Cartesian convolution first gathers node features onto edges and couples
 them to Cartesian harmonics in `u1u` mode. Every tensor-product path is kept
 as a separate output copy, and `project=False` avoids projecting these edge
-messages. After aggregation, a UV `Linear` compresses the paths and the result
+messages. After aggregation, a `Linear` compresses the paths and the result
 is projected once at node level:
 
 ```python
