@@ -1,8 +1,8 @@
 # EQX
 
 EQX is a self-contained library for equivariant PyTorch operators. Its current
-focus is complete real O(2) representation theory together with the conversion
-between global O(3) features and local O(2) features.
+focus is complete real O(2) representation theory, conversion between global
+O(3) and local O(2) features, and Cartesian O(3) operators.
 
 The public O(2) API provides:
 
@@ -57,14 +57,14 @@ from eqx import o2
 
 num_nodes = 8
 num_edges = 20
-channels = 2
+channels = 64
 lmax = 3
 mmax = 2
 
 # Every listed O(3) irrep has the same channel multiplicity.
 irreps_o3 = o3.Irreps(
-    "2x0e + 2x0o + 2x1o + 2x1e + "
-    "2x2e + 2x2o + 2x3o + 2x3e"
+    "64x0e + 64x0o + 64x1o + 64x1e + "
+    "64x2e + 64x2o + 64x3o + 64x3e"
 )
 node_feats = torch.randn(num_nodes, irreps_o3.dim)
 
@@ -143,6 +143,160 @@ assert edge_attrs.shape == (32, circular_harmonics.irreps_out.dim)
 With `normalize=True`, the output depends only on direction. With
 `normalize=False`, order `m` is homogeneous of degree `m` in the input vector.
 
+## Cartesian O(3)
+
+The `co3` module represents a rank-`l` irreducible Cartesian
+tensor with `3**l` stored components. Both polar tensors and pseudotensors are
+supported through the explicit parity label `p` in `0e`, `0o`, `1o`, `1e`,
+and so on. For an orthogonal matrix $Q\in O(3)$, the representation acts as
+
+\[
+\eta_{l,p}=\frac{1-p(-1)^l}{2},\qquad
+T'=[\det(Q)]^{\eta_{l,p}}Q^{\otimes l}T.
+\]
+
+The tensor product contains the two Cartesian coupling branches. The
+Kronecker-delta branch contracts `k` index pairs,
+
+\[
+(A\otimes_k^\delta B)_{\boldsymbol i\boldsymbol j}
+=3^{-k/2}\sum_{\boldsymbol a}
+A_{\boldsymbol i\boldsymbol a}B_{\boldsymbol a\boldsymbol j},
+\qquad l_3=l_1+l_2-2k,
+\]
+
+while the Levi-Civita branch additionally couples one index from each input,
+
+\[
+(A\otimes_k^\epsilon B)_{\boldsymbol i w\boldsymbol j}
+=(2\,3^k)^{-1/2}\sum_{\boldsymbol a,u,v}
+A_{\boldsymbol i u\boldsymbol a}\epsilon_{wuv}
+B_{\boldsymbol a v\boldsymbol j},
+\qquad l_3=l_1+l_2-2k-1.
+\]
+
+Both branches obey `p3 = p1 * p2`. `Linear` uses dense UV channel mixing,
+`Gate` uses invariant `0e` gates for Cartesian tensors, and
+`CartesianHarmonics` constructs symmetric traceless Cartesian features.
+The fixed tensors are also available as `co3.delta()` and
+`co3.levi_civita()`.
+
+### Cartesian convolution
+
+A Cartesian convolution first gathers node features onto edges and couples
+them to Cartesian harmonics in `u1u` mode. Every tensor-product path is kept
+as a separate output copy, and `project=False` avoids projecting these edge
+messages. After aggregation, a UV `Linear` compresses the paths and the result
+is projected once at node level:
+
+```python
+import torch
+
+from eqx import co3
+
+num_nodes = 16
+num_edges = 48
+channels = 64
+lmax = 2
+
+irreps_node = co3.Irreps("0e + 0o + 1o + 1e + 2e + 2o")
+cartesian_harmonics = co3.CartesianHarmonics(lmax, irreps_in="1o")
+irreps_edge = cartesian_harmonics.irreps_out
+
+# Project each ambient Cartesian block before using it as an irrep.
+node_feats = torch.cat(
+    [
+        co3.project(torch.randn(num_nodes, irrep.dim, channels), irrep.l)
+        for irrep in irreps_node.expanded()
+    ],
+    dim=1,
+)
+edge_index = torch.randint(0, num_nodes, (2, num_edges))
+edge_vectors = torch.randn(num_edges, 3)
+edge_attrs = cartesian_harmonics(edge_vectors).unsqueeze(-1)
+
+# Retain one output irrep copy for every allowed tensor-product path.
+irreps_paths = []
+paths = []
+for input1_index, irrep1 in enumerate(irreps_node.expanded()):
+    for input2_index, irrep2 in enumerate(irreps_edge.expanded()):
+        for irrep_out in irrep1 * irrep2:
+            if irrep_out.l <= lmax:
+                output_index = len(irreps_paths)
+                irreps_paths.append(irrep_out)
+                paths.append((output_index, input1_index, input2_index))
+irreps_paths = co3.Irreps(irreps_paths)
+
+tensor_product = co3.TensorProduct(
+    irreps_node,
+    irreps_edge,
+    irreps_paths,
+    channels_in1=channels,
+    channels_in2=1,
+    channels_out=channels,
+    project=False,
+    path_mode="u1u",
+    path=paths,
+)
+
+source, target = edge_index
+raw_edge_messages = tensor_product(node_feats[source], edge_attrs)
+raw_node_messages = raw_edge_messages.new_zeros(
+    num_nodes,
+    irreps_paths.dim,
+    channels,
+)
+raw_node_messages.index_add_(0, target, raw_edge_messages)
+
+# Compress all paths of the same (l, p) type before projection.
+linear_down = co3.Linear(
+    irreps_paths,
+    irreps_node,
+    channels,
+    channels,
+    bias=False,
+)
+node_messages = linear_down(raw_node_messages)
+node_messages = torch.cat(
+    [
+        co3.project(node_messages[..., block_slice, :], irrep.l)
+        for irrep, block_slice in zip(
+            irreps_node.expanded(),
+            irreps_node.expanded_slices(),
+        )
+    ],
+    dim=-2,
+)
+```
+
+Because the projection is linear, projecting after aggregation is equivalent
+to projecting every edge message before aggregation. Projection must be
+completed before treating the result as an irreducible feature in a subsequent
+nonlinear operation.
+
+### Cartesian many-body expansion
+
+For a node-level many-body expansion, node features are coupled directly with
+`project=True`. The output is immediately an irreducible Cartesian:
+
+```python
+node_tensor_product = co3.TensorProduct(
+    irreps_node,
+    irreps_node,
+    irreps_node,
+    channels_in1=channels,
+    channels_in2=channels,
+    channels_out=channels,
+    project=True,
+    path_mode="uuu",
+)
+node_product = node_tensor_product(node_feats, node_feats)
+```
+
+The `project` argument is mandatory. Use `project=False` only when a linear
+operation such as path compression or aggregation is intentionally placed
+before projection; otherwise use `project=True`.
+
 ## Citation
 
 If you use the complete local O(2) method or its global O(3)/local O(2)
@@ -157,5 +311,19 @@ conversion, please cite:
   archivePrefix={arXiv},
   primaryClass={physics.chem-ph},
   url={https://arxiv.org/abs/2608.16592},
+}
+```
+
+If you use Cartesian O(3) method please cite:
+
+```bibtex
+@misc{xu2026spectralspatialtensoratomiccluster,
+   title={Spectral/Spatial Tensor Atomic Cluster Expansion with Universal Embeddings in Cartesian Space}, 
+   author={Zemin Xu and Wenbo Xie and P. Hu},
+   year={2026},
+   eprint={2509.14961},
+   archivePrefix={arXiv},
+   primaryClass={stat.ML},
+   url={https://arxiv.org/abs/2509.14961}, 
 }
 ```
