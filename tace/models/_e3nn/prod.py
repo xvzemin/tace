@@ -9,8 +9,6 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from tace.utils.env import acceleration_enabled
-
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear
 from .base import Product
 from .dropout import GraphDropPath
@@ -96,7 +94,7 @@ class CgtpACE(Product):
                 l1l2=self.l1l2,
                 trainable=self.use_bilinear_ace,
                 identical_inputs=nu == 2 and not self.use_bilinear_ace,
-                warning=self.correlation > 2,
+                warning=self.correlation > 2 and self.layer == 0,
                 use_fused=self.correlation > 2,
             )
             self.aces.append(this_ace)
