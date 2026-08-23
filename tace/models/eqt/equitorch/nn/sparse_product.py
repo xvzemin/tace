@@ -1,17 +1,16 @@
 from typing import Union
 
-
 import torch
-from torch_geometric.utils import segment, scatter
 
-
+from tace.models.eqt import _segment_csr
+from tace.utils.torch_scatter import scatter_sum
 from ..structs import SparseProductInfo
 
 
 def indexed_mul_scale_gather_cpu(
         input1, input2, 
         scale=None, index1=None, index2=None,
-        seg=None, gather_index=None, 
+        seg=None, segment_index=None, gather_index=None,
         index_out=None, out=None,
         out_accumulated=False,
         out_size=None):
@@ -31,16 +30,22 @@ def indexed_mul_scale_gather_cpu(
     # Handle segmentation/gathering
     if seg is not None:
         if gather_index is not None:
-            # Gather then segment
-            gathered = inter.index_select(-2, gather_index)
-            inter = segment(gathered, seg.unsqueeze(0))
+            inter = inter.index_select(-2, gather_index)
+        if _segment_csr is not None:
+            inter = _segment_csr(inter, seg.unsqueeze(0), reduce="sum")
         else:
-            # Direct segment
-            inter = segment(inter, seg.unsqueeze(0))
+            if segment_index is None:
+                raise RuntimeError("Missing segment indices for the EQT fallback.")
+            inter = scatter_sum(
+                inter,
+                segment_index,
+                dim=-2,
+                dim_size=out_size,
+            )
     
     # Handle output indexing
     if index_out is not None:
-        inter = scatter(inter, index_out, dim=-2, dim_size=out_size)
+        inter = scatter_sum(inter, index_out, dim=-2, dim_size=out_size)
     
     # Handle accumulation
     if out_accumulated:
@@ -52,7 +57,7 @@ def indexed_mul_scale_gather_cpu(
 def indexed_mul_scale_gather(
         input1, input2, 
         scale=None, index1=None, index2=None,
-        seg=None, gather_index=None, 
+        seg=None, segment_index=None, gather_index=None,
         index_out=None, out=None,
         out_accumulated=False,
         out_size=None,
@@ -60,7 +65,7 @@ def indexed_mul_scale_gather(
 
         return indexed_mul_scale_gather_cpu(
             input1, input2, scale, index1, index2,
-            seg, gather_index, index_out, out,
+            seg, segment_index, gather_index, index_out, out,
             out_accumulated, out_size)
 
 
@@ -82,6 +87,7 @@ class SparseMul(torch.autograd.Function):
             info_fwd.index1,
             info_fwd.index2,
             info_fwd.seg_out,
+            info_fwd.segment_index,
             info_fwd.gather_index,
             info_fwd.index_out,
             out_accumulated=out_accumulated,

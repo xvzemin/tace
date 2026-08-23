@@ -292,6 +292,7 @@ class SparseProductInfo(NamedTuple):
     index1: Union[torch.Tensor, None] = None # (num_t,), int in [0, num_M1)
     index2: Union[torch.Tensor, None] = None # (num_t,), int in [0, num_M2)
     seg_out: Union[torch.Tensor, None] = None # (num_M_nonzero+1,), increasing int in [0, num_t]
+    segment_index: Union[torch.Tensor, None] = None # (num_t,), int in [0, num_M)
     gather_index: Union[torch.Tensor, None] = None # (num_M_nonzero,) int in [0, num_t)
     index_out: Union[torch.Tensor, None] = None # (num_M_nonzero,), int in [0, num_M)
     out_size: Union[int, None] = None # num_M
@@ -598,6 +599,7 @@ def sparse_product_info(index1=None, index2=None, index=None, scale=None, out_si
         index1=tensor(index1_MM1M2) if index1_MM1M2 is not None else None,
         index2=tensor(index2_MM1M2) if index2_MM1M2 is not None else None,
         seg_out=tensor(seg_new) if seg_new is not None else None,
+        segment_index=tensor(index_MM1M2) if seg_new is not None else None,
         # seg_out=tensor(seg_M_MM1M2) if seg_M_MM1M2 is not None else None,
         index_out=tensor(index_M) if index_M is not None else None,
         out_size=out_size
@@ -755,6 +757,5 @@ def tp_infos(
     tp_backward1 = create_tp_info(cg_vals, M1, M2, M, i, j, k, w_idx, irreps1.dim, irreps2.dim, irreps_out.dim)
     tp_backward2 = create_tp_info(cg_vals, M2, M, M1, j, k, i, w_idx, irreps2.dim, irreps_out.dim, irreps1.dim)
     return tp_forward, tp_backward1, tp_backward2, num_paths
-
 
 
