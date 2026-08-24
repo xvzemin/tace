@@ -1,7 +1,7 @@
 Tutorials
 =========
 
-Our model is developed based on three major Python packages: 
+TACE is developed based on three major Python packages: 
 `PyTorch <https://pytorch.org/>`_, 
 `PyTorch Lightning <https://lightning.ai/docs/pytorch/stable/>`_, 
 and `Hydra <https://hydra.cc/>`_.

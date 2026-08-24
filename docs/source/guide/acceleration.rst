@@ -8,7 +8,7 @@ TACE provides several composable acceleration layers:
 * OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide alternative
   implementations of the same edge-level equivariant operations and are
   mutually exclusive;
-* EquiTorch (EQT) independently accelerates supported product-basis tensor
+* EquiTorch (EQT) accelerates product-basis tensor
   products and can be combined with either OEQ or CUEQ;
 * PyTorch compilation accelerates a larger part of the model and can either
   run inside the current Python process or produce an AOTInductor package for
@@ -33,13 +33,13 @@ The following kernel backends are available:
      - Scope
      - Environment variable
    * - OpenEquivariance
-     - Alternative edge-level backend; choose OEQ or CUEQ
+     - Edge in atomic basis
      - ``TACE_USE_OEQ=1``
    * - cuEquivariance
-     - Alternative edge-level backend; choose OEQ or CUEQ
+     - Edge in atomic basis
      - ``TACE_USE_CUE=1``
    * - EquiTorch
-     - Independent product-basis acceleration
+     - Node in product basis
      - ``TACE_USE_EQT=1``
 
 For example:
@@ -54,7 +54,7 @@ basis.
 OpenEquivariance is the recommended edge-level backend for supported NVIDIA
 GPUs.
 
-The acceleration environment can also be configured through one Python
+The acceleration environment can also be configured through Python
 interface before constructing or loading the model:
 
 .. code-block:: python
@@ -119,7 +119,7 @@ AOTI produces a ``.pt2`` package containing compiled native code. Loading the
 package does not call ``torch.compile`` again.
 
 AOTI is an independent compilation and deployment layer. It does not replace
-OEQ, CUEQ, EQT, or EQX. Configure the desired compatible acceleration
+OEQ, CUEQ, or EQT. Configure the desired compatible acceleration
 backends before export; the resulting package captures the model constructed
 with those selections.
 
@@ -130,10 +130,8 @@ with those selections.
    When OpenEquivariance is enabled for AOTI export, OEQ 0.6.4 or newer is
    required.
 
-Compilation currently supports energy and its atomic-force, stress, virial,
-and noncollinear-magnetic-force derivatives, together with the direct
-prediction variants. A graph AOTI package for a magnetic model takes
-``initial_noncollinear_magmoms`` as an additional per-atom input. Models using
+Compilation currently supports energy force, stress, virial, charge
+and noncollinear-magnetic-force. Models using
 unsupported output properties or LES cannot be exported through the current
 AOTI path.
 
@@ -159,28 +157,28 @@ The commands accept ``.ckpt``, state-dict ``.pt``/``.pth`` packages, and
 serialized full models as input. Use ``-f`` to select a fidelity and ``--dtype``
 to change model precision during export.
 
-Export for Training
-~~~~~~~~~~~~~~~~~~~
+.. Export for Training
+.. ~~~~~~~~~~~~~~~~~~~
 
-Use this form when the result must remain editable by TACE:
+.. Use this form when the result must remain editable by TACE:
 
-.. code-block:: bash
+.. .. code-block:: bash
 
-   tace-export-train -m model.ckpt
+..    tace-export-train -m model.ckpt
 
-The default output is ``model.ckpt-state.pt``. It stores the state dictionary
-and the model configuration required by ``load_tace`` and training utilities.
-The command loads EMA parameters when they are available.
+.. The default output is ``model.ckpt-state.pt``. It stores the state dictionary
+.. and the model configuration required by ``load_tace`` and training utilities.
+.. The command loads EMA parameters when they are available.
 
-An explicit output, fidelity, and precision can also be selected:
+.. An explicit output, fidelity, and precision can also be selected:
 
-.. code-block:: bash
+.. .. code-block:: bash
 
-   tace-export-train \
-     -m model.ckpt \
-     -o model-fidelity-1.pt \
-     -f 1 \
-     --dtype float32
+..    tace-export-train \
+..      -m model.ckpt \
+..      -o model-fidelity-1.pt \
+..      -f 1 \
+..      --dtype float32
 
 Export for Native PyTorch Inference
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
