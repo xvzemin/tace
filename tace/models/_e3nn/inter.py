@@ -301,11 +301,8 @@ class O3GeneralizedWigner6jInteraction(O3CgtpInteraction, abc.ABC):
         """Irreps of the additional equivariant node attributes."""
         raise NotImplementedError
 
-    def _validate_extra_setup(self) -> None:
-        pass
-
     def _prepare_setup(self) -> None:
-        self._validate_extra_setup()
+        super()._prepare_setup()
         extra_irreps_node_attrs = o3.Irreps(self.extra_irreps_node_attrs)
         if any(multiplicity != 1 for multiplicity, _ in extra_irreps_node_attrs):
             raise ValueError("extra_irreps_node_attrs must have multiplicity one")
@@ -454,15 +451,21 @@ class uvSO2Interaction(O3CgtpInteraction):
     use_radial_phase = True
 
     def _prepare_setup(self) -> None:
-        assert self.parity == False, "uvSO2Interaction not support O(3) group"
-        assert self.irreps_in.lmax > 0, (
-            "uvSO2Interaction's irreps_in.lmax must > 0, "
-            "use uvSO2Interaction from the second layer or use other node_embedding with l > 0"
-        )
-        assert (
-            self.edge_nonlinear == "so2_sigmoid_gate"
-            or self.edge_nonlinear == "so2_silu_gate"
-        )
+        super()._prepare_setup()
+        if self.parity:
+            raise ValueError("uvSO2Interaction does not support O(3).")
+        if self.irreps_in.lmax <= 0:
+            raise ValueError(
+                "uvSO2Interaction requires irreps_in.lmax > 0. Use it after "
+                "the first layer or provide a node embedding with l > 0."
+            )
+        if self.edge_nonlinear not in {
+            "so2_sigmoid_gate",
+            "so2_silu_gate",
+        }:
+            raise ValueError(
+                "uvSO2Interaction requires a supported SO2 edge nonlinearity."
+            )
         self.scatter_norm = None
 
     def _build_rejector(self) -> torch.nn.Module:
@@ -529,10 +532,6 @@ class O2Interaction(O3CgtpInteraction):
     radial basis as scale and shift.
     """
 
-    def _validate_o2_setup(self) -> None:
-        if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
-            raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
-
     def _build_rejector(self) -> torch.nn.Module:
         rejector = O2ScatterLinear(
             self.irreps_in,
@@ -564,7 +563,7 @@ class O2Interaction(O3CgtpInteraction):
     ) -> torch.Tensor:
         return edge_feats
 
-    def _apply_o2_rejector(
+    def _apply_rejector(
         self,
         node_feats: torch.Tensor,
         magnetic_node_attrs: Union[torch.Tensor, None],
@@ -585,8 +584,10 @@ class O2Interaction(O3CgtpInteraction):
             edge_cutoff=edge_cutoff,
         )
 
-    def _setup(self) -> None:
-        self._validate_o2_setup()
+    def _prepare_setup(self) -> None:
+        super()._prepare_setup()
+        if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
+            raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
         self.use_radial_rotary_attention = (
             self.use_radial_rotary_attention
             and min(self.irreps_in.lmax, self.mmax) > 0
@@ -631,7 +632,6 @@ class O2Interaction(O3CgtpInteraction):
         self._o2_act_0e_name = act_0e_name
         self._o2_act_0o_name = act_0o_name
         self._o2_act_lm_name = act_lm_name
-        super()._setup()
 
     def _compute_messages(
         self,
@@ -653,7 +653,7 @@ class O2Interaction(O3CgtpInteraction):
             magnetic_radial_basis,
         )
         radial_weights = self.edge_info(edge_weight_inputs)
-        return self._apply_o2_rejector(
+        return self._apply_rejector(
             node_feats,
             magnetic_node_attrs,
             radial_weights,
@@ -672,7 +672,7 @@ class O3Wigner6jMagneticInteraction(O3GeneralizedWigner6jInteraction):
     def extra_irreps_node_attrs(self) -> o3.Irreps:
         return self.magnetic_irreps
 
-    def _validate_extra_setup(self) -> None:
+    def _prepare_setup(self) -> None:
         if self.magnetic_irreps is None:
             raise ValueError("o3_w6j_mag requires magnetic_irreps.")
         if not 1 <= self.mag_Lmax <= self.Lmax:
@@ -685,13 +685,13 @@ class O3Wigner6jMagneticInteraction(O3GeneralizedWigner6jInteraction):
             raise ValueError(
                 "wigner6j_magnetic_conv requires parity: true for full O(3)"
             )
+        super()._prepare_setup()
 
 
 class O2MagneticInteraction(O2Interaction):
     """Local-O2 interaction augmented by magnetic solid harmonics."""
 
-    def _validate_o2_setup(self) -> None:
-        super()._validate_o2_setup()
+    def _prepare_setup(self) -> None:
         if not self.parity:
             raise ValueError("o2_mag requires parity: true for full O(3)")
         if self.magnetic_irreps is None:
@@ -700,6 +700,7 @@ class O2MagneticInteraction(O2Interaction):
             raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
         if self.magnetic_irreps.lmax != self.mag_Lmax:
             raise ValueError("magnetic_irreps must end at mag_Lmax.")
+        super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:
         rejector = O2MagneticScatterLinear(
@@ -745,7 +746,7 @@ class O2MagneticInteraction(O2Interaction):
             dim=-1,
         )
 
-    def _apply_o2_rejector(
+    def _apply_rejector(
         self,
         node_feats: torch.Tensor,
         magnetic_node_attrs: Union[torch.Tensor, None],
