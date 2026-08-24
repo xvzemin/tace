@@ -23,6 +23,7 @@ myst_heading_anchors = 3
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "none"
+autodoc_mock_imports = ["torch_sim"]
 autosummary_generate = True
 source_suffix = {
     ".rst": "restructuredtext",

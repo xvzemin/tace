@@ -108,23 +108,6 @@ Use the `PyTorch Geometric installation guide
 <https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html>`_
 to select a different PyTorch or CUDA wheel.
 
-EQX Operator Preview
---------------------
-
-EQX is planned as a general operator library for ``O(3)``, ``O(2)``, Wigner-6j,
-and Cartesian equivariant computations. The current TACE preview uses Triton
-from a compatible CUDA-enabled PyTorch build and requires no additional TACE
-extra:
-
-.. code-block:: bash
-
-   export TACE_USE_EQX=1
-
-The preview is independent of OEQ, CUEQ, and EQT and currently applies only to
-the scatter calculation in ``uuSO2Interaction`` now. Internally it calls
-``tace.models.triton_ops``; that module is a temporary placeholder until the
-operators move into independent EQX package.
-
 
 Latent Ewald Summation (LES)
 ----------------------------
@@ -202,8 +185,7 @@ Acceleration Selection
 
 OEQ and CUEQ are alternative implementations of the same edge-level
 operations; enable only one of them. EQT is an independent product-basis
-acceleration and may be combined with either OEQ or CUEQ. The EQX preview is
-also independent and currently accelerates only the ``uuSO2Interaction``
-scatter calculation. AOTI is a separate compilation and
-deployment layer. See the :ref:`acceleration-tutorial` for backend selection,
-Python interfaces, compilation, and AOTI export.
+acceleration and may be combined with either OEQ or CUEQ. 
+AOTI is a separate compilation and deployment layer. See the
+:ref:`acceleration-tutorial` for backend selection, Python interfaces,
+compilation, and AOTI export.
