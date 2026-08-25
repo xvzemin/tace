@@ -337,17 +337,13 @@ model:
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, sqrt_avg_num_neighbors, density]
       nonlinear: gate # [null, gate]
       edge_nonlinear: gate # [gate]
-      scalar_act: null # unscaled name for 0e, or [0e, 0o]
-      tensor_act: null # unscaled name for tensor-irrep 0e gates
-      use_asymmetric_contraction: true
+      scalar_act: null # name for 0e, or [0e, 0o]
+      tensor_act: null # name for tensor-irrep 0e gates
+      use_asymmetric_contraction: false
       use_radial_rotary_attention: true
       num_head: null
-  
-      # in test, not use
-      node_wise_hidden: null
-      edge_wise_hidden: null
-      edge_ace_hidden: null
-      gate_m0: false # always use false, legacy option
+      edge_ace_hidden: null # legacy SO2 asymmetric-contraction width
+      gate_m0: false # always use false, legacy option for whether gating m=0 
 
     product_basis:
       type: cgtp  # (str or list[str]) [cgtp]

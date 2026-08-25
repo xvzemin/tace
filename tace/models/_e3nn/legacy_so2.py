@@ -707,7 +707,6 @@ class uvSO2Convolution(torch.nn.Module):
         num_head: int,
         use_temperature: bool,
         edge_ace_hidden: int,
-        edge_wise_hidden: int,
         num_radial_basis: int,
         so2_linear_type: str,
         gate_m0: bool,
@@ -726,9 +725,8 @@ class uvSO2Convolution(torch.nn.Module):
         self.num_channel = num_channel
         self.num_head = num_head
         self.edge_ace_hidden = edge_ace_hidden
-        self.edge_wise_hidden = edge_wise_hidden or self.num_channel
-        self.num_channel_per_head = self.edge_wise_hidden // self.num_head
-        assert self.edge_wise_hidden % self.num_head == 0
+        self.num_channel_per_head = self.num_channel // self.num_head
+        assert self.num_channel % self.num_head == 0
         self.so2_linear_type = so2_linear_type
         self.use_temperature = use_temperature
         self.use_radial_rotary_attention = use_radial_rotary_attention
@@ -769,7 +767,7 @@ class uvSO2Convolution(torch.nn.Module):
             self.num_channel * 2,
             self.edge_ace_hidden
             if self.use_asymmetric_contraction
-            else self.edge_wise_hidden,
+            else self.num_channel,
             num_components_out=num_components_out,
             weight_type=self.so2_linear_type,
         )
@@ -778,7 +776,7 @@ class uvSO2Convolution(torch.nn.Module):
             lmax,
             self.edge_ace_hidden
             if self.use_asymmetric_contraction
-            else self.edge_wise_hidden,
+            else self.num_channel,
             channel_wise=self.use_asymmetric_contraction,
             gate_m0=gate_m0,
             scalar_act=scalar_act,
@@ -791,7 +789,7 @@ class uvSO2Convolution(torch.nn.Module):
                 self.num_channel * 2,
                 self.edge_ace_hidden
                 if self.use_asymmetric_contraction
-                else self.edge_wise_hidden,
+                else self.num_channel,
                 num_components_out=[lmax + 1] + [lmax + 1 for m in range(1, mmax + 1)],
                 weight_type=self.so2_linear_type,
             )
@@ -814,8 +812,8 @@ class uvSO2Convolution(torch.nn.Module):
             lmax,
             self.edge_ace_hidden
             if self.use_asymmetric_contraction
-            else self.edge_wise_hidden,
-            self.edge_wise_hidden,
+            else self.num_channel,
+            self.num_channel,
             num_components_in=num_components_in,
             weight_type=self.so2_linear_type,
         )
@@ -824,14 +822,14 @@ class uvSO2Convolution(torch.nn.Module):
                 mmax,
                 lmax,
                 self.num_channel,
-                self.edge_wise_hidden,
+                self.num_channel,
                 weight_type=self.so2_linear_type,
             )
             self.key_proj = uvSO2Linear(
                 mmax,
                 lmax,
                 self.num_channel,
-                self.edge_wise_hidden,
+                self.num_channel,
                 weight_type=self.so2_linear_type,
             )
             if self.use_radial_phase:
@@ -967,7 +965,7 @@ class uvSO2Convolution(torch.nn.Module):
                 num_edges, m_ij.size(1), self.num_head, self.num_channel_per_head
             )
             m_ij = real_alpha * m_ij
-            m_ij = m_ij.view(num_edges, m_ij.size(1), self.edge_wise_hidden)
+            m_ij = m_ij.view(num_edges, m_ij.size(1), self.num_channel)
         else:
             if cutoff is not None:
                 m_ij = m_ij * cutoff.unsqueeze(-1)

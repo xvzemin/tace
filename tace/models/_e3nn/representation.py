@@ -198,8 +198,6 @@ class Representation(torch.nn.Module):
             "use_first_pre_norm": layer_norm["use_first_pre_norm"],
             "parity": parity,
             "bias": True,
-            "node_wise_hidden": atomic_basis["node_wise_hidden"],
-            "edge_wise_hidden": atomic_basis["edge_wise_hidden"],
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
             "use_asymmetric_contraction": atomic_basis[

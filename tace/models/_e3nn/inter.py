@@ -75,7 +75,7 @@ class O3CgtpInteraction(Interaction):
             linear_down_irreps_out,
         ) = get_nonlinear_layer(
             self.nonlinear,
-            o3.Irreps([(self.node_wise_hidden, ir) for _, ir in self.irreps_out]),
+            o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out]),
             self.irreps_out,
             gate_m0=self.gate_m0,
             scalar_act=self.scalar_act,
@@ -487,14 +487,13 @@ class uvSO2Interaction(O3CgtpInteraction):
             num_head=self.num_head,
             use_temperature=self.use_temperature,
             edge_ace_hidden=self.edge_ace_hidden,
-            edge_wise_hidden=self.edge_wise_hidden,
             so2_linear_type=self.so2_linear_type,
             gate_m0=False,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
             reshape_in=LayoutTransform(self.irreps_in),
             reshape_out=LayoutTransform(
-                o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
+                o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])
             ),
             scalar_act=get_scaled_activation(scalar_act),
             tensor_act=get_scaled_activation(tensor_act),
@@ -502,7 +501,7 @@ class uvSO2Interaction(O3CgtpInteraction):
         )
 
     def _linear_down_irreps_in(self) -> o3.Irreps:
-        return o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
+        return o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])
 
     def _compute_messages(
         self,

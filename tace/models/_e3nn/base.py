@@ -145,8 +145,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         use_first_dropout: bool = False,
         parity: bool = False,
         num_head: Union[int, None] = None,
-        node_wise_hidden: Union[int, None] = None,
-        edge_wise_hidden: Union[int, None] = None,
         gate_m0: bool = True,
         use_asymmetric_contraction: bool = True,
         use_radial_rotary_attention: bool = True,
@@ -215,8 +213,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.stochastic_depth_p = stochastic_depth
         self.parity = parity
         self.num_head = num_head or 1
-        self.node_wise_hidden = node_wise_hidden or num_channel
-        self.edge_wise_hidden = edge_wise_hidden or num_channel
         self.num_mag_radial_basis = num_mag_radial_basis
         self.magnetic_irreps = magnetic_irreps
         self.mag_Lmax = mag_Lmax
