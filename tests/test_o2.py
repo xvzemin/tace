@@ -49,7 +49,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config["node_embedding"]["type"] = "linear"
     config["atomic_basis"]["type"] = ["o2"]
-    config["atomic_basis"]["nonlinear"] = ["sigmoid_gate"]
+    config["atomic_basis"]["nonlinear"] = ["gate"]
     config["product_basis"]["type"] = ["cgtp"]
     config["product_basis"]["correlation"] = [2]
 
@@ -2398,7 +2398,7 @@ def test_o2_magnetic_interaction_rejects_nonstring_scalar_activation_entries():
 
 def test_o2_magnetic_interaction_preserves_outer_o3_gate_and_linears():
     torch.manual_seed(11)
-    module = _build_o2_magnetic_interaction(nonlinear="sigmoid_gate")
+    module = _build_o2_magnetic_interaction(nonlinear="gate")
     assert not isinstance(module.linear_up, torch.nn.Identity)
     assert not isinstance(module.linear_down, torch.nn.Identity)
     assert not isinstance(module.nonlinearity, torch.nn.Identity)

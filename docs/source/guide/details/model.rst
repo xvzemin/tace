@@ -88,7 +88,7 @@ Example
         # type: [cgtp, so2, cgtp, so2 ...]
         l1l2: null # [null, <=], restriction for each layer
         scatter_norm: avg_num_neighbors  # [sqrt_avg_num_neighbors, avg_num_neighbors, density]
-        nonlinear: sigmoid_gate # [null, sigmoid_gate]
+        nonlinear: gate # [null, gate]
         edge_nonlinear: so2_sigmoid_gate # [null, so2_sigmoid_gate]
         edge_info_type: mlp # [mlp, glu]
             
@@ -98,8 +98,8 @@ Example
         edge_ace_hidden: null
         num_head: null
         gate_m0: false
-        scalar_act: null
-        tensor_act: null
+        scalar_act: null # str for 0e, or [0e, 0o]
+        tensor_act: null # 0e gate activation for tensor irreps
 
         product_basis:
         type: cgtp  # [cgtp, gtp]

@@ -49,7 +49,7 @@ DEFAULT_MODEL_CONFIG = {
         "type": "cgtp",
         "l1l2": None,
         "scatter_norm": "avg_num_neighbors",
-        "nonlinear": "sigmoid_gate",
+        "nonlinear": "gate",
         "edge_nonlinear": "so2_sigmoid_gate",
         "use_o2_asymmetric_contraction": False,
         "use_radial_rotary_attention": False,

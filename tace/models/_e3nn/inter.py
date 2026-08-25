@@ -74,7 +74,7 @@ class O3CgtpInteraction(Interaction):
             self.linear_nonlinearity,
             linear_down_irreps_out,
         ) = get_nonlinear_layer(
-            self.nonlinear_type,
+            self.nonlinear,
             o3.Irreps([(self.node_wise_hidden, ir) for _, ir in self.irreps_out]),
             self.irreps_out,
             gate_m0=self.gate_m0,
@@ -629,7 +629,6 @@ class O2Interaction(O3CgtpInteraction):
         if not isinstance(act_lm_name, str):
             raise TypeError("O2 tensor_act must be None or a string for lm gates.")
 
-        self.scalar_act = act_0e_name
         self._o2_act_0e_name = act_0e_name
         self._o2_act_0o_name = act_0o_name
         self._o2_act_lm_name = act_lm_name

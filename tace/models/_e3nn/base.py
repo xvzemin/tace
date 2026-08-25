@@ -183,10 +183,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.radial_layer_norm = False
         if self.edge_feats_channel != self.num_radial_basis:
             self.radial_layer_norm = True
-        self.nonlinear_type = None
-        self.nonlinear_act = None
-        if nonlinear is not None:
-            self.nonlinear_act, self.nonlinear_type = nonlinear.split("_")
         self.gate_m0 = gate_m0
         self.use_o2_asymmetric_contraction = use_o2_asymmetric_contraction
         self.use_radial_rotary_attention = use_radial_rotary_attention

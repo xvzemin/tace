@@ -15,79 +15,121 @@ from ..linear import e3nnLinear
 from ..mlp import ACTIVATION
 
 
-def get_nonlinear_layer(
-    nonlinear_type,
+def _get_gate_layer(
     irreps_in,
     irreps_out,
     gate_m0: bool,
-    scalar_act: Union[str, None] = None,
+    scalar_act: Union[str, list[str], None] = None,
     tensor_act: Union[str, None] = None,
     bias: bool = True,
 ):
-    if nonlinear_type == "gate":
-        if gate_m0:
-            irreps_gated = irreps_in
-            irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_in)
-            scalar_act = scalar_act or "sigmoid"
-            tensor_act = tensor_act or "sigmoid"
-            act_gates = [ACTIVATION[scalar_act]()] + [ACTIVATION[tensor_act]()] * (
-                len(irreps_gates) - 1
-            )
-            nonlinearity = O3Gate(
-                irreps_gates=irreps_gates,
-                act_gates=act_gates,
-                irreps_gated=irreps_gated,
-            )
-            linear_down_irreps_out = nonlinearity.irreps_in.simplify()
-            linear_nonlinearity = e3nnLinear(irreps_in, irreps_out, bias=bias)
+    if gate_m0:
+        if scalar_act is None:
+            act_0e_name = "sigmoid"
+        elif isinstance(scalar_act, str):
+            act_0e_name = scalar_act
+        elif isinstance(scalar_act, list) and len(scalar_act) == 2:
+            if not all(isinstance(name, str) for name in scalar_act):
+                raise TypeError("scalar_act entries must be strings.")
+            act_0e_name = scalar_act[0]
         else:
-            from e3nn.nn import Gate
+            raise TypeError(
+                "scalar_act must be None, a string, or a list of two strings "
+                "for 0e and 0o."
+            )
+        act_0e = ACTIVATION[act_0e_name.removeprefix("scaled_")]()
 
-            even_scalar = o3.Irrep("0e")
-            irreps_scalars = o3.Irreps(
-                [(mul, ir) for mul, ir in irreps_in if ir == even_scalar]
-            )
-            irreps_gated = o3.Irreps(
-                [(mul, ir) for mul, ir in irreps_in if ir != even_scalar]
-            )
-            irreps_gates = o3.Irreps([mul, "0e"] for mul, _ in irreps_gated)
-            scalar_act = scalar_act or "silu"
-            tensor_act = tensor_act or "sigmoid"
-            activation_fn = ACTIVATION[scalar_act]()
-            act_gates_fn = ACTIVATION[tensor_act]()
-            nonlinearity = Gate(
-                irreps_scalars=irreps_scalars,
-                act_scalars=[activation_fn for _ in irreps_scalars],
-                irreps_gates=irreps_gates,
-                act_gates=[act_gates_fn] * len(irreps_gates),
-                irreps_gated=irreps_gated,
-            )
-            linear_down_irreps_out = nonlinearity.irreps_in.simplify()
-            linear_nonlinearity = e3nnLinear(
-                nonlinearity.irreps_out,
-                irreps_out,
-                bias=bias,
-            )
-    # elif nonlinear_type == 'norm':
-    #     scalar_act = scalar_act or 'sigmoid'
-    #     tensor_act = tensor_act or 'sigmoid'
-    #     assert scalar_act == tensor_act
-    #     nonlinearity = O3Norm(
-    #         irreps=irreps_in,
-    #         activation=[ACTIVATION[scalar_act]()],
-    #     )
-    #     linear_down_irreps_out = nonlinearity.irreps_in.simplify()
-    #     linear_nonlinearity = e3nnLinear(irreps_in, irreps_out, bias=bias)
-    # elif nonlinear_type == 'bilineargate':
-    #     nonlinearity = O3BilinearGate(irreps_in)
-    #     linear_down_irreps_out = nonlinearity.irreps_in
-    #     linear_nonlinearity = e3nnLinear(nonlinearity.irreps_out, irreps_out, bias=bias)
+        irreps_gated = irreps_in
+        irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_in)
+        nonlinearity = O3Gate(
+            irreps_gates=irreps_gates,
+            act_gates=[act_0e] * len(irreps_gates),
+            irreps_gated=irreps_gated,
+        )
+        linear_down_irreps_out = nonlinearity.irreps_in.simplify()
+        linear_nonlinearity = e3nnLinear(irreps_in, irreps_out, bias=bias)
     else:
-        nonlinearity = torch.nn.Identity()
-        linear_nonlinearity = torch.nn.Identity()
-        linear_down_irreps_out = irreps_in
+        from e3nn.nn import Gate
+
+        if scalar_act is None:
+            act_0e_name = "silu"
+            act_0o_name = "tanh"
+        elif isinstance(scalar_act, str):
+            act_0e_name = scalar_act
+            act_0o_name = "tanh"
+        elif isinstance(scalar_act, list) and len(scalar_act) == 2:
+            act_0e_name, act_0o_name = scalar_act
+            if not isinstance(act_0e_name, str) or not isinstance(act_0o_name, str):
+                raise TypeError("scalar_act entries must be strings.")
+        else:
+            raise TypeError(
+                "scalar_act must be None, a string, or a list of two strings "
+                "for 0e and 0o."
+            )
+        if tensor_act is None:
+            tensor_act = "sigmoid"
+        if not isinstance(tensor_act, str):
+            raise TypeError("tensor_act must be None or a string for tensor gates.")
+        act_0e = ACTIVATION[act_0e_name.removeprefix("scaled_")]()
+        act_0o = ACTIVATION[act_0o_name.removeprefix("scaled_")]()
+        act_tensor = ACTIVATION[tensor_act.removeprefix("scaled_")]()
+
+        irreps_scalars = o3.Irreps(
+            [(mul, ir) for mul, ir in irreps_in if ir.l == 0]
+        )
+        irreps_gated = o3.Irreps(
+            [(mul, ir) for mul, ir in irreps_in if ir.l > 0]
+        )
+        irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_gated)
+        nonlinearity = Gate(
+            irreps_scalars=irreps_scalars,
+            act_scalars=[
+                act_0e if irrep.p == 1 else act_0o
+                for _, irrep in irreps_scalars
+            ],
+            irreps_gates=irreps_gates,
+            act_gates=[act_tensor] * len(irreps_gates),
+            irreps_gated=irreps_gated,
+        )
+        linear_down_irreps_out = nonlinearity.irreps_in.simplify()
+        linear_nonlinearity = e3nnLinear(
+            nonlinearity.irreps_out,
+            irreps_out,
+            bias=bias,
+        )
 
     return nonlinearity, linear_nonlinearity, linear_down_irreps_out
+
+
+def get_nonlinear_layer(
+    nonlinear: Union[str, None],
+    irreps_in: o3.Irreps,
+    irreps_out: o3.Irreps,
+    gate_m0: bool,
+    scalar_act: Union[str, list[str], None] = None,
+    tensor_act: Union[str, None] = None,
+    bias: bool = True,
+):
+    if nonlinear is None:
+        return torch.nn.Identity(), torch.nn.Identity(), irreps_in
+    elif nonlinear == "gate":
+        return _get_gate_layer(
+            irreps_in,
+            irreps_out,
+            gate_m0,
+            scalar_act,
+            tensor_act,
+            bias,
+        )
+    else:
+        return _get_gate_layer(
+            irreps_in,
+            irreps_out,
+            gate_m0,
+            scalar_act,
+            tensor_act,
+            bias,
+        )
 
 
 class O3Gate(torch.nn.Module):
