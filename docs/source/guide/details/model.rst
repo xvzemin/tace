@@ -92,7 +92,7 @@ Example
         edge_nonlinear: gate # edge scalar/tensor activations use scalar_act/tensor_act
         edge_info_type: mlp # [mlp, glu]
             
-        edge_ace_hidden: null # legacy SO2 asymmetric-contraction width
+        edge_ace_hidden: null # SO2/O2 asymmetric-contraction width
         num_head: null
         gate_m0: false # only controls the node gate; edge gates activate scalars directly
         scalar_act: null # unscaled name for 0e, or [0e, 0o]

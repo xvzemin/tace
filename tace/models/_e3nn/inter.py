@@ -555,6 +555,7 @@ class O2Interaction(O3CgtpInteraction):
             num_radial_basis=self.num_radial_basis,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
+            edge_ace_hidden=self.edge_ace_hidden,
         )
         if rejector.attention is not None:
             self.scatter_norm = None
@@ -727,6 +728,7 @@ class O2MagneticInteraction(O2Interaction):
             num_radial_basis=self.num_radial_basis,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
+            edge_ace_hidden=self.edge_ace_hidden,
         )
         if rejector.attention is not None:
             self.scatter_norm = None

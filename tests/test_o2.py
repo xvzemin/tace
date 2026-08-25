@@ -1674,6 +1674,7 @@ def _build_o2_magnetic_interaction(
     correlation=1,
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
+    edge_ace_hidden=None,
 ):
     angular_max = mag_Lmax if angular_max is None else angular_max
     edge_lmax = angular_max if edge_lmax is None else edge_lmax
@@ -1699,7 +1700,7 @@ def _build_o2_magnetic_interaction(
         irreps_in=o3.Irreps("2x0e + 2x1o"),
         scalar_act=scalar_act,
         tensor_act=tensor_act,
-        edge_ace_hidden=None,
+        edge_ace_hidden=edge_ace_hidden,
         parity=True,
         nonlinear=nonlinear,
         edge_nonlinear=edge_nonlinear,
@@ -1723,6 +1724,7 @@ def _build_o2_interaction(
     scatter_norm="avg_num_neighbors",
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
+    edge_ace_hidden=None,
 ):
     edge_lmax = angular_max if edge_lmax is None else edge_lmax
     mmax = max(angular_max, edge_lmax) if mmax is None else mmax
@@ -1746,7 +1748,7 @@ def _build_o2_interaction(
         scalar_act=scalar_act,
         tensor_act=tensor_act,
         edge_nonlinear=edge_nonlinear,
-        edge_ace_hidden=None,
+        edge_ace_hidden=edge_ace_hidden,
         scatter_norm=scatter_norm,
         parity=True,
         num_head=2,
@@ -2222,10 +2224,13 @@ def test_o2_interaction_is_globally_o3_equivariant(
 
 def test_o2_magnetic_interaction_uses_uv_gate_uv():
     torch.manual_seed(7)
-    module = _build_o2_magnetic_interaction()
+    module = _build_o2_magnetic_interaction(edge_ace_hidden=3)
     assert module.edge_info.dims[0] == module.edge_feats_channel + 2 * 3
     assert module.rejector.linear_up.path_mode == "uv"
     assert module.rejector.linear_up.internal_weights
+    assert module.rejector.edge_ace_hidden == 3
+    assert module.rejector.linear_up.channels_in == module.num_channel
+    assert module.rejector.linear_up.channels_out == module.num_channel
     assert isinstance(module.rejector.nonlinearity, Gate)
     assert isinstance(module.rejector.nonlinearity.act_0e, ScaledSiLU)
     assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
@@ -2238,6 +2243,8 @@ def test_o2_magnetic_interaction_uses_uv_gate_uv():
     )
     assert module.rejector.linear_down.path_mode == "uv"
     assert module.rejector.linear_down.internal_weights
+    assert module.rejector.linear_down.channels_in == module.num_channel
+    assert module.rejector.linear_down.channels_out == module.num_channel
     assert not isinstance(module.linear_down, torch.nn.Identity)
 
     inputs = _o2_magnetic_inputs(module)
@@ -2259,6 +2266,7 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     module = _build_o2_magnetic_interaction(
         correlation=2,
         use_asymmetric_contraction=True,
+        edge_ace_hidden=3,
     )
     assert isinstance(
         module.rejector.asymmetric_contraction,
@@ -2270,13 +2278,26 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     assert not hasattr(module, "contraction_info")
     assert isinstance(module.rejector.scalar_act, ScaledSiLU)
     contraction = module.rejector.asymmetric_contraction
+    assert module.rejector.edge_ace_hidden == 3
+    assert contraction.channels == 3
+    assert module.rejector.linear_up.channels_in == module.num_channel
+    assert module.rejector.linear_up.channels_out == module.correlation * 3
+    assert all(
+        multiplicity == 1
+        for multiplicity, _ in module.rejector.linear_up.irreps_out
+    )
+    assert module.rejector.linear_up.irreps_out == contraction.irreps_in
+    assert module.rejector.linear_coefs.irreps_out == o2.Irreps("0e")
+    assert module.rejector.linear_coefs.channels_in == module.num_channel
+    assert (
+        module.rejector.linear_coefs.channels_out
+        == contraction.weight_numel
+    )
+    assert module.rejector.linear_down.channels_in == 3
+    assert module.rejector.linear_down.channels_out == module.num_channel
     assert all(multiplicity == 1 for multiplicity, _ in contraction.irreps_in)
     assert len(contraction.irreps_in.expanded()) == len(
         set(contraction.irreps_in.expanded())
-    )
-    assert module.rejector.linear_up.irreps_out.count("0e") == (
-        contraction.irreps_in.count("0e") * module.correlation
-        + module.rejector.asymmetric_contraction.num_paths
     )
     assert module.rejector.linear_down.irreps_in == contraction.irreps_out
     assert (
@@ -2288,7 +2309,10 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
 
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
-    parameters = tuple(module.rejector.linear_up.parameters())
+    parameters = (
+        *module.rejector.linear_up.parameters(),
+        *module.rejector.linear_coefs.parameters(),
+    )
     gradients = torch.autograd.grad(
         output.square().sum(),
         (inputs[0], inputs[2], inputs[-1], *parameters),

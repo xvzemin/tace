@@ -148,9 +148,12 @@ class O2ScatterLinear(torch.nn.Module):
     representation. Optional extra node attributes use the same source-target
     construction. Edge weights first apply a diagonal channel-wise radial map.
     Two internal ``uv`` linears use either a gate or an asymmetric contraction
-    between them. These nonlinear paths are mutually exclusive. The first O2
-    linear also generates auxiliary ``0e`` gates for the positive-order
-    representations. Those gates use the tensor activation. The optional
+    between them. These nonlinear paths are mutually exclusive. The
+    asymmetric path keeps one copy of each intermediate irrep and stores its
+    latent width in ``edge_ace_hidden`` channels; the gate path retains
+    ``num_channel`` throughout. The first O2 linear also generates auxiliary
+    ``0e`` gates for the positive-order representations. Those gates use the
+    tensor activation. The optional
     attention uses real O2-invariant query-key products and a zero-initialized
     radial scale-and-shift projection whose sigmoid scale starts at one; it
     never applies a complex phase.
@@ -176,6 +179,7 @@ class O2ScatterLinear(torch.nn.Module):
         num_radial_basis: int,
         use_asymmetric_contraction: bool,
         use_radial_rotary_attention: bool,
+        edge_ace_hidden: Union[int, None] = None,
     ) -> None:
         super().__init__()
 
@@ -187,6 +191,7 @@ class O2ScatterLinear(torch.nn.Module):
             else o3.Irreps(extra_node_attrs_irreps)
         )
         self.num_channel = num_channel
+        self.edge_ace_hidden = edge_ace_hidden or num_channel
         self.lmax = lmax
         self.mmax = mmax
         self.correlation = correlation
@@ -273,23 +278,24 @@ class O2ScatterLinear(torch.nn.Module):
             self.asymmetric_contraction = o2.AsymmetricContraction(
                 contraction_irreps,
                 contraction_irreps,
-                num_channel,
+                self.edge_ace_hidden,
                 self.correlation,
                 algorithm="edge",
             )
             self.scalar_act = act_0e
-            projection_groups = [
-                (multiplicity * self.correlation, irrep)
-                for multiplicity, irrep in self.asymmetric_contraction.irreps_in
-            ]
-            projection_groups.append(
-                (self.asymmetric_contraction.num_paths, o2.Irrep("0e"))
-            )
-            projection_irreps = o2.Irreps(projection_groups).regroup()
             self.linear_up = o2.Linear(
                 input_irreps,
-                projection_irreps,
+                contraction_irreps,
                 num_channel,
+                self.correlation * self.edge_ace_hidden,
+                path_mode="uv",
+                bias=False,
+            )
+            self.linear_coefs = o2.Linear(
+                input_irreps,
+                o2.Irreps("0e"),
+                num_channel,
+                self.asymmetric_contraction.weight_numel,
                 path_mode="uv",
                 bias=False,
             )
@@ -333,6 +339,9 @@ class O2ScatterLinear(torch.nn.Module):
         self.linear_down = o2.Linear(
             nonlinear_irreps_out,
             output_irreps,
+            self.edge_ace_hidden
+            if self.asymmetric_contraction is not None
+            else num_channel,
             num_channel,
             path_mode="uv",
             bias=False,
@@ -412,44 +421,30 @@ class O2ScatterLinear(torch.nn.Module):
     def _apply_asymmetric_contraction(
         self,
         projected_blocks: tuple[torch.Tensor, ...],
+        contraction_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         if self.asymmetric_contraction is None:
             raise RuntimeError("O2 asymmetric contraction is not enabled.")
-
-        blocks_by_irrep = {
-            irrep: block
-            for (_, irrep), block in zip(
-                self.linear_up.irreps_out,
-                projected_blocks,
-            )
-        }
+        if len(projected_blocks) != len(self.asymmetric_contraction.irreps_in):
+            raise ValueError("Expected one projected block per contraction irrep.")
         contraction_inputs = [[] for _ in range(self.correlation)]
-        contraction_weights = None
-        for multiplicity, irrep in self.asymmetric_contraction.irreps_in:
-            block = blocks_by_irrep[irrep]
-            feature_width = multiplicity * self.correlation * self.num_channel
-            features = block[..., :feature_width]
+        for (multiplicity, _), block in zip(
+            self.asymmetric_contraction.irreps_in,
+            projected_blocks,
+        ):
             for correlation_index in range(self.correlation):
-                start = correlation_index * multiplicity * self.num_channel
-                stop = start + multiplicity * self.num_channel
+                start = (
+                    correlation_index * multiplicity * self.edge_ace_hidden
+                )
+                stop = start + multiplicity * self.edge_ace_hidden
                 contraction_inputs[correlation_index].append(
-                    features[..., start:stop]
+                    block[..., start:stop]
                 )
-            if irrep == o2.Irrep("0e"):
-                contraction_weights = block[..., feature_width:].reshape(
-                    *block.shape[:-2],
-                    self.asymmetric_contraction.weight_numel,
-                )
-
-        if contraction_weights is None:
-            raise RuntimeError(
-                "O2 contraction projection did not produce 0e weights."
-            )
         dense_inputs = [
             self._grouped_to_dense(
                 tuple(blocks),
                 self.asymmetric_contraction.irreps_in,
-                self.num_channel,
+                self.edge_ace_hidden,
             )
             for blocks in contraction_inputs
         ]
@@ -460,7 +455,7 @@ class O2ScatterLinear(torch.nn.Module):
         return self._dense_to_grouped(
             contracted,
             self.asymmetric_contraction.irreps_out,
-            self.num_channel,
+            self.edge_ace_hidden,
         )
 
     def forward(
@@ -545,7 +540,16 @@ class O2ScatterLinear(torch.nn.Module):
         weighted_blocks = tuple(weighted_blocks)
         projected_blocks = self.linear_up.forward_grouped(weighted_blocks)
         if self.asymmetric_contraction is not None:
-            hidden_blocks = self._apply_asymmetric_contraction(projected_blocks)
+            contraction_weights = self.linear_coefs.forward_grouped(
+                weighted_blocks
+            )[0].reshape(
+                radial_weights.size(0),
+                self.asymmetric_contraction.weight_numel,
+            )
+            hidden_blocks = self._apply_asymmetric_contraction(
+                projected_blocks,
+                contraction_weights,
+            )
         else:
             if self.nonlinearity is None:
                 raise RuntimeError("O2 nonlinearity is not configured.")
