@@ -9,7 +9,8 @@ from tace.utils.loss.dens import (
     mae_dens_forces,
     mse_dens_forces,
 )
-from tace.utils.loss.mse_fn import LOSS_FN
+from tace.utils.loss.huber_fn import huber_forces
+from tace.utils.loss.mse_fn import LOSS_FN, mse_forces
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.registry import ensure_loss_functions_registered
 from tace.utils.loss.uncertainty import UncertaintyLoss
@@ -25,6 +26,20 @@ def _dens_inputs():
         "noise_vec": torch.zeros(2, 3),
         "noise_mask": torch.tensor([False, True]),
         "batch": torch.zeros(2, dtype=torch.long),
+        "entropy": torch.ones(1),
+        "forces_weight": torch.ones(1),
+    }
+    return pred, label
+
+
+def _element_weight_inputs():
+    pred = {"forces": torch.tensor([[1.0, 0.0, 0.0]] * 3)}
+    label = {
+        "forces": torch.zeros(3, 3),
+        "node_attrs": torch.tensor(
+            [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]
+        ),
+        "batch": torch.zeros(3, dtype=torch.long),
         "entropy": torch.ones(1),
         "forces_weight": torch.ones(1),
     }
@@ -70,6 +85,36 @@ def test_loss_function_kwargs_are_forwarded():
     )
     expected = mse_dens_forces(pred, label, dens_loss_ratio=0.25)
     torch.testing.assert_close(loss(pred, label), expected)
+
+
+def test_per_atom_element_weights_follow_node_attrs_order():
+    pred, label = _element_weight_inputs()
+    actual = mse_forces(pred, label, element_weights=[2.0, 4.0])
+    torch.testing.assert_close(actual, torch.tensor(8.0 / 9.0))
+
+
+def test_default_element_weights_are_one():
+    pred, label = _element_weight_inputs()
+    default = mse_forces(pred, label)
+    explicit = mse_forces(pred, label, element_weights=[1.0, 1.0])
+    torch.testing.assert_close(default, explicit)
+
+
+def test_huber_element_weights_scale_loss_not_residual():
+    pred, label = _element_weight_inputs()
+    actual = huber_forces(
+        pred,
+        label,
+        huber_delta=1.0,
+        element_weights=[2.0, 4.0],
+    )
+    torch.testing.assert_close(actual, torch.tensor(4.0 / 9.0))
+
+
+def test_element_weights_must_cover_all_node_attrs():
+    pred, label = _element_weight_inputs()
+    with pytest.raises(ValueError, match="expected 2, got 1"):
+        mse_forces(pred, label, element_weights=[1.0])
 
 
 def test_uncertainty_loss_forwards_loss_function_kwargs():

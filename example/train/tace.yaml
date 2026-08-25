@@ -258,7 +258,6 @@ synth_metric:
   val/stress_rmse: 1.0
 
 loss:
-  # All physical quantity must follow a consistent order.
   _target_: tace.utils.loss.NormalLoss
   loss_property: [energy, forces, stress]
   loss_function_name: # prefix can be [mse, mae, huber, l2mae]
@@ -266,13 +265,33 @@ loss:
     - mse_forces
     - mse_stress
   loss_property_weights: [1.0, 5.0, 0.5]
+  loss_function_kwargs:
+    - {}
+    - {}
+    - {}
+
+  # All physical quantity must follow a consistent order.
+  # You can easily define your own loss function with minimal code changes.
+
+  # Example: use Huber for forces and weight each element independently.
+  # The element weight order follows atomic number from smallest to largest,
+  # and the list must contain every element in your model.
+  # loss_function_name:
+  #   - mse_energy_per_atom
+  #   - huber_forces
+  #   - mse_stress
+  # loss_function_kwargs:
+  #   - {}
+  #   - {huber_delta: 0.01, element_weights: [1.0, 2.0]}
+  #   - {}
+
 
 model:
   # export TACE_USE_OEQ=1 to use openequivariance, 0 to disable
   # export TACE_USE_CUE=1 to use cuequivariance, 0 to disable
   # export TACE_USE_EQT=1 to use equitorch, 0 to disable for correlation > 2
-
   # export TACE_USE_COMPILE=1 to use aoti, 0 to disable
+  
   config:
 
     _target_: tace.models.e3nnTACE # [e3nnTACE]

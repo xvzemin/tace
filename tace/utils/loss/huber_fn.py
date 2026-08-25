@@ -3,12 +3,29 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Dict
+from typing import Dict, List, Optional
 
 import torch
 
-from .common import polarization_error_per_atom, voigt6_stress
+from .common import apply_element_weights, polarization_error_per_atom, voigt6_stress
 from .mse_fn import register_loss
+
+
+def _per_atom_huber_loss(
+    pred: torch.Tensor,
+    label_value: torch.Tensor,
+    total_weight: torch.Tensor,
+    label: Dict[str, torch.Tensor],
+    huber_delta: float,
+    element_weights: Optional[List[float]],
+) -> torch.Tensor:
+    loss = torch.nn.functional.huber_loss(
+        total_weight * label_value,
+        total_weight * pred,
+        reduction="none",
+        delta=huber_delta,
+    )
+    return torch.mean(apply_element_weights(loss, label, element_weights))
 
 
 @register_loss
@@ -49,15 +66,13 @@ def huber_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = (label["entropy"] * label["forces_weight"])[batch].unsqueeze(-1)
     key = "forces"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -137,17 +152,15 @@ def huber_direct_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = label["entropy"][batch].unsqueeze(-1) * label[
         "direct_forces_weight"
     ][batch].unsqueeze(-1)
     key = "direct_forces"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -361,6 +374,7 @@ def huber_born_effective_charges(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = (
@@ -369,11 +383,8 @@ def huber_born_effective_charges(
         .unsqueeze(-1)
     )
     key = "born_effective_charges"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -399,15 +410,13 @@ def huber_charges(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = (label["entropy"] * label["charges_weight"])[batch]
     key = "charges"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -416,15 +425,13 @@ def huber_final_collinear_magmoms(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = (label["entropy"] * label["final_collinear_magmoms_weight"])[batch]
     key = "final_collinear_magmoms"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -433,17 +440,15 @@ def huber_abs_final_collinear_magmoms(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = (label["entropy"] * label["abs_final_collinear_magmoms_weight"])[
         batch
     ]
     key = "abs_final_collinear_magmoms"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -452,17 +457,15 @@ def huber_final_noncollinear_magmoms(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = label["entropy"][batch].unsqueeze(-1) * label[
         "final_noncollinear_magmoms_weight"
     ][batch].unsqueeze(-1)
     key = "final_noncollinear_magmoms"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -471,15 +474,13 @@ def huber_collinear_magnetic_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = (label["entropy"] * label["collinear_magnetic_forces_weight"])[batch]
     key = "collinear_magnetic_forces"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 
@@ -488,17 +489,15 @@ def huber_noncollinear_magnetic_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     batch = label["batch"]
     total_weight = label["entropy"][batch].unsqueeze(-1) * label[
         "noncollinear_magnetic_forces_weight"
     ][batch].unsqueeze(-1)
     key = "noncollinear_magnetic_forces"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
+    return _per_atom_huber_loss(
+        pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
 

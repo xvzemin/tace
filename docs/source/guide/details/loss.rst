@@ -27,8 +27,10 @@ Example
       - mse_forces
       - mse_stress
     loss_property_weights: [1, 8, 8] 
-    loss_function_kwargs: [{}, {}, {}]
-    # loss_property_weights: [1, 1, 1, 1, 1000, 1] 
+    loss_function_kwargs: 
+      - {}
+      - {}
+      - {}
 
   # # Loss Type 2
   # # This loss does not require manually specified weights.
@@ -55,7 +57,23 @@ Notes
 
 - For properties that are already *per-atom* quantities,  
   the ``per_atom`` suffix is not required and is not supported.
-- ``loss_function_kwargs`` optionally supplies one parameter mapping per loss
-  function. For example, use ``{huber_delta: 0.01}`` with a Huber loss or
-  ``{dens_loss_ratio: 0.05}`` with a DeNS forces loss. Parameters are checked
-  against the selected loss function when the loss module is constructed.
+- ``loss_function_kwargs`` supplies extra arameters for each loss function. 
+  For example, use ``{huber_delta: 0.01}`` with a Huber loss. 
+  Parameters are checked.
+- Every loss whose property has per-atom scope accepts ``element_weights``.
+  The list must contain one value for every element in ``node_attrs`` and must
+  follow increasing atomic-number order. Omitting ``element_weights`` is equivalent to
+  assigning weight ``1.0`` to every element. For example:
+
+  .. code-block:: yaml
+
+    loss_function_name:
+      - mse_energy_per_atom
+      - huber_forces
+    loss_function_kwargs:
+      - {}
+      - {huber_delta: 0.01, element_weights: [1.0, 2.0]}
+
+  Here the two element weights correspond to the two elements represented by
+  ``node_attrs``, ordered by increasing atomic number.
+- You can easily define your own loss function without any additional code.

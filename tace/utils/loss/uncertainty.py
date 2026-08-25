@@ -4,7 +4,7 @@
 ################################################################################
 
 import math
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from omegaconf import ListConfig
@@ -26,7 +26,7 @@ class UncertaintyLoss(nn.Module):
         loss_property: list[str],
         loss_function_name: list[str],
         loss_property_weights: list[float],
-        loss_function_kwargs: list[dict[str, Any]] | None = None,
+        loss_function_kwargs: Optional[list[dict[str, Any]]] = None,
     ):
         super().__init__()
         assert isinstance(loss_property, (list, ListConfig)), (

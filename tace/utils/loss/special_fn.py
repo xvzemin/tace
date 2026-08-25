@@ -3,10 +3,11 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Dict
+from typing import Dict, List, Optional
 
 import torch
 
+from .common import apply_element_weights
 from .mse_fn import register_loss
 
 
@@ -15,6 +16,7 @@ def conditional_huber_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    element_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
     pred_forces = pred["forces"]
     label_forces = label["forces"]
@@ -39,7 +41,7 @@ def conditional_huber_forces(
     se[c4] = torch.nn.functional.huber_loss(
         label_forces[c4], pred_forces[c4], reduction="none", delta=factors[3]
     )
-    return torch.mean(se)
+    return torch.mean(apply_element_weights(se, label, element_weights))
 
 
 # TODO

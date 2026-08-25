@@ -3,9 +3,36 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Dict
+from typing import Dict, List, Optional
 
 import torch
+
+
+def apply_element_weights(
+    total_weight: torch.Tensor,
+    label: Dict[str, torch.Tensor],
+    element_weights: Optional[List[float]],
+) -> torch.Tensor:
+    if element_weights is None:
+        return total_weight
+
+    node_attrs = label["node_attrs"]
+    # if node_attrs.ndim != 2:
+    #     raise ValueError("node_attrs must have shape (num_atoms, num_elements).")
+    if len(element_weights) != node_attrs.shape[-1]:
+        raise ValueError(
+            "element_weights must provide one weight for every element in "
+            f"node_attrs; expected {node_attrs.shape[-1]}, got "
+            f"{len(element_weights)}."
+        )
+    weights = torch.as_tensor(
+        list(element_weights),
+        dtype=total_weight.dtype,
+        device=total_weight.device,
+    )
+    atom_weights = node_attrs @ weights
+    shape = (atom_weights.shape[0],) + (1,) * (total_weight.ndim - 1)
+    return total_weight * atom_weights.reshape(shape)
 
 
 def num_atoms_per_graph(label: Dict[str, torch.Tensor]) -> torch.Tensor:

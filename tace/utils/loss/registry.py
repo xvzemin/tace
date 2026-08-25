@@ -8,7 +8,7 @@ import inspect
 import re
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Any, Iterable
+from typing import Any, Iterable, Union
 
 from omegaconf import ListConfig
 
@@ -99,7 +99,7 @@ def validate_loss_function_names(loss_function_names: Iterable[str]) -> None:
 
 def prepare_loss_function_kwargs(
     loss_function_names: Iterable[str],
-    loss_function_kwargs: list[dict[str, Any]] | ListConfig | None,
+    loss_function_kwargs: Union[list[dict[str, Any]], ListConfig, None],
 ) -> list[dict[str, Any]]:
     loss_function_names = list(loss_function_names)
     validate_loss_function_names(loss_function_names)
