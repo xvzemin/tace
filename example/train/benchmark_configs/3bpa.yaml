@@ -1,0 +1,98 @@
+# Reproduce the 3BPA CGTP setup while inheriting the current TACE defaults.
+
+hydra:
+  searchpath:
+    - file://..
+
+defaults:
+  - tace
+  - _self_
+
+misc:
+  project_name: 3BPA
+
+
+callbacks:
+  early_stopping:
+    patience: 100
+
+  ema:
+    decay: 0.99
+
+  checkpoint_epoch:
+    monitor: ${synth_metric.monitor_metric_name}
+    save_top_k: 3
+
+dataset:
+  train_file: ${oc.env:HOME}/dataset/3BPA/train_300K.xyz
+
+  train_dataloader:
+    batch_size: 5
+    num_workers: 0
+
+  valid_dataloader:
+    batch_size: 25
+    num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1e-2
+  weight_decay: 0.0
+  amsgrad: true
+
+scheduler:
+  factor: 0.8
+  patience: 50
+
+# Replace the inherited E/F/S composite because this benchmark trains E/F only.
+synth_metric: "${oc.create:{monitor_metric_name: val/forces_rmse}}"
+
+loss:
+  loss_property: [energy, forces]
+  loss_function_name:
+    - mse_energy_per_atom
+    - mse_forces
+  loss_property_weights: [1.0, 10.0]
+  loss_function_kwargs:
+    - {}
+    - {}
+
+model:
+  config:
+    cutoff: 5.0
+    fidelity:
+      - name: PBE
+        atomic_energy:
+          1: -13.587222780835477
+          6: -1029.4889999855063
+          7: -1484.9814568572233
+          8: -2041.9816003861047
+
+    edge_update:
+      type: identity
+
+    mmax: 2
+    Lmax: 2
+    lmax: 3
+    num_layers: 2
+    num_channel: 64
+
+    radial_basis:
+      hidden: [64, 64, 64, 1024]
+      bias: false
+
+    atomic_basis:
+      type: cgtp
+      nonlinear: gate
+      edge_nonlinear: null
+      scalar_act: silu
+      tensor_act: sigmoid
+
+    product_basis:
+      correlation: 3
+
+    readout_emlp:
+      use_alllayer: true
+
+    scale_shift:
+      shift_type: mean_delta_energy_per_atom

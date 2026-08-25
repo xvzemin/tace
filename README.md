@@ -114,7 +114,7 @@ TACE currently supports the following plugin:
 For bugs or feature requests, please use the
 [TACE issue](https://github.com/xvzemin/tace/issues).
 
-For usage discussions, you can join the TACE community through QQ or Discord.
+<!-- For usage discussions, you can join the TACE community through QQ or Discord.
 
 <table>
   <tr>
@@ -129,7 +129,7 @@ For usage discussions, you can join the TACE community through QQ or Discord.
       <img src="fig/discord.jpg" alt="TACE Discord QR code" width="260">
     </td>
   </tr>
-</table>
+</table> -->
 
 ## Citing
 
