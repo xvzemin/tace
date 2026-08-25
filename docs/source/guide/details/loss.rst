@@ -63,7 +63,14 @@ Notes
 - Every loss whose property has per-atom scope accepts ``element_weights``.
   The list must contain one value for every element in ``node_attrs`` and must
   follow increasing atomic-number order. Omitting ``element_weights`` is equivalent to
-  assigning weight ``1.0`` to every element. For example:
+  assigning weight ``1.0`` to every element. During force-statistics calculation,
+  TACE reports three candidate lists under
+  ``recommended_force_element_weights`` for :math:`\alpha=0`, :math:`0.5`, and
+  :math:`1`. For element :math:`Z`, it estimates
+  :math:`A_Z=\pi_Z\langle\|\mathbf F\|^2/3\rangle_Z` and uses
+  :math:`w_Z\propto A_Z^{-\alpha}`. The weights are clipped to ``[0.25, 4.0]``
+  and normalized to have atom-count-weighted mean one. These values are
+  recommendations only; copy the selected list into the loss configuration:
 
   .. code-block:: yaml
 
@@ -74,6 +81,4 @@ Notes
       - {}
       - {huber_delta: 0.01, element_weights: [1.0, 2.0]}
 
-  Here the two element weights correspond to the two elements represented by
-  ``node_attrs``, ordered by increasing atomic number.
 - You can easily define your own loss function without any additional code.

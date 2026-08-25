@@ -18,6 +18,63 @@ from .element import TorchElement
 from .quantity import KeySpecification
 
 
+def balanced_element_weights(
+    counts: torch.Tensor,
+    mean_losses: torch.Tensor,
+    alpha: float = 0.5,
+    minimum: float = 0.25,
+    maximum: float = 4.0,
+) -> torch.Tensor:
+    """Recommend element weights from their loss contributions.
+
+    The unweighted contribution of element ``z`` is estimated as
+    ``counts[z] / counts.sum() * mean_losses[z]``. ``alpha=0`` leaves the loss
+    unchanged, while ``alpha=1`` fully balances those contributions. The
+    default ``alpha=0.5`` is a tempered compromise. Returned weights have an
+    atom-count-weighted mean of one.
+    """
+    counts = torch.as_tensor(counts, dtype=torch.float64)
+    mean_losses = torch.as_tensor(mean_losses, dtype=torch.float64)
+    if counts.ndim != 1 or mean_losses.shape != counts.shape:
+        raise ValueError("counts and mean_losses must be one-dimensional and aligned")
+    if torch.any(counts < 0) or torch.any(mean_losses < 0):
+        raise ValueError("counts and mean_losses must be non-negative")
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be between 0 and 1")
+    if not 0.0 < minimum <= maximum:
+        raise ValueError("weight bounds must satisfy 0 < minimum <= maximum")
+
+    present = counts > 0
+    weights = torch.ones_like(counts)
+    if not torch.any(present):
+        return weights
+
+    frequencies = counts[present] / counts[present].sum()
+    contributions = frequencies * mean_losses[present]
+    largest = contributions.max()
+    if not torch.isfinite(largest) or largest <= 0:
+        return weights
+
+    epsilon = torch.finfo(contributions.dtype).eps * largest
+    raw = contributions.clamp_min(epsilon).pow(-alpha)
+
+    lower_scale = 0.0
+    upper_scale = 1.0
+    while torch.sum(frequencies * (raw * upper_scale).clamp(minimum, maximum)) < 1:
+        upper_scale *= 2.0
+    for _ in range(64):
+        scale = 0.5 * (lower_scale + upper_scale)
+        weighted_mean = torch.sum(
+            frequencies * (raw * scale).clamp(minimum, maximum)
+        )
+        if weighted_mean < 1:
+            lower_scale = scale
+        else:
+            upper_scale = scale
+    weights[present] = (raw * upper_scale).clamp(minimum, maximum)
+    return weights
+
+
 def _canonical_atomic_energy(
     atomic_energy: Dict[int, float], atomic_numbers: Sequence[int]
 ) -> Dict[int, float]:
@@ -192,6 +249,7 @@ def _compute_statistics(
     force_norm_by_element = [
         [_RunningMoments() for _ in atomic_numbers] for _ in range(num_fidelities)
     ]
+    all_forces_by_element = [_RunningMoments() for _ in atomic_numbers]
     magmoms_norm_by_element = torch.zeros(len(atomic_numbers), dtype=torch.float64)
     has_noncollinear_magmoms = False
 
@@ -319,6 +377,12 @@ def _compute_statistics(
                         force_norm_by_element[level][element_id].update(
                             level_norms[element_mask]
                         )
+                valid_elements = element_idx[valid_force]
+                valid_forces = forces[valid_force]
+                for element_id in valid_elements.unique().tolist():
+                    all_forces_by_element[element_id].update(
+                        valid_forces[valid_elements == element_id]
+                    )
 
     if neighbor_moments.count == 0:
         raise ValueError("Cannot compute statistics from an empty training dataset")
@@ -335,6 +399,46 @@ def _compute_statistics(
                 z: float(magmoms_norm_by_element[idx])
                 for idx, z in enumerate(atomic_numbers)
             },
+        )
+
+    force_atom_counts_by_element = None
+    force_mse_by_element = None
+    recommended_force_element_weights = None
+    if "forces" in target_property or "direct_forces" in target_property:
+        force_atom_counts = torch.tensor(
+            [moments.count for moments in all_forces_by_element],
+            dtype=torch.float64,
+        )
+        force_mse = torch.stack(
+            [
+                moments.rms_or_zeros((3,)).square().mean()
+                for moments in all_forces_by_element
+            ]
+        )
+        force_atom_counts_by_element = {
+            z: int(force_atom_counts[idx]) for idx, z in enumerate(atomic_numbers)
+        }
+        force_mse_by_element = {
+            z: float(force_mse[idx]) for idx, z in enumerate(atomic_numbers)
+        }
+
+        alphas = (0, 0.25, 0.5, 0.75, 1.0)
+        recommended_force_element_weights = {
+            f"alpha_{alpha:g}": balanced_element_weights(
+                force_atom_counts,
+                force_mse,
+                alpha=alpha,
+            ).tolist()
+            for alpha in alphas
+        }
+        logging.info(
+            "Recommended force element weights (atomic-number order %s):\n%s",
+            atomic_numbers,
+            "\n".join(
+                f"- alpha={alpha:.2f}: "
+                f"[{', '.join(f'{weight:.4f}' for weight in recommended_force_element_weights[f'alpha_{alpha:g}'])}]"
+                for alpha in alphas
+            ),
         )
 
     per_level_stats = []
@@ -446,6 +550,11 @@ def _compute_statistics(
                     "std_forces": {z: _finite_scale(norm_std) for z in atomic_numbers},
                     "rms_forces_by_element": scale_rms_by_element,
                     "std_forces_by_element": scale_std_by_element,
+                    "force_atom_counts_by_element": force_atom_counts_by_element,
+                    "force_mse_by_element": force_mse_by_element,
+                    "recommended_force_element_weights": (
+                        recommended_force_element_weights
+                    ),
                 }
             )
 

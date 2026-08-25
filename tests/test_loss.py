@@ -3,6 +3,7 @@ import inspect
 import pytest
 import torch
 
+from tace.dataset.statistics import balanced_element_weights
 from tace.utils.loss.dens import (
     huber_dens_forces,
     l2mae_dens_forces,
@@ -144,3 +145,20 @@ def test_only_huber_losses_accept_huber_delta():
     for name, loss_fn in LOSS_FN.items():
         has_huber_delta = "huber_delta" in inspect.signature(loss_fn).parameters
         assert has_huber_delta == ("huber" in name)
+
+
+def test_balanced_element_weights_have_weighted_mean_one():
+    counts = torch.tensor([12.0, 12.0, 2.0, 1.0])
+    mean_losses = torch.tensor([1.0, 4.0, 3.0, 2.0])
+    frequencies = counts / counts.sum()
+    for alpha in (0.0, 0.5, 1.0):
+        weights = balanced_element_weights(counts, mean_losses, alpha=alpha)
+        torch.testing.assert_close(
+            torch.sum(frequencies * weights),
+            torch.tensor(1.0, dtype=weights.dtype),
+        )
+        assert torch.all((0.25 <= weights) & (weights <= 4.0))
+    torch.testing.assert_close(
+        balanced_element_weights(counts, mean_losses, alpha=0.0),
+        torch.ones(4, dtype=torch.float64),
+    )
