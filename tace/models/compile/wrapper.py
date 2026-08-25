@@ -82,13 +82,27 @@ class CompileTensorModel(TensorModel):
             )
 
         flat_model, compiled, parameter_names, buffer_names = cache[cache_key]
-        outputs = compiled_call(
-            compiled,
-            flat_model,
-            (data[key] for key in input_keys),
-            parameter_names,
-            buffer_names,
-        )
+        if self.training:
+            outputs = compiled_call(
+                compiled,
+                flat_model,
+                (data[key] for key in input_keys),
+                parameter_names,
+                buffer_names,
+            )
+        else:
+            # The traced evaluation graph already contains the explicit
+            # first-derivative operations used to compute forces, stress, and
+            # magnetic forces.  Do not ask AOTAutograd to build another graph
+            # around those outputs when evaluation never differentiates them.
+            with torch.no_grad():
+                outputs = compiled_call(
+                    compiled,
+                    flat_model,
+                    (data[key] for key in input_keys),
+                    parameter_names,
+                    buffer_names,
+                )
         result: Dict[str, Union[torch.Tensor, None]] = {
             "energy": None,
             "node_energy": None,

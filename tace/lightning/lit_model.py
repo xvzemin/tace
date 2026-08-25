@@ -242,7 +242,8 @@ class LightningWrapperModel(L.LightningModule):
         #         update_metrics(metrics, prefix, unnormalizerd_output, batch, self.loss_property)
         #     else:
         #         update_metrics(metrics, prefix, output, batch, self.loss_property)
-        update_metrics(metrics, prefix, output, batch, self.loss_property)
+        with torch.no_grad():
+            update_metrics(metrics, prefix, output, batch, self.loss_property)
         return loss
 
     def training_step(self, batch, batch_idx):

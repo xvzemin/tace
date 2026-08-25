@@ -96,9 +96,6 @@ class LayoutTransform(torch.nn.Module):
             self.muls.append(mul)
             self.dims.append(ir.dim)
 
-        self._setup_indices()
-
-    def _setup_indices(self) -> None:
         if not self.muls:
             raise ValueError("LayoutTransform requires at least one irrep.")
         if any(mul != self.muls[0] for mul in self.muls[1:]):

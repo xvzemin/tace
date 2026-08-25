@@ -6,6 +6,7 @@ from typing import Union
 import pytest
 import torch
 
+import tace.models.compile.wrapper as compile_wrapper
 from tace.dataset.quantity import get_need_property
 from tace.lightning.torch_model import (
     _prune_removed_keys,
@@ -157,6 +158,39 @@ def test_aoti_charges_requires_total_charge_input():
     assert "total_charge" in json.loads(metadata["tace_input_keys"])
     assert "total_charge" in json.loads(metadata["tace_embedding_property"])
     assert json.loads(metadata["tace_output_keys"]) == ["charges"]
+
+
+@pytest.mark.parametrize(
+    ("training", "grad_enabled"),
+    [(False, False), (True, True)],
+)
+def test_compiled_call_uses_grad_only_during_training(
+    monkeypatch,
+    training,
+    grad_enabled,
+):
+    model = CompileTensorModel(_ChargeReadout()).train(training)
+    sample = _magnetic_embedding_sample()
+    sample.pop("initial_noncollinear_magmoms")
+    sample["total_charge"] = torch.tensor([1.5])
+    observed = []
+
+    monkeypatch.setattr(
+        compile_wrapper,
+        "trace_and_compile",
+        lambda *args, **kwargs: (object(), (), ()),
+    )
+
+    def fake_compiled_call(*args, **kwargs):
+        observed.append(torch.is_grad_enabled())
+        return (torch.zeros(3),)
+
+    monkeypatch.setattr(compile_wrapper, "compiled_call", fake_compiled_call)
+
+    with torch.enable_grad():
+        model._compiled_forward(sample)
+
+    assert observed == [grad_enabled]
 
 
 def _slice_update(x: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
