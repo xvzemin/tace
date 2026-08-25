@@ -1956,6 +1956,30 @@ def test_o2_radial_rotary_attention_skips_scatter_normalization():
     assert hasattr(module_without_attention, "edge_density")
 
 
+def test_sqrt_avg_num_neighbors_scatter_normalization():
+    module = _build_o2_interaction(scatter_norm="sqrt_avg_num_neighbors")
+    messages = torch.randn(5, module.irreps_out.dim, device=DEVICE, dtype=DTYPE)
+
+    normalized = module._normalize_messages(messages, density=None)
+
+    torch.testing.assert_close(
+        normalized,
+        messages / module.avg_num_neighbors**0.5,
+    )
+    assert not module._uses_edge_density()
+    assert not hasattr(module, "edge_density")
+
+
+def test_density_scatter_normalization_uses_sqrt_initialization():
+    module = _build_o2_interaction(scatter_norm="density")
+
+    torch.testing.assert_close(
+        module.alpha,
+        module.alpha.new_tensor(module.avg_num_neighbors**0.5),
+    )
+    torch.testing.assert_close(module.beta, module.beta.new_zeros(()))
+
+
 def test_o2_radial_rotary_attention_falls_back_without_positive_m():
     module = _build_o2_interaction(
         angular_max=3,

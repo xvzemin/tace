@@ -246,6 +246,8 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
             return messages
         if self.scatter_norm == "avg_num_neighbors":
             return messages / self.avg_num_neighbors
+        if self.scatter_norm == "sqrt_avg_num_neighbors":
+            return messages / self.avg_num_neighbors**0.5
         return messages / density
 
 

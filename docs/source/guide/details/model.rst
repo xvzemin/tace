@@ -87,7 +87,7 @@ Example
         type: cgtp # [cgtp, so2] 
         # type: [cgtp, so2, cgtp, so2 ...]
         l1l2: null # [null, <=], restriction for each layer
-        scatter_norm: avg_num_neighbors  # [avg_num_neighbors, density] density are from mace
+        scatter_norm: avg_num_neighbors  # [sqrt_avg_num_neighbors, avg_num_neighbors, density]
         nonlinear: sigmoid_gate # [null, sigmoid_gate]
         edge_nonlinear: so2_sigmoid_gate # [null, so2_sigmoid_gate]
         edge_info_type: mlp # [mlp, glu]

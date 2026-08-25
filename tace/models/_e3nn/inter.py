@@ -10,7 +10,6 @@ import torch
 from e3nn import o3
 
 from tace.utils.torch_scatter import scatter_sum
-
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
@@ -105,8 +104,10 @@ class O3CgtpInteraction(Interaction):
                 bias=self.radial_bias,
                 layer_norm=self.radial_layer_norm,
                 act="silu",
-            )  # From MACE
-            self.alpha = torch.nn.Parameter(torch.tensor(self.avg_num_neighbors))
+            )
+            self.alpha = torch.nn.Parameter(
+                torch.tensor(self.avg_num_neighbors**0.5)
+            )
             self.beta = torch.nn.Parameter(torch.tensor(0.0))
 
         if (self.use_first_resnet or self.layer > 0) and self.resnet_type == "BB":

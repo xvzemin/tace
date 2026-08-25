@@ -334,7 +334,7 @@ model:
     atomic_basis:
       type: cgtp # (str or list[str]) [cgtp, o2, so2, o3_w6j_mag, o2_mag]
       l1l2: null # [null, <=], restriction for each layer
-      scatter_norm: avg_num_neighbors  # [avg_num_neighbors, density] density are from mace
+      scatter_norm: avg_num_neighbors  # [sqrt_avg_num_neighbors, avg_num_neighbors, density]
       nonlinear: sigmoid_gate # [null, sigmoid_gate]
       edge_nonlinear: so2_sigmoid_gate # [null, so2_sigmoid_gate]
 
