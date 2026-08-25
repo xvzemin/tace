@@ -2396,6 +2396,8 @@ def _build_so2_interaction(
     scalar_act=None,
     tensor_act=None,
     edge_nonlinear="gate",
+    use_asymmetric_contraction=True,
+    use_radial_rotary_attention=True,
 ):
     return uvSO2Interaction(
         layer=0,
@@ -2419,12 +2421,25 @@ def _build_so2_interaction(
         edge_nonlinear=edge_nonlinear,
         parity=False,
         num_head=1,
+        use_asymmetric_contraction=use_asymmetric_contraction,
+        use_radial_rotary_attention=use_radial_rotary_attention,
     )
 
 
 def test_so2_requires_edge_nonlinearity():
     with pytest.raises(ValueError, match="edge_nonlinear to be set"):
         _build_so2_interaction(edge_nonlinear=None)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_so2_uses_common_asymmetric_contraction_and_attention_flags(enabled):
+    module = _build_so2_interaction(
+        use_asymmetric_contraction=enabled,
+        use_radial_rotary_attention=enabled,
+    )
+
+    assert module.rejector.use_asymmetric_contraction is enabled
+    assert module.rejector.use_radial_rotary_attention is enabled
 
 
 @pytest.mark.parametrize(

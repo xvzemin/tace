@@ -711,8 +711,8 @@ class uvSO2Convolution(torch.nn.Module):
         num_radial_basis: int,
         so2_linear_type: str,
         gate_m0: bool,
-        use_so2_edge_ace: bool,
-        use_graph_softmax: bool,
+        use_asymmetric_contraction: bool,
+        use_radial_rotary_attention: bool,
         reshape_in: LayoutTransform,
         reshape_out: LayoutTransform,
         scalar_act: torch.nn.Module,
@@ -731,8 +731,8 @@ class uvSO2Convolution(torch.nn.Module):
         assert self.edge_wise_hidden % self.num_head == 0
         self.so2_linear_type = so2_linear_type
         self.use_temperature = use_temperature
-        self.use_graph_softmax = use_graph_softmax
-        self.use_so2_edge_ace = use_so2_edge_ace
+        self.use_radial_rotary_attention = use_radial_rotary_attention
+        self.use_asymmetric_contraction = use_asymmetric_contraction
         self.reshape_in = reshape_in
         self.reshape_out = reshape_out
         self.use_radial_phase = use_radial_phase
@@ -742,7 +742,7 @@ class uvSO2Convolution(torch.nn.Module):
         self.register_buffer("expand_index", expand_index, persistent=False)
 
         start_m = 0 if gate_m0 else 1
-        if self.use_so2_edge_ace:
+        if self.use_asymmetric_contraction:
             self.num_gates = sum(lmax + 1 for _ in range(start_m, mmax + 1))
             num_components_out = [self.num_gates + lmax + 1] + [
                 lmax + 1 for m in range(1, mmax + 1)
@@ -767,26 +767,30 @@ class uvSO2Convolution(torch.nn.Module):
             mmax,
             lmax,
             self.num_channel * 2,
-            self.edge_ace_hidden if self.use_so2_edge_ace else self.edge_wise_hidden,
+            self.edge_ace_hidden
+            if self.use_asymmetric_contraction
+            else self.edge_wise_hidden,
             num_components_out=num_components_out,
             weight_type=self.so2_linear_type,
         )
         self.nonlinearity = SO2Gate(
             mmax,
             lmax,
-            self.edge_ace_hidden if self.use_so2_edge_ace else self.edge_wise_hidden,
-            channel_wise=self.use_so2_edge_ace,
+            self.edge_ace_hidden
+            if self.use_asymmetric_contraction
+            else self.edge_wise_hidden,
+            channel_wise=self.use_asymmetric_contraction,
             gate_m0=gate_m0,
             scalar_act=scalar_act,
             tensor_act=tensor_act,
         )
-        if self.use_so2_edge_ace:
+        if self.use_asymmetric_contraction:
             self.linear_glu = uvSO2Linear(
                 mmax,
                 lmax,
                 self.num_channel * 2,
                 self.edge_ace_hidden
-                if self.use_so2_edge_ace
+                if self.use_asymmetric_contraction
                 else self.edge_wise_hidden,
                 num_components_out=[lmax + 1] + [lmax + 1 for m in range(1, mmax + 1)],
                 weight_type=self.so2_linear_type,
@@ -808,12 +812,14 @@ class uvSO2Convolution(torch.nn.Module):
         self.linear_down = uvSO2Linear(
             mmax,
             lmax,
-            self.edge_ace_hidden if self.use_so2_edge_ace else self.edge_wise_hidden,
+            self.edge_ace_hidden
+            if self.use_asymmetric_contraction
+            else self.edge_wise_hidden,
             self.edge_wise_hidden,
             num_components_in=num_components_in,
             weight_type=self.so2_linear_type,
         )
-        if self.use_graph_softmax:
+        if self.use_radial_rotary_attention:
             self.query_proj = uvSO2Linear(
                 mmax,
                 lmax,
@@ -924,7 +930,7 @@ class uvSO2Convolution(torch.nn.Module):
         m_ij = torch.cat((x[edge_index[0]], x[edge_index[1]]), dim=-1)
         m_ij = torch.bmm(wigner, m_ij)
 
-        if self.use_graph_softmax:
+        if self.use_radial_rotary_attention:
             key = self.key_proj(m_ij[:, :, : self.num_channel])
             query = self.query_proj(m_ij[:, :, self.num_channel :])
             real_alpha = self._complex_qk_attention(query, key, radial_basis)
@@ -933,7 +939,7 @@ class uvSO2Convolution(torch.nn.Module):
         w = torch.index_select(w, dim=1, index=self.expand_index)
         m_ij = w * m_ij
 
-        if self.use_so2_edge_ace:
+        if self.use_asymmetric_contraction:
             coefs = self.nonlinearity.scalar_act(self.linear_coefs(m_ij).squeeze(-1))
             m_ij_2 = self.linear_glu(m_ij)
             m_ij = self.linear_up(m_ij)
@@ -950,7 +956,7 @@ class uvSO2Convolution(torch.nn.Module):
 
         m_ij = self.linear_down(m_ij)
 
-        if self.use_graph_softmax:
+        if self.use_radial_rotary_attention:
             real_alpha = self.graph_softmax(
                 real_alpha, edge_index[1], num_nodes=num_nodes, exp_rescale=cutoff
             )  # [edge, head]

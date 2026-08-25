@@ -447,8 +447,6 @@ class uvSO2Interaction(O3CgtpInteraction):
 
     so2_linear_type = "w1"
     use_temperature = True
-    use_so2_edge_ace = True
-    use_graph_softmax = True
     use_radial_phase = True
 
     def _prepare_setup(self) -> None:
@@ -492,8 +490,8 @@ class uvSO2Interaction(O3CgtpInteraction):
             edge_wise_hidden=self.edge_wise_hidden,
             so2_linear_type=self.so2_linear_type,
             gate_m0=False,
-            use_so2_edge_ace=self.use_so2_edge_ace,
-            use_graph_softmax=self.use_graph_softmax,
+            use_asymmetric_contraction=self.use_asymmetric_contraction,
+            use_radial_rotary_attention=self.use_radial_rotary_attention,
             reshape_in=LayoutTransform(self.irreps_in),
             reshape_out=LayoutTransform(
                 o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])

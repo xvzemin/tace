@@ -125,8 +125,8 @@ magnetic interaction, and then converts the result back to global
 
        atomic_basis:
          type: o2_mag
-         use_asymmetric_contraction: false
-         use_radial_rotary_attention: false
+         use_asymmetric_contraction: true
+         use_radial_rotary_attention: true
 
        universal_embedding:
          initial_noncollinear_magmoms:

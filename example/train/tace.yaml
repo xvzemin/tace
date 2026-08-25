@@ -339,8 +339,8 @@ model:
       edge_nonlinear: gate # [gate]
       scalar_act: null # unscaled name for 0e, or [0e, 0o]
       tensor_act: null # unscaled name for tensor-irrep 0e gates
-      use_asymmetric_contraction: false
-      use_radial_rotary_attention: false
+      use_asymmetric_contraction: true
+      use_radial_rotary_attention: true
       num_head: null
   
       # in test, not use
