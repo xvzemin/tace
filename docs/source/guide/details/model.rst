@@ -98,8 +98,8 @@ Example
         edge_ace_hidden: null
         num_head: null
         gate_m0: false # only controls the node gate; edge gates activate scalars directly
-        scalar_act: null # str for 0e, or [0e, 0o]
-        tensor_act: null # 0e gate activation for tensor irreps
+        scalar_act: null # unscaled name for 0e, or [0e, 0o]
+        tensor_act: null # unscaled name for tensor-irrep 0e gates
 
         product_basis:
         type: cgtp  # [cgtp, gtp]

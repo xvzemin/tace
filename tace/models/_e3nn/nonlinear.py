@@ -37,7 +37,7 @@ def _get_gate_layer(
                 "scalar_act must be None, a string, or a list of two strings "
                 "for 0e and 0o."
             )
-        act_0e = ACTIVATION[act_0e_name.removeprefix("scaled_")]()
+        act_0e = ACTIVATION[act_0e_name]()
 
         irreps_gated = irreps_in
         irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_in)
@@ -70,9 +70,9 @@ def _get_gate_layer(
             tensor_act = "sigmoid"
         if not isinstance(tensor_act, str):
             raise TypeError("tensor_act must be None or a string for tensor gates.")
-        act_0e = ACTIVATION[act_0e_name.removeprefix("scaled_")]()
-        act_0o = ACTIVATION[act_0o_name.removeprefix("scaled_")]()
-        act_tensor = ACTIVATION[tensor_act.removeprefix("scaled_")]()
+        act_0e = ACTIVATION[act_0e_name]()
+        act_0o = ACTIVATION[act_0o_name]()
+        act_tensor = ACTIVATION[tensor_act]()
 
         irreps_scalars = o3.Irreps(
             [(mul, ir) for mul, ir in irreps_in if ir.l == 0]

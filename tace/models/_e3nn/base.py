@@ -175,6 +175,23 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.scatter_norm = scatter_norm
         self.scalar_act = scalar_act
         self.tensor_act = tensor_act
+        activation_names = (
+            [scalar_act]
+            if isinstance(scalar_act, str)
+            else scalar_act
+            if isinstance(scalar_act, list)
+            else []
+        )
+        if isinstance(tensor_act, str):
+            activation_names = [*activation_names, tensor_act]
+        if any(
+            isinstance(name, str) and name.startswith("scaled_")
+            for name in activation_names
+        ):
+            raise ValueError(
+                "scalar_act and tensor_act must use activation names without "
+                "the 'scaled_' prefix."
+            )
         self.edge_ace_hidden = edge_ace_hidden or num_channel
         if self.scatter_norm == "no_cutoff_density":
             self.apply_density_cutoff = False

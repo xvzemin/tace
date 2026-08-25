@@ -466,7 +466,7 @@ class uvSO2Interaction(O3CgtpInteraction):
 
     def _build_rejector(self) -> torch.nn.Module:
         if self.scalar_act is None:
-            scalar_act = "scaled_silu"
+            scalar_act = "silu"
         elif isinstance(self.scalar_act, str):
             scalar_act = self.scalar_act
         elif isinstance(self.scalar_act, list) and len(self.scalar_act) == 2:
@@ -478,7 +478,7 @@ class uvSO2Interaction(O3CgtpInteraction):
                 "scalar_act must be None, a string, or a list of two strings "
                 "for 0e and 0o."
             )
-        tensor_act = self.tensor_act or "scaled_sigmoid"
+        tensor_act = self.tensor_act or "sigmoid"
         if not isinstance(tensor_act, str):
             raise TypeError("tensor_act must be None or a string for tensor gates.")
         return uvSO2Convolution(
@@ -621,11 +621,11 @@ class O2Interaction(O3CgtpInteraction):
 
         scalar_act = self.scalar_act
         if scalar_act is None:
-            act_0e_name = "scaled_silu"
-            act_0o_name = "scaled_tanh"
+            act_0e_name = "silu"
+            act_0o_name = "tanh"
         elif isinstance(scalar_act, str):
             act_0e_name = scalar_act
-            act_0o_name = "scaled_tanh"
+            act_0o_name = "tanh"
         elif isinstance(scalar_act, list) and len(scalar_act) == 2:
             act_0e_name, act_0o_name = scalar_act
             if not isinstance(act_0e_name, str) or not isinstance(act_0o_name, str):
@@ -635,7 +635,7 @@ class O2Interaction(O3CgtpInteraction):
                 "O2 scalar_act must be None, a string, or a list of two strings "
                 "for 0e and 0o."
             )
-        act_lm_name = self.tensor_act or "scaled_sigmoid"
+        act_lm_name = self.tensor_act or "sigmoid"
         if not isinstance(act_lm_name, str):
             raise TypeError("O2 tensor_act must be None or a string for lm gates.")
 

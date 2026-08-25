@@ -135,8 +135,8 @@ magnetic interaction, and then converts the result back to global
 The asymmetric-contraction correlation order follows
 ``product_basis.correlation``. It replaces the O(2) gate rather than following
 it. The first O(2) linear jointly generates its independent features and
-``0e`` path coefficients, which use ``scalar_act`` (``scaled_silu`` by
-default). The gated path uses the same first linear to generate its ``0e`` gate
+``0e`` path coefficients, which use ``scalar_act`` (``silu`` by default and
+scaled internally). The gated path uses the same first linear to generate its ``0e`` gate
 scalars. Radial rotary attention uses ``atomic_basis.num_head``, separate O(2)
 query and key projections, and a zero-initialized real radial scale-and-shift
 projection. The scale uses a sigmoid and the shift is additive; no complex

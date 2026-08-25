@@ -2342,11 +2342,11 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
 
 
 def test_o2_magnetic_interaction_parses_scalar_activations():
-    single = _build_o2_magnetic_interaction(scalar_act="scaled_silu")
+    single = _build_o2_magnetic_interaction(scalar_act="silu")
     assert isinstance(single.rejector.nonlinearity.act_0e, ScaledSiLU)
     assert isinstance(single.rejector.nonlinearity.act_0o, ScaledTanh)
 
-    separate = _build_o2_magnetic_interaction(scalar_act=["scaled_silu", "tanh"])
+    separate = _build_o2_magnetic_interaction(scalar_act=["silu", "tanh"])
     assert isinstance(separate.rejector.nonlinearity.act_0e, ScaledSiLU)
     assert isinstance(separate.rejector.nonlinearity.act_0o, ScaledTanh)
 
@@ -2356,7 +2356,35 @@ def test_o2_magnetic_interaction_parses_scalar_activations():
 
 def test_o2_magnetic_interaction_rejects_invalid_tensor_activation():
     with pytest.raises(TypeError, match="tensor_act must be None or a string"):
-        _build_o2_magnetic_interaction(tensor_act=["scaled_sigmoid"])
+        _build_o2_magnetic_interaction(tensor_act=["sigmoid"])
+
+
+@pytest.mark.parametrize(
+    ("scalar_act", "tensor_act"),
+    [("scaled_silu", None), (None, "scaled_sigmoid")],
+)
+def test_interaction_rejects_scaled_activation_names(scalar_act, tensor_act):
+    with pytest.raises(ValueError, match="without the 'scaled_' prefix"):
+        _build_o2_interaction(
+            scalar_act=scalar_act,
+            tensor_act=tensor_act,
+        )
+
+
+def test_node_and_o2_edge_gates_choose_scaling_internally():
+    module = _build_o2_magnetic_interaction(
+        nonlinear="gate",
+        scalar_act="silu",
+        tensor_act="sigmoid",
+    )
+
+    assert all(
+        isinstance(activation.f, torch.nn.SiLU)
+        for activation in module.nonlinearity.act_gates.acts
+    )
+    assert isinstance(module.rejector.nonlinearity.act_0e, ScaledSiLU)
+    assert isinstance(module.rejector.nonlinearity.act_0o, ScaledTanh)
+    assert isinstance(module.rejector.nonlinearity.act_lm, ScaledSigmoid)
 
 
 def test_o2_requires_edge_nonlinearity():
@@ -2428,17 +2456,17 @@ def test_o2_asymmetric_contraction_defaults_to_scaled_silu():
         correlation=2,
         use_asymmetric_contraction=True,
     )
-    assert module._o2_act_0e_name == "scaled_silu"
-    assert module._o2_act_0o_name == "scaled_tanh"
-    assert module._o2_act_lm_name == "scaled_sigmoid"
+    assert module._o2_act_0e_name == "silu"
+    assert module._o2_act_0o_name == "tanh"
+    assert module._o2_act_lm_name == "sigmoid"
     assert isinstance(module.rejector.scalar_act, ScaledSiLU)
 
 
 def test_o2_asymmetric_contraction_uses_only_0e_activation():
     module = _build_o2_magnetic_interaction(
         correlation=2,
-        scalar_act=["scaled_silu", "scaled_tanh"],
-        tensor_act="scaled_sigmoid",
+        scalar_act=["silu", "tanh"],
+        tensor_act="sigmoid",
         use_asymmetric_contraction=True,
     )
 
