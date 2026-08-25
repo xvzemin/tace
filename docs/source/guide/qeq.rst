@@ -24,7 +24,6 @@ follows:
        - mse_forces
        - mse_charges
      loss_property_weights: [1.0, 5.0, 1.0]
-     loss_huber_delta: [0.01, 0.01, 0.01]
 
    model:
      config:

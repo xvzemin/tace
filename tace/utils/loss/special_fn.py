@@ -47,7 +47,6 @@ def conditional_huber_forces(
 def mse_direct_forces_curl(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
 
     num_pairs = 1

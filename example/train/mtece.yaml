@@ -17,7 +17,6 @@ loss:
     - mse_stress
     - mse_noncollinear_magnetic_forces
   loss_property_weights: [1.0, 5.0, 0.5, 5.0]
-  loss_huber_delta: [0.01, 0.01, 0.01, 0.01]
 
 synth_metric:
   val/noncollinear_magnetic_forces_mae: 5.0

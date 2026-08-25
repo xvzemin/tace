@@ -75,16 +75,5 @@ def get_tace_use_dens():
     return os.environ.get("TACE_USE_DENS", "0")
 
 
-def get_tace_dens_loss_ratio():
-    value = os.environ.get("TACE_DENS_LOSS_RATIO", 0.05)
-    try:
-        ratio = float(value)
-    except ValueError as e:
-        raise ValueError(f"Invalid TACE_DENS_LOSS_RATIO: {value}") from e
-    if ratio <= 0:
-        raise ValueError("TACE_DENS_LOSS_RATIO must be positive")
-    return ratio
-
-
 def get_tace_use_matrix_weight():
     return os.environ.get("TACE_USE_MATRIX_WEIGHT", "0")

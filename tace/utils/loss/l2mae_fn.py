@@ -15,7 +15,6 @@ from .mse_fn import register_loss
 def l2mae_energy(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "energy"
     total_weight = label["entropy"] * label["energy_weight"]
@@ -26,7 +25,6 @@ def l2mae_energy(
 def l2mae_energy_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "energy"
     total_weight = label["entropy"] * label["energy_weight"]
@@ -38,7 +36,6 @@ def l2mae_energy_per_atom(
 def l2mae_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "forces"
     batch = label["batch"]
@@ -52,7 +49,6 @@ def l2mae_forces(
 def l2mae_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     total_weight = label["entropy"] * label["stress_weight"]
@@ -66,7 +62,6 @@ def l2mae_stress(
 def l2mae_voigt_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     total_weight = label["entropy"] * label["stress_weight"]
@@ -78,7 +73,6 @@ def l2mae_voigt_stress(
 def l2mae_virials(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "virials"
     total_weight = label["entropy"] * label["virials_weight"]
@@ -92,7 +86,6 @@ def l2mae_virials(
 def l2mae_virials_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "virials"
     total_weight = label["entropy"] * label["virials_weight"]
@@ -109,7 +102,6 @@ def l2mae_virials_per_atom(
 def l2mae_direct_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_forces"
     batch = label["batch"]
@@ -123,7 +115,6 @@ def l2mae_direct_forces(
 def l2mae_direct_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     total_weight = label["entropy"] * label["direct_stress_weight"]
@@ -137,7 +128,6 @@ def l2mae_direct_stress(
 def l2mae_voigt_direct_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     total_weight = label["entropy"] * label["direct_stress_weight"]
@@ -149,7 +139,6 @@ def l2mae_voigt_direct_stress(
 def l2mae_direct_virials_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_virials"
     total_weight = label["entropy"] * label["direct_virials_weight"]
@@ -168,7 +157,6 @@ def l2mae_direct_virials_per_atom(
 def l2mae_direct_dipole(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_dipole"
     total_weight = label["entropy"] * label["direct_dipole_weight"]
@@ -186,7 +174,6 @@ def l2mae_direct_dipole(
 def l2mae_direct_dipole_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_dipole"
     total_weight = label["entropy"] * label["direct_dipole_weight"]
@@ -205,7 +192,6 @@ def l2mae_direct_dipole_per_atom(
 def l2mae_conservative_dipole(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "conservative_dipole"
     total_weight = label["entropy"] * label["conservative_dipole_weight"]
@@ -223,7 +209,6 @@ def l2mae_conservative_dipole(
 def l2mae_conservative_dipole_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "conservative_dipole"
     total_weight = label["entropy"] * label["conservative_dipole_weight"]
@@ -242,7 +227,6 @@ def l2mae_conservative_dipole_per_atom(
 def l2mae_direct_polarizability(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_polarizability"
     total_weight = label["entropy"] * label["direct_polarizability_weight"]
@@ -260,7 +244,6 @@ def l2mae_direct_polarizability(
 def l2mae_direct_polarizability_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_polarizability"
     total_weight = label["entropy"] * label["direct_polarizability_weight"]
@@ -279,7 +262,6 @@ def l2mae_direct_polarizability_per_atom(
 def l2mae_conservative_polarizability(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "conservative_polarizability"
     total_weight = label["entropy"] * label["conservative_polarizability_weight"]
@@ -297,7 +279,6 @@ def l2mae_conservative_polarizability(
 def l2mae_conservative_polarizability_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "conservative_polarizability"
     total_weight = label["entropy"] * label["conservative_polarizability_weight"]
@@ -316,7 +297,6 @@ def l2mae_conservative_polarizability_per_atom(
 def l2mae_born_effective_charges(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "born_effective_charges"
     batch = label["batch"]
@@ -335,7 +315,6 @@ def l2mae_born_effective_charges(
 def l2mae_polarization_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "polarization"
     total_weight = label["entropy"] * label["polarization_weight"]
@@ -347,7 +326,6 @@ def l2mae_polarization_per_atom(
 def l2mae_charges(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "charges"
     batch = label["batch"]
@@ -359,7 +337,6 @@ def l2mae_charges(
 def l2mae_final_collinear_magmoms(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "final_collinear_magmoms"
     batch = label["batch"]
@@ -371,7 +348,6 @@ def l2mae_final_collinear_magmoms(
 def l2mae_abs_final_collinear_magmoms(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "abs_final_collinear_magmoms"
     batch = label["batch"]
@@ -385,7 +361,6 @@ def l2mae_abs_final_collinear_magmoms(
 def l2mae_final_noncollinear_magmoms(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "final_noncollinear_magmoms"
     batch = label["batch"]
@@ -401,7 +376,6 @@ def l2mae_final_noncollinear_magmoms(
 def l2mae_collinear_magnetic_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "collinear_magnetic_forces"
     batch = label["batch"]
@@ -413,7 +387,6 @@ def l2mae_collinear_magnetic_forces(
 def l2mae_noncollinear_magnetic_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "noncollinear_magnetic_forces"
     batch = label["batch"]
@@ -429,7 +402,6 @@ def l2mae_noncollinear_magnetic_forces(
 def l2mae_total_collinear_magmom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "total_collinear_magmom"
     total_weight = label["entropy"] * label["total_collinear_magmom_weight"]
@@ -440,7 +412,6 @@ def l2mae_total_collinear_magmom(
 def l2mae_total_collinear_magmom_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "total_collinear_magmom"
     total_weight = label["entropy"] * label["total_collinear_magmom_weight"]
@@ -452,7 +423,6 @@ def l2mae_total_collinear_magmom_per_atom(
 def l2mae_total_noncollinear_magmom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "total_noncollinear_magmom"
     total_weight = label["entropy"] * label["total_noncollinear_magmom_weight"]
@@ -465,7 +435,6 @@ def l2mae_total_noncollinear_magmom(
 def l2mae_total_noncollinear_magmom_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "total_noncollinear_magmom"
     total_weight = label["entropy"] * label["total_noncollinear_magmom_weight"]

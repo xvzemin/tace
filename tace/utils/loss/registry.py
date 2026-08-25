@@ -4,9 +4,13 @@
 ################################################################################
 
 import importlib
+import inspect
 import re
 from collections import defaultdict
-from typing import Iterable
+from collections.abc import Mapping
+from typing import Any, Iterable
+
+from omegaconf import ListConfig
 
 from .mse_fn import LOSS_FN
 
@@ -91,3 +95,36 @@ def validate_loss_function_names(loss_function_names: Iterable[str]) -> None:
     ]
     if unknown:
         raise ValueError(format_unknown_loss_error(unknown))
+
+
+def prepare_loss_function_kwargs(
+    loss_function_names: Iterable[str],
+    loss_function_kwargs: list[dict[str, Any]] | ListConfig | None,
+) -> list[dict[str, Any]]:
+    loss_function_names = list(loss_function_names)
+    validate_loss_function_names(loss_function_names)
+
+    if loss_function_kwargs is None:
+        loss_function_kwargs = [{} for _ in loss_function_names]
+    if not isinstance(loss_function_kwargs, (list, ListConfig)):
+        raise TypeError("loss_function_kwargs must be a list of mappings.")
+    if len(loss_function_kwargs) != len(loss_function_names):
+        raise ValueError(
+            "loss_function_kwargs and loss_function_name must have the same length."
+        )
+
+    prepared = []
+    for loss_name, kwargs in zip(loss_function_names, loss_function_kwargs):
+        if kwargs is None:
+            kwargs = {}
+        if not isinstance(kwargs, Mapping):
+            raise TypeError(f"Parameters for {loss_name!r} must be a mapping.")
+        kwargs = dict(kwargs)
+        try:
+            inspect.signature(LOSS_FN[loss_name]).bind(None, None, **kwargs)
+        except TypeError as error:
+            raise ValueError(
+                f"Invalid parameters for loss function {loss_name!r}: {error}"
+            ) from error
+        prepared.append(kwargs)
+    return prepared

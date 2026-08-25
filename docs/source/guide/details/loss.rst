@@ -27,7 +27,7 @@ Example
       - mse_forces
       - mse_stress
     loss_property_weights: [1, 8, 8] 
-    loss_huber_delta: [0.01, 0.01, 0.01] # float or List[float]
+    loss_function_kwargs: [{}, {}, {}]
     # loss_property_weights: [1, 1, 1, 1, 1000, 1] 
 
   # # Loss Type 2
@@ -48,11 +48,14 @@ Example
   #     - mse_forces
   #     - mse_stress
   #   loss_property_weights: [1, 1, 1] 
-  #   loss_huber_delta: 0.01 # float or List[float]
+  #   loss_function_kwargs: [{}, {}, {}]
   
 Notes
 -----
 
 - For properties that are already *per-atom* quantities,  
   the ``per_atom`` suffix is not required and is not supported.
-
+- ``loss_function_kwargs`` optionally supplies one parameter mapping per loss
+  function. For example, use ``{huber_delta: 0.01}`` with a Huber loss or
+  ``{dens_loss_ratio: 0.05}`` with a DeNS forces loss. Parameters are checked
+  against the selected loss function when the loss module is constructed.

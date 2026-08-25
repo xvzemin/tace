@@ -1,10 +1,8 @@
 import dataclasses
-import logging
 from typing import Union
 
 import torch
 
-from ..env import get_tace_dens_loss_ratio
 from ..torch_scatter import scatter
 from .common import voigt6_stress
 from .mse_fn import register_loss
@@ -22,13 +20,9 @@ class DenoisingPosParams:
     max_force_norm: Union[float, None] = 2.5
     max_stress_norm: Union[float, None] = None
     max_mean_force_norm: Union[float, None] = None
-    loss_ratio: float = get_tace_dens_loss_ratio()
 
 
 DeNS = DenoisingPosParams()
-
-# logging.info("DeNS Loss Ratio: %s", DeNS.loss_ratio)
-
 
 def add_gaussian_noise_to_position(
     batch,
@@ -187,15 +181,18 @@ def _dens_forces_error(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
     key: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch = label["batch"]
     total_weight = (label["entropy"] * label[f"{key}_weight"])[batch]
     noise_mask = label["noise_mask"].unsqueeze(-1)
     forces_error = (pred[key] - label[key]) * (~noise_mask)
-    noise_error = (
-        (pred["noise_vec"] - label["noise_vec"]) * noise_mask * DeNS.loss_ratio
-    )
-    return forces_error + noise_error, total_weight
+    noise_error = (pred["noise_vec"] - label["noise_vec"]) * noise_mask
+    return forces_error, noise_error, total_weight
+
+
+def _validate_dens_loss_ratio(dens_loss_ratio: float) -> None:
+    if dens_loss_ratio < 0:
+        raise ValueError("dens_loss_ratio must be non-negative.")
 
 
 def _dens_stress_error(
@@ -224,22 +221,26 @@ def _dens_voigt_stress_error(
 def mse_dens_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    return torch.mean(torch.square(error) * total_weight.unsqueeze(-1))
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    error = torch.square(forces_error) + dens_loss_ratio * torch.square(noise_error)
+    return torch.mean(error * total_weight.unsqueeze(-1))
 
 
 @register_loss
 def mae_dens_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    return torch.mean(torch.abs(error) * total_weight.unsqueeze(-1))
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    error = torch.abs(forces_error) + dens_loss_ratio * torch.abs(noise_error)
+    return torch.mean(error * total_weight.unsqueeze(-1))
 
 
 @register_loss
@@ -247,49 +248,69 @@ def huber_dens_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    weighted_error = total_weight.unsqueeze(-1) * error
-    return torch.nn.functional.huber_loss(
-        weighted_error,
-        torch.zeros_like(weighted_error),
-        reduction="mean",
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    total_weight = total_weight.unsqueeze(-1)
+    forces_error = total_weight * forces_error
+    noise_error = total_weight * noise_error
+    forces_loss = torch.nn.functional.huber_loss(
+        forces_error,
+        torch.zeros_like(forces_error),
+        reduction="none",
         delta=huber_delta,
     )
+    noise_loss = torch.nn.functional.huber_loss(
+        noise_error,
+        torch.zeros_like(noise_error),
+        reduction="none",
+        delta=huber_delta,
+    )
+    return torch.mean(forces_loss + dens_loss_ratio * noise_loss)
 
 
 @register_loss
 def l2mae_dens_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    return torch.mean(torch.linalg.vector_norm(error, ord=2, dim=-1) * total_weight)
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    error = torch.linalg.vector_norm(forces_error, ord=2, dim=-1)
+    error = error + dens_loss_ratio * torch.linalg.vector_norm(
+        noise_error, ord=2, dim=-1
+    )
+    return torch.mean(error * total_weight)
 
 
 @register_loss
 def mse_dens_direct_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "direct_forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    return torch.mean(torch.square(error) * total_weight.unsqueeze(-1))
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    error = torch.square(forces_error) + dens_loss_ratio * torch.square(noise_error)
+    return torch.mean(error * total_weight.unsqueeze(-1))
 
 
 @register_loss
 def mae_dens_direct_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "direct_forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    return torch.mean(torch.abs(error) * total_weight.unsqueeze(-1))
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    error = torch.abs(forces_error) + dens_loss_ratio * torch.abs(noise_error)
+    return torch.mean(error * total_weight.unsqueeze(-1))
 
 
 @register_loss
@@ -297,34 +318,49 @@ def huber_dens_direct_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
     huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "direct_forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    weighted_error = total_weight.unsqueeze(-1) * error
-    return torch.nn.functional.huber_loss(
-        weighted_error,
-        torch.zeros_like(weighted_error),
-        reduction="mean",
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    total_weight = total_weight.unsqueeze(-1)
+    forces_error = total_weight * forces_error
+    noise_error = total_weight * noise_error
+    forces_loss = torch.nn.functional.huber_loss(
+        forces_error,
+        torch.zeros_like(forces_error),
+        reduction="none",
         delta=huber_delta,
     )
+    noise_loss = torch.nn.functional.huber_loss(
+        noise_error,
+        torch.zeros_like(noise_error),
+        reduction="none",
+        delta=huber_delta,
+    )
+    return torch.mean(forces_loss + dens_loss_ratio * noise_loss)
 
 
 @register_loss
 def l2mae_dens_direct_forces(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
+    dens_loss_ratio: float = 0.05,
 ) -> torch.Tensor:
     key = "direct_forces"
-    error, total_weight = _dens_forces_error(pred, label, key)
-    return torch.mean(torch.linalg.vector_norm(error, ord=2, dim=-1) * total_weight)
+    _validate_dens_loss_ratio(dens_loss_ratio)
+    forces_error, noise_error, total_weight = _dens_forces_error(pred, label, key)
+    error = torch.linalg.vector_norm(forces_error, ord=2, dim=-1)
+    error = error + dens_loss_ratio * torch.linalg.vector_norm(
+        noise_error, ord=2, dim=-1
+    )
+    return torch.mean(error * total_weight)
 
 
 @register_loss
 def mse_dens_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     error, total_weight = _dens_stress_error(pred, label, key)
@@ -335,7 +371,6 @@ def mse_dens_stress(
 def mae_dens_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     error, total_weight = _dens_stress_error(pred, label, key)
@@ -363,7 +398,6 @@ def huber_dens_stress(
 def l2mae_dens_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     error, total_weight = _dens_stress_error(pred, label, key)
@@ -374,7 +408,6 @@ def l2mae_dens_stress(
 def mse_dens_direct_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     error, total_weight = _dens_stress_error(pred, label, key)
@@ -385,7 +418,6 @@ def mse_dens_direct_stress(
 def mae_dens_direct_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     error, total_weight = _dens_stress_error(pred, label, key)
@@ -413,7 +445,6 @@ def huber_dens_direct_stress(
 def l2mae_dens_direct_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     error, total_weight = _dens_stress_error(pred, label, key)
@@ -424,7 +455,6 @@ def l2mae_dens_direct_stress(
 def mse_dens_voigt_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     error, total_weight = _dens_voigt_stress_error(pred, label, key)
@@ -435,7 +465,6 @@ def mse_dens_voigt_stress(
 def mae_dens_voigt_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     error, total_weight = _dens_voigt_stress_error(pred, label, key)
@@ -463,7 +492,6 @@ def huber_dens_voigt_stress(
 def l2mae_dens_voigt_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "stress"
     error, total_weight = _dens_voigt_stress_error(pred, label, key)
@@ -474,7 +502,6 @@ def l2mae_dens_voigt_stress(
 def mse_dens_voigt_direct_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     error, total_weight = _dens_voigt_stress_error(pred, label, key)
@@ -485,7 +512,6 @@ def mse_dens_voigt_direct_stress(
 def mae_dens_voigt_direct_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     error, total_weight = _dens_voigt_stress_error(pred, label, key)
@@ -513,7 +539,6 @@ def huber_dens_voigt_direct_stress(
 def l2mae_dens_voigt_direct_stress(
     pred: dict[str, torch.Tensor],
     label: dict[str, torch.Tensor],
-    huber_delta: float = 0.01,
 ) -> torch.Tensor:
     key = "direct_stress"
     error, total_weight = _dens_voigt_stress_error(pred, label, key)
