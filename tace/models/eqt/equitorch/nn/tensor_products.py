@@ -28,8 +28,6 @@ class TensorProductUUUDummy(torch.autograd.Function):
         grad_input2 = input2.requires_grad
         
         ctx.inter_shape = inter.shape
-        ctx.inter_dtype = inter.dtype
-        ctx.inter_device = inter.device
         ctx.weight_ndim = weight.ndim
         if not grad_weight:
             inter = None
@@ -49,32 +47,50 @@ class TensorProductUUUDummy(torch.autograd.Function):
         input1, input2, weight, inter = ctx.saved_tensors
         tp_info_forward, tp_info_backward1, tp_info_backward2 = ctx.tp_info
 
-        # Ensure grad_inter has correct shape for higher-order derivatives
+        # ``inter`` is an auxiliary output used only when a higher-order
+        # derivative propagates through the weight gradient.  In the usual
+        # first-derivative path it is not consumed, so ``grad_inter`` is None
+        # and its contribution is exactly zero.  Avoid materializing that
+        # potentially large zero tensor and the two sparse products fed by it.
         if grad_inter is not None:
             grad_inter = torch.broadcast_to(grad_inter, ctx.inter_shape)
-        else:
-            grad_inter = torch.zeros(ctx.inter_shape, dtype=ctx.inter_dtype, device=ctx.inter_device)
         if ctx.needs_input_grad[0]:
             grad1 = tensor_product_uuu(
-                input2, grad, weight, 
-                tp_info_backward1, tp_info_backward2, tp_info_forward)
-            # if grad1.requires_grad:
-            grad1 = grad1 + sparse_mul(input2, grad_inter,
-                                    tp_info_forward.info_Mij_bwd1,
-                                    tp_info_forward.info_Mij_bwd2,
-                                    tp_info_forward.info_Mij_fwd)
+                input2,
+                grad,
+                weight,
+                tp_info_backward1,
+                tp_info_backward2,
+                tp_info_forward,
+            )
+            if grad_inter is not None:
+                grad1 = grad1 + sparse_mul(
+                    input2,
+                    grad_inter,
+                    tp_info_forward.info_Mij_bwd1,
+                    tp_info_forward.info_Mij_bwd2,
+                    tp_info_forward.info_Mij_fwd,
+                )
         else:
             grad1 = None
-            
+
         if ctx.needs_input_grad[1]:
             grad2 = tensor_product_uuu(
-                grad, input1, weight, 
-                tp_info_backward2, tp_info_forward, tp_info_backward1)
-            # if grad2.requires_grad:
-            grad2 = grad2 + sparse_mul(grad_inter, input1,
-                                    tp_info_forward.info_Mij_bwd2,
-                                    tp_info_forward.info_Mij_fwd,
-                                    tp_info_forward.info_Mij_bwd1)
+                grad,
+                input1,
+                weight,
+                tp_info_backward2,
+                tp_info_forward,
+                tp_info_backward1,
+            )
+            if grad_inter is not None:
+                grad2 = grad2 + sparse_mul(
+                    grad_inter,
+                    input1,
+                    tp_info_forward.info_Mij_bwd2,
+                    tp_info_forward.info_Mij_fwd,
+                    tp_info_forward.info_Mij_bwd1,
+                )
         else:
             grad2 = None
 

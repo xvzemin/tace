@@ -5,6 +5,7 @@ import torch
 from e3nn import o3
 
 import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
+import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
 from tace.models._e3nn.prod import CgtpACE
 from tace.models.eqt.equitorch.nn import TensorProduct
 from tace.utils.env import acceleration_enabled
@@ -170,3 +171,74 @@ def test_eqt_native_scatter_fallback_third_derivative(
     grad2 = torch.autograd.grad(grad1.square().sum(), input1, create_graph=True)[0]
     grad3 = torch.autograd.grad(grad2.square().sum(), input1)[0]
     assert torch.isfinite(grad3).all()
+
+
+def test_eqt_first_derivative_skips_unused_intermediate_gradient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor_product = TensorProduct(
+        "0e+1o",
+        "0e+1o",
+        "0e+1o",
+        channels_in1=2,
+        channels_in2=2,
+        channels_out=2,
+        internal_weights=True,
+    ).to(device=DEVICE, dtype=DTYPE)
+    tensor_product.weight.requires_grad_(False)
+    input1 = torch.randn(
+        2,
+        tensor_product.irreps_in1_dim,
+        2,
+        device=DEVICE,
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    input2 = torch.randn_like(input1, requires_grad=True)
+
+    sparse_mul_calls = 0
+    sparse_mul = tensor_products.sparse_mul
+
+    def tracked_sparse_mul(*args, **kwargs):
+        nonlocal sparse_mul_calls
+        sparse_mul_calls += 1
+        return sparse_mul(*args, **kwargs)
+
+    monkeypatch.setattr(tensor_products, "sparse_mul", tracked_sparse_mul)
+    output = tensor_product(input1, input2)
+    torch.autograd.grad(output.sum(), (input1, input2))
+
+    assert sparse_mul_calls == 6
+
+
+def test_eqt_mixed_weight_third_derivative() -> None:
+    torch.manual_seed(2)
+    tensor_product = TensorProduct(
+        "0e+1o+2e",
+        "0e+1o+2e",
+        "0e+1o+2e",
+        channels_in1=3,
+        channels_in2=3,
+        channels_out=3,
+        internal_weights=True,
+    ).to(device=DEVICE, dtype=DTYPE)
+    input1 = torch.randn(
+        2,
+        tensor_product.irreps_in1_dim,
+        3,
+        device=DEVICE,
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    input2 = torch.randn_like(input1, requires_grad=True)
+
+    output = tensor_product(input1, input2)
+    grad_weight = torch.autograd.grad(
+        output.sin().sum(), tensor_product.weight, create_graph=True
+    )[0]
+    grad_input1 = torch.autograd.grad(
+        grad_weight.square().sum(), input1, create_graph=True
+    )[0]
+    grad_input2 = torch.autograd.grad(grad_input1.square().sum(), input2)[0]
+
+    assert torch.isfinite(grad_input2).all()
