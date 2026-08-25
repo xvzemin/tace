@@ -8,11 +8,46 @@ import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
 import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
 from tace.models._e3nn.prod import CgtpACE
 from tace.models.eqt.equitorch.nn import TensorProduct
+from tace.models.layout import LayoutTransform
 from tace.utils.env import acceleration_enabled
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+def test_layout_transform_matches_blockwise_reference() -> None:
+    irreps = o3.Irreps("3x0e+3x1o+3x1o+3x2e")
+    transform = LayoutTransform(irreps).to(DEVICE)
+    input1 = torch.randn(
+        5,
+        irreps.dim,
+        device=DEVICE,
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    input2 = input1.detach().clone().requires_grad_(True)
+
+    blocks = []
+    offset = 0
+    for multiplicity, irrep in irreps:
+        block_dim = multiplicity * irrep.dim
+        blocks.append(
+            input2[:, offset : offset + block_dim].reshape(
+                input2.shape[0], multiplicity, irrep.dim
+            )
+        )
+        offset += block_dim
+    expected = torch.cat(blocks, dim=-1).transpose(-1, -2).contiguous()
+    actual = transform(input1)
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(transform.inverse(actual), input1)
+    output_grad = torch.randn_like(actual)
+    actual_grad = torch.autograd.grad((actual * output_grad).sum(), input1)[0]
+    expected_grad = torch.autograd.grad((expected * output_grad).sum(), input2)[0]
+    torch.testing.assert_close(actual_grad, expected_grad)
+    assert not transform.state_dict()
 
 
 def _product(correlation: int) -> CgtpACE:
