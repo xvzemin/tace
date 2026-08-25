@@ -476,7 +476,9 @@ class uvSO2Interaction(O3CgtpInteraction):
                 "scalar_act must be None, a string, or a list of two strings "
                 "for 0e and 0o."
             )
-        tensor_act = self.tensor_act or "sigmoid"
+        tensor_act = self.tensor_act or (
+            "silu" if self.use_asymmetric_contraction else "sigmoid"
+        )
         if not isinstance(tensor_act, str):
             raise TypeError("tensor_act must be None or a string for tensor gates.")
         return uvSO2Convolution(

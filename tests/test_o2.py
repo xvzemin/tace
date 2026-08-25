@@ -2443,13 +2443,21 @@ def test_so2_uses_common_asymmetric_contraction_and_attention_flags(enabled):
 
 
 @pytest.mark.parametrize(
-    ("scalar_act", "tensor_act", "scalar_type", "tensor_type"),
+    (
+        "use_asymmetric_contraction",
+        "scalar_act",
+        "tensor_act",
+        "scalar_type",
+        "tensor_type",
+    ),
     [
-        (None, None, ScaledSiLU, ScaledSigmoid),
-        ("tanh", "silu", ScaledTanh, ScaledSiLU),
+        (True, None, None, ScaledSiLU, ScaledSiLU),
+        (False, None, None, ScaledSiLU, ScaledSigmoid),
+        (True, "tanh", "sigmoid", ScaledTanh, ScaledSigmoid),
     ],
 )
 def test_so2_edge_gate_uses_external_activations(
+    use_asymmetric_contraction,
     scalar_act,
     tensor_act,
     scalar_type,
@@ -2458,6 +2466,7 @@ def test_so2_edge_gate_uses_external_activations(
     module = _build_so2_interaction(
         scalar_act=scalar_act,
         tensor_act=tensor_act,
+        use_asymmetric_contraction=use_asymmetric_contraction,
     )
 
     gate = module.rejector.nonlinearity
@@ -2487,6 +2496,9 @@ def test_o2_asymmetric_contraction_uses_only_0e_activation():
 
     assert module.rejector.asymmetric_contraction is not None
     assert module.rejector.nonlinearity is None
+    assert module._o2_act_0e_name == "silu"
+    assert module._o2_act_0o_name == "tanh"
+    assert module._o2_act_lm_name == "sigmoid"
     assert isinstance(module.rejector.scalar_act, ScaledSiLU)
 
 
