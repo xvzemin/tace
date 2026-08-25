@@ -13,7 +13,7 @@ from tace.utils.torch_scatter import scatter_sum
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
-from ..mlp import MLP, ScaledSigmoid, ScaledSiLU, get_scaled_activation
+from ..mlp import MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct
 from .legacy_so2 import uvSO2Convolution
@@ -460,19 +460,27 @@ class uvSO2Interaction(O3CgtpInteraction):
                 "uvSO2Interaction requires irreps_in.lmax > 0. Use it after "
                 "the first layer or provide a node embedding with l > 0."
             )
-        if self.edge_nonlinear not in {
-            "so2_sigmoid_gate",
-            "so2_silu_gate",
-        }:
-            raise ValueError(
-                "uvSO2Interaction requires a supported SO2 edge nonlinearity."
-            )
+        if self.edge_nonlinear is None:
+            raise ValueError("uvSO2Interaction requires edge_nonlinear to be set.")
         self.scatter_norm = None
 
     def _build_rejector(self) -> torch.nn.Module:
-        edge_act = self.edge_nonlinear.split("_")[1]
-        scalar_act = self.scalar_act or edge_act
-        tensor_act = self.tensor_act or edge_act
+        if self.scalar_act is None:
+            scalar_act = "scaled_silu"
+        elif isinstance(self.scalar_act, str):
+            scalar_act = self.scalar_act
+        elif isinstance(self.scalar_act, list) and len(self.scalar_act) == 2:
+            if not all(isinstance(name, str) for name in self.scalar_act):
+                raise TypeError("scalar_act entries must be strings.")
+            scalar_act = self.scalar_act[0]
+        else:
+            raise TypeError(
+                "scalar_act must be None, a string, or a list of two strings "
+                "for 0e and 0o."
+            )
+        tensor_act = self.tensor_act or "scaled_sigmoid"
+        if not isinstance(tensor_act, str):
+            raise TypeError("tensor_act must be None or a string for tensor gates.")
         return uvSO2Convolution(
             mmax=self.mmax,
             lmax=self.lmax,
@@ -483,15 +491,15 @@ class uvSO2Interaction(O3CgtpInteraction):
             edge_ace_hidden=self.edge_ace_hidden,
             edge_wise_hidden=self.edge_wise_hidden,
             so2_linear_type=self.so2_linear_type,
-            gate_m0=self.gate_m0,
+            gate_m0=False,
             use_so2_edge_ace=self.use_so2_edge_ace,
             use_graph_softmax=self.use_graph_softmax,
             reshape_in=LayoutTransform(self.irreps_in),
             reshape_out=LayoutTransform(
                 o3.Irreps([(self.edge_wise_hidden, ir) for _, ir in self.irreps_out])
             ),
-            scalar_act=ScaledSigmoid() if scalar_act == "sigmoid" else ScaledSiLU(),
-            tensor_act=ScaledSigmoid() if tensor_act == "sigmoid" else ScaledSiLU(),
+            scalar_act=get_scaled_activation(scalar_act),
+            tensor_act=get_scaled_activation(tensor_act),
             use_radial_phase=self.use_radial_phase,
         )
 
@@ -546,7 +554,7 @@ class O2Interaction(O3CgtpInteraction):
             correlation=2, # hardcore 2 now for memory
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
-            use_asymmetric_contraction=self.use_o2_asymmetric_contraction,
+            use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
         if rejector.attention is not None:
@@ -587,6 +595,8 @@ class O2Interaction(O3CgtpInteraction):
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
+        if self.edge_nonlinear is None:
+            raise ValueError("o2 requires edge_nonlinear to be set.")
         if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
             raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
         self.use_radial_rotary_attention = (
@@ -604,8 +614,8 @@ class O2Interaction(O3CgtpInteraction):
             self.irreps_out.lmax,
             self.mmax,
         )
-        self.use_o2_asymmetric_contraction = (
-            self.use_o2_asymmetric_contraction
+        self.use_asymmetric_contraction = (
+            self.use_asymmetric_contraction
             and contraction_mmax > 0
         )
 
@@ -716,7 +726,7 @@ class O2MagneticInteraction(O2Interaction):
             correlation=self.correlation,
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
-            use_asymmetric_contraction=self.use_o2_asymmetric_contraction,
+            use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
         if rejector.attention is not None:

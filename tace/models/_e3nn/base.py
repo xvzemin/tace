@@ -148,7 +148,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         node_wise_hidden: Union[int, None] = None,
         edge_wise_hidden: Union[int, None] = None,
         gate_m0: bool = True,
-        use_o2_asymmetric_contraction: bool = False,
+        use_asymmetric_contraction: bool = False,
         use_radial_rotary_attention: bool = False,
         num_mag_radial_basis: int = 8,
         magnetic_irreps: o3.Irreps = None,
@@ -184,7 +184,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         if self.edge_feats_channel != self.num_radial_basis:
             self.radial_layer_norm = True
         self.gate_m0 = gate_m0
-        self.use_o2_asymmetric_contraction = use_o2_asymmetric_contraction
+        self.use_asymmetric_contraction = use_asymmetric_contraction
         self.use_radial_rotary_attention = use_radial_rotary_attention
 
         self.use_first_resnet = use_first_resnet

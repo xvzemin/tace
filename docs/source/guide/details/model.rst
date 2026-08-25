@@ -89,7 +89,7 @@ Example
         l1l2: null # [null, <=], restriction for each layer
         scatter_norm: avg_num_neighbors  # [sqrt_avg_num_neighbors, avg_num_neighbors, density]
         nonlinear: gate # [null, gate]
-        edge_nonlinear: so2_sigmoid_gate # [null, so2_sigmoid_gate]
+        edge_nonlinear: gate # edge scalar/tensor activations use scalar_act/tensor_act
         edge_info_type: mlp # [mlp, glu]
             
         # in test, not use
@@ -97,7 +97,7 @@ Example
         edge_wise_hidden: null
         edge_ace_hidden: null
         num_head: null
-        gate_m0: false
+        gate_m0: false # only controls the node gate; edge gates activate scalars directly
         scalar_act: null # str for 0e, or [0e, 0o]
         tensor_act: null # 0e gate activation for tensor irreps
 

@@ -19,6 +19,7 @@ from tace.models._e3nn.inter import (
     INTERACTION,
     O2Interaction,
     O2MagneticInteraction,
+    uvSO2Interaction,
 )
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.o2 import (
@@ -50,6 +51,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     config["node_embedding"]["type"] = "linear"
     config["atomic_basis"]["type"] = ["o2"]
     config["atomic_basis"]["nonlinear"] = ["gate"]
+    config["atomic_basis"]["edge_nonlinear"] = ["gate"]
     config["product_basis"]["type"] = ["cgtp"]
     config["product_basis"]["correlation"] = [2]
 
@@ -1668,6 +1670,7 @@ def _build_o2_magnetic_interaction(
     nonlinear=None,
     scalar_act=None,
     tensor_act=None,
+    edge_nonlinear="gate",
     correlation=1,
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
@@ -1699,8 +1702,9 @@ def _build_o2_magnetic_interaction(
         edge_ace_hidden=None,
         parity=True,
         nonlinear=nonlinear,
+        edge_nonlinear=edge_nonlinear,
         num_head=2,
-        use_o2_asymmetric_contraction=use_asymmetric_contraction,
+        use_asymmetric_contraction=use_asymmetric_contraction,
         use_radial_rotary_attention=use_radial_rotary_attention,
     )
     return module.to(device=DEVICE, dtype=DTYPE)
@@ -1715,6 +1719,7 @@ def _build_o2_interaction(
     irreps_in=None,
     scalar_act=None,
     tensor_act=None,
+    edge_nonlinear="gate",
     scatter_norm="avg_num_neighbors",
     use_asymmetric_contraction=False,
     use_radial_rotary_attention=False,
@@ -1740,11 +1745,12 @@ def _build_o2_interaction(
         irreps_in=irreps_in,
         scalar_act=scalar_act,
         tensor_act=tensor_act,
+        edge_nonlinear=edge_nonlinear,
         edge_ace_hidden=None,
         scatter_norm=scatter_norm,
         parity=True,
         num_head=2,
-        use_o2_asymmetric_contraction=use_asymmetric_contraction,
+        use_asymmetric_contraction=use_asymmetric_contraction,
         use_radial_rotary_attention=use_radial_rotary_attention,
     )
     return module.to(device=DEVICE, dtype=DTYPE)
@@ -2012,7 +2018,7 @@ def test_o2_asymmetric_contraction_falls_back_to_gate_without_positive_m():
     )
 
     assert module.rejector.input_frame.local_irreps.m_max == 0
-    assert not module.use_o2_asymmetric_contraction
+    assert not module.use_asymmetric_contraction
     assert not module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is None
     assert isinstance(module.rejector.nonlinearity, Gate)
@@ -2035,7 +2041,7 @@ def test_o2_asymmetric_contraction_and_attention_support_positive_m():
     )
 
     assert module.rejector.input_frame.local_irreps.m_max > 0
-    assert module.use_o2_asymmetric_contraction
+    assert module.use_asymmetric_contraction
     assert module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is not None
     assert module.rejector.nonlinearity is None
@@ -2353,6 +2359,70 @@ def test_o2_magnetic_interaction_rejects_invalid_tensor_activation():
         _build_o2_magnetic_interaction(tensor_act=["scaled_sigmoid"])
 
 
+def test_o2_requires_edge_nonlinearity():
+    with pytest.raises(ValueError, match="edge_nonlinear to be set"):
+        _build_o2_interaction(edge_nonlinear=None)
+
+
+def _build_so2_interaction(
+    scalar_act=None,
+    tensor_act=None,
+    edge_nonlinear="gate",
+):
+    return uvSO2Interaction(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        avg_num_neighbors=4.0,
+        mmax=1,
+        Lmax=1,
+        lmax=1,
+        correlation=[1],
+        num_channel=2,
+        edge_feats_channel=4,
+        target_irreps=o3.Irreps("0e"),
+        num_radial_basis=4,
+        radial_mlp=[8],
+        radial_bias=True,
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        scalar_act=scalar_act,
+        tensor_act=tensor_act,
+        edge_ace_hidden=None,
+        edge_nonlinear=edge_nonlinear,
+        parity=False,
+        num_head=1,
+    )
+
+
+def test_so2_requires_edge_nonlinearity():
+    with pytest.raises(ValueError, match="edge_nonlinear to be set"):
+        _build_so2_interaction(edge_nonlinear=None)
+
+
+@pytest.mark.parametrize(
+    ("scalar_act", "tensor_act", "scalar_type", "tensor_type"),
+    [
+        (None, None, ScaledSiLU, ScaledSigmoid),
+        ("tanh", "silu", ScaledTanh, ScaledSiLU),
+    ],
+)
+def test_so2_edge_gate_uses_external_activations(
+    scalar_act,
+    tensor_act,
+    scalar_type,
+    tensor_type,
+):
+    module = _build_so2_interaction(
+        scalar_act=scalar_act,
+        tensor_act=tensor_act,
+    )
+
+    gate = module.rejector.nonlinearity
+    assert not gate.gate_m0
+    assert isinstance(gate.scalar_act, scalar_type)
+    assert isinstance(gate.tensor_act, tensor_type)
+
+
 def test_o2_asymmetric_contraction_defaults_to_scaled_silu():
     module = _build_o2_magnetic_interaction(
         correlation=2,
@@ -2474,7 +2544,7 @@ def test_o2_magnetic_contraction_and_attention_are_o3_equivariant(
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
-    assert module.use_o2_asymmetric_contraction
+    assert module.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is not None
     assert module.rejector.nonlinearity is None
     assert module.rejector.attention is not None

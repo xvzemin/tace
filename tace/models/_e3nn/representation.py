@@ -202,8 +202,8 @@ class Representation(torch.nn.Module):
             "edge_wise_hidden": atomic_basis["edge_wise_hidden"],
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
-            "use_o2_asymmetric_contraction": atomic_basis[
-                "use_o2_asymmetric_contraction"
+            "use_asymmetric_contraction": atomic_basis[
+                "use_asymmetric_contraction"
             ],
             "use_radial_rotary_attention": atomic_basis[
                 "use_radial_rotary_attention"

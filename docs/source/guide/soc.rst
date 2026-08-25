@@ -125,7 +125,7 @@ magnetic interaction, and then converts the result back to global
 
        atomic_basis:
          type: o2_mag
-         use_o2_asymmetric_contraction: false
+         use_asymmetric_contraction: false
          use_radial_rotary_attention: false
 
        universal_embedding:
