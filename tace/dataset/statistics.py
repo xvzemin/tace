@@ -157,6 +157,11 @@ class _RunningMoments:
         mean_square = self.m2 / self.count + self.mean.square()
         return torch.sqrt(torch.clamp(mean_square, min=0.0))
 
+    def sum_squares_or_zeros(self, shape=()):
+        if self.count == 0:
+            return torch.zeros(shape, dtype=torch.float64)
+        return self.m2 + self.count * self.mean.square()
+
 
 def _compute_atomic_energy(
     points: Sequence[ase.Atoms],
@@ -249,7 +254,6 @@ def _compute_statistics(
     force_norm_by_element = [
         [_RunningMoments() for _ in atomic_numbers] for _ in range(num_fidelities)
     ]
-    all_forces_by_element = [_RunningMoments() for _ in atomic_numbers]
     magmoms_norm_by_element = torch.zeros(len(atomic_numbers), dtype=torch.float64)
     has_noncollinear_magmoms = False
 
@@ -377,13 +381,6 @@ def _compute_statistics(
                         force_norm_by_element[level][element_id].update(
                             level_norms[element_mask]
                         )
-                valid_elements = element_idx[valid_force]
-                valid_forces = forces[valid_force]
-                for element_id in valid_elements.unique().tolist():
-                    all_forces_by_element[element_id].update(
-                        valid_forces[valid_elements == element_id]
-                    )
-
     if neighbor_moments.count == 0:
         raise ValueError("Cannot compute statistics from an empty training dataset")
 
@@ -406,14 +403,32 @@ def _compute_statistics(
     recommended_force_element_weights = None
     if "forces" in target_property or "direct_forces" in target_property:
         force_atom_counts = torch.tensor(
-            [moments.count for moments in all_forces_by_element],
+            [
+                sum(
+                    force_by_element[level][element_id].count
+                    for level in range(num_fidelities)
+                )
+                for element_id in range(len(atomic_numbers))
+            ],
             dtype=torch.float64,
         )
-        force_mse = torch.stack(
+        force_square_sums = torch.stack(
             [
-                moments.rms_or_zeros((3,)).square().mean()
-                for moments in all_forces_by_element
+                sum(
+                    (
+                        force_by_element[level][element_id]
+                        .sum_squares_or_zeros((3,))
+                        .sum()
+                    )
+                    for level in range(num_fidelities)
+                )
+                for element_id in range(len(atomic_numbers))
             ]
+        )
+        force_mse = torch.where(
+            force_atom_counts > 0,
+            force_square_sums / (3.0 * force_atom_counts.clamp_min(1.0)),
+            0.0,
         )
         force_atom_counts_by_element = {
             z: int(force_atom_counts[idx]) for idx, z in enumerate(atomic_numbers)
@@ -431,14 +446,15 @@ def _compute_statistics(
             ).tolist()
             for alpha in alphas
         }
+        weight_lines = []
+        for alpha in alphas:
+            weights = recommended_force_element_weights[f"alpha_{alpha:g}"]
+            values = ", ".join(f"{weight:.4f}" for weight in weights)
+            weight_lines.append(f"- alpha={alpha:.2f}: [{values}]")
         logging.info(
             "Recommended force element weights (atomic-number order %s):\n%s",
             atomic_numbers,
-            "\n".join(
-                f"- alpha={alpha:.2f}: "
-                f"[{', '.join(f'{weight:.4f}' for weight in recommended_force_element_weights[f'alpha_{alpha:g}'])}]"
-                for alpha in alphas
-            ),
+            "\n".join(weight_lines),
         )
 
     per_level_stats = []

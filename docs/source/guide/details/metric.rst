@@ -14,16 +14,5 @@ Note that the ``val/synth_metric`` is only supported for the validation, ``train
 Example
 -------
 
-.. code-block:: yaml
-
-    synth_metric: 
-        monitor_metric_name: val/synth_metric # use for variable interpolation
-        # MAE
-        val/energy_mae: 1.0
-        val/energy_per_atom_mae: 5.0
-        val/forces_mae: 5.0
-        val/stress_mae: 2.5
-        # RMSE
-        val/energy_per_atom_rmse: 1.0
-        val/forces_rmse: 1.0
-        val/stress_rmse: 1.0
+.. yaml-config:: ../../../../example/train/tace.yaml
+   :path: synth_metric

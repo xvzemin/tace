@@ -43,36 +43,22 @@ Installation
 Training configuration
 ~~~~~~~~~~~~~~~~~~~~~~
 
-.. code-block:: yaml
+The following blocks are read directly from ``example/train/tace.yaml`` so that
+the tutorial remains synchronized with the supported training configuration.
+Energy must be included in ``loss_property``. Natural parity already contains
+the ``1o`` and ``2e`` representations required by LES.
 
-   loss:
-     loss_property: [energy, forces, stress] # at least energy
+.. yaml-config:: ../../../example/train/tace.yaml
+   :path: loss
 
-   model:
-     config:
-       # Natural parity already contains the 1o and 2e needed by LES.
-       parity: false
+.. yaml-config:: ../../../example/train/tace.yaml
+   :path: model.config.parity
 
-      long_range:
-        les: # for introduction to the arguments, see the official repo: https://github.com/ChengUCB/les
-          enable: false
-          les_arguments:
-            # Latent quantities predicted by TACE and evaluated by LES.
-            use_dipole: false
-            use_quad: false
-            use_induced_charge: false
-            use_induced_dipole: false
-            use_anisotropic_polarizability: false
+.. yaml-config:: ../../../example/train/tace.yaml
+   :path: model.config.long_range.les
 
-            # Ewald backend. See https://github.com/ChengUCB/les for all options.
-            sigma: 1.0
-            dl: 2.0
-            remove_self_interaction: true
-            # null supports mixed boundary conditions but evaluates structures
-            # individually. true/false enables the vectorized fixed-grid path.
-            is_periodic: true # [null, true, false]
-            N_max: 10
-            use_epsilon_r_scaling: false
+Set ``model.config.long_range.les.enable`` to ``true`` and enable only the LES
+latent quantities required by the model.
 
 
 Latent quantities used in TACE-LES

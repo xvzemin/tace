@@ -1,9 +1,19 @@
+import sys
+from pathlib import Path
+
+
+SOURCE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SOURCE_DIR))
+sys.path.insert(0, str(SOURCE_DIR.parents[1]))
+
+
 project = "TACE"
 copyright = "2026, xuzemin"
 author = "xuzemin"
 release = "v0.2.1"
 
 extensions = [
+    "_ext.yaml_config",
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
@@ -60,8 +70,3 @@ html_show_sourcelink = False
 html_static_path = ["_static"]
 # html_logo = "_static/logo.png"
 html_favicon = "_static/favicon.svg"
-
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath("../.."))

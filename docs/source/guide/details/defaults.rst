@@ -4,18 +4,18 @@ defaults
 This example shows how to configure the ``defaults`` section in ``tace.yaml`` to 
 read multiple YAML files from different paths and merge them.
 
-.. code-block:: yaml
-
-    defaults:
-        - _self_                        
-        - config/model@model: e3nn      
-        - config/logger@_here_: wandb
+.. yaml-config:: ../../../../example/train/tace.yaml
+   :path: defaults
 
 Explanation:
 
 - ``_self_``: Start from the current YAML file itself.  
-- ``config/model@model: e3nn``: Load model configuration from ``./config/model/e3nn.yaml`` and add all parameters under the ``model`` field.  
-- ``config/logger@_here_: wandb``: Load logger configuration from ``./config/logger/wandb.yaml`` and merge all parameters directly into the current file.
+- ``config/model@model: e3nn``: After uncommenting it, load model
+  configuration from ``./config/model/e3nn.yaml`` and add all parameters under
+  the ``model`` field.
+- ``config/logger@_here_: wandb``: After uncommenting it, load logger
+  configuration from ``./config/logger/wandb.yaml`` and merge all parameters
+  directly into the current file.
 
 
 

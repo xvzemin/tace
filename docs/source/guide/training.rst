@@ -35,7 +35,10 @@ YAML Configuration
 ~~~~~~~~~~~~~~~~~~
 
 The configuration file of **TACE** is organized into **different fields**.  
-All other parameters must be placed under these fields.  
+All other parameters must be placed under these fields. The examples in the
+detailed pages below are extracted directly from the canonical
+``example/train/tace.yaml`` file, so their values and comments remain
+synchronized with the actual training configuration.
 
   defaults:
   resume_from_model: 
@@ -170,7 +173,6 @@ During training, **TACE** automatically generates several directories and files 
 .. note::
   Automatically reading the statistics is equivalent to running the dataloader once in advance, which may sometimes 
   cause subtle effects, though in most cases these can be ignored.
-
 
 
 
