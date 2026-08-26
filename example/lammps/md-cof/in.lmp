@@ -13,7 +13,7 @@ mass 1 1.00794  # H
 mass 2 12.0107  # C
 mass 3 14.0067  # N
 
-pair_style      mliap unified TACE-v1-OMat24-M.pt-lammps_mliap.pt 0
+pair_style      mliap unified TACE-OAM-7M.pt-lammps_aoti.pt 0
 pair_coeff      * * H C N
 
 neighbor        2.0 bin
