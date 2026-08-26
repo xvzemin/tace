@@ -370,7 +370,8 @@ model:
       return_components: null # [null, list(int)], if not specify, last layer will only return target weight
       num_expert: null
       num_channel_per_expert: null
-      nonlinear: null # [null, silu_bilineargate]
+      nonlinear: null # [null, bilinear_gate]
+      scalar_act: null # [null, silu, scaled_silu]
       use_shared_expert: false
       agnostic: false
 

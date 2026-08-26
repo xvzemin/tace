@@ -277,6 +277,7 @@ class Product(torch.nn.Module):
         l1l2: Union[str, None],
         bias: bool,
         nonlinear: Union[str, None],
+        scalar_act: Union[str, None] = None,
         stochastic_depth: float = 0.0,
         use_first_dropout: bool = False,
         parity: bool = False,
@@ -303,10 +304,9 @@ class Product(torch.nn.Module):
         self.num_elements = num_elements
         self.l1l2 = l1l2
         self.use_bias = bias
-        self.nonlinear_type = None
-        self.nonlinear_act = None
-        if nonlinear is not None:
-            self.nonlinear_act, self.nonlinear_type = nonlinear.split("_")
+        self.nonlinear = None if nonlinear is None else "bilinear_gate"
+        self.use_bilinear_gate = self.nonlinear == "bilinear_gate"
+        self.scalar_act = scalar_act or "silu"
         self.stochastic_depth_p = stochastic_depth
         self.use_first_dropout = use_first_dropout
         self.parity = parity

@@ -31,5 +31,6 @@ model:
       type: o2_mag
 
     product_basis:
-      nonlinear: silu_bilineargate
+      nonlinear: bilinear_gate
+      scalar_act: scaled_silu
       agnostic: true

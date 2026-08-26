@@ -19,5 +19,6 @@ model:
       num_head: 4
 
     product_basis:
-      nonlinear: silu_bilineargate
+      nonlinear: bilinear_gate
+      scalar_act: scaled_silu
       agnostic: true

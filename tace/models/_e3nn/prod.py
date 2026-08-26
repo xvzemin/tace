@@ -10,6 +10,7 @@ import torch
 from e3nn import o3
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear
+from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
 from .fused import uuuTensorProduct
@@ -53,7 +54,6 @@ class CgtpACE(Product):
                 coefs_cls = e3nnMoEElementLinear
                 for_coefs["num_experts"] = self.num_expert
 
-        self.use_bilinear_ace = self.nonlinear_type == "bilineargate"
         self.aces = torch.nn.ModuleList()
         self.coefs = torch.nn.ModuleList()
         if self.use_shared_expert and self.num_expert > 1:
@@ -78,8 +78,9 @@ class CgtpACE(Product):
             )
 
         self.irreps_base = self.irreps_hidden
-        if self.use_bilinear_ace:
+        if self.use_bilinear_gate:
             assert self.correlation == 2
+            self.nonlinearity = ACTIVATION[self.scalar_act]()
             self.irreps_base = self.irreps_hidden + o3.Irreps(
                 [(self.num_hidden_channel, o3.Irrep("0e"))]
             )
@@ -92,8 +93,8 @@ class CgtpACE(Product):
                 irreps_in2=self.irreps_base,
                 irreps_out=self.irreps_tp_out_list[nu - 2],
                 l1l2=self.l1l2,
-                trainable=self.use_bilinear_ace,
-                identical_inputs=nu == 2 and not self.use_bilinear_ace,
+                trainable=self.use_bilinear_gate,
+                identical_inputs=nu == 2 and not self.use_bilinear_gate,
                 warning=self.correlation > 2 and self.layer == 0,
                 use_fused=self.correlation > 2,
             )
@@ -121,7 +122,7 @@ class CgtpACE(Product):
                 )
             product_in1 = this_ace.irreps_out
 
-        if self.use_bilinear_ace:
+        if self.use_bilinear_gate:
             self._ace_gate_slices = []
             gate_offset = 0
             for ace in self.aces:
@@ -179,10 +180,10 @@ class CgtpACE(Product):
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, Union[torch.Tensor, None]]:
         x = self.linear_up(x)
-        if not self.use_bilinear_ace:
+        if not self.use_bilinear_gate:
             return x, None, None
 
-        ace_weights = torch.nn.functional.silu(x[:, : self.num_ace_gate_weights])
+        ace_weights = self.nonlinearity(x[:, : self.num_ace_gate_weights])
         double_features = x[:, self.num_ace_gate_weights :]
 
         node_fields = []
@@ -238,7 +239,7 @@ class CgtpACE(Product):
         )
 
         for nu in range(2, self.correlation + 1):
-            if self.use_bilinear_ace:
+            if self.use_bilinear_gate:
                 corr_feats[nu] = self.aces[nu - 2](
                     corr_feats[nu - 1],
                     base_feats,

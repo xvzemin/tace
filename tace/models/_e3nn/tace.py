@@ -195,9 +195,7 @@ class e3nnTACE(torch.nn.Module):
                     use_alllayer=False,
                     parity=cfg["parity"],
                     irreps_in=[
-                        o3.Irreps(
-                            f"{self.representation.magnetic_basis.num_basis}x0e"
-                        )
+                        o3.Irreps(f"{self.representation.magnetic_basis.num_basis}x0e")
                     ],
                     irreps_out="0e",
                 )[0]
@@ -342,9 +340,7 @@ class e3nnTACE(torch.nn.Module):
                     ]
                 )
             if self.use_one_body_magmoms:
-                one_body_magmoms_basis = from_representation[
-                    "one_body_magmoms_basis"
-                ]
+                one_body_magmoms_basis = from_representation["one_body_magmoms_basis"]
                 if one_body_magmoms_basis is None:
                     raise RuntimeError("one-body magnetic-moment basis is unavailable")
                 e_one_body_magmoms_node = self.one_body_magmoms_readout(

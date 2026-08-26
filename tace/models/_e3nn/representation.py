@@ -200,12 +200,8 @@ class Representation(torch.nn.Module):
             "bias": True,
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
-            "use_asymmetric_contraction": atomic_basis[
-                "use_asymmetric_contraction"
-            ],
-            "use_radial_rotary_attention": atomic_basis[
-                "use_radial_rotary_attention"
-            ],
+            "use_asymmetric_contraction": atomic_basis["use_asymmetric_contraction"],
+            "use_radial_rotary_attention": atomic_basis["use_radial_rotary_attention"],
             "gate_m0": atomic_basis["gate_m0"],
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
@@ -266,6 +262,7 @@ class Representation(torch.nn.Module):
                     num_expert=product_basis["num_expert"],
                     num_channel_per_expert=product_basis["num_channel_per_expert"],
                     nonlinear=product_basis["nonlinear"],
+                    scalar_act=product_basis["scalar_act"],
                     target_irreps=target_irreps,
                     correlation=product_basis["correlation"],
                     l1l2=product_basis["l1l2"],

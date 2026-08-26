@@ -78,6 +78,7 @@ DEFAULT_MODEL_CONFIG = {
         "num_channel_per_expert": None,
         "use_shared_expert": False,
         "nonlinear": None,
+        "scalar_act": None,
         "agnostic": False,
     },
     "readout_emlp": {
@@ -279,7 +280,6 @@ def check_model_config(cfg: dict[str, Any]):
     cfg["atomic_basis"]["edge_nonlinear"] = _to_list(
         cfg["atomic_basis"]["edge_nonlinear"]
     )
-    # cfg['product_basis']['nonlinear'] = _to_list(cfg['product_basis']['nonlinear'])
 
     # if cfg['parity']: assert 'so2' not in cfg['atomic_basis']['type'], "When using SO(2) Interaction, set parity: false"
     components = cfg["product_basis"]["return_components"]
