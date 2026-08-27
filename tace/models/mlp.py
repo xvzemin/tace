@@ -189,3 +189,71 @@ class MLP(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+
+
+# class SphericalBesselPathMLP(torch.nn.Module):
+#     """Generate each CGTP path from its matching spherical-Bessel order."""
+
+#     def __init__(
+#         self,
+#         tensor_product: O3ScatterTensorProduct,
+#         num_shells: int,
+#         edge_feats_channel: int,
+#         radial_mlp: list[int],
+#         bias: bool,
+#         layer_norm: bool,
+#     ) -> None:
+#         super().__init__()
+#         self.num_shells = num_shells
+#         self.num_radial_basis = (tensor_product.irreps_in2.lmax + 1) * num_shells
+#         context_dim = edge_feats_channel - self.num_radial_basis
+
+#         path_indices = [[] for _ in range(tensor_product.irreps_in2.lmax + 1)]
+#         offset = 0
+#         for instruction in tensor_product.tp.instructions:
+#             path_numel = math.prod(instruction.path_shape)
+#             degree = tensor_product.irreps_in2[instruction.i_in2].ir.l
+#             path_indices[degree].extend(range(offset, offset + path_numel))
+#             offset += path_numel
+#         if offset != tensor_product.weight_numel:
+#             raise RuntimeError("Tensor-product path weights were counted incorrectly.")
+
+#         self.degrees = [
+#             degree for degree, indices in enumerate(path_indices) if indices
+#         ]
+#         grouped_indices = [
+#             index for degree in self.degrees for index in path_indices[degree]
+#         ]
+#         self.register_buffer(
+#             "inverse_order",
+#             torch.argsort(torch.tensor(grouped_indices, dtype=torch.long)),
+#             persistent=False,
+#         )
+#         self.mlps = torch.nn.ModuleList(
+#             MLP(
+#                 [num_shells + context_dim] + radial_mlp + [len(path_indices[degree])],
+#                 bias=bias,
+#                 layer_norm=layer_norm,
+#                 act="silu",
+#             )
+#             for degree in self.degrees
+#         )
+
+#     def forward(
+#         self,
+#         edge_radial_basis: torch.Tensor,
+#         edge_feats: torch.Tensor,
+#     ) -> torch.Tensor:
+#         context = edge_feats[:, self.num_radial_basis :]
+#         grouped_weights = []
+#         for degree, mlp in zip(self.degrees, self.mlps):
+#             radial = edge_radial_basis.narrow(
+#                 -1,
+#                 degree * self.num_shells,
+#                 self.num_shells,
+#             )
+#             grouped_weights.append(mlp(torch.cat((radial, context), dim=-1)))
+#         return torch.cat(grouped_weights, dim=-1).index_select(
+#             -1,
+#             self.inverse_order,
+#         )

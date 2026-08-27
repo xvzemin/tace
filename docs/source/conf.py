@@ -10,7 +10,7 @@ sys.path.insert(0, str(SOURCE_DIR.parents[1]))
 project = "TACE"
 copyright = "2026, xuzemin"
 author = "xuzemin"
-release = "v0.2.1"
+release = "v0.2.2"
 
 extensions = [
     "_ext.yaml_config",
