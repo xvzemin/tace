@@ -445,9 +445,9 @@ class uvSO2Interaction(O3CgtpInteraction):
     This interaction block add nonlinearity to the message.
     """
 
-    so2_linear_type = "w1"
     use_temperature = True
-    use_radial_phase = True
+    so2_linear_type = "w1"  # w1: O(3), w1_w1, w1_w2: SO(3)
+    use_radial_phase = True # False: O(3), True:  SO(3)
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()

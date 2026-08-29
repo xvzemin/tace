@@ -1,5 +1,5 @@
 Tensor Atomic/Edge Cluster Expansion
-===============================
+====================================
 .. = - ~ ^ "
 
 ``TACE/TECE`` is designed with physical priors and strong inductive biases 
@@ -14,7 +14,7 @@ Documentation Structure
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents
+   .. :caption: Contents
 
    install/install
    guide/guide
