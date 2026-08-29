@@ -3,12 +3,17 @@
 Tutorials
 =========
 
-EquivariantX (``eqx``) provides PyTorch operators for
-:math:`O(2)` and Cartesian :math:`O(3)`. Each operator stores its input and
-output irreps, validates tensor layouts, enumerates allowed equivariant paths,
-and exposes ordinary :class:`torch.nn.Module` semantics.
+EquivariantX (``eqx``) provides operators for
+:math:`O(2)` and Cartesian :math:`O(3)`. 
 
-The two namespaces are independent:
+.. note::
+
+   **EquivariantX is under active development.**
+
+   APIs, module names, and behaviors may change without notice, and backward
+   compatibility is not guaranteed at this stage.
+
+   A stable release will be published as a separate package.
 
 ``eqx.o2``
    General real :math:`O(2)` irreps and operations, plus the specialized
@@ -18,9 +23,6 @@ The two namespaces are independent:
 ``eqx.co3``
    Complete Cartesian :math:`O(3)` irreps, polar and pseudotensor coupling,
    Cartesian harmonics, and projection onto symmetric traceless tensors.
-
-All learnable operators use real weights and are implemented with PyTorch
-operations, so ordinary autograd supports derivatives of arbitrary order.
 
 Quick start
 -----------

@@ -14,15 +14,9 @@ Documentation Structure
 
 .. toctree::
    :maxdepth: 2
-   .. :caption: Contents
+   :caption: Contents
 
    install/install
    guide/guide
    equivariantx
    model/model
-   
-.. .. toctree::
-..    :maxdepth: 1
-..    :caption: Changelog
-
-..    changelog/changelog
