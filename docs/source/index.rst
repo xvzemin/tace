@@ -1,13 +1,13 @@
-Tensor Atomic Cluster Expansion
+Tensor Atomic/Edge Cluster Expansion
 ===============================
 .. = - ~ ^ "
 
-Tensor Atomic/Edge Cluster Expansion (TACE/TECE)
-------------------------------------------------
+``TACE/TECE`` is designed with physical priors and strong inductive biases 
+to enhance extrapolation capability. 
 
-``TACE/TECE`` is designed with physical priors and strong inductive biases to enhance extrapolation capability. 
-It performs Atomic Cluster Expansion and Edge Cluster Expansion based on spherical tensors 
-or irreducible Cartesian tensors, with an optional attention architecture.
+It performs Atomic Cluster Expansion and Edge Cluster Expansion 
+based on spherical tensors or irreducible Cartesian tensors, 
+with an optional attention architecture.
 
 Documentation Structure
 -----------------------
