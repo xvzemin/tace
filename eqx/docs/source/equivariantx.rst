@@ -24,10 +24,11 @@ EquivariantX (``eqx``) provides operators for
    Complete Cartesian :math:`O(3)` irreps, polar and pseudotensor coupling,
    Cartesian harmonics, and projection onto symmetric traceless tensors.
 
+This documentation assumes that you are already familiar with ``e3nn`` and
+its core concepts and operations.
+
 Quick start
 -----------
-
-Import the symmetry namespace explicitly:
 
 .. code-block:: python
 
@@ -42,18 +43,17 @@ Common tensor conventions
 -------------------------
 
 EquivariantX keeps the representation and channel axes separate. Unless an
-API explicitly says otherwise, a dense feature tensor has shape
+API explicitly says otherwise, the learnable feature has shape
 
 .. math::
 
    (\ldots,\ D_{\mathrm{irreps}},\ C),
 
-where the leading axes are arbitrary broadcastable batch axes,
+where the leading axes are batch axes,
 ``irreps.dim`` is the representation axis, and :math:`C` is the channel
 count. Multiplicity belongs to :class:`Irreps`; channels belong to the layer.
 
-The grouped layout used by local :math:`O(2)` operations stores one tensor per
-irrep group:
+The layout used by local :math:`O(2)` operations:
 
 .. math::
 
@@ -64,8 +64,8 @@ The order of groups and components always follows the corresponding
 real floating-point dtypes. Modules and inputs should be moved to the same
 device and dtype in the usual PyTorch way.
 
-Complete real O(2)
-------------------
+Ral O(2)
+--------
 
 Representations
 ~~~~~~~~~~~~~~~
