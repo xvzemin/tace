@@ -133,7 +133,7 @@ import torch
 from eqx import o2
 
 vectors_2d = torch.randn(32, 2)
-circular_harmonics = o2.CircularHarmonics(m_max=3)
+circular_harmonics = o2.CircularHarmonics(mmax=3)
 edge_attrs = circular_harmonics(vectors_2d)
 
 assert circular_harmonics.irreps_out == o2.Irreps("0e + 1m + 2m + 3m")

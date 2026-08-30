@@ -188,7 +188,7 @@ input vector.
 .. code-block:: python
 
    vectors_2d = torch.randn(128, 2)
-   harmonics = o2.CircularHarmonics(m_max=3, normalize=True)
+   harmonics = o2.CircularHarmonics(mmax=3, normalize=True)
    edge_attrs = harmonics(vectors_2d)
 
    assert harmonics.irreps_out == o2.Irreps("0e + 1m + 2m + 3m")

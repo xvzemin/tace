@@ -364,7 +364,7 @@ def test_o2_irrep_and_irreps_metadata():
     irreps = Irreps("2x0e + 0o + 3x1m + 2m")
     assert irreps.dim == 2 + 1 + 6 + 2
     assert irreps.num_irreps == 7
-    assert irreps.m_max == 2
+    assert irreps.mmax == 2
     assert irreps.expanded() == (
         Irrep("0e"),
         Irrep("0e"),
@@ -453,10 +453,12 @@ def test_o2_direct_sum_representation_uses_complete_layout():
 @pytest.mark.parametrize("normalize", [False, True])
 @pytest.mark.parametrize("reflected", [False, True])
 def test_circular_harmonics_is_native_o2_equivariant(normalize, reflected):
-    module = o2.CircularHarmonics(4, normalize=normalize).to(
+    module = o2.CircularHarmonics(mmax=4, normalize=normalize).to(
         device=DEVICE,
         dtype=DTYPE,
     )
+    assert module.mmax == 4
+    assert "mmax=4" in repr(module)
     vectors = torch.randn(9, 2, dtype=DTYPE, device=DEVICE)
     angle = torch.tensor(0.37, dtype=DTYPE, device=DEVICE)
     input_transform = o2.Irrep("1m").D_from_angle(angle, reflected)
@@ -471,7 +473,7 @@ def test_circular_harmonics_is_native_o2_equivariant(normalize, reflected):
 def test_circular_harmonics_matches_analytic_angles_and_zero():
     angles = torch.tensor([0.2, -0.7], dtype=DTYPE, device=DEVICE)
     vectors = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
-    actual = o2.circular_harmonics(vectors, 3)
+    actual = o2.circular_harmonics(vectors, mmax=3)
     expected = torch.cat(
         [torch.ones_like(angles).unsqueeze(-1)]
         + [
@@ -1997,7 +1999,7 @@ def test_o2_radial_rotary_attention_falls_back_without_positive_m():
         use_radial_rotary_attention=True,
     )
 
-    assert module.rejector.input_frame.local_irreps.m_max == 0
+    assert module.rejector.input_frame.local_irreps.mmax == 0
     assert not module.use_radial_rotary_attention
     assert not module.rejector.use_radial_rotary_attention
     assert module.rejector.attention is None
@@ -2019,7 +2021,7 @@ def test_o2_asymmetric_contraction_falls_back_to_gate_without_positive_m():
         use_asymmetric_contraction=True,
     )
 
-    assert module.rejector.input_frame.local_irreps.m_max == 0
+    assert module.rejector.input_frame.local_irreps.mmax == 0
     assert not module.use_asymmetric_contraction
     assert not module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is None
@@ -2042,7 +2044,7 @@ def test_o2_asymmetric_contraction_and_attention_support_positive_m():
         use_radial_rotary_attention=True,
     )
 
-    assert module.rejector.input_frame.local_irreps.m_max > 0
+    assert module.rejector.input_frame.local_irreps.mmax > 0
     assert module.use_asymmetric_contraction
     assert module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is not None
@@ -2077,8 +2079,8 @@ def test_o2_interaction_mmax_restricts_internal_paths():
         irreps_in=irreps_in,
     )
 
-    assert truncated.rejector.linear_down.irreps_out.m_max == 1
-    assert complete.rejector.linear_down.irreps_out.m_max == 2
+    assert truncated.rejector.linear_down.irreps_out.mmax == 1
+    assert complete.rejector.linear_down.irreps_out.mmax == 2
     assert len(truncated.rejector.linear_down.path) < len(
         complete.rejector.linear_down.path
     )
@@ -2130,10 +2132,10 @@ def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper
     assert module.rejector.active_mmax == 0
     assert module.rejector.input_frame.mmax == 0
     assert module.rejector.output_frame.mmax == 0
-    assert module.rejector.nonlinearity.irreps_out.m_max == 0
-    assert module.rejector.linear_up.irreps_out.m_max == 0
-    assert module.rejector.linear_down.irreps_in.m_max == 0
-    assert module.rejector.linear_down.irreps_out.m_max == 0
+    assert module.rejector.nonlinearity.irreps_out.mmax == 0
+    assert module.rejector.linear_up.irreps_out.mmax == 0
+    assert module.rejector.linear_down.irreps_in.mmax == 0
+    assert module.rejector.linear_down.irreps_out.mmax == 0
     assert module.rejector.irreps_out.lmax == 3
 
     inputs = _o2_magnetic_inputs(module)
@@ -2186,8 +2188,8 @@ def test_o2_interaction_is_globally_o3_equivariant(
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
-    assert module.rejector.input_frame.local_irreps.m_max == mmax
-    assert module.rejector.output_frame.local_irreps.m_max == mmax
+    assert module.rejector.input_frame.local_irreps.mmax == mmax
+    assert module.rejector.output_frame.local_irreps.mmax == mmax
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_interaction(module, inputs)
 

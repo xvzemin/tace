@@ -233,7 +233,7 @@ class Irreps:
         return sum(multiplicity for multiplicity, _ in self)
 
     @property
-    def m_max(self) -> int:
+    def mmax(self) -> int:
         return max((irrep.m for _, irrep in self), default=-1)
 
     def expanded(self) -> Tuple[Irrep, ...]:

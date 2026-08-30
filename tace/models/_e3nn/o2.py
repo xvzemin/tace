@@ -228,7 +228,7 @@ class O2ScatterLinear(torch.nn.Module):
         )
         self.use_radial_rotary_attention = (
             use_radial_rotary_attention
-            and self.input_frame.local_irreps.m_max > 0
+            and self.input_frame.local_irreps.mmax > 0
         )
         if self.use_radial_rotary_attention and (
             self.num_head < 1 or self.num_channel % self.num_head != 0
@@ -252,7 +252,7 @@ class O2ScatterLinear(torch.nn.Module):
         output_irreps = self.output_frame.local_irreps
         self.use_asymmetric_contraction = (
             use_asymmetric_contraction
-            and output_irreps.m_max > 0
+            and output_irreps.mmax > 0
         )
 
         self.node_block_indices = {
