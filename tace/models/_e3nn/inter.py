@@ -599,25 +599,6 @@ class O2Interaction(O3CgtpInteraction):
             raise ValueError("o2 requires edge_nonlinear to be set.")
         if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
             raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
-        self.use_radial_rotary_attention = (
-            self.use_radial_rotary_attention
-            and min(self.irreps_in.lmax, self.mmax) > 0
-        )
-        contraction_input_lmax = self.irreps_in.lmax
-        if self.magnetic_irreps is not None:
-            contraction_input_lmax = max(
-                contraction_input_lmax,
-                self.magnetic_irreps.lmax,
-            )
-        contraction_mmax = min(
-            contraction_input_lmax,
-            self.irreps_out.lmax,
-            self.mmax,
-        )
-        self.use_asymmetric_contraction = (
-            self.use_asymmetric_contraction
-            and contraction_mmax > 0
-        )
 
         scalar_act = self.scalar_act
         if scalar_act is None:

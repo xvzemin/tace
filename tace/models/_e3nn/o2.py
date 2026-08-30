@@ -234,25 +234,20 @@ class O2ScatterLinear(torch.nn.Module):
             self.num_head < 1 or self.num_channel % self.num_head != 0
         ):
             raise ValueError("num_head must divide num_channel.")
-        input_groups = (
-            tuple(self.input_frame.local_irreps)
-            + tuple(self.input_frame.local_irreps)
-        )
+        input_groups = tuple(self.input_frame.local_irreps) * 2
         if self.extra_node_attrs_irreps is not None:
             self.extra_node_attrs_frame = o2.LocalFrame(
                 self.extra_node_attrs_irreps,
                 lmax,
                 self.active_mmax,
             )
-            input_groups += (
-                tuple(self.extra_node_attrs_frame.local_irreps)
-                + tuple(self.extra_node_attrs_frame.local_irreps)
-            )
+            input_groups += tuple(self.extra_node_attrs_frame.local_irreps) * 2
         input_irreps = o2.Irreps(input_groups).regroup()
+
         output_irreps = self.output_frame.local_irreps
         self.use_asymmetric_contraction = (
             use_asymmetric_contraction
-            and output_irreps.mmax > 0
+            and self.irreps_node.lmax > 0
         )
 
         self.node_block_indices = {

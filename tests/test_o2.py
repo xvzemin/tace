@@ -1669,6 +1669,7 @@ def _build_o2_magnetic_interaction(
     angular_max=None,
     edge_lmax=None,
     mmax=None,
+    irreps_in=None,
     nonlinear=None,
     scalar_act=None,
     tensor_act=None,
@@ -1681,6 +1682,7 @@ def _build_o2_magnetic_interaction(
     angular_max = mag_Lmax if angular_max is None else angular_max
     edge_lmax = angular_max if edge_lmax is None else edge_lmax
     mmax = max(angular_max, edge_lmax) if mmax is None else mmax
+    irreps_in = o3.Irreps("2x0e + 2x1o") if irreps_in is None else irreps_in
     module = O2MagneticInteraction(
         layer=0,
         num_layers=1,
@@ -1699,7 +1701,7 @@ def _build_o2_magnetic_interaction(
         magnetic_irreps=o3.Irreps.spherical_harmonics(mag_Lmax, p=1),
         radial_mlp=[8],
         radial_bias=True,
-        irreps_in=o3.Irreps("2x0e + 2x1o"),
+        irreps_in=irreps_in,
         scalar_act=scalar_act,
         tensor_act=tensor_act,
         edge_ace_hidden=edge_ace_hidden,
@@ -2000,7 +2002,7 @@ def test_o2_radial_rotary_attention_falls_back_without_positive_m():
     )
 
     assert module.rejector.input_frame.local_irreps.mmax == 0
-    assert not module.use_radial_rotary_attention
+    assert module.use_radial_rotary_attention
     assert not module.rejector.use_radial_rotary_attention
     assert module.rejector.attention is None
     assert isinstance(module.rejector.nonlinearity, Gate)
@@ -2022,7 +2024,7 @@ def test_o2_asymmetric_contraction_falls_back_to_gate_without_positive_m():
     )
 
     assert module.rejector.input_frame.local_irreps.mmax == 0
-    assert not module.use_asymmetric_contraction
+    assert module.use_asymmetric_contraction
     assert not module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is None
     assert isinstance(module.rejector.nonlinearity, Gate)
@@ -2034,6 +2036,27 @@ def test_o2_asymmetric_contraction_falls_back_to_gate_without_positive_m():
 
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_interaction(module, inputs)
+    assert output.isfinite().all()
+
+
+def test_o2_magnetic_asymmetric_contraction_requires_tensor_node_input():
+    module = _build_o2_magnetic_interaction(
+        angular_max=2,
+        mmax=2,
+        irreps_in=o3.Irreps("2x0e"),
+        correlation=2,
+        use_asymmetric_contraction=True,
+    )
+
+    assert module.irreps_in.lmax == 0
+    assert module.rejector.output_frame.local_irreps.mmax > 0
+    assert module.use_asymmetric_contraction
+    assert not module.rejector.use_asymmetric_contraction
+    assert module.rejector.asymmetric_contraction is None
+    assert isinstance(module.rejector.nonlinearity, Gate)
+
+    inputs = _o2_magnetic_inputs(module)
+    output = _evaluate_o2_magnetic_interaction(module, inputs)
     assert output.isfinite().all()
 
 
