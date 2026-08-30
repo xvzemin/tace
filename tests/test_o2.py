@@ -88,8 +88,8 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     assert not representation.use_legacy_so2
     assert representation.so2_angular_basis.lmax == common_lmax
     rejector = representation.interactions[0].rejector
-    assert rejector.input_frame.lmax == common_lmax
-    assert rejector.output_frame.lmax == common_lmax
+    assert rejector.local_frame_in.lmax == common_lmax
+    assert rejector.local_frame_out.lmax == common_lmax
 
 
 def test_o2_does_not_import_other_tace_model_modules():
@@ -1883,6 +1883,16 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
     assert issubclass(O2MagneticInteraction, O2Interaction)
     assert type(module.rejector) is O2ScatterLinear
     assert not isinstance(module.rejector, O2MagneticScatterLinear)
+    assert module.rejector.irreps_in == module.irreps_in
+    assert module.rejector.irreps_out == module.irreps_out
+    assert (
+        module.rejector.local_irreps_in
+        == module.rejector.linear_up.irreps_in
+    )
+    assert (
+        module.rejector.local_irreps_out
+        == module.rejector.linear_down.irreps_out
+    )
     assert module.edge_info.dims[0] == module.edge_feats_channel
 
     inputs = _o2_magnetic_inputs(module)
@@ -2001,7 +2011,7 @@ def test_o2_radial_rotary_attention_falls_back_without_positive_m():
         use_radial_rotary_attention=True,
     )
 
-    assert module.rejector.input_frame.local_irreps.mmax == 0
+    assert module.rejector.local_frame_in.local_irreps.mmax == 0
     assert module.use_radial_rotary_attention
     assert not module.rejector.use_radial_rotary_attention
     assert module.rejector.attention is None
@@ -2023,7 +2033,7 @@ def test_o2_asymmetric_contraction_falls_back_to_gate_without_positive_m():
         use_asymmetric_contraction=True,
     )
 
-    assert module.rejector.input_frame.local_irreps.mmax == 0
+    assert module.rejector.local_frame_in.local_irreps.mmax == 0
     assert module.use_asymmetric_contraction
     assert not module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is None
@@ -2049,7 +2059,7 @@ def test_o2_magnetic_asymmetric_contraction_requires_tensor_node_input():
     )
 
     assert module.irreps_in.lmax == 0
-    assert module.rejector.output_frame.local_irreps.mmax > 0
+    assert module.rejector.local_frame_out.local_irreps.mmax > 0
     assert module.use_asymmetric_contraction
     assert not module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is None
@@ -2067,7 +2077,7 @@ def test_o2_asymmetric_contraction_and_attention_support_positive_m():
         use_radial_rotary_attention=True,
     )
 
-    assert module.rejector.input_frame.local_irreps.mmax > 0
+    assert module.rejector.local_frame_in.local_irreps.mmax > 0
     assert module.use_asymmetric_contraction
     assert module.rejector.use_asymmetric_contraction
     assert module.rejector.asymmetric_contraction is not None
@@ -2139,8 +2149,8 @@ def test_o2_interaction_allows_Lmax_and_lmax_to_differ(magnetic, Lmax, lmax):
     assert module.Lmax == Lmax
     assert module.lmax == lmax
     assert module.rejector.lmax == common_lmax
-    assert module.rejector.input_frame.lmax == common_lmax
-    assert module.rejector.output_frame.lmax == common_lmax
+    assert module.rejector.local_frame_in.lmax == common_lmax
+    assert module.rejector.local_frame_out.lmax == common_lmax
     assert output.shape == (inputs[0].size(0), module.rejector.irreps_out.dim)
 
 
@@ -2152,9 +2162,9 @@ def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper
         irreps_in=o3.Irreps("2x0e"),
     )
 
-    assert module.rejector.active_mmax == 0
-    assert module.rejector.input_frame.mmax == 0
-    assert module.rejector.output_frame.mmax == 0
+    assert module.rejector.effective_mmax == 0
+    assert module.rejector.local_frame_in.mmax == 0
+    assert module.rejector.local_frame_out.mmax == 0
     assert module.rejector.nonlinearity.irreps_out.mmax == 0
     assert module.rejector.linear_up.irreps_out.mmax == 0
     assert module.rejector.linear_down.irreps_in.mmax == 0
@@ -2211,8 +2221,8 @@ def test_o2_interaction_is_globally_o3_equivariant(
         use_asymmetric_contraction=True,
         use_radial_rotary_attention=True,
     )
-    assert module.rejector.input_frame.local_irreps.mmax == mmax
-    assert module.rejector.output_frame.local_irreps.mmax == mmax
+    assert module.rejector.local_frame_in.local_irreps.mmax == mmax
+    assert module.rejector.local_frame_out.local_irreps.mmax == mmax
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_interaction(module, inputs)
 
@@ -2306,18 +2316,16 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     assert module.rejector.edge_ace_hidden == 3
     assert contraction.channels == 3
     assert module.rejector.linear_up.channels_in == module.num_channel
-    assert module.rejector.linear_up.channels_out == module.correlation * 3
-    assert all(
-        multiplicity == 1
-        for multiplicity, _ in module.rejector.linear_up.irreps_out
+    assert module.rejector.linear_up.channels_out == 1
+    projected_channels = module.correlation * 3
+    assert module.rejector.linear_up.irreps_out == (
+        contraction.irreps_in * projected_channels
+        + o2.Irreps("0e") * contraction.weight_numel
+    ).regroup()
+    assert module.rejector.linear_up.irreps_out.count("0e") == (
+        projected_channels + contraction.weight_numel
     )
-    assert module.rejector.linear_up.irreps_out == contraction.irreps_in
-    assert module.rejector.linear_coefs.irreps_out == o2.Irreps("0e")
-    assert module.rejector.linear_coefs.channels_in == module.num_channel
-    assert (
-        module.rejector.linear_coefs.channels_out
-        == contraction.weight_numel
-    )
+    assert not hasattr(module.rejector, "linear_coefs")
     assert module.rejector.linear_down.channels_in == 3
     assert module.rejector.linear_down.channels_out == module.num_channel
     assert all(multiplicity == 1 for multiplicity, _ in contraction.irreps_in)
@@ -2327,17 +2335,14 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     assert module.rejector.linear_down.irreps_in == contraction.irreps_out
     assert (
         module.rejector.linear_down.irreps_out
-        == module.rejector.output_frame.local_irreps
+        == module.rejector.local_frame_out.local_irreps
     )
     assert not hasattr(module.rejector, "projection_irreps")
     assert not tuple(module.rejector.asymmetric_contraction.parameters())
 
     inputs = _o2_magnetic_inputs(module)
     output = _evaluate_o2_magnetic_interaction(module, inputs)
-    parameters = (
-        *module.rejector.linear_up.parameters(),
-        *module.rejector.linear_coefs.parameters(),
-    )
+    parameters = tuple(module.rejector.linear_up.parameters())
     gradients = torch.autograd.grad(
         output.square().sum(),
         (inputs[0], inputs[2], inputs[-1], *parameters),
@@ -2367,7 +2372,7 @@ def test_o2_magnetic_interaction_uses_real_radial_rotary_attention():
         device=DEVICE,
         dtype=DTYPE,
     )
-    radial_projection = module.rejector.attention.radial_scale_shift
+    radial_projection = module.rejector.attention.radial_proj
     assert isinstance(radial_projection, torchLinear)
     assert radial_projection.out_features == 2 * module.num_head
     assert torch.count_nonzero(radial_projection.weight) == 0

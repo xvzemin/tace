@@ -239,7 +239,8 @@ class LocalFrame(torch.nn.Module):
         return (
             f"{self.__class__.__name__}({self.global_irreps} -> "
             f"{self.channels * self.local_irreps})"
-            f"(mmax={self.mmax}, layout={self.layout!r})"
+            f"(mmax={self.mmax})"
+            # f"(mmax={self.mmax}, layout={self.layout!r})"
         )
 
     def _wigner_mmax(self, wigner_inv: torch.Tensor) -> int:
