@@ -40,7 +40,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             channels,
             channels,
             path_mode="uv",
-            bias=False,
+            bias=True,
         )
         self.k_proj = o2.Linear(
             self.irreps,
@@ -48,11 +48,12 @@ class RadialRotaryComplexAttention(torch.nn.Module):
             channels,
             channels,
             path_mode="uv",
-            bias=False,
+            bias=True,
         )
         self.radial_proj = torchLinear(
             num_radial_basis,
             2 * num_head,
+            bias=True,
         )
         torch.nn.init.zeros_(self.radial_proj.weight)
         torch.nn.init.zeros_(self.radial_proj.bias)
@@ -267,7 +268,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 num_channel,
                 1,
                 path_mode="uv",
-                bias=False,
+                bias=True,
             )
         else:
             self.asymmetric_contraction = None
@@ -295,7 +296,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 projection_irreps,
                 num_channel,
                 path_mode="uv",
-                bias=False,
+                bias=True,
             )
         if self.asymmetric_contraction is not None:
             nonlinear_irreps_out = self.asymmetric_contraction.irreps_out
@@ -314,7 +315,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             else num_channel,
             num_channel,
             path_mode="uv",
-            bias=False,
+            bias=True,
         )
         self.weight_numel = self.linear_up.irreps_in.num_irreps * num_channel
 
