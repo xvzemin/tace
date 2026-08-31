@@ -4,20 +4,14 @@ EQX is a library for equivariant PyTorch operators. Its current
 focus is real O(2) representation theory, conversion between global
 O(3) and local O(2) features, and Cartesian O(3) operators.
 
-```markdown
 > [!WARNING]
 > **EquivariantX is under active development.**
 >
 > APIs, module names, and behaviors may change without notice, and backward compatibility is not guaranteed at this stage.
 >
 > A stable release will be published as a separate package.
-```
 
-
-```markdown
 See [EquivariantX](https://tace.readthedocs.io/en/latest/equivariantx.html) for a tutorial.
-```
-
 
 ## Citation
 

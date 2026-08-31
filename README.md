@@ -13,34 +13,34 @@ or irreducible Cartesian tensors, with an optional attention architecture.
 
 <img src="fig/cartesian_arch.png" width="100%" align="center">
 
-$$
+```math
 (A\otimes_k^\delta B)_{\boldsymbol i\boldsymbol j}
 =\frac{1}{\sqrt{3^k}}\sum_{\boldsymbol a}
 A_{\boldsymbol i\boldsymbol a}B_{\boldsymbol a\boldsymbol j},
 \qquad l_3=l_1+l_2-2k,
-$$
+````
 
-$$
+```math
 (A\otimes_k^\epsilon B)_{\boldsymbol i w\boldsymbol j}
 =\frac{1}{\sqrt{2}}\frac{1}{\sqrt{3^k}}\sum_{\boldsymbol a,u,v}
 A_{\boldsymbol i u\boldsymbol a}\epsilon_{wuv}
 B_{\boldsymbol a v\boldsymbol j},
 \qquad l_3=l_1+l_2-2k-1.
-$$
+````
 
 ## O(3) Spherical/Wigner-6j/O(2) Architecture
 
 The SO(2) implementation in TACE will be gradually replaced by an O(2) formulation to ensure complete parity support for O(3). Backward compatibility will be maintained for the SO(2) implementation, while backward compatibility for the O(2) implementation is not currently guaranteed.
 
 
-$$
-(l,p)_{O(3)}
-\downarrow O(2)
+```math
+\left.(l,p)_{O(3)}\right\downarrow_{O(2)}
 =
 \underbrace{\bigl(0,p(-1)^l\bigr)}_{\text{1D},\,m=0}
 \oplus
 \underbrace{\bigoplus_{m=1}^{l}(m,0)}_{\text{2D},\,m>0}.
-$$
+````
+
 
 ## Documentation
 
