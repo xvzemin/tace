@@ -62,7 +62,7 @@ def _cg_product(
         difference_imag = -difference_imag
     if irrep_out.m > 0:
         return torch.stack((difference_real, difference_imag), dim=-3) * scale
-    if irrep_out == Irrep("0e"):
+    if irrep_out.is_even_scalar():
         return difference_real.unsqueeze(-3) * scale
     return difference_imag.unsqueeze(-3) * scale
 
@@ -114,7 +114,7 @@ def _cg_product_uuu(
         difference_imag = -difference_imag
     if irrep_out.m > 0:
         return torch.stack((difference_real, difference_imag), dim=-2) * scale
-    if irrep_out == Irrep("0e"):
+    if irrep_out.is_even_scalar():
         return difference_real.unsqueeze(-2) * scale
     return difference_imag.unsqueeze(-2) * scale
 
@@ -180,16 +180,16 @@ class TensorProduct(torch.nn.Module):
         self.internal_weights = bool(internal_weights)
         self.path_norm = bool(path_norm)
 
-        inputs1 = self.irreps_in1.expanded()
-        inputs2 = self.irreps_in2.expanded()
-        outputs = self.irreps_out.expanded()
+        input1_irrep_list = self.irreps_in1.expanded()
+        input2_irrep_list = self.irreps_in2.expanded()
+        output_irrep_list = self.irreps_out.expanded()
         if path is None:
             paths = tuple(
                 (output_index, input1_index, input2_index)
-                for output_index, output in enumerate(outputs)
-                for input1_index, input1_irrep in enumerate(inputs1)
-                for input2_index, input2_irrep in enumerate(inputs2)
-                if output in input1_irrep * input2_irrep
+                for output_index, output_ir in enumerate(output_irrep_list)
+                for input1_index, input1_ir in enumerate(input1_irrep_list)
+                for input2_index, input2_ir in enumerate(input2_irrep_list)
+                if output_ir in input1_ir * input2_ir
             )
         else:
             paths = tuple(path)
@@ -204,19 +204,20 @@ class TensorProduct(torch.nn.Module):
                 not isinstance(index, int) or isinstance(index, bool) for index in item
             ):
                 raise TypeError("TensorProduct path indices must be integers.")
-            if not 0 <= output_index < len(outputs):
+            if not 0 <= output_index < len(output_irrep_list):
                 raise ValueError(f"Invalid TensorProduct output index: {output_index}.")
-            if not 0 <= input1_index < len(inputs1):
+            if not 0 <= input1_index < len(input1_irrep_list):
                 raise ValueError(f"Invalid TensorProduct input1 index: {input1_index}.")
-            if not 0 <= input2_index < len(inputs2):
+            if not 0 <= input2_index < len(input2_irrep_list):
                 raise ValueError(f"Invalid TensorProduct input2 index: {input2_index}.")
-            if outputs[output_index] not in (
-                inputs1[input1_index] * inputs2[input2_index]
+            if output_irrep_list[output_index] not in (
+                input1_irrep_list[input1_index] * input2_irrep_list[input2_index]
             ):
                 raise ValueError(
                     "Illegal complete O(2) TensorProduct path: "
-                    f"{inputs1[input1_index]} x {inputs2[input2_index]} "
-                    f"-> {outputs[output_index]}."
+                    f"{input1_irrep_list[input1_index]} x "
+                    f"{input2_irrep_list[input2_index]} "
+                    f"-> {output_irrep_list[output_index]}."
                 )
         self.path = paths
 
@@ -230,7 +231,7 @@ class TensorProduct(torch.nn.Module):
             torch.tensor(scales, dtype=torch.get_default_dtype()),
             persistent=False,
         )
-        paths_by_output = [[] for _ in outputs]
+        paths_by_output = [[] for _ in output_irrep_list]
         for path_index, (output_index, input1_index, input2_index) in enumerate(paths):
             paths_by_output[output_index].append(
                 (path_index, input1_index, input2_index)
@@ -321,12 +322,12 @@ class TensorProduct(torch.nn.Module):
         input1 = input1.expand(leading_shape + expected1)
         input2 = input2.expand(leading_shape + expected2)
 
-        inputs1 = self.irreps_in1.expanded()
-        inputs2 = self.irreps_in2.expanded()
-        outputs = self.irreps_out.expanded()
+        input1_irrep_list = self.irreps_in1.expanded()
+        input2_irrep_list = self.irreps_in2.expanded()
+        output_irrep_list = self.irreps_out.expanded()
         zero_dependency = input1.sum() * 0 + input2.sum() * 0 + weight.sum() * 0
         output_blocks = []
-        for output_index, output_irrep in enumerate(outputs):
+        for output_index, output_ir in enumerate(output_irrep_list):
             contributions = []
             for path_index, input1_index, input2_index in self._paths_by_output[
                 output_index
@@ -334,10 +335,10 @@ class TensorProduct(torch.nn.Module):
                 if self.path_mode == "uuu":
                     contribution = _cg_product_uuu(
                         input1[..., self._input1_slices[input1_index], :],
-                        inputs1[input1_index],
+                        input1_irrep_list[input1_index],
                         input2[..., self._input2_slices[input2_index], :],
-                        inputs2[input2_index],
-                        output_irrep,
+                        input2_irrep_list[input2_index],
+                        output_ir,
                     )
                     contribution = contribution * weight[..., path_index, :].unsqueeze(
                         -2
@@ -345,10 +346,10 @@ class TensorProduct(torch.nn.Module):
                 else:
                     product = _cg_product(
                         input1[..., self._input1_slices[input1_index], :],
-                        inputs1[input1_index],
+                        input1_irrep_list[input1_index],
                         input2[..., self._input2_slices[input2_index], :],
-                        inputs2[input2_index],
-                        output_irrep,
+                        input2_irrep_list[input2_index],
+                        output_ir,
                     )
                     if self.path_mode == "u1u":
                         contribution = product.squeeze(-1)
@@ -366,7 +367,7 @@ class TensorProduct(torch.nn.Module):
                 output_block = sum(contributions[1:], contributions[0])
             else:
                 output_block = input1.new_zeros(
-                    leading_shape + (output_irrep.dim, self.channels_out)
+                    leading_shape + (output_ir.dim, self.channels_out)
                 )
                 output_block = output_block + zero_dependency
             output_blocks.append(output_block)

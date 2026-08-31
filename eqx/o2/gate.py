@@ -72,20 +72,16 @@ class Gate(torch.nn.Module):
             raise TypeError("act_0o must be a torch.nn.Module or None.")
 
         self.irreps_out = Irreps(irreps_out)
-        even_groups = []
-        odd_groups = []
-        gated_groups = []
-        for multiplicity, irrep in self.irreps_out:
-            if irrep == Irrep("0e"):
-                even_groups.append((multiplicity, irrep))
-            elif irrep == Irrep("0o") and act_0o is not None:
-                odd_groups.append((multiplicity, irrep))
-            else:
-                gated_groups.append((multiplicity, irrep))
-
-        self.irreps_0e = Irreps(even_groups).regroup()
-        self.irreps_0o = Irreps(odd_groups).regroup()
-        self.irreps_gated = Irreps(gated_groups)
+        self.irreps_0e = self.irreps_out.filter(keep="0e").regroup()
+        self.irreps_0o = (
+            self.irreps_out.filter(keep="0o").regroup()
+            if act_0o is not None
+            else Irreps()
+        )
+        direct_irrep_list = [Irrep("0e")]
+        if act_0o is not None:
+            direct_irrep_list.append(Irrep("0o"))
+        self.irreps_gated = self.irreps_out.filter(drop=direct_irrep_list)
         self.num_gates = self.irreps_gated.num_irreps
         self.irreps_gates = (
             Irreps([(self.num_gates, Irrep("0e"))]) if self.num_gates > 0 else Irreps()
@@ -110,12 +106,12 @@ class Gate(torch.nn.Module):
         gated_offset = 0
         odd_start = self.irreps_0e.dim
         gated_start = odd_start + self.irreps_0o.dim
-        for multiplicity, irrep in self.irreps_out:
-            width = multiplicity * irrep.dim
-            if irrep == Irrep("0e"):
+        for mul, ir in self.irreps_out:
+            width = mul * ir.dim
+            if ir.is_even_scalar():
                 source_offset = even_offset
                 even_offset += width
-            elif irrep == Irrep("0o") and act_0o is not None:
+            elif ir.is_odd_scalar() and act_0o is not None:
                 source_offset = odd_start + odd_offset
                 odd_offset += width
             else:
@@ -155,11 +151,11 @@ class Gate(torch.nn.Module):
 
         if self.num_gates > 0:
             gate_components = []
-            for gate_index, irrep in enumerate(self.irreps_gated.expanded()):
+            for gate_index, ir in enumerate(self.irreps_gated.expanded()):
                 gate_components.append(
                     gates[..., gate_index : gate_index + 1, :].expand(
                         *gates.shape[:-2],
-                        irrep.dim,
+                        ir.dim,
                         gates.shape[-1],
                     )
                 )
@@ -185,7 +181,7 @@ class Gate(torch.nn.Module):
             raise ValueError("Invalid grouped Gate channel width.")
         channels = input_blocks[0].shape[-1] // first_multiplicity
         input_by_irrep = {
-            irrep: block for (_, irrep), block in zip(self.irreps_in, input_blocks)
+            ir: block for (mul, ir), block in zip(self.irreps_in, input_blocks)
         }
         even_block = input_by_irrep.get(Irrep("0e"))
         even_width = self.irreps_0e.num_irreps * channels
@@ -204,14 +200,14 @@ class Gate(torch.nn.Module):
         gate_block = self.act_lm(even_block[..., even_width:])
         outputs = []
         gate_offset = 0
-        for multiplicity, irrep in self.irreps_out:
-            width = multiplicity * channels
-            if irrep == Irrep("0e"):
+        for mul, ir in self.irreps_out:
+            width = mul * channels
+            if ir.is_even_scalar():
                 outputs.append(even_output)
-            elif irrep == Irrep("0o") and self.act_0o is not None:
-                outputs.append(self.act_0o(input_by_irrep[irrep]))
+            elif ir.is_odd_scalar() and self.act_0o is not None:
+                outputs.append(self.act_0o(input_by_irrep[ir]))
             else:
-                input_block = input_by_irrep[irrep]
+                input_block = input_by_irrep[ir]
                 gate = gate_block[..., gate_offset : gate_offset + width]
                 outputs.append(input_block * gate)
                 gate_offset += width

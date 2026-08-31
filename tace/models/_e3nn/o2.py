@@ -13,6 +13,7 @@ from eqx import o2
 
 from tace.utils.torch_scatter import scatter_sum
 
+from ..layout import LayoutTransform
 from ..linear import torchLinear
 from ..softmax import GraphSoftmax
 
@@ -199,6 +200,14 @@ class O2ScatterTensorProduct(torch.nn.Module):
         
         self.local_frame_in = o2.LocalFrame(self.irreps_in, self.lmax, self.mmax)
         self.local_frame_out = o2.LocalFrame(self.irreps_out, self.lmax, self.mmax)
+        self.reshape_in = LayoutTransform(self.irreps_in)
+        self.reshape_out = LayoutTransform(self.irreps_out)
+        node_local_irreps_in = o2.Irreps(
+            [(mul // num_channel, ir) for mul, ir in self.local_frame_in.local_irreps]
+        )
+        node_local_irreps_out = o2.Irreps(
+            [(mul // num_channel, ir) for mul, ir in self.local_frame_out.local_irreps]
+        )
 
         self.use_radial_rotary_attention = (
             use_radial_rotary_attention
@@ -211,8 +220,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
 
         if self.extra_node_attrs_irreps is not None:
             self.local_frame_extra = o2.LocalFrame(self.extra_node_attrs_irreps, self.lmax, self.mmax)
+            self.reshape_extra = LayoutTransform(self.extra_node_attrs_irreps)
         self.local_irreps_in = o2.Irreps(
-            tuple(self.local_frame_in.local_irreps) * 2
+            tuple(node_local_irreps_in) * 2
             + (
                 tuple(self.local_frame_extra.local_irreps) * 2
                 if self.extra_node_attrs_irreps is not None
@@ -220,7 +230,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
         ).regroup()
 
-        self.local_irreps_out = self.local_frame_out.local_irreps
+        self.local_irreps_out = node_local_irreps_out
         self.use_asymmetric_contraction = (
             use_asymmetric_contraction
             and self.irreps_in.lmax > 0
@@ -229,7 +239,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.node_block_indices = {
             irrep: index
             for index, (_, irrep) in enumerate(
-                self.local_frame_in.local_irreps
+                node_local_irreps_in
             )
         }
         self.extra_node_attrs_block_indices = (
@@ -246,7 +256,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if self.use_asymmetric_contraction:
             self.nonlinearity = None
             contraction_irreps = o2.Irreps(
-                [irrep for _, irrep in self.local_irreps_out]
+                [ir for mul, ir in self.local_irreps_out]
             )
             self.asymmetric_contraction = o2.AsymmetricContraction(
                 contraction_irreps,
@@ -272,12 +282,8 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
         else:
             self.asymmetric_contraction = None
-            hidden_irreps = o2.Irreps(
-                [
-                    (multiplicity, irrep)
-                    for multiplicity, irrep in self.local_irreps_out
-                    if self.local_irreps_in.count(irrep) > 0
-                ]
+            hidden_irreps = self.local_irreps_out.filter(
+                keep=lambda mul_ir: self.local_irreps_in.count(mul_ir.ir) > 0
             )
             self.nonlinearity = o2.Gate(
                 num_channel * hidden_irreps,
@@ -287,8 +293,8 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
             projection_irreps = o2.Irreps(
                 [
-                    (multiplicity // num_channel, irrep)
-                    for multiplicity, irrep in self.nonlinearity.irreps_in
+                    (mul // num_channel, ir)
+                    for mul, ir in self.nonlinearity.irreps_in
                 ]
             )
             self.linear_up = o2.Linear(
@@ -303,8 +309,8 @@ class O2ScatterTensorProduct(torch.nn.Module):
         else:
             nonlinear_irreps_out = o2.Irreps(
                 [
-                    (multiplicity // num_channel, irrep)
-                    for multiplicity, irrep in self.nonlinearity.irreps_out
+                    (mul // num_channel, ir)
+                    for mul, ir in self.nonlinearity.irreps_out
                 ]
             )
         self.linear_down = o2.Linear(
@@ -321,7 +327,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
 
         if self.use_radial_rotary_attention:
             self.attention = RadialRotaryComplexAttention(
-                self.local_frame_in.local_irreps,
+                node_local_irreps_in,
                 self.linear_down.irreps_out,
                 num_channel,
                 self.num_head,
@@ -339,12 +345,12 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if len(blocks) != len(irreps):
             raise ValueError("Expected one block per O(2) irrep group.")
         outputs = []
-        for block, (multiplicity, irrep) in zip(blocks, irreps):
+        for block, (mul, ir) in zip(blocks, irreps):
             leading_shape = block.shape[:-2]
             output = block.reshape(
                 *leading_shape,
-                irrep.dim,
-                multiplicity,
+                ir.dim,
+                mul,
                 channels,
             )
             output = output.permute(
@@ -354,7 +360,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 len(leading_shape) + 2,
             )
             outputs.append(
-                output.reshape(*leading_shape, multiplicity * irrep.dim, channels)
+                output.reshape(*leading_shape, mul * ir.dim, channels)
             )
         return torch.cat(outputs, dim=-2)
 
@@ -366,13 +372,11 @@ class O2ScatterTensorProduct(torch.nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         leading_shape = input.shape[:-2]
         outputs = []
-        offset = 0
-        for multiplicity, irrep in irreps:
-            width = multiplicity * irrep.dim
-            block = input[..., offset : offset + width, :].reshape(
+        for (mul, ir), ir_slice in zip(irreps, irreps.slices()):
+            block = input[..., ir_slice, :].reshape(
                 *leading_shape,
-                multiplicity,
-                irrep.dim,
+                mul,
+                ir.dim,
                 channels,
             )
             block = block.permute(
@@ -382,10 +386,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 len(leading_shape) + 2,
             )
             outputs.append(
-                block.reshape(*leading_shape, irrep.dim, multiplicity * channels)
+                block.reshape(*leading_shape, ir.dim, mul * channels)
             )
-            offset += width
-        if offset != input.size(-2):
+        if irreps.dim != input.size(-2):
             raise ValueError("Invalid dense O(2) representation size.")
         return tuple(outputs)
 
@@ -399,15 +402,15 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if len(projected_blocks) != len(self.asymmetric_contraction.irreps_in):
             raise ValueError("Expected one projected block per contraction irrep.")
         contraction_inputs = [[] for _ in range(self.correlation)]
-        for (multiplicity, _), block in zip(
+        for (mul, ir), block in zip(
             self.asymmetric_contraction.irreps_in,
             projected_blocks,
         ):
             for correlation_index in range(self.correlation):
                 start = (
-                    correlation_index * multiplicity * self.edge_ace_hidden
+                    correlation_index * mul * self.edge_ace_hidden
                 )
-                stop = start + multiplicity * self.edge_ace_hidden
+                stop = start + mul * self.edge_ace_hidden
                 contraction_inputs[correlation_index].append(
                     block[..., start:stop]
                 )
@@ -444,19 +447,46 @@ class O2ScatterTensorProduct(torch.nn.Module):
             raise ValueError("O2 convolution requires edge_cutoff.")
 
         source, target = edge_index
-        source_node_blocks = self.local_frame_in.to_local(
-            node_feats[source],
+        num_nodes = node_feats.size(0)
+        node_feats = self.reshape_in(node_feats)
+        paired_node_blocks = self.local_frame_in.to_local(
+            torch.cat((node_feats[source], node_feats[target]), dim=-1),
             wigner,
         )
-        target_node_blocks = self.local_frame_in.to_local(
-            node_feats[target],
-            wigner,
-        )
+        source_node_blocks = []
+        target_node_blocks = []
+        for block, (mul, ir) in zip(
+            paired_node_blocks,
+            self.local_frame_in.local_irreps,
+        ):
+            block = block.reshape(
+                block.size(0),
+                ir.dim,
+                mul // self.num_channel,
+                2 * self.num_channel,
+            )
+            source_node_blocks.append(
+                block[..., : self.num_channel].reshape(
+                    block.size(0),
+                    ir.dim,
+                    mul,
+                )
+            )
+            target_node_blocks.append(
+                block[..., self.num_channel :].reshape(
+                    block.size(0),
+                    ir.dim,
+                    mul,
+                )
+            )
+        source_node_blocks = tuple(source_node_blocks)
+        target_node_blocks = tuple(target_node_blocks)
         source_extra_blocks = None
         target_extra_blocks = None
         if self.extra_node_attrs_irreps is not None:
             if extra_node_attrs is None:
                 raise ValueError("O2 convolution requires extra_node_attrs.")
+            extra_node_attrs = self.reshape_extra(extra_node_attrs)
             source_extra_blocks = self.local_frame_extra.to_local(
                 extra_node_attrs[source],
                 wigner,
@@ -479,13 +509,13 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
 
         input_blocks = []
-        for _, irrep in self.linear_up.irreps_in:
+        for mul, ir in self.linear_up.irreps_in:
             parts = []
-            node_index = self.node_block_indices.get(irrep)
+            node_index = self.node_block_indices.get(ir)
             if node_index is not None:
                 parts.append(target_node_blocks[node_index])
                 parts.append(source_node_blocks[node_index])
-            extra_index = self.extra_node_attrs_block_indices.get(irrep)
+            extra_index = self.extra_node_attrs_block_indices.get(ir)
             if extra_index is not None:
                 parts.append(target_extra_blocks[extra_index])
                 parts.append(source_extra_blocks[extra_index])
@@ -495,11 +525,11 @@ class O2ScatterTensorProduct(torch.nn.Module):
         radial_weights = radial_weights.reshape(radial_weights.size(0), -1)
         weighted_blocks = []
         offset = 0
-        for (multiplicity, _), input_block in zip(
+        for (mul, ir), input_block in zip(
             self.linear_up.irreps_in,
             input_blocks,
         ):
-            width = multiplicity * self.num_channel
+            width = mul * self.num_channel
             weight = radial_weights[:, offset : offset + width].unsqueeze(-2)
             weighted_blocks.append(input_block * weight)
             offset += width
@@ -545,12 +575,14 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
         messages = self.local_frame_out.to_global(output_blocks, wigner_inv)
         if self.attention is None:
-            messages = messages * edge_cutoff
-        return scatter_sum(
-            messages,
-            edge_index[1],
-            dim=0,
-            dim_size=node_feats.size(0),
+            messages = messages * edge_cutoff.unsqueeze(-1)
+        return self.reshape_out.inverse(
+            scatter_sum(
+                messages,
+                edge_index[1],
+                dim=0,
+                dim_size=num_nodes,
+            )
         )
 
 

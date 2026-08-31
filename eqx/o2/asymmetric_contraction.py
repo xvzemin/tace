@@ -63,7 +63,7 @@ class AsymmetricContraction(torch.nn.Module):
         super().__init__()
 
         self.irreps_in = Irreps(irreps_in)
-        if any(multiplicity != 1 for multiplicity, _ in self.irreps_in):
+        if any(mul != 1 for mul, ir in self.irreps_in):
             raise ValueError(
                 "Every AsymmetricContraction input irrep group must have "
                 "multiplicity one. Repeat an irrep as separate groups when "
@@ -88,9 +88,9 @@ class AsymmetricContraction(torch.nn.Module):
         self.path_mode = path_mode
 
         output_types = []
-        for _, irrep in requested_irreps_out:
-            if irrep not in output_types:
-                output_types.append(irrep)
+        for mul, ir in requested_irreps_out:
+            if ir not in output_types:
+                output_types.append(ir)
         self.irreps_out_types = Irreps(output_types)
 
         states_by_order = self._enumerate_states()
@@ -107,7 +107,7 @@ class AsymmetricContraction(torch.nn.Module):
         if path_mode == "sum":
             self.irreps_out = self.irreps_out_types
             output_indices = {
-                irrep: index for index, irrep in enumerate(output_types)
+                ir: index for index, ir in enumerate(output_types)
             }
             paths_by_order = [
                 tuple(
@@ -117,22 +117,22 @@ class AsymmetricContraction(torch.nn.Module):
                 for states in filtered_states
             ]
         else:
-            output_counts = {irrep: 0 for irrep in output_types}
+            output_counts = {ir: 0 for ir in output_types}
             for states in filtered_states:
                 for _, intermediates in states:
                     output_counts[intermediates[-1]] += 1
             self.irreps_out = Irreps(
                 [
-                    (output_counts[irrep], irrep)
-                    for irrep in output_types
-                    if output_counts[irrep] > 0
+                    (output_counts[ir], ir)
+                    for ir in output_types
+                    if output_counts[ir] > 0
                 ]
             )
             next_output_index = {}
             offset = 0
-            for multiplicity, irrep in self.irreps_out:
-                next_output_index[irrep] = offset
-                offset += multiplicity
+            for mul, ir in self.irreps_out:
+                next_output_index[ir] = offset
+                offset += mul
             paths_by_order = []
             for states in filtered_states:
                 paths = []
@@ -194,18 +194,20 @@ class AsymmetricContraction(torch.nn.Module):
     def _enumerate_states(
         self,
     ) -> tuple[tuple[tuple[tuple[int, ...], tuple[Irrep, ...]], ...], ...]:
-        inputs = self.irreps_in.expanded()
-        previous = tuple((((index,), (irrep,))) for index, irrep in enumerate(inputs))
+        irrep_list = self.irreps_in.expanded()
+        previous = tuple(
+            (((index,), (ir,))) for index, ir in enumerate(irrep_list)
+        )
         states_by_order = [previous]
         for _ in range(2, self.correlation + 1):
             current = []
             for leaves, intermediates in previous:
-                for input_index, input_irrep in enumerate(inputs):
-                    for output_irrep in intermediates[-1] * input_irrep:
+                for input_index, input_ir in enumerate(irrep_list):
+                    for output_ir in intermediates[-1] * input_ir:
                         current.append(
                             (
                                 leaves + (input_index,),
-                                intermediates + (output_irrep,),
+                                intermediates + (output_ir,),
                             )
                         )
             previous = tuple(current)
@@ -213,14 +215,14 @@ class AsymmetricContraction(torch.nn.Module):
         return tuple(states_by_order)
 
     def _compact_generalized_cg(self, path: _Path) -> torch.Tensor:
-        inputs = self.irreps_in.expanded()
-        first_irrep = inputs[path.leaves[0]]
-        coefficient = torch.eye(first_irrep.dim, dtype=torch.float64)
+        irrep_list = self.irreps_in.expanded()
+        first_ir = irrep_list[path.leaves[0]]
+        coefficient = torch.eye(first_ir.dim, dtype=torch.float64)
         for order_index in range(1, len(path.leaves)):
-            previous_irrep = path.intermediates[order_index - 1]
-            input_irrep = inputs[path.leaves[order_index]]
-            output_irrep = path.intermediates[order_index]
-            pair = _cg_tensor(previous_irrep, input_irrep, output_irrep)
+            previous_ir = path.intermediates[order_index - 1]
+            input_ir = irrep_list[path.leaves[order_index]]
+            output_ir = path.intermediates[order_index]
+            pair = _cg_tensor(previous_ir, input_ir, output_ir)
             coefficient = torch.tensordot(
                 coefficient,
                 pair,
@@ -344,9 +346,9 @@ class AsymmetricContraction(torch.nn.Module):
             self._order_weights(weights, order_index)
             for order_index in range(self.correlation)
         )
-        for output_index, output_irrep in enumerate(self.irreps_out.expanded()):
+        for output_index, output_ir in enumerate(self.irreps_out.expanded()):
             output = inputs[0].new_zeros(
-                leading_shape + (output_irrep.dim, self.channels)
+                leading_shape + (output_ir.dim, self.channels)
             )
             output = output + zero_dependency
             for order_index, path_index, path in self._paths_by_output[output_index]:

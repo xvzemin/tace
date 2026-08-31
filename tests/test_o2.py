@@ -30,6 +30,7 @@ from tace.models._e3nn.o2 import (
 from tace.models._e3nn.representation import Representation
 from tace.models.angular import SolidHarmonics
 from tace.models.linear import torchLinear
+from tace.models.layout import LayoutTransform
 from tace.models.mag import MagneticBasis
 from tace.models.mlp import (
     ACTIVATION,
@@ -139,22 +140,27 @@ def test_local_frame_roundtrip_supports_both_parities_per_degree():
     try:
         irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
         layout = o2.LocalFrame(irreps, 2).to(device=DEVICE)
+        reshape = LayoutTransform(irreps).to(device=DEVICE)
         wigner_module = WignerD(2, 2).to(device=DEVICE)
     finally:
         torch.set_default_dtype(previous_dtype)
     edge_vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
     wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
     input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+    input_ir_mul = reshape(input)
 
-    blocks = layout(input, wigner)
-    assert layout.local_irreps == o2.Irreps("3x0e+3x0o+4x1m+2x2m")
+    blocks = layout(input_ir_mul, wigner)
+    assert layout.local_irreps == o2.Irreps("6x0e+6x0o+8x1m+4x2m")
     assert tuple(block.shape for block in blocks) == (
         (7, 1, 6),
         (7, 1, 6),
         (7, 2, 8),
         (7, 2, 4),
     )
-    torch.testing.assert_close(layout.to_global(blocks, wigner_inv), input)
+    torch.testing.assert_close(
+        reshape.inverse(layout.to_global(blocks, wigner_inv)),
+        input,
+    )
 
 
 def test_local_frame_mmax_restricts_local_blocks():
@@ -163,6 +169,7 @@ def test_local_frame_mmax_restricts_local_blocks():
     try:
         irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
         layout = o2.LocalFrame(irreps, lmax=2, mmax=1).to(device=DEVICE)
+        reshape = LayoutTransform(irreps).to(device=DEVICE)
         wigner_module = WignerD(1, 2).to(device=DEVICE)
     finally:
         torch.set_default_dtype(previous_dtype)
@@ -170,15 +177,15 @@ def test_local_frame_mmax_restricts_local_blocks():
     edge_vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
     wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
     input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
-    blocks = layout(input, wigner)
+    blocks = layout(reshape(input), wigner)
 
-    assert layout.local_irreps == o2.Irreps("3x0e+3x0o+4x1m")
+    assert layout.local_irreps == o2.Irreps("6x0e+6x0o+8x1m")
     assert tuple(block.shape for block in blocks) == (
         (7, 1, 6),
         (7, 1, 6),
         (7, 2, 8),
     )
-    assert layout.to_global(blocks, wigner_inv).shape == input.shape
+    assert layout.to_global(blocks, wigner_inv).shape == (7, 18, 2)
 
 
 def test_local_frame_to_global_rescales_shared_higher_mmax_wigner():
@@ -187,6 +194,7 @@ def test_local_frame_to_global_rescales_shared_higher_mmax_wigner():
     try:
         irreps = o3.Irreps("2x0e+2x1o+2x2e+2x3o")
         layout = o2.LocalFrame(irreps, lmax=3, mmax=0).to(device=DEVICE)
+        reshape = LayoutTransform(irreps).to(device=DEVICE)
         active_wigner = WignerD(0, 3).to(device=DEVICE)
         shared_wigner = WignerD(3, 3).to(device=DEVICE)
     finally:
@@ -196,6 +204,7 @@ def test_local_frame_to_global_rescales_shared_higher_mmax_wigner():
     wigner_active, wigner_inv_active = active_wigner.get_wigner(edge_vectors)
     wigner_shared, wigner_inv_shared = shared_wigner.get_wigner(edge_vectors)
     input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+    input = reshape(input)
 
     active_blocks = layout(input, wigner_active)
     shared_blocks = layout(input, wigner_shared)
@@ -216,63 +225,41 @@ def test_local_frame_repr_shows_irreps_conversion():
 
     assert repr(layout) == (
         f"LocalFrame({layout.global_irreps} -> "
-        f"{layout.channels * layout.local_irreps})"
-        "(mmax=1, layout='mul_ir')"
+        f"{layout.local_irreps})(mmax=1)"
     )
     assert not tuple(layout.children())
 
 
-def test_local_frame_validates_mmax_and_layout():
+def test_local_frame_validates_mmax():
     irreps = o3.Irreps("0e+1o+2e")
     with pytest.raises(ValueError, match="0 <= mmax <= lmax"):
         o2.LocalFrame(irreps, lmax=2, mmax=3)
-    with pytest.raises(ValueError, match="mul_ir.*ir_mul"):
-        o2.LocalFrame(irreps, lmax=2, layout="invalid")
 
 
-def test_local_frame_supports_mul_ir_and_ir_mul_global_layouts():
+def test_local_frame_accepts_layout_transform_output():
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(DTYPE)
     try:
         irreps = o3.Irreps("2x0e+2x1o+2x2e")
-        mul_ir_frame = o2.LocalFrame(irreps, lmax=2, layout="mul_ir").to(
-            device=DEVICE
-        )
-        ir_mul_frame = o2.LocalFrame(irreps, lmax=2, layout="ir_mul").to(
-            device=DEVICE
-        )
+        frame = o2.LocalFrame(irreps, lmax=2).to(device=DEVICE)
+        reshape = LayoutTransform(irreps).to(device=DEVICE)
         wigner_module = WignerD(2, 2).to(device=DEVICE)
     finally:
         torch.set_default_dtype(previous_dtype)
 
     edge_vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
     wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
-    mul_ir_input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
-    ir_mul_parts = []
-    offset = 0
-    for multiplicity, irrep in irreps:
-        width = multiplicity * irrep.dim
-        ir_mul_parts.append(
-            mul_ir_input[:, offset : offset + width]
-            .reshape(7, multiplicity, irrep.dim)
-            .transpose(1, 2)
-            .reshape(7, width)
-        )
-        offset += width
-    ir_mul_input = torch.cat(ir_mul_parts, dim=-1).contiguous()
-    assert ir_mul_input.shape == mul_ir_input.shape
+    input = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+    reshaped = reshape(input)
 
-    mul_ir_blocks = mul_ir_frame.to_local(mul_ir_input, wigner)
-    ir_mul_blocks = ir_mul_frame.to_local(ir_mul_input, wigner)
-    for mul_ir_block, ir_mul_block in zip(mul_ir_blocks, ir_mul_blocks):
-        torch.testing.assert_close(ir_mul_block, mul_ir_block)
+    assert reshaped.shape == (7, 9, 2)
+    local_blocks = frame.to_local(reshaped, wigner)
+    forward_blocks = frame(reshaped, wigner)
+    for local_block, forward_block in zip(local_blocks, forward_blocks):
+        torch.testing.assert_close(local_block, forward_block)
     torch.testing.assert_close(
-        mul_ir_frame.to_global(mul_ir_blocks, wigner_inv),
-        mul_ir_input,
-    )
-    torch.testing.assert_close(
-        ir_mul_frame.to_global(ir_mul_blocks, wigner_inv),
-        ir_mul_input,
+        reshape.inverse(frame.to_global(local_blocks, wigner_inv)),
+        input,
     )
 
 
@@ -360,8 +347,16 @@ def test_o2_irrep_and_irreps_metadata():
     assert Irrep("0e") == Irrep(0, 1)
     assert Irrep("0o") == Irrep((0, -1))
     assert Irrep("3m").dim == 2
+    assert Irrep("0e").is_even_scalar()
+    assert not Irrep("0o").is_even_scalar()
+    assert not Irrep("1m").is_even_scalar()
+    assert Irrep("0o").is_odd_scalar()
+    assert not Irrep("0e").is_odd_scalar()
+    assert not Irrep("1m").is_odd_scalar()
 
     irreps = Irreps("2x0e + 0o + 3x1m + 2m")
+    mul_ir = irreps[0]
+    assert (mul_ir.mul, mul_ir.ir, mul_ir.dim) == (2, Irrep("0e"), 2)
     assert irreps.dim == 2 + 1 + 6 + 2
     assert irreps.num_irreps == 7
     assert irreps.mmax == 2
@@ -374,9 +369,18 @@ def test_o2_irrep_and_irreps_metadata():
         Irrep("1m"),
         Irrep("2m"),
     )
+    assert irreps.slices() == (
+        slice(0, 2),
+        slice(2, 3),
+        slice(3, 9),
+        slice(9, 11),
+    )
     assert irreps.expanded_slices()[-1] == slice(9, 11)
+    assert Irreps.common_multiplicity(Irreps("2x0e+2x1m")) == 2
+    with pytest.raises(ValueError, match="common multiplicity"):
+        Irreps.common_multiplicity(Irreps("2x0e+1m"))
     with pytest.raises(AttributeError, match="immutable"):
-        irreps._groups = ()
+        irreps._irreps = ()
 
 
 def test_o2_irreps_simplify_and_regroup():
@@ -385,6 +389,21 @@ def test_o2_irreps_simplify_and_regroup():
     assert irreps.simplify() == Irreps("3x0e+1m+0o+2x1m")
     assert irreps.regroup() == Irreps("3x0e+0o+3x1m")
     assert irreps == Irreps("0e+2x0e+1m+0o+2x1m")
+
+
+def test_o2_irreps_filter_matches_e3nn_style():
+    irreps = Irreps("2x0e+0o+3x1m+2m")
+
+    assert irreps.filter(keep="0e+2m") == Irreps("2x0e+2m")
+    assert irreps.filter(drop=[Irrep("0o"), Irrep("2m")]) == Irreps(
+        "2x0e+3x1m"
+    )
+    assert irreps.filter(keep=lambda mul_ir: mul_ir.mul > 1) == Irreps(
+        "2x0e+3x1m"
+    )
+    assert irreps.filter(mmax=1) == Irreps("2x0e+0o+3x1m")
+    with pytest.raises(ValueError, match="only one"):
+        irreps.filter(keep="0e", mmax=1)
 
 
 @pytest.mark.parametrize("normalization", ["component", "norm"])
@@ -434,7 +453,7 @@ def test_o3_restriction_is_complete_and_parity_aware():
     assert o2.LocalFrame.restrict(o3.Irreps("2e")) == Irreps("0e+1m+2m")
     assert o2.LocalFrame.restrict(o3.Irreps("2o")) == Irreps("0o+1m+2m")
     assert o2.LocalFrame.restrict(o3.Irreps("2x1e+0o")) == Irreps(
-        "2x0o+1m"
+        "3x0o+2x1m"
     )
 
 
@@ -2162,7 +2181,7 @@ def test_o2_first_layer_only_registers_input_irreps_before_zero_padding(improper
         irreps_in=o3.Irreps("2x0e"),
     )
 
-    assert module.rejector.effective_mmax == 0
+    assert module.rejector.mmax == 0
     assert module.rejector.local_frame_in.mmax == 0
     assert module.rejector.local_frame_out.mmax == 0
     assert module.rejector.nonlinearity.irreps_out.mmax == 0
@@ -2335,7 +2354,7 @@ def test_o2_magnetic_interaction_uses_linear_asymmetric_weights():
     assert module.rejector.linear_down.irreps_in == contraction.irreps_out
     assert (
         module.rejector.linear_down.irreps_out
-        == module.rejector.local_frame_out.local_irreps
+        == module.rejector.local_irreps_out
     )
     assert not hasattr(module.rejector, "projection_irreps")
     assert not tuple(module.rejector.asymmetric_contraction.parameters())

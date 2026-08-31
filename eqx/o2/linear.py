@@ -78,14 +78,14 @@ class Linear(torch.nn.Module):
             else 1.0
         )
 
-        inputs = self.irreps_in.expanded()
-        outputs = self.irreps_out.expanded()
+        input_irrep_list = self.irreps_in.expanded()
+        output_irrep_list = self.irreps_out.expanded()
         if path is None:
             paths = tuple(
                 (output_index, input_index)
-                for output_index, output in enumerate(outputs)
-                for input_index, input_irrep in enumerate(inputs)
-                if output == input_irrep
+                for output_index, output_ir in enumerate(output_irrep_list)
+                for input_index, input_ir in enumerate(input_irrep_list)
+                if output_ir == input_ir
             )
         else:
             paths = tuple(path)
@@ -97,14 +97,15 @@ class Linear(torch.nn.Module):
                 raise TypeError("Linear path indices must be integers.")
             if not isinstance(input_index, int) or isinstance(input_index, bool):
                 raise TypeError("Linear path indices must be integers.")
-            if not 0 <= output_index < len(outputs):
+            if not 0 <= output_index < len(output_irrep_list):
                 raise ValueError(f"Invalid Linear output path index: {output_index}.")
-            if not 0 <= input_index < len(inputs):
+            if not 0 <= input_index < len(input_irrep_list):
                 raise ValueError(f"Invalid Linear input path index: {input_index}.")
-            if outputs[output_index] != inputs[input_index]:
+            if output_irrep_list[output_index] != input_irrep_list[input_index]:
                 raise ValueError(
                     "A complete O(2) Linear path must connect identical irreps; "
-                    f"got {inputs[input_index]} -> {outputs[output_index]}."
+                    f"got {input_irrep_list[input_index]} -> "
+                    f"{output_irrep_list[output_index]}."
                 )
         self.path = paths
 
@@ -119,7 +120,7 @@ class Linear(torch.nn.Module):
             persistent=False,
         )
 
-        paths_by_output = [[] for _ in outputs]
+        paths_by_output = [[] for _ in output_irrep_list]
         for path_index, (output_index, input_index) in enumerate(paths):
             paths_by_output[output_index].append((path_index, input_index))
         self._paths_by_output = tuple(tuple(group) for group in paths_by_output)
@@ -127,12 +128,12 @@ class Linear(torch.nn.Module):
 
         input_group_offsets = {}
         input_offset = 0
-        for multiplicity, irrep in self.irreps_in:
-            if irrep in input_group_offsets:
-                input_group_offsets[irrep] = None
+        for mul, ir in self.irreps_in:
+            if ir in input_group_offsets:
+                input_group_offsets[ir] = None
             else:
-                input_group_offsets[irrep] = (input_offset, multiplicity)
-            input_offset += multiplicity
+                input_group_offsets[ir] = (input_offset, mul)
+            input_offset += mul
 
         output_offset = 0
         grouped_paths = []
@@ -140,25 +141,25 @@ class Linear(torch.nn.Module):
             (output_index, input_index): path_index
             for path_index, (output_index, input_index) in enumerate(paths)
         }
-        for output_multiplicity, output_irrep in self.irreps_out:
-            input_group = input_group_offsets.get(output_irrep, False)
+        for mul, ir in self.irreps_out:
+            input_group = input_group_offsets.get(ir, False)
             if input_group is False:
-                grouped_paths.append((0, 0, 0, output_multiplicity))
-                output_offset += output_multiplicity
+                grouped_paths.append((0, 0, 0, mul))
+                output_offset += mul
                 continue
             if input_group is None:
                 grouped_paths.append(None)
             else:
-                input_start, input_multiplicity = input_group
+                input_start, input_mul = input_group
                 path_indices = tuple(
                     path_lookup.get((output_index, input_index), -1)
                     for output_index in range(
                         output_offset,
-                        output_offset + output_multiplicity,
+                        output_offset + mul,
                     )
                     for input_index in range(
                         input_start,
-                        input_start + input_multiplicity,
+                        input_start + input_mul,
                     )
                 )
                 if any(path_index < 0 for path_index in path_indices):
@@ -172,11 +173,11 @@ class Linear(torch.nn.Module):
                             (
                                 first,
                                 len(path_indices),
-                                input_multiplicity,
-                                output_multiplicity,
+                                input_mul,
+                                mul,
                             )
                         )
-            output_offset += output_multiplicity
+            output_offset += mul
         self._grouped_paths = tuple(grouped_paths)
 
         if self.path_mode == "uv":
@@ -191,8 +192,8 @@ class Linear(torch.nn.Module):
 
         bias_row_by_output = []
         num_biases = 0
-        for output in outputs:
-            if output.m == 0 and output.p == 1:
+        for ir in output_irrep_list:
+            if ir.is_even_scalar():
                 bias_row_by_output.append(num_biases)
                 num_biases += 1
             else:
@@ -266,8 +267,8 @@ class Linear(torch.nn.Module):
 
         output_blocks = []
         zero_dependency = input.sum() * 0 + weight.sum() * 0
-        outputs = self.irreps_out.expanded()
-        for output_index, output in enumerate(outputs):
+        output_irrep_list = self.irreps_out.expanded()
+        for output_index, ir in enumerate(output_irrep_list):
             contributions = []
             for path_index, input_index in self._paths_by_output[output_index]:
                 input_block = input[..., self._input_slices[input_index], :]
@@ -285,7 +286,7 @@ class Linear(torch.nn.Module):
                 output_block = sum(contributions[1:], contributions[0])
             else:
                 output_block = input.new_zeros(
-                    leading_shape + (output.dim, self.channels_out)
+                    leading_shape + (ir.dim, self.channels_out)
                 )
                 output_block = output_block + zero_dependency
 
@@ -322,41 +323,41 @@ class Linear(torch.nn.Module):
 
         weight = self._resolve_weight(weight) * self.alpha
         input_by_irrep = {
-            irrep: (multiplicity, block)
-            for (multiplicity, irrep), block in zip(self.irreps_in, input_blocks)
+            ir: (mul, block)
+            for (mul, ir), block in zip(self.irreps_in, input_blocks)
         }
         output_blocks = []
         for (
-            (output_multiplicity, output_irrep),
+            (mul, ir),
             specification,
         ) in zip(self.irreps_out, self._grouped_paths):
             if specification is None:
                 raise RuntimeError("Grouped Linear path resolution failed.")
-            first_path, num_paths, input_multiplicity, _ = specification
+            first_path, num_paths, input_mul, _ = specification
             if num_paths == 0:
                 reference = input_blocks[0]
                 output_block = reference.new_zeros(
                     *reference.shape[:-2],
-                    output_irrep.dim,
-                    output_multiplicity * self.channels_out,
+                    ir.dim,
+                    mul * self.channels_out,
                 )
                 output_block = output_block + reference.sum() * 0 + weight.sum() * 0
-                if self.bias is not None and output_irrep == Irrep("0e"):
+                if self.bias is not None and ir.is_even_scalar():
                     output_block = output_block + self.bias.reshape(
                         1,
-                        output_multiplicity * self.channels_out,
+                        mul * self.channels_out,
                     )
                 output_blocks.append(output_block)
                 continue
-            input_group = input_by_irrep.get(output_irrep)
+            input_group = input_by_irrep.get(ir)
             if input_group is None:
                 raise RuntimeError("Grouped Linear input resolution failed.")
-            observed_multiplicity, input_block = input_group
-            if observed_multiplicity != input_multiplicity:
+            observed_mul, input_block = input_group
+            if observed_mul != input_mul:
                 raise RuntimeError("Grouped Linear multiplicity resolution failed.")
             expected_shape = (
-                output_irrep.dim,
-                input_multiplicity * self.channels_in,
+                ir.dim,
+                input_mul * self.channels_in,
             )
             if tuple(input_block.shape[-2:]) != expected_shape:
                 raise ValueError(
@@ -367,14 +368,14 @@ class Linear(torch.nn.Module):
             path_weight = weight.narrow(-3, first_path, num_paths)
             path_weight = path_weight.reshape(
                 *path_weight.shape[:-3],
-                output_multiplicity,
-                input_multiplicity,
+                mul,
+                input_mul,
                 self.channels_in,
                 self.channels_out,
             )
             scales = self.path_scales.narrow(0, first_path, num_paths).reshape(
-                output_multiplicity,
-                input_multiplicity,
+                mul,
+                input_mul,
                 1,
                 1,
             )
@@ -387,8 +388,8 @@ class Linear(torch.nn.Module):
                 -1,
             ).reshape(
                 *path_weight.shape[:-4],
-                input_multiplicity * self.channels_in,
-                output_multiplicity * self.channels_out,
+                input_mul * self.channels_in,
+                mul * self.channels_out,
             )
             if matrix.ndim == 2:
                 output_block = torch.mm(
@@ -396,16 +397,16 @@ class Linear(torch.nn.Module):
                     matrix,
                 ).reshape(
                     *input_block.shape[:-2],
-                    output_irrep.dim,
-                    output_multiplicity * self.channels_out,
+                    ir.dim,
+                    mul * self.channels_out,
                 )
             else:
                 output_block = torch.matmul(input_block, matrix)
 
-            if self.bias is not None and output_irrep == Irrep("0e"):
+            if self.bias is not None and ir.is_even_scalar():
                 output_block = output_block + self.bias.reshape(
                     1,
-                    output_multiplicity * self.channels_out,
+                    mul * self.channels_out,
                 )
             output_blocks.append(output_block)
         return tuple(output_blocks)
