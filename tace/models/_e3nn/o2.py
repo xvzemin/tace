@@ -91,45 +91,14 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         self.channels = channels
         self.num_head = num_head
         self.channels_per_head = channels // num_head
-        self.q_proj = o2.Linear(
-            self.irreps,
-            self.irreps,
-            channels,
-            channels,
-            path_mode="uv",
-            bias=True,
-        )
-        self.k_proj = o2.Linear(
-            self.irreps,
-            self.irreps,
-            channels,
-            channels,
-            path_mode="uv",
-            bias=True,
-        )
-        self.radial_proj = torchLinear(
-            num_radial_basis,
-            2 * num_head,
-            bias=True,
-        )
+        self.q_proj = o2.Linear(self.irreps, self.irreps, channels, channels)
+        self.k_proj = o2.Linear(self.irreps, self.irreps, channels, channels)
+        self.radial_proj = torchLinear(num_radial_basis, 2 * num_head)
         torch.nn.init.zeros_(self.radial_proj.weight)
         torch.nn.init.zeros_(self.radial_proj.bias)
         components_per_head = self.irreps.dim * channels // num_head
         self.scale = 1.0 / math.sqrt(components_per_head)
         self.graph_softmax = GraphSoftmax()
-
-    def _project_query_key(
-        self,
-        source_features: tuple[torch.Tensor, ...],
-        target_features: tuple[torch.Tensor, ...],
-    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-        if len(source_features) != len(self.irreps) or len(target_features) != len(
-            self.irreps
-        ):
-            raise ValueError("Expected one source and target tensor per O2 group.")
-        query_features = self.q_proj.forward_grouped(target_features)
-        key_features = self.k_proj.forward_grouped(source_features)
-        return query_features, key_features
 
     def forward(
         self,
@@ -143,10 +112,8 @@ class RadialRotaryComplexAttention(torch.nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         if len(message) != len(self.message_irreps):
             raise ValueError("Expected one message tensor per output O2 group.")
-        query_features, key_features = self._project_query_key(
-            source_features,
-            target_features,
-        )
+        query_features = self.q_proj.forward_grouped(target_features)
+        key_features = self.k_proj.forward_grouped(source_features)
         score = edge_radial_basis.new_zeros(
             edge_radial_basis.size(0),
             self.num_head,
