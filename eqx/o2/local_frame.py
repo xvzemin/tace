@@ -13,17 +13,14 @@ from .irreps import Irrep, Irreps
 
 
 class LocalFrame(torch.nn.Module):
-    """Convert between global O(3) and edge-local O(2) representations.
+    """Convert between global O(3) and local O(2) representations.
 
-    Inputs and outputs use ``(batch, component, channel)`` tensors. Conversion
-    to and from the default e3nn layout is owned by the calling model.
-    ``local_irreps`` contains the complete O(2) multiplicities, including the
-    common channel multiplicity of the input O(3) irreps.
+    Inputs and outputs shape use ``(batch, component, channel)``.
     """
 
     @staticmethod
     def restrict(irreps: o3.Irreps, mmax: Optional[int] = None) -> Irreps:
-        """Restrict complete O(3) irreps to complete O(2) irreps."""
+        """Restrict O(3) irreps to O(2) irreps."""
         irreps = o3.Irreps(irreps)
         if mmax is None:
             mmax = irreps.lmax

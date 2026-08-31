@@ -41,7 +41,7 @@ def _check_odd_activation(activation: torch.nn.Module) -> None:
 
 
 class Gate(torch.nn.Module):
-    """Apply equivariant nonlinearities to complete O(2) features.
+    """Apply equivariant nonlinearities to O(2) features.
 
     ``0e`` outputs are passed directly through ``act_0e``. If ``act_0o`` is
     provided, it must be odd and is applied directly to ``0o`` outputs. If

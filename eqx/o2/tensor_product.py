@@ -120,7 +120,7 @@ def _cg_product_uuu(
 
 
 class TensorProduct(torch.nn.Module):
-    """A weighted tensor product between complete real O(2) representations.
+    """A weighted tensor product between real O(2) representations.
 
     Inputs use shapes ``(..., irreps_in1.dim, channels_in1)`` and
     ``(..., irreps_in2.dim, channels_in2)``. ``path_mode="u1u"`` requires
@@ -214,7 +214,7 @@ class TensorProduct(torch.nn.Module):
                 input1_irrep_list[input1_index] * input2_irrep_list[input2_index]
             ):
                 raise ValueError(
-                    "Illegal complete O(2) TensorProduct path: "
+                    "Illegal O(2) TensorProduct path: "
                     f"{input1_irrep_list[input1_index]} x "
                     f"{input2_irrep_list[input2_index]} "
                     f"-> {output_irrep_list[output_index]}."
@@ -275,7 +275,7 @@ class TensorProduct(torch.nn.Module):
         if weight is None:
             raise RuntimeError("TensorProduct weight resolution failed.")
         if weight.is_complex():
-            raise TypeError("Complete O(2) TensorProduct supports real weights only.")
+            raise TypeError("O(2) TensorProduct supports real weights only.")
         weight_ndim = len(self.weight_shape)
         if (
             weight.ndim < weight_ndim
@@ -294,7 +294,7 @@ class TensorProduct(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if input1.is_complex() or input2.is_complex():
-            raise TypeError("Complete O(2) TensorProduct supports real inputs only.")
+            raise TypeError("O(2) TensorProduct supports real inputs only.")
         expected1 = (self.irreps_in1.dim, self.channels_in1)
         expected2 = (self.irreps_in2.dim, self.channels_in2)
         if input1.ndim < 2 or tuple(input1.shape[-2:]) != expected1:

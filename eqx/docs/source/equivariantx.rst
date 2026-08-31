@@ -21,7 +21,7 @@ EquivariantX (``eqx``) provides operators for
    :math:`O(2)` frames.
 
 ``eqx.co3``
-   Complete Cartesian :math:`O(3)` irreps, polar and pseudotensor coupling,
+   Cartesian :math:`O(3)` irreps, polar and pseudotensor coupling,
    Cartesian harmonics, and projection onto symmetric traceless tensors.
 
 This documentation assumes that you are already familiar with ``e3nn`` and
@@ -70,7 +70,7 @@ Ral O(2)
 Representations
 ~~~~~~~~~~~~~~~
 
-The complete real irreps of :math:`O(2)` are
+The real irreps of :math:`O(2)` are
 
 ``0e``
    One-dimensional scalar, even under reflection.
@@ -201,7 +201,7 @@ A directed three-dimensional vector defines a local axis. Restricting an
 :math:`O(3)` irrep ``(l, p)`` to the :math:`O(2)` isotropy subgroup gives one
 order-zero block and positive orders up to :math:`l`. The order-zero block is
 ``0e`` if :math:`p(-1)^l=1` and ``0o`` otherwise. This distinction retains
-complete global :math:`O(3)` parity.
+global :math:`O(3)` parity.
 
 :class:`eqx.o2.WignerD` constructs the global-to-local and local-to-global
 matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies
@@ -325,7 +325,7 @@ every degree. With ``normalize=True``, only the input direction is retained.
 Cartesian tensor product
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Complete Cartesian coupling contains a Kronecker-delta branch,
+Cartesian coupling contains a Kronecker-delta branch,
 
 .. math::
 

@@ -67,7 +67,7 @@ def _cartesian_product(
 
 
 class TensorProduct(torch.nn.Module):
-    """A weighted complete O(3) Cartesian tensor product.
+    """A weighted O(3) Cartesian tensor product.
 
     Args:
         irreps_in1: First input irreps.
@@ -84,7 +84,7 @@ class TensorProduct(torch.nn.Module):
 
     Inputs and outputs use ``(..., irreps.dim, channels)``. Delta contractions
     generate the even rank-difference paths and Levi-Civita contractions
-    generate the odd rank-difference paths required by complete O(3).
+    generate the odd rank-difference O(3) paths.
     """
 
     def __init__(
@@ -167,7 +167,7 @@ class TensorProduct(torch.nn.Module):
             if outputs[output_index] not in (
                 inputs1[input1_index] * inputs2[input2_index]
             ):
-                raise ValueError("Illegal complete O(3) TensorProduct path.")
+                raise ValueError("Illegal O(3) TensorProduct path.")
         self.path = paths
         self._input1_slices = self.irreps_in1.expanded_slices()
         self._input2_slices = self.irreps_in2.expanded_slices()

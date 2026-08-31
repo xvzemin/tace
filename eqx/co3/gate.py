@@ -37,7 +37,7 @@ def _check_odd_activation(activation: torch.nn.Module) -> None:
 
 
 class Gate(torch.nn.Module):
-    """Apply equivariant nonlinearities to complete Cartesian O(3) features.
+    """Apply equivariant nonlinearities to Cartesian O(3) features.
 
     ``0e`` scalars use ``act_0e``. A provided ``act_0o`` must be odd. Every
     non-scalar irrep, and ``0o`` when ``act_0o`` is absent, is multiplied by

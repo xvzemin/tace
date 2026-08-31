@@ -170,7 +170,7 @@ class _MulIr(NamedTuple):
 
 
 class Irreps:
-    """A direct sum of complete real O(2) irreps.
+    """A direct sum of real O(2) irreps.
 
     Iteration yields ``(multiplicity, irrep)`` pairs. Use :meth:`expanded`
     when one entry per irrep copy is required.

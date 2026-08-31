@@ -1,12 +1,12 @@
 # EQX
 
 EQX is a self-contained library for equivariant PyTorch operators. Its current
-focus is complete real O(2) representation theory, conversion between global
+focus is real O(2) representation theory, conversion between global
 O(3) and local O(2) features, and Cartesian O(3) operators.
 
 The public O(2) API provides:
 
-- `Irrep` and `Irreps` for complete real O(2) representations;
+- `Irrep` and `Irreps` for real O(2) representations;
 - `Linear` with `uv` and `uu` channel paths;
 - `Gate` for equivariant scalar and tensor nonlinearities;
 - `TensorProduct` with `u1u`, `uuu`, and `uvw` paths;
@@ -17,7 +17,7 @@ The public O(2) API provides:
 EQX is under active development. Compatibility between development versions is
 not currently guaranteed.
 
-## Complete real O(2) representations
+## Real O(2) representations
 
 The one-dimensional scalar irreps are `0e` and `0o`. The positive-order real
 irreps are two-dimensional and are written as `1m`, `2m`, and so on:
@@ -294,7 +294,7 @@ before projection; otherwise use `project=True`.
 
 ## Citation
 
-If you use the complete local O(2) method or its global O(3)/local O(2)
+If you use the local O(2) method or its global O(3)/local O(2)
 conversion, please cite:
 
 ```bibtex

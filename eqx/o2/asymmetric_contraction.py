@@ -27,7 +27,7 @@ def _cg_tensor(irrep1: Irrep, irrep2: Irrep, irrep_out: Irrep) -> torch.Tensor:
 
 
 class AsymmetricContraction(torch.nn.Module):
-    """Contract independent complete-O(2) features to increasing correlation.
+    """Contract independent O(2) features to increasing correlation.
 
     ``correlation`` input tensors are required. The contribution of order
     ``nu`` uses the first ``nu`` tensors. Every input irrep group must have

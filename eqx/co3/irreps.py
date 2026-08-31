@@ -20,7 +20,7 @@ IrrepsLike = Union[
 
 @dataclass(frozen=True, init=False)
 class Irrep:
-    """An irreducible Cartesian representation of complete O(3).
+    """An irreducible Cartesian representation of O(3).
 
     The representation is stored in the ambient rank-``l`` Cartesian space
     of dimension ``3**l``. Its physical subspace is the symmetric traceless
@@ -134,7 +134,7 @@ class Irrep:
 
 
 class Irreps:
-    """An immutable direct sum of complete Cartesian O(3) irreps."""
+    """An immutable direct sum of Cartesian O(3) irreps."""
 
     __slots__ = ("_groups",)
 

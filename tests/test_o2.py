@@ -447,7 +447,7 @@ def test_o2_irrep_rejects_invalid_labels(value):
         Irrep(value)
 
 
-def test_o3_restriction_is_complete_and_parity_aware():
+def test_o3_restriction_is_parity_aware():
     assert o2.LocalFrame.restrict(o3.Irreps("1o")) == Irreps("0e+1m")
     assert o2.LocalFrame.restrict(o3.Irreps("1e")) == Irreps("0o+1m")
     assert o2.LocalFrame.restrict(o3.Irreps("2e")) == Irreps("0e+1m+2m")
@@ -457,7 +457,7 @@ def test_o3_restriction_is_complete_and_parity_aware():
     )
 
 
-def test_o2_direct_sum_representation_uses_complete_layout():
+def test_o2_direct_sum_representation_uses_expected_layout():
     irreps = Irreps("0e+0o+2x1m")
     angle = torch.tensor([0.2, -0.7], dtype=DTYPE, device=DEVICE)
     representation = irreps.D_from_angle(angle, True)
@@ -723,7 +723,7 @@ def test_scaled_activation_factory_uses_fixed_common_constants_and_general_fallb
     assert scaled_relu.scale_factor == normalize2mom(torch.nn.ReLU()).cst
 
 
-def test_o2_tensor_product_irrep_rules_are_complete():
+def test_o2_tensor_product_irrep_rules_cover_all_paths():
     assert Irrep("0e") * Irrep("0o") == (Irrep("0o"),)
     assert Irrep("0o") * Irrep("0o") == (Irrep("0e"),)
     assert Irrep("0o") * Irrep("2m") == (Irrep("2m"),)
@@ -1277,7 +1277,7 @@ def test_o2_linear_uses_normal_weights_and_fixed_alpha():
 
 @pytest.mark.parametrize("reflected", [False, True])
 @pytest.mark.parametrize("path_mode", ["uv", "uu"])
-def test_o2_linear_is_equivariant_with_complete_irreps(reflected, path_mode):
+def test_o2_linear_is_equivariant(reflected, path_mode):
     torch.manual_seed(0)
     irreps_in = o2.Irreps("2x0e+0o+2x1m+2m")
     irreps_out = o2.Irreps("0e+2x0o+1m+2x2m")
@@ -2125,19 +2125,19 @@ def test_o2_interaction_mmax_restricts_internal_paths():
         mmax=1,
         irreps_in=irreps_in,
     )
-    complete = _build_o2_interaction(
+    full_mmax = _build_o2_interaction(
         angular_max=2,
         mmax=2,
         irreps_in=irreps_in,
     )
 
     assert truncated.rejector.linear_down.irreps_out.mmax == 1
-    assert complete.rejector.linear_down.irreps_out.mmax == 2
+    assert full_mmax.rejector.linear_down.irreps_out.mmax == 2
     assert len(truncated.rejector.linear_down.path) < len(
-        complete.rejector.linear_down.path
+        full_mmax.rejector.linear_down.path
     )
     assert truncated.rejector.linear_down.weight_numel < (
-        complete.rejector.linear_down.weight_numel
+        full_mmax.rejector.linear_down.weight_numel
     )
 
 

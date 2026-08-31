@@ -31,7 +31,7 @@ def _transform(
     return torch.einsum("ij,bjc->bic", irreps.D_from_matrix(matrix), input)
 
 
-def test_irrep_metadata_and_complete_parity() -> None:
+def test_irrep_metadata_and_parity() -> None:
     assert co3.Irrep("2e").dim == 9
     assert co3.Irrep("2e").dof == 5
     assert not co3.Irrep("2e").pseudo
@@ -86,7 +86,7 @@ def test_cartesian_harmonics_equivariance(
 
 
 @pytest.mark.parametrize("improper", [False, True])
-def test_linear_complete_o3_equivariance(improper: bool) -> None:
+def test_linear_o3_equivariance(improper: bool) -> None:
     irreps_in = co3.Irreps("2x0e+0o+2x1o+1e+2e+2o")
     irreps_out = co3.Irreps("0e+2x0o+1o+2x1e+2e+2o")
     linear = co3.Linear(irreps_in, irreps_out, 3, 4).to(dtype=DTYPE)
@@ -116,7 +116,7 @@ def test_linear_default_initialization_preserves_variance() -> None:
 
 
 @pytest.mark.parametrize("improper", [False, True])
-def test_gate_complete_o3_equivariance(improper: bool) -> None:
+def test_gate_o3_equivariance(improper: bool) -> None:
     gate = co3.Gate(
         "0e+0o+1o+1e+2e+2o",
         act_0e=torch.nn.SiLU(),
@@ -166,7 +166,7 @@ def test_public_cartesian_invariant_tensors() -> None:
         ("2o", "2e", "0o+1o+2o+3o+4o"),
     ],
 )
-def test_tensor_product_complete_o3_equivariance(
+def test_tensor_product_o3_equivariance(
     improper: bool,
     irreps_in1: str,
     irreps_in2: str,
@@ -197,7 +197,7 @@ def test_tensor_product_complete_o3_equivariance(
 
 
 @pytest.mark.parametrize("improper", [False, True])
-def test_tensor_product_all_complete_o3_paths_through_l2(improper: bool) -> None:
+def test_tensor_product_all_o3_paths_through_l2(improper: bool) -> None:
     matrix = _orthogonal(improper=improper)
     for degree1 in range(3):
         for parity1 in (-1, 1):

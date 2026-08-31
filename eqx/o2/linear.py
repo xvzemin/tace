@@ -13,7 +13,7 @@ from .irreps import Irrep, Irreps, IrrepsLike
 
 
 class Linear(torch.nn.Module):
-    """A complete real O(2)-equivariant linear layer.
+    """A real O(2)-equivariant linear layer.
 
     Inputs use shape ``(..., irreps_in.dim, channels_in)`` and outputs use
     ``(..., irreps_out.dim, channels_out)``. Paths connect only identical
@@ -103,7 +103,7 @@ class Linear(torch.nn.Module):
                 raise ValueError(f"Invalid Linear input path index: {input_index}.")
             if output_irrep_list[output_index] != input_irrep_list[input_index]:
                 raise ValueError(
-                    "A complete O(2) Linear path must connect identical irreps; "
+                    "An O(2) Linear path must connect identical irreps; "
                     f"got {input_irrep_list[input_index]} -> "
                     f"{output_irrep_list[output_index]}."
                 )
@@ -228,7 +228,7 @@ class Linear(torch.nn.Module):
         if weight is None:
             raise RuntimeError("Linear weight resolution failed.")
         if weight.is_complex():
-            raise TypeError("Complete O(2) Linear supports real weights only.")
+            raise TypeError("O(2) Linear supports real weights only.")
         weight_ndim = len(self.weight_shape)
         if (
             weight.ndim < weight_ndim
@@ -246,7 +246,7 @@ class Linear(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if input.is_complex():
-            raise TypeError("Complete O(2) Linear supports real inputs only.")
+            raise TypeError("O(2) Linear supports real inputs only.")
         expected_input_shape = (self.irreps_in.dim, self.channels_in)
         if input.ndim < 2 or tuple(input.shape[-2:]) != expected_input_shape:
             raise ValueError(
