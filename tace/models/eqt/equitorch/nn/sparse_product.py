@@ -2,7 +2,7 @@ from typing import Union
 
 import torch
 
-from tace.models.eqt import _segment_csr
+from tace.models.eqt import segment_csr
 from tace.utils.torch_scatter import scatter_sum
 from ..structs import SparseProductInfo
 
@@ -31,8 +31,8 @@ def indexed_mul_scale_gather_cpu(
     if seg is not None:
         if gather_index is not None:
             inter = inter.index_select(-2, gather_index)
-        if _segment_csr is not None:
-            inter = _segment_csr(inter, seg.unsqueeze(0), reduce="sum")
+        if segment_csr is not None:
+            inter = segment_csr(inter, seg.unsqueeze(0), reduce="sum")
         else:
             if segment_index is None:
                 raise RuntimeError("Missing segment indices for the EQT fallback.")

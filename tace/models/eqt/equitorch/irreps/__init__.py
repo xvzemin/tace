@@ -123,7 +123,7 @@ class Irrep:
         return 2 * self.l + 1
     
     def __mul__(self, other: 'Irrep') -> 'Irreps':
-        """
+        r"""
         Compute the tensor product decomposition of two O(3) / SO(3) irreducible representations.
 
         Args:

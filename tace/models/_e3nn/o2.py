@@ -141,27 +141,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         return tuple(outputs)
 
 
-class O2ScatterLinear(torch.nn.Module):
-    """Local O2 Convolution.
-
-    Source and target node features are concatenated in the local
-    representation. Optional extra node attributes use the same source-target
-    construction. Edge weights first apply a diagonal channel-wise radial map.
-    Two internal ``uv`` linears use either a gate or an asymmetric contraction
-    between them. These nonlinear paths are mutually exclusive. The
-    asymmetric path keeps one copy of each intermediate irrep and stores its
-    latent width in ``edge_ace_hidden`` channels; the gate path retains
-    ``num_channel`` throughout. The first O2 linear also generates auxiliary
-    ``0e`` gates for the positive-order representations. Those gates use the
-    tensor activation. The optional
-    attention uses real O2-invariant query-key products and a zero-initialized
-    radial scale-and-shift projection whose sigmoid scale starts at one; it
-    never applies a complex phase.
-    Radial weights never contain the cutoff. Without attention, the cutoff is
-    applied to the global O3 edge message; with attention, it is applied before
-    the inverse local-to-global transformation.
-    """
-
+class O2ScatterTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -590,7 +570,7 @@ class O2ScatterLinear(torch.nn.Module):
         )
 
 
-class O2MagneticScatterLinear(O2ScatterLinear):
+class O2ScatterMagneticTensorProduct(O2ScatterTensorProduct):
     """O2 scatter convolution with magnetic solid harmonics as extra attrs."""
 
     def __init__(

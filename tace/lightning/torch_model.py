@@ -78,7 +78,7 @@ def create_model(
     ):
         logging.warning(
             "AOTI is not enabled for energy, forces, stress, virials, charges "
-            "or noncollinear magnetic forces outputs. "
+            "or noncollinear magnetic forces outputs. \n"
             "For acceleration options, see "
             "https://tace.readthedocs.io/en/latest/guide/acceleration.html"
         )

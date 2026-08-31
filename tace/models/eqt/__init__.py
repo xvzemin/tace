@@ -1,12 +1,12 @@
 import logging
 
 try:
-    from torch_scatter import segment_csr as _segment_csr
+    from torch_scatter import segment_csr
 except (ImportError, OSError, RuntimeError):
-    _segment_csr = None
+    segment_csr = None
     logging.warning(
         "torch-scatter is unavailable; EQT will use the native PyTorch "
-        "scatter fallback. Install a torch-scatter build matching the current "
+        "scatter fallback. \n Install a torch-scatter build matching the current "
         "PyTorch and CUDA versions to accelerate large batches.",
     )
 

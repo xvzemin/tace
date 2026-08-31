@@ -23,8 +23,8 @@ from tace.models._e3nn.inter import (
 )
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.o2 import (
-    O2MagneticScatterLinear,
-    O2ScatterLinear,
+    O2ScatterMagneticTensorProduct,
+    O2ScatterTensorProduct,
     RadialRotaryComplexAttention,
 )
 from tace.models._e3nn.representation import Representation
@@ -1881,8 +1881,8 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
     )
     assert INTERACTION["o2"] is O2Interaction
     assert issubclass(O2MagneticInteraction, O2Interaction)
-    assert type(module.rejector) is O2ScatterLinear
-    assert not isinstance(module.rejector, O2MagneticScatterLinear)
+    assert type(module.rejector) is O2ScatterTensorProduct
+    assert not isinstance(module.rejector, O2ScatterMagneticTensorProduct)
     assert module.rejector.irreps_in == module.irreps_in
     assert module.rejector.irreps_out == module.irreps_out
     assert (

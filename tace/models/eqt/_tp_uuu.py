@@ -46,3 +46,7 @@ class e3nnEqtTensorProduct(torch.nn.Module):
         self, x: torch.Tensor, y: torch.Tensor, w: Union[torch.Tensor, None] = None
     ) -> torch.Tensor:
         return self.reshap3.inverse(self.eqt_tp(self.reshap1(x), self.reshap2(y), w))
+
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}"

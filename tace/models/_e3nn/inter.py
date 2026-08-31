@@ -19,7 +19,7 @@ from .fused import O3ScatterTensorProduct
 from .legacy_so2 import uvSO2Convolution
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
-from .o2 import O2MagneticScatterLinear, O2ScatterLinear
+from .o2 import O2ScatterMagneticTensorProduct, O2ScatterTensorProduct
 from .residual import get_resnet_layer
 from .wigner6j import O3Wigner6jScatterTensorProduct
 
@@ -541,7 +541,7 @@ class O2Interaction(O3CgtpInteraction):
     """
 
     def _build_rejector(self) -> torch.nn.Module:
-        rejector = O2ScatterLinear(
+        rejector = O2ScatterTensorProduct(
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
@@ -694,7 +694,7 @@ class O2MagneticInteraction(O2Interaction):
         super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:
-        rejector = O2MagneticScatterLinear(
+        rejector = O2ScatterMagneticTensorProduct(
             self.irreps_in,
             self.irreps_out,
             self.magnetic_irreps,

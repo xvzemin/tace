@@ -162,15 +162,15 @@ def test_eqt_native_scatter_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     input2 = torch.randn_like(input1, requires_grad=True)
 
-    installed_segment = sparse_product._segment_csr
-    monkeypatch.setattr(sparse_product, "_segment_csr", _reference_segment)
+    installed_segment = sparse_product.segment_csr
+    monkeypatch.setattr(sparse_product, "segment_csr", _reference_segment)
     expected = _value_and_gradients(tensor_product, input1, input2)
     if installed_segment is not None:
-        monkeypatch.setattr(sparse_product, "_segment_csr", installed_segment)
+        monkeypatch.setattr(sparse_product, "segment_csr", installed_segment)
         accelerated = _value_and_gradients(tensor_product, input1, input2)
         for accelerated_tensor, expected_tensor in zip(accelerated, expected):
             torch.testing.assert_close(accelerated_tensor, expected_tensor)
-    monkeypatch.setattr(sparse_product, "_segment_csr", None)
+    monkeypatch.setattr(sparse_product, "segment_csr", None)
     actual = _value_and_gradients(tensor_product, input1, input2)
 
     for actual_tensor, expected_tensor in zip(actual, expected):
@@ -200,7 +200,7 @@ def test_eqt_native_scatter_fallback_third_derivative(
     )
     input2 = torch.randn_like(input1, requires_grad=True)
 
-    monkeypatch.setattr(sparse_product, "_segment_csr", None)
+    monkeypatch.setattr(sparse_product, "segment_csr", None)
     output = tensor_product(input1, input2)
     grad1 = torch.autograd.grad(output.sin().sum(), input1, create_graph=True)[0]
     grad2 = torch.autograd.grad(grad1.square().sum(), input1, create_graph=True)[0]
