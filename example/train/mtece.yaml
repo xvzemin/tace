@@ -5,8 +5,7 @@ defaults:
   - _self_
 
 dataset:
-  train_file: ${oc.env:HOME}/dataset/LCAO/lcao_val.xyz
-  # train_file: ${oc.env:HOME}/dataset/LCAO/lcao_train.xyz
+  train_file: ${oc.env:HOME}/dataset/LCAO/lcao_train.xyz
   valid_file: ${oc.env:HOME}/dataset/LCAO/lcao_val.xyz
   keys:
     energy_key: energy
@@ -15,6 +14,12 @@ dataset:
     virials_key: virials
     initial_noncollinear_magmoms_key: initial_noncollinear_magmoms
     noncollinear_magnetic_forces_key: noncollinear_magnetic_forces
+
+  train_dataloader:
+    batch_size: 16
+
+  valid_dataloader:
+    batch_size: 8
 
 loss:
   loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
