@@ -15,7 +15,7 @@ from .irreps import Irrep, Irreps
 class LocalFrame(torch.nn.Module):
     """Convert between global O(3) and local O(2) representations.
 
-    Inputs and outputs shape use ``(batch, component, channel)``.
+    ``to_local`` preserves all axes after ``(batch, component)``.
     """
 
     @staticmethod
@@ -65,25 +65,25 @@ class LocalFrame(torch.nn.Module):
 
         irrep_slices = []
         offset = 0
-        for mul, ir in self.global_irreps:
+        for _, ir in self.global_irreps:
             irrep_slices.append(slice(offset, offset + ir.dim))
             offset += ir.dim
         self.irrep_slices = tuple(irrep_slices)
         self.global_component_dim = offset
 
-        sources_by_ir = {ir: [] for mul, ir in self.local_irreps}
-        for ir_index, (mul, ir) in enumerate(self.global_irreps):
+        sources_by_ir = {ir: [] for _, ir in self.local_irreps}
+        for ir_index, (_, ir) in enumerate(self.global_irreps):
             zero_ir = Irrep(0, ir.p * ((-1) ** ir.l))
             sources_by_ir[zero_ir].append(ir_index)
             for order in range(1, min(ir.l, mmax) + 1):
                 sources_by_ir[Irrep(order, 0)].append(ir_index)
         self.block_sources = tuple(
-            tuple(sources_by_ir[ir]) for mul, ir in self.local_irreps
+            tuple(sources_by_ir[ir]) for _, ir in self.local_irreps
         )
 
         block_lookup = {
             (ir, ir_index): (block_index, source_position)
-            for block_index, ((mul, ir), sources) in enumerate(
+            for block_index, ((_, ir), sources) in enumerate(
                 zip(self.local_irreps, self.block_sources)
             )
             for source_position, ir_index in enumerate(sources)
@@ -91,7 +91,7 @@ class LocalFrame(torch.nn.Module):
 
         rotation_irrep_indices = []
         degree_counts = {}
-        for ir_index, (mul, ir) in enumerate(self.global_irreps):
+        for ir_index, (_, ir) in enumerate(self.global_irreps):
             rotation_index = degree_counts.get(ir.l, 0)
             degree_counts[ir.l] = rotation_index + 1
             while len(rotation_irrep_indices) <= rotation_index:
@@ -117,7 +117,7 @@ class LocalFrame(torch.nn.Module):
         ):
             columns = []
             for ir_index in irrep_indices:
-                mul, ir = self.global_irreps[ir_index]
+                _, ir = self.global_irreps[ir_index]
                 columns.extend(range(ir.l**2, (ir.l + 1) ** 2))
 
             rows = []
@@ -130,7 +130,7 @@ class LocalFrame(torch.nn.Module):
                 ]
                 if order == 0:
                     for ir_index in active_indices:
-                        mul, ir = self.global_irreps[ir_index]
+                        _, ir = self.global_irreps[ir_index]
                         row_locations[(ir_index, order)] = (len(rows),)
                         rows.append(ir.l)
                     continue
@@ -142,11 +142,11 @@ class LocalFrame(torch.nn.Module):
                 )
                 real_positions = {}
                 for ir_index in active_indices:
-                    mul, ir = self.global_irreps[ir_index]
+                    _, ir = self.global_irreps[ir_index]
                     real_positions[ir_index] = len(rows)
                     rows.append(row_offset + ir.l - order)
                 for ir_index in active_indices:
-                    mul, ir = self.global_irreps[ir_index]
+                    _, ir = self.global_irreps[ir_index]
                     imaginary_position = len(rows)
                     rows.append(row_offset + count + ir.l - order)
                     row_locations[(ir_index, order)] = (
@@ -181,7 +181,7 @@ class LocalFrame(torch.nn.Module):
                 ]
                 if order == 0:
                     for ir_index in active_indices:
-                        mul, ir = self.global_irreps[ir_index]
+                        _, ir = self.global_irreps[ir_index]
                         local_ir = Irrep(0, ir.p * ((-1) ** ir.l))
                         block_index, source_position = block_lookup[
                             (local_ir, ir_index)
@@ -193,7 +193,7 @@ class LocalFrame(torch.nn.Module):
 
                 for component in range(2):
                     for ir_index in active_indices:
-                        mul, ir = self.global_irreps[ir_index]
+                        _, ir = self.global_irreps[ir_index]
                         block_index, source_position = block_lookup[
                             (Irrep(order, 0), ir_index)
                         ]
@@ -215,7 +215,7 @@ class LocalFrame(torch.nn.Module):
             inverse_specs_list.append(tuple(inverse_specs))
 
             for ir_index in irrep_indices:
-                mul, ir = self.global_irreps[ir_index]
+                _, ir = self.global_irreps[ir_index]
                 odd = ir.p * ((-1) ** ir.l) == -1
                 for order in range(min(ir.l, mmax) + 1):
                     source_locations[(ir_index, order)] = (
@@ -231,7 +231,7 @@ class LocalFrame(torch.nn.Module):
             tuple(
                 source_locations[(ir_index, ir.m)] for ir_index in sources
             )
-            for (mul, ir), sources in zip(
+            for (_, ir), sources in zip(
                 self.local_irreps,
                 self.block_sources,
             )
@@ -248,10 +248,10 @@ class LocalFrame(torch.nn.Module):
         input: torch.Tensor,
         wigner: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        if input.ndim != 3 or input.size(1) != self.global_component_dim:
+        if input.ndim < 3 or input.size(1) != self.global_component_dim:
             raise ValueError(
                 "Local-frame input must have shape "
-                f"(batch, {self.global_component_dim}, channels), "
+                f"(batch, {self.global_component_dim}, ...), "
                 f"got {tuple(input.shape)}."
             )
         if input.size(0) != wigner.size(0):
@@ -274,10 +274,27 @@ class LocalFrame(torch.nn.Module):
                 rows = getattr(self, f"wigner_rows_{rotation_index}")
                 columns = getattr(self, f"wigner_columns_{rotation_index}")
                 rotation = wigner.index_select(1, rows).index_select(2, columns)
-            rotated_list.append(torch.bmm(rotation, irrep_input))
+            if input.ndim == 3:
+                rotated = torch.bmm(rotation, irrep_input)
+            else:
+                trailing_shape = irrep_input.shape[2:]
+                flat_channels = math.prod(trailing_shape)
+                rotated = torch.bmm(
+                    rotation,
+                    irrep_input.view(
+                        irrep_input.size(0),
+                        irrep_input.size(1),
+                        flat_channels,
+                    ),
+                ).view(
+                    irrep_input.size(0),
+                    rotation.size(1),
+                    *trailing_shape,
+                )
+            rotated_list.append(rotated)
 
         output_blocks = []
-        for (mul, ir), locations in zip(
+        for (_, ir), locations in zip(
             self.local_irreps,
             self.source_locations,
         ):
@@ -368,7 +385,7 @@ class LocalFrame(torch.nn.Module):
 
             offset = 0
             for ir_index in irrep_indices:
-                mul, ir = self.global_irreps[ir_index]
+                _, ir = self.global_irreps[ir_index]
                 retained = 2 * min(ir.l, self.mmax) + 1
                 source = 2 * min(ir.l, wigner_mmax) + 1
                 output_by_irrep[ir_index] = rotated[

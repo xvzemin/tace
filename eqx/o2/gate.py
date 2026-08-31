@@ -181,7 +181,7 @@ class Gate(torch.nn.Module):
             raise ValueError("Invalid grouped Gate channel width.")
         channels = input_blocks[0].shape[-1] // first_multiplicity
         input_by_irrep = {
-            ir: block for (mul, ir), block in zip(self.irreps_in, input_blocks)
+            ir: block for (_, ir), block in zip(self.irreps_in, input_blocks)
         }
         even_block = input_by_irrep.get(Irrep("0e"))
         even_width = self.irreps_0e.num_irreps * channels

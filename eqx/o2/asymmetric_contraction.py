@@ -63,7 +63,7 @@ class AsymmetricContraction(torch.nn.Module):
         super().__init__()
 
         self.irreps_in = Irreps(irreps_in)
-        if any(mul != 1 for mul, ir in self.irreps_in):
+        if any(mul != 1 for mul, _ in self.irreps_in):
             raise ValueError(
                 "Every AsymmetricContraction input irrep group must have "
                 "multiplicity one. Repeat an irrep as separate groups when "
@@ -88,7 +88,7 @@ class AsymmetricContraction(torch.nn.Module):
         self.path_mode = path_mode
 
         output_types = []
-        for mul, ir in requested_irreps_out:
+        for _, ir in requested_irreps_out:
             if ir not in output_types:
                 output_types.append(ir)
         self.irreps_out_types = Irreps(output_types)

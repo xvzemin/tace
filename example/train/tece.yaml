@@ -14,7 +14,7 @@ model:
       linear_type: identity
 
     atomic_basis:
-      type: [cgtp, uv_so2, uv_so2]
+      type: [cgtp, so2, so2]
       edge_ace_hidden: 32
       num_head: 4
 

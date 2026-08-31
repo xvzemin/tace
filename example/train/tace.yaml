@@ -359,7 +359,7 @@ model:
       tensor_act: null # name for tensor-irrep 0e gates
       use_asymmetric_contraction: false
       use_radial_rotary_attention: true
-      num_head: null
+      num_head: 4 # recommended 2~8, avoid using 1, as it prevents effective use of the radial information.
       edge_ace_hidden: null # SO2/O2 asymmetric-contraction width
       gate_m0: false # always use false, legacy option for whether gating m=0 
 

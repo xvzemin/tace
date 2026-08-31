@@ -220,7 +220,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if self.use_asymmetric_contraction:
             self.nonlinearity = None
             contraction_irreps = o2.Irreps(
-                [ir for mul, ir in self.local_irreps_out]
+                [ir for _, ir in self.local_irreps_out]
             )
             self.asymmetric_contraction = o2.AsymmetricContraction(
                 contraction_irreps,
@@ -375,7 +375,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if len(projected_blocks) != len(self.asymmetric_contraction.irreps_in):
             raise ValueError("Expected one projected block per contraction irrep.")
         contraction_inputs = [[] for _ in range(self.correlation)]
-        for (mul, ir), block in zip(
+        for (mul, _), block in zip(
             self.asymmetric_contraction.irreps_in,
             projected_blocks,
         ):
@@ -415,40 +415,13 @@ class O2ScatterTensorProduct(torch.nn.Module):
         tuple[torch.Tensor, ...],
         tuple[torch.Tensor, ...],
     ]:
-        source, target = edge_index
         node_feats = self.reshape_in(node_feats)
         paired_node_blocks = self.local_frame_in.to_local(
-            torch.cat((node_feats[source], node_feats[target]), dim=-1),
+            node_feats[edge_index.T].movedim(1, 2).contiguous(),
             wigner,
         )
-        source_node_blocks = []
-        target_node_blocks = []
-        for block, (mul, ir) in zip(
-            paired_node_blocks,
-            self.local_frame_in.local_irreps,
-        ):
-            block = block.reshape(
-                block.size(0),
-                ir.dim,
-                mul // self.num_channel,
-                2 * self.num_channel,
-            )
-            source_node_blocks.append(
-                block[..., : self.num_channel].reshape(
-                    block.size(0),
-                    ir.dim,
-                    mul,
-                )
-            )
-            target_node_blocks.append(
-                block[..., self.num_channel :].reshape(
-                    block.size(0),
-                    ir.dim,
-                    mul,
-                )
-            )
-        source_node_blocks = tuple(source_node_blocks)
-        target_node_blocks = tuple(target_node_blocks)
+        source_node_blocks = tuple(block[:, :, 0] for block in paired_node_blocks)
+        target_node_blocks = tuple(block[:, :, 1] for block in paired_node_blocks)
         return node_feats, source_node_blocks, target_node_blocks
 
     def _forward_local(
@@ -463,10 +436,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
         edge_radial_basis: Union[torch.Tensor, None],
         edge_cutoff: torch.Tensor,
     ) -> torch.Tensor:
-        radial_weights = radial_weights.reshape(radial_weights.size(0), -1)
         weighted_blocks = []
         offset = 0
-        for (mul, ir), input_block in zip(
+        for (mul, _), input_block in zip(
             self.linear_up.irreps_in,
             input_blocks,
         ):
@@ -539,7 +511,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 ),
                 dim=-1,
             )
-            for mul, ir in self.linear_up.irreps_in
+            for _, ir in self.linear_up.irreps_in
         )
 
     def forward(
@@ -626,7 +598,7 @@ class O2ScatterMagneticTensorProduct(O2ScatterTensorProduct):
         self.reshape_magnetic = LayoutTransform(self.magnetic_irreps)
         self.magnetic_block_indices = {
             ir: index
-            for index, (mul, ir) in enumerate(self.magnetic_frame.local_irreps)
+            for index, (_, ir) in enumerate(self.magnetic_frame.local_irreps)
         }
         return o2.Irreps(
             tuple(node_local_irreps_in) * 2
@@ -639,30 +611,20 @@ class O2ScatterMagneticTensorProduct(O2ScatterTensorProduct):
         edge_index: torch.Tensor,
         wigner: Union[torch.Tensor, None],
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-        source, target = edge_index
         magnetic_node_attrs = self.reshape_magnetic(magnetic_node_attrs)
-        source_blocks = self.magnetic_frame.to_local(
-            magnetic_node_attrs[source],
+        paired_blocks = self.magnetic_frame.to_local(
+            magnetic_node_attrs[edge_index.T].movedim(1, 2).contiguous(),
             wigner,
         )
-        target_blocks = self.magnetic_frame.to_local(
-            magnetic_node_attrs[target],
-            wigner,
+        source_blocks = tuple(
+            block[:, :, 0].repeat_interleave(self.num_channel, dim=-1)
+            for block in paired_blocks
         )
-        return self._repeat_channels(source_blocks), self._repeat_channels(
-            target_blocks
+        target_blocks = tuple(
+            block[:, :, 1].repeat_interleave(self.num_channel, dim=-1)
+            for block in paired_blocks
         )
-
-    def _repeat_channels(
-        self,
-        blocks: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, ...]:
-        return tuple(
-            block.reshape(*block.shape, 1)
-            .expand(*block.shape, self.num_channel)
-            .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
-            for block in blocks
-        )
+        return source_blocks, target_blocks
 
     def _input_blocks(
         self,
@@ -672,7 +634,7 @@ class O2ScatterMagneticTensorProduct(O2ScatterTensorProduct):
         target_magnetic_blocks: tuple[torch.Tensor, ...],
     ) -> tuple[torch.Tensor, ...]:
         input_blocks = []
-        for mul, ir in self.linear_up.irreps_in:
+        for _, ir in self.linear_up.irreps_in:
             parts = []
             node_index = self.node_block_indices.get(ir)
             if node_index is not None:

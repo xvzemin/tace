@@ -242,7 +242,7 @@ class Irreps:
         irreps: Union[o3.Irreps, "Irreps"],
     ) -> int:
         """Return the multiplicity shared by all irrep entries."""
-        multiplicities = {mul for mul, ir in irreps}
+        multiplicities = {mul for mul, _ in irreps}
         if not multiplicities:
             raise ValueError("Irreps must contain at least one entry.")
         if len(multiplicities) != 1:
@@ -255,11 +255,11 @@ class Irreps:
 
     @property
     def num_irreps(self) -> int:
-        return sum(mul for mul, ir in self)
+        return sum(mul for mul, _ in self)
 
     @property
     def mmax(self) -> int:
-        return max((ir.m for mul, ir in self), default=-1)
+        return max((ir.m for _, ir in self), default=-1)
 
     def expanded(self) -> Tuple[Irrep, ...]:
         return tuple(ir for mul, ir in self for _ in range(mul))

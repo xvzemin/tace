@@ -263,6 +263,39 @@ def test_local_frame_accepts_layout_transform_output():
     )
 
 
+def test_local_frame_preserves_trailing_axes_and_empty_batch():
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    try:
+        irreps = o3.Irreps("2x0e+2x1o+2x2e")
+        frame = o2.LocalFrame(irreps, lmax=2).to(device=DEVICE)
+        reshape = LayoutTransform(irreps).to(device=DEVICE)
+        wigner_module = WignerD(2, 2).to(device=DEVICE)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+    edge_vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    wigner, _ = wigner_module.get_wigner(edge_vectors)
+    input = reshape(torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE))
+    reference_blocks = frame.to_local(input, wigner)
+    paired_blocks = frame.to_local(
+        torch.stack((input, 2.0 * input), dim=2),
+        wigner,
+    )
+
+    for paired, reference in zip(paired_blocks, reference_blocks):
+        assert paired.shape == reference.shape[:-1] + (2, reference.shape[-1])
+        torch.testing.assert_close(paired[:, :, 0], reference)
+        torch.testing.assert_close(paired[:, :, 1], 2.0 * reference)
+
+    empty_blocks = frame.to_local(
+        torch.stack((input[:0], input[:0]), dim=2),
+        wigner[:0],
+    )
+    for empty, reference in zip(empty_blocks, reference_blocks):
+        assert empty.shape == (0, reference.size(1), 2, reference.size(2))
+
+
 @pytest.mark.parametrize("lmax,mmax", [(0, 0), (2, 0), (3, 1), (4, 2), (4, 4)])
 def test_o2_wigner_layout_matches_legacy_so2_mapping(lmax, mmax):
     from tace.models._e3nn.legacy_so2 import (
@@ -1945,6 +1978,43 @@ def test_o2_magnetic_scatter_owns_magnetic_layout():
     assert rejector.magnetic_irreps == module.magnetic_irreps
     assert rejector.reshape_magnetic.irreps == module.magnetic_irreps
     assert rejector.magnetic_frame.global_irreps == module.magnetic_irreps
+
+
+@pytest.mark.parametrize("magnetic", [False, True])
+def test_o2_interaction_supports_empty_edge_batch(magnetic):
+    module = (
+        _build_o2_magnetic_interaction()
+        if magnetic
+        else _build_o2_interaction()
+    )
+    num_nodes = 3
+    node_feats = torch.randn(
+        num_nodes,
+        module.irreps_in.dim,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)[
+        torch.tensor([0, 1, 0], device=DEVICE)
+    ]
+    inputs = (
+        node_feats,
+        node_attrs,
+        torch.empty(0, 4, dtype=DTYPE, device=DEVICE),
+        torch.empty(0, 3, dtype=DTYPE, device=DEVICE),
+        torch.empty(2, 0, dtype=torch.long, device=DEVICE),
+        torch.empty(0, 1, dtype=DTYPE, device=DEVICE),
+        torch.randn(num_nodes, 3, dtype=DTYPE, device=DEVICE),
+    )
+
+    output = (
+        _evaluate_o2_magnetic_interaction(module, inputs)
+        if magnetic
+        else _evaluate_o2_interaction(module, inputs)
+    )
+
+    assert output.shape == (num_nodes, module.rejector.irreps_out.dim)
+    torch.testing.assert_close(output, torch.zeros_like(output))
 
 
 def test_o2_scatter_requires_cutoff_before_wigner():
