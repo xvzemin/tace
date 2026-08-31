@@ -9,18 +9,38 @@ TACE is designed with physical priors and strong inductive biases to enhance ext
 It performs Atomic Cluster Expansion and Edge Cluster Expansion based on spherical tensors 
 or irreducible Cartesian tensors, with an optional attention architecture.
 
-## Cartesian Architecture
+## O(3) Cartesian Architecture
 
 <img src="fig/cartesian_arch.png" width="100%" align="center">
 
-## Spherical/SO(2) Architecture
+$$
+(A\otimes_k^\delta B)_{\boldsymbol i\boldsymbol j}
+=\frac{1}{\sqrt{3^k}}\sum_{\boldsymbol a}
+A_{\boldsymbol i\boldsymbol a}B_{\boldsymbol a\boldsymbol j},
+\qquad l_3=l_1+l_2-2k,
+$$
 
-The architecture of the spherical model is largely the same as that of the Cartesian space. 
-For details on the SO(2) component, please refer to our paper and code.
+$$
+(A\otimes_k^\epsilon B)_{\boldsymbol i w\boldsymbol j}
+=\frac{1}{\sqrt{2}}\frac{1}{\sqrt{3^k}}\sum_{\boldsymbol a,u,v}
+A_{\boldsymbol i u\boldsymbol a}\epsilon_{wuv}
+B_{\boldsymbol a v\boldsymbol j},
+\qquad l_3=l_1+l_2-2k-1.
+$$
 
-## Wigner6j/O(2) Architecture
+## O(3) Spherical/Wigner-6j/O(2) Architecture
 
-The current implementation is still subject to change, and backward compatibility is not guaranteed. Please refer to our paper and code for details.
+The SO(2) implementation in TACE will be gradually replaced by an O(2) formulation to ensure complete parity support for O(3). Backward compatibility will be maintained for the SO(2) implementation, while backward compatibility for the O(2) implementation is not currently guaranteed.
+
+
+$$
+(l,p)_{O(3)}
+\downarrow O(2)
+=
+\underbrace{\bigl(0,p(-1)^l\bigr)}_{\text{1D},\,m=0}
+\oplus
+\underbrace{\bigoplus_{m=1}^{l}(m,0)}_{\text{2D},\,m>0}.
+$$
 
 ## Documentation
 
