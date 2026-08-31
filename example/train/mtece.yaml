@@ -1,11 +1,18 @@
-# Magnetic TECE inherits TECE and only overrides its magnetic architecture,
+# Magnetic TECE inherits TACE and only overrides its magnetic architecture,
 # dataset keys, loss, and validation metric.
 defaults:
-  - tece
+  - tace
   - _self_
 
 dataset:
+  train_file: ${oc.env:HOME}/dataset/LCAO/lcao_val.xyz
+  # train_file: ${oc.env:HOME}/dataset/LCAO/lcao_train.xyz
+  valid_file: ${oc.env:HOME}/dataset/LCAO/lcao_val.xyz
   keys:
+    energy_key: energy
+    forces_key: forces
+    stress_key: stress
+    virials_key: virials
     initial_noncollinear_magmoms_key: initial_noncollinear_magmoms
     noncollinear_magnetic_forces_key: noncollinear_magnetic_forces
 
@@ -17,6 +24,11 @@ loss:
     - mse_stress
     - mse_noncollinear_magnetic_forces
   loss_property_weights: [1.0, 5.0, 0.5, 5.0]
+  loss_function_kwargs:
+    - {}
+    - {}
+    - {}
+    - {}
 
 synth_metric:
   val/noncollinear_magnetic_forces_mae: 5.0
@@ -25,12 +37,13 @@ synth_metric:
 model:
   config:
     parity: true
-    mmax: 3
 
     atomic_basis:
       type: o2_mag
+      use_asymmetric_contraction: false
+      use_radial_rotary_attention: true
 
     product_basis:
-      nonlinear: bilinear_gate
-      scalar_act: scaled_silu
-      agnostic: true
+      nonlinear: null
+      scalar_act: null
+      agnostic: false
