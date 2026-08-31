@@ -18,6 +18,62 @@ from ..linear import torchLinear
 from ..softmax import GraphSoftmax
 
 
+def _to_contraction_layout(
+    features: tuple[torch.Tensor, ...],
+    irreps: o2.Irreps,
+    channels: int,
+) -> torch.Tensor:
+    if len(features) != len(irreps):
+        raise ValueError("Expected one tensor per O(2) irrep group.")
+    outputs = []
+    for values, (mul, ir) in zip(features, irreps):
+        leading_shape = values.shape[:-2]
+        output = values.reshape(
+            *leading_shape,
+            ir.dim,
+            mul,
+            channels,
+        )
+        output = output.permute(
+            *range(len(leading_shape)),
+            len(leading_shape) + 1,
+            len(leading_shape),
+            len(leading_shape) + 2,
+        )
+        outputs.append(
+            output.reshape(*leading_shape, mul * ir.dim, channels)
+        )
+    return torch.cat(outputs, dim=-2)
+
+
+def _from_contraction_layout(
+    features: torch.Tensor,
+    irreps: o2.Irreps,
+    channels: int,
+) -> tuple[torch.Tensor, ...]:
+    leading_shape = features.shape[:-2]
+    outputs = []
+    for (mul, ir), ir_slice in zip(irreps, irreps.slices()):
+        values = features[..., ir_slice, :].reshape(
+            *leading_shape,
+            mul,
+            ir.dim,
+            channels,
+        )
+        values = values.permute(
+            *range(len(leading_shape)),
+            len(leading_shape) + 1,
+            len(leading_shape),
+            len(leading_shape) + 2,
+        )
+        outputs.append(
+            values.reshape(*leading_shape, ir.dim, mul * channels)
+        )
+    if irreps.dim != features.size(-2):
+        raise ValueError("Invalid contraction O(2) representation size.")
+    return tuple(outputs)
+
+
 class RadialRotaryComplexAttention(torch.nn.Module):
     def __init__(
         self,
@@ -77,7 +133,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
 
     def forward(
         self,
-        message_features: tuple[torch.Tensor, ...],
+        message: tuple[torch.Tensor, ...],
         source_features: tuple[torch.Tensor, ...],
         target_features: tuple[torch.Tensor, ...],
         edge_radial_basis: torch.Tensor,
@@ -85,7 +141,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> tuple[torch.Tensor, ...]:
-        if len(message_features) != len(self.message_irreps):
+        if len(message) != len(self.message_irreps):
             raise ValueError("Expected one message tensor per output O2 group.")
         query_features, key_features = self._project_query_key(
             source_features,
@@ -126,7 +182,7 @@ class RadialRotaryComplexAttention(torch.nn.Module):
 
         outputs = []
         for features, (multiplicity, irrep) in zip(
-            message_features,
+            message,
             self.message_irreps,
         ):
             shape = (
@@ -300,62 +356,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
         else:
             self.attention = None
 
-    @staticmethod
-    def _grouped_to_dense(
-        features: tuple[torch.Tensor, ...],
-        irreps: o2.Irreps,
-        channels: int,
-    ) -> torch.Tensor:
-        if len(features) != len(irreps):
-            raise ValueError("Expected one tensor per O(2) irrep group.")
-        outputs = []
-        for values, (mul, ir) in zip(features, irreps):
-            leading_shape = values.shape[:-2]
-            output = values.reshape(
-                *leading_shape,
-                ir.dim,
-                mul,
-                channels,
-            )
-            output = output.permute(
-                *range(len(leading_shape)),
-                len(leading_shape) + 1,
-                len(leading_shape),
-                len(leading_shape) + 2,
-            )
-            outputs.append(
-                output.reshape(*leading_shape, mul * ir.dim, channels)
-            )
-        return torch.cat(outputs, dim=-2)
-
-    @staticmethod
-    def _dense_to_grouped(
-        input: torch.Tensor,
-        irreps: o2.Irreps,
-        channels: int,
-    ) -> tuple[torch.Tensor, ...]:
-        leading_shape = input.shape[:-2]
-        outputs = []
-        for (mul, ir), ir_slice in zip(irreps, irreps.slices()):
-            values = input[..., ir_slice, :].reshape(
-                *leading_shape,
-                mul,
-                ir.dim,
-                channels,
-            )
-            values = values.permute(
-                *range(len(leading_shape)),
-                len(leading_shape) + 1,
-                len(leading_shape),
-                len(leading_shape) + 2,
-            )
-            outputs.append(
-                values.reshape(*leading_shape, ir.dim, mul * channels)
-            )
-        if irreps.dim != input.size(-2):
-            raise ValueError("Invalid dense O(2) representation size.")
-        return tuple(outputs)
-
     def _apply_asymmetric_contraction(
         self,
         projected_features: tuple[torch.Tensor, ...],
@@ -379,7 +379,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
                     features[..., start:stop]
                 )
         dense_inputs = [
-            self._grouped_to_dense(
+            _to_contraction_layout(
                 tuple(features),
                 self.asymmetric_contraction.irreps_in,
                 self.edge_ace_hidden,
@@ -390,7 +390,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             dense_inputs,
             self.scalar_act(contraction_weights),
         )
-        return self._dense_to_grouped(
+        return _from_contraction_layout(
             contracted,
             self.asymmetric_contraction.irreps_out,
             self.edge_ace_hidden,
@@ -419,7 +419,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self,
         source_features: tuple[torch.Tensor, ...],
         target_features: tuple[torch.Tensor, ...],
-        radial_weights: torch.Tensor,
+        conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_radial_basis: Union[torch.Tensor, None],
         edge_cutoff: torch.Tensor,
@@ -443,11 +443,11 @@ class O2ScatterTensorProduct(torch.nn.Module):
             edge_features,
         ):
             width = mul * self.num_channel
-            weight = radial_weights[:, offset : offset + width].unsqueeze(-2)
+            weight = conv_weights[:, offset : offset + width].unsqueeze(-2)
             weighted_features.append(features * weight)
             offset += width
-        if offset != radial_weights.size(-1):
-            raise ValueError("Invalid O2 radial weight size.")
+        if offset != conv_weights.size(-1):
+            raise ValueError("Invalid O2 convolution weight size.")
 
         projected_features = self.linear_up.forward_grouped(
             tuple(weighted_features)
@@ -457,7 +457,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             contraction_weights = projected_features[0][
                 ..., projected_channels:
             ].reshape(
-                radial_weights.size(0),
+                conv_weights.size(0),
                 self.asymmetric_contraction.weight_numel,
             )
             projected_features = tuple(
@@ -472,14 +472,14 @@ class O2ScatterTensorProduct(torch.nn.Module):
             if self.nonlinearity is None:
                 raise RuntimeError("O2 nonlinearity is not configured.")
             hidden_features = self.nonlinearity.forward_grouped(projected_features)
-        message_features = self.linear_down.forward_grouped(hidden_features)
+        message = self.linear_down.forward_grouped(hidden_features)
         if self.attention is not None:
             if edge_radial_basis is None:
                 raise ValueError(
                     "O2 radial rotary attention requires edge_radial_basis."
                 )
-            message_features = self.attention(
-                message_features,
+            message = self.attention(
+                message,
                 source_features,
                 target_features,
                 edge_radial_basis,
@@ -487,22 +487,22 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 edge_cutoff,
                 num_nodes,
             )
-        return message_features
+        return message
 
     def _to_global(
         self,
-        message_features: tuple[torch.Tensor, ...],
+        message: tuple[torch.Tensor, ...],
         edge_index: torch.Tensor,
         wigner_inv: Union[torch.Tensor, None],
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
-        messages = self.local_frame_out.to_global(message_features, wigner_inv)
+        message = self.local_frame_out.to_global(message, wigner_inv)
         if self.attention is None:
-            messages = messages * edge_cutoff.unsqueeze(-1)
+            message = message * edge_cutoff.unsqueeze(-1)
         return self.reshape_out.inverse(
             scatter_sum(
-                messages,
+                message,
                 edge_index[1],
                 dim=0,
                 dim_size=num_nodes,
@@ -512,7 +512,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
     def forward(
         self,
         node_feats: torch.Tensor,
-        radial_weights: torch.Tensor,
+        conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: Union[torch.Tensor, None],
         wigner_inv: Union[torch.Tensor, None],
@@ -526,17 +526,17 @@ class O2ScatterTensorProduct(torch.nn.Module):
             edge_index,
             wigner,
         )
-        message_features = self._convolution(
+        message = self._convolution(
             source_features,
             target_features,
-            radial_weights,
+            conv_weights,
             edge_index,
             edge_radial_basis,
             edge_cutoff,
             node_features.size(0),
         )
         return self._to_global(
-            message_features,
+            message,
             edge_index,
             wigner_inv,
             edge_cutoff,
@@ -728,62 +728,6 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         else:
             self.attention = None
 
-    @staticmethod
-    def _grouped_to_dense(
-        features: tuple[torch.Tensor, ...],
-        irreps: o2.Irreps,
-        channels: int,
-    ) -> torch.Tensor:
-        if len(features) != len(irreps):
-            raise ValueError("Expected one tensor per O(2) irrep group.")
-        outputs = []
-        for values, (mul, ir) in zip(features, irreps):
-            leading_shape = values.shape[:-2]
-            output = values.reshape(
-                *leading_shape,
-                ir.dim,
-                mul,
-                channels,
-            )
-            output = output.permute(
-                *range(len(leading_shape)),
-                len(leading_shape) + 1,
-                len(leading_shape),
-                len(leading_shape) + 2,
-            )
-            outputs.append(
-                output.reshape(*leading_shape, mul * ir.dim, channels)
-            )
-        return torch.cat(outputs, dim=-2)
-
-    @staticmethod
-    def _dense_to_grouped(
-        input: torch.Tensor,
-        irreps: o2.Irreps,
-        channels: int,
-    ) -> tuple[torch.Tensor, ...]:
-        leading_shape = input.shape[:-2]
-        outputs = []
-        for (mul, ir), ir_slice in zip(irreps, irreps.slices()):
-            values = input[..., ir_slice, :].reshape(
-                *leading_shape,
-                mul,
-                ir.dim,
-                channels,
-            )
-            values = values.permute(
-                *range(len(leading_shape)),
-                len(leading_shape) + 1,
-                len(leading_shape),
-                len(leading_shape) + 2,
-            )
-            outputs.append(
-                values.reshape(*leading_shape, ir.dim, mul * channels)
-            )
-        if irreps.dim != input.size(-2):
-            raise ValueError("Invalid dense O(2) representation size.")
-        return tuple(outputs)
-
     def _apply_asymmetric_contraction(
         self,
         projected_features: tuple[torch.Tensor, ...],
@@ -805,7 +749,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
                     features[..., start:stop]
                 )
         dense_inputs = [
-            self._grouped_to_dense(
+            _to_contraction_layout(
                 tuple(features),
                 self.asymmetric_contraction.irreps_in,
                 self.edge_ace_hidden,
@@ -816,7 +760,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             dense_inputs,
             self.scalar_act(contraction_weights),
         )
-        return self._dense_to_grouped(
+        return _from_contraction_layout(
             contracted,
             self.asymmetric_contraction.irreps_out,
             self.edge_ace_hidden,
@@ -873,7 +817,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         target_features: tuple[torch.Tensor, ...],
         source_magnetic_features: tuple[torch.Tensor, ...],
         target_magnetic_features: tuple[torch.Tensor, ...],
-        radial_weights: torch.Tensor,
+        conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_radial_basis: Union[torch.Tensor, None],
         edge_cutoff: torch.Tensor,
@@ -907,11 +851,11 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             edge_features,
         ):
             width = mul * self.num_channel
-            weight = radial_weights[:, offset : offset + width].unsqueeze(-2)
+            weight = conv_weights[:, offset : offset + width].unsqueeze(-2)
             weighted_features.append(features * weight)
             offset += width
-        if offset != radial_weights.size(-1):
-            raise ValueError("Invalid O2 radial weight size.")
+        if offset != conv_weights.size(-1):
+            raise ValueError("Invalid O2 convolution weight size.")
 
         projected_features = self.linear_up.forward_grouped(
             tuple(weighted_features)
@@ -921,7 +865,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             contraction_weights = projected_features[0][
                 ..., projected_channels:
             ].reshape(
-                radial_weights.size(0),
+                conv_weights.size(0),
                 self.asymmetric_contraction.weight_numel,
             )
             projected_features = tuple(
@@ -936,14 +880,14 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             if self.nonlinearity is None:
                 raise RuntimeError("O2 nonlinearity is not configured.")
             hidden_features = self.nonlinearity.forward_grouped(projected_features)
-        message_features = self.linear_down.forward_grouped(hidden_features)
+        message = self.linear_down.forward_grouped(hidden_features)
         if self.attention is not None:
             if edge_radial_basis is None:
                 raise ValueError(
                     "O2 radial rotary attention requires edge_radial_basis."
                 )
-            message_features = self.attention(
-                message_features,
+            message = self.attention(
+                message,
                 source_features,
                 target_features,
                 edge_radial_basis,
@@ -951,22 +895,22 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
                 edge_cutoff,
                 num_nodes,
             )
-        return message_features
+        return message
 
     def _to_global(
         self,
-        message_features: tuple[torch.Tensor, ...],
+        message: tuple[torch.Tensor, ...],
         edge_index: torch.Tensor,
         wigner_inv: Union[torch.Tensor, None],
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
-        messages = self.local_frame_out.to_global(message_features, wigner_inv)
+        message = self.local_frame_out.to_global(message, wigner_inv)
         if self.attention is None:
-            messages = messages * edge_cutoff.unsqueeze(-1)
+            message = message * edge_cutoff.unsqueeze(-1)
         return self.reshape_out.inverse(
             scatter_sum(
-                messages,
+                message,
                 edge_index[1],
                 dim=0,
                 dim_size=num_nodes,
@@ -977,7 +921,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         self,
         node_feats: torch.Tensor,
         magnetic_node_attrs: torch.Tensor,
-        radial_weights: torch.Tensor,
+        conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: Union[torch.Tensor, None],
         wigner_inv: Union[torch.Tensor, None],
@@ -998,19 +942,19 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             edge_index,
             wigner,
         )
-        message_features = self._convolution(
+        message = self._convolution(
             source_features,
             target_features,
             source_magnetic_features,
             target_magnetic_features,
-            radial_weights,
+            conv_weights,
             edge_index,
             edge_radial_basis,
             edge_cutoff,
             node_features.size(0),
         )
         return self._to_global(
-            message_features,
+            message,
             edge_index,
             wigner_inv,
             edge_cutoff,

@@ -576,7 +576,7 @@ class O2Interaction(O3CgtpInteraction):
         self,
         node_feats: torch.Tensor,
         magnetic_node_attrs: Union[torch.Tensor, None],
-        radial_weights: torch.Tensor,
+        conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_wigner: Union[torch.Tensor, None],
         edge_wigner_inv: Union[torch.Tensor, None],
@@ -585,7 +585,7 @@ class O2Interaction(O3CgtpInteraction):
     ) -> torch.Tensor:
         return self.rejector(
             node_feats,
-            radial_weights,
+            conv_weights,
             edge_index,
             edge_wigner,
             edge_wigner_inv,
@@ -643,11 +643,11 @@ class O2Interaction(O3CgtpInteraction):
             edge_index,
             magnetic_radial_basis,
         )
-        radial_weights = self.edge_info(edge_weight_inputs)
+        conv_weights = self.edge_info(edge_weight_inputs)
         return self._apply_rejector(
             node_feats,
             magnetic_node_attrs,
-            radial_weights,
+            conv_weights,
             edge_index,
             edge_wigner,
             edge_wigner_inv,
@@ -742,7 +742,7 @@ class O2MagneticInteraction(O2Interaction):
         self,
         node_feats: torch.Tensor,
         magnetic_node_attrs: Union[torch.Tensor, None],
-        radial_weights: torch.Tensor,
+        conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_wigner: Union[torch.Tensor, None],
         edge_wigner_inv: Union[torch.Tensor, None],
@@ -756,7 +756,7 @@ class O2MagneticInteraction(O2Interaction):
         return self.rejector(
             node_feats,
             magnetic_node_attrs,
-            radial_weights,
+            conv_weights,
             edge_index,
             edge_wigner,
             edge_wigner_inv,

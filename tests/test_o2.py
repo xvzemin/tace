@@ -2030,11 +2030,11 @@ def test_o2_interaction_supports_empty_edge_batch(magnetic):
 def test_o2_scatter_requires_cutoff_before_wigner():
     module = _build_o2_interaction()
     inputs = _o2_magnetic_inputs(module)
-    radial_weights = module.edge_info(inputs[2])
+    conv_weights = module.edge_info(inputs[2])
     with pytest.raises(ValueError, match="requires edge_cutoff"):
         module.rejector(
             inputs[0],
-            radial_weights,
+            conv_weights,
             inputs[4],
             None,
             None,
@@ -2043,7 +2043,7 @@ def test_o2_scatter_requires_cutoff_before_wigner():
 
 
 @pytest.mark.parametrize("use_radial_rotary_attention", [False, True])
-def test_o2_cutoff_scales_messages_not_radial_weights(
+def test_o2_cutoff_scales_messages_not_conv_weights(
     use_radial_rotary_attention,
 ):
     torch.manual_seed(17)
