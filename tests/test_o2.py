@@ -1902,6 +1902,13 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
     assert issubclass(O2MagneticInteraction, O2Interaction)
     assert type(module.rejector) is O2ScatterTensorProduct
     assert not isinstance(module.rejector, O2ScatterMagneticTensorProduct)
+    assert issubclass(
+        O2ScatterMagneticTensorProduct,
+        O2ScatterTensorProduct,
+    )
+    assert not hasattr(module.rejector, "extra_node_attrs_irreps")
+    assert not hasattr(module.rejector, "magnetic_irreps")
+    assert not hasattr(module.rejector, "magnetic_frame")
     assert module.rejector.irreps_in == module.irreps_in
     assert module.rejector.irreps_out == module.irreps_out
     assert (
@@ -1926,6 +1933,18 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
         create_graph=True,
     )
     assert all(gradient.isfinite().all() for gradient in gradients)
+
+
+def test_o2_magnetic_scatter_owns_magnetic_layout():
+    module = _build_o2_magnetic_interaction(mag_Lmax=2)
+    rejector = module.rejector
+
+    assert type(rejector) is O2ScatterMagneticTensorProduct
+    assert isinstance(rejector, O2ScatterTensorProduct)
+    assert not hasattr(rejector, "extra_node_attrs_irreps")
+    assert rejector.magnetic_irreps == module.magnetic_irreps
+    assert rejector.reshape_magnetic.irreps == module.magnetic_irreps
+    assert rejector.magnetic_frame.global_irreps == module.magnetic_irreps
 
 
 def test_o2_scatter_requires_cutoff_before_wigner():

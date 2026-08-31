@@ -150,7 +150,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
         irreps_in: o3.Irreps,
         irreps_out: o3.Irreps,
         *,
-        extra_node_attrs_irreps: Union[o3.Irreps, None] = None,
         num_channel: int,
         lmax: int,
         mmax: int,
@@ -168,28 +167,14 @@ class O2ScatterTensorProduct(torch.nn.Module):
 
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
-        self.extra_node_attrs_irreps = (
-            None
-            if extra_node_attrs_irreps is None
-            else o3.Irreps(extra_node_attrs_irreps)
-        )
         self.num_channel = num_channel
         self.edge_ace_hidden = edge_ace_hidden or num_channel
         self.lmax = lmax
-        self.mmax = mmax
+        self.mmax = self._resolve_mmax(self.irreps_in, mmax)
         self.correlation = correlation
         self.num_head = num_head
         self.use_asymmetric_contraction = use_asymmetric_contraction
         self.use_radial_rotary_attention = use_radial_rotary_attention
-        self.mmax = min(
-            max(
-                self.irreps_in.lmax,
-                self.extra_node_attrs_irreps.lmax
-                if self.extra_node_attrs_irreps is not None
-                else 0,
-            ),
-            mmax,
-        )
 
         if not (
             o2.Irreps.common_multiplicity(self.irreps_in)
@@ -197,7 +182,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             == num_channel
         ):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
-        
+
         self.local_frame_in = o2.LocalFrame(self.irreps_in, self.lmax, self.mmax)
         self.local_frame_out = o2.LocalFrame(self.irreps_out, self.lmax, self.mmax)
         self.reshape_in = LayoutTransform(self.irreps_in)
@@ -218,17 +203,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         ):
             raise ValueError("num_head must divide num_channel.")
 
-        if self.extra_node_attrs_irreps is not None:
-            self.local_frame_extra = o2.LocalFrame(self.extra_node_attrs_irreps, self.lmax, self.mmax)
-            self.reshape_extra = LayoutTransform(self.extra_node_attrs_irreps)
-        self.local_irreps_in = o2.Irreps(
-            tuple(node_local_irreps_in) * 2
-            + (
-                tuple(self.local_frame_extra.local_irreps) * 2
-                if self.extra_node_attrs_irreps is not None
-                else ()
-            )
-        ).regroup()
+        self.local_irreps_in = self._build_local_irreps_in(node_local_irreps_in)
 
         self.local_irreps_out = node_local_irreps_out
         self.use_asymmetric_contraction = (
@@ -242,17 +217,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 node_local_irreps_in
             )
         }
-        self.extra_node_attrs_block_indices = (
-            {
-                irrep: index
-                for index, (_, irrep) in enumerate(
-                    self.local_frame_extra.local_irreps
-                )
-            }
-            if self.extra_node_attrs_irreps is not None
-            else {}
-        )
-
         if self.use_asymmetric_contraction:
             self.nonlinearity = None
             contraction_irreps = o2.Irreps(
@@ -335,6 +299,15 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
         else:
             self.attention = None
+
+    def _build_local_irreps_in(
+        self,
+        node_local_irreps_in: o2.Irreps,
+    ) -> o2.Irreps:
+        return o2.Irreps(tuple(node_local_irreps_in) * 2).regroup()
+
+    def _resolve_mmax(self, irreps_in: o3.Irreps, mmax: int) -> int:
+        return min(irreps_in.lmax, mmax)
 
     @staticmethod
     def _grouped_to_dense(
@@ -432,22 +405,17 @@ class O2ScatterTensorProduct(torch.nn.Module):
             self.edge_ace_hidden,
         )
 
-    def forward(
+    def _localize_node_blocks(
         self,
         node_feats: torch.Tensor,
-        radial_weights: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: Union[torch.Tensor, None],
-        wigner_inv: Union[torch.Tensor, None],
-        extra_node_attrs: Union[torch.Tensor, None] = None,
-        edge_radial_basis: Union[torch.Tensor, None] = None,
-        edge_cutoff: Union[torch.Tensor, None] = None,
-    ) -> torch.Tensor:
-        if edge_cutoff is None:
-            raise ValueError("O2 convolution requires edge_cutoff.")
-
+    ) -> tuple[
+        torch.Tensor,
+        tuple[torch.Tensor, ...],
+        tuple[torch.Tensor, ...],
+    ]:
         source, target = edge_index
-        num_nodes = node_feats.size(0)
         node_feats = self.reshape_in(node_feats)
         paired_node_blocks = self.local_frame_in.to_local(
             torch.cat((node_feats[source], node_feats[target]), dim=-1),
@@ -481,47 +449,20 @@ class O2ScatterTensorProduct(torch.nn.Module):
             )
         source_node_blocks = tuple(source_node_blocks)
         target_node_blocks = tuple(target_node_blocks)
-        source_extra_blocks = None
-        target_extra_blocks = None
-        if self.extra_node_attrs_irreps is not None:
-            if extra_node_attrs is None:
-                raise ValueError("O2 convolution requires extra_node_attrs.")
-            extra_node_attrs = self.reshape_extra(extra_node_attrs)
-            source_extra_blocks = self.local_frame_extra.to_local(
-                extra_node_attrs[source],
-                wigner,
-            )
-            target_extra_blocks = self.local_frame_extra.to_local(
-                extra_node_attrs[target],
-                wigner,
-            )
-            source_extra_blocks = tuple(
-                block.reshape(*block.shape, 1)
-                .expand(*block.shape, self.num_channel)
-                .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
-                for block in source_extra_blocks
-            )
-            target_extra_blocks = tuple(
-                block.reshape(*block.shape, 1)
-                .expand(*block.shape, self.num_channel)
-                .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
-                for block in target_extra_blocks
-            )
+        return node_feats, source_node_blocks, target_node_blocks
 
-        input_blocks = []
-        for mul, ir in self.linear_up.irreps_in:
-            parts = []
-            node_index = self.node_block_indices.get(ir)
-            if node_index is not None:
-                parts.append(target_node_blocks[node_index])
-                parts.append(source_node_blocks[node_index])
-            extra_index = self.extra_node_attrs_block_indices.get(ir)
-            if extra_index is not None:
-                parts.append(target_extra_blocks[extra_index])
-                parts.append(source_extra_blocks[extra_index])
-            input_blocks.append(torch.cat(parts, dim=-1))
-        input_blocks = tuple(input_blocks)
-
+    def _forward_local(
+        self,
+        node_feats: torch.Tensor,
+        input_blocks: tuple[torch.Tensor, ...],
+        source_node_blocks: tuple[torch.Tensor, ...],
+        target_node_blocks: tuple[torch.Tensor, ...],
+        radial_weights: torch.Tensor,
+        edge_index: torch.Tensor,
+        wigner_inv: Union[torch.Tensor, None],
+        edge_radial_basis: Union[torch.Tensor, None],
+        edge_cutoff: torch.Tensor,
+    ) -> torch.Tensor:
         radial_weights = radial_weights.reshape(radial_weights.size(0), -1)
         weighted_blocks = []
         offset = 0
@@ -581,33 +522,176 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 messages,
                 edge_index[1],
                 dim=0,
-                dim_size=num_nodes,
+                dim_size=node_feats.size(0),
             )
+        )
+
+    def _input_blocks(
+        self,
+        source_node_blocks: tuple[torch.Tensor, ...],
+        target_node_blocks: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        return tuple(
+            torch.cat(
+                (
+                    target_node_blocks[self.node_block_indices[ir]],
+                    source_node_blocks[self.node_block_indices[ir]],
+                ),
+                dim=-1,
+            )
+            for mul, ir in self.linear_up.irreps_in
+        )
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        radial_weights: torch.Tensor,
+        edge_index: torch.Tensor,
+        wigner: Union[torch.Tensor, None],
+        wigner_inv: Union[torch.Tensor, None],
+        edge_radial_basis: Union[torch.Tensor, None] = None,
+        edge_cutoff: Union[torch.Tensor, None] = None,
+    ) -> torch.Tensor:
+        if edge_cutoff is None:
+            raise ValueError("O2 convolution requires edge_cutoff.")
+        node_feats, source_node_blocks, target_node_blocks = (
+            self._localize_node_blocks(node_feats, edge_index, wigner)
+        )
+        return self._forward_local(
+            node_feats,
+            self._input_blocks(source_node_blocks, target_node_blocks),
+            source_node_blocks,
+            target_node_blocks,
+            radial_weights,
+            edge_index,
+            wigner_inv,
+            edge_radial_basis,
+            edge_cutoff,
         )
 
 
 class O2ScatterMagneticTensorProduct(O2ScatterTensorProduct):
-    """O2 scatter convolution with magnetic solid harmonics as extra attrs."""
+    """O2 tensor product including magnetic solid harmonics followed by scatter."""
 
     def __init__(
         self,
         irreps_in: o3.Irreps,
         irreps_out: o3.Irreps,
         magnetic_irreps: o3.Irreps,
-        **kwargs,
+        *,
+        num_channel: int,
+        lmax: int,
+        mmax: int,
+        act_0e: torch.nn.Module,
+        act_0o: Union[torch.nn.Module, None],
+        act_lm: torch.nn.Module,
+        correlation: int,
+        num_head: int,
+        num_radial_basis: int,
+        use_asymmetric_contraction: bool,
+        use_radial_rotary_attention: bool,
+        edge_ace_hidden: Union[int, None] = None,
     ) -> None:
-        magnetic_irreps = o3.Irreps(magnetic_irreps)
+        irreps_in = o3.Irreps(irreps_in)
+        self.magnetic_irreps = o3.Irreps(magnetic_irreps)
         super().__init__(
             irreps_in,
             irreps_out,
-            extra_node_attrs_irreps=magnetic_irreps,
-            **kwargs,
+            num_channel=num_channel,
+            lmax=lmax,
+            mmax=mmax,
+            act_0e=act_0e,
+            act_0o=act_0o,
+            act_lm=act_lm,
+            correlation=correlation,
+            num_head=num_head,
+            num_radial_basis=num_radial_basis,
+            use_asymmetric_contraction=use_asymmetric_contraction,
+            use_radial_rotary_attention=use_radial_rotary_attention,
+            edge_ace_hidden=edge_ace_hidden,
         )
-        self.magnetic_irreps = magnetic_irreps
 
-    @property
-    def magnetic_frame(self) -> o2.LocalFrame:
-        return self.local_frame_extra
+    def _resolve_mmax(self, irreps_in: o3.Irreps, mmax: int) -> int:
+        return min(max(irreps_in.lmax, self.magnetic_irreps.lmax), mmax)
+
+    def _build_local_irreps_in(
+        self,
+        node_local_irreps_in: o2.Irreps,
+    ) -> o2.Irreps:
+        self.magnetic_frame = o2.LocalFrame(
+            self.magnetic_irreps,
+            self.lmax,
+            self.mmax,
+        )
+        self.reshape_magnetic = LayoutTransform(self.magnetic_irreps)
+        self.magnetic_block_indices = {
+            ir: index
+            for index, (mul, ir) in enumerate(self.magnetic_frame.local_irreps)
+        }
+        return o2.Irreps(
+            tuple(node_local_irreps_in) * 2
+            + tuple(self.magnetic_frame.local_irreps) * 2
+        ).regroup()
+
+    def _localize_magnetic_blocks(
+        self,
+        magnetic_node_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+        wigner: Union[torch.Tensor, None],
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        source, target = edge_index
+        magnetic_node_attrs = self.reshape_magnetic(magnetic_node_attrs)
+        source_blocks = self.magnetic_frame.to_local(
+            magnetic_node_attrs[source],
+            wigner,
+        )
+        target_blocks = self.magnetic_frame.to_local(
+            magnetic_node_attrs[target],
+            wigner,
+        )
+        return self._repeat_channels(source_blocks), self._repeat_channels(
+            target_blocks
+        )
+
+    def _repeat_channels(
+        self,
+        blocks: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        return tuple(
+            block.reshape(*block.shape, 1)
+            .expand(*block.shape, self.num_channel)
+            .reshape(*block.shape[:-1], block.size(-1) * self.num_channel)
+            for block in blocks
+        )
+
+    def _input_blocks(
+        self,
+        source_node_blocks: tuple[torch.Tensor, ...],
+        target_node_blocks: tuple[torch.Tensor, ...],
+        source_magnetic_blocks: tuple[torch.Tensor, ...],
+        target_magnetic_blocks: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        input_blocks = []
+        for mul, ir in self.linear_up.irreps_in:
+            parts = []
+            node_index = self.node_block_indices.get(ir)
+            if node_index is not None:
+                parts.extend(
+                    (
+                        target_node_blocks[node_index],
+                        source_node_blocks[node_index],
+                    )
+                )
+            magnetic_index = self.magnetic_block_indices.get(ir)
+            if magnetic_index is not None:
+                parts.extend(
+                    (
+                        target_magnetic_blocks[magnetic_index],
+                        source_magnetic_blocks[magnetic_index],
+                    )
+                )
+            input_blocks.append(torch.cat(parts, dim=-1))
+        return tuple(input_blocks)
 
     def forward(
         self,
@@ -620,13 +704,32 @@ class O2ScatterMagneticTensorProduct(O2ScatterTensorProduct):
         edge_radial_basis: Union[torch.Tensor, None] = None,
         edge_cutoff: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
-        return super().forward(
+        if edge_cutoff is None:
+            raise ValueError("O2 convolution requires edge_cutoff.")
+        node_feats, source_node_blocks, target_node_blocks = (
+            self._localize_node_blocks(node_feats, edge_index, wigner)
+        )
+        source_magnetic_blocks, target_magnetic_blocks = (
+            self._localize_magnetic_blocks(
+                magnetic_node_attrs,
+                edge_index,
+                wigner,
+            )
+        )
+        input_blocks = self._input_blocks(
+            source_node_blocks,
+            target_node_blocks,
+            source_magnetic_blocks,
+            target_magnetic_blocks,
+        )
+        return self._forward_local(
             node_feats,
+            input_blocks,
+            source_node_blocks,
+            target_node_blocks,
             radial_weights,
             edge_index,
-            wigner,
             wigner_inv,
-            magnetic_node_attrs,
             edge_radial_basis,
             edge_cutoff,
         )
