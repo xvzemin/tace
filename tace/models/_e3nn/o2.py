@@ -3,8 +3,6 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-"""Complete local O(2) interactions for the e3nn model."""
-
 import math
 from typing import Union
 
@@ -142,6 +140,9 @@ class RadialRotaryComplexAttention(torch.nn.Module):
 
 
 class O2ScatterTensorProduct(torch.nn.Module):
+
+    ece_path_mode: str = "expand" # [expand, sum]
+
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -178,20 +179,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.num_head = num_head
         self.use_asymmetric_contraction = use_asymmetric_contraction
         self.use_radial_rotary_attention = use_radial_rotary_attention
-        if (
-            o2.Irreps.common_multiplicity(self.irreps_in)
-            != num_channel
-        ):
-            raise ValueError("irreps_in multiplicity must equal num_channel.")
-        if (
-            o2.Irreps.common_multiplicity(self.irreps_out)
-            != num_channel
-        ):
-            raise ValueError("irreps_out multiplicity must equal num_channel.")
-        if self.correlation < 1:
-            raise ValueError("correlation must be positive.")
-
-        self.effective_mmax = min(
+        self.mmax = min(
             max(
                 self.irreps_in.lmax,
                 self.extra_node_attrs_irreps.lmax
@@ -201,16 +189,16 @@ class O2ScatterTensorProduct(torch.nn.Module):
             mmax,
         )
 
-        self.local_frame_in = o2.LocalFrame(
-            self.irreps_in,
-            lmax,
-            self.effective_mmax,
-        )
-        self.local_frame_out = o2.LocalFrame(
-            self.irreps_out,
-            lmax,
-            self.effective_mmax,
-        )
+        if not (
+            o2.Irreps.common_multiplicity(self.irreps_in)
+            == o2.Irreps.common_multiplicity(self.irreps_out)
+            == num_channel
+        ):
+            raise ValueError("irreps_in/out multiplicity must equal num_channel.")
+        
+        self.local_frame_in = o2.LocalFrame(self.irreps_in, self.lmax, self.mmax)
+        self.local_frame_out = o2.LocalFrame(self.irreps_out, self.lmax, self.mmax)
+
         self.use_radial_rotary_attention = (
             use_radial_rotary_attention
             and self.local_frame_in.local_irreps.mmax > 0
@@ -221,11 +209,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             raise ValueError("num_head must divide num_channel.")
 
         if self.extra_node_attrs_irreps is not None:
-            self.local_frame_extra = o2.LocalFrame(
-                self.extra_node_attrs_irreps,
-                lmax,
-                self.effective_mmax,
-            )
+            self.local_frame_extra = o2.LocalFrame(self.extra_node_attrs_irreps, self.lmax, self.mmax)
         self.local_irreps_in = o2.Irreps(
             tuple(self.local_frame_in.local_irreps) * 2
             + (
@@ -269,6 +253,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 self.edge_ace_hidden,
                 self.correlation,
                 algorithm="edge",
+                path_mode=self.ece_path_mode,
             )
             self.scalar_act = act_0e
             self.linear_up = o2.Linear(
@@ -456,8 +441,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
-        if wigner is None or wigner_inv is None:
-            raise ValueError("O2 convolution requires edge Wigner matrices.")
 
         source, target = edge_index
         source_node_blocks = self.local_frame_in.to_local(
