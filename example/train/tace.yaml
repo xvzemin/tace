@@ -335,7 +335,7 @@ model:
       gaussian_width: 2.0
       order: 0 # (int), specify order for jn, for j0, it is negligible, for jn, <7 stable
       trainable: false # (bool)
-      apply_cutoff: false # # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
+      apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
       bias: true  # (bool)
 
@@ -355,11 +355,11 @@ model:
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, sqrt_avg_num_neighbors, density]
       nonlinear: gate # [null, gate]
       edge_nonlinear: gate # [gate]
-      scalar_act: null # name for 0e, or [0e, 0o]
+      scalar_act: null # (str or list[str]), name for 0e, or [0e, 0o]
       tensor_act: null # name for tensor-irrep 0e gates
       use_asymmetric_contraction: false
       use_radial_rotary_attention: true
-      num_head: 4 # recommended 2~8, avoid using 1, as it prevents effective use of the radial information.
+      num_head: 2 # recommended 2~8, avoid using 1, ensure that each head has >= 16 channels.
       edge_ace_hidden: null # SO2/O2 asymmetric-contraction width
       gate_m0: false # always use false, legacy option for whether gating m=0 
 

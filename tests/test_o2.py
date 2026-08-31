@@ -1925,7 +1925,7 @@ def _evaluate_o2_interaction(module, inputs):
     )
 
 
-def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
+def test_o2_interaction_uses_nonmagnetic_scatter():
     module = _build_o2_interaction(
         correlation=2,
         use_asymmetric_contraction=True,
@@ -1935,10 +1935,20 @@ def test_o2_interaction_is_nonmagnetic_base_for_o2_mag():
     assert issubclass(O2MagneticInteraction, O2Interaction)
     assert type(module.rejector) is O2ScatterTensorProduct
     assert not isinstance(module.rejector, O2ScatterMagneticTensorProduct)
-    assert issubclass(
+    assert not issubclass(
         O2ScatterMagneticTensorProduct,
         O2ScatterTensorProduct,
     )
+    for scatter_type in (
+        O2ScatterTensorProduct,
+        O2ScatterMagneticTensorProduct,
+    ):
+        assert {"_to_local", "_convolution", "_to_global"} <= set(
+            scatter_type.__dict__
+        )
+        assert "_input_blocks" not in scatter_type.__dict__
+        assert "_forward_local" not in scatter_type.__dict__
+        assert "_localize_node_blocks" not in scatter_type.__dict__
     assert not hasattr(module.rejector, "extra_node_attrs_irreps")
     assert not hasattr(module.rejector, "magnetic_irreps")
     assert not hasattr(module.rejector, "magnetic_frame")
@@ -1973,7 +1983,7 @@ def test_o2_magnetic_scatter_owns_magnetic_layout():
     rejector = module.rejector
 
     assert type(rejector) is O2ScatterMagneticTensorProduct
-    assert isinstance(rejector, O2ScatterTensorProduct)
+    assert not isinstance(rejector, O2ScatterTensorProduct)
     assert not hasattr(rejector, "extra_node_attrs_irreps")
     assert rejector.magnetic_irreps == module.magnetic_irreps
     assert rejector.reshape_magnetic.irreps == module.magnetic_irreps
