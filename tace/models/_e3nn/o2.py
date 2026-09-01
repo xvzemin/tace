@@ -134,8 +134,16 @@ class O2ScatterTensorProduct(torch.nn.Module):
 
         self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
         self.local_frame_out = o2.LocalFrame(self.irreps_out, lmax, self.mmax)
-        self.reshape_in = LayoutTransform(self.irreps_in)
-        self.reshape_out = LayoutTransform(self.irreps_out)
+        self.reshape_in = LayoutTransform(
+            self.irreps_in,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
+        self.reshape_out = LayoutTransform(
+            self.irreps_out,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_irreps_in = 2 * self.node_irreps
         self.local_irreps_out = self.local_frame_out.irreps_out
@@ -235,7 +243,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         edge_index: torch.Tensor,
         wigner: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        node_features = self.reshape_in(node_features).flatten(1)
+        node_features = self.reshape_in(node_features)
         paired = self.local_frame_in.to_local(
             node_features[edge_index.T],
             wigner,
@@ -336,13 +344,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if self.attention is None:
             message = message * edge_cutoff
         message = scatter_sum(message, edge_index[1], dim=0, dim_size=num_nodes)
-        return self.reshape_out.inverse(
-            message.view(
-                num_nodes,
-                self.reshape_out.num_components,
-                self.reshape_out.num_channels,
-            )
-        )
+        return self.reshape_out.inverse(message)
 
     def forward(
         self,
@@ -421,9 +423,21 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
         self.local_frame_out = o2.LocalFrame(self.irreps_out, lmax, self.mmax)
         self.magnetic_frame = o2.LocalFrame(self.magnetic_irreps, lmax, self.mmax)
-        self.reshape_in = LayoutTransform(self.irreps_in)
-        self.reshape_out = LayoutTransform(self.irreps_out)
-        self.reshape_magnetic = LayoutTransform(self.magnetic_irreps)
+        self.reshape_in = LayoutTransform(
+            self.irreps_in,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
+        self.reshape_out = LayoutTransform(
+            self.irreps_out,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
+        self.reshape_magnetic = LayoutTransform(
+            self.magnetic_irreps,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_magnetic_irreps = o2.Irreps(
             [(ir, mul * num_channel) for ir, mul in self.magnetic_frame.irreps_out]
@@ -531,8 +545,8 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         edge_index: torch.Tensor,
         wigner: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        node_features = self.reshape_in(node_features).flatten(1)
-        magnetic_node_attrs = self.reshape_magnetic(magnetic_node_attrs).flatten(1)
+        node_features = self.reshape_in(node_features)
+        magnetic_node_attrs = self.reshape_magnetic(magnetic_node_attrs)
         paired_node = self.local_frame_in.to_local(node_features[edge_index.T], wigner)
         paired_magnetic = self.magnetic_frame.to_local(
             magnetic_node_attrs[edge_index.T], wigner
@@ -662,13 +676,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         if self.attention is None:
             message = message * edge_cutoff
         message = scatter_sum(message, edge_index[1], dim=0, dim_size=num_nodes)
-        return self.reshape_out.inverse(
-            message.view(
-                num_nodes,
-                self.reshape_out.num_components,
-                self.reshape_out.num_channels,
-            )
-        )
+        return self.reshape_out.inverse(message)
 
     def forward(
         self,

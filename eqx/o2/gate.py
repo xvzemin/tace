@@ -20,7 +20,7 @@ def _quarter_turn(features: torch.Tensor) -> torch.Tensor:
 
 
 class Activation(torch.nn.Module):
-    """Apply normalized scalar activations entry by entry."""
+    """Apply normalized scalar activations to flattened ``ir_mul`` features."""
 
     def __init__(
         self,
@@ -105,7 +105,7 @@ class _GatePath(NamedTuple):
 
 
 class Gate(torch.nn.Module):
-    """Apply normalized scalar activations and scalar gates to O(2) features."""
+    """Apply scalar activations and gates to flattened ``ir_mul`` features."""
 
     def __init__(
         self,

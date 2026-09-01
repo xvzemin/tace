@@ -11,7 +11,6 @@ from tace.models.eqt.equitorch.nn import TensorProduct
 from tace.models.layout import LayoutTransform
 from tace.utils.env import acceleration_enabled
 
-
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
@@ -48,6 +47,78 @@ def test_layout_transform_matches_blockwise_reference() -> None:
     expected_grad = torch.autograd.grad((expected * output_grad).sum(), input2)[0]
     torch.testing.assert_close(actual_grad, expected_grad)
     assert not transform.state_dict()
+
+
+@pytest.mark.parametrize(
+    "layout_in",
+    ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
+)
+@pytest.mark.parametrize(
+    "layout_out",
+    ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
+)
+def test_layout_transform_supports_every_layout_pair(layout_in, layout_out) -> None:
+    irreps = o3.Irreps("3x0e+3x1o+3x2e")
+    flatten_mul_ir = torch.randn(5, irreps.dim, dtype=DTYPE, device=DEVICE)
+    blocks = []
+    offset = 0
+    for mul, ir in irreps:
+        width = mul * ir.dim
+        blocks.append(
+            flatten_mul_ir[..., offset : offset + width].reshape(5, mul, ir.dim)
+        )
+        offset += width
+    mul_ir = torch.cat(blocks, dim=-1)
+    ir_mul = mul_ir.transpose(-1, -2)
+    layouts = {
+        "ir_mul": ir_mul,
+        "mul_ir": mul_ir,
+        "flatten_ir_mul": ir_mul.flatten(-2),
+        "flatten_mul_ir": flatten_mul_ir,
+    }
+    transform = LayoutTransform(
+        irreps,
+        layout_in=layout_in,
+        layout_out=layout_out,
+    ).to(DEVICE)
+    observed = transform(layouts[layout_in])
+    torch.testing.assert_close(observed, layouts[layout_out])
+    torch.testing.assert_close(transform.inverse(observed), layouts[layout_in])
+
+
+def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> None:
+    irreps = o3.Irreps("2x0e+3x1o")
+    features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)
+    transform = LayoutTransform(
+        irreps,
+        layout_in="flatten_mul_ir",
+        layout_out="flatten_ir_mul",
+    ).to(DEVICE)
+    torch.testing.assert_close(transform.inverse(transform(features)), features)
+    with pytest.raises(ValueError, match="common multiplicity"):
+        LayoutTransform(
+            irreps,
+            layout_in="flatten_mul_ir",
+            layout_out="ir_mul",
+        )
+
+
+def test_flatten_ir_mul_matches_explicit_ir_mul_conversion() -> None:
+    irreps = o3.Irreps("4x0e+4x1o+4x2e")
+    explicit = LayoutTransform(irreps).to(DEVICE)
+    flattened = LayoutTransform(
+        irreps,
+        layout_in="flatten_mul_ir",
+        layout_out="flatten_ir_mul",
+    ).to(DEVICE)
+    features = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
+    explicit_ir_mul = explicit(features)
+    flattened_ir_mul = flattened(features)
+    torch.testing.assert_close(flattened_ir_mul, explicit_ir_mul.flatten(-2))
+    torch.testing.assert_close(
+        flattened.inverse(flattened_ir_mul),
+        explicit.inverse(explicit_ir_mul),
+    )
 
 
 def _product(correlation: int) -> CgtpACE:

@@ -21,10 +21,10 @@ O(2) layers
 ------------
 
 .. autoclass:: eqx.o2.Linear
-   :members: forward, forward_grouped
+   :members: forward
 
 .. autoclass:: eqx.o2.Gate
-   :members: forward, forward_grouped
+   :members: forward
 
 .. autoclass:: eqx.o2.TensorProduct
    :members: forward

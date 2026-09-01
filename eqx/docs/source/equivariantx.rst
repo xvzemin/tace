@@ -24,9 +24,6 @@ EquivariantX (``eqx``) provides operators for
    Cartesian :math:`O(3)` irreps, polar and pseudotensor coupling,
    Cartesian harmonics, and projection onto symmetric traceless tensors.
 
-This documentation assumes that you are already familiar with ``e3nn`` and
-its core concepts and operations.
-
 Quick start
 -----------
 
@@ -42,30 +39,30 @@ Quick start
 Common tensor conventions
 -------------------------
 
-EquivariantX keeps the representation and channel axes separate. Unless an
-API explicitly says otherwise, the learnable feature has shape
+The :mod:`eqx.o2` operators use one flattened feature axis:
 
 .. math::
 
-   (\ldots,\ D_{\mathrm{irreps}},\ C),
+   (\ldots,\ D_{\mathrm{irreps}}).
 
-where the leading axes are batch axes,
-``irreps.dim`` is the representation axis, and :math:`C` is the channel
-count. Multiplicity belongs to :class:`Irreps`; channels belong to the layer.
-
-The layout used by local :math:`O(2)` operations:
+Inside every ``(ir, mul)`` entry, values are ordered as ``ir_mul``. The entry
+can therefore be viewed directly as
 
 .. math::
 
-   (\ldots,\ d_{\mathrm{irrep}},\ \mathrm{multiplicity}\times C).
+   (\ldots,\ d_{\mathrm{irrep}},\ \mathrm{mul}).
 
-The order of groups and components always follows the corresponding
-``Irreps`` object. Inputs, internal parameters, and external weights must use
-real floating-point dtypes. Modules and inputs should be moved to the same
-device and dtype in the usual PyTorch way.
+Linear, activation, gate, tensor-product, and local-frame modules use this
+flattened ``ir_mul`` representation. Circular harmonics produce the same
+layout. Asymmetric contraction accepts a sequence of independent flattened
+inputs, one for each correlation order.
 
-Ral O(2)
---------
+The :mod:`eqx.co3` operators keep their representation and channel axes
+explicit. Inputs, internal parameters, and external weights use real
+floating-point dtypes unless an API states otherwise.
+
+Real O(2)
+----------
 
 Representations
 ~~~~~~~~~~~~~~~
@@ -117,11 +114,9 @@ The tensor-product rules are
 Linear, Gate, and TensorProduct
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:class:`eqx.o2.Linear` connects only identical irreps. ``path_mode="uv"``
-uses a dense input-output channel matrix for every path. ``path_mode="uu"``
-requires equal channel counts and applies one channel-wise weight per path.
-Missing output irreps are returned as differentiable zeros; only ``0e`` can
-receive a bias.
+:class:`eqx.o2.Linear` connects only identical irreps and uses a dense
+input-output multiplicity matrix for every instruction. Missing output irreps
+are returned as differentiable zeros; only ``0e`` can receive a bias.
 
 :class:`eqx.o2.Gate` applies an arbitrary scalar activation to ``0e``. A
 direct activation on ``0o`` must be odd. If no ``0o`` activation is supplied,
@@ -151,30 +146,30 @@ A minimal nonlinear block is
 
 .. code-block:: python
 
-   channels = 64
    irreps = o2.Irreps("4x0e + 2x0o + 3x1m + 2x2m")
+   irreps_scalars = o2.Irreps("4x0e + 2x0o")
+   irreps_gated = o2.Irreps("3x1m + 2x2m")
+   irreps_gates = o2.Irreps("5x0e")
 
    nonlinearity = o2.Gate(
-       irreps,
-       act_0e=torch.nn.SiLU(),
-       act_0o=torch.nn.Tanh(),
-       act_lm=torch.nn.Sigmoid(),
+       irreps_scalars,
+       [torch.nn.SiLU(), torch.nn.Tanh()],
+       irreps_gates,
+       [torch.nn.Sigmoid()],
+       irreps_gated,
    )
    linear_up = o2.Linear(
        irreps,
        nonlinearity.irreps_in,
-       channels,
-       channels,
+       biases=True,
    )
    linear_down = o2.Linear(
        nonlinearity.irreps_out,
        irreps,
-       channels,
-       channels,
-       bias=False,
+       biases=False,
    )
 
-   node_feats = torch.randn(32, irreps.dim, channels)
+   node_feats = torch.randn(32, irreps.dim)
    node_feats = linear_down(nonlinearity(linear_up(node_feats)))
 
 Circular harmonics
@@ -205,8 +200,8 @@ global :math:`O(3)` parity.
 
 :class:`eqx.o2.WignerD` constructs the global-to-local and local-to-global
 matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies
-those matrices and converts between flattened global features and grouped
-local blocks. ``mmax`` may truncate local positive orders while inverse
+those matrices. Its global input and local output both use flattened
+``ir_mul`` layout. ``mmax`` may truncate local positive orders while inverse
 rescaling preserves the intended variance.
 
 .. code-block:: python
@@ -227,16 +222,15 @@ rescaling preserves the intended variance.
        irreps_o3,
        lmax=lmax,
        mmax=mmax,
-       layout="mul_ir",
    )
    node_feats = torch.randn(16, frame.global_irreps.dim)
 
-   local_blocks = frame.to_local(node_feats[edge_index[0]], D)
-   global_messages = frame.to_global(local_blocks, D_inv)
+   local_features = frame.to_local(node_feats[edge_index[0]], D)
+   global_messages = frame.to_global(local_features, D_inv)
 
-``layout="mul_ir"`` and ``layout="ir_mul"`` are both flattened global
-layouts. Local O(2) features are returned as grouped blocks with explicit
-representation and combined multiplicity-channel axes.
+``node_feats`` must already use flattened ``ir_mul`` order inside every O(3)
+entry. ``local_features`` follows ``frame.irreps_out`` in the same flattened
+order.
 
 Asymmetric contraction
 ~~~~~~~~~~~~~~~~~~~~~~
