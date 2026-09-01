@@ -367,7 +367,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self,
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
-        wigner: Union[torch.Tensor, None],
+        wigner: torch.Tensor,
     ) -> tuple[
         torch.Tensor,
         tuple[torch.Tensor, ...],
@@ -441,10 +441,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
             hidden_features = self.nonlinearity.forward_grouped(projected_features)
         message = self.linear_down.forward_grouped(hidden_features)
         if self.attention is not None:
-            if edge_radial_basis is None:
-                raise ValueError(
-                    "O2 radial rotary attention requires edge_radial_basis."
-                )
             message = self.attention(
                 message,
                 source_features,
@@ -460,7 +456,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self,
         message: tuple[torch.Tensor, ...],
         edge_index: torch.Tensor,
-        wigner_inv: Union[torch.Tensor, None],
+        wigner_inv: torch.Tensor,
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
