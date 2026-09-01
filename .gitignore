@@ -53,4 +53,6 @@ _cart/
 !Jd.pt
 !matbench_tece_rra.png
 !_cart/README.md
+!tace/models/_cart/
+!tace/models/_cart/*.py
 !example/data/liquid-64.xyz

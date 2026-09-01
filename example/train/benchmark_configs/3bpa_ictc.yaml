@@ -1,4 +1,4 @@
-# Reproduce the 3BPA Local O(2) setup while inheriting the current TACE defaults.
+# Reproduce the 3BPA ICTP+ICTC setup while inheriting the current TACE defaults.
 
 hydra:
   searchpath:
@@ -59,6 +59,7 @@ loss:
 
 model:
   config:
+    _target_: tace.models.cartTACE
     cutoff: 5.0
     fidelity:
       - name: PBE
@@ -71,7 +72,7 @@ model:
     edge_update:
       type: identity
 
-    mmax: 3
+    mmax: 2
     Lmax: 2
     lmax: 3
     num_layers: 2
@@ -82,13 +83,11 @@ model:
       bias: false
 
     atomic_basis:
-      type: o2
+      type: cgtp
       nonlinear: gate
-      edge_nonlinear: gate
-      scalar_act: [silu, tanh]
+      edge_nonlinear: null
+      scalar_act: silu
       tensor_act: sigmoid
-      use_asymmetric_contraction: false
-      use_radial_rotary_attention: true
 
     product_basis:
       correlation: 3

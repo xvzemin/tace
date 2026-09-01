@@ -1,5 +1,6 @@
+from eqx.co3 import CartesianHarmonics
+
 from .tace import cartTACE
-from ..angular import CartesianHarmonics
 
 __all__ = [
     "CartesianHarmonics",
