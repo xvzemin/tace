@@ -53,9 +53,6 @@ class Gate(torch.nn.Module):
     The input irreps are ordered as the output ``0e`` scalars, the auxiliary
     ``0e`` gates, the directly activated ``0o`` scalars, and the gated
     irreps. The output is restored to ``irreps_out`` order.
-
-    An odd ``act_0o`` commutes with the sign change of ``0o`` under
-    reflections, making this a general O(2)-equivariant operation
     """
 
     def __init__(
@@ -131,8 +128,6 @@ class Gate(torch.nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Apply the gate to ``(..., irreps_in.dim, channels)`` input."""
-        if input.is_complex():
-            raise TypeError("Gate supports real inputs only.")
         if input.ndim < 2 or input.shape[-2] != self.irreps_in.dim:
             raise ValueError(
                 "Gate input O(2) dimension must be "

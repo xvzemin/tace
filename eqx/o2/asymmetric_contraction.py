@@ -275,8 +275,6 @@ class AsymmetricContraction(torch.nn.Module):
         for input in inputs:
             if not isinstance(input, torch.Tensor):
                 raise TypeError("Every contraction input must be a torch.Tensor.")
-            if input.is_complex():
-                raise TypeError("AsymmetricContraction supports real inputs only.")
             if input.ndim < 2 or tuple(input.shape[-2:]) != expected:
                 raise ValueError(
                     "Contraction input trailing shape must be "

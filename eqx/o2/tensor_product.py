@@ -293,8 +293,6 @@ class TensorProduct(torch.nn.Module):
         input2: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if input1.is_complex() or input2.is_complex():
-            raise TypeError("O(2) TensorProduct supports real inputs only.")
         expected1 = (self.irreps_in1.dim, self.channels_in1)
         expected2 = (self.irreps_in2.dim, self.channels_in2)
         if input1.ndim < 2 or tuple(input1.shape[-2:]) != expected1:

@@ -1477,7 +1477,8 @@ def test_o2_linear_rejects_unknown_path_mode():
 
 
 @pytest.mark.parametrize("path_mode", ["uv", "uu"])
-def test_o2_linear_supports_batched_external_weights(path_mode):
+@pytest.mark.parametrize("flattened", [False, True])
+def test_o2_linear_supports_batched_external_weights(path_mode, flattened):
     torch.manual_seed(1)
     module = o2.Linear(
         "2x0e+0o+2x1m",
@@ -1501,9 +1502,85 @@ def test_o2_linear_supports_batched_external_weights(path_mode):
         dtype=DTYPE,
         device=DEVICE,
     )
+    if flattened:
+        weight = weight.flatten(1)
     actual = module(input, weight)
     expected = torch.stack(
         [module(input[index], weight[index]) for index in range(input.shape[0])]
+    )
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("path_mode", ["uv", "uu"])
+def test_o2_linear_supports_unbatched_and_singleton_external_weights(path_mode):
+    torch.manual_seed(2)
+    module = o2.Linear(
+        "2x0e+0o+2x1m",
+        "0e+2x0o+1m",
+        channels_in=2,
+        channels_out=2 if path_mode == "uu" else 3,
+        path_mode=path_mode,
+        internal_weights=False,
+        bias=False,
+    ).to(device=DEVICE, dtype=DTYPE)
+    input = torch.randn(
+        4,
+        module.irreps_in.dim,
+        module.channels_in,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    weight = torch.randn(
+        *module.weight_shape,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    expected = module(input, weight)
+    for external_weight in (
+        weight,
+        weight.reshape(module.weight_numel),
+        weight.unsqueeze(0),
+        weight.reshape(1, module.weight_numel),
+    ):
+        torch.testing.assert_close(
+            module(input, external_weight),
+            expected,
+        )
+
+
+def test_o2_linear_grouped_supports_batched_flat_external_weights():
+    torch.manual_seed(2)
+    module = o2.Linear(
+        "2x0e+0o+2x1m",
+        "0e+2x0o+1m",
+        channels_in=2,
+        channels_out=3,
+        path_mode="uv",
+        internal_weights=False,
+        bias=False,
+    ).to(device=DEVICE, dtype=DTYPE)
+    input = torch.randn(
+        4,
+        module.irreps_in.dim,
+        module.channels_in,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    weight = torch.randn(
+        4,
+        *module.weight_shape,
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    expected = module(input, weight)
+    grouped = module.forward_grouped(
+        _pack_o2_groups(module.irreps_in, input),
+        weight.flatten(1),
+    )
+    actual = _unpack_o2_groups(
+        module.irreps_out,
+        grouped,
+        module.channels_out,
     )
     torch.testing.assert_close(actual, expected)
 

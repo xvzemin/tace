@@ -28,7 +28,7 @@ def circular_harmonics(
         ``0e`` through ``mmax``. Every positive-order block uses
         the real ``(cos(m theta), sin(m theta))`` component order.
     """
-    if not isinstance(mmax, int) or isinstance(mmax, bool):
+    if not isinstance(mmax, int):
         raise TypeError("mmax must be an integer.")
     if mmax < 0:
         raise ValueError("mmax must be non-negative.")
@@ -37,8 +37,6 @@ def circular_harmonics(
             "circular_harmonics input must have trailing dimension 2; "
             f"got {tuple(input.shape)}."
         )
-    if input.is_complex() or not input.is_floating_point():
-        raise TypeError("circular_harmonics requires real floating-point input.")
 
     if normalize:
         input = torch.nn.functional.normalize(input, dim=-1)
@@ -67,7 +65,7 @@ class CircularHarmonics(torch.nn.Module):
 
     def __init__(self, mmax: int, *, normalize: bool = True) -> None:
         super().__init__()
-        if not isinstance(mmax, int) or isinstance(mmax, bool):
+        if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
         if mmax < 0:
             raise ValueError("mmax must be non-negative.")

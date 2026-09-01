@@ -9,7 +9,7 @@ from typing import Optional, Sequence, Tuple
 
 import torch
 
-from .irreps import Irrep, Irreps, IrrepsLike
+from .irreps import Irreps, IrrepsLike
 
 
 class Linear(torch.nn.Module):
@@ -17,8 +17,7 @@ class Linear(torch.nn.Module):
 
     Inputs use shape ``(..., irreps_in.dim, channels_in)`` and outputs use
     ``(..., irreps_out.dim, channels_out)``. Paths connect only identical
-    irreps. In particular, ``0e`` and ``0o`` never mix, and both real
-    components of every positive-order ``m`` block share one channel matrix.
+    irreps.
 
     Args:
         irreps_in: Input :class:`Irreps`.
@@ -29,7 +28,9 @@ class Linear(torch.nn.Module):
             path. ``"uu"`` requires equal input and output channel counts and
             uses one channel-wise weight per path.
         internal_weights: Store trainable weights in the module. If ``False``,
-            weights must be passed to :meth:`forward`.
+            weights must be passed to :meth:`forward`. External weights may
+            use ``weight_shape`` or flattened ``(weight_numel,)`` layout,
+            with an optional leading singleton batch dimension.
         bias: Add a trainable bias to every output ``0e`` copy.
         path_norm: Divide paths entering each output irrep copy by the square
             root of their count.
@@ -207,46 +208,12 @@ class Linear(torch.nn.Module):
 
         self.reset_parameters()
 
-    def reset_parameters(self) -> None:
-        if self.weight is not None and self.weight.numel() > 0:
-            torch.nn.init.normal_(self.weight)
-        if self.bias is not None:
-            torch.nn.init.zeros_(self.bias)
-
-    def _resolve_weight(
-        self,
-        weight: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if self.internal_weights:
-            if weight is not None:
-                raise ValueError(
-                    "Do not pass weight when Linear uses internal weights."
-                )
-            weight = self.weight
-        elif weight is None:
-            raise ValueError("Linear requires external weight.")
-        if weight is None:
-            raise RuntimeError("Linear weight resolution failed.")
-        if weight.is_complex():
-            raise TypeError("O(2) Linear supports real weights only.")
-        weight_ndim = len(self.weight_shape)
-        if (
-            weight.ndim < weight_ndim
-            or tuple(weight.shape[-weight_ndim:]) != self.weight_shape
-        ):
-            raise ValueError(
-                "Linear weight trailing shape must be "
-                f"{self.weight_shape}, got {tuple(weight.shape)}."
-            )
-        return weight
-
     def forward(
         self,
         input: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if input.is_complex():
-            raise TypeError("O(2) Linear supports real inputs only.")
+
         expected_input_shape = (self.irreps_in.dim, self.channels_in)
         if input.ndim < 2 or tuple(input.shape[-2:]) != expected_input_shape:
             raise ValueError(
@@ -410,6 +377,41 @@ class Linear(torch.nn.Module):
                 )
             output_blocks.append(output_block)
         return tuple(output_blocks)
+
+    def _resolve_weight(
+        self,
+        weight: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if self.internal_weights:
+            if weight is not None:
+                raise ValueError(
+                    "Do not pass weight when Linear uses internal weights."
+                )
+            weight = self.weight
+        elif weight is None:
+            raise ValueError("Linear requires external weight.")
+        
+        if weight is None:
+            raise RuntimeError("Linear weight resolution failed.")
+        weight_ndim = len(self.weight_shape)
+        if (
+            weight.ndim >= weight_ndim
+            and tuple(weight.shape[-weight_ndim:]) == self.weight_shape
+        ):
+            return weight
+        if weight.ndim >= 1 and weight.size(-1) == self.weight_numel:
+            return weight.reshape(*weight.shape[:-1], *self.weight_shape)
+        raise ValueError(
+            "Linear weight trailing shape must be "
+            f"{self.weight_shape} or ({self.weight_numel},), "
+            f"got {tuple(weight.shape)}."
+        )
+
+    def reset_parameters(self) -> None:
+        if self.weight is not None and self.weight.numel() > 0:
+            torch.nn.init.normal_(self.weight)
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
 
     def __repr__(self) -> str:
         return (
