@@ -79,27 +79,27 @@ size ``3**l`` while tracking its symmetric traceless degrees of freedom.
 Cartesian O(3) layers
 ----------------------
 
-Cartesian layers use explicit trailing axes
-``(..., irreps.dim, channels)``. Multiplicity belongs to the representation
-axis, while ``channels`` is the independently mixed feature axis.
+Cartesian layers use the same flattened ``(..., irreps.dim)`` convention as
+the O(2) layers. Each entry uses ``ir_mul`` order and is viewed internally as
+``(..., ir.dim, mul)``.
 
 .. autoclass:: eqx.co3.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.co3.Activation
    :members: forward
 
 .. autoclass:: eqx.co3.Gate
    :members: forward
 
 .. autoclass:: eqx.co3.TensorProduct
-   :members: forward, project_output
-
-.. autoclass:: eqx.co3.Layout
-   :members: to_grouped, from_grouped
+   :members: forward, project_output, weight_view_for_instruction, weight_views
 
 Cartesian O(3) harmonics and tensors
 ------------------------------------
 
-These utilities construct and project ambient Cartesian tensors without
-changing their explicit channel layout.
+These utilities construct and project ambient Cartesian tensors while keeping
+the public representation axis flattened.
 
 .. autoclass:: eqx.co3.CartesianHarmonics
    :members: forward

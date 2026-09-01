@@ -11,10 +11,14 @@ from .irreps import Irrep, IrrepLike, Irreps
 from .projector import project
 
 
-def _normalization(degree: int) -> float:
-    if degree == 0:
-        return 1.0
-    return math.prod(range(1, 2 * degree, 2)) / math.factorial(degree)
+def _normalization(degree: int, normalization: str) -> float:
+    inverse_norm = math.prod(range(1, 2 * degree, 2)) / math.factorial(degree)
+    if normalization == "norm":
+        return math.sqrt(inverse_norm)
+    scale = math.sqrt((2 * degree + 1) * inverse_norm)
+    if normalization == "integral":
+        scale /= math.sqrt(4.0 * math.pi)
+    return scale
 
 
 class CartesianHarmonics(torch.nn.Module):
@@ -30,6 +34,11 @@ class CartesianHarmonics(torch.nn.Module):
     normalize : bool, optional
         Normalize each input vector before constructing the harmonics. If
         ``False``, degree ``l`` is homogeneous of degree ``l`` in the input.
+    normalization : {"integral", "component", "norm"}, optional
+        Output normalization. ``"component"`` gives each independent
+        component unit second moment over uniformly distributed directions;
+        ``"norm"`` gives each degree unit norm; ``"integral"`` gives the
+        conventional unit-sphere integral normalization.
 
     Notes
     -----
@@ -44,6 +53,7 @@ class CartesianHarmonics(torch.nn.Module):
         *,
         irreps_in: IrrepLike = "1o",
         normalize: bool = True,
+        normalization: str = "component",
     ) -> None:
         super().__init__()
         if not isinstance(lmax, int) or isinstance(lmax, bool) or lmax < 0:
@@ -54,12 +64,14 @@ class CartesianHarmonics(torch.nn.Module):
             raise ValueError("CartesianHarmonics input must be 1o or 1e.")
         if not isinstance(normalize, bool):
             raise TypeError("normalize must be a bool.")
+        if normalization not in ("integral", "component", "norm"):
+            raise ValueError(
+                "normalization must be 'integral', 'component', or 'norm'."
+            )
         self.normalize = normalize
+        self.normalization = normalization
         self.irreps_out = Irreps(
-            [
-                (1, Irrep(degree, self.irreps_in.p**degree))
-                for degree in range(lmax + 1)
-            ]
+            [(Irrep(degree, self.irreps_in.p**degree), 1) for degree in range(lmax + 1)]
         )
 
     def forward(self, vectors: torch.Tensor) -> torch.Tensor:
@@ -83,17 +95,19 @@ class CartesianHarmonics(torch.nn.Module):
             vectors = torch.nn.functional.normalize(vectors, dim=-1)
 
         tensor = vectors.new_ones(vectors.shape[:-1] + (1, 1))
-        outputs = [tensor]
+        outputs = [tensor * _normalization(0, self.normalization)]
         vector = vectors.unsqueeze(-1)
         for degree in range(1, self.lmax + 1):
             tensor = torch.einsum("...ic,...jc->...ijc", tensor, vector).reshape(
                 vectors.shape[:-1] + (3**degree, 1)
             )
-            outputs.append(project(tensor, degree) * _normalization(degree))
+            outputs.append(
+                project(tensor, degree) * _normalization(degree, self.normalization)
+            )
         return torch.cat(outputs, dim=-2).squeeze(-1)
 
     def extra_repr(self) -> str:
         return (
             f"irreps_in={self.irreps_in}, irreps_out={self.irreps_out}, "
-            f"normalize={self.normalize}"
+            f"normalize={self.normalize}, normalization={self.normalization!r}"
         )

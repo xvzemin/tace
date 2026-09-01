@@ -46,9 +46,7 @@ def project(input: torch.Tensor, degree: int) -> torch.Tensor:
         symmetric traceless subspace.
     """
     if input.ndim < 2 or input.shape[-2] != 3**degree:
-        raise ValueError(
-            f"input must have Cartesian dimension {3**degree} at axis -2."
-        )
+        raise ValueError(f"input must have Cartesian dimension {3**degree} at axis -2.")
     basis = _cartesian_to_spherical_basis(degree).to(input)
     spherical = torch.einsum("...dc,dm->...mc", input, basis)
     return torch.einsum("...mc,dm->...dc", spherical, basis)

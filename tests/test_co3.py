@@ -1,61 +1,104 @@
 import pytest
 import torch
 
+import eqx
 from eqx import co3
-
 
 DTYPE = torch.float64
 
 
 def _orthogonal(*, improper: bool) -> torch.Tensor:
     matrix, _ = torch.linalg.qr(torch.randn(3, 3, dtype=DTYPE))
-    determinant_is_negative = torch.linalg.det(matrix) < 0
-    if bool(determinant_is_negative) != improper:
+    if bool(torch.linalg.det(matrix) < 0) != improper:
         matrix[:, 0] *= -1
     return matrix
 
 
-def _irreducible(irreps: co3.Irreps, batch: int, channels: int) -> torch.Tensor:
-    blocks = []
-    for irrep in irreps.expanded():
-        value = torch.randn(batch, irrep.dim, channels, dtype=DTYPE)
-        blocks.append(co3.project(value, irrep.l))
-    return torch.cat(blocks, dim=-2)
+def _irreducible(irreps: co3.Irreps, batch: int) -> torch.Tensor:
+    outputs = []
+    for ir, mul in irreps:
+        values = torch.randn(batch, ir.dim, mul, dtype=DTYPE)
+        outputs.append(co3.project(values, ir.l).reshape(batch, ir.dim * mul))
+    return torch.cat(outputs, dim=-1)
 
 
 def _transform(
-    input: torch.Tensor,
+    features: torch.Tensor,
     irreps: co3.Irreps,
     matrix: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.einsum("ij,bjc->bic", irreps.D_from_matrix(matrix), input)
+    return torch.einsum("ij,bj->bi", irreps.D_from_matrix(matrix), features)
 
 
-def test_irrep_metadata_and_parity() -> None:
+def _instructions(
+    irreps_in1: co3.Irreps,
+    irreps_in2: co3.Irreps,
+    irreps_out: co3.Irreps,
+    mode: str,
+    train: bool = True,
+) -> list[tuple]:
+    return [
+        (i_in1, i_in2, i_out, mode, train)
+        for i_in1, (ir1, _) in enumerate(irreps_in1)
+        for i_in2, (ir2, _) in enumerate(irreps_in2)
+        for i_out, (ir_out, _) in enumerate(irreps_out)
+        if ir_out in ir1 * ir2
+    ]
+
+
+def test_public_namespace_and_irrep_metadata() -> None:
+    assert hasattr(eqx, "co3")
+    assert not hasattr(eqx, "o3")
     assert co3.Irrep("2e").dim == 9
     assert co3.Irrep("2e").dof == 5
     assert not co3.Irrep("2e").pseudo
     assert co3.Irrep("2o").pseudo
+    assert co3.Irrep("0e").is_even_scalar()
+    assert co3.Irrep("0o").is_odd_scalar()
     assert tuple(map(str, co3.Irrep("1e") * co3.Irrep("2o"))) == (
         "1o",
         "2o",
         "3o",
     )
-    assert co3.Irreps("2x0e+1o+2e").dim == 14
     with pytest.raises(TypeError):
         co3.Irrep(1)
 
 
-def test_layout_round_trip() -> None:
-    layout = co3.Layout("2x0e+1o+2x2e", channels=3)
-    input = torch.randn(5, layout.irreps.dim, 3)
-    grouped = layout.to_grouped(input)
-    assert [block.shape for block in grouped] == [
-        (5, 1, 6),
-        (5, 3, 3),
-        (5, 9, 6),
-    ]
-    torch.testing.assert_close(layout.from_grouped(grouped), input)
+def test_irreps_use_ir_mul_entries_and_flattened_slices() -> None:
+    irreps = co3.Irreps("2x0e+1o+2x2e")
+    assert irreps.dim == 23
+    assert tuple(irreps) == (
+        (co3.Irrep("0e"), 2),
+        (co3.Irrep("1o"), 1),
+        (co3.Irrep("2e"), 2),
+    )
+    assert irreps.slices() == (slice(0, 2), slice(2, 5), slice(5, 23))
+    assert co3.Irreps("0e+0e+1o").simplify() == co3.Irreps("2x0e+1o")
+    assert co3.Irreps("1o+0o+0e+1o").regroup() == co3.Irreps("0e+0o+2x1o")
+    assert irreps.filter(lmax=1) == co3.Irreps("2x0e+1o")
+    assert irreps.filter(keep="2e") == co3.Irreps("2x2e")
+
+
+@pytest.mark.parametrize("normalization", ["component", "norm"])
+def test_irreps_randn_is_irreducible(normalization: str) -> None:
+    irreps = co3.Irreps("2x0e+3x1o+2x2e")
+    features = irreps.randn(7, -1, normalization=normalization, dtype=DTYPE)
+    assert features.shape == (7, irreps.dim)
+    for (ir, mul), ir_slice in zip(irreps, irreps.slices()):
+        values = features[..., ir_slice].reshape(7, ir.dim, mul)
+        torch.testing.assert_close(co3.project(values, ir.l), values)
+        if normalization == "norm":
+            torch.testing.assert_close(
+                values.norm(dim=-2), torch.ones(7, mul, dtype=DTYPE)
+            )
+
+
+def test_direct_sum_matrix_matches_ir_mul_layout() -> None:
+    irreps = co3.Irreps("2x1o")
+    matrix = _orthogonal(improper=False)
+    representation = irreps.D_from_matrix(matrix)
+    expected = torch.einsum("ij,uv->iujv", matrix, torch.eye(2, dtype=DTYPE))
+    torch.testing.assert_close(representation, expected.reshape(6, 6))
 
 
 @pytest.mark.parametrize("input_irrep", ["1o", "1e"])
@@ -72,101 +115,96 @@ def test_cartesian_harmonics_equivariance(
     vectors = torch.randn(7, 3, dtype=DTYPE)
     matrix = _orthogonal(improper=improper)
     transformed_vectors = torch.einsum(
-        "ij,bj->bi",
-        co3.Irrep(input_irrep).D_from_matrix(matrix),
-        vectors,
+        "ij,bj->bi", co3.Irrep(input_irrep).D_from_matrix(matrix), vectors
     )
-    actual = harmonics(transformed_vectors).unsqueeze(-1)
-    expected = _transform(
-        harmonics(vectors).unsqueeze(-1),
-        harmonics.irreps_out,
-        matrix,
-    )
+    actual = harmonics(transformed_vectors)
+    expected = _transform(harmonics(vectors), harmonics.irreps_out, matrix)
     torch.testing.assert_close(actual, expected, atol=2.0e-12, rtol=2.0e-12)
 
 
+@pytest.mark.parametrize(
+    ("normalization", "expected_scale"),
+    [("component", 1.0), ("norm", None), ("integral", 1.0 / (4.0 * torch.pi))],
+)
+def test_cartesian_harmonics_normalization(
+    normalization: str,
+    expected_scale,
+) -> None:
+    harmonics = co3.CartesianHarmonics(4, normalization=normalization).to(dtype=DTYPE)
+    values = harmonics(torch.tensor([[1.0, 2.0, 3.0]], dtype=DTYPE))
+    for (ir, _), ir_slice in zip(harmonics.irreps_out, harmonics.irreps_out.slices()):
+        norm = values[..., ir_slice].square().sum().item()
+        expected = 1.0 if expected_scale is None else ir.dof * expected_scale
+        assert norm == pytest.approx(expected, abs=2.0e-12)
+
+
 @pytest.mark.parametrize("improper", [False, True])
-def test_linear_o3_equivariance(improper: bool) -> None:
+def test_linear_equivariance(improper: bool) -> None:
     irreps_in = co3.Irreps("2x0e+0o+2x1o+1e+2e+2o")
     irreps_out = co3.Irreps("0e+2x0o+1o+2x1e+2e+2o")
-    linear = co3.Linear(irreps_in, irreps_out, 3, 4).to(dtype=DTYPE)
-    input = _irreducible(irreps_in, 5, 3)
+    linear = co3.Linear(irreps_in, irreps_out, biases=True).to(dtype=DTYPE)
+    features = _irreducible(irreps_in, 5)
     matrix = _orthogonal(improper=improper)
-    actual = linear(_transform(input, irreps_in, matrix))
-    expected = _transform(linear(input), irreps_out, matrix)
+    actual = linear(_transform(features, irreps_in, matrix))
+    expected = _transform(linear(features), irreps_out, matrix)
     torch.testing.assert_close(actual, expected, atol=2.0e-12, rtol=2.0e-12)
 
 
-def test_linear_is_uv_only() -> None:
-    linear = co3.Linear("2x0e+1o", "0e+2x1o", 3, 5)
-    assert linear.weight_shape == (4, 3, 5)
-    assert linear.weight_scale == pytest.approx(3**-0.5)
-    with pytest.raises(TypeError, match="path_mode"):
-        co3.Linear("0e", "0e", 3, path_mode="uu")
+def test_linear_external_batched_weights_and_variance() -> None:
+    linear = co3.Linear(
+        "4x0e",
+        "5x0e",
+        internal_weights=False,
+        shared_weights=False,
+    ).to(dtype=DTYPE)
+    features = torch.randn(4096, 4, dtype=DTYPE)
+    shared = torch.randn(linear.weight_numel, dtype=DTYPE)
+    singleton = shared.unsqueeze(0)
+    torch.testing.assert_close(linear(features, shared), linear(features, singleton))
 
-
-def test_linear_default_initialization_preserves_variance() -> None:
     torch.manual_seed(0)
-    channels = 128
-    linear = co3.Linear("4x0e", "5x0e", channels, channels, bias=False)
-    input = torch.randn(4096, 4, channels)
-    output = linear(input)
-    assert input.var().item() == pytest.approx(1.0, abs=0.02)
-    assert output.var().item() == pytest.approx(1.0, abs=0.08)
+    internal = co3.Linear("128x0e", "128x0e", biases=False).to(dtype=DTYPE)
+    values = torch.randn(4096, 128, dtype=DTYPE)
+    assert internal(values).var().item() == pytest.approx(1.0, abs=0.08)
 
 
 @pytest.mark.parametrize("improper", [False, True])
-def test_gate_o3_equivariance(improper: bool) -> None:
+def test_gate_equivariance(improper: bool) -> None:
     gate = co3.Gate(
-        "0e+0o+1o+1e+2e+2o",
-        act_0e=torch.nn.SiLU(),
-        act_0o=torch.nn.Tanh(),
-        act_tensor=torch.nn.Sigmoid(),
-    )
-    input = _irreducible(gate.irreps_in, 5, 3)
+        "2x0e+0o",
+        [torch.nn.SiLU(), torch.nn.Tanh()],
+        "8x0e",
+        [torch.nn.Sigmoid()],
+        "2x1o+2x1e+2x2e+2x2o",
+    ).to(dtype=DTYPE)
+    features = _irreducible(gate.irreps_in, 5)
     matrix = _orthogonal(improper=improper)
-    actual = gate(_transform(input, gate.irreps_in, matrix))
-    expected = _transform(gate(input), gate.irreps_out, matrix)
+    actual = gate(_transform(features, gate.irreps_in, matrix))
+    expected = _transform(gate(features), gate.irreps_out, matrix)
     torch.testing.assert_close(actual, expected, atol=2.0e-12, rtol=2.0e-12)
 
 
-def test_tensor_product_requires_explicit_projection() -> None:
-    with pytest.raises(TypeError, match="project"):
-        co3.TensorProduct("1o", "1o", "0e", 2)
-
-
-def test_levi_civita_is_a_fixed_buffer() -> None:
-    tensor_product = co3.TensorProduct("1o", "1o", "1e", 2, project=True)
-    buffers = dict(tensor_product.named_buffers())
-    assert "levi_civita" in buffers
-    assert "levi_civita" not in tensor_product.state_dict()
-    assert tensor_product.levi_civita.shape == (3, 3, 3)
-    assert tensor_product.levi_civita.square().sum().item() == 6
-    assert not tensor_product.levi_civita.requires_grad
-    assert tensor_product.to(dtype=DTYPE).levi_civita.dtype == DTYPE
-
-
-def test_public_cartesian_invariant_tensors() -> None:
+def test_invariant_cartesian_tensors_and_projector() -> None:
     kronecker = co3.delta(dtype=DTYPE)
     epsilon = co3.levi_civita(dtype=DTYPE)
     torch.testing.assert_close(kronecker, torch.eye(3, dtype=DTYPE))
-    assert epsilon.shape == (3, 3, 3)
     assert epsilon.square().sum().item() == 6
-    assert epsilon[0, 1, 2].item() == 1
-    assert epsilon[0, 2, 1].item() == -1
+    values = torch.randn(4, 9, 3, dtype=DTYPE)
+    projected = co3.project(values, 2)
+    torch.testing.assert_close(co3.project(projected, 2), projected)
 
 
 @pytest.mark.parametrize("improper", [False, True])
 @pytest.mark.parametrize(
     ("irreps_in1", "irreps_in2", "irreps_out"),
     [
-        ("1o", "1o", "0e+1e+2e"),
-        ("1e", "1o", "0o+1o+2o"),
-        ("2e", "1e", "1e+2e+3e"),
-        ("2o", "2e", "0o+1o+2o+3o+4o"),
+        ("3x1o", "3x1o", "3x0e+3x1e+3x2e"),
+        ("3x1e", "3x1o", "3x0o+3x1o+3x2o"),
+        ("3x2e", "3x1e", "3x1e+3x2e+3x3e"),
+        ("3x2o", "3x2e", "3x0o+3x1o+3x2o+3x3o+3x4o"),
     ],
 )
-def test_tensor_product_o3_equivariance(
+def test_tensor_product_equivariance(
     improper: bool,
     irreps_in1: str,
     irreps_in2: str,
@@ -179,108 +217,75 @@ def test_tensor_product_o3_equivariance(
         first_irreps,
         second_irreps,
         output_irreps,
-        3,
-        project=True,
-        path_mode="uuu",
+        _instructions(first_irreps, second_irreps, output_irreps, "uuu"),
     ).to(dtype=DTYPE)
-    first = _irreducible(first_irreps, 4, 3)
-    second = _irreducible(second_irreps, 4, 3)
+    first = _irreducible(first_irreps, 4)
+    second = _irreducible(second_irreps, 4)
     matrix = _orthogonal(improper=improper)
     actual = tensor_product(
         _transform(first, first_irreps, matrix),
         _transform(second, second_irreps, matrix),
     )
-    expected = _transform(
-        tensor_product(first, second), output_irreps, matrix
-    )
+    expected = _transform(tensor_product(first, second), output_irreps, matrix)
     torch.testing.assert_close(actual, expected, atol=3.0e-12, rtol=3.0e-12)
 
 
-@pytest.mark.parametrize("improper", [False, True])
-def test_tensor_product_all_o3_paths_through_l2(improper: bool) -> None:
-    matrix = _orthogonal(improper=improper)
-    for degree1 in range(3):
-        for parity1 in (-1, 1):
-            irrep1 = co3.Irrep(degree1, parity1)
-            first = _irreducible(co3.Irreps(irrep1), 2, 1)
-            transformed_first = torch.einsum(
-                "ij,bjc->bic", irrep1.D_from_matrix(matrix), first
-            )
-            for degree2 in range(3):
-                for parity2 in (-1, 1):
-                    irrep2 = co3.Irrep(degree2, parity2)
-                    second = _irreducible(co3.Irreps(irrep2), 2, 1)
-                    transformed_second = torch.einsum(
-                        "ij,bjc->bic", irrep2.D_from_matrix(matrix), second
-                    )
-                    for irrep_out in irrep1 * irrep2:
-                        tensor_product = co3.TensorProduct(
-                            irrep1,
-                            irrep2,
-                            irrep_out,
-                            1,
-                            project=True,
-                        ).to(dtype=DTYPE)
-                        actual = tensor_product(
-                            transformed_first,
-                            transformed_second,
-                        )
-                        expected = torch.einsum(
-                            "ij,bjc->bic",
-                            irrep_out.D_from_matrix(matrix),
-                            tensor_product(first, second),
-                        )
-                        torch.testing.assert_close(
-                            actual,
-                            expected,
-                            atol=3.0e-12,
-                            rtol=3.0e-12,
-                        )
+@pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
+def test_tensor_product_connection_modes(mode: str) -> None:
+    mul1, mul2, mul_out = {
+        "u1u": (3, 1, 3),
+        "uuu": (3, 3, 3),
+        "uvw": (2, 3, 4),
+    }[mode]
+    irreps_in1 = co3.Irreps([(co3.Irrep("1o"), mul1)])
+    irreps_in2 = co3.Irreps([(co3.Irrep("1o"), mul2)])
+    irreps_out = co3.Irreps([(co3.Irrep("1e"), mul_out)])
+    tensor_product = co3.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        [(0, 0, 0, mode, True)],
+    ).to(dtype=DTYPE)
+    output = tensor_product(_irreducible(irreps_in1, 5), _irreducible(irreps_in2, 5))
+    assert output.shape == (5, irreps_out.dim)
 
 
-def test_projection_can_be_deferred_until_after_aggregation() -> None:
-    kwargs = {
-        "irreps_in1": "1o+2e",
-        "irreps_in2": "1e+2o",
-        "irreps_out": "0o+1o+2o+3o+4o",
-        "channels_in1": 2,
-        "path_mode": "uuu",
-    }
-    raw = co3.TensorProduct(**kwargs, project=False).to(dtype=DTYPE)
-    direct = co3.TensorProduct(**kwargs, project=True).to(dtype=DTYPE)
-    direct.load_state_dict(raw.state_dict())
-    first = _irreducible(raw.irreps_in1, 11, 2)
-    second = _irreducible(raw.irreps_in2, 11, 2)
-    batch = torch.randint(0, 4, (11,))
-    raw_nodes = torch.zeros(4, raw.irreps_out.dim, 2, dtype=DTYPE)
-    raw_nodes.index_add_(0, batch, raw(first, second))
-    direct_nodes = torch.zeros_like(raw_nodes)
-    direct_nodes.index_add_(0, batch, direct(first, second))
-    torch.testing.assert_close(
-        raw.project_output(raw_nodes),
-        direct_nodes,
-        atol=3.0e-12,
-        rtol=3.0e-12,
-    )
+@pytest.mark.parametrize(
+    ("irrep1", "irrep2", "irrep_out"),
+    [("1o", "1o", "1e"), ("1o", "2e", "1o"), ("2e", "2e", "2e")],
+)
+def test_tensor_product_component_normalization_preserves_variance(
+    irrep1: str,
+    irrep2: str,
+    irrep_out: str,
+) -> None:
+    tensor_product = co3.TensorProduct(
+        irrep1,
+        irrep2,
+        irrep_out,
+        [(0, 0, 0, "uuu", False)],
+        irrep_normalization="component",
+    ).to(dtype=DTYPE)
+    first = co3.Irreps(irrep1).randn(32768, -1, dtype=DTYPE)
+    second = co3.Irreps(irrep2).randn(32768, -1, dtype=DTYPE)
+    output = tensor_product(first, second)
+    ir = co3.Irrep(irrep_out)
+    second_moment = output.square().sum(dim=-1).mean() / ir.dof
+    assert second_moment.item() == pytest.approx(1.0, abs=0.04)
 
 
-def test_tensor_product_first_and_second_derivatives() -> None:
+def test_tensor_product_external_weight_derivatives() -> None:
     tensor_product = co3.TensorProduct(
         "1o",
         "1o",
         "1e",
-        1,
-        project=True,
-        path_mode="uuu",
+        [(0, 0, 0, "uuu", True)],
         internal_weights=False,
+        shared_weights=False,
     ).to(dtype=DTYPE)
-    first = torch.randn(2, 3, 1, dtype=DTYPE, requires_grad=True)
-    second = torch.randn(2, 3, 1, dtype=DTYPE, requires_grad=True)
-    weight = torch.randn(
-        tensor_product.weight_shape,
-        dtype=DTYPE,
-        requires_grad=True,
-    )
+    first = torch.randn(2, 3, dtype=DTYPE, requires_grad=True)
+    second = torch.randn(2, 3, dtype=DTYPE, requires_grad=True)
+    weight = torch.randn(tensor_product.weight_numel, dtype=DTYPE, requires_grad=True)
 
     def function(input1, input2, external_weight):
         return tensor_product(input1, input2, external_weight)

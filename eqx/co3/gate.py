@@ -3,175 +3,286 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Union
+from typing import NamedTuple, Optional, Sequence
 
 import torch
+from e3nn.math import normalize2mom
 
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
-def _check_odd_activation(activation: torch.nn.Module) -> None:
-    reference = next(activation.parameters(), None)
-    if reference is None:
-        reference = next(activation.buffers(), None)
-    kwargs = {}
-    if reference is not None:
-        kwargs["device"] = reference.device
-        if reference.is_floating_point():
-            kwargs["dtype"] = reference.dtype
-    values = torch.linspace(0.0, 10.0, 256, **kwargs)
-    training = activation.training
-    activation.eval()
-    try:
-        with torch.no_grad():
-            positive = activation(values)
-            negative = activation(-values)
-    finally:
-        activation.train(training)
-    scale = torch.maximum(
-        torch.ones((), device=positive.device, dtype=positive.dtype),
-        torch.maximum(positive.abs().max(), negative.abs().max()),
-    )
-    if (positive + negative).abs().max() > 1.0e-5 * scale:
-        raise ValueError("act_0o must be an odd function.")
+def _parity_order(ir: Irrep) -> tuple[int, int]:
+    return ir.l, {1: 0, -1: 1}[ir.p]
 
 
-class Gate(torch.nn.Module):
-    """Apply equivariant nonlinearities to Cartesian O(3) features.
+class Activation(torch.nn.Module):
+    """Apply normalized activations to flattened scalar entries.
 
     Parameters
     ----------
-    irreps_out : IrrepsLike
-        Requested output representation. The module derives the required
-        scalar gates and exposes the resulting input representation as
-        :attr:`irreps_in`.
-    act_0e : torch.nn.Module
-        Activation applied directly to scalar-even entries.
-    act_0o : torch.nn.Module or None
-        Odd activation applied directly to scalar-odd entries. If ``None``,
-        scalar-odd entries are handled by an auxiliary scalar-even gate.
-    act_tensor : torch.nn.Module
-        Activation applied to the scalar-even gates for all gated entries.
-
-    Notes
-    -----
-    ``0e`` scalars use ``act_0e``. A provided ``act_0o`` must be odd. Every
-    non-scalar irrep, and ``0o`` when ``act_0o`` is absent, is multiplied by
-    an auxiliary ``0e`` gate activated by ``act_tensor``. Features use shape
-    ``(..., irreps.dim, channels)`` and retain the channel axis.
+    irreps_in : IrrepsLike
+        Input representation. Non-``None`` activations are valid only for
+        degree-zero entries.
+    acts : sequence of torch.nn.Module or None
+        One activation per input entry. ``None`` leaves the entry unchanged.
     """
 
     def __init__(
         self,
-        irreps_out: IrrepsLike,
-        *,
-        act_0e: torch.nn.Module,
-        act_0o: Union[torch.nn.Module, None],
-        act_tensor: torch.nn.Module,
+        irreps_in: IrrepsLike,
+        acts: Sequence[Optional[torch.nn.Module]],
     ) -> None:
         super().__init__()
-        if not isinstance(act_0e, torch.nn.Module):
-            raise TypeError("act_0e must be a torch.nn.Module.")
-        if act_0o is not None and not isinstance(act_0o, torch.nn.Module):
-            raise TypeError("act_0o must be a torch.nn.Module or None.")
-        if not isinstance(act_tensor, torch.nn.Module):
-            raise TypeError("act_tensor must be a torch.nn.Module.")
-        self.irreps_out = Irreps(irreps_out)
-        direct_even = []
-        direct_odd = []
-        gated = []
-        for multiplicity, irrep in self.irreps_out:
-            if irrep == Irrep("0e"):
-                direct_even.append((multiplicity, irrep))
-            elif irrep == Irrep("0o") and act_0o is not None:
-                direct_odd.append((multiplicity, irrep))
-            else:
-                gated.append((multiplicity, irrep))
-        self.irreps_0e = Irreps(direct_even).regroup()
-        self.irreps_0o = Irreps(direct_odd).regroup()
-        self.irreps_gated = Irreps(gated)
-        self.num_gates = self.irreps_gated.num_irreps
-        self.irreps_gates = (
-            Irreps([(self.num_gates, Irrep("0e"))])
-            if self.num_gates
-            else Irreps()
-        )
-        self.irreps_in = Irreps(
-            tuple(self.irreps_0e)
-            + tuple(self.irreps_gates)
-            + tuple(self.irreps_0o)
-            + tuple(self.irreps_gated)
-        ).simplify()
-        if act_0o is not None:
-            _check_odd_activation(act_0o)
-        self.act_0e = act_0e
-        self.act_0o = act_0o
-        self.act_tensor = act_tensor
-
-        sources = [0] * self.irreps_out.dim
-        output_offset = even_offset = odd_offset = gated_offset = 0
-        odd_start = self.irreps_0e.dim
-        gated_start = odd_start + self.irreps_0o.dim
-        for multiplicity, irrep in self.irreps_out:
-            width = multiplicity * irrep.dim
-            if irrep == Irrep("0e"):
-                source = even_offset
-                even_offset += width
-            elif irrep == Irrep("0o") and act_0o is not None:
-                source = odd_start + odd_offset
-                odd_offset += width
-            else:
-                source = gated_start + gated_offset
-                gated_offset += width
-            sources[output_offset : output_offset + width] = range(
-                source, source + width
+        self.irreps_in = Irreps(irreps_in)
+        if len(self.irreps_in) != len(acts):
+            raise ValueError(
+                "Irreps and activation counts do not match: "
+                f"{len(self.irreps_in)} != {len(acts)}."
             )
-            output_offset += width
-        self.register_buffer(
-            "_output_sources",
-            torch.tensor(sources, dtype=torch.long),
-            persistent=False,
-        )
+        normalized_acts = [
+            normalize2mom(act) if act is not None else None for act in acts
+        ]
+        irreps_out = []
+        for (ir, mul), act in zip(self.irreps_in, normalized_acts):
+            if act is None:
+                irreps_out.append((ir, mul))
+                continue
+            if ir.l != 0:
+                raise ValueError("Activation functions can only act on scalars.")
+            reference = next(act.parameters(), None)
+            if reference is None:
+                reference = next(act.buffers(), None)
+            kwargs = {}
+            if reference is not None:
+                kwargs["device"] = reference.device
+                if reference.is_floating_point():
+                    kwargs["dtype"] = reference.dtype
+            values = torch.linspace(0.0, 10.0, 256, **kwargs)
+            training = act.training
+            act.eval()
+            try:
+                with torch.no_grad():
+                    positive = act(values)
+                    negative = act(-values)
+            finally:
+                act.train(training)
+            scale = torch.maximum(
+                torch.ones((), device=positive.device, dtype=positive.dtype),
+                torch.maximum(positive.abs().max(), negative.abs().max()),
+            )
+            even = (positive - negative).abs().max() <= 1.0e-5 * scale
+            odd = (positive + negative).abs().max() <= 1.0e-5 * scale
+            activation_parity = 1 if even else -1 if odd else 0
+            output_parity = activation_parity if ir.p == -1 else ir.p
+            if output_parity == 0:
+                raise ValueError("Odd scalar activation must be either even or odd.")
+            irreps_out.append((Irrep(0, output_parity), mul))
+        self.irreps_out = Irreps(irreps_out)
+        self.acts = torch.nn.ModuleList(normalized_acts)
+        self._slices = self.irreps_in.slices()
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Apply direct scalar activations and tensor gates.
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Apply the configured scalar activations.
 
         Parameters
         ----------
-        input : torch.Tensor
-            Tensor with shape ``(..., irreps_in.dim, channels)``.
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``.
 
         Returns
         -------
         torch.Tensor
-            Tensor with shape ``(..., irreps_out.dim, channels)``.
+            Activated features with shape ``(..., irreps_out.dim)``.
         """
-        if input.is_complex():
-            raise TypeError("Cartesian O(3) Gate supports real inputs only.")
-        if input.ndim < 2 or input.shape[-2] != self.irreps_in.dim:
+        if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
-                f"Gate input Cartesian dimension must be {self.irreps_in.dim}."
+                f"Activation feature trailing dimension must be {self.irreps_in.dim}, "
+                f"got {tuple(features.shape)}."
             )
-        even_end = self.irreps_0e.dim
-        gate_end = even_end + self.irreps_gates.dim
-        odd_end = gate_end + self.irreps_0o.dim
-        even = self.act_0e(input[..., :even_end, :])
-        gates = self.act_tensor(input[..., even_end:gate_end, :])
-        odd = input[..., gate_end:odd_end, :]
-        if self.act_0o is not None:
-            odd = self.act_0o(odd)
-        tensors = input[..., odd_end:, :]
-        if self.num_gates:
-            expanded = []
-            for gate_index, irrep in enumerate(self.irreps_gated.expanded()):
-                expanded.append(
-                    gates[..., gate_index : gate_index + 1, :].expand(
-                        *gates.shape[:-2], irrep.dim, gates.shape[-1]
-                    )
+        outputs = []
+        for ir_slice, act in zip(self._slices, self.acts):
+            values = features[..., ir_slice]
+            outputs.append(values if act is None else act(values))
+        if outputs:
+            return torch.cat(outputs, dim=-1)
+        return features.new_empty(*features.shape[:-1], 0)
+
+
+class _GatePath(NamedTuple):
+    i_gate: int
+    gate_start: int
+    i_gated: int
+    gated_start: int
+    mul: int
+    ir_out: Irrep
+
+
+class Gate(torch.nn.Module):
+    """Apply scalar activations and scalar gates to O(3) features.
+
+    Parameters
+    ----------
+    irreps_scalars : IrrepsLike
+        Scalar entries transformed directly by ``act_scalars``.
+    act_scalars : sequence of torch.nn.Module or None
+        One normalized activation per scalar entry.
+    irreps_gates : IrrepsLike
+        Scalar entries used as gates. Their total multiplicity must equal the
+        total multiplicity in ``irreps_gated``.
+    act_gates : sequence of torch.nn.Module or None
+        One normalized activation per gate entry.
+    irreps_gated : IrrepsLike
+        Entries multiplied channel-wise by activated gates.
+
+    Notes
+    -----
+    All inputs and outputs use flattened ``ir_mul`` layout.
+    """
+
+    def __init__(
+        self,
+        irreps_scalars: IrrepsLike,
+        act_scalars: Sequence[Optional[torch.nn.Module]],
+        irreps_gates: IrrepsLike,
+        act_gates: Sequence[Optional[torch.nn.Module]],
+        irreps_gated: IrrepsLike,
+    ) -> None:
+        super().__init__()
+        irreps_scalars = Irreps(irreps_scalars)
+        irreps_gates = Irreps(irreps_gates)
+        irreps_gated = Irreps(irreps_gated)
+        if any(ir.l != 0 for ir, _ in irreps_scalars):
+            raise ValueError("Gate scalars must be scalar O(3) irreps.")
+        if any(ir.l != 0 for ir, _ in irreps_gates):
+            raise ValueError("Gate inputs must be scalar O(3) irreps.")
+        if irreps_gates.num_irreps != irreps_gated.num_irreps:
+            raise ValueError(
+                f"There are {irreps_gated.num_irreps} gated irreps, but "
+                f"{irreps_gates.num_irreps} gate scalars."
+            )
+
+        self.act_scalars = Activation(irreps_scalars, act_scalars)
+        self.act_gates = Activation(irreps_gates, act_gates)
+        self.irreps_scalars = irreps_scalars
+        self.irreps_gates = irreps_gates
+        self.irreps_gated = irreps_gated
+
+        tagged_entries = (
+            [
+                ("scalar", index, mul, ir)
+                for index, (ir, mul) in enumerate(irreps_scalars)
+            ]
+            + [("gate", index, mul, ir) for index, (ir, mul) in enumerate(irreps_gates)]
+            + [
+                ("gated", index, mul, ir)
+                for index, (ir, mul) in enumerate(irreps_gated)
+            ]
+        )
+        tagged_entries.sort(key=lambda item: _parity_order(item[3]))
+        self.irreps_in = Irreps([(ir, mul) for _, _, mul, ir in tagged_entries])
+        input_locations = {
+            (kind, index): location
+            for location, (kind, index, _, _) in enumerate(tagged_entries)
+        }
+        self._scalar_locations = tuple(
+            input_locations[("scalar", index)] for index in range(len(irreps_scalars))
+        )
+        self._gate_locations = tuple(
+            input_locations[("gate", index)] for index in range(len(irreps_gates))
+        )
+        self._gated_locations = tuple(
+            input_locations[("gated", index)] for index in range(len(irreps_gated))
+        )
+        self._input_slices = self.irreps_in.slices()
+
+        paths = []
+        output_irrep_list = []
+        i_gate = i_gated = 0
+        gate_start = gated_start = 0
+        while i_gate < len(self.act_gates.irreps_out):
+            gate_ir, gate_mul = self.act_gates.irreps_out[i_gate]
+            gated_ir, gated_mul = irreps_gated[i_gated]
+            count = min(gate_mul - gate_start, gated_mul - gated_start)
+            product = gated_ir * gate_ir
+            if len(product) != 1:
+                raise RuntimeError("A scalar gate must produce one O(3) irrep.")
+            ir_out = product[0]
+            paths.append(
+                _GatePath(
+                    i_gate,
+                    gate_start,
+                    i_gated,
+                    gated_start,
+                    count,
+                    ir_out,
                 )
-            tensors = tensors * torch.cat(expanded, dim=-2)
-        output = torch.cat((even, odd, tensors), dim=-2)
-        return output.index_select(-2, self._output_sources)
+            )
+            output_irrep_list.append((ir_out, count))
+            gate_start += count
+            gated_start += count
+            if gate_start == gate_mul:
+                i_gate += 1
+                gate_start = 0
+            if gated_start == gated_mul:
+                i_gated += 1
+                gated_start = 0
+        self._paths = tuple(paths)
+        self.irreps_out = self.act_scalars.irreps_out + Irreps(output_irrep_list)
+
+    def _select_entries(
+        self,
+        features: torch.Tensor,
+        locations: tuple[int, ...],
+    ) -> torch.Tensor:
+        if not locations:
+            return features.new_empty(*features.shape[:-1], 0)
+        return torch.cat(
+            [features[..., self._input_slices[index]] for index in locations], dim=-1
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Activate scalars and apply gates.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``. Entries follow the
+            ordering recorded in :attr:`irreps_in`.
+
+        Returns
+        -------
+        torch.Tensor
+            Activated scalars followed by gated entries, flattened to shape
+            ``(..., irreps_out.dim)``.
+        """
+        if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
+            raise ValueError(
+                f"Gate feature trailing dimension must be {self.irreps_in.dim}, "
+                f"got {tuple(features.shape)}."
+            )
+        scalars = self.act_scalars(
+            self._select_entries(features, self._scalar_locations)
+        )
+        if not self._paths:
+            return scalars
+        gates = self.act_gates(self._select_entries(features, self._gate_locations))
+        gated = self._select_entries(features, self._gated_locations)
+        gate_slices = self.act_gates.irreps_out.slices()
+        gated_slices = self.irreps_gated.slices()
+        outputs = [scalars]
+        for path in self._paths:
+            gate = gates[..., gate_slices[path.i_gate]].reshape(
+                *gates.shape[:-1], self.act_gates.irreps_out[path.i_gate].mul
+            )[..., path.gate_start : path.gate_start + path.mul]
+            gated_ir, gated_mul = self.irreps_gated[path.i_gated]
+            values = gated[..., gated_slices[path.i_gated]].reshape(
+                *gated.shape[:-1], gated_ir.dim, gated_mul
+            )[..., path.gated_start : path.gated_start + path.mul]
+            output = values * gate.unsqueeze(-2)
+            outputs.append(
+                output.reshape(*features.shape[:-1], path.ir_out.dim * path.mul)
+            )
+        return torch.cat(outputs, dim=-1)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self.irreps_in} -> {self.irreps_out})"
+        return f"{self.__class__.__name__} ({self.irreps_in} -> {self.irreps_out})"

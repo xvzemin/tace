@@ -39,7 +39,7 @@ Quick start
 Common tensor conventions
 -------------------------
 
-The :mod:`eqx.o2` operators use one flattened feature axis:
+The :mod:`eqx.o2` and :mod:`eqx.co3` operators use one flattened feature axis:
 
 .. math::
 
@@ -53,13 +53,13 @@ can therefore be viewed directly as
    (\ldots,\ d_{\mathrm{irrep}},\ \mathrm{mul}).
 
 Linear, activation, gate, tensor-product, and local-frame modules use this
-flattened ``ir_mul`` representation. Circular harmonics produce the same
-layout. Asymmetric contraction accepts a sequence of independent flattened
-inputs, one for each correlation order.
-
-The :mod:`eqx.co3` operators keep their representation and channel axes
-explicit. Inputs, internal parameters, and external weights use real
-floating-point dtypes unless an API states otherwise.
+flattened ``ir_mul`` representation. Circular and Cartesian harmonics produce
+the same layout. In :mod:`eqx.co3`, ``ir.dim`` is the ambient Cartesian size
+:math:`3^l`; each entry is therefore viewed as
+``(..., 3**l, multiplicity)``. Asymmetric contraction accepts a sequence of
+independent flattened inputs, one for each correlation order. Inputs, internal
+parameters, and external weights use real floating-point dtypes unless an API
+states otherwise.
 
 Real O(2)
 ----------
@@ -209,7 +209,7 @@ rescaling preserves the intended variance.
    channels = 64
    lmax = 3
    mmax = 2
-   irreps_o3 = (
+   irreps_co3 = (
        "64x0e + 64x0o + 64x1o + 64x1e + "
        "64x2e + 64x2o + 64x3o + 64x3e"
    )
@@ -219,7 +219,7 @@ rescaling preserves the intended variance.
    wigner = o2.WignerD(lmax=lmax, mmax=mmax)
    D, D_inv = wigner.get_wigner(edge_vectors)
    frame = o2.LocalFrame(
-       irreps_o3,
+       irreps_co3,
        lmax=lmax,
        mmax=mmax,
    )
@@ -275,25 +275,27 @@ one determinant factor and represents pseudotensors. :func:`eqx.co3.project`
 maps an ambient tensor onto the symmetric traceless subspace using an
 orthonormal Cartesian-to-spherical basis.
 
-:class:`eqx.co3.Layout` converts between dense
-``(batch, irreps.dim, channels)`` data and grouped
-``(batch, 3**l, multiplicity * channels)`` blocks. It changes storage only;
-it does not rotate or project features.
+An :class:`eqx.co3.Irreps` entry is written as ``(ir, mul)``. Its flattened
+segment has length ``ir.dim * mul`` and can be viewed without a permutation as
+``(..., ir.dim, mul)``. Distinct entries remain distinct even when they carry
+the same irrep, so explicit linear instructions can address them separately.
 
 Linear and Gate
 ~~~~~~~~~~~~~~~
 
-:class:`eqx.co3.Linear` provides only dense UV channel mixing. It connects
-equal ``(l, p)`` types, zero-pads absent outputs, and permits bias only on
-``0e``. Internal weights have unit normal initialization and are multiplied by
-the fixed scale :math:`C_{\mathrm{in}}^{-1/2}`. Default path normalization
-adds :math:`N_{\mathrm{path}}^{-1/2}`, keeping variance stable as channels and
-path counts change.
+:class:`eqx.co3.Linear` connects equal ``(l, p)`` types and mixes their
+multiplicity axes with dense matrices. Compatible input/output entries are
+connected by default; ``instructions`` can select entry-level paths. The
+``element`` normalization accounts for all input multiplicities feeding an
+output, whereas ``path`` gives each incoming path equal variance. Bias is
+available only for ``0e`` entries. Weights can be stored internally or supplied
+as a flattened tensor to :meth:`eqx.co3.Linear.forward`.
 
-:class:`eqx.co3.Gate` follows the same scalar rules as the O(2) gate. ``0e``
-uses ``act_0e``; a direct ``0o`` activation must be odd; all non-scalars and
-an indirectly activated ``0o`` use invariant ``0e`` gates passed through
-``act_tensor``.
+:class:`eqx.co3.Gate` takes scalar entries, scalar gate entries, and gated
+entries. Scalar and gate activations are normalized to preserve second
+moments. Each activated gate multiplies one multiplicity channel of a gated
+entry. An odd scalar gate flips the parity of the gated irrep; an even scalar
+gate preserves it. Both input and output remain flattened ``ir_mul`` tensors.
 
 Cartesian harmonics
 ~~~~~~~~~~~~~~~~~~~
@@ -302,6 +304,9 @@ Cartesian harmonics
 powers through ``lmax``. A polar ``1o`` input produces
 ``0e + 1o + 2e + ...``. An axial ``1e`` input produces even-parity outputs at
 every degree. With ``normalize=True``, only the input direction is retained.
+``normalization="component"`` gives every independent component unit second
+moment over uniformly distributed directions; ``"norm"`` gives each degree
+unit norm, and ``"integral"`` uses unit-sphere integral normalization.
 
 .. code-block:: python
 
@@ -338,36 +343,19 @@ and a Levi-Civita branch,
    B_{\boldsymbol a v\boldsymbol j},
    \qquad l_3=l_1+l_2-2k-1.
 
-Both branches satisfy :math:`p_3=p_1p_2`. The channel modes ``u1u``, ``uuu``,
-and ``uvw`` have the same meaning as in :class:`eqx.o2.TensorProduct`.
-
-The ``project`` argument is mandatory:
-
-``project=True``
-   Project the output immediately. Use this for ordinary tensor products and
-   node-level many-body expansions.
-
-``project=False``
-   Return a generic Cartesian tensor in the same ambient shape. Linear
-   operations may then be moved before projection. In particular, edge
-   aggregation and path compression can precede one node-level projection.
-
-Projection is linear, hence
-
-.. math::
-
-   \mathcal P\!\left(\sum_j M_{ij}\right)
-   =\sum_j\mathcal P(M_{ij}).
-
-The unprojected result must be projected before it is treated as an
-irreducible feature by a nonlinear operation.
+Both branches satisfy :math:`p_3=p_1p_2`. The connection modes ``u1u``,
+``uuu``, and ``uvw`` have the same multiplicity rules as in
+:class:`eqx.o2.TensorProduct`. Every output entry is projected onto its
+symmetric traceless subspace after all paths feeding that entry have been
+summed. Consequently, the returned flattened tensor is immediately a valid
+irreducible feature.
 
 Cartesian convolution pattern
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The intended Cartesian convolution keeps paths explicit on edges, aggregates
-without projection, compresses paths with :class:`eqx.co3.Linear`, and then
-projects once:
+The following convolution uses ``u1u`` paths. Node channels occupy the
+multiplicity axis, while each Cartesian harmonic occurs once. The tensor
+product therefore preserves the node multiplicity on every compatible path:
 
 .. code-block:: python
 
@@ -375,81 +363,56 @@ projects once:
    num_edges = 48
    channels = 64
    lmax = 2
-   irreps_node = co3.Irreps("0e + 0o + 1o + 1e + 2e + 2o")
+   irreps_node = co3.Irreps(
+       [(co3.Irrep(name), channels) for name in ("0e", "1o", "2e")]
+   )
    harmonics = co3.CartesianHarmonics(lmax, irreps_in="1o")
    irreps_edge = harmonics.irreps_out
 
-   node_feats = torch.cat(
-       [
-           co3.project(torch.randn(num_nodes, ir.dim, channels), ir.l)
-           for ir in irreps_node.expanded()
-       ],
-       dim=1,
-   )
+   node_parts = []
+   for ir, mul in irreps_node:
+       part = co3.project(torch.randn(num_nodes, ir.dim, mul), ir.l)
+       node_parts.append(part.reshape(num_nodes, ir.dim * mul))
+   node_feats = torch.cat(node_parts, dim=-1)
    edge_index = torch.randint(0, num_nodes, (2, num_edges))
-   edge_attrs = harmonics(torch.randn(num_edges, 3)).unsqueeze(-1)
+   edge_attrs = harmonics(torch.randn(num_edges, 3))
 
-   irreps_paths = []
-   paths = []
-   for i, irrep1 in enumerate(irreps_node.expanded()):
-       for j, irrep2 in enumerate(irreps_edge.expanded()):
-           for irrep_out in irrep1 * irrep2:
-               if irrep_out.l <= lmax:
-                   output_index = len(irreps_paths)
-                   irreps_paths.append(irrep_out)
-                   paths.append((output_index, i, j))
-   irreps_paths = co3.Irreps(irreps_paths)
+   irreps_out = irreps_node
+   instructions = [
+       (i, j, k, "u1u", True)
+       for i, (ir1, _) in enumerate(irreps_node)
+       for j, (ir2, _) in enumerate(irreps_edge)
+       for k, (ir_out, _) in enumerate(irreps_out)
+       if ir_out in ir1 * ir2
+   ]
 
    tensor_product = co3.TensorProduct(
        irreps_node,
        irreps_edge,
-       irreps_paths,
-       channels_in1=channels,
-       channels_in2=1,
-       channels_out=channels,
-       project=False,
-       path_mode="u1u",
-       path=paths,
+       irreps_out,
+       instructions,
    )
    source, target = edge_index
-   raw_edges = tensor_product(node_feats[source], edge_attrs)
-   raw_nodes = raw_edges.new_zeros(num_nodes, irreps_paths.dim, channels)
-   raw_nodes.index_add_(0, target, raw_edges)
-
-   linear_down = co3.Linear(
-       irreps_paths,
-       irreps_node,
-       channels,
-       channels,
-       bias=False,
-   )
-   node_messages = linear_down(raw_nodes)
-   node_messages = torch.cat(
-       [
-           co3.project(node_messages[..., block, :], ir.l)
-           for ir, block in zip(
-               irreps_node.expanded(),
-               irreps_node.expanded_slices(),
-           )
-       ],
-       dim=-2,
-   )
+   edge_messages = tensor_product(node_feats[source], edge_attrs)
+   node_messages = edge_messages.new_zeros(num_nodes, irreps_out.dim)
+   node_messages.index_add_(0, target, edge_messages)
 
 Cartesian many-body pattern
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A node-level many-body step uses immediate projection:
+A node-level many-body step uses ``uuu`` when corresponding input and output
+entries have the same multiplicity:
 
 .. code-block:: python
 
+   instructions = [
+       (i, j, k, "uuu", True)
+       for i, (ir1, mul1) in enumerate(irreps_node)
+       for j, (ir2, mul2) in enumerate(irreps_node)
+       for k, (ir_out, mul_out) in enumerate(irreps_node)
+       if ir_out in ir1 * ir2 and mul1 == mul2 == mul_out
+   ]
    node_tensor_product = co3.TensorProduct(
-       irreps_node,
-       irreps_node,
-       irreps_node,
-       channels_in1=channels,
-       channels_in2=channels,
-       channels_out=channels,
-       project=True,
-       path_mode="uuu",
+       irreps_node, irreps_node, irreps_node, instructions
    )
    node_product = node_tensor_product(node_feats, node_feats)
