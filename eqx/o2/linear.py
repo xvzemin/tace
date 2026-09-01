@@ -56,11 +56,11 @@ class Linear(torch.nn.Module):
 
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)
-        if not isinstance(channels_in, int) or isinstance(channels_in, bool):
+        if not isinstance(channels_in, int):
             raise TypeError("channels_in must be an integer.")
         if channels_out is None:
             channels_out = channels_in
-        if not isinstance(channels_out, int) or isinstance(channels_out, bool):
+        if not isinstance(channels_out, int):
             raise TypeError("channels_out must be an integer.")
         if channels_in < 1 or channels_out < 1:
             raise ValueError("Linear channel counts must be positive.")
@@ -78,7 +78,6 @@ class Linear(torch.nn.Module):
             if self.path_mode == "uv"
             else 1.0
         )
-
         input_irrep_list = self.irreps_in.expanded()
         output_irrep_list = self.irreps_out.expanded()
         if path is None:
@@ -94,9 +93,9 @@ class Linear(torch.nn.Module):
             if not isinstance(item, tuple) or len(item) != 2:
                 raise TypeError("Each Linear path must be (output_index, input_index).")
             output_index, input_index = item
-            if not isinstance(output_index, int) or isinstance(output_index, bool):
+            if not isinstance(output_index, int):
                 raise TypeError("Linear path indices must be integers.")
-            if not isinstance(input_index, int) or isinstance(input_index, bool):
+            if not isinstance(input_index, int):
                 raise TypeError("Linear path indices must be integers.")
             if not 0 <= output_index < len(output_irrep_list):
                 raise ValueError(f"Invalid Linear output path index: {output_index}.")
@@ -109,7 +108,6 @@ class Linear(torch.nn.Module):
                     f"{output_irrep_list[output_index]}."
                 )
         self.path = paths
-
         path_counts = Counter(output_index for output_index, _ in paths)
         scales = [
             path_counts[output_index] ** -0.5 if self.path_norm else 1.0
