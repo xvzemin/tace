@@ -23,6 +23,17 @@ IrrepsLike = Union[
 class Irrep:
     """A real irreducible representation of O(2).
 
+    Parameters
+    ----------
+    m : int, str, tuple, or Irrep
+        Non-negative order, canonical name such as ``"0e"`` or ``"2m"``,
+        ``(order, parity)`` pair, or an existing instance.
+    p : {-1, 0, 1, "o", "m", "e"}, optional
+        Reflection parity when ``m`` is supplied as an integer. Order zero
+        uses ``+1`` or ``-1``; positive orders use ``0``.
+
+    Notes
+    -----
     ``0e`` and ``0o`` are the one-dimensional reflection-even and
     reflection-odd irreps. Every positive order is a two-dimensional real
     irrep denoted by ``m``, for example ``1m`` or ``3m``.
@@ -135,7 +146,25 @@ class Irrep:
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
     ) -> torch.Tensor:
-        """Return the real matrix for ``S**reflected @ R(angle)``."""
+        """Return the real representation matrix of an O(2) transformation.
+
+        Parameters
+        ----------
+        angle : array-like
+            Rotation angle in radians.
+        reflected : bool, optional
+            Compose the rotation with the canonical reflection.
+        dtype : torch.dtype, optional
+            Requested floating-point dtype.
+        device : torch.device, optional
+            Requested output device.
+
+        Returns
+        -------
+        torch.Tensor
+            Matrix with shape ``angle.shape + (dim, dim)`` representing
+            ``S**reflected @ R(angle)``.
+        """
         if not isinstance(reflected, bool):
             raise TypeError("reflected must be a bool.")
         angle = torch.as_tensor(angle, dtype=dtype, device=device)
@@ -172,8 +201,18 @@ class _IrMul(NamedTuple):
 class Irreps:
     """A direct sum of real O(2) irreps.
 
+    Parameters
+    ----------
+    irreps : IrrepsLike, optional
+        Representation specification. Accepted forms include canonical strings,
+        individual irreps, ``(irrep, multiplicity)`` pairs, and sequences of
+        those pairs.
+
+    Notes
+    -----
     Iteration yields ``(irrep, multiplicity)`` pairs. Use :meth:`expanded`
-    when one entry per irrep copy is required.
+    when one entry per irrep copy is required. Feature slices use flattened
+    ``ir_mul`` order.
     """
 
     __slots__ = ("_irreps",)
@@ -284,7 +323,25 @@ class Irreps:
         drop=None,
         mmax: Optional[int] = None,
     ) -> "Irreps":
-        """Filter irreps by type, predicate, or maximum O(2) order."""
+        """Filter entries by type, predicate, or maximum order.
+
+        Parameters
+        ----------
+        keep : optional
+            Irreps, iterable of irrep types, or predicate selecting entries to
+            retain.
+        drop : optional
+            Irreps, iterable of irrep types, or predicate selecting entries to
+            remove.
+        mmax : int, optional
+            Retain entries whose order is at most this value.
+
+        Returns
+        -------
+        Irreps
+            Filtered representation. Exactly one selection argument may be
+            supplied.
+        """
         specified = sum(value is not None for value in (keep, drop, mmax))
         if specified == 0:
             return self
@@ -362,9 +419,25 @@ class Irreps:
     ) -> torch.Tensor:
         """Return a random tensor with ``-1`` replaced by ``self.dim``.
 
-        ``normalization="component"`` samples independent standard-normal
-        components. ``normalization="norm"`` normalizes every irrep copy to
-        unit norm. Within each entry, features use flattened ``ir_mul`` order.
+        Parameters
+        ----------
+        *size : int
+            Requested shape containing exactly one ``-1`` representation axis.
+        normalization : {"component", "norm"}, optional
+            ``"component"`` samples independent standard-normal components.
+            ``"norm"`` normalizes every irrep copy to unit norm.
+        requires_grad : bool, optional
+            Enable gradient tracking on the returned tensor.
+        dtype : torch.dtype, optional
+            Requested dtype.
+        device : torch.device, optional
+            Requested device.
+
+        Returns
+        -------
+        torch.Tensor
+            Random features with ``-1`` replaced by :attr:`dim`. Within each
+            entry, features use flattened ``ir_mul`` order.
         """
         if size.count(-1) != 1:
             raise ValueError("size must contain exactly one -1.")
@@ -414,7 +487,25 @@ class Irreps:
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
     ) -> torch.Tensor:
-        """Return the block-diagonal representation matrix."""
+        """Return the direct-sum representation matrix.
+
+        Parameters
+        ----------
+        angle : array-like
+            Rotation angle in radians.
+        reflected : bool, optional
+            Compose the rotation with the canonical reflection.
+        dtype : torch.dtype, optional
+            Requested floating-point dtype.
+        device : torch.device, optional
+            Requested output device.
+
+        Returns
+        -------
+        torch.Tensor
+            Block-diagonal matrix with shape
+            ``angle.shape + (self.dim, self.dim)``.
+        """
         if not isinstance(reflected, bool):
             raise TypeError("reflected must be a bool.")
         angle = torch.as_tensor(angle, dtype=dtype, device=device)

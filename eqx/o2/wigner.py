@@ -18,6 +18,26 @@ _BATCH = 10000
 
 
 class WignerD(torch.nn.Module):
+    """Construct global-to-local and local-to-global rotation matrices.
+
+    Parameters
+    ----------
+    mmax : int
+        Largest local O(2) order retained in the local matrix axis.
+    lmax : int
+        Largest global O(3) degree represented by the matrices.
+    use_opt_einsum_fx : bool, optional
+        If ``True``, pre-optimize the recursive contractions for degrees two
+        and above. This may reduce repeated eager execution cost at the expense
+        of additional module setup.
+
+    Notes
+    -----
+    Each input vector defines a local frame whose second axis is aligned with
+    the vector. The matrices use degree-major global storage and truncated
+    order-major local storage compatible with :class:`LocalFrame`.
+    """
+
     def __init__(
         self,
         mmax: int,
@@ -84,6 +104,24 @@ class WignerD(torch.nn.Module):
         return to_m, inverse_scale
 
     def get_wigner(self, edge_vector) -> tuple[torch.Tensor]:
+        """Build both rotation directions for a batch of vectors.
+
+        Parameters
+        ----------
+        edge_vector : torch.Tensor
+            Three-dimensional vectors with shape ``(batch, 3)``. Their
+            magnitudes do not affect the resulting frame.
+
+        Returns
+        -------
+        wigner : torch.Tensor
+            Global-to-local matrix with shape
+            ``(batch, local_dim, (lmax + 1)**2)``.
+        wigner_inv : torch.Tensor
+            Local-to-global matrix with shape
+            ``(batch, (lmax + 1)**2, local_dim)``. Truncated degrees include
+            the variance-preserving inverse scale.
+        """
         rot_mat3x3 = init_edge_rot_mat_quaternion(edge_vector)
         wigner = self._rotation_to_wigner_matrix_recursive(
             rot_mat3x3,

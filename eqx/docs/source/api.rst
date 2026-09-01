@@ -10,6 +10,10 @@ described in :ref:`equivariantx-tutorials`.
 O(2) representations
 ---------------------
 
+Representation metadata defines the flattened ``ir_mul`` feature axis used by
+all :mod:`eqx.o2` layers. Iterating over :class:`eqx.o2.Irreps` yields
+``(irrep, multiplicity)`` entries.
+
 .. autoclass:: eqx.o2.Irrep
    :members:
    :special-members: __mul__
@@ -20,20 +24,31 @@ O(2) representations
 O(2) layers
 ------------
 
+These layers accept real tensors with trailing shape ``(irreps.dim,)``.
+External weights may carry leading batch dimensions when the corresponding
+module is configured without shared internal weights.
+
 .. autoclass:: eqx.o2.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.o2.Activation
    :members: forward
 
 .. autoclass:: eqx.o2.Gate
    :members: forward
 
 .. autoclass:: eqx.o2.TensorProduct
-   :members: forward
+   :members: forward, weight_view_for_instruction, weight_views
 
 .. autoclass:: eqx.o2.AsymmetricContraction
    :members: forward
 
 O(2) angular and local-frame tools
 ----------------------------------
+
+Circular harmonics operate directly in two dimensions. ``WignerD`` and
+``LocalFrame`` convert global three-dimensional features to edge-aligned local
+features and back while retaining flattened ``ir_mul`` storage.
 
 .. autofunction:: eqx.o2.circular_harmonics
 
@@ -51,6 +66,9 @@ O(2) angular and local-frame tools
 Cartesian O(3) representations
 -------------------------------
 
+Cartesian representations store each rank-``l`` tensor in an ambient axis of
+size ``3**l`` while tracking its symmetric traceless degrees of freedom.
+
 .. autoclass:: eqx.co3.Irrep
    :members:
    :special-members: __mul__
@@ -60,6 +78,10 @@ Cartesian O(3) representations
 
 Cartesian O(3) layers
 ----------------------
+
+Cartesian layers use explicit trailing axes
+``(..., irreps.dim, channels)``. Multiplicity belongs to the representation
+axis, while ``channels`` is the independently mixed feature axis.
 
 .. autoclass:: eqx.co3.Linear
    :members: forward
@@ -75,6 +97,9 @@ Cartesian O(3) layers
 
 Cartesian O(3) harmonics and tensors
 ------------------------------------
+
+These utilities construct and project ambient Cartesian tensors without
+changing their explicit channel layout.
 
 .. autoclass:: eqx.co3.CartesianHarmonics
    :members: forward

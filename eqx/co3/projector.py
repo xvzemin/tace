@@ -29,7 +29,22 @@ def _cartesian_to_spherical_basis(degree: int) -> torch.Tensor:
 
 
 def project(input: torch.Tensor, degree: int) -> torch.Tensor:
-    """Project ambient rank-``degree`` tensors onto their STF subspace."""
+    """Project ambient Cartesian tensors onto their symmetric traceless part.
+
+    Parameters
+    ----------
+    input : torch.Tensor
+        Tensor with shape ``(..., 3**degree, channels)``. The penultimate axis
+        stores flattened ambient Cartesian components.
+    degree : int
+        Non-negative Cartesian tensor rank.
+
+    Returns
+    -------
+    torch.Tensor
+        Projected tensor with the same shape, lying in the degree-``degree``
+        symmetric traceless subspace.
+    """
     if input.ndim < 2 or input.shape[-2] != 3**degree:
         raise ValueError(
             f"input must have Cartesian dimension {3**degree} at axis -2."

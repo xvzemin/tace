@@ -16,17 +16,22 @@ def circular_harmonics(
 ) -> torch.Tensor:
     """Evaluate real circular harmonics through order ``mmax``.
 
-    Args:
-        input: Two-dimensional vectors with shape ``(..., 2)``.
-        mmax: Largest circular order to return.
-        normalize: Normalize each nonzero input vector before constructing the
-            harmonics. If ``False``, order ``m`` is homogeneous of degree
-            ``m`` in the input vector.
+    Parameters
+    ----------
+    input : torch.Tensor
+        Two-dimensional vectors with shape ``(..., 2)``.
+    mmax : int
+        Largest circular order to return.
+    normalize : bool, optional
+        Normalize each nonzero vector before constructing the harmonics. If
+        ``False``, order ``m`` is homogeneous of degree ``m`` in the input.
 
-    Returns:
-        A tensor with shape ``(..., 1 + 2 * mmax)`` in contiguous order from
-        ``0e`` through ``mmax``. Every positive-order block uses
-        the real ``(cos(m theta), sin(m theta))`` component order.
+    Returns
+    -------
+    torch.Tensor
+        Tensor with shape ``(..., 1 + 2 * mmax)`` in contiguous order from
+        ``0e`` through ``mmax``. Every positive-order entry stores its real
+        cosine-like and sine-like components in that order.
     """
     if not isinstance(mmax, int):
         raise TypeError("mmax must be an integer.")
@@ -58,9 +63,18 @@ def circular_harmonics(
 class CircularHarmonics(torch.nn.Module):
     """Construct real O(2) circular harmonics from two-dimensional vectors.
 
-    The output follows contiguous order from ``0e`` through ``mmax``. With
-    ``normalize=True`` it depends only on direction. With ``normalize=False``
-    it returns the corresponding homogeneous circular solid harmonics.
+    Parameters
+    ----------
+    mmax : int
+        Largest circular order in the output.
+    normalize : bool, optional
+        If ``True``, normalize each input vector so the output depends only on
+        direction. If ``False``, return homogeneous circular solid harmonics.
+
+    Notes
+    -----
+    The output follows flattened ``ir_mul`` order from ``0e`` through
+    ``mmax`` and has representation metadata in :attr:`irreps_out`.
     """
 
     def __init__(self, mmax: int, *, normalize: bool = True) -> None:
@@ -77,6 +91,18 @@ class CircularHarmonics(torch.nn.Module):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Evaluate circular harmonics for the input vectors.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Two-dimensional vectors with shape ``(..., 2)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Harmonics with shape ``(..., irreps_out.dim)``.
+        """
         return circular_harmonics(
             input,
             self.mmax,

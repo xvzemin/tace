@@ -75,6 +75,26 @@ def init_edge_rot_mat_quaternion(
     edge_distance_vec: torch.Tensor,
     eps: float = 1e-7,
 ) -> torch.Tensor:
+    """Construct smooth rotation matrices aligned with edge vectors.
+
+    Parameters
+    ----------
+    edge_distance_vec : torch.Tensor
+        Three-dimensional vectors with shape ``(..., 3)``. Each resulting
+        matrix aligns its vector with the positive second Cartesian axis.
+    eps : float, optional
+        Positive regularization used by vector and quaternion normalization.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotation matrices with shape ``(..., 3, 3)``.
+
+    Notes
+    -----
+    Two quaternion charts are blended smoothly to avoid a singular choice of
+    frame near either direction of the alignment axis.
+    """
     edge_unit = edge_distance_vec / _norm(edge_distance_vec, eps)
     x, y, z = edge_unit.unbind(dim=-1)
     q_pos = _quaternion_normalize(

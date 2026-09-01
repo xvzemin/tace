@@ -15,9 +15,34 @@ from .irreps import Irrep, Irreps, IrrepsLike
 class Linear(torch.nn.Module):
     """An O(3)-equivariant linear map between Cartesian irreps.
 
+    Parameters
+    ----------
+    irreps_in : IrrepsLike
+        Cartesian representation of the input axis.
+    irreps_out : IrrepsLike
+        Cartesian representation of the output axis.
+    channels_in : int
+        Number of channels carried by every input irrep copy.
+    channels_out : int, optional
+        Number of output channels. Defaults to ``channels_in``.
+    internal_weights : bool, optional
+        If ``True``, store trainable weights in the module. If ``False``, an
+        external weight tensor must be passed to :meth:`forward`.
+    bias : bool, optional
+        Add trainable biases to scalar-even outputs.
+    path_norm : bool, optional
+        Normalize multiple paths into the same output by the inverse square
+        root of their count.
+    path : sequence of tuple of int, optional
+        Explicit ``(output_index, input_index)`` paths over expanded irrep
+        copies. By default, every pair of identical irreps is connected.
+
+    Notes
+    -----
     Inputs and outputs use ``(..., irreps.dim, channels)``. Every valid path
-    uses a dense input-output channel matrix (UV mode). Only equal ``(l, p)``
-    types mix, and only ``0e`` outputs receive a bias.
+    uses a dense input-output channel matrix. Only equal ``(l, p)`` types mix,
+    and only ``0e`` outputs receive a bias. External weight leading dimensions
+    may broadcast with the input leading dimensions.
     """
 
     def __init__(
@@ -142,6 +167,24 @@ class Linear(torch.nn.Module):
         input: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Apply the Cartesian linear map.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Tensor with shape
+            ``(..., irreps_in.dim, channels_in)``.
+        weight : torch.Tensor, optional
+            External weights with trailing shape ``weight_shape``. Omit when
+            internal weights are enabled.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor with shape
+            ``(..., irreps_out.dim, channels_out)`` over the broadcast leading
+            shape.
+        """
         expected = (self.irreps_in.dim, self.channels_in)
         if input.is_complex():
             raise TypeError("Cartesian O(3) Linear supports real inputs only.")

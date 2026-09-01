@@ -20,10 +20,22 @@ def _normalization(degree: int) -> float:
 class CartesianHarmonics(torch.nn.Module):
     """Cartesian harmonics stored as symmetric traceless tensors.
 
-    Args:
-        lmax: Maximum tensor degree.
-        irreps_in: Vector type, either polar ``1o`` or axial ``1e``.
-        normalize: Normalize each input vector before constructing harmonics.
+    Parameters
+    ----------
+    lmax : int
+        Largest tensor degree included in the output.
+    irreps_in : IrrepLike, optional
+        Input vector type. Use ``"1o"`` for a polar vector or ``"1e"`` for an
+        axial vector.
+    normalize : bool, optional
+        Normalize each input vector before constructing the harmonics. If
+        ``False``, degree ``l`` is homogeneous of degree ``l`` in the input.
+
+    Notes
+    -----
+    The output concatenates degrees zero through ``lmax`` along one ambient
+    Cartesian representation axis. Every degree is projected onto its
+    symmetric traceless subspace.
     """
 
     def __init__(
@@ -51,6 +63,18 @@ class CartesianHarmonics(torch.nn.Module):
         )
 
     def forward(self, vectors: torch.Tensor) -> torch.Tensor:
+        """Evaluate Cartesian harmonics.
+
+        Parameters
+        ----------
+        vectors : torch.Tensor
+            Real three-dimensional vectors with shape ``(..., 3)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Harmonics with shape ``(..., irreps_out.dim)``.
+        """
         if vectors.is_complex():
             raise TypeError("CartesianHarmonics supports real inputs only.")
         if vectors.ndim < 1 or vectors.shape[-1] != 3:

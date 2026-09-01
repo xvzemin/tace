@@ -22,11 +22,44 @@ class _FrameEntry(NamedTuple):
 
 
 class LocalFrame(torch.nn.Module):
-    """Rotate O(3) features in ``ir_mul`` layout into local O(2) features."""
+    """Rotate global O(3) features into a local O(2) frame.
+
+    Parameters
+    ----------
+    irreps : O(3) irreps-like
+        Global input representation. Every entry is stored in flattened
+        ``ir_mul`` order.
+    lmax : int
+        Maximum global degree covered by the supplied Wigner matrices. It must
+        be at least the largest degree in ``irreps``.
+    mmax : int, optional
+        Largest local O(2) order to retain. Defaults to ``lmax``.
+
+    Notes
+    -----
+    The first tensor dimension is the rotation batch. Additional leading
+    dimensions, such as a source/target axis, are preserved. The local output
+    representation is available as :attr:`irreps_out`.
+    """
 
     @staticmethod
     def restrict(irreps: o3.Irreps, mmax: Optional[int] = None) -> Irreps:
-        """Restrict every O(3) entry to ordered O(2) entries."""
+        """Restrict global O(3) entries to local O(2) entries.
+
+        Parameters
+        ----------
+        irreps : O(3) irreps-like
+            Global representation to restrict.
+        mmax : int, optional
+            Largest positive local order to retain. If omitted, all orders up
+            to the largest global degree are retained.
+
+        Returns
+        -------
+        Irreps
+            Regrouped local representation. The order-zero parity for a
+            global entry ``(l, p)`` is ``p * (-1)**l``.
+        """
         irreps = o3.Irreps(irreps)
         if mmax is None:
             mmax = irreps.lmax
@@ -159,6 +192,22 @@ class LocalFrame(torch.nn.Module):
         features: torch.Tensor,
         wigner: torch.Tensor,
     ) -> torch.Tensor:
+        """Rotate global features into their local frame.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Global features with shape ``(batch, ..., irreps_in.dim)`` in
+            flattened ``ir_mul`` order.
+        wigner : torch.Tensor
+            Global-to-local matrices with shape
+            ``(batch, local_wigner_dim, (lmax + 1)**2)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Local features with shape ``(batch, ..., irreps_out.dim)``.
+        """
         if features.ndim < 2 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "LocalFrame input trailing dimension must be "
@@ -221,6 +270,7 @@ class LocalFrame(torch.nn.Module):
         features: torch.Tensor,
         wigner: torch.Tensor,
     ) -> torch.Tensor:
+        """Alias for :meth:`to_local`."""
         return self.to_local(features, wigner)
 
     def _wigner_mmax(self, local_dim: int) -> int:
@@ -239,6 +289,23 @@ class LocalFrame(torch.nn.Module):
         features: torch.Tensor,
         wigner_inv: torch.Tensor,
     ) -> torch.Tensor:
+        """Rotate local features back into the global frame.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Local features with shape ``(batch, ..., irreps_out.dim)``.
+        wigner_inv : torch.Tensor
+            Local-to-global matrices with shape
+            ``(batch, (lmax + 1)**2, local_wigner_dim)``. A matrix retaining
+            more local orders than this module is accepted and rescaled.
+
+        Returns
+        -------
+        torch.Tensor
+            Global features with shape ``(batch, ..., irreps_in.dim)`` in
+            flattened ``ir_mul`` order.
+        """
         if features.ndim < 2 or features.size(-1) != self.irreps_out.dim:
             raise ValueError(
                 "LocalFrame input trailing dimension must be "

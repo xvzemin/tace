@@ -13,7 +13,20 @@ def delta(
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
-    """Return the rank-two Kronecker delta in three dimensions."""
+    """Return the rank-two Kronecker delta in three dimensions.
+
+    Parameters
+    ----------
+    dtype : torch.dtype, optional
+        Output dtype. Defaults to the current floating-point default.
+    device : torch.device, optional
+        Output device.
+
+    Returns
+    -------
+    torch.Tensor
+        Identity tensor with shape ``(3, 3)``.
+    """
     if dtype is None:
         dtype = torch.get_default_dtype()
     return torch.eye(3, dtype=dtype, device=device)
@@ -24,7 +37,20 @@ def levi_civita(
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
-    """Return the rank-three Levi-Civita tensor in three dimensions."""
+    """Return the rank-three Levi-Civita tensor in three dimensions.
+
+    Parameters
+    ----------
+    dtype : torch.dtype, optional
+        Output dtype. Defaults to the current floating-point default.
+    device : torch.device, optional
+        Output device.
+
+    Returns
+    -------
+    torch.Tensor
+        Fully antisymmetric tensor with shape ``(3, 3, 3)``.
+    """
     if dtype is None:
         dtype = torch.get_default_dtype()
     epsilon = torch.zeros(3, 3, 3, dtype=dtype, device=device)

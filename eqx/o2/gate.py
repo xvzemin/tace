@@ -20,7 +20,23 @@ def _quarter_turn(features: torch.Tensor) -> torch.Tensor:
 
 
 class Activation(torch.nn.Module):
-    """Apply normalized scalar activations to flattened ``ir_mul`` features."""
+    """Apply normalized scalar activations to O(2) features.
+
+    Parameters
+    ----------
+    irreps_in : IrrepsLike
+        Input representation. Non-``None`` activations are valid only for
+        order-zero entries.
+    acts : sequence of torch.nn.Module or None
+        One activation per input entry. ``None`` leaves that entry unchanged.
+        Each activation is rescaled to preserve second moments, and its parity
+        determines the corresponding output scalar parity.
+
+    Notes
+    -----
+    Inputs and outputs use flattened ``ir_mul`` layout with shape
+    ``(..., irreps.dim)``.
+    """
 
     def __init__(
         self,
@@ -79,6 +95,18 @@ class Activation(torch.nn.Module):
         self._slices = self.irreps_in.slices()
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Apply the configured activations.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Activated features with shape ``(..., irreps_out.dim)``.
+        """
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "Activation feature trailing dimension must be "
@@ -105,7 +133,28 @@ class _GatePath(NamedTuple):
 
 
 class Gate(torch.nn.Module):
-    """Apply scalar activations and gates to flattened ``ir_mul`` features."""
+    """Apply scalar activations and scalar gates to O(2) features.
+
+    Parameters
+    ----------
+    irreps_scalars : IrrepsLike
+        Scalar entries transformed directly by ``act_scalars``.
+    act_scalars : sequence of torch.nn.Module or None
+        One normalized activation for each scalar entry.
+    irreps_gates : IrrepsLike
+        Order-zero entries used as gates. Their total multiplicity must equal
+        the total multiplicity in ``irreps_gated``.
+    act_gates : sequence of torch.nn.Module or None
+        One normalized activation for each gate entry.
+    irreps_gated : IrrepsLike
+        Entries multiplied channel-wise by the activated gates.
+
+    Notes
+    -----
+    ``irreps_in`` is the canonical ordering of scalar, gate, and gated entries.
+    The output contains the activated scalars followed by gated entries. All
+    tensors use flattened ``ir_mul`` layout.
+    """
 
     def __init__(
         self,
@@ -212,6 +261,18 @@ class Gate(torch.nn.Module):
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Activate scalar entries and apply the gates.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Gated output with shape ``(..., irreps_out.dim)``.
+        """
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "Gate feature trailing dimension must be "

@@ -13,6 +13,15 @@ from .irreps import Irreps, IrrepsLike
 class Layout(torch.nn.Module):
     """Convert between dense and grouped Cartesian O(3) feature layouts.
 
+    Parameters
+    ----------
+    irreps : IrrepsLike
+        Representation metadata for the dense Cartesian axis.
+    channels : int
+        Number of channels carried by every irrep copy.
+
+    Notes
+    -----
     The dense layout is ``(batch, irreps.dim, channels)``. A grouped block for
     ``mul x (l, p)`` has shape ``(batch, 3**l, mul * channels)``.
     """
@@ -27,7 +36,19 @@ class Layout(torch.nn.Module):
         self.channels = channels
 
     def to_grouped(self, input: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        """Convert ``(batch, irreps.dim, channels)`` to grouped blocks."""
+        """Convert a dense tensor to one block per representation entry.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Dense input with shape ``(batch, irreps.dim, channels)``.
+
+        Returns
+        -------
+        tuple of torch.Tensor
+            One tensor per entry. Entry ``mul x (l, p)`` has shape
+            ``(batch, 3**l, mul * channels)``.
+        """
         expected = (self.irreps.dim, self.channels)
         if input.ndim != 3 or tuple(input.shape[-2:]) != expected:
             raise ValueError(
@@ -50,7 +71,20 @@ class Layout(torch.nn.Module):
         return tuple(blocks)
 
     def from_grouped(self, blocks: Sequence[torch.Tensor]) -> torch.Tensor:
-        """Convert grouped blocks to ``(batch, irreps.dim, channels)``."""
+        """Convert grouped representation blocks to a dense tensor.
+
+        Parameters
+        ----------
+        blocks : sequence of torch.Tensor
+            One block per representation entry, ordered like ``irreps``. Entry
+            ``mul x (l, p)`` must have shape
+            ``(batch, 3**l, mul * channels)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Dense tensor with shape ``(batch, irreps.dim, channels)``.
+        """
         if len(blocks) != len(self.irreps):
             raise ValueError("Expected one block per Irreps group.")
         dense = []

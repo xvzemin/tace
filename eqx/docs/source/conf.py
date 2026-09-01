@@ -12,14 +12,13 @@ extensions = [
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
-    "sphinx.ext.viewcode",
     "sphinx_copybutton",
 ]
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "none"
 autosummary_generate = True
-napoleon_google_docstring = True
+napoleon_google_docstring = False
 napoleon_numpy_docstring = True
 napoleon_use_param = True
 napoleon_use_rtype = True

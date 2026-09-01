@@ -22,6 +22,16 @@ IrrepsLike = Union[
 class Irrep:
     """An irreducible Cartesian representation of O(3).
 
+    Parameters
+    ----------
+    l : int, str, tuple, or Irrep
+        Non-negative tensor degree, canonical name such as ``"2e"``, a
+        ``(degree, parity)`` pair, or an existing instance.
+    p : {-1, 1, "o", "e"}, optional
+        Inversion parity when ``l`` is supplied as an integer.
+
+    Notes
+    -----
     The representation is stored in the ambient rank-``l`` Cartesian space
     of dimension ``3**l``. Its physical subspace is the symmetric traceless
     tensor with ``2*l + 1`` degrees of freedom. Parity is always explicit.
@@ -115,7 +125,19 @@ class Irrep:
         )
 
     def D_from_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
-        """Return the ambient Cartesian representation of an O(3) matrix."""
+        """Return the ambient Cartesian representation of a matrix.
+
+        Parameters
+        ----------
+        matrix : torch.Tensor
+            Orthogonal matrices with shape ``(..., 3, 3)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Representation matrices with shape ``(..., dim, dim)``. A
+            determinant factor is included for pseudotensor realizations.
+        """
         matrix = torch.as_tensor(matrix)
         if matrix.shape[-2:] != (3, 3):
             raise ValueError("matrix must have trailing shape (3, 3).")
@@ -134,7 +156,21 @@ class Irrep:
 
 
 class Irreps:
-    """An immutable direct sum of Cartesian O(3) irreps."""
+    """An immutable direct sum of Cartesian O(3) irreps.
+
+    Parameters
+    ----------
+    irreps : IrrepsLike, optional
+        Representation specification. Accepted forms include canonical strings,
+        individual irreps, ``(multiplicity, irrep)`` pairs, and sequences of
+        those pairs.
+
+    Notes
+    -----
+    Iteration yields ``(multiplicity, irrep)`` pairs. :attr:`dim` counts the
+    ambient Cartesian storage, while :attr:`dof` counts independent symmetric
+    traceless components.
+    """
 
     __slots__ = ("_groups",)
 
@@ -256,6 +292,18 @@ class Irreps:
         return sum(multiplicity for multiplicity, item in self if item == irrep)
 
     def D_from_matrix(self, matrix: torch.Tensor) -> torch.Tensor:
+        """Return the direct-sum Cartesian representation matrix.
+
+        Parameters
+        ----------
+        matrix : torch.Tensor
+            Orthogonal matrices with shape ``(..., 3, 3)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Block-diagonal matrices with shape ``(..., self.dim, self.dim)``.
+        """
         matrix = torch.as_tensor(matrix)
         if matrix.shape[-2:] != (3, 3):
             raise ValueError("matrix must have trailing shape (3, 3).")

@@ -39,9 +39,26 @@ def _check_odd_activation(activation: torch.nn.Module) -> None:
 class Gate(torch.nn.Module):
     """Apply equivariant nonlinearities to Cartesian O(3) features.
 
+    Parameters
+    ----------
+    irreps_out : IrrepsLike
+        Requested output representation. The module derives the required
+        scalar gates and exposes the resulting input representation as
+        :attr:`irreps_in`.
+    act_0e : torch.nn.Module
+        Activation applied directly to scalar-even entries.
+    act_0o : torch.nn.Module or None
+        Odd activation applied directly to scalar-odd entries. If ``None``,
+        scalar-odd entries are handled by an auxiliary scalar-even gate.
+    act_tensor : torch.nn.Module
+        Activation applied to the scalar-even gates for all gated entries.
+
+    Notes
+    -----
     ``0e`` scalars use ``act_0e``. A provided ``act_0o`` must be odd. Every
     non-scalar irrep, and ``0o`` when ``act_0o`` is absent, is multiplied by
-    an auxiliary ``0e`` gate activated by ``act_tensor``.
+    an auxiliary ``0e`` gate activated by ``act_tensor``. Features use shape
+    ``(..., irreps.dim, channels)`` and retain the channel axis.
     """
 
     def __init__(
@@ -117,6 +134,18 @@ class Gate(torch.nn.Module):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply direct scalar activations and tensor gates.
+
+        Parameters
+        ----------
+        input : torch.Tensor
+            Tensor with shape ``(..., irreps_in.dim, channels)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor with shape ``(..., irreps_out.dim, channels)``.
+        """
         if input.is_complex():
             raise TypeError("Cartesian O(3) Gate supports real inputs only.")
         if input.ndim < 2 or input.shape[-2] != self.irreps_in.dim:

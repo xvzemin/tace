@@ -89,9 +89,42 @@ class Instruction(NamedTuple):
 class TensorProduct(torch.nn.Module):
     """O(2) tensor product driven by entry-level coupling instructions.
 
-    Inputs and outputs use ``(..., irreps.dim)`` tensors. Every entry is laid
-    out as flattened ``ir_mul``. Supported connection modes are ``u1u``,
-    ``uuu``, and ``uvw``.
+    Parameters
+    ----------
+    irreps_in1 : IrrepsLike
+        Representation of the first input.
+    irreps_in2 : IrrepsLike
+        Representation of the second input.
+    irreps_out : IrrepsLike
+        Requested output representation.
+    instructions : sequence of tuple
+        Coupling paths written as ``(i_in1, i_in2, i_out, mode, train)`` or
+        ``(i_in1, i_in2, i_out, mode, train, path_weight)``. ``mode`` is one
+        of ``"u1u"``, ``"uuu"``, or ``"uvw"``; ``train`` selects whether the
+        path has a weight.
+    in1_var : sequence of float, optional
+        Expected variance for each first-input entry. Used only to calculate
+        path normalization. Defaults to one.
+    in2_var : sequence of float, optional
+        Expected variance for each second-input entry. Defaults to one.
+    out_var : sequence of float, optional
+        Requested variance for each output entry. Defaults to one.
+    irrep_normalization : {"component", "norm", "none"}, optional
+        Normalization of each irreducible coupling map.
+    path_normalization : {"element", "path", "none"}, optional
+        Normalization across paths contributing to the same output entry.
+    internal_weights : bool, optional
+        If ``True``, trainable weights are stored by the module. The default
+        is inferred from ``shared_weights`` and the weighted instructions.
+    shared_weights : bool, optional
+        Whether one weight vector is shared over all leading dimensions.
+
+    Notes
+    -----
+    Inputs and outputs use ``(..., irreps.dim)`` tensors in flattened
+    ``ir_mul`` order. ``u1u`` couples a single second-input channel to matched
+    first/output channels, ``uuu`` couples matching channels, and ``uvw`` uses
+    a dense ``mul1 x mul2 x mul_out`` weight tensor.
     """
 
     def __init__(
@@ -298,6 +331,25 @@ class TensorProduct(torch.nn.Module):
         input2: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Evaluate all tensor-product instructions.
+
+        Parameters
+        ----------
+        input1 : torch.Tensor
+            First input with shape ``(..., irreps_in1.dim)``.
+        input2 : torch.Tensor
+            Second input with shape ``(..., irreps_in2.dim)``.
+        weight : torch.Tensor, optional
+            External flattened weights with trailing shape ``weight_shape``.
+            Leading dimensions broadcast with both inputs. Omit when internal
+            weights are enabled.
+
+        Returns
+        -------
+        torch.Tensor
+            Coupled features with shape ``(..., irreps_out.dim)`` over the
+            broadcast leading shape.
+        """
         if input1.is_complex() or input2.is_complex():
             raise TypeError("O(2) TensorProduct supports real inputs only.")
         if input1.ndim < 1 or input1.size(-1) != self.irreps_in1.dim:
@@ -389,6 +441,20 @@ class TensorProduct(torch.nn.Module):
         instruction: int,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Return an instruction-shaped view of the weight storage.
+
+        Parameters
+        ----------
+        instruction : int
+            Index into :attr:`instructions`.
+        weight : torch.Tensor, optional
+            Weight storage to view. The module weight is used when omitted.
+
+        Returns
+        -------
+        torch.Tensor
+            View whose trailing dimensions equal the instruction path shape.
+        """
         specification = self.instructions[instruction]
         if not specification.has_weight:
             raise ValueError("The selected instruction has no weights.")
@@ -404,6 +470,20 @@ class TensorProduct(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
         yield_instruction: bool = False,
     ) -> Iterator:
+        """Iterate over the weighted instruction views.
+
+        Parameters
+        ----------
+        weight : torch.Tensor, optional
+            Weight storage to view. The module weight is used when omitted.
+        yield_instruction : bool, optional
+            If ``True``, also yield the instruction index and metadata.
+
+        Yields
+        ------
+        torch.Tensor or tuple
+            One weight view, optionally with its instruction metadata.
+        """
         for index, instruction in enumerate(self.instructions):
             if not instruction.has_weight:
                 continue

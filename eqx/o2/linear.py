@@ -21,13 +21,38 @@ class Instruction(NamedTuple):
 class Linear(torch.nn.Module):
     """Linear operation equivariant to O(2).
 
-    Features have shape ``(..., irreps.dim)``. Each ``(ir, mul)`` entry uses
-    flattened ``ir_mul`` order, so its slice is viewed directly as
-    ``(..., ir.dim, mul)``.
+    Parameters
+    ----------
+    irreps_in : IrrepsLike
+        Representation carried by the input feature axis.
+    irreps_out : IrrepsLike
+        Representation carried by the output feature axis.
+    internal_weights : bool, optional
+        If ``True``, store trainable weights and biases in the module. If
+        ``False``, they must be supplied to :meth:`forward`. The default is
+        inferred from ``shared_weights``.
+    shared_weights : bool, optional
+        Whether one weight tensor is shared over all leading dimensions.
+        Internal weights require shared weights. External weights may add
+        broadcastable leading dimensions when this is ``False``.
+    instructions : sequence of tuple of int, optional
+        Entry-level paths ``(i_in, i_out)``. Each path must connect identical
+        irreps. By default, every compatible input and output entry is
+        connected.
+    biases : bool or sequence of bool, optional
+        Enable biases globally or per output entry. Biases are permitted only
+        for reflection-even scalar outputs.
+    path_normalization : {"element", "path"}, optional
+        Normalization applied when several paths contribute to one output.
+        ``"element"`` normalizes by the total input multiplicity, while
+        ``"path"`` assigns equal variance to each path.
 
-    Instructions connect complete ``(ir, mul)`` entries rather than expanded
-    irrep copies. Different partitions of equal irreps therefore have distinct
-    instructions and path normalization.
+    Notes
+    -----
+    Features have shape ``(..., irreps.dim)``. Each entry uses flattened
+    ``ir_mul`` order and can be viewed as ``(..., ir.dim, mul)`` without a
+    permutation. Instructions connect complete entries rather than expanded
+    irrep copies, so different partitions of equal irreps remain distinct.
     """
 
     def __init__(
@@ -210,6 +235,26 @@ class Linear(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Apply the linear map.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``.
+        weight : torch.Tensor, optional
+            External weights with trailing shape ``weight_shape``. Leading
+            dimensions must broadcast with ``features``. Omit when internal
+            weights are enabled.
+        bias : torch.Tensor, optional
+            External biases with trailing dimension ``bias_numel``. Leading
+            dimensions follow the same broadcasting rules as ``weight``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output with shape ``(..., irreps_out.dim)`` over the broadcast
+            leading shape.
+        """
         if features.is_complex():
             raise TypeError("O(2) Linear supports real features only.")
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
@@ -273,6 +318,20 @@ class Linear(torch.nn.Module):
         instruction: int,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Return the weight matrix associated with one weighted instruction.
+
+        Parameters
+        ----------
+        instruction : int
+            Index into the weighted instructions.
+        weight : torch.Tensor, optional
+            Weight storage to view. The module weight is used when omitted.
+
+        Returns
+        -------
+        torch.Tensor
+            A view with trailing shape ``(mul_in, mul_out)``.
+        """
         weight = self._resolve_weight(weight)
         weighted_instruction = self._weight_instructions[instruction]
         offset, size = self._weight_offsets[instruction]
@@ -286,6 +345,21 @@ class Linear(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
         yield_instruction: bool = False,
     ) -> Iterator:
+        """Iterate over instruction-shaped views of the weight storage.
+
+        Parameters
+        ----------
+        weight : torch.Tensor, optional
+            Weight storage to view. The module weight is used when omitted.
+        yield_instruction : bool, optional
+            If ``True``, yield ``(index, instruction, view)`` tuples instead
+            of views alone.
+
+        Yields
+        ------
+        torch.Tensor or tuple
+            One weight view, optionally accompanied by its metadata.
+        """
         for index, instruction in enumerate(self._weight_instructions):
             view = self.weight_view_for_instruction(index, weight)
             yield (index, instruction, view) if yield_instruction else view

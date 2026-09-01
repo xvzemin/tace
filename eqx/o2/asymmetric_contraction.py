@@ -27,7 +27,33 @@ def _cg_tensor(irrep1: Irrep, irrep2: Irrep, irrep_out: Irrep) -> torch.Tensor:
 
 
 class AsymmetricContraction(torch.nn.Module):
-    """Channel-wise O(2) many-body contraction in flattened ``ir_mul`` layout."""
+    """Contract independent O(2) inputs into many-body features.
+
+    Parameters
+    ----------
+    irreps_in : IrrepsLike
+        Representation of every independent input. All entries must have one
+        common multiplicity, which is interpreted as the channel count.
+    irreps_out : IrrepsLike
+        Requested output types. Their multiplicities must equal the common
+        input multiplicity.
+    correlation : int
+        Highest correlation order to enumerate. The module consumes one
+        independent input tensor for every order up to this value.
+    algorithm : {"edge", "node"}
+        Evaluation strategy. ``"edge"`` recursively contracts individual
+        paths; ``"node"`` evaluates precomputed generalized coupling tensors.
+    path_mode : {"sum", "expand"}, optional
+        ``"sum"`` accumulates equivalent paths into each requested output
+        type with variance normalization. ``"expand"`` preserves every path
+        as a separate output multiplicity.
+
+    Notes
+    -----
+    Inputs and outputs use flattened ``ir_mul`` layout. Weights are always
+    supplied externally and are applied directly to the enumerated paths.
+    ``weight_numel`` gives the required trailing weight dimension.
+    """
 
     def __init__(
         self,
@@ -374,6 +400,24 @@ class AsymmetricContraction(torch.nn.Module):
         inputs: Sequence[torch.Tensor],
         weights: torch.Tensor,
     ) -> torch.Tensor:
+        """Evaluate all correlation orders.
+
+        Parameters
+        ----------
+        inputs : sequence of torch.Tensor
+            Exactly ``correlation`` independent tensors. Every tensor has
+            shape ``(..., irreps_in.dim)``; their leading dimensions must
+            broadcast.
+        weights : torch.Tensor
+            Real external path weights with shape ``(..., weight_numel)``.
+            Leading dimensions broadcast with all inputs.
+
+        Returns
+        -------
+        torch.Tensor
+            Contracted features with shape ``(..., irreps_out.dim)`` over the
+            broadcast leading shape.
+        """
         inputs, weights, leading_shape = self._validate_inputs(inputs, weights)
         if self.algorithm == "edge":
             return self._forward_edge(inputs, weights, leading_shape)
