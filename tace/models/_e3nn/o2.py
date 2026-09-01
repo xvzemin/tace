@@ -358,8 +358,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
-        if wigner is None or wigner_inv is None:
-            raise ValueError("O2 convolution requires Wigner matrices.")
         node_features, source_features, target_features = self._to_local(
             node_feats, edge_index, wigner
         )

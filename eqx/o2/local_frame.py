@@ -204,16 +204,16 @@ class LocalFrame(torch.nn.Module):
                     )
                     offset += 2
         if outputs:
-            return torch.cat(
-                [
-                    torch.cat(
-                        [part for _, part in sorted(parts, key=lambda item: item[0])],
-                        dim=-1,
-                    ).reshape(*features.shape[:-1], ir.dim * mul)
-                    for (ir, mul), parts in zip(self.irreps_out, outputs)
-                ],
-                dim=-1,
-            )
+            flattened = []
+            for (ir, mul), parts in zip(self.irreps_out, outputs):
+                parts = [part for _, part in sorted(parts, key=lambda item: item[0])]
+                values = (
+                    parts[0].contiguous()
+                    if len(parts) == 1
+                    else torch.cat(parts, dim=-1)
+                )
+                flattened.append(values.view(*features.shape[:-1], ir.dim * mul))
+            return torch.cat(flattened, dim=-1)
         return features.new_empty(*features.shape[:-1], 0)
 
     def forward(
