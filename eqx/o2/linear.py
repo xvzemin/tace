@@ -4,417 +4,294 @@
 ################################################################################
 
 import math
-from collections import Counter
-from typing import Optional, Sequence, Tuple
+from typing import Iterator, NamedTuple, Optional, Sequence, Union
 
 import torch
 
 from .irreps import Irreps, IrrepsLike
 
 
+class Instruction(NamedTuple):
+    i_in: int
+    i_out: int
+    path_shape: tuple[int, ...]
+    path_weight: float
+
+
 class Linear(torch.nn.Module):
-    """A real O(2)-equivariant linear layer.
+    """Linear operation equivariant to O(2).
 
-    Inputs use shape ``(..., irreps_in.dim, channels_in)`` and outputs use
-    ``(..., irreps_out.dim, channels_out)``. Paths connect only identical
-    irreps.
+    Features have shape ``(..., irreps.dim)``. Each ``(ir, mul)`` entry uses
+    flattened ``ir_mul`` order, so its slice is viewed directly as
+    ``(..., ir.dim, mul)``.
 
-    Args:
-        irreps_in: Input :class:`Irreps`.
-        irreps_out: Output :class:`Irreps`.
-        channels_in: Number of input channels.
-        channels_out: Number of output channels. Defaults to ``channels_in``.
-        path_mode: ``"uv"`` uses one full input-output channel matrix per
-            path. ``"uu"`` requires equal input and output channel counts and
-            uses one channel-wise weight per path.
-        internal_weights: Store trainable weights in the module. If ``False``,
-            weights must be passed to :meth:`forward`. External weights may
-            use ``weight_shape`` or flattened ``(weight_numel,)`` layout,
-            with an optional leading singleton batch dimension.
-        bias: Add a trainable bias to every output ``0e`` copy.
-        path_norm: Divide paths entering each output irrep copy by the square
-            root of their count.
-        path: Optional ``(output_index, input_index)`` entries indexing the
-            expanded irrep-copy layouts. By default, all identical-irrep paths
-            are included.
+    Instructions connect complete ``(ir, mul)`` entries rather than expanded
+    irrep copies. Different partitions of equal irreps therefore have distinct
+    instructions and path normalization.
     """
 
     def __init__(
         self,
         irreps_in: IrrepsLike,
         irreps_out: IrrepsLike,
-        channels_in: int,
-        channels_out: Optional[int] = None,
         *,
-        path_mode: str = "uv",
-        internal_weights: bool = True,
-        bias: bool = True,
-        path_norm: bool = True,
-        path: Optional[Sequence[Tuple[int, int]]] = None,
+        internal_weights: Optional[bool] = None,
+        shared_weights: Optional[bool] = None,
+        instructions: Optional[Sequence[tuple[int, int]]] = None,
+        biases: Union[bool, Sequence[bool]] = False,
+        path_normalization: str = "element",
     ) -> None:
         super().__init__()
 
+        if path_normalization not in ("element", "path"):
+            raise ValueError("path_normalization must be 'element' or 'path'.")
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)
-        if not isinstance(channels_in, int):
-            raise TypeError("channels_in must be an integer.")
-        if channels_out is None:
-            channels_out = channels_in
-        if not isinstance(channels_out, int):
-            raise TypeError("channels_out must be an integer.")
-        if channels_in < 1 or channels_out < 1:
-            raise ValueError("Linear channel counts must be positive.")
-        if path_mode not in ("uv", "uu"):
-            raise ValueError("path_mode must be 'uv' or 'uu'.")
-        if path_mode == "uu" and channels_in != channels_out:
-            raise ValueError("path_mode='uu' requires channels_in == channels_out.")
-        self.channels_in = channels_in
-        self.channels_out = channels_out
-        self.path_mode = path_mode
-        self.internal_weights = bool(internal_weights)
-        self.path_norm = bool(path_norm)
-        self.alpha = (
-            1.0 / math.sqrt(self.channels_in)
-            if self.path_mode == "uv"
-            else 1.0
-        )
-        input_irrep_list = self.irreps_in.expanded()
-        output_irrep_list = self.irreps_out.expanded()
-        if path is None:
-            paths = tuple(
-                (output_index, input_index)
-                for output_index, output_ir in enumerate(output_irrep_list)
-                for input_index, input_ir in enumerate(input_irrep_list)
-                if output_ir == input_ir
-            )
+        self.path_normalization = path_normalization
+
+        if instructions is None:
+            instructions = [
+                (i_in, i_out)
+                for i_in, (ir_in, _) in enumerate(self.irreps_in)
+                for i_out, (ir_out, _) in enumerate(self.irreps_out)
+                if ir_in == ir_out
+            ]
         else:
-            paths = tuple(path)
-        for item in paths:
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise TypeError("Each Linear path must be (output_index, input_index).")
-            output_index, input_index = item
-            if not isinstance(output_index, int):
-                raise TypeError("Linear path indices must be integers.")
-            if not isinstance(input_index, int):
-                raise TypeError("Linear path indices must be integers.")
-            if not 0 <= output_index < len(output_irrep_list):
-                raise ValueError(f"Invalid Linear output path index: {output_index}.")
-            if not 0 <= input_index < len(input_irrep_list):
-                raise ValueError(f"Invalid Linear input path index: {input_index}.")
-            if output_irrep_list[output_index] != input_irrep_list[input_index]:
-                raise ValueError(
-                    "An O(2) Linear path must connect identical irreps; "
-                    f"got {input_irrep_list[input_index]} -> "
-                    f"{output_irrep_list[output_index]}."
+            instructions = list(instructions)
+
+        for instruction in instructions:
+            if not isinstance(instruction, tuple) or len(instruction) != 2:
+                raise TypeError("Each Linear instruction must be (i_in, i_out).")
+            i_in, i_out = instruction
+            if not isinstance(i_in, int) or isinstance(i_in, bool):
+                raise TypeError("Linear instruction indices must be integers.")
+            if not isinstance(i_out, int) or isinstance(i_out, bool):
+                raise TypeError("Linear instruction indices must be integers.")
+            if not 0 <= i_in < len(self.irreps_in):
+                raise IndexError(f"{i_in} is not a valid index for irreps_in.")
+            if not 0 <= i_out < len(self.irreps_out):
+                raise IndexError(f"{i_out} is not a valid index for irreps_out.")
+            if self.irreps_in[i_in].ir != self.irreps_out[i_out].ir:
+                raise ValueError(f"{i_in} and {i_out} do not have the same irrep.")
+
+        weighted_instructions = []
+        for i_in, i_out in instructions:
+            mul_in = self.irreps_in[i_in].mul
+            if path_normalization == "element":
+                denominator = sum(
+                    self.irreps_in[j_in].mul
+                    for j_in, j_out in instructions
+                    if j_out == i_out
                 )
-        self.path = paths
-        path_counts = Counter(output_index for output_index, _ in paths)
-        scales = [
-            path_counts[output_index] ** -0.5 if self.path_norm else 1.0
-            for output_index, _ in paths
+            else:
+                denominator = mul_in * sum(j_out == i_out for _, j_out in instructions)
+            path_weight = 1.0 if denominator == 0 else denominator**-0.5
+            weighted_instructions.append(
+                Instruction(
+                    i_in,
+                    i_out,
+                    (mul_in, self.irreps_out[i_out].mul),
+                    path_weight,
+                )
+            )
+
+        if isinstance(biases, bool):
+            bias_list = [biases and ir.is_even_scalar() for ir, _ in self.irreps_out]
+        else:
+            bias_list = list(biases)
+            if len(bias_list) != len(self.irreps_out):
+                raise ValueError("biases must have one value per output entry.")
+        for bias, (ir, _) in zip(bias_list, self.irreps_out):
+            if bias and not ir.is_even_scalar():
+                raise ValueError("Only reflection-even scalars can have biases.")
+
+        bias_instructions = [
+            Instruction(-1, i_out, (mul,), 1.0)
+            for i_out, (bias, (_, mul)) in enumerate(zip(bias_list, self.irreps_out))
+            if bias
         ]
+        self.instructions = tuple(weighted_instructions + bias_instructions)
+        self._weight_instructions = tuple(weighted_instructions)
+        self._bias_instructions = tuple(bias_instructions)
+
+        if shared_weights is False and internal_weights is None:
+            internal_weights = False
+        if shared_weights is None:
+            shared_weights = True
+        if internal_weights is None:
+            internal_weights = True
+        if internal_weights and not shared_weights:
+            raise ValueError("Internal weights require shared_weights=True.")
+        self.internal_weights = bool(internal_weights)
+        self.shared_weights = bool(shared_weights)
+
+        self.weight_numel = sum(
+            math.prod(instruction.path_shape)
+            for instruction in self._weight_instructions
+        )
+        self.bias_numel = sum(
+            math.prod(instruction.path_shape) for instruction in self._bias_instructions
+        )
+        self.weight_shape = (self.weight_numel,)
+        if self.internal_weights and self.weight_numel > 0:
+            self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
+        else:
+            self.register_buffer("weight", torch.empty(0))
+        if self.internal_weights and self.bias_numel > 0:
+            self.bias = torch.nn.Parameter(torch.zeros(self.bias_numel))
+        else:
+            self.register_buffer("bias", torch.empty(0))
+
+        self._input_slices = self.irreps_in.slices()
+        weight_offsets = []
+        offset = 0
+        for instruction in self._weight_instructions:
+            size = math.prod(instruction.path_shape)
+            weight_offsets.append((offset, size))
+            offset += size
+        self._weight_offsets = tuple(weight_offsets)
+        bias_offsets = {}
+        offset = 0
+        for instruction in self._bias_instructions:
+            size = math.prod(instruction.path_shape)
+            bias_offsets[instruction.i_out] = (offset, size)
+            offset += size
+        self._bias_offsets = bias_offsets
+
+        output_mask = []
+        for i_out, ir_mul in enumerate(self.irreps_out):
+            connected = any(
+                instruction.i_out == i_out for instruction in self.instructions
+            )
+            output_mask.append(
+                torch.ones(ir_mul.dim) if connected else torch.zeros(ir_mul.dim)
+            )
         self.register_buffer(
-            "path_scales",
-            torch.tensor(scales, dtype=torch.get_default_dtype()),
+            "output_mask",
+            torch.cat(output_mask) if output_mask else torch.ones(0),
             persistent=False,
         )
 
-        paths_by_output = [[] for _ in output_irrep_list]
-        for path_index, (output_index, input_index) in enumerate(paths):
-            paths_by_output[output_index].append((path_index, input_index))
-        self._paths_by_output = tuple(tuple(group) for group in paths_by_output)
-        self._input_slices = self.irreps_in.expanded_slices()
-
-        input_group_offsets = {}
-        input_offset = 0
-        for mul, ir in self.irreps_in:
-            if ir in input_group_offsets:
-                input_group_offsets[ir] = None
-            else:
-                input_group_offsets[ir] = (input_offset, mul)
-            input_offset += mul
-
-        output_offset = 0
-        grouped_paths = []
-        path_lookup = {
-            (output_index, input_index): path_index
-            for path_index, (output_index, input_index) in enumerate(paths)
-        }
-        for mul, ir in self.irreps_out:
-            input_group = input_group_offsets.get(ir, False)
-            if input_group is False:
-                grouped_paths.append((0, 0, 0, mul))
-                output_offset += mul
-                continue
-            if input_group is None:
-                grouped_paths.append(None)
-            else:
-                input_start, input_mul = input_group
-                path_indices = tuple(
-                    path_lookup.get((output_index, input_index), -1)
-                    for output_index in range(
-                        output_offset,
-                        output_offset + mul,
-                    )
-                    for input_index in range(
-                        input_start,
-                        input_start + input_mul,
-                    )
+    def _resolve_weight(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
+        if weight is None:
+            if self.weight_numel > 0 and not self.internal_weights:
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights=False."
                 )
-                if any(path_index < 0 for path_index in path_indices):
-                    grouped_paths.append(None)
-                else:
-                    first = path_indices[0]
-                    if path_indices != tuple(range(first, first + len(path_indices))):
-                        grouped_paths.append(None)
-                    else:
-                        grouped_paths.append(
-                            (
-                                first,
-                                len(path_indices),
-                                input_mul,
-                                mul,
-                            )
-                        )
-            output_offset += mul
-        self._grouped_paths = tuple(grouped_paths)
+            weight = self.weight
+        if weight.is_complex():
+            raise TypeError("O(2) Linear supports real weights only.")
+        if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
+            raise ValueError(
+                "Linear weight trailing dimension must be "
+                f"{self.weight_numel}, got {tuple(weight.shape)}."
+            )
+        return weight
 
-        if self.path_mode == "uv":
-            self.weight_shape = (len(paths), channels_in, channels_out)
-        else:
-            self.weight_shape = (len(paths), channels_in)
-        self.weight_numel = math.prod(self.weight_shape)
-        if self.internal_weights:
-            self.weight = torch.nn.Parameter(torch.empty(self.weight_shape))
-        else:
-            self.register_parameter("weight", None)
-
-        bias_row_by_output = []
-        num_biases = 0
-        for ir in output_irrep_list:
-            if ir.is_even_scalar():
-                bias_row_by_output.append(num_biases)
-                num_biases += 1
-            else:
-                bias_row_by_output.append(-1)
-        self._bias_row_by_output = tuple(bias_row_by_output)
-        self.bias_numel = num_biases * channels_out
-        if bias:
-            self.bias = torch.nn.Parameter(torch.empty(num_biases, channels_out))
-        else:
-            self.register_parameter("bias", None)
-
-        self.reset_parameters()
+    def _resolve_bias(self, bias: Optional[torch.Tensor]) -> torch.Tensor:
+        if bias is None:
+            if self.bias_numel > 0 and not self.internal_weights:
+                raise RuntimeError(
+                    "Biases must be provided when internal_weights=False."
+                )
+            bias = self.bias
+        if bias.is_complex():
+            raise TypeError("O(2) Linear supports real biases only.")
+        if bias.ndim < 1 or bias.size(-1) != self.bias_numel:
+            raise ValueError(
+                "Linear bias trailing dimension must be "
+                f"{self.bias_numel}, got {tuple(bias.shape)}."
+            )
+        return bias
 
     def forward(
         self,
-        input: torch.Tensor,
+        features: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
-        expected_input_shape = (self.irreps_in.dim, self.channels_in)
-        if input.ndim < 2 or tuple(input.shape[-2:]) != expected_input_shape:
+        if features.is_complex():
+            raise TypeError("O(2) Linear supports real features only.")
+        if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
-                "Linear input trailing shape must be "
-                f"{expected_input_shape}, got {tuple(input.shape)}."
+                "Linear feature trailing dimension must be "
+                f"{self.irreps_in.dim}, got {tuple(features.shape)}."
             )
-        weight = self._resolve_weight(weight) * self.alpha
-        weight_ndim = len(self.weight_shape)
+        weight = self._resolve_weight(weight)
+        bias = self._resolve_bias(bias)
         try:
             leading_shape = torch.broadcast_shapes(
-                input.shape[:-2],
-                weight.shape[:-weight_ndim],
+                features.shape[:-1],
+                weight.shape[:-1],
+                bias.shape[:-1],
             )
         except RuntimeError as error:
             raise ValueError(
-                "Linear input and external weight batch dimensions do not broadcast."
+                "Linear feature, weight, and bias batch dimensions do not broadcast."
             ) from error
 
-        output_blocks = []
-        zero_dependency = input.sum() * 0 + weight.sum() * 0
-        output_irrep_list = self.irreps_out.expanded()
-        for output_index, ir in enumerate(output_irrep_list):
+        outputs = []
+        zero = features.sum() * 0 + weight.sum() * 0 + bias.sum() * 0
+        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
             contributions = []
-            for path_index, input_index in self._paths_by_output[output_index]:
-                input_block = input[..., self._input_slices[input_index], :]
-                if self.path_mode == "uv":
-                    contribution = torch.matmul(
-                        input_block,
-                        weight[..., path_index, :, :],
-                    )
-                else:
-                    contribution = input_block * weight[..., path_index, :].unsqueeze(
-                        -2
-                    )
-                contributions.append(contribution * self.path_scales[path_index])
+            for instruction_index, instruction in enumerate(self._weight_instructions):
+                if instruction.i_out != i_out:
+                    continue
+                mul_in, _ = instruction.path_shape
+                values = features[..., self._input_slices[instruction.i_in]].reshape(
+                    *features.shape[:-1], ir_out.dim, mul_in
+                )
+                offset, size = self._weight_offsets[instruction_index]
+                matrix = weight.narrow(-1, offset, size).reshape(
+                    *weight.shape[:-1], mul_in, mul_out
+                )
+                contributions.append(
+                    torch.matmul(values, matrix) * instruction.path_weight
+                )
             if contributions:
-                output_block = sum(contributions[1:], contributions[0])
+                output = sum(contributions[1:], contributions[0])
             else:
-                output_block = input.new_zeros(
-                    leading_shape + (ir.dim, self.channels_out)
-                )
-                output_block = output_block + zero_dependency
-
-            bias_row = self._bias_row_by_output[output_index]
-            if self.bias is not None and bias_row >= 0:
-                output_block = output_block + self.bias[bias_row]
-            output_blocks.append(output_block)
-
-        if output_blocks:
-            return torch.cat(output_blocks, dim=-2)
-        output = input.new_empty(leading_shape + (0, self.channels_out))
-        return output + zero_dependency
-
-    def forward_grouped(
-        self,
-        input_blocks: Sequence[torch.Tensor],
-        weight: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, ...]:
-        """Apply one dense UV contraction per contiguous O(2) irrep group.
-
-        Each input block has shape ``(..., irrep.dim, mul * channels_in)``.
-        The multiplicity and channel axes are already contiguous, so every
-        ``0e``, ``0o``, or positive-order block is evaluated by one large
-        matrix multiplication instead of one multiplication per path.
-        """
-        if len(input_blocks) != len(self.irreps_in):
-            raise ValueError("Expected one input block per O(2) irrep group.")
-        if self.path_mode != "uv":
-            raise ValueError("Grouped Linear is only available in path_mode='uv'.")
-        if any(specification is None for specification in self._grouped_paths):
-            raise ValueError(
-                "Grouped Linear requires regrouped irreps and fully connected paths."
-            )
-
-        weight = self._resolve_weight(weight) * self.alpha
-        input_by_irrep = {
-            ir: (mul, block)
-            for (mul, ir), block in zip(self.irreps_in, input_blocks)
-        }
-        output_blocks = []
-        for (
-            (mul, ir),
-            specification,
-        ) in zip(self.irreps_out, self._grouped_paths):
-            if specification is None:
-                raise RuntimeError("Grouped Linear path resolution failed.")
-            first_path, num_paths, input_mul, _ = specification
-            if num_paths == 0:
-                reference = input_blocks[0]
-                output_block = reference.new_zeros(
-                    *reference.shape[:-2],
-                    ir.dim,
-                    mul * self.channels_out,
-                )
-                output_block = output_block + reference.sum() * 0 + weight.sum() * 0
-                if self.bias is not None and ir.is_even_scalar():
-                    output_block = output_block + self.bias.reshape(
-                        1,
-                        mul * self.channels_out,
+                output = (
+                    features.new_zeros(
+                        *leading_shape,
+                        ir_out.dim,
+                        mul_out,
                     )
-                output_blocks.append(output_block)
-                continue
-            input_group = input_by_irrep.get(ir)
-            if input_group is None:
-                raise RuntimeError("Grouped Linear input resolution failed.")
-            observed_mul, input_block = input_group
-            if observed_mul != input_mul:
-                raise RuntimeError("Grouped Linear multiplicity resolution failed.")
-            expected_shape = (
-                ir.dim,
-                input_mul * self.channels_in,
-            )
-            if tuple(input_block.shape[-2:]) != expected_shape:
-                raise ValueError(
-                    "Grouped Linear input block trailing shape must be "
-                    f"{expected_shape}, got {tuple(input_block.shape)}."
+                    + zero
                 )
+            bias_specification = self._bias_offsets.get(i_out)
+            if bias_specification is not None:
+                offset, size = bias_specification
+                output = output + bias.narrow(-1, offset, size).unsqueeze(-2)
+            outputs.append(output.reshape(*leading_shape, mul_out * ir_out.dim))
+        if outputs:
+            return torch.cat(outputs, dim=-1)
+        return features.new_empty(*leading_shape, 0) + zero
 
-            path_weight = weight.narrow(-3, first_path, num_paths)
-            path_weight = path_weight.reshape(
-                *path_weight.shape[:-3],
-                mul,
-                input_mul,
-                self.channels_in,
-                self.channels_out,
-            )
-            scales = self.path_scales.narrow(0, first_path, num_paths).reshape(
-                mul,
-                input_mul,
-                1,
-                1,
-            )
-            path_weight = path_weight * scales
-            matrix = path_weight.permute(
-                *range(path_weight.ndim - 4),
-                -3,
-                -2,
-                -4,
-                -1,
-            ).reshape(
-                *path_weight.shape[:-4],
-                input_mul * self.channels_in,
-                mul * self.channels_out,
-            )
-            if matrix.ndim == 2:
-                output_block = torch.mm(
-                    input_block.reshape(-1, matrix.size(0)),
-                    matrix,
-                ).reshape(
-                    *input_block.shape[:-2],
-                    ir.dim,
-                    mul * self.channels_out,
-                )
-            else:
-                output_block = torch.matmul(input_block, matrix)
-
-            if self.bias is not None and ir.is_even_scalar():
-                output_block = output_block + self.bias.reshape(
-                    1,
-                    mul * self.channels_out,
-                )
-            output_blocks.append(output_block)
-        return tuple(output_blocks)
-
-    def _resolve_weight(
+    def weight_view_for_instruction(
         self,
-        weight: Optional[torch.Tensor],
+        instruction: int,
+        weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if self.internal_weights:
-            if weight is not None:
-                raise ValueError(
-                    "Do not pass weight when Linear uses internal weights."
-                )
-            weight = self.weight
-        elif weight is None:
-            raise ValueError("Linear requires external weight.")
-        
-        if weight is None:
-            raise RuntimeError("Linear weight resolution failed.")
-        weight_ndim = len(self.weight_shape)
-        if (
-            weight.ndim >= weight_ndim
-            and tuple(weight.shape[-weight_ndim:]) == self.weight_shape
-        ):
-            return weight
-        if weight.ndim >= 1 and weight.size(-1) == self.weight_numel:
-            return weight.reshape(*weight.shape[:-1], *self.weight_shape)
-        raise ValueError(
-            "Linear weight trailing shape must be "
-            f"{self.weight_shape} or ({self.weight_numel},), "
-            f"got {tuple(weight.shape)}."
+        weight = self._resolve_weight(weight)
+        weighted_instruction = self._weight_instructions[instruction]
+        offset, size = self._weight_offsets[instruction]
+        return weight.narrow(-1, offset, size).view(
+            *weight.shape[:-1],
+            *weighted_instruction.path_shape,
         )
 
-    def reset_parameters(self) -> None:
-        if self.weight is not None and self.weight.numel() > 0:
-            torch.nn.init.normal_(self.weight)
-        if self.bias is not None:
-            torch.nn.init.zeros_(self.bias)
+    def weight_views(
+        self,
+        weight: Optional[torch.Tensor] = None,
+        yield_instruction: bool = False,
+    ) -> Iterator:
+        for index, instruction in enumerate(self._weight_instructions):
+            view = self.weight_view_for_instruction(index, weight)
+            yield (index, instruction, view) if yield_instruction else view
 
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}"
-            f"({self.channels_in * self.irreps_in} -> "
-            f"{self.channels_out * self.irreps_out} | {self.weight_numel} weights)"
-            f"(bias={self.bias is not None})"
+            f"{self.__class__.__name__}({self.irreps_in} -> "
+            f"{self.irreps_out} | {self.weight_numel} weights)"
         )

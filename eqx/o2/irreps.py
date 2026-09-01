@@ -15,7 +15,7 @@ IrrepsLike = Union[
     "Irreps",
     "Irrep",
     str,
-    Sequence[Union[IrrepLike, Tuple[int, IrrepLike]]],
+    Sequence[Union[IrrepLike, Tuple[IrrepLike, int]]],
 ]
 
 
@@ -160,9 +160,9 @@ class Irrep:
         return matrix
 
 
-class _MulIr(NamedTuple):
-    mul: int
+class _IrMul(NamedTuple):
     ir: Irrep
+    mul: int
 
     @property
     def dim(self) -> int:
@@ -172,7 +172,7 @@ class _MulIr(NamedTuple):
 class Irreps:
     """A direct sum of real O(2) irreps.
 
-    Iteration yields ``(multiplicity, irrep)`` pairs. Use :meth:`expanded`
+    Iteration yields ``(irrep, multiplicity)`` pairs. Use :meth:`expanded`
     when one entry per irrep copy is required.
     """
 
@@ -182,7 +182,7 @@ class Irreps:
         if isinstance(irreps, Irreps):
             irrep_list = tuple(irreps)
         elif isinstance(irreps, Irrep):
-            irrep_list = ((1, irreps),)
+            irrep_list = ((irreps, 1),)
         elif isinstance(irreps, str):
             irrep_list = []
             compact = irreps.replace(" ", "")
@@ -201,38 +201,38 @@ class Irreps:
                         ) from None
                     if multiplicity < 1:
                         raise ValueError("Irrep multiplicities must be positive.")
-                    irrep_list.append((multiplicity, irrep))
+                    irrep_list.append((irrep, multiplicity))
             irrep_list = tuple(irrep_list)
         elif (
             isinstance(irreps, tuple)
             and len(irreps) == 2
-            and isinstance(irreps[0], int)
+            and isinstance(irreps[1], int)
         ):
-            irrep_list = (self._from_mul_ir(irreps),)
+            irrep_list = (self._from_ir_mul(irreps),)
         elif isinstance(irreps, Sequence):
-            irrep_list = tuple(self._from_mul_ir(item) for item in irreps)
+            irrep_list = tuple(self._from_ir_mul(item) for item in irreps)
         else:
             raise TypeError("Unsupported Irreps input.")
         object.__setattr__(
             self,
             "_irreps",
-            tuple(self._from_mul_ir(item) for item in irrep_list),
+            tuple(self._from_ir_mul(item) for item in irrep_list),
         )
 
     @staticmethod
-    def _from_mul_ir(item) -> _MulIr:
+    def _from_ir_mul(item) -> _IrMul:
         if isinstance(item, (Irrep, str)):
-            return _MulIr(1, Irrep(item))
+            return _IrMul(Irrep(item), 1)
         if not isinstance(item, tuple) or len(item) != 2:
             raise TypeError(
-                "Each Irreps entry must be an irrep or a (multiplicity, irrep) pair."
+                "Each Irreps entry must be an irrep or an (irrep, multiplicity) pair."
             )
-        multiplicity, irrep = item
+        irrep, multiplicity = item
         if not isinstance(multiplicity, int) or isinstance(multiplicity, bool):
             raise TypeError("Irrep multiplicity must be an integer.")
         if multiplicity < 1:
             raise ValueError("Irrep multiplicities must be positive.")
-        return _MulIr(multiplicity, Irrep(irrep))
+        return _IrMul(Irrep(irrep), multiplicity)
 
     def __setattr__(self, name, value) -> None:
         raise AttributeError("Irreps metadata is immutable.")
@@ -242,7 +242,10 @@ class Irreps:
         irreps: Union[o3.Irreps, "Irreps"],
     ) -> int:
         """Return the multiplicity shared by all irrep entries."""
-        multiplicities = {mul for mul, _ in irreps}
+        if isinstance(irreps, o3.Irreps):
+            multiplicities = {entry.mul for entry in irreps}
+        else:
+            multiplicities = {mul for _, mul in irreps}
         if not multiplicities:
             raise ValueError("Irreps must contain at least one entry.")
         if len(multiplicities) != 1:
@@ -251,34 +254,25 @@ class Irreps:
 
     @property
     def dim(self) -> int:
-        return sum(mul * ir.dim for mul, ir in self)
+        return sum(ir.dim * mul for ir, mul in self)
 
     @property
     def num_irreps(self) -> int:
-        return sum(mul for mul, _ in self)
+        return sum(mul for _, mul in self)
 
     @property
     def mmax(self) -> int:
-        return max((ir.m for _, ir in self), default=-1)
+        return max((ir.m for ir, _ in self), default=-1)
 
     def expanded(self) -> Tuple[Irrep, ...]:
-        return tuple(ir for mul, ir in self for _ in range(mul))
-
-    def expanded_slices(self) -> Tuple[slice, ...]:
-        slices = []
-        start = 0
-        for ir in self.expanded():
-            stop = start + ir.dim
-            slices.append(slice(start, stop))
-            start = stop
-        return tuple(slices)
+        return tuple(ir for ir, mul in self for _ in range(mul))
 
     def slices(self) -> Tuple[slice, ...]:
-        """Return one flattened representation slice per ``(mul, ir)``."""
+        """Return one ``ir_mul`` feature slice per ``(ir, mul)`` entry."""
         slices = []
         start = 0
-        for mul_ir in self:
-            stop = start + mul_ir.dim
+        for ir_mul in self:
+            stop = start + ir_mul.dim
             slices.append(slice(start, stop))
             start = stop
         return tuple(slices)
@@ -302,7 +296,7 @@ class Irreps:
                 raise TypeError("mmax must be an integer.")
             if mmax < 0:
                 raise ValueError("mmax must be non-negative.")
-            return Irreps([(mul, ir) for mul, ir in self if ir.m <= mmax])
+            return Irreps([(ir, mul) for ir, mul in self if ir.m <= mmax])
 
         selection = keep if keep is not None else drop
         if callable(selection):
@@ -310,31 +304,33 @@ class Irreps:
         else:
             if isinstance(selection, str):
                 selection = Irreps(selection)
-            elif isinstance(selection, (Irrep, _MulIr)):
+            elif isinstance(selection, (Irrep, _IrMul)):
                 selection = [selection]
             irrep_set = {
-                item.ir if isinstance(item, _MulIr) else Irrep(item)
+                item.ir if isinstance(item, _IrMul) else Irrep(item)
                 for item in selection
             }
-            predicate = lambda mul_ir: mul_ir.ir in irrep_set
+
+            def predicate(ir_mul):
+                return ir_mul.ir in irrep_set
 
         if keep is not None:
-            return Irreps([mul_ir for mul_ir in self if predicate(mul_ir)])
-        return Irreps([mul_ir for mul_ir in self if not predicate(mul_ir)])
+            return Irreps([ir_mul for ir_mul in self if predicate(ir_mul)])
+        return Irreps([ir_mul for ir_mul in self if not predicate(ir_mul)])
 
     def simplify(self) -> "Irreps":
         """Combine adjacent entries carrying the same irrep."""
         if not self._irreps:
             return self
         irrep_list = []
-        mul, ir = self._irreps[0]
-        for next_mul, next_ir in self._irreps[1:]:
+        ir, mul = self._irreps[0]
+        for next_ir, next_mul in self._irreps[1:]:
             if next_ir == ir:
                 mul += next_mul
             else:
-                irrep_list.append((mul, ir))
-                mul, ir = next_mul, next_ir
-        irrep_list.append((mul, ir))
+                irrep_list.append((ir, mul))
+                ir, mul = next_ir, next_mul
+        irrep_list.append((ir, mul))
         return Irreps(irrep_list)
 
     def sort(self) -> "Irreps":
@@ -342,9 +338,9 @@ class Irreps:
         return Irreps(
             sorted(
                 self._irreps,
-                key=lambda mul_ir: (
-                    mul_ir.ir.m,
-                    parity_order[mul_ir.ir.p],
+                key=lambda ir_mul: (
+                    ir_mul.ir.m,
+                    parity_order[ir_mul.ir.p],
                 ),
             )
         )
@@ -352,11 +348,9 @@ class Irreps:
     def regroup(self) -> "Irreps":
         """Collect equal irreps and return them in canonical order."""
         counts = {}
-        for mul, ir in self:
+        for ir, mul in self:
             counts[ir] = counts.get(ir, 0) + mul
-        return Irreps(
-            [(mul, ir) for ir, mul in counts.items()]
-        ).sort()
+        return Irreps(list(counts.items())).sort()
 
     def randn(
         self,
@@ -370,9 +364,7 @@ class Irreps:
 
         ``normalization="component"`` samples independent standard-normal
         components. ``normalization="norm"`` normalizes every irrep copy to
-        unit norm along the representation axis. Additional dimensions, such
-        as the explicit channel dimension used by the O(2) layers, are kept
-        independent.
+        unit norm. Within each entry, features use flattened ``ir_mul`` order.
         """
         if size.count(-1) != 1:
             raise ValueError("size must contain exactly one -1.")
@@ -393,33 +385,26 @@ class Irreps:
                 requires_grad=requires_grad,
             )
 
-        output = torch.empty(
-            shape,
-            dtype=dtype,
-            device=device,
-            requires_grad=requires_grad,
-        )
+        output = torch.empty(shape, dtype=dtype, device=device)
+        output_last = output.movedim(representation_axis, -1)
         with torch.no_grad():
-            for ir, block_slice in zip(self.expanded(), self.expanded_slices()):
-                block_shape = list(shape)
-                block_shape[representation_axis] = ir.dim
-                block = torch.randn(block_shape, dtype=dtype, device=device)
-                block /= block.norm(
-                    dim=representation_axis,
-                    keepdim=True,
-                )
-                output.narrow(
-                    representation_axis,
-                    block_slice.start,
+            for (ir, mul), ir_slice in zip(self, self.slices()):
+                values = torch.randn(
+                    *output_last.shape[:-1],
                     ir.dim,
-                ).copy_(block)
-        return output
+                    mul,
+                    dtype=dtype,
+                    device=device,
+                )
+                values = values / values.norm(dim=-2, keepdim=True)
+                output_last[..., ir_slice].copy_(
+                    values.reshape(*output_last.shape[:-1], mul * ir.dim)
+                )
+        return output.requires_grad_(requires_grad)
 
     def count(self, irrep: IrrepLike) -> int:
         irrep = Irrep(irrep)
-        return sum(
-            mul for mul, ir in self if ir == irrep
-        )
+        return sum(mul for ir, mul in self if ir == irrep)
 
     def D_from_angle(
         self,
@@ -436,14 +421,16 @@ class Irreps:
         if not angle.is_floating_point():
             angle = angle.to(dtype=torch.get_default_dtype())
         output = angle.new_zeros(angle.shape + (self.dim, self.dim))
-        for ir, block_slice in zip(self.expanded(), self.expanded_slices()):
-            output[..., block_slice, block_slice] = ir.D_from_angle(
-                angle,
-                reflected,
-            )
+        for (ir, mul), ir_slice in zip(self, self.slices()):
+            matrix = ir.D_from_angle(angle, reflected)
+            identity = torch.eye(mul, dtype=matrix.dtype, device=matrix.device)
+            matrix = (
+                matrix[..., :, None, :, None] * identity[..., None, :, None, :]
+            ).reshape(*angle.shape, mul * ir.dim, mul * ir.dim)
+            output[..., ir_slice, ir_slice] = matrix
         return output
 
-    def __iter__(self) -> Iterator[_MulIr]:
+    def __iter__(self) -> Iterator[_IrMul]:
         return iter(self._irreps)
 
     def __len__(self) -> int:
@@ -462,7 +449,7 @@ class Irreps:
             return NotImplemented
         if multiplicity < 1:
             raise ValueError("Irreps can only be multiplied by a positive integer.")
-        return Irreps([(multiplicity * mul, ir) for mul, ir in self._irreps])
+        return Irreps([(ir, multiplicity * mul) for ir, mul in self._irreps])
 
     __rmul__ = __mul__
 
@@ -476,10 +463,7 @@ class Irreps:
         return hash(self._irreps)
 
     def __str__(self) -> str:
-        return "+".join(
-            f"{'' if mul == 1 else f'{mul}x'}{ir}"
-            for mul, ir in self
-        )
+        return "+".join(f"{'' if mul == 1 else f'{mul}x'}{ir}" for ir, mul in self)
 
     def __repr__(self) -> str:
         return f"Irreps({str(self)!r})"

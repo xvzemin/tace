@@ -73,7 +73,7 @@ class CircularHarmonics(torch.nn.Module):
         self.normalize = bool(normalize)
         self.irreps_in = Irreps("1m")
         self.irreps_out = Irreps(
-            [(1, Irrep("0e"))] + [(1, Irrep(order, 0)) for order in range(1, mmax + 1)]
+            [(Irrep("0e"), 1)] + [(Irrep(order, 0), 1) for order in range(1, mmax + 1)]
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

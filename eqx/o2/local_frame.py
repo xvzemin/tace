@@ -4,7 +4,7 @@
 ################################################################################
 
 import math
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import torch
 from e3nn import o3
@@ -12,30 +12,34 @@ from e3nn import o3
 from .irreps import Irrep, Irreps
 
 
-class LocalFrame(torch.nn.Module):
-    """Convert between global O(3) and local O(2) representations.
+class _FrameEntry(NamedTuple):
+    global_slice: slice
+    local_indices: tuple[int, ...]
+    local_slices: tuple[slice, ...]
+    mul: int
+    degree: int
+    odd: bool
 
-    ``to_local`` preserves all axes after ``(batch, component)``.
-    """
+
+class LocalFrame(torch.nn.Module):
+    """Rotate O(3) features in ``ir_mul`` layout into local O(2) features."""
 
     @staticmethod
     def restrict(irreps: o3.Irreps, mmax: Optional[int] = None) -> Irreps:
-        """Restrict O(3) irreps to O(2) irreps."""
+        """Restrict every O(3) entry to ordered O(2) entries."""
         irreps = o3.Irreps(irreps)
         if mmax is None:
             mmax = irreps.lmax
-        if not isinstance(mmax, int):
+        if not isinstance(mmax, int) or isinstance(mmax, bool):
             raise TypeError("mmax must be an integer.")
         if mmax < 0:
             raise ValueError("mmax must be non-negative.")
-
         irrep_list = []
-        for mul, ir in irreps:
-            zero_parity = ir.p * ((-1) ** ir.l)
-            irrep_list.append((mul, Irrep(0, zero_parity)))
+        for entry in irreps:
+            ir, mul = entry.ir, entry.mul
+            irrep_list.append((Irrep(0, ir.p * ((-1) ** ir.l)), mul))
             irrep_list.extend(
-                (mul, Irrep(order, 0))
-                for order in range(1, min(ir.l, mmax) + 1)
+                (Irrep(order, 0), mul) for order in range(1, min(ir.l, mmax) + 1)
             )
         return Irreps(irrep_list).regroup()
 
@@ -46,350 +50,247 @@ class LocalFrame(torch.nn.Module):
         mmax: Optional[int] = None,
     ) -> None:
         super().__init__()
-
-        self.global_irreps = o3.Irreps(irreps)
-        self.channels = Irreps.common_multiplicity(self.global_irreps)
-        if not isinstance(lmax, int):
+        self.irreps_in = o3.Irreps(irreps)
+        if not isinstance(lmax, int) or isinstance(lmax, bool):
             raise TypeError("lmax must be an integer.")
-        if self.global_irreps.lmax > lmax:
+        if self.irreps_in.lmax > lmax:
             raise ValueError("lmax must cover every O(3) irrep.")
         if mmax is None:
             mmax = lmax
-        if not isinstance(mmax, int):
+        if not isinstance(mmax, int) or isinstance(mmax, bool):
             raise TypeError("mmax must be an integer.")
         if not 0 <= mmax <= lmax:
             raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
         self.lmax = lmax
         self.mmax = mmax
-        self.local_irreps = self.restrict(self.global_irreps, mmax)
+        self.irreps_out = self.restrict(self.irreps_in, mmax)
+        self.global_irreps = self.irreps_in
+        self.local_irreps = self.irreps_out
 
-        irrep_slices = []
-        offset = 0
-        for _, ir in self.global_irreps:
-            irrep_slices.append(slice(offset, offset + ir.dim))
-            offset += ir.dim
-        self.irrep_slices = tuple(irrep_slices)
-        self.global_component_dim = offset
-
-        sources_by_ir = {ir: [] for _, ir in self.local_irreps}
-        for ir_index, (_, ir) in enumerate(self.global_irreps):
-            zero_ir = Irrep(0, ir.p * ((-1) ** ir.l))
-            sources_by_ir[zero_ir].append(ir_index)
-            for order in range(1, min(ir.l, mmax) + 1):
-                sources_by_ir[Irrep(order, 0)].append(ir_index)
-        self.block_sources = tuple(
-            tuple(sources_by_ir[ir]) for _, ir in self.local_irreps
-        )
-
-        block_lookup = {
-            (ir, ir_index): (block_index, source_position)
-            for block_index, ((_, ir), sources) in enumerate(
-                zip(self.local_irreps, self.block_sources)
+        global_slices = self.irreps_in.slices()
+        local_indices = {ir: index for index, (ir, _) in enumerate(self.irreps_out)}
+        local_offsets = [0] * len(self.irreps_out)
+        entries = []
+        wigner_rows = []
+        wigner_columns = []
+        for global_slice, global_entry in zip(global_slices, self.irreps_in):
+            ir, mul = global_entry.ir, global_entry.mul
+            retained_mmax = min(ir.l, mmax)
+            local_irrep_list = [Irrep(0, ir.p * ((-1) ** ir.l))]
+            local_irrep_list.extend(
+                Irrep(order, 0) for order in range(1, retained_mmax + 1)
             )
-            for source_position, ir_index in enumerate(sources)
-        }
-
-        rotation_irrep_indices = []
-        degree_counts = {}
-        for ir_index, (_, ir) in enumerate(self.global_irreps):
-            rotation_index = degree_counts.get(ir.l, 0)
-            degree_counts[ir.l] = rotation_index + 1
-            while len(rotation_irrep_indices) <= rotation_index:
-                rotation_irrep_indices.append([])
-            rotation_irrep_indices[rotation_index].append(ir_index)
-        self.rotation_irrep_indices = tuple(
-            tuple(
-                sorted(
-                    irrep_indices,
-                    key=lambda index: self.global_irreps[index][1].l,
-                )
+            entry_local_indices = tuple(
+                local_indices[local_ir] for local_ir in local_irrep_list
             )
-            for irrep_indices in rotation_irrep_indices
-        )
-
-        full_size = (lmax + 1) ** 2
-        wigner_is_full = []
-        rotation_uses_input = []
-        source_locations = {}
-        inverse_specs_list = []
-        for rotation_index, irrep_indices in enumerate(
-            self.rotation_irrep_indices
-        ):
-            columns = []
-            for ir_index in irrep_indices:
-                _, ir = self.global_irreps[ir_index]
-                columns.extend(range(ir.l**2, (ir.l + 1) ** 2))
-
-            rows = []
-            row_locations = {}
-            for order in range(mmax + 1):
-                active_indices = [
-                    ir_index
-                    for ir_index in irrep_indices
-                    if self.global_irreps[ir_index][1].l >= order
-                ]
-                if order == 0:
-                    for ir_index in active_indices:
-                        _, ir = self.global_irreps[ir_index]
-                        row_locations[(ir_index, order)] = (len(rows),)
-                        rows.append(ir.l)
-                    continue
-
-                count = lmax + 1 - order
-                row_offset = (lmax + 1) + sum(
-                    2 * (lmax + 1 - lower_order)
-                    for lower_order in range(1, order)
-                )
-                real_positions = {}
-                for ir_index in active_indices:
-                    _, ir = self.global_irreps[ir_index]
-                    real_positions[ir_index] = len(rows)
-                    rows.append(row_offset + ir.l - order)
-                for ir_index in active_indices:
-                    _, ir = self.global_irreps[ir_index]
-                    imaginary_position = len(rows)
-                    rows.append(row_offset + count + ir.l - order)
-                    row_locations[(ir_index, order)] = (
-                        real_positions[ir_index],
-                        imaginary_position,
+            entry_local_slices = []
+            for index in entry_local_indices:
+                start = local_offsets[index]
+                entry_local_slices.append(slice(start, start + mul))
+                local_offsets[index] += mul
+            rows = [ir.l]
+            for order in range(1, retained_mmax + 1):
+                offset = (
+                    lmax
+                    + 1
+                    + sum(
+                        2 * (lmax + 1 - lower_order) for lower_order in range(1, order)
                     )
-
+                )
+                degree_offset = ir.l - order
+                rows.extend(
+                    (
+                        offset + degree_offset,
+                        offset + (lmax + 1 - order) + degree_offset,
+                    )
+                )
+            wigner_rows.append(torch.tensor(rows, dtype=torch.long))
+            wigner_columns.append(torch.arange(ir.l**2, (ir.l + 1) ** 2))
+            entries.append(
+                _FrameEntry(
+                    global_slice,
+                    entry_local_indices,
+                    tuple(entry_local_slices),
+                    mul,
+                    ir.l,
+                    ir.p * ((-1) ** ir.l) == -1,
+                )
+            )
+        self._entries = tuple(entries)
+        rotation_groups = []
+        for index, entry in enumerate(entries):
+            for indices in rotation_groups:
+                if entries[indices[0]].mul == entry.mul and all(
+                    entries[grouped_index].degree != entry.degree
+                    for grouped_index in indices
+                ):
+                    indices.append(index)
+                    break
+            else:
+                rotation_groups.append([index])
+        self._rotation_groups = tuple(tuple(indices) for indices in rotation_groups)
+        for group_index, indices in enumerate(self._rotation_groups):
             self.register_buffer(
-                f"wigner_rows_{rotation_index}",
-                torch.tensor(rows, dtype=torch.int64),
+                f"wigner_rows_{group_index}",
+                torch.cat([wigner_rows[index] for index in indices]),
                 persistent=False,
             )
             self.register_buffer(
-                f"wigner_columns_{rotation_index}",
-                torch.tensor(columns, dtype=torch.int64),
+                f"wigner_columns_{group_index}",
+                torch.cat([wigner_columns[index] for index in indices]),
                 persistent=False,
             )
-            wigner_is_full.append(
-                rows == list(range(full_size))
-                and columns == list(range(full_size))
-            )
-            rotation_uses_input.append(
-                irrep_indices == tuple(range(len(self.global_irreps)))
-            )
-
-            inverse_specs = []
-            for order in range(mmax + 1):
-                active_indices = [
-                    ir_index
-                    for ir_index in irrep_indices
-                    if self.global_irreps[ir_index][1].l >= order
-                ]
-                if order == 0:
-                    for ir_index in active_indices:
-                        _, ir = self.global_irreps[ir_index]
-                        local_ir = Irrep(0, ir.p * ((-1) ** ir.l))
-                        block_index, source_position = block_lookup[
-                            (local_ir, ir_index)
-                        ]
-                        inverse_specs.append(
-                            (block_index, source_position, 0, 1)
-                        )
-                    continue
-
-                for component in range(2):
-                    for ir_index in active_indices:
-                        _, ir = self.global_irreps[ir_index]
-                        block_index, source_position = block_lookup[
-                            (Irrep(order, 0), ir_index)
-                        ]
-                        odd = ir.p * ((-1) ** ir.l) == -1
-                        if not odd:
-                            local_component, sign = component, 1
-                        elif component == 0:
-                            local_component, sign = 1, 1
-                        else:
-                            local_component, sign = 0, -1
-                        inverse_specs.append(
-                            (
-                                block_index,
-                                source_position,
-                                local_component,
-                                sign,
-                            )
-                        )
-            inverse_specs_list.append(tuple(inverse_specs))
-
-            for ir_index in irrep_indices:
-                _, ir = self.global_irreps[ir_index]
-                odd = ir.p * ((-1) ** ir.l) == -1
-                for order in range(min(ir.l, mmax) + 1):
-                    source_locations[(ir_index, order)] = (
-                        rotation_index,
-                        *row_locations[(ir_index, order)],
-                        odd,
-                    )
-
-        self.wigner_is_full = tuple(wigner_is_full)
-        self.rotation_uses_input = tuple(rotation_uses_input)
-        self.inverse_specs = tuple(inverse_specs_list)
-        self.source_locations = tuple(
-            tuple(
-                source_locations[(ir_index, ir.m)] for ir_index in sources
-            )
-            for (_, ir), sources in zip(
-                self.local_irreps,
-                self.block_sources,
-            )
-        )
 
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}({self.global_irreps} -> "
-            f"{self.local_irreps})(mmax={self.mmax})"
+            f"{self.__class__.__name__}({self.irreps_in} -> "
+            f"{self.irreps_out})(mmax={self.mmax})"
         )
+
+    @staticmethod
+    def _apply_rotation(
+        rotation: torch.Tensor,
+        features: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.einsum("bij,b...jk->b...ik", rotation, features)
 
     def to_local(
         self,
-        input: torch.Tensor,
+        features: torch.Tensor,
         wigner: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        if input.ndim < 3 or input.size(1) != self.global_component_dim:
+    ) -> torch.Tensor:
+        if features.ndim < 2 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
-                "Local-frame input must have shape "
-                f"(batch, {self.global_component_dim}, ...), "
-                f"got {tuple(input.shape)}."
+                "LocalFrame input trailing dimension must be "
+                f"{self.irreps_in.dim}, got {tuple(features.shape)}."
             )
-        if input.size(0) != wigner.size(0):
-            raise ValueError("Input and Wigner batch dimensions must match.")
-
-        rotated_list = []
-        for rotation_index, irrep_indices in enumerate(
-            self.rotation_irrep_indices
-        ):
-            if self.rotation_uses_input[rotation_index]:
-                irrep_input = input
-            else:
-                irrep_input = torch.cat(
-                    [input[:, self.irrep_slices[index]] for index in irrep_indices],
-                    dim=1,
-                )
-            if self.wigner_is_full[rotation_index]:
-                rotation = wigner
-            else:
-                rows = getattr(self, f"wigner_rows_{rotation_index}")
-                columns = getattr(self, f"wigner_columns_{rotation_index}")
-                rotation = wigner.index_select(1, rows).index_select(2, columns)
-            if input.ndim == 3:
-                rotated = torch.bmm(rotation, irrep_input)
-            else:
-                trailing_shape = irrep_input.shape[2:]
-                flat_channels = math.prod(trailing_shape)
-                rotated = torch.bmm(
-                    rotation,
-                    irrep_input.view(
-                        irrep_input.size(0),
-                        irrep_input.size(1),
-                        flat_channels,
-                    ),
-                ).view(
-                    irrep_input.size(0),
-                    rotation.size(1),
-                    *trailing_shape,
-                )
-            rotated_list.append(rotated)
-
-        output_blocks = []
-        for (_, ir), locations in zip(
-            self.local_irreps,
-            self.source_locations,
-        ):
-            irrep_list = []
-            for location in locations:
-                rotation_index, first_position, *remainder = location
-                rotated = rotated_list[rotation_index]
-                if ir.m == 0:
-                    irrep_list.append(
-                        rotated[:, first_position : first_position + 1]
+        if features.size(0) != wigner.size(0):
+            raise ValueError("Feature and Wigner batch dimensions must match.")
+        outputs = [[] for _ in self.irreps_out]
+        for group_index, indices in enumerate(self._rotation_groups):
+            values = torch.cat(
+                [
+                    features[..., self._entries[index].global_slice].reshape(
+                        *features.shape[:-1],
+                        2 * self._entries[index].degree + 1,
+                        self._entries[index].mul,
                     )
-                    continue
-                second_position, odd = remainder
-                first = rotated[:, first_position : first_position + 1]
-                second = rotated[:, second_position : second_position + 1]
-                irrep_list.append(
-                    torch.cat((-second, first), dim=1)
-                    if odd
-                    else torch.cat((first, second), dim=1)
+                    for index in indices
+                ],
+                dim=-2,
+            )
+            rows = getattr(self, f"wigner_rows_{group_index}")
+            columns = getattr(self, f"wigner_columns_{group_index}")
+            rotation = wigner.index_select(1, rows).index_select(2, columns)
+            values = self._apply_rotation(rotation, values)
+            offset = 0
+            for entry_index in indices:
+                entry = self._entries[entry_index]
+                outputs[entry.local_indices[0]].append(
+                    (
+                        entry.local_slices[0].start,
+                        values[..., offset : offset + 1, :],
+                    )
                 )
-            output_blocks.append(torch.cat(irrep_list, dim=-1))
-        return tuple(output_blocks)
+                offset += 1
+                for local_position, local_index in enumerate(
+                    entry.local_indices[1:], start=1
+                ):
+                    pair = values[..., offset : offset + 2, :]
+                    if entry.odd:
+                        pair = torch.cat((-pair[..., 1:2, :], pair[..., :1, :]), dim=-2)
+                    outputs[local_index].append(
+                        (entry.local_slices[local_position].start, pair)
+                    )
+                    offset += 2
+        if outputs:
+            return torch.cat(
+                [
+                    torch.cat(
+                        [part for _, part in sorted(parts, key=lambda item: item[0])],
+                        dim=-1,
+                    ).reshape(*features.shape[:-1], ir.dim * mul)
+                    for (ir, mul), parts in zip(self.irreps_out, outputs)
+                ],
+                dim=-1,
+            )
+        return features.new_empty(*features.shape[:-1], 0)
 
     def forward(
         self,
-        input: torch.Tensor,
+        features: torch.Tensor,
         wigner: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
-        return self.to_local(input, wigner)
+    ) -> torch.Tensor:
+        return self.to_local(features, wigner)
+
+    def _wigner_mmax(self, local_dim: int) -> int:
+        for candidate in range(self.mmax, self.lmax + 1):
+            expected = (
+                self.lmax
+                + 1
+                + sum(2 * (self.lmax + 1 - order) for order in range(1, candidate + 1))
+            )
+            if local_dim == expected:
+                return candidate
+        raise ValueError("Wigner inverse has an incompatible local dimension.")
 
     def to_global(
         self,
-        input_blocks: tuple[torch.Tensor, ...],
+        features: torch.Tensor,
         wigner_inv: torch.Tensor,
     ) -> torch.Tensor:
-        if len(input_blocks) != len(self.local_irreps):
-            raise ValueError("Expected one input block per local O(2) irrep.")
-
-        channel_list = []
-        for input_block, sources in zip(input_blocks, self.block_sources):
-            if input_block.size(-1) % len(sources) != 0:
-                raise ValueError("Invalid O(2) block width.")
-            channel_list.append(input_block.size(-1) // len(sources))
-        if len(set(channel_list)) != 1 or channel_list[0] != self.channels:
-            raise ValueError("O(2) blocks must use the configured channel count.")
-
+        if features.ndim < 2 or features.size(-1) != self.irreps_out.dim:
+            raise ValueError(
+                "LocalFrame input trailing dimension must be "
+                f"{self.irreps_out.dim}, got {tuple(features.shape)}."
+            )
+        if features.size(0) != wigner_inv.size(0):
+            raise ValueError("Feature and Wigner batch dimensions must match.")
         if wigner_inv.size(-2) != (self.lmax + 1) ** 2:
             raise ValueError("Wigner inverse has an incompatible global dimension.")
-        local_dim = wigner_inv.size(-1)
-        wigner_mmax = None
-        for candidate in range(self.mmax, self.lmax + 1):
-            expected = self.lmax + 1 + sum(
-                2 * (self.lmax + 1 - order)
-                for order in range(1, candidate + 1)
+        wigner_mmax = self._wigner_mmax(wigner_inv.size(-1))
+        local_values = [
+            features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
+            for (ir, mul), ir_slice in zip(
+                self.irreps_out,
+                self.irreps_out.slices(),
             )
-            if local_dim == expected:
-                wigner_mmax = candidate
-                break
-        if wigner_mmax is None:
-            raise ValueError("Wigner inverse has an incompatible local dimension.")
+        ]
 
-        output_by_irrep = [None] * len(self.global_irreps)
-        for rotation_index, (irrep_indices, inverse_specs) in enumerate(
-            zip(self.rotation_irrep_indices, self.inverse_specs)
-        ):
-            row_list = []
-            for block_index, source_position, component, sign in inverse_specs:
-                input_block = input_blocks[block_index]
-                row = input_block[
-                    :,
-                    component : component + 1,
-                    source_position
-                    * self.channels : (source_position + 1)
-                    * self.channels,
+        outputs = [None] * len(self._entries)
+        for group_index, indices in enumerate(self._rotation_groups):
+            group_values = []
+            for entry_index in indices:
+                entry = self._entries[entry_index]
+                entry_values = [
+                    local_values[entry.local_indices[0]][..., entry.local_slices[0]]
                 ]
-                row_list.append(row if sign == 1 else -row)
-            irrep_input = torch.cat(row_list, dim=1)
-            if self.wigner_is_full[rotation_index]:
-                rotation = wigner_inv
-            else:
-                rows = getattr(self, f"wigner_rows_{rotation_index}")
-                columns = getattr(self, f"wigner_columns_{rotation_index}")
-                rotation = wigner_inv.index_select(1, columns).index_select(
-                    2,
-                    rows,
-                )
-            rotated = torch.bmm(rotation, irrep_input)
-
+                for local_index, local_slice in zip(
+                    entry.local_indices[1:],
+                    entry.local_slices[1:],
+                ):
+                    pair = local_values[local_index][..., local_slice]
+                    if entry.odd:
+                        pair = torch.cat((pair[..., 1:2, :], -pair[..., :1, :]), dim=-2)
+                    entry_values.append(pair)
+                values = torch.cat(entry_values, dim=-2)
+                retained = 2 * min(entry.degree, self.mmax) + 1
+                source = 2 * min(entry.degree, wigner_mmax) + 1
+                group_values.append(values * math.sqrt(source / retained))
+            values = torch.cat(group_values, dim=-2)
+            rows = getattr(self, f"wigner_rows_{group_index}")
+            columns = getattr(self, f"wigner_columns_{group_index}")
+            rotation = wigner_inv.index_select(1, columns).index_select(2, rows)
+            values = self._apply_rotation(rotation, values)
             offset = 0
-            for ir_index in irrep_indices:
-                _, ir = self.global_irreps[ir_index]
-                retained = 2 * min(ir.l, self.mmax) + 1
-                source = 2 * min(ir.l, wigner_mmax) + 1
-                output_by_irrep[ir_index] = rotated[
-                    :, offset : offset + ir.dim
-                ] * math.sqrt(source / retained)
-                offset += ir.dim
-        return torch.cat(output_by_irrep, dim=1)
+            for entry_index in indices:
+                entry = self._entries[entry_index]
+                width = 2 * entry.degree + 1
+                outputs[entry_index] = values[..., offset : offset + width, :].reshape(
+                    *features.shape[:-1],
+                    entry.mul * width,
+                )
+                offset += width
+        if outputs:
+            return torch.cat(outputs, dim=-1)
+        return features.new_empty(*features.shape[:-1], 0)

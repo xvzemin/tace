@@ -4,16 +4,15 @@
 ################################################################################
 
 import math
-from collections import Counter
-from typing import Optional, Sequence, Tuple
+from typing import Iterator, NamedTuple, Optional, Sequence
 
 import torch
 
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
-def _quarter_turn(input: torch.Tensor) -> torch.Tensor:
-    return torch.stack((-input[..., 1, :], input[..., 0, :]), dim=-2)
+def _quarter_turn(features: torch.Tensor) -> torch.Tensor:
+    return torch.stack((-features[..., 1, :], features[..., 0, :]), dim=-2)
 
 
 def _cg_product(
@@ -23,26 +22,19 @@ def _cg_product(
     irrep2: Irrep,
     irrep_out: Irrep,
 ) -> torch.Tensor:
-    """Evaluate one orthonormal real O(2) Clebsch--Gordan map."""
+    """Evaluate one component-normalized real O(2) Clebsch--Gordan map."""
     if irrep_out not in irrep1 * irrep2:
         raise ValueError(
             f"Illegal O(2) tensor-product path: {irrep1} x {irrep2} -> {irrep_out}."
         )
-
     if irrep1.m == 0 and irrep2.m == 0:
         value = input1[..., 0, :, None] * input2[..., 0, None, :]
         return value.unsqueeze(-3)
-
     if irrep1.m == 0:
-        vector = input2
-        if irrep1.p == -1:
-            vector = _quarter_turn(vector)
+        vector = _quarter_turn(input2) if irrep1.p == -1 else input2
         return input1[..., 0, None, :, None] * vector.unsqueeze(-2)
-
     if irrep2.m == 0:
-        vector = input1
-        if irrep2.p == -1:
-            vector = _quarter_turn(vector)
+        vector = _quarter_turn(input1) if irrep2.p == -1 else input1
         return vector.unsqueeze(-1) * input2[..., 0, None, None, :]
 
     first_real = input1[..., 0, :, None]
@@ -50,21 +42,20 @@ def _cg_product(
     second_real = input2[..., 0, None, :]
     second_imag = input2[..., 1, None, :]
     scale = math.sqrt(0.5)
-
     if irrep_out.m == irrep1.m + irrep2.m:
         real = first_real * second_real - first_imag * second_imag
-        imag = first_real * second_imag + first_imag * second_real
-        return torch.stack((real, imag), dim=-3) * scale
+        imaginary = first_real * second_imag + first_imag * second_real
+        return torch.stack((real, imaginary), dim=-3) * scale
 
-    difference_real = first_real * second_real + first_imag * second_imag
-    difference_imag = first_imag * second_real - first_real * second_imag
+    real = first_real * second_real + first_imag * second_imag
+    imaginary = first_imag * second_real - first_real * second_imag
     if irrep2.m > irrep1.m:
-        difference_imag = -difference_imag
+        imaginary = -imaginary
     if irrep_out.m > 0:
-        return torch.stack((difference_real, difference_imag), dim=-3) * scale
+        return torch.stack((real, imaginary), dim=-3) * scale
     if irrep_out.is_even_scalar():
-        return difference_real.unsqueeze(-3) * scale
-    return difference_imag.unsqueeze(-3) * scale
+        return real.unsqueeze(-3) * scale
+    return imaginary.unsqueeze(-3) * scale
 
 
 def _cg_product_uuu(
@@ -74,62 +65,33 @@ def _cg_product_uuu(
     irrep2: Irrep,
     irrep_out: Irrep,
 ) -> torch.Tensor:
-    """Evaluate a channel-wise real O(2) Clebsch--Gordan map."""
-    if irrep_out not in irrep1 * irrep2:
-        raise ValueError(
-            f"Illegal O(2) tensor-product path: {irrep1} x {irrep2} -> {irrep_out}."
-        )
     if input1.size(-1) != input2.size(-1):
-        raise ValueError("uuu tensor products require equal channel counts.")
+        raise ValueError("uuu tensor products require equal multiplicities.")
+    return _cg_product(
+        input1,
+        irrep1,
+        input2,
+        irrep2,
+        irrep_out,
+    ).diagonal(dim1=-2, dim2=-1)
 
-    if irrep1.m == 0 and irrep2.m == 0:
-        return (input1[..., 0, :] * input2[..., 0, :]).unsqueeze(-2)
 
-    if irrep1.m == 0:
-        vector = input2
-        if irrep1.p == -1:
-            vector = _quarter_turn(vector)
-        return input1[..., 0, :].unsqueeze(-2) * vector
-
-    if irrep2.m == 0:
-        vector = input1
-        if irrep2.p == -1:
-            vector = _quarter_turn(vector)
-        return vector * input2[..., 0, :].unsqueeze(-2)
-
-    first_real = input1[..., 0, :]
-    first_imag = input1[..., 1, :]
-    second_real = input2[..., 0, :]
-    second_imag = input2[..., 1, :]
-    scale = math.sqrt(0.5)
-
-    if irrep_out.m == irrep1.m + irrep2.m:
-        real = first_real * second_real - first_imag * second_imag
-        imag = first_real * second_imag + first_imag * second_real
-        return torch.stack((real, imag), dim=-2) * scale
-
-    difference_real = first_real * second_real + first_imag * second_imag
-    difference_imag = first_imag * second_real - first_real * second_imag
-    if irrep2.m > irrep1.m:
-        difference_imag = -difference_imag
-    if irrep_out.m > 0:
-        return torch.stack((difference_real, difference_imag), dim=-2) * scale
-    if irrep_out.is_even_scalar():
-        return difference_real.unsqueeze(-2) * scale
-    return difference_imag.unsqueeze(-2) * scale
+class Instruction(NamedTuple):
+    i_in1: int
+    i_in2: int
+    i_out: int
+    connection_mode: str
+    has_weight: bool
+    path_weight: float
+    path_shape: tuple[int, ...]
 
 
 class TensorProduct(torch.nn.Module):
-    """A weighted tensor product between real O(2) representations.
+    """O(2) tensor product driven by entry-level coupling instructions.
 
-    Inputs use shapes ``(..., irreps_in1.dim, channels_in1)`` and
-    ``(..., irreps_in2.dim, channels_in2)``. ``path_mode="u1u"`` requires
-    one channel in the second input and preserves the first input channels.
-    ``path_mode="uuu"`` contracts equal channel indices and requires all
-    channel counts to match.
-    ``path_mode="uvw"`` learns a dense channel tensor for every equivariant
-    path. Paths are ``(output_index, input1_index, input2_index)`` tuples over
-    expanded irrep-copy layouts.
+    Inputs and outputs use ``(..., irreps.dim)`` tensors. Every entry is laid
+    out as flattened ``ir_mul``. Supported connection modes are ``u1u``,
+    ``uuu``, and ``uvw``.
     """
 
     def __init__(
@@ -137,153 +99,196 @@ class TensorProduct(torch.nn.Module):
         irreps_in1: IrrepsLike,
         irreps_in2: IrrepsLike,
         irreps_out: IrrepsLike,
-        channels_in1: int,
-        channels_in2: Optional[int] = None,
-        channels_out: Optional[int] = None,
-        *,
-        path_mode: str = "uuu",
-        internal_weights: bool = True,
-        path_norm: bool = True,
-        path: Optional[Sequence[Tuple[int, int, int]]] = None,
+        instructions: Sequence[tuple],
+        in1_var: Optional[Sequence[float]] = None,
+        in2_var: Optional[Sequence[float]] = None,
+        out_var: Optional[Sequence[float]] = None,
+        irrep_normalization: str = "component",
+        path_normalization: str = "element",
+        internal_weights: Optional[bool] = None,
+        shared_weights: Optional[bool] = None,
     ) -> None:
         super().__init__()
-
+        if irrep_normalization not in ("component", "norm", "none"):
+            raise ValueError(
+                "irrep_normalization must be 'component', 'norm', or 'none'."
+            )
+        if path_normalization not in ("element", "path", "none"):
+            raise ValueError("path_normalization must be 'element', 'path', or 'none'.")
         self.irreps_in1 = Irreps(irreps_in1)
         self.irreps_in2 = Irreps(irreps_in2)
         self.irreps_out = Irreps(irreps_out)
-        if channels_in2 is None:
-            channels_in2 = 1 if path_mode == "u1u" else channels_in1
-        if channels_out is None:
-            channels_out = channels_in1
-        channel_counts = (channels_in1, channels_in2, channels_out)
-        if any(
-            not isinstance(value, int) or isinstance(value, bool)
-            for value in channel_counts
-        ):
-            raise TypeError("TensorProduct channel counts must be integers.")
-        if any(value < 1 for value in channel_counts):
-            raise ValueError("TensorProduct channel counts must be positive.")
-        if path_mode not in ("u1u", "uuu", "uvw"):
-            raise ValueError("path_mode must be 'u1u', 'uuu', or 'uvw'.")
-        if path_mode == "u1u" and (channels_in2 != 1 or channels_in1 != channels_out):
-            raise ValueError(
-                "path_mode='u1u' requires channels_in2 == 1 and "
-                "channels_in1 == channels_out."
-            )
-        if path_mode == "uuu" and len(set(channel_counts)) != 1:
-            raise ValueError("path_mode='uuu' requires all channel counts to match.")
+        self.irrep_normalization = irrep_normalization
+        self.path_normalization = path_normalization
 
-        self.channels_in1 = channels_in1
-        self.channels_in2 = channels_in2
-        self.channels_out = channels_out
-        self.path_mode = path_mode
-        self.internal_weights = bool(internal_weights)
-        self.path_norm = bool(path_norm)
-
-        input1_irrep_list = self.irreps_in1.expanded()
-        input2_irrep_list = self.irreps_in2.expanded()
-        output_irrep_list = self.irreps_out.expanded()
-        if path is None:
-            paths = tuple(
-                (output_index, input1_index, input2_index)
-                for output_index, output_ir in enumerate(output_irrep_list)
-                for input1_index, input1_ir in enumerate(input1_irrep_list)
-                for input2_index, input2_ir in enumerate(input2_irrep_list)
-                if output_ir in input1_ir * input2_ir
-            )
-        else:
-            paths = tuple(path)
-        for item in paths:
-            if not isinstance(item, tuple) or len(item) != 3:
-                raise TypeError(
-                    "Each TensorProduct path must be "
-                    "(output_index, input1_index, input2_index)."
-                )
-            output_index, input1_index, input2_index = item
-            if any(
-                not isinstance(index, int) or isinstance(index, bool) for index in item
-            ):
-                raise TypeError("TensorProduct path indices must be integers.")
-            if not 0 <= output_index < len(output_irrep_list):
-                raise ValueError(f"Invalid TensorProduct output index: {output_index}.")
-            if not 0 <= input1_index < len(input1_irrep_list):
-                raise ValueError(f"Invalid TensorProduct input1 index: {input1_index}.")
-            if not 0 <= input2_index < len(input2_irrep_list):
-                raise ValueError(f"Invalid TensorProduct input2 index: {input2_index}.")
-            if output_irrep_list[output_index] not in (
-                input1_irrep_list[input1_index] * input2_irrep_list[input2_index]
-            ):
-                raise ValueError(
-                    "Illegal O(2) TensorProduct path: "
-                    f"{input1_irrep_list[input1_index]} x "
-                    f"{input2_irrep_list[input2_index]} "
-                    f"-> {output_irrep_list[output_index]}."
-                )
-        self.path = paths
-
-        path_counts = Counter(output_index for output_index, _, _ in paths)
-        scales = [
-            path_counts[output_index] ** -0.5 if self.path_norm else 1.0
-            for output_index, _, _ in paths
+        raw_instructions = [
+            instruction if len(instruction) == 6 else instruction + (1.0,)
+            for instruction in instructions
         ]
+        parsed = []
+        for instruction in raw_instructions:
+            if len(instruction) != 6:
+                raise TypeError(
+                    "TensorProduct instructions must be "
+                    "(i_in1, i_in2, i_out, mode, train[, path_weight])."
+                )
+            i_in1, i_in2, i_out, mode, train, path_weight = instruction
+            if mode not in ("u1u", "uuu", "uvw"):
+                raise ValueError("connection_mode must be 'u1u', 'uuu', or 'uvw'.")
+            if not 0 <= i_in1 < len(self.irreps_in1):
+                raise IndexError(f"{i_in1} is not a valid irreps_in1 index.")
+            if not 0 <= i_in2 < len(self.irreps_in2):
+                raise IndexError(f"{i_in2} is not a valid irreps_in2 index.")
+            if not 0 <= i_out < len(self.irreps_out):
+                raise IndexError(f"{i_out} is not a valid irreps_out index.")
+            ir1, mul1 = self.irreps_in1[i_in1]
+            ir2, mul2 = self.irreps_in2[i_in2]
+            ir_out, mul_out = self.irreps_out[i_out]
+            if ir_out not in ir1 * ir2:
+                raise ValueError(
+                    f"Illegal O(2) TensorProduct instruction: "
+                    f"{ir1} x {ir2} -> {ir_out}."
+                )
+            if mode == "u1u" and not (mul2 == 1 and mul1 == mul_out):
+                raise ValueError(
+                    "connection_mode='u1u' requires mul_in2=1 and mul_in1=mul_out."
+                )
+            if mode == "uuu" and not (mul1 == mul2 == mul_out):
+                raise ValueError("connection_mode='uuu' requires equal multiplicities.")
+            path_shape = {
+                "u1u": (mul1,),
+                "uuu": (mul1,),
+                "uvw": (mul1, mul2, mul_out),
+            }[mode]
+            parsed.append(
+                Instruction(
+                    i_in1,
+                    i_in2,
+                    i_out,
+                    mode,
+                    bool(train),
+                    float(path_weight),
+                    path_shape,
+                )
+            )
+
+        def variances(
+            values: Optional[Sequence[float]],
+            size: int,
+            name: str,
+        ) -> tuple[float, ...]:
+            if values is None:
+                return (1.0,) * size
+            values = tuple(float(value) for value in values)
+            if len(values) != size:
+                raise ValueError(f"{name} must have one value per irrep entry.")
+            return values
+
+        in1_var = variances(in1_var, len(self.irreps_in1), "in1_var")
+        in2_var = variances(in2_var, len(self.irreps_in2), "in2_var")
+        out_var = variances(out_var, len(self.irreps_out), "out_var")
+
+        def num_elements(instruction: Instruction) -> int:
+            mul1 = self.irreps_in1[instruction.i_in1].mul
+            mul2 = self.irreps_in2[instruction.i_in2].mul
+            return mul1 * mul2 if instruction.connection_mode == "uvw" else 1
+
+        normalized = []
+        for instruction in parsed:
+            ir1 = self.irreps_in1[instruction.i_in1].ir
+            ir2 = self.irreps_in2[instruction.i_in2].ir
+            ir_out = self.irreps_out[instruction.i_out].ir
+            if irrep_normalization == "component":
+                coefficient = 1.0
+            elif irrep_normalization == "norm":
+                coefficient = ir1.dim * ir2.dim / ir_out.dim
+            else:
+                coefficient = 1.0
+
+            if path_normalization == "element":
+                denominator = sum(
+                    in1_var[item.i_in1] * in2_var[item.i_in2] * num_elements(item)
+                    for item in parsed
+                    if item.i_out == instruction.i_out
+                )
+            elif path_normalization == "path":
+                denominator = (
+                    in1_var[instruction.i_in1]
+                    * in2_var[instruction.i_in2]
+                    * num_elements(instruction)
+                    * sum(item.i_out == instruction.i_out for item in parsed)
+                )
+            else:
+                denominator = 1.0
+            if denominator > 0:
+                coefficient /= denominator
+            coefficient *= out_var[instruction.i_out]
+            coefficient *= instruction.path_weight
+            normalized.append(instruction._replace(path_weight=math.sqrt(coefficient)))
+        self.instructions = tuple(normalized)
+
+        if shared_weights is None:
+            shared_weights = True
+        if internal_weights is None:
+            internal_weights = bool(shared_weights) and any(
+                instruction.has_weight for instruction in self.instructions
+            )
+        if internal_weights and not shared_weights:
+            raise ValueError("Internal weights require shared_weights=True.")
+        self.internal_weights = bool(internal_weights)
+        self.shared_weights = bool(shared_weights)
+        self.weight_numel = sum(
+            math.prod(instruction.path_shape)
+            for instruction in self.instructions
+            if instruction.has_weight
+        )
+        self.weight_shape = (self.weight_numel,)
+        if self.internal_weights and self.weight_numel > 0:
+            self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
+        else:
+            self.register_buffer("weight", torch.empty(0))
+
+        self._input1_slices = self.irreps_in1.slices()
+        self._input2_slices = self.irreps_in2.slices()
+        offsets = []
+        offset = 0
+        for instruction in self.instructions:
+            if instruction.has_weight:
+                size = math.prod(instruction.path_shape)
+                offsets.append((offset, size))
+                offset += size
+            else:
+                offsets.append(None)
+        self._weight_offsets = tuple(offsets)
+
+        output_mask = []
+        for i_out, ir_mul in enumerate(self.irreps_out):
+            connected = any(
+                instruction.i_out == i_out and instruction.path_weight != 0
+                for instruction in self.instructions
+            )
+            output_mask.append(
+                torch.ones(ir_mul.dim) if connected else torch.zeros(ir_mul.dim)
+            )
         self.register_buffer(
-            "path_scales",
-            torch.tensor(scales, dtype=torch.get_default_dtype()),
+            "output_mask",
+            torch.cat(output_mask) if output_mask else torch.ones(0),
             persistent=False,
         )
-        paths_by_output = [[] for _ in output_irrep_list]
-        for path_index, (output_index, input1_index, input2_index) in enumerate(paths):
-            paths_by_output[output_index].append(
-                (path_index, input1_index, input2_index)
-            )
-        self._paths_by_output = tuple(tuple(group) for group in paths_by_output)
-        self._input1_slices = self.irreps_in1.expanded_slices()
-        self._input2_slices = self.irreps_in2.expanded_slices()
-
-        if self.path_mode in ("u1u", "uuu"):
-            self.weight_shape = (len(paths), self.channels_out)
-        else:
-            self.weight_shape = (
-                len(paths),
-                self.channels_in1,
-                self.channels_in2,
-                self.channels_out,
-            )
-        self.weight_numel = math.prod(self.weight_shape)
-        if self.internal_weights:
-            self.weight = torch.nn.Parameter(torch.empty(self.weight_shape))
-            if self.weight_numel:
-                fan_in = (
-                    1
-                    if self.path_mode in ("u1u", "uuu")
-                    else self.channels_in1 * self.channels_in2
-                )
-                bound = math.sqrt(3.0 / fan_in)
-                torch.nn.init.uniform_(self.weight, -bound, bound)
-        else:
-            self.register_parameter("weight", None)
 
     def _resolve_weight(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
-        if self.internal_weights:
-            if weight is not None:
-                raise ValueError(
-                    "Do not pass weight when TensorProduct uses internal weights."
+        if weight is None:
+            if self.weight_numel > 0 and not self.internal_weights:
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights=False."
                 )
             weight = self.weight
-        elif weight is None:
-            raise ValueError("TensorProduct requires external weight.")
-        if weight is None:
-            raise RuntimeError("TensorProduct weight resolution failed.")
         if weight.is_complex():
             raise TypeError("O(2) TensorProduct supports real weights only.")
-        weight_ndim = len(self.weight_shape)
-        if (
-            weight.ndim < weight_ndim
-            or tuple(weight.shape[-weight_ndim:]) != self.weight_shape
-        ):
+        if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
             raise ValueError(
-                "TensorProduct weight trailing shape must be "
-                f"{self.weight_shape}, got {tuple(weight.shape)}."
+                "TensorProduct weight trailing dimension must be "
+                f"{self.weight_numel}, got {tuple(weight.shape)}."
             )
         return weight
 
@@ -293,94 +298,122 @@ class TensorProduct(torch.nn.Module):
         input2: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        expected1 = (self.irreps_in1.dim, self.channels_in1)
-        expected2 = (self.irreps_in2.dim, self.channels_in2)
-        if input1.ndim < 2 or tuple(input1.shape[-2:]) != expected1:
+        if input1.is_complex() or input2.is_complex():
+            raise TypeError("O(2) TensorProduct supports real inputs only.")
+        if input1.ndim < 1 or input1.size(-1) != self.irreps_in1.dim:
             raise ValueError(
-                f"TensorProduct input1 trailing shape must be {expected1}, "
-                f"got {tuple(input1.shape)}."
+                "TensorProduct input1 trailing dimension must be "
+                f"{self.irreps_in1.dim}, got {tuple(input1.shape)}."
             )
-        if input2.ndim < 2 or tuple(input2.shape[-2:]) != expected2:
+        if input2.ndim < 1 or input2.size(-1) != self.irreps_in2.dim:
             raise ValueError(
-                f"TensorProduct input2 trailing shape must be {expected2}, "
-                f"got {tuple(input2.shape)}."
+                "TensorProduct input2 trailing dimension must be "
+                f"{self.irreps_in2.dim}, got {tuple(input2.shape)}."
             )
         weight = self._resolve_weight(weight)
-        weight_ndim = len(self.weight_shape)
         try:
             leading_shape = torch.broadcast_shapes(
-                input1.shape[:-2],
-                input2.shape[:-2],
-                weight.shape[:-weight_ndim],
+                input1.shape[:-1],
+                input2.shape[:-1],
+                weight.shape[:-1],
             )
         except RuntimeError as error:
             raise ValueError(
                 "TensorProduct input and weight batch dimensions do not broadcast."
             ) from error
-        input1 = input1.expand(leading_shape + expected1)
-        input2 = input2.expand(leading_shape + expected2)
 
-        input1_irrep_list = self.irreps_in1.expanded()
-        input2_irrep_list = self.irreps_in2.expanded()
-        output_irrep_list = self.irreps_out.expanded()
-        zero_dependency = input1.sum() * 0 + input2.sum() * 0 + weight.sum() * 0
-        output_blocks = []
-        for output_index, output_ir in enumerate(output_irrep_list):
+        outputs = []
+        zero = input1.sum() * 0 + input2.sum() * 0 + weight.sum() * 0
+        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
             contributions = []
-            for path_index, input1_index, input2_index in self._paths_by_output[
-                output_index
-            ]:
-                if self.path_mode == "uuu":
-                    contribution = _cg_product_uuu(
-                        input1[..., self._input1_slices[input1_index], :],
-                        input1_irrep_list[input1_index],
-                        input2[..., self._input2_slices[input2_index], :],
-                        input2_irrep_list[input2_index],
-                        output_ir,
-                    )
-                    contribution = contribution * weight[..., path_index, :].unsqueeze(
-                        -2
-                    )
-                else:
-                    product = _cg_product(
-                        input1[..., self._input1_slices[input1_index], :],
-                        input1_irrep_list[input1_index],
-                        input2[..., self._input2_slices[input2_index], :],
-                        input2_irrep_list[input2_index],
-                        output_ir,
-                    )
-                    if self.path_mode == "u1u":
-                        contribution = product.squeeze(-1)
-                        contribution = contribution * weight[
-                            ..., path_index, :
-                        ].unsqueeze(-2)
-                    else:
-                        contribution = torch.einsum(
-                            "...duv,...uvc->...dc",
-                            product,
-                            weight[..., path_index, :, :, :],
-                        )
-                contributions.append(contribution * self.path_scales[path_index])
-            if contributions:
-                output_block = sum(contributions[1:], contributions[0])
-            else:
-                output_block = input1.new_zeros(
-                    leading_shape + (output_ir.dim, self.channels_out)
+            for instruction_index, instruction in enumerate(self.instructions):
+                if instruction.i_out != i_out:
+                    continue
+                ir1, mul1 = self.irreps_in1[instruction.i_in1]
+                ir2, mul2 = self.irreps_in2[instruction.i_in2]
+                values1 = input1[..., self._input1_slices[instruction.i_in1]].reshape(
+                    *input1.shape[:-1], ir1.dim, mul1
                 )
-                output_block = output_block + zero_dependency
-            output_blocks.append(output_block)
+                values2 = input2[..., self._input2_slices[instruction.i_in2]].reshape(
+                    *input2.shape[:-1], ir2.dim, mul2
+                )
+                product = _cg_product(values1, ir1, values2, ir2, ir_out)
+                if instruction.connection_mode == "uvw":
+                    if instruction.has_weight:
+                        offset, size = self._weight_offsets[instruction_index]
+                        path_weight = weight.narrow(-1, offset, size).reshape(
+                            *weight.shape[:-1], mul1, mul2, mul_out
+                        )
+                        contribution = torch.einsum(
+                            "...duv,...uvw->...dw",
+                            product,
+                            path_weight,
+                        )
+                    else:
+                        raise ValueError("uvw instructions require weights.")
+                elif instruction.connection_mode == "u1u":
+                    contribution = product[..., 0]
+                    if instruction.has_weight:
+                        offset, size = self._weight_offsets[instruction_index]
+                        path_weight = weight.narrow(-1, offset, size).reshape(
+                            *weight.shape[:-1], mul_out
+                        )
+                        contribution = contribution * path_weight.unsqueeze(-2)
+                else:
+                    contribution = product.diagonal(dim1=-2, dim2=-1)
+                    if instruction.has_weight:
+                        offset, size = self._weight_offsets[instruction_index]
+                        path_weight = weight.narrow(-1, offset, size).reshape(
+                            *weight.shape[:-1], mul_out
+                        )
+                        contribution = contribution * path_weight.unsqueeze(-2)
+                contributions.append(contribution * instruction.path_weight)
+            if contributions:
+                output = sum(contributions[1:], contributions[0])
+            else:
+                output = (
+                    input1.new_zeros(
+                        *leading_shape,
+                        ir_out.dim,
+                        mul_out,
+                    )
+                    + zero
+                )
+            outputs.append(output.reshape(*leading_shape, ir_out.dim * mul_out))
+        if outputs:
+            return torch.cat(outputs, dim=-1)
+        return input1.new_empty(*leading_shape, 0) + zero
 
-        if output_blocks:
-            return torch.cat(output_blocks, dim=-2)
-        return (
-            input1.new_empty(leading_shape + (0, self.channels_out)) + zero_dependency
+    def weight_view_for_instruction(
+        self,
+        instruction: int,
+        weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        specification = self.instructions[instruction]
+        if not specification.has_weight:
+            raise ValueError("The selected instruction has no weights.")
+        weight = self._resolve_weight(weight)
+        offset, size = self._weight_offsets[instruction]
+        return weight.narrow(-1, offset, size).view(
+            *weight.shape[:-1],
+            *specification.path_shape,
         )
 
-    def extra_repr(self) -> str:
+    def weight_views(
+        self,
+        weight: Optional[torch.Tensor] = None,
+        yield_instruction: bool = False,
+    ) -> Iterator:
+        for index, instruction in enumerate(self.instructions):
+            if not instruction.has_weight:
+                continue
+            view = self.weight_view_for_instruction(index, weight)
+            yield (index, instruction, view) if yield_instruction else view
+
+    def __repr__(self) -> str:
+        num_paths = sum(math.prod(item.path_shape) for item in self.instructions)
         return (
-            f"irreps_in1={self.irreps_in1}, irreps_in2={self.irreps_in2}, "
-            f"irreps_out={self.irreps_out}, channels_in1={self.channels_in1}, "
-            f"channels_in2={self.channels_in2}, channels_out={self.channels_out}, "
-            f"path_mode={self.path_mode}, internal_weights={self.internal_weights}, "
-            f"num_paths={len(self.path)}"
+            f"{self.__class__.__name__}({self.irreps_in1.simplify()} x "
+            f"{self.irreps_in2.simplify()} -> {self.irreps_out.simplify()} | "
+            f"{num_paths} paths | {self.weight_numel} weights)"
         )
