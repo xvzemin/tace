@@ -12,7 +12,7 @@ import opt_einsum_fx
 import torch
 from e3nn import o3
 
-from .rotation_matrix import init_edge_rot_mat_quaternion
+from .rotation_matrix import rotation_matrix_to_y_axis
 
 _BATCH = 10000
 
@@ -122,7 +122,7 @@ class WignerD(torch.nn.Module):
             ``(batch, (lmax + 1)**2, local_dim)``. Truncated degrees include
             the variance-preserving inverse scale.
         """
-        rot_mat3x3 = init_edge_rot_mat_quaternion(edge_vector)
+        rot_mat3x3 = rotation_matrix_to_y_axis(edge_vector)
         wigner = self._rotation_to_wigner_matrix_recursive(
             rot_mat3x3,
             0,

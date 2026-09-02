@@ -2,14 +2,6 @@
 # Authors: Zemin Xu
 # License: MIT, see LICENSE.md
 ################################################################################
-"""
-The rotation matrix constructed here aligns the edge with the y-axis [0,1,0].
-
-For details on obtaining a rotation matrix from quaternions, see:
-https://en.wikipedia.org/wiki/Hopf_fibration#Explicit_formulae
-and
-https://github.com/facebookresearch/fairchem/blob/main/src/fairchem/core/models/uma/common/quaternion/quaternion_utils.py
-"""
 
 import torch
 
@@ -71,32 +63,27 @@ def _quaternion_to_rotation_matrix(q: torch.Tensor) -> torch.Tensor:
     )
 
 
-def init_edge_rot_mat_quaternion(
-    edge_distance_vec: torch.Tensor,
+def rotation_matrix_to_y_axis(
+    vector: torch.Tensor,
     eps: float = 1e-7,
 ) -> torch.Tensor:
-    """Construct smooth rotation matrices aligned with edge vectors.
+    """Return rotations that align nonzero vectors with the positive y-axis.
 
     Parameters
     ----------
-    edge_distance_vec : torch.Tensor
-        Three-dimensional vectors with shape ``(..., 3)``. Each resulting
-        matrix aligns its vector with the positive second Cartesian axis.
+    vector : torch.Tensor
+        Nonzero three-dimensional vectors with shape ``(..., 3)``.
     eps : float, optional
         Positive regularization used by vector and quaternion normalization.
 
     Returns
     -------
     torch.Tensor
-        Rotation matrices with shape ``(..., 3, 3)``.
-
-    Notes
-    -----
-    Two quaternion charts are blended smoothly to avoid a singular choice of
-    frame near either direction of the alignment axis.
+        Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
+        its corresponding input vector aligns the result with ``[0, 1, 0]``.
     """
-    edge_unit = edge_distance_vec / _norm(edge_distance_vec, eps)
-    x, y, z = edge_unit.unbind(dim=-1)
+    unit_vector = vector / _norm(vector, eps)
+    x, y, z = unit_vector.unbind(dim=-1)
     q_pos = _quaternion_normalize(
         torch.stack([1.0 + y, -z, torch.zeros_like(x), x], dim=-1), eps
     )
@@ -104,5 +91,69 @@ def init_edge_rot_mat_quaternion(
         torch.stack([-z, 1.0 - y, x, torch.zeros_like(x)], dim=-1), eps
     )
     blend = _smooth_step_cinf(0.5 * (y + 1.0))
+    quaternion = _quaternion_nlerp(q_neg, q_pos, blend, eps)
+    return _quaternion_to_rotation_matrix(quaternion)
+
+
+def rotation_matrix_to_x_axis(
+    vector: torch.Tensor,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """Return rotations that align nonzero vectors with the positive x-axis.
+
+    Parameters
+    ----------
+    vector : torch.Tensor
+        Nonzero three-dimensional vectors with shape ``(..., 3)``.
+    eps : float, optional
+        Positive regularization used by vector and quaternion normalization.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
+        its corresponding input vector aligns the result with ``[1, 0, 0]``.
+    """
+    unit_vector = vector / _norm(vector, eps)
+    x, y, z = unit_vector.unbind(dim=-1)
+    q_pos = _quaternion_normalize(
+        torch.stack([1.0 + x, torch.zeros_like(x), z, -y], dim=-1), eps
+    )
+    q_neg = _quaternion_normalize(
+        torch.stack([-y, z, torch.zeros_like(x), 1.0 - x], dim=-1), eps
+    )
+    blend = _smooth_step_cinf(0.5 * (x + 1.0))
+    quaternion = _quaternion_nlerp(q_neg, q_pos, blend, eps)
+    return _quaternion_to_rotation_matrix(quaternion)
+
+
+def rotation_matrix_to_z_axis(
+    vector: torch.Tensor,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """Return rotations that align nonzero vectors with the positive z-axis.
+
+    Parameters
+    ----------
+    vector : torch.Tensor
+        Nonzero three-dimensional vectors with shape ``(..., 3)``.
+    eps : float, optional
+        Positive regularization used by vector and quaternion normalization.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
+        its corresponding input vector aligns the result with ``[0, 0, 1]``.
+    """
+    unit_vector = vector / _norm(vector, eps)
+    x, y, z = unit_vector.unbind(dim=-1)
+    q_pos = _quaternion_normalize(
+        torch.stack([1.0 + z, y, -x, torch.zeros_like(x)], dim=-1), eps
+    )
+    q_neg = _quaternion_normalize(
+        torch.stack([-x, torch.zeros_like(x), 1.0 - z, y], dim=-1), eps
+    )
+    blend = _smooth_step_cinf(0.5 * (z + 1.0))
     quaternion = _quaternion_nlerp(q_neg, q_pos, blend, eps)
     return _quaternion_to_rotation_matrix(quaternion)

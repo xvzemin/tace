@@ -4,7 +4,11 @@ from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
 from .linear import Linear
 from .local_frame import LocalFrame
-from .rotation_matrix import init_edge_rot_mat_quaternion
+from .rotation_matrix import (
+    rotation_matrix_to_x_axis,
+    rotation_matrix_to_y_axis,
+    rotation_matrix_to_z_axis,
+)
 from .tensor_product import TensorProduct
 from .wigner import WignerD
 
@@ -20,5 +24,7 @@ __all__ = [
     "TensorProduct",
     "WignerD",
     "circular_harmonics",
-    "init_edge_rot_mat_quaternion",
+    "rotation_matrix_to_x_axis",
+    "rotation_matrix_to_y_axis",
+    "rotation_matrix_to_z_axis",
 ]

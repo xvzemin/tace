@@ -9,19 +9,21 @@ from e3nn import o3
 
 from eqx import o2
 from eqx.o2 import (
+    Gate,
     Irrep,
     Irreps,
-    Gate,
     WignerD,
+    rotation_matrix_to_x_axis,
+    rotation_matrix_to_y_axis,
+    rotation_matrix_to_z_axis,
 )
-
+from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.inter import (
     INTERACTION,
     O2Interaction,
     O2MagneticInteraction,
     uvSO2Interaction,
 )
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
     O2ScatterTensorProduct,
@@ -29,8 +31,8 @@ from tace.models._e3nn.o2 import (
 )
 from tace.models._e3nn.representation import Representation
 from tace.models.angular import SolidHarmonics
-from tace.models.linear import torchLinear
 from tace.models.layout import LayoutTransform
+from tace.models.linear import torchLinear
 from tace.models.mag import MagneticBasis
 from tace.models.mlp import (
     ACTIVATION,
@@ -44,6 +46,43 @@ from tace.models.radial import j0SincSphericalBesselBasis, j0SphericalBesselBasi
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+@pytest.mark.parametrize(
+    ("rotation_matrix", "axis"),
+    [
+        (rotation_matrix_to_x_axis, 0),
+        (rotation_matrix_to_y_axis, 1),
+        (rotation_matrix_to_z_axis, 2),
+    ],
+)
+def test_rotation_matrix_to_axis(rotation_matrix, axis):
+    generator = torch.Generator().manual_seed(20260903)
+    vectors = torch.randn(64, 32, 3, dtype=DTYPE, generator=generator)
+    vectors /= torch.linalg.vector_norm(vectors, dim=-1, keepdim=True)
+    scales = torch.empty(64, 32, 1, dtype=DTYPE).uniform_(
+        -3.0,
+        3.0,
+        generator=generator,
+    )
+    vectors *= 10.0**scales
+    axes = torch.eye(3, dtype=DTYPE)
+    vectors.view(-1, 3)[:6] = torch.cat((axes, -axes))
+    vectors = vectors.to(DEVICE)
+
+    rotation = rotation_matrix(vectors)
+    rotated = torch.einsum("...ij,...j->...i", rotation, vectors)
+    expected = torch.zeros_like(vectors)
+    expected[..., axis] = torch.linalg.vector_norm(vectors, dim=-1)
+
+    assert rotation.shape == (*vectors.shape[:-1], 3, 3)
+    torch.testing.assert_close(rotated, expected)
+    identity = torch.eye(3, dtype=DTYPE, device=DEVICE).expand_as(rotation)
+    torch.testing.assert_close(rotation @ rotation.transpose(-1, -2), identity)
+    torch.testing.assert_close(
+        torch.linalg.det(rotation),
+        torch.ones_like(expected[..., 0]),
+    )
 
 
 @pytest.mark.parametrize(("Lmax", "lmax"), [(2, 3), (3, 2)])

@@ -55,7 +55,11 @@ features and back while retaining flattened ``ir_mul`` storage.
 .. autoclass:: eqx.o2.CircularHarmonics
    :members: forward
 
-.. autofunction:: eqx.o2.init_edge_rot_mat_quaternion
+.. autofunction:: eqx.o2.rotation_matrix_to_x_axis
+
+.. autofunction:: eqx.o2.rotation_matrix_to_y_axis
+
+.. autofunction:: eqx.o2.rotation_matrix_to_z_axis
 
 .. autoclass:: eqx.o2.WignerD
    :members: get_wigner
