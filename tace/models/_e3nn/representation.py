@@ -19,7 +19,7 @@ from ..linear import e3nnLinear
 from ..mag import MagneticBasis
 from ..radial import RadialBasis
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
-from .inter import INTERACTION  # , SO2EdgeInteraction
+from .inter import INTERACTION
 from .layer_norm import get_normalization_layer
 from .node import NODE_EMBEDDING
 from .prod import PRODUCT

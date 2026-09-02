@@ -76,6 +76,38 @@ However, in our current version, we do not include replay data such as
 multi-fidelity or multi-head training data during finetuning by default.
 
 
+Updating Atomic Energies
+------------------------
+
+When the finetuning dataset uses a different reference-energy convention from
+the pretrained model, update the per-element atomic energies before starting
+finetuning. The model uses these values as the composition-dependent energy
+baseline, while the learned model predicts the remaining energy contribution.
+
+``tace-update`` reads ``statistics_<fidelity_idx>.yaml`` files from the current
+directory. For example, for a single-fidelity model containing H, C, N, and O,
+prepare ``statistics_0.yaml`` with the new atomic energies:
+
+.. code-block:: yaml
+
+   atomic_energy:
+     1: -13.587222780835477
+     6: -1029.4889999855063
+     7: -1484.9814568572233
+     8: -2041.9816003861047
+
+The keys may be atomic numbers, as above, or chemical symbols. The dictionary
+must contain the same elements as the pretrained model. For a multi-fidelity
+model, ``statistics_0.yaml``, ``statistics_1.yaml``, and so on update the
+corresponding fidelity. A missing file or a file without an
+``atomic_energy`` entry leaves that fidelity unchanged.
+
+Run the update from the directory containing the statistics files:
+
+.. code-block:: bash
+
+   tace-update -m TACE-OAM-7M.pt -u atomic_energy
+
 Example
 -------
 
