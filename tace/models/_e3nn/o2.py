@@ -35,8 +35,8 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         for _, mul in self.message_irreps:
             if mul % num_head != 0:
                 raise ValueError("num_head must divide every message multiplicity.")
-        self.q_proj = o2.Linear(self.irreps, self.irreps, biases=True)
-        self.k_proj = o2.Linear(self.irreps, self.irreps, biases=True)
+        self.q_proj = o2.Linear(self.irreps, self.irreps)
+        self.k_proj = o2.Linear(self.irreps, self.irreps)
         self.radial_proj = torchLinear(num_radial_basis, 2 * num_head)
         torch.nn.init.zeros_(self.radial_proj.weight)
         torch.nn.init.zeros_(self.radial_proj.bias)
@@ -96,7 +96,6 @@ class RadialRotaryComplexAttention(torch.nn.Module):
 
 
 class O2ScatterTensorProduct(torch.nn.Module):
-    ece_path_mode: str = "expand"
 
     def __init__(
         self,
@@ -161,7 +160,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 contraction_irreps,
                 correlation,
                 algorithm="edge",
-                path_mode=self.ece_path_mode,
             )
             projection_irreps = o2.Irreps(
                 [
@@ -173,7 +171,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
             self.linear_up = o2.Linear(
                 self.local_irreps_in,
                 projection_irreps,
-                biases=True,
             )
         else:
             self.asymmetric_contraction = None
@@ -208,7 +205,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
             self.linear_up = o2.Linear(
                 self.local_irreps_in,
                 self.nonlinearity.irreps_in,
-                biases=True,
             )
 
         hidden_irreps = (
@@ -219,7 +215,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.linear_down = o2.Linear(
             hidden_irreps,
             self.local_irreps_out,
-            biases=True,
         )
         self.weight_numel = self.local_irreps_in.num_irreps
 

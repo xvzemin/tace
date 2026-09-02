@@ -32,7 +32,7 @@ class Linear(torch.nn.Module):
         ``False``, they must be supplied to :meth:`forward`. The default is
         inferred from ``shared_weights``.
     shared_weights : bool, optional
-        Whether one weight tensor is shared over all leading dimensions.
+        Whether one weight is shared over all leading dimensions.
         Internal weights require shared weights. External weights may add
         broadcastable leading dimensions when this is ``False``.
     instructions : sequence of tuple of int, optional
@@ -46,13 +46,6 @@ class Linear(torch.nn.Module):
         Normalization applied when several paths contribute to one output.
         ``"element"`` normalizes by the total input multiplicity, while
         ``"path"`` assigns equal variance to each path.
-
-    Notes
-    -----
-    Features have shape ``(..., irreps.dim)``. Each entry uses flattened
-    ``ir_mul`` order and can be viewed as ``(..., ir.dim, mul)`` without a
-    permutation. Instructions connect complete entries rather than expanded
-    irrep copies, so different partitions of equal irreps remain distinct.
     """
 
     def __init__(
@@ -88,9 +81,9 @@ class Linear(torch.nn.Module):
             if not isinstance(instruction, tuple) or len(instruction) != 2:
                 raise TypeError("Each Linear instruction must be (i_in, i_out).")
             i_in, i_out = instruction
-            if not isinstance(i_in, int) or isinstance(i_in, bool):
+            if not isinstance(i_in, int):
                 raise TypeError("Linear instruction indices must be integers.")
-            if not isinstance(i_out, int) or isinstance(i_out, bool):
+            if not isinstance(i_out, int):
                 raise TypeError("Linear instruction indices must be integers.")
             if not 0 <= i_in < len(self.irreps_in):
                 raise IndexError(f"{i_in} is not a valid index for irreps_in.")
@@ -204,8 +197,6 @@ class Linear(torch.nn.Module):
                     "Weights must be provided when internal_weights=False."
                 )
             weight = self.weight
-        if weight.is_complex():
-            raise TypeError("O(2) Linear supports real weights only.")
         if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
             raise ValueError(
                 "Linear weight trailing dimension must be "
@@ -220,8 +211,6 @@ class Linear(torch.nn.Module):
                     "Biases must be provided when internal_weights=False."
                 )
             bias = self.bias
-        if bias.is_complex():
-            raise TypeError("O(2) Linear supports real biases only.")
         if bias.ndim < 1 or bias.size(-1) != self.bias_numel:
             raise ValueError(
                 "Linear bias trailing dimension must be "
@@ -242,11 +231,11 @@ class Linear(torch.nn.Module):
         features : torch.Tensor
             Input with shape ``(..., irreps_in.dim)``.
         weight : torch.Tensor, optional
-            External weights with trailing shape ``weight_shape``. Leading
+            External weights with shape ``weight_shape``. Leading
             dimensions must broadcast with ``features``. Omit when internal
             weights are enabled.
         bias : torch.Tensor, optional
-            External biases with trailing dimension ``bias_numel``. Leading
+            External biases with dimension ``bias_numel``. Leading
             dimensions follow the same broadcasting rules as ``weight``.
 
         Returns
@@ -255,8 +244,6 @@ class Linear(torch.nn.Module):
             Output with shape ``(..., irreps_out.dim)`` over the broadcast
             leading shape.
         """
-        if features.is_complex():
-            raise TypeError("O(2) Linear supports real features only.")
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "Linear feature trailing dimension must be "
