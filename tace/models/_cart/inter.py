@@ -10,17 +10,17 @@ import torch
 from eqx import co3
 from tace.utils.torch_scatter import scatter_sum
 
-from ..mlp import MLP
-from .base import Interaction, possible_irreps
+from ..mlp import MLP, get_scaled_activation
+from .base import Interaction
 from .dropout import GraphDropPath
-from .fused import O3MagneticScatterTensorProduct, O3ScatterTensorProduct
+from .fused import O3ScatterTensorProduct
 from .linear import Linear
-from .nonlinear import CartesianGate, split_scalars
+from .nonlinear import Gate, O3Gate, split_scalars
 from .residual import get_resnet_layer
 
 
-class CartesianCgtpInteraction(Interaction):
-    """Cartesian counterpart of the standard CG tensor-product interaction."""
+class O3IctpInteraction(Interaction):
+    """Interaction based on irreducible tensor products."""
 
     def _setup(self) -> None:
         self.irreps_up = co3.Irreps(
@@ -66,8 +66,6 @@ class CartesianCgtpInteraction(Interaction):
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Optional[torch.Tensor],
-        magnetic_radial_basis,
-        magnetic_node_attrs,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
@@ -76,23 +74,50 @@ class CartesianCgtpInteraction(Interaction):
 
     def _setup_output(self) -> None:
         if self.nonlinear == "gate":
-            scalars, tensors = split_scalars(self.irreps_out)
-            self.nonlinearity = CartesianGate(
-                scalars,
-                tensors,
-                scalar_act=self.scalar_act,
-                tensor_act=self.tensor_act,
-            )
+            if self.gate_m0:
+                scalar_name = (
+                    self.scalar_act[0]
+                    if isinstance(self.scalar_act, list)
+                    else self.scalar_act
+                )
+                irreps_gates = co3.Irreps(
+                    [(co3.Irrep("0e"), mul) for _, mul in self.irreps_out]
+                )
+                self.nonlinearity = O3Gate(
+                    irreps_gates,
+                    [get_scaled_activation(scalar_name or "sigmoid")]
+                    * len(irreps_gates),
+                    self.irreps_out,
+                )
+            else:
+                scalars, tensors = split_scalars(self.irreps_out)
+                self.nonlinearity = Gate(
+                    scalars,
+                    tensors,
+                    scalar_act=self.scalar_act,
+                    tensor_act=self.tensor_act,
+                )
             linear_out = self.nonlinearity.irreps_in
+            self.linear_nonlinearity = Linear(
+                self.irreps_out if self.gate_m0 else self.nonlinearity.irreps_out,
+                self.irreps_out,
+                bias=self.use_bias,
+            )
         elif self.nonlinear is None:
             self.nonlinearity = None
             linear_out = self.irreps_out
+            self.linear_nonlinearity = torch.nn.Identity()
         else:
             raise ValueError(
-                "Cartesian interactions support nonlinear=None or 'gate', "
+                "Interactions support nonlinear=None or 'gate', "
                 f"got {self.nonlinear!r}."
             )
-        self.linear_down = Linear(self.irreps_out, linear_out, bias=self.use_bias)
+        self.linear_down = Linear(
+            self.rejector.irreps_out,
+            linear_out,
+            bias=self.use_bias,
+        )
+        self.irreps_project = linear_out
         use_residual = self.layer > 0 or self.use_first_resnet
         if use_residual and self.resnet_type == "BB":
             self.residual_bb = get_resnet_layer(
@@ -175,8 +200,6 @@ class CartesianCgtpInteraction(Interaction):
         edge_cutoff: Optional[torch.Tensor],
         edge_wigner=None,
         edge_wigner_inv=None,
-        magnetic_radial_basis=None,
-        magnetic_node_attrs=None,
         batch=None,
         graph=None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -211,9 +234,9 @@ class CartesianCgtpInteraction(Interaction):
             edge_attrs,
             edge_index,
             edge_cutoff,
-            magnetic_radial_basis,
-            magnetic_node_attrs,
         )
+        messages = self.linear_down(messages)
+        messages = co3.project_irreps(messages, self.irreps_project)
         density = self._density(
             edge_feats,
             edge_cutoff,
@@ -223,9 +246,9 @@ class CartesianCgtpInteraction(Interaction):
             messages.device,
         )
         messages = self._normalize_messages(messages, density)
-        messages = self.linear_down(messages)
         if self.nonlinearity is not None:
             messages = self.nonlinearity(messages)
+        messages = self.linear_nonlinearity(messages)
         if residual_ba is not None:
             if hasattr(self, "stochastic_depth"):
                 residual_ba = self.stochastic_depth(residual_ba, batch)
@@ -248,97 +271,12 @@ class CartesianCgtpInteraction(Interaction):
         return messages, sc
 
 
-class CartesianMagneticInteraction(CartesianCgtpInteraction):
-    """Three-factor Cartesian interaction with axial magnetic harmonics."""
-
-    def _setup(self) -> None:
-        if self.magnetic_irreps is None:
-            raise ValueError("o3_w6j_mag requires magnetic Cartesian irreps.")
-        message_lmax = self.Lmax if self.correlation == 1 else self.lmax
-        intermediate = possible_irreps(
-            self.irreps_in,
-            self.irreps_edge,
-            parity=True,
-            lmax=message_lmax + self.magnetic_irreps.lmax,
-        )
-        output_types = possible_irreps(
-            intermediate,
-            self.magnetic_irreps,
-            parity=True,
-            lmax=message_lmax,
-        )
-        self.irreps_out = co3.Irreps([(ir, self.num_channel) for ir, _ in output_types])
-        if self.layer != self.num_layers - 1:
-            self.irreps_sc = self.irreps_out.filter(lmax=self.Lmax)
-        super()._setup()
-
-    def _build_rejector(self) -> torch.nn.Module:
-        if not self.parity:
-            raise ValueError("o3_w6j_mag requires parity=true.")
-        return O3MagneticScatterTensorProduct(
-            self.irreps_up,
-            self.irreps_edge,
-            self.magnetic_irreps,
-            self.irreps_out,
-            l1l2=self.l1l2,
-        )
-
-    def _edge_weight_input_dim(self) -> int:
-        return self.edge_feats_channel + self.num_mag_radial_basis
-
-    def _setup_additional_modules(self) -> None:
-        self.extra_info = MLP(
-            [
-                self._edge_weight_input_dim(),
-                *self.radial_mlp,
-                self.rejector.extra_weight_numel,
-            ],
-            bias=self.radial_bias,
-            layer_norm=True,
-            act="silu",
-        )
-
-    def _compute_messages(
-        self,
-        lifted: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_cutoff: Optional[torch.Tensor],
-        magnetic_radial_basis,
-        magnetic_node_attrs,
-    ) -> torch.Tensor:
-        if magnetic_radial_basis is None or magnetic_node_attrs is None:
-            raise ValueError(
-                "o3_w6j_mag requires magnetic radial and angular features."
-            )
-        source = edge_index[0]
-        inputs = torch.cat((edge_feats, magnetic_radial_basis[source]), dim=-1)
-        conv_weights = self.edge_info(inputs)
-        extra_weights = self.extra_info(inputs)
-        if edge_cutoff is not None:
-            conv_weights = conv_weights * edge_cutoff
-            extra_weights = extra_weights * edge_cutoff
-        return self.rejector(
-            lifted,
-            edge_attrs,
-            magnetic_node_attrs,
-            conv_weights,
-            extra_weights,
-            edge_index,
-        )
-
-
 INTERACTION = {
-    "cgtp": CartesianCgtpInteraction,
-    "spatial": CartesianCgtpInteraction,
-    "coupled": CartesianCgtpInteraction,
-    "o3_w6j_mag": CartesianMagneticInteraction,
+    "ictp": O3IctpInteraction,
 }
 
 
 __all__ = [
-    "CartesianCgtpInteraction",
-    "CartesianMagneticInteraction",
+    "O3IctpInteraction",
     "INTERACTION",
 ]

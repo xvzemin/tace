@@ -10,12 +10,8 @@ from typing import Iterator, NamedTuple, Optional, Sequence
 import torch
 
 from .irreps import Irrep, Irreps, IrrepsLike
-from .projector import (
-    _cartesian_to_spherical_basis,
-)
-from .projector import (
-    project as project_cartesian,
-)
+from .projector import path_matrix
+from .projector import project as project_cartesian
 from .utils import levi_civita
 
 
@@ -60,15 +56,74 @@ def _cartesian_product(
     )
 
 
+def _cartesian_contraction(
+    input1: torch.Tensor,
+    irrep1: Irrep,
+    input2: torch.Tensor,
+    irrep2: Irrep,
+    irrep_out: Irrep,
+    epsilon: torch.Tensor,
+) -> torch.Tensor:
+    """Evaluate parallel path- and channel-wise Cartesian contractions."""
+    difference = irrep1.l + irrep2.l - irrep_out.l
+    if difference < 0 or irrep_out not in irrep1 * irrep2:
+        raise ValueError(
+            f"Illegal O(3) tensor-contraction path: {irrep1} x {irrep2} -> {irrep_out}."
+        )
+    if difference % 2 == 0:
+        contracted = difference // 2
+        free1 = 3 ** (irrep1.l - contracted)
+        shared = 3**contracted
+        free2 = 3 ** (irrep2.l - contracted)
+        first = input1.reshape(
+            *input1.shape[:-3], input1.shape[-3], free1, shared, input1.shape[-1]
+        )
+        second = input2.reshape(
+            *input2.shape[:-3], input2.shape[-3], shared, free2, input2.shape[-1]
+        )
+        output = torch.einsum("...piac,...pajc->...pijc", first, second)
+        return output.reshape(
+            *output.shape[:-4], input1.shape[-3], irrep_out.dim, input1.shape[-1]
+        ) * (3.0 ** (-0.5 * contracted))
+
+    contracted = (difference - 1) // 2
+    free1 = 3 ** (irrep1.l - contracted - 1)
+    shared = 3**contracted
+    free2 = 3 ** (irrep2.l - contracted - 1)
+    first = input1.reshape(
+        *input1.shape[:-3],
+        input1.shape[-3],
+        free1,
+        3,
+        shared,
+        input1.shape[-1],
+    )
+    second = input2.reshape(
+        *input2.shape[:-3],
+        input2.shape[-3],
+        shared,
+        3,
+        free2,
+        input2.shape[-1],
+    )
+    output = torch.einsum("...piuac,wuv,...pavjc->...piwjc", first, epsilon, second)
+    return (
+        output.reshape(
+            *output.shape[:-5], input1.shape[-3], irrep_out.dim, input1.shape[-1]
+        )
+        * (0.5 * 3.0**contracted) ** -0.5
+    )
+
+
 @lru_cache(maxsize=None)
 def _component_scale(degree1: int, degree2: int, degree_out: int) -> float:
     """Return the scale giving unit variance to each output component."""
     ir1 = Irrep(degree1, 1)
     ir2 = Irrep(degree2, 1)
     ir_out = Irrep(degree_out, 1)
-    basis1 = _cartesian_to_spherical_basis(degree1)
-    basis2 = _cartesian_to_spherical_basis(degree2)
-    basis_out = _cartesian_to_spherical_basis(degree_out)
+    basis1 = path_matrix(degree1, dtype=torch.float64)
+    basis2 = path_matrix(degree2, dtype=torch.float64)
+    basis_out = path_matrix(degree_out, dtype=torch.float64)
     product = _cartesian_product(
         basis1,
         ir1,
@@ -96,7 +151,7 @@ class Instruction(NamedTuple):
 
 
 class TensorProduct(torch.nn.Module):
-    """Evaluate an O(3) tensor product in flattened ``ir_mul`` layout.
+    """Evaluate tensor products in flattened ``ir_mul`` layout.
 
     Parameters
     ----------
@@ -110,6 +165,14 @@ class TensorProduct(torch.nn.Module):
         Paths written as ``(i_in1, i_in2, i_out, mode, train)`` or with an
         additional path multiplier. ``mode`` is ``"u1u"``, ``"uuu"``, or
         ``"uvw"``.
+    project : bool
+        Project outputs onto their symmetric traceless subspaces. This must be
+        specified explicitly. Set it to ``False`` when a linear path
+        compression is applied before projection.
+    simplify : bool, optional
+        Pack consecutive equal path entries into one multiplicity axis. Inputs
+        are read in the corresponding simplified layout and outputs are
+        returned in that layout.
     in1_var, in2_var, out_var : sequence of float, optional
         Expected entry variances used to calculate path normalization.
     irrep_normalization : {"component", "norm", "none"}, optional
@@ -124,8 +187,7 @@ class TensorProduct(torch.nn.Module):
     Notes
     -----
     Every tensor has shape ``(..., irreps.dim)``. Entries are viewed internally
-    as ``(..., ir.dim, mul)`` and projected onto their symmetric traceless
-    subspaces after path aggregation.
+    as ``(..., ir.dim, mul)``.
     """
 
     def __init__(
@@ -134,6 +196,9 @@ class TensorProduct(torch.nn.Module):
         irreps_in2: IrrepsLike,
         irreps_out: IrrepsLike,
         instructions: Sequence[tuple],
+        *,
+        project: bool,
+        simplify: bool = False,
         in1_var: Optional[Sequence[float]] = None,
         in2_var: Optional[Sequence[float]] = None,
         out_var: Optional[Sequence[float]] = None,
@@ -143,15 +208,30 @@ class TensorProduct(torch.nn.Module):
         shared_weights: Optional[bool] = None,
     ) -> None:
         super().__init__()
+        if not isinstance(project, bool):
+            raise TypeError("project must be explicitly set to True or False.")
+        if not isinstance(simplify, bool):
+            raise TypeError("simplify must be a bool.")
         if irrep_normalization not in ("component", "norm", "none"):
             raise ValueError(
                 "irrep_normalization must be 'component', 'norm', or 'none'."
             )
         if path_normalization not in ("element", "path", "none"):
             raise ValueError("path_normalization must be 'element', 'path', or 'none'.")
-        self.irreps_in1 = Irreps(irreps_in1)
-        self.irreps_in2 = Irreps(irreps_in2)
-        self.irreps_out = Irreps(irreps_out)
+        self.path_irreps_in1 = Irreps(irreps_in1)
+        self.path_irreps_in2 = Irreps(irreps_in2)
+        self.path_irreps_out = Irreps(irreps_out)
+        self.irreps_in1 = (
+            self.path_irreps_in1.simplify() if simplify else self.path_irreps_in1
+        )
+        self.irreps_in2 = (
+            self.path_irreps_in2.simplify() if simplify else self.path_irreps_in2
+        )
+        self.irreps_out = (
+            self.path_irreps_out.simplify() if simplify else self.path_irreps_out
+        )
+        self.project = project
+        self.simplify = simplify
         self.irrep_normalization = irrep_normalization
         self.path_normalization = path_normalization
 
@@ -169,19 +249,18 @@ class TensorProduct(torch.nn.Module):
             i_in1, i_in2, i_out, mode, train, path_weight = instruction
             if mode not in ("u1u", "uuu", "uvw"):
                 raise ValueError("connection_mode must be 'u1u', 'uuu', or 'uvw'.")
-            if not 0 <= i_in1 < len(self.irreps_in1):
+            if not 0 <= i_in1 < len(self.path_irreps_in1):
                 raise IndexError(f"{i_in1} is not a valid irreps_in1 index.")
-            if not 0 <= i_in2 < len(self.irreps_in2):
+            if not 0 <= i_in2 < len(self.path_irreps_in2):
                 raise IndexError(f"{i_in2} is not a valid irreps_in2 index.")
-            if not 0 <= i_out < len(self.irreps_out):
+            if not 0 <= i_out < len(self.path_irreps_out):
                 raise IndexError(f"{i_out} is not a valid irreps_out index.")
-            ir1, mul1 = self.irreps_in1[i_in1]
-            ir2, mul2 = self.irreps_in2[i_in2]
-            ir_out, mul_out = self.irreps_out[i_out]
+            ir1, mul1 = self.path_irreps_in1[i_in1]
+            ir2, mul2 = self.path_irreps_in2[i_in2]
+            ir_out, mul_out = self.path_irreps_out[i_out]
             if ir_out not in ir1 * ir2:
                 raise ValueError(
-                    f"Illegal O(3) TensorProduct instruction: "
-                    f"{ir1} x {ir2} -> {ir_out}."
+                    f"Illegal TensorProduct instruction: {ir1} x {ir2} -> {ir_out}."
                 )
             if mode == "u1u" and not (mul2 == 1 and mul1 == mul_out):
                 raise ValueError(
@@ -216,20 +295,20 @@ class TensorProduct(torch.nn.Module):
                 raise ValueError(f"{name} must have one value per irrep entry.")
             return values
 
-        in1_var = variances(in1_var, len(self.irreps_in1), "in1_var")
-        in2_var = variances(in2_var, len(self.irreps_in2), "in2_var")
-        out_var = variances(out_var, len(self.irreps_out), "out_var")
+        in1_var = variances(in1_var, len(self.path_irreps_in1), "in1_var")
+        in2_var = variances(in2_var, len(self.path_irreps_in2), "in2_var")
+        out_var = variances(out_var, len(self.path_irreps_out), "out_var")
 
         def num_elements(instruction: Instruction) -> int:
-            mul1 = self.irreps_in1[instruction.i_in1].mul
-            mul2 = self.irreps_in2[instruction.i_in2].mul
+            mul1 = self.path_irreps_in1[instruction.i_in1].mul
+            mul2 = self.path_irreps_in2[instruction.i_in2].mul
             return mul1 * mul2 if instruction.connection_mode == "uvw" else 1
 
         normalized = []
         for instruction in parsed:
-            ir1 = self.irreps_in1[instruction.i_in1].ir
-            ir2 = self.irreps_in2[instruction.i_in2].ir
-            ir_out = self.irreps_out[instruction.i_out].ir
+            ir1 = self.path_irreps_in1[instruction.i_in1].ir
+            ir2 = self.path_irreps_in2[instruction.i_in2].ir
+            ir_out = self.path_irreps_out[instruction.i_out].ir
             if irrep_normalization == "component":
                 coefficient = _component_scale(ir1.l, ir2.l, ir_out.l) ** 2
             elif irrep_normalization == "norm":
@@ -287,6 +366,42 @@ class TensorProduct(torch.nn.Module):
 
         self._input1_slices = self.irreps_in1.slices()
         self._input2_slices = self.irreps_in2.slices()
+        projector_names = []
+        for index, (ir, _) in enumerate(self.irreps_out):
+            name = f"_path_matrix_{index}"
+            self.register_buffer(name, path_matrix(ir.l), persistent=False)
+            projector_names.append(name)
+        self._projector_names = tuple(projector_names)
+
+        def packed_entries(path_irreps: Irreps) -> tuple[tuple[int, int], ...]:
+            if not self.simplify:
+                return tuple((index, 0) for index in range(len(path_irreps)))
+            entries = []
+            packed_index = -1
+            previous_ir = None
+            offset = 0
+            for ir, mul in path_irreps:
+                if ir != previous_ir:
+                    packed_index += 1
+                    previous_ir = ir
+                    offset = 0
+                entries.append((packed_index, offset))
+                offset += mul
+            return tuple(entries)
+
+        self._input1_entries = packed_entries(self.path_irreps_in1)
+        self._input2_entries = packed_entries(self.path_irreps_in2)
+
+        output_groups = []
+        for index, (ir, _) in enumerate(self.path_irreps_out):
+            if (
+                not self.simplify
+                or index == 0
+                or ir != self.path_irreps_out[index - 1].ir
+            ):
+                output_groups.append([])
+            output_groups[-1].append(index)
+        self._output_groups = tuple(tuple(group) for group in output_groups)
         offsets = []
         offset = 0
         for instruction in self.instructions:
@@ -297,19 +412,41 @@ class TensorProduct(torch.nn.Module):
             else:
                 offsets.append(None)
         self._weight_offsets = tuple(offsets)
-        output_mask = []
-        for i_out, ir_mul in enumerate(self.irreps_out):
+        path_output_mask = []
+        for i_out, (ir, mul) in enumerate(self.path_irreps_out):
             connected = any(
                 instruction.i_out == i_out and instruction.path_weight != 0
                 for instruction in self.instructions
             )
-            output_mask.append(
-                torch.ones(ir_mul.dim) if connected else torch.zeros(ir_mul.dim)
+            path_output_mask.append(
+                torch.ones(ir.dim, mul) if connected else torch.zeros(ir.dim, mul)
             )
+        output_mask = [
+            torch.cat([path_output_mask[index] for index in group], dim=-1).reshape(-1)
+            for group in self._output_groups
+        ]
         self.register_buffer(
             "output_mask",
             torch.cat(output_mask) if output_mask else torch.ones(0),
             persistent=False,
+        )
+        output_counts = [0] * len(self.path_irreps_out)
+        for instruction in self.instructions:
+            output_counts[instruction.i_out] += 1
+        can_contract = bool(self.instructions) and all(
+            instruction.connection_mode == "uuu" for instruction in self.instructions
+        )
+        can_contract = can_contract and all(count == 1 for count in output_counts)
+        contraction_groups = {}
+        if can_contract:
+            for index, instruction in enumerate(self.instructions):
+                ir1 = self.path_irreps_in1[instruction.i_in1].ir
+                ir2 = self.path_irreps_in2[instruction.i_in2].ir
+                ir_out, mul_out = self.path_irreps_out[instruction.i_out]
+                key = (ir1.l, ir2.l, ir_out.l, mul_out)
+                contraction_groups.setdefault(key, []).append(index)
+        self._contraction_groups = tuple(
+            tuple(group) for group in contraction_groups.values()
         )
 
     def _resolve_weight(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
@@ -320,7 +457,7 @@ class TensorProduct(torch.nn.Module):
                 )
             weight = self.weight
         if weight.is_complex():
-            raise TypeError("O(3) TensorProduct supports real weights only.")
+            raise TypeError("TensorProduct supports real weights only.")
         if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
             raise ValueError(
                 f"TensorProduct weight trailing dimension must be {self.weight_numel}, "
@@ -348,13 +485,15 @@ class TensorProduct(torch.nn.Module):
                 f"got {tuple(features.shape)}."
             )
         outputs = []
-        for (ir, mul), ir_slice in zip(self.irreps_out, self.irreps_out.slices()):
+        for (ir, mul), ir_slice, name in zip(
+            self.irreps_out,
+            self.irreps_out.slices(),
+            self._projector_names,
+        ):
             values = features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
-            outputs.append(
-                project_cartesian(values, ir.l).reshape(
-                    *features.shape[:-1], ir.dim * mul
-                )
-            )
+            matrix = getattr(self, name).to(dtype=values.dtype)
+            values = torch.einsum("dm,mn,...nc->...dc", matrix, matrix.T, values)
+            outputs.append(values.reshape(*features.shape[:-1], ir.dim * mul))
         if outputs:
             return torch.cat(outputs, dim=-1)
         return features.new_empty(*features.shape[:-1], 0)
@@ -381,11 +520,14 @@ class TensorProduct(torch.nn.Module):
         Returns
         -------
         torch.Tensor
-            Symmetric traceless output with shape
-            ``(..., irreps_out.dim)`` over the broadcast leading dimensions.
+            Output with shape ``(..., irreps_out.dim)`` over the broadcast
+            leading dimensions. It is symmetric traceless only when
+            ``project=True``.
         """
+        if self._contraction_groups:
+            return _forward_uuu(self, input1, input2, weight)
         if input1.is_complex() or input2.is_complex():
-            raise TypeError("O(3) TensorProduct supports real inputs only.")
+            raise TypeError("TensorProduct supports real inputs only.")
         if input1.ndim < 1 or input1.size(-1) != self.irreps_in1.dim:
             raise ValueError(
                 f"TensorProduct input1 trailing dimension must be "
@@ -406,21 +548,27 @@ class TensorProduct(torch.nn.Module):
                 "TensorProduct input and weight batch dimensions do not broadcast."
             ) from error
 
-        outputs = []
+        path_outputs = []
         zero = input1.sum() * 0 + input2.sum() * 0 + weight.sum() * 0
-        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
+        for i_out, (ir_out, mul_out) in enumerate(self.path_irreps_out):
             contributions = []
             for instruction_index, instruction in enumerate(self.instructions):
                 if instruction.i_out != i_out:
                     continue
-                ir1, mul1 = self.irreps_in1[instruction.i_in1]
-                ir2, mul2 = self.irreps_in2[instruction.i_in2]
-                values1 = input1[..., self._input1_slices[instruction.i_in1]].reshape(
-                    *input1.shape[:-1], ir1.dim, mul1
+                ir1, mul1 = self.path_irreps_in1[instruction.i_in1]
+                ir2, mul2 = self.path_irreps_in2[instruction.i_in2]
+                packed1, offset1 = self._input1_entries[instruction.i_in1]
+                packed2, offset2 = self._input2_entries[instruction.i_in2]
+                _, packed_mul1 = self.irreps_in1[packed1]
+                _, packed_mul2 = self.irreps_in2[packed2]
+                values1 = input1[..., self._input1_slices[packed1]].reshape(
+                    *input1.shape[:-1], ir1.dim, packed_mul1
                 )
-                values2 = input2[..., self._input2_slices[instruction.i_in2]].reshape(
-                    *input2.shape[:-1], ir2.dim, mul2
+                values1 = values1.narrow(-1, offset1, mul1)
+                values2 = input2[..., self._input2_slices[packed2]].reshape(
+                    *input2.shape[:-1], ir2.dim, packed_mul2
                 )
+                values2 = values2.narrow(-1, offset2, mul2)
                 product = _cartesian_product(
                     values1, ir1, values2, ir2, ir_out, self.levi_civita
                 )
@@ -453,9 +601,19 @@ class TensorProduct(torch.nn.Module):
                 contributions.append(contribution * instruction.path_weight)
             if contributions:
                 output = sum(contributions[1:], contributions[0])
-                output = project_cartesian(output, ir_out.l)
             else:
                 output = input1.new_zeros(*leading_shape, ir_out.dim, mul_out) + zero
+            path_outputs.append(output)
+        outputs = []
+        for group_index, ((ir_out, mul_out), group) in enumerate(
+            zip(self.irreps_out, self._output_groups)
+        ):
+            output = torch.cat([path_outputs[index] for index in group], dim=-1)
+            if self.project:
+                matrix = getattr(self, self._projector_names[group_index]).to(
+                    dtype=output.dtype
+                )
+                output = torch.einsum("dm,mn,...nc->...dc", matrix, matrix.T, output)
             outputs.append(output.reshape(*leading_shape, ir_out.dim * mul_out))
         if outputs:
             return torch.cat(outputs, dim=-1)
@@ -495,3 +653,104 @@ class TensorProduct(torch.nn.Module):
             f"{self.irreps_in2.simplify()} -> {self.irreps_out.simplify()} | "
             f"{num_paths} paths | {self.weight_numel} weights)"
         )
+
+
+def _forward_uuu(
+    self: TensorProduct,
+    input1: torch.Tensor,
+    input2: torch.Tensor,
+    weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if input1.is_complex() or input2.is_complex():
+        raise TypeError("TensorProduct supports real inputs only.")
+    if input1.ndim < 1 or input1.size(-1) != self.irreps_in1.dim:
+        raise ValueError(
+            f"TensorProduct input1 trailing dimension must be {self.irreps_in1.dim}, "
+            f"got {tuple(input1.shape)}."
+        )
+    if input2.ndim < 1 or input2.size(-1) != self.irreps_in2.dim:
+        raise ValueError(
+            f"TensorProduct input2 trailing dimension must be {self.irreps_in2.dim}, "
+            f"got {tuple(input2.shape)}."
+        )
+    weight = self._resolve_weight(weight)
+    try:
+        leading_shape = torch.broadcast_shapes(
+            input1.shape[:-1], input2.shape[:-1], weight.shape[:-1]
+        )
+    except RuntimeError as error:
+        raise ValueError(
+            "TensorProduct input and weight batch dimensions do not broadcast."
+        ) from error
+
+    path_outputs = [None] * len(self.path_irreps_out)
+    zero = input1.sum() * 0 + input2.sum() * 0 + weight.sum() * 0
+    for group in self._contraction_groups:
+        first_instruction = self.instructions[group[0]]
+        ir1 = self.path_irreps_in1[first_instruction.i_in1].ir
+        ir2 = self.path_irreps_in2[first_instruction.i_in2].ir
+        ir_out = self.path_irreps_out[first_instruction.i_out].ir
+        values1 = []
+        values2 = []
+        for index in group:
+            instruction = self.instructions[index]
+            _, mul1 = self.path_irreps_in1[instruction.i_in1]
+            _, mul2 = self.path_irreps_in2[instruction.i_in2]
+            packed1, offset1 = self._input1_entries[instruction.i_in1]
+            packed2, offset2 = self._input2_entries[instruction.i_in2]
+            _, packed_mul1 = self.irreps_in1[packed1]
+            _, packed_mul2 = self.irreps_in2[packed2]
+            entry1 = input1[..., self._input1_slices[packed1]].reshape(
+                *input1.shape[:-1], ir1.dim, packed_mul1
+            )
+            entry2 = input2[..., self._input2_slices[packed2]].reshape(
+                *input2.shape[:-1], ir2.dim, packed_mul2
+            )
+            values1.append(
+                entry1.narrow(-1, offset1, mul1).expand(*leading_shape, ir1.dim, mul1)
+            )
+            values2.append(
+                entry2.narrow(-1, offset2, mul2).expand(*leading_shape, ir2.dim, mul2)
+            )
+        product = _cartesian_contraction(
+            torch.stack(values1, dim=-3),
+            ir1,
+            torch.stack(values2, dim=-3),
+            ir2,
+            ir_out,
+            self.levi_civita,
+        )
+        if any(self.instructions[index].has_weight for index in group):
+            path_weights = []
+            for index in group:
+                instruction = self.instructions[index]
+                size = instruction.path_shape[0]
+                if instruction.has_weight:
+                    offset, _ = self._weight_offsets[index]
+                    path_weight = weight.narrow(-1, offset, size).expand(
+                        *leading_shape, size
+                    )
+                else:
+                    path_weight = product.new_ones(*leading_shape, size)
+                path_weights.append(path_weight)
+            product = product * torch.stack(path_weights, dim=-2).unsqueeze(-2)
+        for path_index, instruction_index in enumerate(group):
+            instruction = self.instructions[instruction_index]
+            path_outputs[instruction.i_out] = (
+                product[..., path_index, :, :] * instruction.path_weight
+            )
+
+    outputs = []
+    for group_index, ((ir_out, mul_out), group) in enumerate(
+        zip(self.irreps_out, self._output_groups)
+    ):
+        output = torch.cat([path_outputs[index] for index in group], dim=-1)
+        if self.project:
+            matrix = getattr(self, self._projector_names[group_index]).to(
+                dtype=output.dtype
+            )
+            output = torch.einsum("dm,mn,...nc->...dc", matrix, matrix.T, output)
+        outputs.append(output.reshape(*leading_shape, ir_out.dim * mul_out))
+    if outputs:
+        return torch.cat(outputs, dim=-1)
+    return input1.new_empty(*leading_shape, 0) + zero

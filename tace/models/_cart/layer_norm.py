@@ -16,7 +16,7 @@ def get_normalization_layer(
     normalization="component",
 ):
     if norm_type not in ("merge_layer_norm", "merge_rms_norm"):
-        raise ValueError(f"Unknown Cartesian normalization: {norm_type!r}.")
+        raise ValueError(f"Unknown normalization: {norm_type!r}.")
     return EquivariantMergeLayerNorm(
         irreps,
         eps=eps,
@@ -27,7 +27,7 @@ def get_normalization_layer(
 
 
 class EquivariantMergeLayerNorm(torch.nn.Module):
-    """Normalize equal-multiplicity Cartesian entries channel-wise."""
+    """Normalize equal-multiplicity entries channel-wise."""
 
     def __init__(
         self,
@@ -42,7 +42,7 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
         multiplicities = {mul for _, mul in self.irreps}
         if len(multiplicities) != 1:
             raise ValueError(
-                "Cartesian merge normalization requires equal multiplicities."
+                "Merge normalization requires equal multiplicities."
             )
         self.num_channels = next(iter(multiplicities))
         self.eps = eps

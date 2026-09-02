@@ -9,7 +9,7 @@ import torch
 
 
 class _SymmetricRankTwoBasisChange(torch.nn.Module):
-    """Combine Cartesian ``0e`` and ambient ``2e`` components."""
+    """Combine ``0e`` and ambient ``2e`` components."""
 
     def forward(self, scalar: torch.Tensor, traceless: torch.Tensor) -> torch.Tensor:
         identity = torch.eye(3, dtype=scalar.dtype, device=scalar.device)

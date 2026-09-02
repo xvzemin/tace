@@ -47,6 +47,13 @@ class ScalarReadOut(ReadOut):
         return linear(features)
 
     def _setup(self) -> None:
+        if self.layer != self.num_layers - 1:
+            self.linears = torch.nn.ModuleList(
+                [self._make_linear(self.irreps_in, self.irreps_out)]
+            )
+            self.activations = torch.nn.ModuleList()
+            self.last_layer = False
+            return
         ir_out, _ = self.irreps_out[0]
         hidden = [
             co3.Irreps([(ir_out, channel * self.num_fidelities)])
@@ -64,8 +71,11 @@ class ScalarReadOut(ReadOut):
             )
             for irreps in hidden
         )
+        self.last_layer = True
 
     def forward(self, features, node_fidelity=None, node_attrs=None):
+        if not self.last_layer:
+            return self._apply_linear(self.linears[0], features, node_attrs)
         for index, linear in enumerate(self.linears[:-1]):
             features = self._apply_linear(linear, features, node_attrs)
             features = self.activations[index](features)
@@ -80,6 +90,13 @@ class ScalarReadOut(ReadOut):
 
 class TensorReadOut(ScalarReadOut):
     def _setup(self) -> None:
+        if self.layer != self.num_layers - 1:
+            self.linears = torch.nn.ModuleList(
+                [self._make_linear(self.irreps_in, self.irreps_out)]
+            )
+            self.activations = torch.nn.ModuleList()
+            self.last_layer = False
+            return
         ir_out, _ = self.irreps_out[0]
         hidden = [
             co3.Irreps([(ir_out, channel * self.num_fidelities)])
@@ -99,8 +116,11 @@ class TensorReadOut(ScalarReadOut):
             self.activations.append(gate)
             irreps_in = gate.irreps_out
         self.linears.append(self._make_linear(irreps_in, self.irreps_out))
+        self.last_layer = True
 
     def forward(self, features, node_fidelity=None, node_attrs=None):
+        if not self.last_layer:
+            return self._apply_linear(self.linears[0], features, node_attrs)
         for index, linear in enumerate(self.linears[:-1]):
             features = self.activations[index](
                 self._apply_linear(linear, features, node_attrs)

@@ -109,6 +109,7 @@ class TensorNodeEmbedding(NodeEmbedding):
             )
             / self.avg_num_neighbors
         )
+        node_feats = co3.project_irreps(node_feats, self.irreps_out)
         scalar_slice = self.irreps_out.slices()[0]
         node_feats = node_feats.clone()
         node_feats[..., scalar_slice] = node_feats[..., scalar_slice] + base

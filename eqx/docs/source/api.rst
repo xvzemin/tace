@@ -104,7 +104,11 @@ the public representation axis flattened.
 .. autoclass:: eqx.co3.CartesianHarmonics
    :members: forward
 
+.. autofunction:: eqx.co3.path_matrix
+
 .. autofunction:: eqx.co3.project
+
+.. autofunction:: eqx.co3.project_irreps
 
 .. autofunction:: eqx.co3.delta
 

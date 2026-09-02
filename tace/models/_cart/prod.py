@@ -17,23 +17,23 @@ from .fused import uuuTensorProduct
 from .linear import ElementLinear, Linear, MoEElementLinear
 
 
-class CgtpACE(Product):
-    """Cartesian many-body expansion based on repeated channel-wise products."""
+class IctpACE(Product):
+    """Many-body expansion based on repeated channel-wise products."""
 
     def _make_coefficient(self, irreps_in):
         if self.agnostic:
-            return Linear(irreps_in, self.irreps_coefficients, bias=self.use_bias)
+            return Linear(irreps_in, self.irreps_coefs_out, bias=self.use_bias)
         if self.num_expert > 1:
             return MoEElementLinear(
                 irreps_in,
-                self.irreps_coefficients,
+                self.irreps_coefs_out,
                 bias=self.use_bias,
                 num_elements=self.num_elements,
                 num_experts=self.num_expert,
             )
         return ElementLinear(
             irreps_in,
-            self.irreps_coefficients,
+            self.irreps_coefs_out,
             bias=self.use_bias,
             num_elements=self.num_elements,
             num_experts=self.num_expert,
@@ -42,12 +42,13 @@ class CgtpACE(Product):
     def _setup(self) -> None:
         if self.nonlinear not in (None, "bilinear_gate"):
             raise ValueError(
-                "Cartesian product nonlinear must be None or 'bilinear_gate'."
+                "Product nonlinear must be None or 'bilinear_gate'."
             )
         self.use_bilinear_gate = self.nonlinear == "bilinear_gate"
         if self.use_bilinear_gate and self.correlation != 2:
             raise ValueError("bilinear_gate requires correlation=2.")
-        self.irreps_coefficients = co3.Irreps(
+        self.scale = 1.0 / math.sqrt(2.0)
+        self.irreps_coefs_out = co3.Irreps(
             [(ir, self.num_hidden_channel) for ir, _ in self.irreps_out]
         )
         hidden_types = co3.Irreps([(ir, 1) for ir, _ in self.irreps_in]).regroup()
@@ -57,7 +58,7 @@ class CgtpACE(Product):
         self.aces = torch.nn.ModuleList()
         correlation_irreps = [self.irreps_hidden]
         product_in = self.irreps_hidden
-        base_irreps = (
+        self.irreps_base = (
             self.irreps_hidden
             + co3.Irreps([(co3.Irrep("0e"), self.num_hidden_channel)])
             if self.use_bilinear_gate
@@ -79,44 +80,57 @@ class CgtpACE(Product):
             )
             ace = uuuTensorProduct(
                 product_in,
-                base_irreps,
+                self.irreps_base,
                 irreps_out,
                 l1l2=self.l1l2,
                 trainable=self.use_bilinear_gate,
+                identical_inputs=nu == 2 and not self.use_bilinear_gate,
             )
             self.aces.append(ace)
-            correlation_irreps.append(irreps_out)
-            product_in = irreps_out
+            correlation_irreps.append(ace.irreps_out)
+            product_in = ace.path_irreps_out
         if self.use_bilinear_gate:
-            self.gate_slices = []
+            self._ace_gate_slices = []
             offset = 0
             for ace in self.aces:
-                self.gate_slices.append(slice(offset, offset + ace.weight_numel))
+                self._ace_gate_slices.append(
+                    slice(offset, offset + ace.weight_numel)
+                )
                 offset += ace.weight_numel
-            self.num_gate_weights = offset
-            doubled = co3.Irreps([(ir, 2 * mul) for ir, mul in self.irreps_hidden])
+            self.num_ace_gate_weights = offset
+            self.irreps_double_hidden = co3.Irreps(
+                [(ir, 2 * mul) for ir, mul in self.irreps_hidden]
+            )
+            self.irreps_linear_up = (
+                co3.Irreps([(co3.Irrep("0e"), offset)])
+                + self.irreps_double_hidden
+            )
             self.linear_up = Linear(
                 self.irreps_in,
-                co3.Irreps([(co3.Irrep("0e"), offset)]) + doubled,
+                self.irreps_linear_up,
                 bias=self.use_bias,
             )
-            self.gate_activation = get_scaled_activation(self.scalar_act)
+            self.nonlinearity = get_scaled_activation(self.scalar_act)
         else:
-            self.linear_up = Linear(
-                self.irreps_in,
-                self.irreps_hidden,
-                bias=self.use_bias,
+            self.linear_up = (
+                Linear(
+                    self.irreps_in,
+                    self.irreps_hidden,
+                    bias=self.use_bias,
+                )
+                if self.num_channel != self.num_hidden_channel
+                else torch.nn.Identity()
             )
-        self.coefficients = torch.nn.ModuleList(
+        self.coefs = torch.nn.ModuleList(
             self._make_coefficient(irreps) for irreps in correlation_irreps
         )
         if self.use_shared_expert and self.num_expert > 1:
-            self.shared_coefficients = torch.nn.ModuleList(
-                Linear(irreps, self.irreps_coefficients, bias=self.use_bias)
+            self.shared_coefs = torch.nn.ModuleList(
+                Linear(irreps, self.irreps_coefs_out, bias=self.use_bias)
                 for irreps in correlation_irreps
             )
-        self.linear_down = Linear(
-            self.irreps_coefficients,
+        self.linear = Linear(
+            self.irreps_coefs_out,
             self.irreps_out,
             bias=self.use_bias,
         )
@@ -133,12 +147,19 @@ class CgtpACE(Product):
             return module(features)
         return module(features, node_attrs)
 
-    def _linear_up(self, features: torch.Tensor):
+    def _merge_shared_expert(
+        self,
+        grouped: torch.Tensor,
+        shared: torch.Tensor,
+    ) -> torch.Tensor:
+        return (grouped + shared) * self.scale
+
+    def _linear_up_features(self, features: torch.Tensor):
         features = self.linear_up(features)
         if not self.use_bilinear_gate:
             return features, features, None
-        weights = self.gate_activation(features[..., : self.num_gate_weights])
-        doubled = features[..., self.num_gate_weights :]
+        weights = self.nonlinearity(features[..., : self.num_ace_gate_weights])
+        doubled = features[..., self.num_ace_gate_weights :]
         node_entries = []
         base_entries = []
         for (ir, mul), ir_slice in zip(
@@ -166,41 +187,36 @@ class CgtpACE(Product):
         sc: Optional[torch.Tensor],
         batch: torch.Tensor,
     ) -> torch.Tensor:
-        node_feats, base, gate_weights = self._linear_up(node_feats)
-        correlations = [node_feats]
-        for index, ace in enumerate(self.aces):
-            weights = (
-                gate_weights[..., self.gate_slices[index]]
-                if gate_weights is not None
-                else None
+        node_feats, base_feats, ace_weights = self._linear_up_features(node_feats)
+        corr_feats = {1: node_feats}
+        for nu in range(2, self.correlation + 1):
+            weights = None
+            if ace_weights is not None:
+                weights = ace_weights[..., self._ace_gate_slices[nu - 2]]
+            corr_feats[nu] = self.aces[nu - 2](
+                corr_feats[nu - 1], base_feats, weights
             )
-            correlations.append(ace(correlations[-1], base, weights))
-        output = sum(
-            (
-                self._coefficient(module, features, node_attrs)
-                for module, features in zip(self.coefficients, correlations)
-            )
+        outs = sum(
+            self._coefficient(module, features, node_attrs)
+            for module, features in zip(self.coefs, corr_feats.values())
         )
-        if hasattr(self, "shared_coefficients"):
-            shared = sum(
+        if hasattr(self, "shared_coefs"):
+            shared_outs = sum(
                 module(features)
-                for module, features in zip(self.shared_coefficients, correlations)
+                for module, features in zip(self.shared_coefs, corr_feats.values())
             )
-            output = (output + shared) / math.sqrt(2.0)
-        output = self.linear_down(output)
+            outs = self._merge_shared_expert(outs, shared_outs)
+        outs = self.linear(outs)
         if hasattr(self, "stochastic_depth"):
-            output = self.stochastic_depth(output, batch)
+            outs = self.stochastic_depth(outs, batch)
         if sc is not None:
-            output = output + sc
-        return output
+            outs = outs + sc
+        return outs
 
 
 PRODUCT = {
-    "spatial": CgtpACE,
-    "coupled": CgtpACE,
-    "cgtp": CgtpACE,
-    "glu": CgtpACE,
+    "ictp": IctpACE,
 }
 
 
-__all__ = ["CgtpACE", "PRODUCT"]
+__all__ = ["IctpACE", "PRODUCT"]

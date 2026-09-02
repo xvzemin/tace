@@ -11,7 +11,6 @@ DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
     "Lmax": 2,
     "lmax": 3,
-    "mag_Lmax": 1,
     "parity": False,
     "num_channel": 64,
     "num_layers": 2,
@@ -34,7 +33,6 @@ DEFAULT_MODEL_CONFIG = {
         "bias": False,
         "radial_basis": "j0",
         "num_radial_basis": 8,
-        "num_mag_radial_basis": 10,
         "distance_transform": None,
         "cutoff_fn": "c2poly",
         "polynomial_cutoff": 5,
@@ -86,7 +84,6 @@ DEFAULT_MODEL_CONFIG = {
         "hidden": [16],
         "use_alllayer": False,
         "use_uie": False,
-        "use_one_body_magmoms": True,
     },
     "scale_shift": {
         "enable": True,
@@ -134,15 +131,7 @@ DEFAULT_MODEL_CONFIG = {
             "enable": False,
             "num_embeddings": -1,
         },
-        "initial_noncollinear_magmoms": {
-            "enable": False,
-            "normalizer": 1.0,
-        },
         "electric_field": {
-            "enable": False,
-            "normalizer": 1.0,
-        },
-        "magnetic_field": {
             "enable": False,
             "normalizer": 1.0,
         },
@@ -215,13 +204,6 @@ def check_model_config(cfg: dict[str, Any]):
     # Update default config with user config
     cfg = recursive_update(cfg)
 
-    if (
-        not isinstance(cfg["mag_Lmax"], int)
-        or isinstance(cfg["mag_Lmax"], bool)
-        or not 1 <= cfg["mag_Lmax"] <= cfg["Lmax"]
-    ):
-        raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
-
     if cfg.get("max_neighbors") is not None:
         raise ValueError(
             "TACE does not "
@@ -236,24 +218,6 @@ def check_model_config(cfg: dict[str, Any]):
     cfg["avg_num_neighbors"] = sum(
         s["avg_num_neighbors"] for s in cfg["statistics"]
     ) / len(cfg["statistics"])
-
-    # TODO
-    magnetic_statistics = [
-        stats["magmoms_norm_by_element"]
-        for stats in cfg["statistics"]
-        if "magmoms_norm_by_element" in stats
-    ]
-    cfg["magmoms_norm_by_element"] = (
-        {
-            z: max(
-                float(stats.get(z, stats.get(str(z), 0.0)))
-                for stats in magnetic_statistics
-            )
-            for z in cfg["atomic_numbers"]
-        }
-        if magnetic_statistics
-        else None
-    )
 
     cfg["atomic_energies"] = (
         [stats["atomic_energy"] for stats in cfg["statistics"]]
@@ -284,27 +248,27 @@ def check_model_config(cfg: dict[str, Any]):
     supported_node_embeddings = {"linear", "nonlinear", "tensor"}
     if cfg["node_embedding"]["type"] not in supported_node_embeddings:
         raise ValueError(
-            "Cartesian node_embedding.type must be one of "
+            "node_embedding.type must be one of "
             f"{sorted(supported_node_embeddings)}, got "
             f"{cfg['node_embedding']['type']!r}."
         )
-    supported_interactions = {"cgtp", "spatial", "coupled", "o3_w6j_mag"}
+    supported_interactions = {"ictp"}
     unsupported_interactions = sorted(
         set(cfg["atomic_basis"]["type"]) - supported_interactions
     )
     if unsupported_interactions:
         raise ValueError(
-            "Cartesian atomic_basis.type does not support "
+            "atomic_basis.type does not support "
             f"{unsupported_interactions}; choose from "
             f"{sorted(supported_interactions)}."
         )
-    supported_products = {"cgtp", "spatial", "coupled", "glu"}
+    supported_products = {"ictp"}
     unsupported_products = sorted(
         set(cfg["product_basis"]["type"]) - supported_products
     )
     if unsupported_products:
         raise ValueError(
-            "Cartesian product_basis.type does not support "
+            "product_basis.type does not support "
             f"{unsupported_products}; choose from {sorted(supported_products)}."
         )
 

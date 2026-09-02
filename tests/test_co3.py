@@ -192,6 +192,117 @@ def test_invariant_cartesian_tensors_and_projector() -> None:
     values = torch.randn(4, 9, 3, dtype=DTYPE)
     projected = co3.project(values, 2)
     torch.testing.assert_close(co3.project(projected, 2), projected)
+    matrix = co3.path_matrix(2, dtype=DTYPE)
+    expected = torch.einsum("dm,mn,...nc->...dc", matrix, matrix.T, values)
+    torch.testing.assert_close(projected, expected)
+
+
+def test_tensor_product_can_defer_projection() -> None:
+    instructions = [(0, 0, 0, "uuu", False)]
+    projected_product = co3.TensorProduct(
+        "1o",
+        "1o",
+        "2e",
+        instructions,
+        project=True,
+    ).to(dtype=DTYPE)
+    unprojected_product = co3.TensorProduct(
+        "1o",
+        "1o",
+        "2e",
+        instructions,
+        project=False,
+    ).to(dtype=DTYPE)
+    first = torch.randn(8, 3, dtype=DTYPE)
+    second = torch.randn(8, 3, dtype=DTYPE)
+    unprojected = unprojected_product(first, second)
+    expected = projected_product(first, second)
+    torch.testing.assert_close(
+        unprojected_product.project_output(unprojected),
+        expected,
+    )
+    assert not torch.allclose(unprojected, expected)
+
+
+def test_tensor_product_simplifies_path_entries_internally() -> None:
+    path_irreps = co3.Irreps([(co3.Irrep("1o"), 2), (co3.Irrep("1o"), 2)])
+    tensor_product = co3.TensorProduct(
+        path_irreps,
+        "0e",
+        path_irreps,
+        [(0, 0, 0, "u1u", False), (1, 0, 1, "u1u", False)],
+        project=True,
+        simplify=True,
+    ).to(dtype=DTYPE)
+    assert tensor_product.irreps_in1 == path_irreps.simplify()
+    assert tensor_product.irreps_out == path_irreps.simplify()
+    assert tensor_product.path_irreps_out == path_irreps
+
+    features = path_irreps.simplify().randn(6, -1, dtype=DTYPE)
+    scalars = torch.ones(6, 1, dtype=DTYPE)
+    torch.testing.assert_close(tensor_product(features, scalars), features)
+
+
+def test_tensor_product_parallel_uuu_matches_generic_paths() -> None:
+    irreps_in1 = co3.Irreps(
+        [
+            (co3.Irrep("1o"), 3),
+            (co3.Irrep("1o"), 3),
+            (co3.Irrep("2e"), 3),
+        ]
+    )
+    irreps_in2 = co3.Irreps("3x1o")
+    irreps_out = co3.Irreps(
+        [
+            (co3.Irrep("0e"), 3),
+            (co3.Irrep("0e"), 3),
+            (co3.Irrep("1o"), 3),
+        ]
+    )
+    instructions = [
+        (0, 0, 0, "uuu", True),
+        (1, 0, 1, "uuu", True),
+        (2, 0, 2, "uuu", True),
+    ]
+    reference = co3.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        project=True,
+        simplify=True,
+        internal_weights=False,
+        shared_weights=False,
+    ).to(dtype=DTYPE)
+    reference._contraction_groups = ()
+    contraction = co3.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        project=True,
+        simplify=True,
+        internal_weights=False,
+        shared_weights=False,
+    ).to(dtype=DTYPE)
+    assert contraction._contraction_groups == ((0, 1), (2,))
+
+    input1 = _irreducible(irreps_in1.simplify(), 5)
+    input2 = _irreducible(irreps_in2, 5)
+    weights = torch.randn(5, contraction.weight_numel, dtype=DTYPE)
+    torch.testing.assert_close(
+        contraction(input1, input2, weights),
+        reference(input1, input2, weights),
+    )
+    exported = torch.export.export(
+        contraction,
+        (input1, input2, weights),
+        strict=True,
+    )
+    torch.testing.assert_close(
+        exported.module()(input1, input2, weights),
+        reference(input1, input2, weights),
+    )
 
 
 @pytest.mark.parametrize("improper", [False, True])
@@ -218,6 +329,7 @@ def test_tensor_product_equivariance(
         second_irreps,
         output_irreps,
         _instructions(first_irreps, second_irreps, output_irreps, "uuu"),
+        project=True,
     ).to(dtype=DTYPE)
     first = _irreducible(first_irreps, 4)
     second = _irreducible(second_irreps, 4)
@@ -245,6 +357,7 @@ def test_tensor_product_connection_modes(mode: str) -> None:
         irreps_in2,
         irreps_out,
         [(0, 0, 0, mode, True)],
+        project=True,
     ).to(dtype=DTYPE)
     output = tensor_product(_irreducible(irreps_in1, 5), _irreducible(irreps_in2, 5))
     assert output.shape == (5, irreps_out.dim)
@@ -264,6 +377,7 @@ def test_tensor_product_component_normalization_preserves_variance(
         irrep2,
         irrep_out,
         [(0, 0, 0, "uuu", False)],
+        project=True,
         irrep_normalization="component",
     ).to(dtype=DTYPE)
     first = co3.Irreps(irrep1).randn(32768, -1, dtype=DTYPE)
@@ -280,6 +394,7 @@ def test_tensor_product_external_weight_derivatives() -> None:
         "1o",
         "1e",
         [(0, 0, 0, "uuu", True)],
+        project=True,
         internal_weights=False,
         shared_weights=False,
     ).to(dtype=DTYPE)

@@ -16,8 +16,8 @@ def _activation(name: Optional[str], fallback: str) -> torch.nn.Module:
     return get_scaled_activation(name or fallback)
 
 
-class CartesianGate(torch.nn.Module):
-    """Scalar activation and gating for flattened Cartesian irreps."""
+class Gate(torch.nn.Module):
+    """Scalar activation and gating for flattened irreps."""
 
     def __init__(
         self,
@@ -87,4 +87,4 @@ def split_scalars(irreps) -> tuple[co3.Irreps, co3.Irreps]:
     return scalars, tensors
 
 
-__all__ = ["CartesianGate", "O3Gate", "split_scalars"]
+__all__ = ["Gate", "O3Gate", "split_scalars"]

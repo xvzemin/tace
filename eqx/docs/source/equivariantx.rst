@@ -344,11 +344,16 @@ and a Levi-Civita branch,
    \qquad l_3=l_1+l_2-2k-1.
 
 Both branches satisfy :math:`p_3=p_1p_2`. The connection modes ``u1u``,
-``uuu``, and ``uvw`` have the same multiplicity rules as in
-:class:`eqx.o2.TensorProduct`. Every output entry is projected onto its
-symmetric traceless subspace after all paths feeding that entry have been
-summed. Consequently, the returned flattened tensor is immediately a valid
-irreducible feature.
+``uuu``, and ``uvw`` follow their stated multiplicity rules. The ``project``
+argument is required. With ``project=True``, every output entry is projected
+after its paths are summed. With ``project=False``, the ambient result is
+retained so that a linear map can compress paths before
+:func:`eqx.co3.project_irreps` is applied.
+
+With ``simplify=True``, consecutive equal path entries are packed directly
+into one ``ir_mul`` multiplicity axis. The tensor product reads similarly
+packed inputs through path offsets and produces the simplified output layout
+without a separate permutation.
 
 Cartesian convolution pattern
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -391,17 +396,20 @@ product therefore preserves the node multiplicity on every compatible path:
        irreps_edge,
        irreps_out,
        instructions,
+       project=False,
    )
    source, target = edge_index
    edge_messages = tensor_product(node_feats[source], edge_attrs)
    node_messages = edge_messages.new_zeros(num_nodes, irreps_out.dim)
    node_messages.index_add_(0, target, edge_messages)
+   node_messages = co3.project_irreps(node_messages, irreps_out)
 
 Cartesian many-body pattern
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A node-level many-body step uses ``uuu`` when corresponding input and output
-entries have the same multiplicity:
+A node-level many-body step uses :class:`eqx.co3.TensorProduct` with ``uuu`` paths when
+corresponding input and output entries have the same multiplicity. Paths with
+the same input and output degrees are contracted together over a path axis:
 
 .. code-block:: python
 
@@ -413,6 +421,10 @@ entries have the same multiplicity:
        if ir_out in ir1 * ir2 and mul1 == mul2 == mul_out
    ]
    node_tensor_product = co3.TensorProduct(
-       irreps_node, irreps_node, irreps_node, instructions
+       irreps_node,
+       irreps_node,
+       irreps_node,
+       instructions,
+       project=True,
    )
    node_product = node_tensor_product(node_feats, node_feats)

@@ -80,7 +80,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
             irreps = co3.Irreps(PROPERTY[name]["irreps"])
             if values.size(-1) != irreps.dim:
                 raise ValueError(
-                    f"Universal Cartesian property {name!r} has trailing size "
+                    f"Universal property {name!r} has trailing size "
                     f"{values.size(-1)}, expected {irreps.dim}."
                 )
             projected = []

@@ -30,7 +30,7 @@ def get_resnet_layer(
 
 
 class SkipIdentity(torch.nn.Module):
-    """Copy matching Cartesian entries and zero-pad all other outputs."""
+    """Copy matching entries and zero-pad all other outputs."""
 
     def __init__(self, irreps_in, irreps_out) -> None:
         super().__init__()

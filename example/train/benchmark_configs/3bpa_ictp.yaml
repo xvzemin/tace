@@ -83,13 +83,14 @@ model:
       bias: false
 
     atomic_basis:
-      type: cgtp
+      type: ictp
       nonlinear: gate
       edge_nonlinear: null
       scalar_act: silu
       tensor_act: sigmoid
 
     product_basis:
+      type: ictp
       correlation: 3
 
     readout_emlp:

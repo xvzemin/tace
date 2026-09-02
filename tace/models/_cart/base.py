@@ -14,7 +14,7 @@ from ..lammps import e3nnGhostExchangeMixin
 
 
 def natural_irreps(lmax: int, multiplicity: int = 1) -> co3.Irreps:
-    """Return natural-parity Cartesian irreps through ``lmax``."""
+    """Return natural-parity irreps through ``lmax``."""
     return co3.Irreps(
         [(co3.Irrep(l, (-1) ** l), multiplicity) for l in range(lmax + 1)]
     )
@@ -27,7 +27,7 @@ def possible_irreps(
     parity: bool,
     lmax: int,
 ) -> co3.Irreps:
-    """Return unique output types allowed by two Cartesian representations."""
+    """Return unique output types allowed by two representations."""
     irreps_in1 = co3.Irreps(irreps_in1)
     irreps_in2 = co3.Irreps(irreps_in2)
     irrep_set = {
@@ -180,9 +180,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.stochastic_depth_p = stochastic_depth
         self.use_first_dropout = use_first_dropout
         self.parity = parity
-        self.num_mag_radial_basis = kwargs.get("num_mag_radial_basis", 0)
-        self.magnetic_irreps = kwargs.get("magnetic_irreps")
-        self.mag_Lmax = kwargs.get("mag_Lmax", 1)
+        self.gate_m0 = kwargs.get("gate_m0", True)
         self.irreps_in = co3.Irreps(irreps_in)
         self.irreps_edge = natural_irreps(lmax)
         output_lmax = Lmax if self.correlation == 1 else lmax
@@ -311,7 +309,7 @@ class ReadOut(torch.nn.Module):
         self.irreps_in = co3.Irreps(irreps_in)
         output_type = co3.Irreps(irreps_out)
         if len(output_type) != 1:
-            raise ValueError("Cartesian readouts require exactly one output irrep.")
+            raise ValueError("Readouts require exactly one output irrep.")
         ir, mul = output_type[0]
         self.irreps_out = co3.Irreps([(ir, mul * num_fidelities)])
         self.l = ir.l

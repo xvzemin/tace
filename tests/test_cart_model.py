@@ -1,21 +1,20 @@
 from copy import deepcopy
-from typing import Optional
 
 import pytest
 import torch
 
 from tace.models._cart.default import DEFAULT_MODEL_CONFIG
 from tace.models._cart.tace import cartTACE
+from tace.models._e3nn.tace import e3nnTACE
 from tace.models.lammps import Graph
 
 
-def _model(*, num_fidelities: int = 2, magnetic: bool = False) -> cartTACE:
+def _model_config(*, num_fidelities: int = 2) -> dict:
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     statistics = {
         "atomic_numbers": [1, 8],
         "avg_num_neighbors": 2.0,
         "atomic_energy": {1: 0.0, 8: 0.0},
-        "magmoms_norm_by_element": {1: 1.0, 8: 2.0},
     }
     config.update(
         cutoff=5.0,
@@ -39,21 +38,18 @@ def _model(*, num_fidelities: int = 2, magnetic: bool = False) -> cartTACE:
     config["radial_basis"]["hidden"] = [8]
     config["radial_basis"]["apply_cutoff"] = False
     config["readout_emlp"]["hidden"] = [4]
-    config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
-    if magnetic:
-        config["parity"] = True
-        config["atomic_basis"]["type"] = "o3_w6j_mag"
-        config["embedding_property"] = ["initial_noncollinear_magmoms"]
-        config["readout_emlp"]["use_one_body_magmoms"] = True
-    return cartTACE(**config)
+    return config
+
+
+def _model(*, num_fidelities: int = 2) -> cartTACE:
+    return cartTACE(**_model_config(num_fidelities=num_fidelities))
 
 
 def _inputs(
     positions: torch.Tensor,
     *,
     multi_fidelity: bool = True,
-    magnetic_moments: Optional[torch.Tensor] = None,
 ) -> tuple[dict[str, torch.Tensor], Graph]:
     edge_index = torch.tensor(
         [[0, 0, 1, 1, 2, 2], [1, 2, 0, 2, 0, 1]],
@@ -70,8 +66,6 @@ def _inputs(
         "lattice": lattice,
         "atomic_numbers": torch.tensor([1, 8, 1], device=positions.device),
     }
-    if magnetic_moments is not None:
-        data["initial_noncollinear_magmoms"] = magnetic_moments
     node_fidelity = torch.tensor(
         [0, int(multi_fidelity), 0],
         device=positions.device,
@@ -160,32 +154,44 @@ def test_cart_model_rejects_local_frame_interaction() -> None:
     )
     config["fidelity"] = [{"name": "level-0", "atomic_energy": None}]
     config["atomic_basis"]["type"] = "o2"
-    with pytest.raises(ValueError, match="Cartesian atomic_basis.type"):
+    with pytest.raises(ValueError, match="atomic_basis.type does not support"):
         cartTACE(**config)
 
 
-@pytest.mark.parametrize("improper", [False, True])
-def test_cart_magnetic_interaction_rotation_invariance(improper: bool) -> None:
-    torch.manual_seed(11)
-    model = _model(num_fidelities=1, magnetic=True).eval()
-    positions = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.2, 0.0], [0.1, 1.0, 0.3]])
-    magnetic_moments = torch.randn(3, 3)
-    matrix, _ = torch.linalg.qr(torch.randn(3, 3))
-    if bool(torch.linalg.det(matrix) < 0) != improper:
-        matrix[:, 0] *= -1
-    data, graph = _inputs(
-        positions,
-        multi_fidelity=False,
-        magnetic_moments=magnetic_moments,
-    )
-    rotated_data, rotated_graph = _inputs(
-        positions @ matrix.T,
-        multi_fidelity=False,
-        magnetic_moments=magnetic_moments @ (torch.linalg.det(matrix) * matrix).T,
+@pytest.mark.parametrize("gate_m0", [False, True])
+def test_cart_model_parameter_count_matches_spherical_model(gate_m0: bool) -> None:
+    config = _model_config(num_fidelities=1)
+    config["atomic_basis"]["gate_m0"] = gate_m0
+    config["product_basis"]["correlation"] = [3, 3]
+    config["readout_emlp"]["use_alllayer"] = True
+    cartesian = cartTACE(**deepcopy(config))
+    spherical = e3nnTACE(**deepcopy(config))
+    assert sum(parameter.numel() for parameter in cartesian.parameters()) == sum(
+        parameter.numel() for parameter in spherical.parameters()
     )
 
-    output = model(data, graph)
-    rotated = model(rotated_data, rotated_graph)
-    torch.testing.assert_close(
-        rotated["energy"], output["energy"], atol=2e-5, rtol=2e-5
-    )
+
+def test_cart_path_features_are_simplified_before_linear_maps() -> None:
+    config = _model_config(num_fidelities=1)
+    config["product_basis"]["correlation"] = [3, 3]
+    model = cartTACE(**config)
+
+    for interaction in model.representation.interactions:
+        path_irreps = interaction.rejector.tp.path_irreps_out
+        assert interaction.rejector.irreps_out == path_irreps.simplify()
+        assert interaction.linear_down.irreps_in == path_irreps.simplify()
+
+    for product in model.representation.products:
+        correlation_irreps = [
+            product.irreps_hidden,
+            *(ace.irreps_out for ace in product.aces),
+        ]
+        for coefficient, irreps in zip(product.coefs, correlation_irreps):
+            assert coefficient.irreps_in == irreps.simplify()
+
+
+def test_cart_model_rejects_magnetic_interaction() -> None:
+    config = _model_config(num_fidelities=1)
+    config["atomic_basis"]["type"] = ["o3_w6j_mag"] * config["num_layers"]
+    with pytest.raises(ValueError, match="does not support"):
+        cartTACE(**config)

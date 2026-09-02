@@ -16,14 +16,13 @@ from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import INTERACTION
 from .layer_norm import get_normalization_layer
 from .linear import Linear
-from .mag import MagneticBasis
 from .node import NODE_EMBEDDING
 from .prod import PRODUCT
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
 
 class Representation(torch.nn.Module):
-    """Build Cartesian node descriptors from graph geometry and attributes."""
+    """Build node descriptors from graph geometry and attributes."""
 
     def __init__(
         self,
@@ -31,11 +30,9 @@ class Representation(torch.nn.Module):
         atomic_numbers: List[int],
         cutoff: float,
         avg_num_neighbors: float,
-        magmoms_norm_by_element,
         mmax: int,
         Lmax: int,
         lmax: int,
-        mag_Lmax: int,
         num_channel: int,
         target_irreps,
         node_embedding: Dict,
@@ -51,7 +48,6 @@ class Representation(torch.nn.Module):
         layer_norm: Dict,
         dropout: Dict,
         parity: bool,
-        use_one_body_magmoms: bool,
     ) -> None:
         super().__init__()
         self.num_elements = len(atomic_numbers)
@@ -59,8 +55,6 @@ class Representation(torch.nn.Module):
         self.num_layers = num_layers
         self.invariant_property = invariant_property
         self.equivariant_property = equivariant_property
-        self.use_one_body_magmoms = use_one_body_magmoms
-        self.use_magnetic_interaction = "o3_w6j_mag" in atomic_basis["type"]
         self.use_dens = get_tace_use_dens() == "1"
         self.register_buffer(
             "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
@@ -83,20 +77,6 @@ class Representation(torch.nn.Module):
             normalize=False,
             normalization="component",
         )
-        self.magnetic_irreps = co3.CartesianHarmonics(
-            mag_Lmax,
-            irreps_in="1e",
-            normalize=False,
-            normalization="integral",
-        ).irreps_out
-        if self.use_one_body_magmoms or self.use_magnetic_interaction:
-            self.magnetic_basis = MagneticBasis(
-                magmoms_norm_by_element,
-                num_basis=radial_basis["num_mag_radial_basis"],
-                lmax=mag_Lmax,
-                atomic_numbers=atomic_numbers,
-            )
-
         self.node_embedding = NODE_EMBEDDING[node_embedding["type"]](
             num_elements=self.num_elements,
             num_radial_basis=self.radial_basis.num_basis,
@@ -143,11 +123,9 @@ class Representation(torch.nn.Module):
             "mmax": mmax,
             "Lmax": Lmax,
             "lmax": lmax,
-            "mag_Lmax": mag_Lmax,
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "num_radial_basis": radial_basis["num_radial_basis"],
-            "num_mag_radial_basis": radial_basis["num_mag_radial_basis"] - 1,
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
             "l1l2": atomic_basis["l1l2"],
@@ -168,7 +146,6 @@ class Representation(torch.nn.Module):
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
             "edge_ace_hidden": atomic_basis["edge_ace_hidden"],
-            "magnetic_irreps": self.magnetic_irreps,
         }
 
         self.interactions = torch.nn.ModuleList()
@@ -281,25 +258,6 @@ class Representation(torch.nn.Module):
                 self._forward_dens_forces_encoding(data)
             )
 
-        one_body_magmoms_basis = None
-        magnetic_radial_basis = None
-        magnetic_node_attrs = None
-        if self.use_one_body_magmoms or self.use_magnetic_interaction:
-            magnetic_moments = data.get("initial_noncollinear_magmoms")
-            if magnetic_moments is None:
-                raise ValueError(
-                    "initial_noncollinear_magmoms is required by the magnetic "
-                    "one-body readout."
-                )
-            magnetic_basis, magnetic_node_attrs = self.magnetic_basis(
-                magnetic_moments,
-                data["node_attrs"],
-            )
-            if self.use_one_body_magmoms:
-                one_body_magmoms_basis = magnetic_basis
-            if self.use_magnetic_interaction:
-                magnetic_radial_basis = magnetic_basis[..., 1:]
-
         descriptors = []
         for layer, (edge_update, interaction, product) in enumerate(
             zip(self.edge_updates, self.interactions, self.products)
@@ -323,8 +281,6 @@ class Representation(torch.nn.Module):
                 edge_attrs,
                 data["edge_index"],
                 edge_cutoff,
-                magnetic_radial_basis=magnetic_radial_basis,
-                magnetic_node_attrs=magnetic_node_attrs,
                 batch=data["batch"],
                 graph=graph,
             )
@@ -344,7 +300,6 @@ class Representation(torch.nn.Module):
             "uie_feats": uie_feats,
             "noise_mask_tensor": noise_mask_tensor,
             "dens_batch_mask_tensor": dens_batch_mask_tensor,
-            "one_body_magmoms_basis": one_body_magmoms_basis,
             "decouple_node_feats1": None,
             "decouple_node_feats2": None,
         }

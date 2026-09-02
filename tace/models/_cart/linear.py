@@ -11,7 +11,7 @@ from eqx import co3
 
 
 class Linear(co3.Linear):
-    """Cartesian equivariant linear map using flattened ``ir_mul`` features."""
+    """Equivariant linear map using flattened ``ir_mul`` features."""
 
     def __init__(
         self,
@@ -25,7 +25,7 @@ class Linear(co3.Linear):
 
 
 class ElementLinear(torch.nn.Module):
-    """Element-conditioned Cartesian equivariant linear map."""
+    """Element-conditioned equivariant linear map."""
 
     def __init__(
         self,
