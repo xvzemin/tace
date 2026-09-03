@@ -13,6 +13,7 @@ from e3nn.o3._irreps import Irreps
 from e3nn.o3._spherical_harmonics import _spherical_harmonics
 from e3nn.util.jit import compile_mode
 
+from .time_reversal import make_irrep
 from .ictd import ICTD
 from .utils import expand_dims_to
 
@@ -188,19 +189,27 @@ class SphericalHarmonics(torch.nn.Module):
             irreps_out = Irreps(irreps_out)
         if isinstance(irreps_out, Irreps) and irreps_in is None:
             for _, ir in irreps_out:
-                if ir.l % 2 == 1 and ir.p == 1:
-                    irreps_in = Irreps("1e")
+                if ir.l % 2 == 1:
+                    irreps_in = Irreps(
+                        [(1, make_irrep(1, ir.p, getattr(ir, "t", 1)))]
+                    )
+                    break
         if irreps_in is None:
             irreps_in = Irreps("1o")
 
         irreps_in = Irreps(irreps_in)
-        if irreps_in not in (Irreps("1x1o"), Irreps("1x1e")):
+        if (
+            len(irreps_in) != 1
+            or irreps_in[0].mul != 1
+            or irreps_in[0].ir.l != 1
+        ):
             raise ValueError(
-                f"irreps_in for SphericalHarmonics must be either a vector (`1x1o`) or a pseudovector (`1x1e`), "
-                f"not `{irreps_in}`"
+                "irreps_in for SphericalHarmonics must contain exactly one "
+                f"l=1 irrep, not `{irreps_in}`"
             )
         self.irreps_in = irreps_in
         input_p = irreps_in[0].ir.p  # pylint: disable=no-member
+        input_t = getattr(irreps_in[0].ir, "t", 1)
 
         if isinstance(irreps_out, Irreps):
             ls = []
@@ -211,13 +220,22 @@ class SphericalHarmonics(torch.nn.Module):
                         f"p = {ir.p}, which is inconsistent with the input parity {input_p} — the output parity should have been "
                         f"p = {input_p**ir.l}"
                     )
+                if getattr(ir, "t", 1) != input_t**ir.l:
+                    raise ValueError(
+                        f"irreps_out `{irreps_out}` passed to SphericalHarmonics "
+                        f"asked for an output of l = {ir.l} with time-reversal "
+                        f"parity t = {ir.t}, which is inconsistent with the "
+                        f"input time-reversal parity {input_t}"
+                    )
                 ls.extend([ir.l] * mul)
         elif isinstance(irreps_out, int):
             ls = [irreps_out]
         else:
             ls = list(irreps_out)
 
-        irreps_out = Irreps([(1, (l, input_p**l)) for l in ls]).simplify()
+        irreps_out = Irreps(
+            [(1, make_irrep(l, input_p**l, input_t**l)) for l in ls]
+        ).simplify()
         self.irreps_out = irreps_out
         self._ls_list = ls
         self._lmax = max(ls)
