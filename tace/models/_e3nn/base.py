@@ -283,6 +283,7 @@ class Product(torch.nn.Module):
         parity: bool = False,
         use_shared_expert: bool = False,
         agnostic: bool = False,
+        use_time_reversal: bool = False,
     ) -> None:
         super().__init__()
 
@@ -310,6 +311,7 @@ class Product(torch.nn.Module):
         self.stochastic_depth_p = stochastic_depth
         self.use_first_dropout = use_first_dropout
         self.parity = parity
+        self.use_time_reversal = use_time_reversal
         self.last_layer = layer == num_layers - 1
         self.irreps_in = irreps_in
         self.irreps_hidden = o3.Irreps(
@@ -386,17 +388,20 @@ class ReadOut(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.scalar_act = "tanh" if "0o" in irreps_out else "silu"
-        self.tensor_act = "sigmoid"
         self.layer = layer
         self.num_layers = num_layers
         self.use_bias = bias
         self.num_elements = num_elements
         self.num_fidelities = num_fidelities
         self.parity = parity
-
         self.irreps_in = o3.Irreps(irreps_in)
-        self.irreps_out = (irreps_out * num_fidelities).regroup()
+        self.irreps_out = (o3.Irreps(irreps_out) * num_fidelities).regroup()
+        self.scalar_act = (
+            "tanh"
+            if any(ir.l == 0 and not ir.is_scalar() for _, ir in self.irreps_out)
+            else "silu"
+        )
+        self.tensor_act = "sigmoid"
 
         self.irreps_gates = [
             o3.Irreps([(c * self.num_fidelities, (0, 1))]) for c in hidden_channel
