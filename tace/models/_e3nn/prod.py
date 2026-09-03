@@ -96,7 +96,7 @@ class CgtpACE(Product):
                 trainable=self.use_bilinear_gate,
                 identical_inputs=nu == 2 and not self.use_bilinear_gate,
                 warning=self.correlation > 2 and self.layer == 0,
-                use_fused=self.correlation > 2,
+                use_fused=self.correlation > 2 and not self.use_time_reversal,
             )
             self.aces.append(this_ace)
             self.coefs.append(

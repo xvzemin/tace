@@ -126,6 +126,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     common_lmax = max(Lmax, lmax)
     assert representation.use_o2
     assert not representation.use_legacy_so2
+    assert not representation.use_time_reversal
     assert representation.so2_angular_basis.lmax == common_lmax
     rejector = representation.interactions[0].rejector
     assert rejector.local_frame_in.lmax == common_lmax

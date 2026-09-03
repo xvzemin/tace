@@ -118,10 +118,9 @@ class MagneticBasis(torch.nn.Module):
         self.magnetic_irreps = o3.Irreps(magnetic_irreps)
         self.angular_basis = SolidHarmonics(
             self.magnetic_irreps,
+            normalize=False,
             normalization="integral",
-            irreps_in=o3.Irreps("1e"),
         )
-
 
     def forward(
         self,

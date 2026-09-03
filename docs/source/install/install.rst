@@ -183,8 +183,8 @@ The two upstream NVIDIA repositories are provided for reference:
 Time-reversal e3nn
 ------------------
 
-The standard e3nn installation is insufficient for magnetic TACE models.
-To use mTACE, install the ``time-reversal`` branch of `e3nn
+To enforce time-reversal equivariance in mTACE, install the ``time-reversal``
+branch of `e3nn
 <https://github.com/xvzemin/e3nn/tree/time-reversal>`_ to ensure time-reversal
 equivariance:
 
@@ -194,6 +194,17 @@ equivariance:
      "e3nn @ git+https://github.com/xvzemin/e3nn.git@time-reversal"
 
 The package name and Python import remain ``e3nn``.
+
+TACE detects this capability at runtime; no model option is required. Pure
+O(3) models then attach time-reversal parity to magnetic moments, magnetic
+fields, and their tensor-product paths automatically.
+
+Time-reversal models use the installed time-reversal e3nn implementation for
+all equivariant operations, including irreps, spherical harmonics, linear
+maps, gates, and tensor products. TACE rejects explicit
+EQT, CUEQ, OEQ, or EquivariantX kernel selection for these models and does not
+automatically enable EQT for higher-order products, because these kernels do
+not represent time-reversal parity.
 
 EquivariantX
 ------------

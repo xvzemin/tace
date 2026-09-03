@@ -10,14 +10,15 @@ import torch
 from e3nn import o3
 
 from tace.utils.torch_scatter import scatter_sum
+
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct
-from .legacy_so2 import uvSO2Convolution
 from .layer_norm import get_normalization_layer
+from .legacy_so2 import uvSO2Convolution
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2ScatterMagneticTensorProduct, O2ScatterTensorProduct
 from .residual import get_resnet_layer
@@ -152,15 +153,17 @@ class O3CgtpInteraction(Interaction):
             if self.resnet_type in ["BB", "BAB"]:
                 self.norm1 = get_normalization_layer(
                     self.pre_norm_type,
-                    ls=self.irreps_in.lmax,
+                    ls=self.irreps_in.ls,
                     num_channels=self.num_channel,
+                    irreps=self.irreps_in,
                 )
                 self.reshape1 = LayoutTransform(self.irreps_in)
             if self.resnet_type in ["AB", "BAB"]:
                 self.norm2 = get_normalization_layer(
                     self.pre_norm_type,
-                    ls=self.irreps_out.lmax,
+                    ls=self.irreps_out.ls,
                     num_channels=self.num_channel,
+                    irreps=self.irreps_out,
                 )
                 self.reshape2 = LayoutTransform(self.irreps_out)
 
@@ -665,7 +668,7 @@ class O3Wigner6jMagneticInteraction(O3GeneralizedWigner6jInteraction):
 
     def _prepare_setup(self) -> None:
         if self.magnetic_irreps is None:
-            raise ValueError("o3_w6j_mag requires magnetic_irreps.")
+            raise ValueError("w6j_mag requires magnetic_irreps.")
         if not 1 <= self.mag_Lmax <= self.Lmax:
             raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
         if self.magnetic_irreps.lmax != self.mag_Lmax:

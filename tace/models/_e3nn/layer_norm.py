@@ -1,31 +1,14 @@
-"""
-Copy From equiformer_v3
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
-MIT License
-Copyright (c) 2026 The Atomic Architects
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-"""
+# TODO, refactor this layernorm
 
 from functools import partial
 
 import torch
+from e3nn import o3
 
 _LAYER_NORM = [
     "merge_layer_norm",
@@ -34,7 +17,13 @@ _LAYER_NORM = [
 
 
 def get_normalization_layer(
-    norm_type, ls, num_channels, eps=1e-5, affine=True, normalization="component"
+    norm_type,
+    ls,
+    num_channels,
+    eps=1e-5,
+    affine=True,
+    normalization="component",
+    irreps=None,
 ):
     assert norm_type in _LAYER_NORM
     if norm_type == "merge_layer_norm":
@@ -43,7 +32,14 @@ def get_normalization_layer(
         norm_class = partial(EquivariantMergeLayerNorm, centering=False)
     else:
         raise ValueError
-    return norm_class(ls, num_channels, eps, affine, normalization)
+    return norm_class(
+        ls,
+        num_channels,
+        eps,
+        affine,
+        normalization,
+        irreps=irreps,
+    )
 
 
 class EquivariantMergeLayerNorm(torch.nn.Module):
@@ -56,9 +52,13 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
         normalization="component",
         std_balance_degrees=True,
         centering=True,
+        irreps=None,
     ):
         super().__init__()
 
+        if irreps is not None:
+            irreps = o3.Irreps(irreps)
+            ls = [ir.l for _, ir in irreps]
         if isinstance(ls, int):
             self.ls = list(range(ls + 1))
         else:
@@ -71,6 +71,17 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
         self.affine = affine
         self.std_balance_degrees = std_balance_degrees
         self.centering = centering
+
+        if irreps is None:
+            self.scalar_index = 0
+        else:
+            offset = 0
+            self.scalar_index = None
+            for _, ir in irreps:
+                if ir.is_scalar():
+                    self.scalar_index = offset
+                    break
+                offset += ir.dim
 
         # total irreps dimension
         self.dim = sum([2 * l + 1 for l in self.ls])
@@ -87,7 +98,7 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
                 expand_index[offset : offset + length] = i
                 offset += length
             self.register_buffer("expand_index", expand_index)
-            if self.centering:
+            if self.centering and self.scalar_index is not None:
                 self.affine_bias = torch.nn.Parameter(torch.zeros(self.num_channels))
             else:
                 self.register_parameter("affine_bias", None)
@@ -121,13 +132,12 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
 
         # for L = 0
-        if self.centering:
-            scalars = inputs.narrow(1, 0, 1)
+        if self.centering and self.scalar_index is not None:
+            scalars = inputs.narrow(1, self.scalar_index, 1)
             scalars_mean = scalars.mean(dim=2, keepdim=True)  # [N, 1, 1]
             scalars = scalars - scalars_mean
-            inputs = torch.cat(
-                (scalars, inputs.narrow(1, 1, inputs.shape[1] - 1)), dim=1
-            )
+            inputs = inputs.clone()
+            inputs[:, self.scalar_index : self.scalar_index + 1, :] = scalars
 
         # for L >= 0
         feature_norm = inputs.pow(2)
@@ -151,9 +161,11 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
             feature_norm = feature_norm * weight
         outputs = inputs * feature_norm
 
-        if self.affine and self.centering:
-            outputs[:, 0:1, :] = outputs.narrow(1, 0, 1) + self.affine_bias.view(
-                1, 1, self.num_channels
+        if self.affine and self.centering and self.scalar_index is not None:
+            scalar = outputs.narrow(1, self.scalar_index, 1)
+            outputs = outputs.clone()
+            outputs[:, self.scalar_index : self.scalar_index + 1, :] = (
+                scalar + self.affine_bias.view(1, 1, self.num_channels)
             )
 
         return outputs

@@ -82,7 +82,7 @@ class e3nnTACE(torch.nn.Module):
         self.embedding_property = (
             cfg["invariant_property"] + cfg["equivariant_property"]
         )
-        magnetic_interactions = {"o3_w6j_mag", "o2_mag"}
+        magnetic_interactions = {"w6j_mag", "o2_mag"}
         self.use_one_body_magmoms = bool(
             cfg["readout_emlp"]["use_one_body_magmoms"]
             and "energy" in cfg["target_property"]
@@ -155,6 +155,7 @@ class e3nnTACE(torch.nn.Module):
             parity=cfg["parity"],
             use_one_body_magmoms=self.use_one_body_magmoms,
         )
+        self.use_time_reversal = self.representation.use_time_reversal
 
         # === Readout ===
         if self.representation.use_dens:

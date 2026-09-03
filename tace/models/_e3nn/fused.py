@@ -11,7 +11,10 @@ from e3nn import o3
 
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
+
+from ..time_reversal import contains_time_odd_irreps
 from .paths import generate_paths
+
 
 
 class uuuTensorProduct(torch.nn.Module):
@@ -58,10 +61,16 @@ class uuuTensorProduct(torch.nn.Module):
         self.weight_numel = self.tp.weight_numel
 
         use_eqt = acceleration_enabled("eqt")
-        if use_eqt is None:
-            self.use_eqt = use_fused
-        else:
-            self.use_eqt = use_eqt
+        self.use_eqt = use_fused if use_eqt is None else use_eqt
+        if self.use_eqt and contains_time_odd_irreps(
+            irreps_in1,
+            irreps_in2,
+            actual_irreps_out,
+        ):
+            raise ValueError(
+                "EQT does not support time-reversal irreps. Disable EQT and "
+                "use the native e3nn tensor product."
+            )
 
         # self.use_cue = acceleration_enabled("cue")
 
@@ -140,6 +149,16 @@ class uvuTensorProduct(torch.nn.Module):
         oeq_compatible = oeq_compatible and all(
             instruction[4] for instruction in instructions
         )
+        uses_time_reversal = contains_time_odd_irreps(
+            irreps_in1,
+            irreps_in2,
+            irreps_out,
+        )
+        if use_oeq and uses_time_reversal:
+            raise ValueError(
+                "OEQ does not support time-reversal irreps. Disable OEQ and "
+                "use the native e3nn tensor product."
+            )
         self.use_oeq = use_oeq and oeq_compatible
 
         if use_oeq and not oeq_compatible:
@@ -225,7 +244,23 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.use_oeq = acceleration_enabled("oeq")
         self.use_cue = acceleration_enabled("cue")
         self.use_aoti = acceleration_enabled("compile")
+        uses_time_reversal = contains_time_odd_irreps(
+            self.irreps_in1,
+            self.irreps_in2,
+            self.irreps_out,
+        )
 
+        enabled_time_reversal_kernels = [
+            name
+            for name, enabled in (("OEQ", self.use_oeq), ("CUE", self.use_cue))
+            if enabled
+        ]
+        if uses_time_reversal and enabled_time_reversal_kernels:
+            raise ValueError(
+                f"{', '.join(enabled_time_reversal_kernels)} does not support "
+                "time-reversal irreps. Disable the accelerated kernel and use "
+                "the native e3nn tensor product."
+            )
         if self.use_aoti and self.use_cue:
             logging.warning(
                 "CUE and AOTI cannot be used simultaneously in Scatter Tensor Product. "
@@ -276,5 +311,3 @@ class O3ScatterTensorProduct(torch.nn.Module):
         return scatter_sum(
             self.tp(x[edge_index[0]], y, w), edge_index[1], dim=0, dim_size=x.size(0)
         )
-
-

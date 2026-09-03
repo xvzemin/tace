@@ -192,6 +192,6 @@ def test_cart_path_features_are_simplified_before_linear_maps() -> None:
 
 def test_cart_model_rejects_magnetic_interaction() -> None:
     config = _model_config(num_fidelities=1)
-    config["atomic_basis"]["type"] = ["o3_w6j_mag"] * config["num_layers"]
+    config["atomic_basis"]["type"] = ["w6j_mag"] * config["num_layers"]
     with pytest.raises(ValueError, match="does not support"):
         cartTACE(**config)

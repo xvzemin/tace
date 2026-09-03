@@ -88,7 +88,7 @@ universal magnetic embedding disabled when testing this method in isolation:
          num_mag_radial_basis: 10
 
        atomic_basis:
-         type: o3_w6j_mag
+         type: w6j_mag
 
        universal_embedding:
          initial_noncollinear_magmoms:
@@ -97,8 +97,10 @@ universal magnetic embedding disabled when testing this method in isolation:
 This path is experimental; its detailed
 design and recommended hyperparameters will accompany the formal paper.
 
-``mag_Lmax`` selects ``0e + 1e + ... + mag_Lmax e`` solid harmonics of the
-axial magnetic-moment input. Its default value is ``1`` and it must satisfy
+``mag_Lmax`` selects the solid harmonics of the axial magnetic-moment input.
+With time-reversal e3nn, the input magnetic moment is ``1eo`` and degree
+``l`` has time parity ``(-1)^l``; the sequence therefore starts as
+``0ee + 1eo + 2ee + ...``. Its default value is ``1`` and it must satisfy
 ``1 <= mag_Lmax <= Lmax``.
 
 Local O(2) frame (experimental)

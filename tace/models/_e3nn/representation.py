@@ -12,8 +12,8 @@ from e3nn import o3
 
 from eqx.o2 import WignerD
 
-from ...utils.env import get_tace_use_dens
-from ..angular import SphericalHarmonics
+from ...dataset.quantity import PROPERTY
+from ...utils.env import acceleration_enabled, get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mag import MagneticBasis
@@ -23,6 +23,7 @@ from .inter import INTERACTION
 from .layer_norm import get_normalization_layer
 from .node import NODE_EMBEDDING
 from .prod import PRODUCT
+from ..time_reversal import spherical_harmonics_irreps, supports_time_reversal
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
 
@@ -60,8 +61,8 @@ class Representation(torch.nn.Module):
         self.num_elements = len(atomic_numbers)
         self.num_channel = num_channel
         self.num_layers = num_layers
-        self.invariant_property = invariant_property
-        self.equivariant_property = equivariant_property
+        self.invariant_property = list(invariant_property)
+        self.equivariant_property = list(equivariant_property)
         self.register_buffer(
             "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
         )
@@ -92,20 +93,47 @@ class Representation(torch.nn.Module):
             or node_embedding["type"] == "so2_tensor"
         )
         self.use_so2 = self.use_legacy_so2 or self.use_o2
+        self.use_time_reversal = supports_time_reversal() and not self.use_so2
+        if self.use_time_reversal:
+            time_odd_scalars = [
+                name
+                for name in self.invariant_property
+                if PROPERTY[name].get("time_reversal", 1) == -1
+            ]
+            self.invariant_property = [
+                name
+                for name in self.invariant_property
+                if name not in time_odd_scalars
+            ]
+            self.equivariant_property.extend(time_odd_scalars)
+        enabled_kernels = [
+            name
+            for name in ("eqt", "cue", "oeq", "eqx")
+            if acceleration_enabled(name)
+        ]
+        if self.use_time_reversal and enabled_kernels:
+            raise ValueError(
+                "Time-reversal models do not support accelerated equivariant "
+                f"kernels: {', '.join(enabled_kernels)}. Disable these kernels."
+            )
         self.use_o3 = (
             any(t != "so2" for t in atomic_basis["type"])
             or node_embedding["type"] == "tensor"
         )
         self.use_magnetic_radial_basis = any(
-            interaction in {"o3_w6j_mag", "o2_mag"}
+            interaction in {"w6j_mag", "o2_mag"}
             for interaction in atomic_basis["type"]
         )
         self.use_one_body_magmoms = use_one_body_magmoms
         self.use_magnetic_node_attrs = any(
-            interaction in {"o3_w6j_mag", "o2_mag"}
+            interaction in {"w6j_mag", "o2_mag"}
             for interaction in atomic_basis["type"]
         )
-        self.magnetic_irreps = o3.Irreps.spherical_harmonics(mag_Lmax, p=1)
+        self.magnetic_irreps = spherical_harmonics_irreps(
+            mag_Lmax,
+            p=1,
+            time_reversal=-1 if self.use_time_reversal else 1,
+        )
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             self.magnetic_basis = MagneticBasis(
                 magmoms_norm_by_element,
@@ -123,7 +151,7 @@ class Representation(torch.nn.Module):
         else:
             self.so2_angular_basis = None
         if self.use_o3:
-            self.o3_angular_basis = SphericalHarmonics(
+            self.o3_angular_basis = o3.SphericalHarmonics(
                 o3.Irreps.spherical_harmonics(lmax, p=-1),
                 normalize=False,
                 normalization="component",
@@ -244,6 +272,7 @@ class Representation(torch.nn.Module):
                             for k, v in universal_embedding.items()
                             if k in self.equivariant_property
                         },
+                        time_reversal=self.use_time_reversal,
                     ),
                 )
                 prod_irreps_in = self.uee_embeddings[layer].irreps_out
@@ -272,6 +301,7 @@ class Representation(torch.nn.Module):
                     irreps_in=prod_irreps_in,
                     use_shared_expert=product_basis["use_shared_expert"],
                     agnostic=product_basis["agnostic"],
+                    use_time_reversal=self.use_time_reversal,
                 )
             )
             self.irreps_out = self.products[-1].irreps_out
@@ -281,6 +311,7 @@ class Representation(torch.nn.Module):
                 layer_norm["final_norm_type"],
                 ls=target_irreps.ls,
                 num_channels=num_channel,
+                irreps=target_irreps,
             )
             self.final_reshape = LayoutTransform(
                 [(num_channel, ir) for _, ir in target_irreps]
