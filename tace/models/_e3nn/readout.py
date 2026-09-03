@@ -7,12 +7,11 @@ from typing import List, Union
 
 import torch
 from e3nn import o3
-from e3nn.nn import Activation
+from e3nn.nn import Activation, Gate
 
-from ..linear import e3nnLinear, e3nnElementLinear
+from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import ACTIVATION
 from .base import ReadOut
-from .nonlinear import O3Gate
 
 
 def mh_mask(
@@ -109,7 +108,9 @@ class TensorReadOut(ReadOut):
                 self.irreps_gates, self.irreps_hidden
             ):
                 self.acts.append(
-                    O3Gate(
+                    Gate(
+                        irreps_scalars=o3.Irreps(),
+                        act_scalars=[],
                         irreps_gates=irreps_gates,
                         act_gates=[ACTIVATION[self.tensor_act]()],
                         irreps_gated=irreps_gated,
