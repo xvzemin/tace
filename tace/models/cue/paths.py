@@ -16,6 +16,13 @@ except Exception:
     pass
 
 
+def _to_cue_irreps(irreps: o3.Irreps):
+    return cue.Irreps(
+        O3_e3nn,
+        [(mul, (ir.l, ir.p)) for mul, ir in o3.Irreps(irreps)],
+    )
+
+
 def satisfy(l1: int, l2: int, restriction: Union[str, None] = None) -> bool:
     if restriction == None:
         return True
@@ -43,9 +50,9 @@ def generate_cueq_paths(
     l2l3: Union[str, None] = None,
     l3l1: Union[str, None] = None,
 ):
-    irreps_in1: cue.Irreps = cue.Irreps(O3_e3nn, irreps_in1)
-    irreps_in2: cue.Irreps = cue.Irreps(O3_e3nn, irreps_in2)
-    irreps_out: cue.Irreps = cue.Irreps(O3_e3nn, irreps_out)
+    irreps_in1: cue.Irreps = _to_cue_irreps(irreps_in1)
+    irreps_in2: cue.Irreps = _to_cue_irreps(irreps_in2)
+    irreps_out: cue.Irreps = _to_cue_irreps(irreps_out)
     G = irreps_in1.irrep_class
     target_irreps_out = into_list_of_irrep(G, irreps_out)
 
@@ -108,9 +115,10 @@ def generate_cueq_uuu_paths(
     The output path order follows ``tace.models._e3nn.paths.generate_paths`` so
     this can be used as a drop-in replacement for ``o3.TensorProduct`` in ACE.
     """
-    irreps_in1: cue.Irreps = cue.Irreps(O3_e3nn, irreps_in1)
-    irreps_in2: cue.Irreps = cue.Irreps(O3_e3nn, irreps_in2)
-    irreps_out: cue.Irreps = cue.Irreps(O3_e3nn, irreps_out)
+    e3nn_irreps_out = o3.Irreps(irreps_out)
+    irreps_in1: cue.Irreps = _to_cue_irreps(irreps_in1)
+    irreps_in2: cue.Irreps = _to_cue_irreps(irreps_in2)
+    irreps_out: cue.Irreps = _to_cue_irreps(e3nn_irreps_out)
     G = irreps_in1.irrep_class
 
     if trainable:
@@ -128,7 +136,8 @@ def generate_cueq_uuu_paths(
         d.add_segment(in2_operand, (ir2.dim, mul2))
 
     irreps_out_list = []
-    for _, ir_out in irreps_out:
+    actual_e3nn_irreps_out = []
+    for (_, e3nn_ir_out), (_, ir_out) in zip(e3nn_irreps_out, irreps_out):
         for i, (mul1, ir1) in enumerate(irreps_in1):
             for j, (mul2, ir2) in enumerate(irreps_in2):
                 l1 = ir1.l
@@ -151,6 +160,7 @@ def generate_cueq_uuu_paths(
                         else:
                             d.add_path(i, j, None, c=cg, dims={"u": mul1})
                         irreps_out_list.append((mul1, ir_out))
+                        actual_e3nn_irreps_out.append((mul1, e3nn_ir_out))
 
     actual_irreps_out = cue.Irreps(G, irreps_out_list)
     d = d.normalize_paths_for_operand(-1)
@@ -171,7 +181,4 @@ def generate_cueq_uuu_paths(
         [cue.IrrepsAndLayout(actual_irreps_out, cue.ir_mul)],
         cue.SegmentedPolynomial.eval_last_operand(d),
     )
-    actual_e3nn_irreps_out = o3.Irreps(
-        [(mul, (ir.l, ir.p)) for mul, ir in irreps_out_list]
-    )
-    return descriptor, actual_e3nn_irreps_out
+    return descriptor, o3.Irreps(actual_e3nn_irreps_out)
