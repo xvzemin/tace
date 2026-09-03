@@ -312,7 +312,7 @@ class e3nnLinear(torch.nn.Module):
         bias_acc = 0
         for mul, ir in self.irreps_out:
             dim = mul * ir.dim
-            if ir.l == 0 and ir.p == 1:
+            if ir.is_scalar():
                 self._0e_muls.append(mul)
                 self._0e_slices.append(slice(acc, acc + dim))
                 self._bias_slices.append(slice(bias_acc, bias_acc + dim))
@@ -407,7 +407,7 @@ class e3nnElementLinear(torch.nn.Module):
         bias_acc = 0
         for mul, ir in self.irreps_out:
             dim = mul * ir.dim
-            if ir.l == 0 and ir.p == 1:
+            if ir.is_scalar():
                 self._0e_muls.append(mul)
                 self._0e_slices.append(slice(acc, acc + dim))
                 self._bias_slices.append(slice(bias_acc, bias_acc + dim))
@@ -554,7 +554,7 @@ class e3nnMoEElementLinear(torch.nn.Module):
         self._bias_out_indices = []
         bias_numel = 0
         for out_idx, (mul, ir) in enumerate(self.expert_irreps_out):
-            if ir.l == 0 and ir.p == 1:
+            if ir.is_scalar():
                 self._bias_out_indices.append((out_idx, bias_numel, bias_numel + mul))
                 bias_numel += mul
         if bias and bias_numel > 0:
