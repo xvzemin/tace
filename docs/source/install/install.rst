@@ -180,6 +180,28 @@ The two upstream NVIDIA repositories are provided for reference:
 - `nvalchemi-toolkit-ops <https://github.com/NVIDIA/nvalchemi-toolkit-ops>`_
 
 
+Time-reversal e3nn
+------------------
+
+The standard e3nn installation is insufficient for magnetic TACE models.
+To use mTACE, install the ``time-reversal`` branch of `e3nn
+<https://github.com/xvzemin/e3nn/tree/time-reversal>`_ to ensure time-reversal
+equivariance:
+
+.. code-block:: bash
+
+   pip install --force-reinstall --no-deps \
+     "e3nn @ git+https://github.com/xvzemin/e3nn.git@time-reversal"
+
+The package name and Python import remain ``e3nn``.
+
+EquivariantX
+------------
+
+EquivariantX is currently bundled with TACE and does not require a separate
+installation. It may be distributed as a standalone package in the future.
+
+
 Acceleration Selection
 ----------------------
 

@@ -770,7 +770,7 @@ INTERACTION: Dict[str, type[Interaction]] = {
     "so2": uvSO2Interaction,
     # below in dev, not stable
     "o2": O2Interaction,
-    "o3_w6j_mag": O3Wigner6jMagneticInteraction,
+    "w6j_mag": O3Wigner6jMagneticInteraction,
     "o2_mag": O2MagneticInteraction,
 }
 
