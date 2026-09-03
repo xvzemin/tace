@@ -3,10 +3,9 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .utils import (
     default_value_for_hessian,
@@ -33,6 +32,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 0,
         "irreps": "1x0e",
+        "time_reversal": 1,
         "abbreviation": "F_IDX",
         "shape": {
             "in_data": (1,),
@@ -52,6 +52,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 0,
         "irreps": "1x0e",
+        "time_reversal": 1,
         "abbreviation": "E",
         "shape": {
             "in_data": (1,),
@@ -71,6 +72,7 @@ PROPERTY = {
         "scope": "per-atom",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "F",
         "shape": {
             "in_data": (-1, 3),
@@ -90,6 +92,7 @@ PROPERTY = {
         "scope": "per-edge",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "EDGE_F",
         "shape": {
             "in_data": (-1, 3),
@@ -109,6 +112,7 @@ PROPERTY = {
         "scope": "per-atom",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "D_F",
         "shape": {
             "in_data": (-1, 3),
@@ -128,6 +132,7 @@ PROPERTY = {
         "scope": "per-edge",
         "rank": 2,
         "irreps": "1x0e+1x2e",
+        "time_reversal": 1,
         "abbreviation": "HESSIAN",
         "shape": {
             "in_data": (-1,),
@@ -166,6 +171,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "S",
         "shape": {
             "in_data": (1, 3, 3),
@@ -186,6 +192,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "D_S",
         "shape": {
             "in_data": (1, 3, 3),
@@ -205,6 +212,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "V",
         "shape": {
             "in_data": (1, 3, 3),
@@ -225,6 +233,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "D_V",
         "shape": {
             "in_data": (1, 3, 3),
@@ -244,6 +253,7 @@ PROPERTY = {
         "scope": "per-atom",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "A_S",
         "shape": {
             "in_data": (-1, 3, 3),
@@ -263,6 +273,7 @@ PROPERTY = {
         "scope": "per-atom",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "A_V",
         "shape": {
             "in_data": (-1, 3, 3),
@@ -282,6 +293,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "D",
         "shape": {
             "in_data": (1, 3),
@@ -301,6 +313,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "D",
         "shape": {
             "in_data": (1, 3),
@@ -320,6 +333,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "P",
         "shape": {
             "in_data": (1, 3),
@@ -339,6 +353,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "ALPHA",
         "shape": {
             "in_data": (1, 3, 3),
@@ -358,6 +373,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "ALPHA",
         "shape": {
             "in_data": (1, 3, 3),
@@ -377,6 +393,7 @@ PROPERTY = {
         "scope": "per-atom",
         "rank": 2,
         "irreps": "1x2e",
+        "time_reversal": 1,
         "abbreviation": "BEC",
         "shape": {
             "in_data": (-1, 3, 3),
@@ -434,6 +451,7 @@ PROPERTY = {
         "scope": "per-atom",
         "rank": 0,
         "irreps": "1x0e",
+        "time_reversal": 1,
         "abbreviation": "C",
         "shape": {
             "in_data": (-1,),
@@ -453,6 +471,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 0,
         "irreps": "1x0e",
+        "time_reversal": 1,
         "abbreviation": "TC",
         "shape": {
             "in_data": (1,),
@@ -490,7 +509,8 @@ PROPERTY = {
         "type": "float",
         "scope": "per-atom",
         "rank": 0,
-        "irreps": "1x0e",  # TODO, check
+        "irreps": "1x0e",
+        "time_reversal": -1,
         "abbreviation": "I_C_MAG",
         "shape": {
             "in_data": (-1,),
@@ -504,31 +524,13 @@ PROPERTY = {
         "second_derivative": False,
         "requires_grad_with": [],
     },
-    "initial_noncollinear_magmoms": {
-        "ase_name": "initial_magmoms",
-        "type": "float",
-        "scope": "per-atom",
-        "rank": 1,
-        "irreps": "1x1e",  # TODO, check
-        "abbreviation": "I_NC_MAG",
-        "shape": {
-            "in_data": (-1, 3),
-            "shape_fn": None,
-        },
-        "default_value_fn": default_value_for_rank1_atom,
-        "must_be_with": [],
-        "enable_prediction": False,
-        "enable_embedding": True,
-        "first_derivative": False,
-        "second_derivative": False,
-        "requires_grad_with": [],
-    },
     "final_collinear_magmoms": {
         "ase_name": "magmoms",
         "type": "float",
         "scope": "per-atom",
         "rank": 0,
-        "irreps": "1x0e",  # TODO, check
+        "irreps": "1x0e",
+        "time_reversal": -1,
         "abbreviation": "F_C_MAG",
         "shape": {
             "in_data": (-1,),
@@ -547,7 +549,8 @@ PROPERTY = {
         "type": "float",
         "scope": "per-atom",
         "rank": 0,
-        "irreps": "1x0e",  # TODO, check
+        "irreps": "1x0e",
+        "time_reversal": 1,
         "abbreviation": "ABS_F_C_MAG",
         "shape": {
             "in_data": (-1,),
@@ -561,31 +564,13 @@ PROPERTY = {
         "second_derivative": False,
         "requires_grad_with": [],
     },
-    "final_noncollinear_magmoms": {
-        "ase_name": "magmoms",
-        "type": "float",
-        "scope": "per-atom",
-        "rank": 1,
-        "irreps": "1x1e",  # TODO, check
-        "abbreviation": "F_NC_MAG",
-        "shape": {
-            "in_data": (-1, 3),
-            "shape_fn": None,
-        },
-        "default_value_fn": default_value_for_rank1_atom,
-        "must_be_with": [],
-        "enable_prediction": True,
-        "enable_embedding": False,
-        "first_derivative": False,
-        "second_derivative": False,
-        "requires_grad_with": [],
-    },
     "collinear_magnetic_forces": {
         "ase_name": None,
         "type": "float",
         "scope": "per-atom",
         "rank": 0,
-        "irreps": "1x0e",  # TODO, check
+        "irreps": "1x0e",
+        "time_reversal": -1,
         "abbreviation": "C_MAG_F",
         "shape": {
             "in_data": (-1,),
@@ -599,31 +584,13 @@ PROPERTY = {
         "second_derivative": False,
         "requires_grad_with": ["initial_collinear_magmoms"],
     },
-    "noncollinear_magnetic_forces": {
-        "ase_name": None,
-        "type": "float",
-        "scope": "per-atom",
-        "rank": 1,
-        "irreps": "1x1e",  # TODO, check
-        "abbreviation": "NC_MAG_F",
-        "shape": {
-            "in_data": (-1, 3),
-            "shape_fn": None,
-        },
-        "default_value_fn": default_value_for_rank1_atom,
-        "must_be_with": ["initial_noncollinear_magmoms"],
-        "enable_prediction": True,
-        "enable_embedding": False,
-        "first_derivative": True,
-        "second_derivative": False,
-        "requires_grad_with": ["initial_noncollinear_magmoms"],
-    },
     "total_collinear_magmom": {
         "ase_name": "magmoms",
         "type": "float",
         "scope": "per-system",
         "rank": 0,
-        "irreps": "1x0e",  # TODO, check
+        "irreps": "1x0e",
+        "time_reversal": -1,
         "abbreviation": "TCM",
         "shape": {
             "in_data": (1,),
@@ -637,12 +604,73 @@ PROPERTY = {
         "second_derivative": False,
         "requires_grad_with": [],
     },
+    "initial_noncollinear_magmoms": {
+        "ase_name": "initial_magmoms",
+        "type": "float",
+        "scope": "per-atom",
+        "rank": 1,
+        "irreps": "1x1e",
+        "time_reversal": -1,
+        "abbreviation": "I_NC_MAG",
+        "shape": {
+            "in_data": (-1, 3),
+            "shape_fn": None,
+        },
+        "default_value_fn": default_value_for_rank1_atom,
+        "must_be_with": [],
+        "enable_prediction": False,
+        "enable_embedding": True,
+        "first_derivative": False,
+        "second_derivative": False,
+        "requires_grad_with": [],
+    },
+    "final_noncollinear_magmoms": {
+        "ase_name": "magmoms",
+        "type": "float",
+        "scope": "per-atom",
+        "rank": 1,
+        "irreps": "1x1e",
+        "time_reversal": -1,
+        "abbreviation": "F_NC_MAG",
+        "shape": {
+            "in_data": (-1, 3),
+            "shape_fn": None,
+        },
+        "default_value_fn": default_value_for_rank1_atom,
+        "must_be_with": [],
+        "enable_prediction": True,
+        "enable_embedding": False,
+        "first_derivative": False,
+        "second_derivative": False,
+        "requires_grad_with": [],
+    },
+    "noncollinear_magnetic_forces": {
+        "ase_name": None,
+        "type": "float",
+        "scope": "per-atom",
+        "rank": 1,
+        "irreps": "1x1e",
+        "time_reversal": -1,
+        "abbreviation": "NC_MAG_F",
+        "shape": {
+            "in_data": (-1, 3),
+            "shape_fn": None,
+        },
+        "default_value_fn": default_value_for_rank1_atom,
+        "must_be_with": ["initial_noncollinear_magmoms"],
+        "enable_prediction": True,
+        "enable_embedding": False,
+        "first_derivative": True,
+        "second_derivative": False,
+        "requires_grad_with": ["initial_noncollinear_magmoms"],
+    },
     "total_noncollinear_magmom": {
         "ase_name": "magmoms",
         "type": "float",
         "scope": "per-system",
         "rank": 1,
-        "irreps": "1x1e",  # TODO, check
+        "irreps": "1x1e",
+        "time_reversal": -1,
         "abbreviation": "TNCM",
         "shape": {
             "in_data": (1, 3),
@@ -662,6 +690,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 1,
         "irreps": "1x1o",
+        "time_reversal": 1,
         "abbreviation": "EF",
         "shape": {
             "in_data": (1, 3),
@@ -681,6 +710,7 @@ PROPERTY = {
         "scope": "per-system",
         "rank": 1,
         "irreps": "1x1e",
+        "time_reversal": -1,
         "abbreviation": "MF",
         "shape": {
             "in_data": (1, 3),
@@ -861,7 +891,7 @@ def get_embedding_property(cfg: Dict) -> List[str]:
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
     if atomic_basis_type is not None and any(
-        interaction in {"o3_w6j_mag", "o2_mag"} for interaction in atomic_basis_type
+        interaction in {"w6j_mag", "o2_mag"} for interaction in atomic_basis_type
     ):
         if "initial_noncollinear_magmoms" not in embedding_property:
             embedding_property.append("initial_noncollinear_magmoms")
