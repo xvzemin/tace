@@ -30,9 +30,15 @@ class e3nnEqtTensorProduct(torch.nn.Module):
         from .equitorch.nn import TensorProduct
 
         self.eqt_tp = TensorProduct(
-            irreps_in1="+".join(str(ir) for _, ir in irreps_in1),
-            irreps_in2="+".join(str(ir) for _, ir in irreps_in2),
-            irreps_out="+".join(str(ir) for _, ir in irreps_out),
+            irreps_in1="+".join(
+                f"{ir.l}{'e' if ir.p == 1 else 'o'}" for _, ir in irreps_in1
+            ),
+            irreps_in2="+".join(
+                f"{ir.l}{'e' if ir.p == 1 else 'o'}" for _, ir in irreps_in2
+            ),
+            irreps_out="+".join(
+                f"{ir.l}{'e' if ir.p == 1 else 'o'}" for _, ir in irreps_out
+            ),
             channels_in1=num_channel,
             channels_in2=num_channel,
             channels_out=num_channel,
