@@ -63,7 +63,7 @@ class LocalFrame(torch.nn.Module):
         irreps = o3.Irreps(irreps)
         if mmax is None:
             mmax = irreps.lmax
-        if not isinstance(mmax, int) or isinstance(mmax, bool):
+        if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
         if mmax < 0:
             raise ValueError("mmax must be non-negative.")
@@ -84,13 +84,13 @@ class LocalFrame(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps)
-        if not isinstance(lmax, int) or isinstance(lmax, bool):
+        if not isinstance(lmax, int):
             raise TypeError("lmax must be an integer.")
         if self.irreps_in.lmax > lmax:
             raise ValueError("lmax must cover every O(3) irrep.")
         if mmax is None:
             mmax = lmax
-        if not isinstance(mmax, int) or isinstance(mmax, bool):
+        if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
         if not 0 <= mmax <= lmax:
             raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
