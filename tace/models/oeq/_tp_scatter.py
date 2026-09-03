@@ -14,6 +14,10 @@ except Exception:
     pass
 
 
+def _to_oeq_irreps(irreps: o3.Irreps):
+    return oeq.Irreps([(mul, (ir.l, ir.p)) for mul, ir in irreps])
+
+
 class e3nnOeqTensorProduct(torch.nn.Module):
     def __init__(
         self,
@@ -27,9 +31,9 @@ class e3nnOeqTensorProduct(torch.nn.Module):
 
         dtype = oeq.torch_to_oeq_dtype(torch.get_default_dtype())
         tpp = oeq.TPProblem(
-            irreps_in1,
-            irreps_in2,
-            irreps_out,
+            _to_oeq_irreps(irreps_in1),
+            _to_oeq_irreps(irreps_in2),
+            _to_oeq_irreps(irreps_out),
             instructions,
             shared_weights=shared_weights,
             internal_weights=False,
@@ -62,9 +66,9 @@ class e3nnOeqScatterTensorProduct(torch.nn.Module):
 
         dtype = oeq.torch_to_oeq_dtype(torch.get_default_dtype())
         tpp = oeq.TPProblem(
-            irreps_in1,
-            irreps_in2,
-            irreps_out,
+            _to_oeq_irreps(irreps_in1),
+            _to_oeq_irreps(irreps_in2),
+            _to_oeq_irreps(irreps_out),
             instructions,
             shared_weights=False,
             internal_weights=False,
