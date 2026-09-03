@@ -90,53 +90,6 @@ def symmetric_traceless_outer_product(
     return subtract_traces(T, n)
 
 
-# legacy, TODO
-# class CartesianHarmonics(torch.nn.Module):
-#     def __init__(self, lmax: int, norm: bool = True, traceless: bool = True) -> None:
-#         super().__init__()
-#         self.lmax = lmax
-#         self.norm = norm
-#         self.traceless = traceless
-#         for l in range(self.lmax+1):
-#             PS, DS, CS, SS = ICTD(l)
-#             self.register_buffer(f"D{l}", DS[0].to(torch.get_default_dtype()), persistent=False)
-#             del PS, DS, CS, SS
-
-#     def forward(self, v: torch.Tensor) -> Dict[int, torch.Tensor]:
-#         T = torch.ones_like(v[..., 0])
-#         edge_attrs: Dict[int, torch.Tensor] = {}
-#         edge_attrs[0] = T.unsqueeze(1)
-
-#         for l in range(1, self.lmax+1):
-#             T = T[..., None] * expand_dims_to(v, T.ndim + 1, dim=v.ndim - 1)
-#             edge_attrs[l] = T
-
-#         if self.traceless:
-#             for l in range(1, self.lmax+1):
-#                 T = edge_attrs[l]
-#                 B = T.size(0)
-#                 if B != 0:
-#                     REST = T.size()[1:]
-#                     T = T.reshape(B, -1)
-#                     T = T @ self.D(l)
-#                     T = T.reshape((B,) + REST)
-#                 edge_attrs[l] = T
-
-#         if self.norm:
-#             for l in range(1, self.lmax+1):
-#                 edge_attrs[l] = edge_attrs[l] * _norm(l)
-
-#         for l in range(1, self.lmax+1):
-#             edge_attrs[l] = edge_attrs[l].unsqueeze(-1)
-
-#         return edge_attrs
-
-#     def D(self, l: int):
-#         return dict(self.named_buffers())[f"D{l}"]
-
-#     def __repr__(self):
-#         return f"{self.__class__.__name__}(r={self.lmax}, norm={self.norm}, traceless={self.traceless})"
-
 
 class CartesianHarmonics(torch.nn.Module):
     def __init__(
@@ -234,8 +187,8 @@ class SphericalHarmonics(torch.nn.Module):
         if isinstance(irreps_out, str):
             irreps_out = Irreps(irreps_out)
         if isinstance(irreps_out, Irreps) and irreps_in is None:
-            for mul, (l, p) in irreps_out:
-                if l % 2 == 1 and p == 1:
+            for _, ir in irreps_out:
+                if ir.l % 2 == 1 and ir.p == 1:
                     irreps_in = Irreps("1e")
         if irreps_in is None:
             irreps_in = Irreps("1o")
@@ -251,14 +204,14 @@ class SphericalHarmonics(torch.nn.Module):
 
         if isinstance(irreps_out, Irreps):
             ls = []
-            for mul, (l, p) in irreps_out:
-                if p != input_p**l:
+            for mul, ir in irreps_out:
+                if ir.p != input_p**ir.l:
                     raise ValueError(
-                        f"irreps_out `{irreps_out}` passed to SphericalHarmonics asked for an output of l = {l} with parity "
-                        f"p = {p}, which is inconsistent with the input parity {input_p} — the output parity should have been "
-                        f"p = {input_p**l}"
+                        f"irreps_out `{irreps_out}` passed to SphericalHarmonics asked for an output of l = {ir.l} with parity "
+                        f"p = {ir.p}, which is inconsistent with the input parity {input_p} — the output parity should have been "
+                        f"p = {input_p**ir.l}"
                     )
-                ls.extend([l] * mul)
+                ls.extend([ir.l] * mul)
         elif isinstance(irreps_out, int):
             ls = [irreps_out]
         else:
