@@ -127,7 +127,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
             == num_channel
         ):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
-
         self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
         self.local_frame_out = o2.LocalFrame(
             self.irreps_out,
@@ -349,6 +348,13 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             == num_channel
         ):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
+        if (
+            o2.Irreps.common_multiplicity(self.magnetic_edge_irreps)
+            != num_channel
+        ):
+            raise ValueError(
+                "magnetic_edge_irreps multiplicity must equal num_channel."
+            )
 
         self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
         self.local_frame_out = o2.LocalFrame(
@@ -378,9 +384,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             layout_out="flatten_ir_mul",
         )
         self.node_irreps = self.local_frame_in.irreps_out
-        self.local_magnetic_irreps = o2.Irreps(
-            [(ir, mul * num_channel) for ir, mul in self.magnetic_frame.irreps_out]
-        )
+        self.local_magnetic_irreps = self.magnetic_frame.irreps_out
         self.local_irreps_in = (
             self.node_irreps
             + self.node_irreps
@@ -489,26 +493,11 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             magnetic_edge_attrs,
             wigner,
         )
-        magnetic = []
-        for (ir, mul), ir_slice in zip(
-            self.magnetic_frame.irreps_out,
-            self.magnetic_frame.irreps_out.slices(),
-        ):
-            values = magnetic_edge_attrs[..., ir_slice].reshape(
-                magnetic_edge_attrs.size(0), ir.dim, mul
-            )
-            values = values.repeat_interleave(self.num_channel, dim=-1)
-            magnetic.append(
-                values.reshape(
-                    magnetic_edge_attrs.size(0),
-                    ir.dim * mul * self.num_channel,
-                )
-            )
         return (
             node_features,
             paired_node[:, 0],
             paired_node[:, 1],
-            torch.cat(magnetic, dim=-1),
+            magnetic_edge_attrs,
         )
 
     def _convolution(

@@ -176,7 +176,7 @@ class O3CgtpInteraction(Interaction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_edge_feats: Union[torch.Tensor, None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
@@ -196,7 +196,7 @@ class O3CgtpInteraction(Interaction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None],
         edge_wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None],
+        magnetic_edge_feats: Union[torch.Tensor, None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         batch: torch.Tensor,
         graph: Graph,
@@ -241,7 +241,7 @@ class O3CgtpInteraction(Interaction):
                     edge_cutoff,
                     edge_wigner,
                     edge_wigner_inv,
-                    magnetic_radial_basis,
+                    magnetic_edge_feats,
                     magnetic_edge_attrs,
                 ),
                 nlocal,
@@ -368,7 +368,7 @@ class uvSO2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_edge_feats: Union[torch.Tensor, None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         return self.rejector(
@@ -429,13 +429,14 @@ class O2Interaction(O3CgtpInteraction):
         self,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
-        magnetic_radial_basis: Union[torch.Tensor, None],
+        magnetic_edge_feats: Union[torch.Tensor, None],
     ) -> torch.Tensor:
         return edge_feats
 
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
+        magnetic_edge_feats: Union[torch.Tensor, None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
@@ -485,17 +486,18 @@ class O2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_edge_feats: Union[torch.Tensor, None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         edge_weight_inputs = self._edge_weight_inputs(
             edge_feats,
             edge_index,
-            magnetic_radial_basis,
+            magnetic_edge_feats,
         )
         conv_weights = self.edge_info(edge_weight_inputs)
         return self._apply_rejector(
             node_feats,
+            magnetic_edge_feats,
             magnetic_edge_attrs,
             conv_weights,
             edge_index,
@@ -518,13 +520,16 @@ class O2MagneticInteraction(O2Interaction):
             raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
         if self.magnetic_edge_irreps.lmax != self.mag_Lmax:
             raise ValueError("magnetic_edge_irreps must end at mag_Lmax.")
+        self.magnetic_edge_irreps_out = o3.Irreps(
+            [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
+        ).regroup()
         super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:
         rejector = O2ScatterMagneticTensorProduct(
             self.irreps_in,
             self.irreps_out,
-            self.magnetic_edge_irreps,
+            self.magnetic_edge_irreps_out,
             num_channel=self.num_channel,
             lmax=max(self.Lmax, self.lmax),
             mmax=self.mmax,
@@ -553,32 +558,25 @@ class O2MagneticInteraction(O2Interaction):
             self.scatter_norm = None
         return rejector
 
-    def _edge_weight_input_dim(self) -> int:
-        return self.edge_feats_channel + 2 * self.num_mag_radial_basis
-
-    def _edge_weight_inputs(
-        self,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-        magnetic_radial_basis: Union[torch.Tensor, None],
-    ) -> torch.Tensor:
-        if magnetic_radial_basis is None:
-            raise ValueError(
-                "O2MagneticInteraction requires precomputed magnetic_radial_basis"
-            )
-        source, target = edge_index
-        return torch.cat(
-            (
-                edge_feats,
-                magnetic_radial_basis[source],
-                magnetic_radial_basis[target],
-            ),
-            dim=-1,
+    def _setup_additional_modules(self) -> None:
+        self.magnetic_linear = e3nnLinear(
+            self.magnetic_edge_irreps,
+            self.magnetic_edge_irreps_out,
+            bias=False,
+            internal_weights=False,
         )
-
+        self.magnetic_edge_info = MLP(
+            [self.magnetic_edge_feats_channel]
+            + self.radial_mlp
+            + [self.magnetic_linear.weight_numel],
+            bias=self.radial_bias,
+            # layer_norm=self.radial_layer_norm,
+            act="silu",
+        )
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
+        magnetic_edge_feats: Union[torch.Tensor, None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
@@ -587,10 +585,14 @@ class O2MagneticInteraction(O2Interaction):
         edge_radial_basis: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
     ) -> torch.Tensor:
-        if magnetic_edge_attrs is None:
+        if magnetic_edge_feats is None or magnetic_edge_attrs is None:
             raise ValueError(
-                "O2MagneticInteraction requires precomputed magnetic_edge_attrs"
+                "O2MagneticInteraction requires magnetic edge features and attrs"
             )
+        magnetic_edge_attrs = self.magnetic_linear(
+            magnetic_edge_attrs,
+            self.magnetic_edge_info(magnetic_edge_feats),
+        )
         return self.rejector(
             node_feats,
             magnetic_edge_attrs,

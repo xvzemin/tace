@@ -8,7 +8,7 @@ from typing import Union
 import torch
 from e3nn.nn import Activation
 
-from ..linear import e3nnLinear
+from ..linear import e3nnElementLinear, e3nnLinear
 from .base import EdgeEmbedding, EdgeUpdate
 
 
@@ -257,6 +257,121 @@ class Element2EdgeUpdate(ElementEdgeUpdate):
         return torch.cat(edge_feats_list, dim=-1)
 
 
+class IdentityMagneticEdgeUpdate(torch.nn.Module):
+    """Gather node magnetic radial bases without transforming them."""
+
+    def __init__(
+        self,
+        num_elements: int,
+        num_radial_basis: int,
+        num_channel: int,
+        bias: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_elements = num_elements
+        self.num_radial_basis = num_radial_basis
+        self.num_channel = num_channel
+        self.use_bias = bias
+        self.out_dim = 2 * num_radial_basis
+
+    def forward(
+        self,
+        magnetic_radial_basis: torch.Tensor,
+        node_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        source, target = edge_index
+        return torch.cat(
+            (magnetic_radial_basis[source], magnetic_radial_basis[target]),
+            dim=-1,
+        )
+
+
+class MagneticEdgeUpdate(torch.nn.Module):
+    """Build magnetic edge features using one shared element linear."""
+
+    def __init__(
+        self,
+        num_elements: int,
+        num_radial_basis: int,
+        num_channel: int,
+        bias: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_elements = num_elements
+        self.num_radial_basis = num_radial_basis
+        self.num_channel = num_channel
+        self.out_dim = 2 * num_channel
+
+        irreps_in = f"{num_radial_basis}x0e"
+        irreps_out = f"{num_channel}x0e"
+        self.embedding = e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            num_elements=num_elements,
+            bias=bias,
+        )
+
+    def forward(
+        self,
+        magnetic_radial_basis: torch.Tensor,
+        node_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        source, target = edge_index
+        node_features = self.embedding(magnetic_radial_basis, node_attrs)
+        return torch.cat(
+            (node_features[source], node_features[target]),
+            dim=-1,
+        )
+
+
+class Magnetic2EdgeUpdate(torch.nn.Module):
+    """Build magnetic edge features using separate endpoint element linears."""
+
+    def __init__(
+        self,
+        num_elements: int,
+        num_radial_basis: int,
+        num_channel: int,
+        bias: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_elements = num_elements
+        self.num_radial_basis = num_radial_basis
+        self.num_channel = num_channel
+        self.out_dim = 2 * num_channel
+
+        irreps_in = f"{num_radial_basis}x0e"
+        irreps_out = f"{num_channel}x0e"
+        self.source_embedding = e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            num_elements=num_elements,
+            bias=bias,
+        )
+        self.target_embedding = e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            num_elements=num_elements,
+            bias=bias,
+        )
+
+    def forward(
+        self,
+        magnetic_radial_basis: torch.Tensor,
+        node_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        source, target = edge_index
+        source_features = self.source_embedding(magnetic_radial_basis, node_attrs)
+        target_features = self.target_embedding(magnetic_radial_basis, node_attrs)
+        return torch.cat(
+            (source_features[source], target_features[target]),
+            dim=-1,
+        )
+
+
 EDGE_EMBEDDING = {
     "identity": IdentityEdgeEmbedding,
     "linear": LinearEdgeEmbedding,
@@ -266,6 +381,12 @@ EDGE_EMBEDDING = {
 
 EDGE_UPDATE = {
     "identity": IdentityEdgeUpdate,
-    "element": ElementEdgeUpdate,
+    # "element": ElementEdgeUpdate,
     "element2": Element2EdgeUpdate,
+}
+
+MAGNETIC_EDGE_UPDATE = {
+    "identity": IdentityMagneticEdgeUpdate,
+    "element": MagneticEdgeUpdate,
+    "element2": Magnetic2EdgeUpdate,
 }

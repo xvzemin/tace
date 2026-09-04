@@ -12,6 +12,7 @@ from e3nn import o3
 
 from eqx import o2
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+from tace.models._e3nn.edge import MAGNETIC_EDGE_UPDATE
 from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
     O2ScatterTensorProduct,
@@ -111,6 +112,89 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     assert not representation.use_time_reversal
     assert representation.so2_angular_basis.lmax == common_lmax
     assert representation.interactions[0].rejector.local_frame_in.lmax == common_lmax
+
+
+@pytest.mark.parametrize("update_type", ["identity", "element", "element2"])
+def test_magnetic_edge_update_is_independent_per_interaction(update_type):
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config["magnetic_edge_update"]["type"] = update_type
+    config["atomic_basis"]["type"] = ["o2_mag", "o2_mag"]
+    config["atomic_basis"]["nonlinear"] = ["gate", "gate"]
+    config["atomic_basis"]["edge_nonlinear"] = ["gate", "gate"]
+    config["product_basis"]["type"] = ["cgtp", "cgtp"]
+    config["product_basis"]["correlation"] = [2, 2]
+
+    representation = Representation(
+        num_layers=2,
+        atomic_numbers=[26],
+        cutoff=3.0,
+        avg_num_neighbors=2.0,
+        magmoms_norm_by_element={26: 2.0},
+        mmax=1,
+        Lmax=1,
+        lmax=1,
+        mag_Lmax=1,
+        num_channel=2,
+        target_irreps=o3.Irreps("0e"),
+        node_embedding=config["node_embedding"],
+        edge_embedding=config["edge_embedding"],
+        edge_update=config["edge_update"],
+        magnetic_edge_update=config["magnetic_edge_update"],
+        radial_basis=config["radial_basis"],
+        atomic_basis=config["atomic_basis"],
+        resnet=config["resnet"],
+        product_basis=config["product_basis"],
+        invariant_property=[],
+        equivariant_property=[],
+        universal_embedding=config["universal_embedding"],
+        layer_norm=config["layer_norm"],
+        dropout=config["dropout"],
+        parity=True,
+        use_one_body_magmoms=False,
+    )
+
+    num_mag_radial_basis = config["radial_basis"]["num_mag_radial_basis"] - 1
+    assert len(representation.magnetic_edge_updates) == 2
+    assert representation.magnetic_edge_updates[0] is not (
+        representation.magnetic_edge_updates[1]
+    )
+    for update, interaction in zip(
+        representation.magnetic_edge_updates,
+        representation.interactions,
+    ):
+        assert isinstance(update, MAGNETIC_EDGE_UPDATE[update_type])
+        assert interaction.edge_info.dims[0] == representation.edge_updates[0].out_dim
+        assert interaction.magnetic_edge_info.dims[:2] == [
+            update.out_dim,
+            num_mag_radial_basis,
+        ]
+        assert all(
+            mul == representation.num_channel
+            for mul, _ in interaction.magnetic_edge_irreps_out
+        )
+        assert interaction.magnetic_linear.bias is None
+
+        edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]])
+        magnetic_radial_basis = torch.randn(3, num_mag_radial_basis)
+        node_attrs = torch.ones(3, 1)
+        magnetic_edge_feats = update(
+            magnetic_radial_basis,
+            node_attrs,
+            edge_index,
+        )
+        magnetic_edge_attrs = torch.randn(
+            edge_index.size(1),
+            interaction.magnetic_edge_irreps.dim,
+        )
+        magnetic_weights = interaction.magnetic_edge_info(magnetic_edge_feats)
+        projected = interaction.magnetic_linear(
+            magnetic_edge_attrs,
+            magnetic_weights,
+        )
+        assert projected.shape == (
+            edge_index.size(1),
+            interaction.magnetic_edge_irreps_out.dim,
+        )
 
 
 def test_o2_does_not_import_tace():
@@ -691,9 +775,46 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
         )
 
 
+@pytest.mark.parametrize("update_type", ["identity", "element", "element2"])
+def test_magnetic_edge_update_gathers_source_and_target(update_type):
+    update = MAGNETIC_EDGE_UPDATE[update_type](
+        num_elements=2,
+        num_radial_basis=3,
+        num_channel=5,
+    ).to(DEVICE, DTYPE)
+    magnetic_radial_basis = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    node_attrs = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
+        device=DEVICE,
+    )
+
+    output = update(magnetic_radial_basis, node_attrs, edge_index)
+    source, target = edge_index
+    if update_type == "identity":
+        source_features = target_features = magnetic_radial_basis
+    elif update_type == "element":
+        source_features = target_features = update.embedding(
+            magnetic_radial_basis,
+            node_attrs,
+        )
+    else:
+        source_features = update.source_embedding(magnetic_radial_basis, node_attrs)
+        target_features = update.target_embedding(magnetic_radial_basis, node_attrs)
+
+    feature_dim = 3 if update_type == "identity" else 5
+    assert output.shape == (edge_index.size(1), update.out_dim)
+    torch.testing.assert_close(output[..., :feature_dim], source_features[source])
+    torch.testing.assert_close(output[..., feature_dim:], target_features[target])
+
+
 def _magnetic_scatter_module(use_attention: bool):
     irreps = o3.Irreps("2x0ee+2x1oe")
-    magnetic_edge_irreps = o3.Irreps("2x0ee+2x1eo+1x1ee")
+    magnetic_edge_irreps = o3.Irreps("2x0ee+2x1eo+2x1ee")
     module = O2ScatterMagneticTensorProduct(
         irreps,
         irreps,

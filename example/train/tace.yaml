@@ -317,6 +317,9 @@ model:
     edge_update:
       type: element2  # [identity, element2], identity is safer
 
+    magnetic_edge_update:
+      type: identity # [identity, element, element2], when num_elements > 1, use element or element2
+
     mmax: 3 # Truncation for SO2 irreps, 3 is recommended.
     Lmax: 2 # Truncation for node, 2 is recommended.
     lmax: 3 # Truncation for edge, 3 is recommended.

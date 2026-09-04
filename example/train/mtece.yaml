@@ -47,6 +47,9 @@ model:
   config:
     parity: true
 
+    magnetic_edge_update:
+      type: identity # [identity, element, element2], when num_elements > 1, use element or element2
+
     atomic_basis:
       type: o2_mag
       use_radial_rotary_attention: true

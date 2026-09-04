@@ -4,6 +4,7 @@
 ################################################################################
 
 import math
+from typing import Union
 
 import torch
 import torch.nn.functional as F
@@ -345,22 +346,35 @@ class e3nnLinear(torch.nn.Module):
         self.register_buffer("_bias_index", bias_index, persistent=False)
         self.register_buffer("_bias_mask", bias_mask, persistent=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        weight = self.weight
-
-        if self.use_matrix_weight:
-            if has_lora(self):
-                weight = torch.cat(
-                    [
-                        (w + _lora_path_delta(self, path_index)).view(-1)
-                        for path_index, w in enumerate(weight)
-                    ],
-                    dim=-1,
+    def forward(
+        self,
+        x: torch.Tensor,
+        weight: Union[torch.Tensor, None] = None,
+    ) -> torch.Tensor:
+        if self.weight is None:
+            if weight is None:
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights=False."
                 )
-            else:
-                weight = torch.cat([w.view(-1) for w in weight], dim=-1)
-        elif has_lora(self):
-            weight = weight + _flat_lora_delta(self)
+        else:
+            if weight is not None:
+                raise RuntimeError(
+                    "Weights must not be provided when internal_weights=True."
+                )
+            weight = self.weight
+            if self.use_matrix_weight:
+                if has_lora(self):
+                    weight = torch.cat(
+                        [
+                            (w + _lora_path_delta(self, path_index)).view(-1)
+                            for path_index, w in enumerate(weight)
+                        ],
+                        dim=-1,
+                    )
+                else:
+                    weight = torch.cat([w.view(-1) for w in weight], dim=-1)
+            elif has_lora(self):
+                weight = weight + _flat_lora_delta(self)
 
         out = self.linear(x, weight)
 

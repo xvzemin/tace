@@ -126,7 +126,8 @@ class MagneticBasis(torch.nn.Module):
         ).regroup()
         self.angular_basis = SolidHarmonics(
             self.magnetic_node_irreps_out,
-            normalization="component",
+            # normalization="component",
+            normalization="integral",
         )
 
         magnetic_edge_irrep_list = []
