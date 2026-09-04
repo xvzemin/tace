@@ -134,6 +134,13 @@ def test_local_frame_roundtrip_flattened_ir_mul():
 
     local = frame(layout(features), wigner)
     assert frame.irreps_out == o2.Irreps("6x0e+6x0o+8x1m+4x2m")
+    assert repr(frame) == (
+        f"LocalFrame({frame.global_irreps} -> {frame.local_irreps})(mmax=2)"
+    )
+    reverse_frame = o2.LocalFrame(irreps, lmax=2, reverse=True)
+    assert repr(reverse_frame) == (
+        f"LocalFrame({frame.local_irreps} -> {frame.global_irreps})(mmax=2)"
+    )
     assert local.shape == (7, frame.irreps_out.dim)
     torch.testing.assert_close(
         layout.inverse(frame.to_global(local, wigner_inv)),
@@ -485,6 +492,8 @@ def test_o2_scatter_is_o3_equivariant(use_attention):
 
 def test_o2_scatter_supports_empty_edges():
     module = _scatter_module(False)
+    assert "reshape_in" not in repr(module)
+    assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
     wigner, wigner_inv = o2.WignerD(1, 1).to(DEVICE, DTYPE).get_wigner(
         torch.empty(0, 3, dtype=DTYPE, device=DEVICE)
@@ -682,6 +691,8 @@ def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
 )
 def test_o2_magnetic_scatter_supports_empty_edges():
     module, irreps, magnetic_irreps = _magnetic_scatter_module(False)
+    assert "reshape_in" not in repr(module)
+    assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
     wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(
         DEVICE, DTYPE

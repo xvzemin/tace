@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+
 import math
 from typing import Optional
 
@@ -15,6 +16,7 @@ from tace.utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
 from ..linear import torchLinear
 from ..softmax import GraphSoftmax
+from ..utils import repr_without
 
 
 class RadialRotaryComplexAttention(torch.nn.Module):
@@ -127,7 +129,12 @@ class O2ScatterTensorProduct(torch.nn.Module):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
 
         self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
-        self.local_frame_out = o2.LocalFrame(self.irreps_out, lmax, self.mmax)
+        self.local_frame_out = o2.LocalFrame(
+            self.irreps_out,
+            lmax,
+            self.mmax,
+            reverse=True,
+        )
         self.reshape_in = LayoutTransform(
             self.irreps_in,
             layout_in="flatten_mul_ir",
@@ -192,6 +199,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
             if self.use_radial_rotary_attention
             else None
         )
+
+    def __repr__(self) -> str:
+        return repr_without(self, "reshape_in", "reshape_out")
 
     def _to_local(
         self,
@@ -338,7 +348,12 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
 
         self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
-        self.local_frame_out = o2.LocalFrame(self.irreps_out, lmax, self.mmax)
+        self.local_frame_out = o2.LocalFrame(
+            self.irreps_out,
+            lmax,
+            self.mmax,
+            reverse=True,
+        )
         self.magnetic_frame = o2.LocalFrame(self.magnetic_irreps, lmax, self.mmax)
         self.reshape_in = LayoutTransform(
             self.irreps_in,
@@ -450,6 +465,9 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             if self.use_radial_rotary_attention
             else None
         )
+
+    def __repr__(self) -> str:
+        return repr_without(self, "reshape_in", "reshape_out")
 
     def _to_local(
         self,

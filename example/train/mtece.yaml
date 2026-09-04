@@ -21,6 +21,10 @@ dataset:
   valid_dataloader:
     batch_size: 8
 
+  storage_mode: lmdb
+  shard_dirs: 
+    - ${oc.env:HOME}/dataset/LCAO/graphCache
+
 loss:
   loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
   loss_function_name:
@@ -28,7 +32,7 @@ loss:
     - mse_forces
     - mse_stress
     - mse_noncollinear_magnetic_forces
-  loss_property_weights: [1.0, 5.0, 0.5, 5.0]
+  loss_property_weights: [1.0, 1.0, 1.0, 10.0]
   loss_function_kwargs:
     - {}
     - {}

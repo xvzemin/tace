@@ -34,6 +34,9 @@ class LocalFrame(torch.nn.Module):
         be at least the largest degree in ``irreps``.
     mmax : int, optional
         Largest local O(2) order to retain. Defaults to ``lmax``.
+    reverse : bool, optional
+        Reverse the global/local order in the module representation. This only
+        changes how the module is displayed.
 
     Notes
     -----
@@ -86,6 +89,7 @@ class LocalFrame(torch.nn.Module):
         irreps: o3.Irreps,
         lmax: int,
         mmax: Optional[int] = None,
+        reverse: bool = False,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps)
@@ -99,8 +103,11 @@ class LocalFrame(torch.nn.Module):
             raise TypeError("mmax must be an integer.")
         if not 0 <= mmax <= lmax:
             raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
+        if not isinstance(reverse, bool):
+            raise TypeError("reverse must be a boolean.")
         self.lmax = lmax
         self.mmax = mmax
+        self.reverse = reverse
         self.irreps_out = self.restrict(self.irreps_in, mmax)
         self.global_irreps = self.irreps_in
         self.local_irreps = self.irreps_out
@@ -186,9 +193,14 @@ class LocalFrame(torch.nn.Module):
             )
 
     def __repr__(self) -> str:
+        irreps_in, irreps_out = (
+            (self.local_irreps, self.global_irreps)
+            if self.reverse
+            else (self.global_irreps, self.local_irreps)
+        )
         return (
-            f"{self.__class__.__name__}({self.irreps_in} -> "
-            f"{self.irreps_out})(mmax={self.mmax})"
+            f"{self.__class__.__name__}({irreps_in} -> "
+            f"{irreps_out})(mmax={self.mmax})"
         )
 
     @staticmethod

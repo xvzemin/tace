@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import copy
 from typing import Callable, Dict, List, Tuple
 
 import torch
@@ -308,3 +309,10 @@ def replace_module_recursively(
         else:
             replace_module_recursively(child, target_cls, factory)
     return model
+
+def repr_without(module: torch.nn.Module, *names: str) -> str:
+    visible = copy.copy(module)
+    visible._modules = {
+        name: child for name, child in module._modules.items() if name not in names
+    }
+    return torch.nn.Module.__repr__(visible)
