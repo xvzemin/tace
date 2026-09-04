@@ -18,6 +18,7 @@ from tace.models._e3nn.o2 import (
 )
 from tace.models._e3nn.representation import Representation
 from tace.models.layout import LayoutTransform
+from tace.models.magnetic import MagneticBasis
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
@@ -618,13 +619,85 @@ def test_local_frame_preserves_time_parity():
     )
 
 
+@pytest.mark.parametrize("Lmax", [1, 2])
+def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
+    time_reversal = hasattr(o3.Irrep("0e"), "t")
+    basis = MagneticBasis(
+        {26: 2.0},
+        num_basis=4,
+        Lmax=Lmax,
+        atomic_numbers=[26],
+        num_elements=1,
+        time_reversal=time_reversal,
+    ).to(DEVICE, DTYPE)
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
+        device=DEVICE,
+    )
+    magmoms = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    node_attrs = torch.ones(4, 1, dtype=DTYPE, device=DEVICE)
+
+    radial, magnetic_node_attrs, magnetic_edge_attrs = basis(
+        magmoms,
+        node_attrs,
+        edge_index,
+    )
+    source, target = edge_index
+    expected = basis.magnetic_edge_tensor_product(
+        magnetic_node_attrs[target],
+        magnetic_node_attrs[source],
+    )
+
+    assert basis.angular_basis.normalization == "component"
+    assert not basis.angular_basis.normalize
+    assert basis.magnetic_edge_tensor_product.weight_numel == 0
+    assert basis.magnetic_node_irreps_out.lmax == Lmax
+    assert basis.magnetic_edge_irreps_out.lmax == Lmax
+    assert repr(basis).splitlines() == [
+        "MagneticBasis(",
+        f"  scale={basis.scale.tolist()},",
+        "  num_basis=4,",
+        f"  Lmax={Lmax},",
+        "  normalize=False,",
+        f"  magnetic_node_irreps_out={basis.magnetic_node_irreps_out},",
+        f"  magnetic_edge_irreps_out={basis.magnetic_edge_irreps_out}",
+        ")",
+    ]
+    assert basis.magnetic_edge_tensor_product.irreps_out.simplify() == (
+        basis.magnetic_edge_irreps_out
+    )
+    assert radial.shape == (4, 4)
+    assert magnetic_node_attrs.shape[-1] == basis.magnetic_node_irreps_out.dim
+    assert magnetic_edge_attrs.shape == (
+        edge_index.size(1),
+        basis.magnetic_edge_irreps_out.dim,
+    )
+    torch.testing.assert_close(magnetic_edge_attrs, expected)
+
+    if time_reversal:
+        reversed_radial, reversed_node, reversed_edge = basis(
+            -magmoms,
+            node_attrs,
+            edge_index,
+        )
+        torch.testing.assert_close(reversed_radial, radial)
+        torch.testing.assert_close(
+            reversed_node,
+            _time_reverse(magnetic_node_attrs, basis.magnetic_node_irreps_out),
+        )
+        torch.testing.assert_close(
+            reversed_edge,
+            _time_reverse(magnetic_edge_attrs, basis.magnetic_edge_irreps_out),
+        )
+
+
 def _magnetic_scatter_module(use_attention: bool):
     irreps = o3.Irreps("2x0ee+2x1oe")
-    magnetic_irreps = o3.Irreps("0ee+1eo")
+    magnetic_edge_irreps = o3.Irreps("2x0ee+2x1eo+1x1ee")
     module = O2ScatterMagneticTensorProduct(
         irreps,
         irreps,
-        magnetic_irreps,
+        magnetic_edge_irreps,
         num_channel=2,
         lmax=1,
         mmax=1,
@@ -635,7 +708,7 @@ def _magnetic_scatter_module(use_attention: bool):
         num_radial_basis=4,
         use_radial_rotary_attention=use_attention,
     ).to(DEVICE, DTYPE)
-    return module, irreps, magnetic_irreps
+    return module, irreps, magnetic_edge_irreps
 
 
 @pytest.mark.parametrize("use_attention", [False, True])
@@ -644,14 +717,14 @@ def _magnetic_scatter_module(use_attention: bool):
     reason="The installed e3nn does not expose time-reversal irreps.",
 )
 def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
-    module, irreps, magnetic_irreps = _magnetic_scatter_module(use_attention)
+    module, irreps, magnetic_edge_irreps = _magnetic_scatter_module(use_attention)
     edge_index = torch.tensor(
         [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE
     )
     num_edges = edge_index.size(1)
     node_features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)
-    magnetic = torch.randn(
-        4, magnetic_irreps.dim, dtype=DTYPE, device=DEVICE
+    magnetic_edge_attrs = torch.randn(
+        num_edges, magnetic_edge_irreps.dim, dtype=DTYPE, device=DEVICE
     )
     conv_weights = torch.randn(
         num_edges, module.weight_numel, dtype=DTYPE, device=DEVICE
@@ -665,10 +738,10 @@ def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
         num_edges, 4, dtype=DTYPE, device=DEVICE
     )
 
-    def apply(magnetic_features):
+    def apply(edge_attrs):
         return module(
             node_features,
-            magnetic_features,
+            edge_attrs,
             conv_weights,
             edge_index,
             wigner,
@@ -677,12 +750,12 @@ def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
             edge_cutoff=edge_cutoff,
         )
 
-    output = apply(magnetic)
+    output = apply(magnetic_edge_attrs)
     torch.testing.assert_close(
-        apply(_time_reverse(magnetic, magnetic_irreps)),
+        apply(_time_reverse(magnetic_edge_attrs, magnetic_edge_irreps)),
         output,
     )
-    assert not torch.allclose(output, apply(torch.zeros_like(magnetic)))
+    assert not torch.allclose(output, apply(torch.zeros_like(magnetic_edge_attrs)))
 
 
 @pytest.mark.skipif(
@@ -690,7 +763,7 @@ def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
     reason="The installed e3nn does not expose time-reversal irreps.",
 )
 def test_o2_magnetic_scatter_supports_empty_edges():
-    module, irreps, magnetic_irreps = _magnetic_scatter_module(False)
+    module, irreps, magnetic_edge_irreps = _magnetic_scatter_module(False)
     assert "reshape_in" not in repr(module)
     assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
@@ -699,7 +772,12 @@ def test_o2_magnetic_scatter_supports_empty_edges():
     ).get_wigner(torch.empty(0, 3, dtype=DTYPE, device=DEVICE))
     output = module(
         torch.randn(3, irreps.dim, dtype=DTYPE, device=DEVICE),
-        torch.randn(3, magnetic_irreps.dim, dtype=DTYPE, device=DEVICE),
+        torch.empty(
+            0,
+            magnetic_edge_irreps.dim,
+            dtype=DTYPE,
+            device=DEVICE,
+        ),
         torch.empty(0, module.weight_numel, dtype=DTYPE, device=DEVICE),
         edge_index,
         wigner,

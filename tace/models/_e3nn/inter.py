@@ -177,7 +177,7 @@ class O3CgtpInteraction(Interaction):
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
@@ -197,7 +197,7 @@ class O3CgtpInteraction(Interaction):
         edge_wigner: Union[torch.Tensor, None],
         edge_wigner_inv: Union[torch.Tensor, None],
         magnetic_radial_basis: Union[torch.Tensor, None],
-        magnetic_node_attrs: Union[torch.Tensor, None],
+        magnetic_edge_attrs: Union[torch.Tensor, None],
         batch: torch.Tensor,
         graph: Graph,
     ):
@@ -242,7 +242,7 @@ class O3CgtpInteraction(Interaction):
                     edge_wigner,
                     edge_wigner_inv,
                     magnetic_radial_basis,
-                    magnetic_node_attrs,
+                    magnetic_edge_attrs,
                 ),
                 nlocal,
             )
@@ -369,7 +369,7 @@ class uvSO2Interaction(O3CgtpInteraction):
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         return self.rejector(
             node_feats,
@@ -436,7 +436,7 @@ class O2Interaction(O3CgtpInteraction):
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
-        magnetic_node_attrs: Union[torch.Tensor, None],
+        magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_wigner: Union[torch.Tensor, None],
@@ -486,7 +486,7 @@ class O2Interaction(O3CgtpInteraction):
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         edge_weight_inputs = self._edge_weight_inputs(
             edge_feats,
@@ -496,7 +496,7 @@ class O2Interaction(O3CgtpInteraction):
         conv_weights = self.edge_info(edge_weight_inputs)
         return self._apply_rejector(
             node_feats,
-            magnetic_node_attrs,
+            magnetic_edge_attrs,
             conv_weights,
             edge_index,
             edge_wigner,
@@ -507,24 +507,24 @@ class O2Interaction(O3CgtpInteraction):
 
 
 class O2MagneticInteraction(O2Interaction):
-    """Local-O2 interaction augmented by magnetic solid harmonics."""
+    """Local-O2 interaction augmented by magnetic edge attributes."""
 
     def _prepare_setup(self) -> None:
         if not self.parity:
             raise ValueError("o2_mag requires parity: true for full O(3)")
-        if self.magnetic_irreps is None:
-            raise ValueError("o2_mag requires magnetic_irreps.")
+        if self.magnetic_edge_irreps is None:
+            raise ValueError("o2_mag requires magnetic_edge_irreps.")
         if not 1 <= self.mag_Lmax <= self.Lmax:
             raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
-        if self.magnetic_irreps.lmax != self.mag_Lmax:
-            raise ValueError("magnetic_irreps must end at mag_Lmax.")
+        if self.magnetic_edge_irreps.lmax != self.mag_Lmax:
+            raise ValueError("magnetic_edge_irreps must end at mag_Lmax.")
         super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:
         rejector = O2ScatterMagneticTensorProduct(
             self.irreps_in,
             self.irreps_out,
-            self.magnetic_irreps,
+            self.magnetic_edge_irreps,
             num_channel=self.num_channel,
             lmax=max(self.Lmax, self.lmax),
             mmax=self.mmax,
@@ -579,7 +579,7 @@ class O2MagneticInteraction(O2Interaction):
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
-        magnetic_node_attrs: Union[torch.Tensor, None],
+        magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_wigner: Union[torch.Tensor, None],
@@ -587,13 +587,13 @@ class O2MagneticInteraction(O2Interaction):
         edge_radial_basis: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
     ) -> torch.Tensor:
-        if magnetic_node_attrs is None:
+        if magnetic_edge_attrs is None:
             raise ValueError(
-                "O2MagneticInteraction requires precomputed magnetic_node_attrs"
+                "O2MagneticInteraction requires precomputed magnetic_edge_attrs"
             )
         return self.rejector(
             node_feats,
-            magnetic_node_attrs,
+            magnetic_edge_attrs,
             conv_weights,
             edge_index,
             edge_wigner,

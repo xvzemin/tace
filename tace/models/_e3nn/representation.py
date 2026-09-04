@@ -16,9 +16,9 @@ from ...dataset.quantity import PROPERTY
 from ...utils.env import acceleration_enabled, get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
-from ..mag import MagneticBasis
+from ..magnetic import MagneticBasis
 from ..radial import RadialBasis
-from ..time_reversal import spherical_harmonics_irreps, supports_time_reversal
+from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import INTERACTION
 from .layer_norm import get_normalization_layer
@@ -138,21 +138,22 @@ class Representation(torch.nn.Module):
         )
         self.use_magnetic_radial_basis = uses_magnetic_interaction
         self.use_one_body_magmoms = use_one_body_magmoms
-        self.use_magnetic_node_attrs = uses_magnetic_interaction
-        self.magnetic_irreps = spherical_harmonics_irreps(
-            mag_Lmax,
-            p=1,
-            time_reversal=-1 if self.use_time_reversal else 1,
-        )
+        self.magnetic_node_irreps_out = None
+        self.magnetic_edge_irreps_out = None
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             self.magnetic_basis = MagneticBasis(
                 magmoms_norm_by_element,
                 num_basis=radial_basis["num_mag_radial_basis"],
-                magnetic_irreps=(
-                    self.magnetic_irreps if self.use_magnetic_node_attrs else None
-                ),
+                Lmax=mag_Lmax,
                 atomic_numbers=atomic_numbers,
                 num_elements=self.num_elements,
+                time_reversal=self.use_time_reversal,
+            )
+            self.magnetic_node_irreps_out = (
+                self.magnetic_basis.magnetic_node_irreps_out
+            )
+            self.magnetic_edge_irreps_out = (
+                self.magnetic_basis.magnetic_edge_irreps_out
             )
         if self.use_so2:
             if self.use_legacy_so2 and Lmax != lmax:
@@ -244,7 +245,7 @@ class Representation(torch.nn.Module):
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
             "edge_ace_hidden": atomic_basis["edge_ace_hidden"],
-            "magnetic_irreps": self.magnetic_irreps,
+            "magnetic_edge_irreps": self.magnetic_edge_irreps_out,
         }
 
         self.interactions = torch.nn.ModuleList()
@@ -392,16 +393,21 @@ class Representation(torch.nn.Module):
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
-        magnetic_node_attrs = None
+        magnetic_edge_attrs = None
         one_body_magmoms_basis = None
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             if initial_noncollinear_magmoms is None:
                 raise ValueError(
                     "A magnetic model requires initial_noncollinear_magmoms"
                 )
-            magnetic_basis, magnetic_node_attrs = self.magnetic_basis(
+            (
+                magnetic_basis,
+                _,
+                magnetic_edge_attrs,
+            ) = self.magnetic_basis(
                 initial_noncollinear_magmoms,
                 data["node_attrs"],
+                data["edge_index"],
             )
         if self.use_magnetic_radial_basis:
             magnetic_radial_basis = magnetic_basis[..., 1:]
@@ -435,7 +441,7 @@ class Representation(torch.nn.Module):
                 edge_wigner,
                 edge_wigner_inv,
                 magnetic_radial_basis,
-                magnetic_node_attrs,
+                magnetic_edge_attrs,
                 data["batch"],
                 graph,
             )

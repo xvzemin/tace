@@ -10,8 +10,10 @@ from typing import Union
 import torch
 from e3nn import o3
 
+from ._e3nn.fused import uuuTensorProduct
 from .angular import SolidHarmonics
 from .radial import MagneticChebyshevBasis
+from .time_reversal import spherical_harmonics_irreps
 
 
 def _resolve_magmoms_norm_by_element(
@@ -69,9 +71,7 @@ def _resolve_magmoms_norm_by_element(
 
 
 class MagneticBasis(torch.nn.Module):
-    """
-    Radial part See https://arxiv.org/abs/2604.08143.
-    """
+    """Construct radial, node, and edge magnetic representations."""
 
     a = 1.2
     b = 0.1
@@ -80,14 +80,18 @@ class MagneticBasis(torch.nn.Module):
         self,
         magmoms_norm_by_element,
         num_basis: int,
-        magnetic_irreps: o3.Irreps,
+        Lmax: int,
         atomic_numbers: list[int],
         num_elements: int,
+        time_reversal: bool = False,
         normalize: bool = False,
         trainable: bool = False,
     ) -> None:
         super().__init__()
+        if not isinstance(Lmax, int) or isinstance(Lmax, bool) or Lmax < 0:
+            raise ValueError("Lmax must be a non-negative integer.")
         self.num_basis = num_basis
+        self.Lmax = Lmax
         self.normalize = normalize
 
         if trainable:
@@ -115,17 +119,44 @@ class MagneticBasis(torch.nn.Module):
             num_basis=num_basis,
             include_constant=True,
         )
-        self.magnetic_irreps = o3.Irreps(magnetic_irreps)
+        self.magnetic_node_irreps_out = spherical_harmonics_irreps(
+            Lmax,
+            p=1,
+            time_reversal=-1 if time_reversal else 1,
+        ).regroup()
         self.angular_basis = SolidHarmonics(
-            self.magnetic_irreps,
-            normalization="integral",
+            self.magnetic_node_irreps_out,
+            normalization="component",
+        )
+
+        magnetic_edge_irrep_list = []
+        for _, ir1 in self.magnetic_node_irreps_out:
+            for _, ir2 in self.magnetic_node_irreps_out:
+                for ir_out in ir1 * ir2:
+                    if (
+                        ir_out.l <= Lmax
+                        and ir_out not in magnetic_edge_irrep_list
+                    ):
+                        magnetic_edge_irrep_list.append(ir_out)
+        magnetic_edge_irreps = o3.Irreps(
+            [(1, ir) for ir in magnetic_edge_irrep_list]
+        ).regroup()
+        self.magnetic_edge_tensor_product = uuuTensorProduct(
+            self.magnetic_node_irreps_out,
+            self.magnetic_node_irreps_out,
+            magnetic_edge_irreps,
+            trainable=False,
+        )
+        self.magnetic_edge_irreps_out = (
+            self.magnetic_edge_tensor_product.irreps_out.regroup()
         )
 
     def forward(
         self,
         initial_noncollinear_magmoms: torch.Tensor,
         node_attrs: torch.Tensor,
-    ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
+        edge_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         scale = self.scale[node_attrs.argmax(dim=-1)].unsqueeze(-1)
         magnetic_norm = initial_noncollinear_magmoms.norm(dim=-1, keepdim=True)
         magnetic_norm = (
@@ -143,13 +174,22 @@ class MagneticBasis(torch.nn.Module):
             if self.normalize
             else initial_noncollinear_magmoms
         )
+        source, target = edge_index
+        magnetic_edge_attrs = self.magnetic_edge_tensor_product(
+            magnetic_node_attrs[target],
+            magnetic_node_attrs[source],
+        )
 
-        return magnetic_radial_basis, magnetic_node_attrs
+        return magnetic_radial_basis, magnetic_node_attrs, magnetic_edge_attrs
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}("
-            f"magmoms_norm_by_element={self.scale.tolist()}, "
-            f"num_basis={self.num_basis}, magnetic_irreps={self.magnetic_irreps}, "
-            f"normalize={self.normalize})"
+            f"{self.__class__.__name__}(\n"
+            f"  scale={self.scale.tolist()},\n"
+            f"  num_basis={self.num_basis},\n"
+            f"  Lmax={self.Lmax},\n"
+            f"  normalize={self.normalize},\n"
+            f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"
+            f"  magnetic_edge_irreps_out={self.magnetic_edge_irreps_out}\n"
+            ")"
         )

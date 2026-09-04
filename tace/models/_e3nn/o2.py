@@ -320,7 +320,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         self,
         irreps_in: o3.Irreps,
         irreps_out: o3.Irreps,
-        magnetic_irreps: o3.Irreps,
+        magnetic_edge_irreps: o3.Irreps,
         *,
         num_channel: int,
         lmax: int,
@@ -335,10 +335,13 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
-        self.magnetic_irreps = o3.Irreps(magnetic_irreps)
+        self.magnetic_edge_irreps = o3.Irreps(magnetic_edge_irreps)
         self.num_channel = num_channel
         self.lmax = lmax
-        self.mmax = min(max(self.irreps_in.lmax, self.magnetic_irreps.lmax), mmax)
+        self.mmax = min(
+            max(self.irreps_in.lmax, self.magnetic_edge_irreps.lmax),
+            mmax,
+        )
         self.num_head = num_head
         if not (
             o2.Irreps.common_multiplicity(self.irreps_in)
@@ -354,7 +357,11 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             self.mmax,
             reverse=True,
         )
-        self.magnetic_frame = o2.LocalFrame(self.magnetic_irreps, lmax, self.mmax)
+        self.magnetic_frame = o2.LocalFrame(
+            self.magnetic_edge_irreps,
+            lmax,
+            self.mmax,
+        )
         self.reshape_in = LayoutTransform(
             self.irreps_in,
             layout_in="flatten_mul_ir",
@@ -366,7 +373,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             layout_out="flatten_ir_mul",
         )
         self.reshape_magnetic = LayoutTransform(
-            self.magnetic_irreps,
+            self.magnetic_edge_irreps,
             layout_in="flatten_mul_ir",
             layout_out="flatten_ir_mul",
         )
@@ -377,7 +384,6 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         self.local_irreps_in = (
             self.node_irreps
             + self.node_irreps
-            + self.local_magnetic_irreps
             + self.local_magnetic_irreps
         ).regroup()
         self.local_irreps_out = self.local_frame_out.irreps_out
@@ -472,47 +478,44 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
     def _to_local(
         self,
         node_features: torch.Tensor,
-        magnetic_node_attrs: torch.Tensor,
+        magnetic_edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         node_features = self.reshape_in(node_features)
-        magnetic_node_attrs = self.reshape_magnetic(magnetic_node_attrs)
+        magnetic_edge_attrs = self.reshape_magnetic(magnetic_edge_attrs)
         paired_node = self.local_frame_in.to_local(node_features[edge_index.T], wigner)
-        paired_magnetic = self.magnetic_frame.to_local(
-            magnetic_node_attrs[edge_index.T], wigner
+        magnetic_edge_attrs = self.magnetic_frame.to_local(
+            magnetic_edge_attrs,
+            wigner,
         )
         magnetic = []
         for (ir, mul), ir_slice in zip(
             self.magnetic_frame.irreps_out,
             self.magnetic_frame.irreps_out.slices(),
         ):
-            values = paired_magnetic[..., ir_slice].reshape(
-                paired_magnetic.size(0), 2, ir.dim, mul
+            values = magnetic_edge_attrs[..., ir_slice].reshape(
+                magnetic_edge_attrs.size(0), ir.dim, mul
             )
             values = values.repeat_interleave(self.num_channel, dim=-1)
             magnetic.append(
                 values.reshape(
-                    paired_magnetic.size(0),
-                    2,
+                    magnetic_edge_attrs.size(0),
                     ir.dim * mul * self.num_channel,
                 )
             )
-        paired_magnetic = torch.cat(magnetic, dim=-1)
         return (
             node_features,
             paired_node[:, 0],
             paired_node[:, 1],
-            paired_magnetic[:, 0],
-            paired_magnetic[:, 1],
+            torch.cat(magnetic, dim=-1),
         )
 
     def _convolution(
         self,
         source_features: torch.Tensor,
         target_features: torch.Tensor,
-        source_magnetic: torch.Tensor,
-        target_magnetic: torch.Tensor,
+        magnetic_edge_attrs: torch.Tensor,
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_radial_basis: Optional[torch.Tensor],
@@ -524,8 +527,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         feature_sets = (
             (target_features, self.node_irreps),
             (source_features, self.node_irreps),
-            (target_magnetic, self.local_magnetic_irreps),
-            (source_magnetic, self.local_magnetic_irreps),
+            (magnetic_edge_attrs, self.local_magnetic_irreps),
         )
         for ir, mul in self.local_irreps_in:
             inputs = []
@@ -582,7 +584,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
     def forward(
         self,
         node_feats: torch.Tensor,
-        magnetic_node_attrs: torch.Tensor,
+        magnetic_edge_attrs: torch.Tensor,
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: Optional[torch.Tensor],
@@ -598,14 +600,12 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             node_features,
             source_features,
             target_features,
-            source_magnetic,
-            target_magnetic,
-        ) = self._to_local(node_feats, magnetic_node_attrs, edge_index, wigner)
+            magnetic_edge_attrs,
+        ) = self._to_local(node_feats, magnetic_edge_attrs, edge_index, wigner)
         message = self._convolution(
             source_features,
             target_features,
-            source_magnetic,
-            target_magnetic,
+            magnetic_edge_attrs,
             conv_weights,
             edge_index,
             edge_radial_basis,
