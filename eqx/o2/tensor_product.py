@@ -87,7 +87,7 @@ class Instruction(NamedTuple):
 
 
 class TensorProduct(torch.nn.Module):
-    """O(2) tensor product driven by entry-level coupling instructions.
+    """O(2) tensor product with time-reversal-aware coupling instructions.
 
     Parameters
     ----------

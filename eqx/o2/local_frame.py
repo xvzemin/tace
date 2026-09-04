@@ -27,8 +27,8 @@ class LocalFrame(torch.nn.Module):
     Parameters
     ----------
     irreps : O(3) irreps-like
-        Global input representation. Every entry is stored in flattened
-        ``ir_mul`` order.
+        Global input representation, including time parity when present.
+        Every entry is stored in flattened ``ir_mul`` order.
     lmax : int
         Maximum global degree covered by the supplied Wigner matrices. It must
         be at least the largest degree in ``irreps``.
@@ -57,8 +57,9 @@ class LocalFrame(torch.nn.Module):
         Returns
         -------
         Irreps
-            Regrouped local representation. The order-zero parity for a
-            global entry ``(l, p)`` is ``p * (-1)**l``.
+            Regrouped local representation. For a global entry ``(l, p, t)``,
+            the order-zero reflection parity is ``p * (-1)**l`` and every
+            restricted entry retains ``t``.
         """
         irreps = o3.Irreps(irreps)
         if mmax is None:
@@ -70,9 +71,13 @@ class LocalFrame(torch.nn.Module):
         irrep_list = []
         for entry in irreps:
             ir, mul = entry.ir, entry.mul
-            irrep_list.append((Irrep(0, ir.p * ((-1) ** ir.l)), mul))
+            time_parity = getattr(ir, "t", 1)
+            irrep_list.append(
+                (Irrep(0, ir.p * ((-1) ** ir.l), time_parity), mul)
+            )
             irrep_list.extend(
-                (Irrep(order, 0), mul) for order in range(1, min(ir.l, mmax) + 1)
+                (Irrep(order, 0, time_parity), mul)
+                for order in range(1, min(ir.l, mmax) + 1)
             )
         return Irreps(irrep_list).regroup()
 
@@ -99,6 +104,8 @@ class LocalFrame(torch.nn.Module):
         self.irreps_out = self.restrict(self.irreps_in, mmax)
         self.global_irreps = self.irreps_in
         self.local_irreps = self.irreps_out
+        self.input_dim = self.irreps_in.dim
+        self.output_dim = self.irreps_out.dim
 
         global_slices = self.irreps_in.slices()
         local_indices = {ir: index for index, (ir, _) in enumerate(self.irreps_out)}
@@ -109,9 +116,13 @@ class LocalFrame(torch.nn.Module):
         for global_slice, global_entry in zip(global_slices, self.irreps_in):
             ir, mul = global_entry.ir, global_entry.mul
             retained_mmax = min(ir.l, mmax)
-            local_irrep_list = [Irrep(0, ir.p * ((-1) ** ir.l))]
+            time_parity = getattr(ir, "t", 1)
+            local_irrep_list = [
+                Irrep(0, ir.p * ((-1) ** ir.l), time_parity)
+            ]
             local_irrep_list.extend(
-                Irrep(order, 0) for order in range(1, retained_mmax + 1)
+                Irrep(order, 0, time_parity)
+                for order in range(1, retained_mmax + 1)
             )
             entry_local_indices = tuple(
                 local_indices[local_ir] for local_ir in local_irrep_list
@@ -208,10 +219,10 @@ class LocalFrame(torch.nn.Module):
         torch.Tensor
             Local features with shape ``(batch, ..., irreps_out.dim)``.
         """
-        if features.ndim < 2 or features.size(-1) != self.irreps_in.dim:
+        if features.ndim < 2 or features.size(-1) != self.input_dim:
             raise ValueError(
                 "LocalFrame input trailing dimension must be "
-                f"{self.irreps_in.dim}, got {tuple(features.shape)}."
+                f"{self.input_dim}, got {tuple(features.shape)}."
             )
         if features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
@@ -306,10 +317,10 @@ class LocalFrame(torch.nn.Module):
             Global features with shape ``(batch, ..., irreps_in.dim)`` in
             flattened ``ir_mul`` order.
         """
-        if features.ndim < 2 or features.size(-1) != self.irreps_out.dim:
+        if features.ndim < 2 or features.size(-1) != self.output_dim:
             raise ValueError(
                 "LocalFrame input trailing dimension must be "
-                f"{self.irreps_out.dim}, got {tuple(features.shape)}."
+                f"{self.output_dim}, got {tuple(features.shape)}."
             )
         if features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")

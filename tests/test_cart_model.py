@@ -165,7 +165,10 @@ def test_cart_model_parameter_count_matches_spherical_model(gate_m0: bool) -> No
     config["product_basis"]["correlation"] = [3, 3]
     config["readout_emlp"]["use_alllayer"] = True
     cartesian = cartTACE(**deepcopy(config))
-    spherical = e3nnTACE(**deepcopy(config))
+    spherical_config = deepcopy(config)
+    spherical_config["atomic_basis"]["type"] = "cgtp"
+    spherical_config["product_basis"]["type"] = "cgtp"
+    spherical = e3nnTACE(**spherical_config)
     assert sum(parameter.numel() for parameter in cartesian.parameters()) == sum(
         parameter.numel() for parameter in spherical.parameters()
     )

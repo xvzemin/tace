@@ -16,7 +16,7 @@ EquivariantX (``eqx``) provides operators for
    A stable release will be published as a separate package.
 
 ``eqx.o2``
-   General real :math:`O(2)` irreps and operations, plus the specialized
+   General real :math:`O(2)\times\mathbb{Z}_2^T` irreps and operations, plus the specialized
    conversion between global spherical :math:`O(3)` features and local
    :math:`O(2)` frames.
 
@@ -33,7 +33,7 @@ Quick start
 
    from eqx import co3, o2
 
-   irreps_o2 = o2.Irreps("8x0e + 4x0o + 6x1m + 3x2m")
+   irreps_o2 = o2.Irreps("8x0ee + 4x0oe + 6x1me + 3x2me")
    irreps_co3 = co3.Irreps("4x0e + 2x0o + 3x1o + 3x1e")
 
 Common tensor conventions
@@ -61,23 +61,29 @@ independent flattened inputs, one for each correlation order. Inputs, internal
 parameters, and external weights use real floating-point dtypes unless an API
 states otherwise.
 
-Real O(2)
-----------
+Real O(2) with time reversal
+-----------------------------
 
 Representations
 ~~~~~~~~~~~~~~~
 
-The real irreps of :math:`O(2)` are
+The real irreps of :math:`O(2)\times\mathbb{Z}_2^T` carry a spatial
+reflection parity and an independent time-reversal parity:
 
-``0e``
-   One-dimensional scalar, even under reflection.
+``0ee``, ``0eo``
+   One-dimensional scalars even under reflection. The final letter is the
+   time parity.
 
-``0o``
-   One-dimensional pseudoscalar, odd under reflection.
+``0oe``, ``0oo``
+   One-dimensional pseudoscalars odd under reflection.
 
-``1m``, ``2m``, ...
+``1me``, ``1mo``, ``2me``, ``2mo``, ...
    Two-dimensional real irreps. The components are stored as the cosine-like
-   and sine-like pair for positive order :math:`m`.
+   and sine-like pair for positive order :math:`m`. ``m`` denotes the spatial
+   representation and the final letter denotes time parity.
+
+The legacy names ``0e``, ``0o``, ``1m``, ``2m``, and so on remain accepted
+and denote their time-even counterparts.
 
 For a rotation by :math:`\theta`, a positive-order block transforms as
 
@@ -89,8 +95,10 @@ For a rotation by :math:`\theta`, a positive-order block transforms as
    \sin(m\theta)& \cos(m\theta)
    \end{pmatrix}.
 
-Reflection distinguishes ``0e`` and ``0o`` and acts on the two-dimensional
-blocks through the reflection component of :math:`O(2)`.
+Reflection distinguishes ``0ee`` and ``0oe`` and acts on the two-dimensional
+blocks through the reflection component of :math:`O(2)`. Time reversal
+multiplies an irrep by its time parity :math:`t=\pm1` without changing its
+spatial components.
 
 The tensor-product rules are
 
@@ -100,28 +108,34 @@ The tensor-product rules are
 
    * - Inputs
      - Outputs
-   * - ``0e x a``
+   * - ``0ee x a``
      - ``a``
-   * - ``0o x 0o``
-     - ``0e``
-   * - ``0o x mm``
-     - ``mm``
-   * - ``m1m x m2m``, :math:`m_1\ne m_2`
-     - ``abs(m1-m2)m + (m1+m2)m``
-   * - ``mm x mm``
-     - ``0e + 0o + (2m)m``
+   * - ``0oo x 0oo``
+     - ``0ee``
+   * - ``0oo x 1mo``
+     - ``1me``
+   * - ``1mo x 2me``
+     - ``1mo + 3mo``
+   * - ``2mo x 2mo``
+     - ``0ee + 0oe + 4me``
+
+For every product, time parity follows
+
+.. math::
+
+   t_{\mathrm{out}}=t_1t_2.
 
 Linear, Gate, and TensorProduct
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`eqx.o2.Linear` connects only identical irreps and uses a dense
 input-output multiplicity matrix for every instruction. Missing output irreps
-are returned as differentiable zeros; only ``0e`` can receive a bias.
+are returned as differentiable zeros; only ``0ee`` can receive a bias.
 
-:class:`eqx.o2.Gate` applies an arbitrary scalar activation to ``0e``. A
-direct activation on ``0o`` must be odd. If no ``0o`` activation is supplied,
-``0o`` is gated by an auxiliary ``0e`` scalar, just like every positive-order
-block.
+:class:`eqx.o2.Gate` applies an arbitrary scalar activation to ``0ee``. An
+activation acting on a scalar that is odd under reflection or time reversal
+must itself be even or odd. Gate products multiply both reflection and time
+parities.
 
 :class:`eqx.o2.TensorProduct` supports three channel contracts:
 
@@ -146,10 +160,10 @@ A minimal nonlinear block is
 
 .. code-block:: python
 
-   irreps = o2.Irreps("4x0e + 2x0o + 3x1m + 2x2m")
-   irreps_scalars = o2.Irreps("4x0e + 2x0o")
-   irreps_gated = o2.Irreps("3x1m + 2x2m")
-   irreps_gates = o2.Irreps("5x0e")
+   irreps = o2.Irreps("4x0ee + 2x0oe + 3x1me + 2x2me")
+   irreps_scalars = o2.Irreps("4x0ee + 2x0oe")
+   irreps_gated = o2.Irreps("3x1me + 2x2me")
+   irreps_gates = o2.Irreps("5x0ee")
 
    nonlinearity = o2.Gate(
        irreps_scalars,
@@ -178,7 +192,8 @@ Circular harmonics
 :class:`eqx.o2.CircularHarmonics` constructs native two-dimensional angular
 features. With ``normalize=True`` the output depends only on direction. With
 ``normalize=False``, order :math:`m` is homogeneous of degree :math:`m` in the
-input vector.
+input vector. ``time_reversal=True`` declares a time-odd input and assigns
+time parity :math:`(-1)^m` to order :math:`m`.
 
 .. code-block:: python
 
@@ -186,17 +201,37 @@ input vector.
    harmonics = o2.CircularHarmonics(mmax=3, normalize=True)
    edge_attrs = harmonics(vectors_2d)
 
-   assert harmonics.irreps_out == o2.Irreps("0e + 1m + 2m + 3m")
+   assert harmonics.irreps_out == o2.Irreps("0ee + 1me + 2me + 3me")
    assert edge_attrs.shape == (128, harmonics.irreps_out.dim)
+
+For a time-odd two-dimensional vector:
+
+.. code-block:: python
+
+   magnetic_harmonics = o2.CircularHarmonics(
+       mmax=3,
+       normalize=True,
+       time_reversal=True,
+   )
+   assert magnetic_harmonics.irreps_out == o2.Irreps(
+       "0ee + 1mo + 2me + 3mo"
+   )
 
 Global O(3) to local O(2)
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A directed three-dimensional vector defines a local axis. Restricting an
-:math:`O(3)` irrep ``(l, p)`` to the :math:`O(2)` isotropy subgroup gives one
-order-zero block and positive orders up to :math:`l`. The order-zero block is
-``0e`` if :math:`p(-1)^l=1` and ``0o`` otherwise. This distinction retains
-global :math:`O(3)` parity.
+:math:`O(3)\times\mathbb{Z}_2^T` irrep ``(l, p, t)`` to the
+:math:`O(2)\times\mathbb{Z}_2^T` isotropy subgroup gives
+
+.. math::
+
+   (l,p,t)\downarrow
+   =\left(0,p(-1)^l,t\right)
+   \oplus\bigoplus_{m=1}^{\min(l,m_{\max})}(m,0,t).
+
+Time parity is retained by every local entry. For example, an axial,
+time-odd vector restricts as ``1eo -> 0oo + 1mo``.
 
 :class:`eqx.o2.WignerD` constructs the global-to-local and local-to-global
 matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies

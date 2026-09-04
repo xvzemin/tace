@@ -19,16 +19,16 @@ from tace.models._e3nn.layer_norm import get_normalization_layer
 from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
 from tace.models._e3nn.tace import e3nnTACE
-from tace.tace.models.time_reversal import (
-    spherical_harmonics_irreps,
-    supports_time_reversal,
-    with_time_reversal,
-)
 from tace.models._e3nn.ue import UniversalEquivariantEmbedding
 from tace.models._e3nn.wigner6j import O3Wigner6jScatterTensorProduct
 from tace.models.angular import SolidHarmonics
 from tace.models.layout import LayoutTransform
 from tace.models.linear import e3nnLinear
+from tace.models.time_reversal import (
+    spherical_harmonics_irreps,
+    supports_time_reversal,
+    with_time_reversal,
+)
 
 
 def _model_config() -> dict:
@@ -54,6 +54,15 @@ def _model_config() -> dict:
     config["readout_emlp"]["hidden"] = [2]
     config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
+    return config
+
+
+def _time_reversal_model_config() -> dict:
+    config = _model_config()
+    config["universal_embedding"]["initial_collinear_magmoms"] = {
+        "enable": True,
+        "normalizer": 1.0,
+    }
     return config
 
 
@@ -178,7 +187,7 @@ def test_time_reversal_model_rejects_acceleration_kernel(monkeypatch, environmen
     monkeypatch.setenv(environment, "1")
 
     with pytest.raises(ValueError, match="Time-reversal models do not support"):
-        e3nnTACE(**_model_config())
+        e3nnTACE(**_time_reversal_model_config())
 
 
 @pytest.mark.skipif(
@@ -188,7 +197,7 @@ def test_time_reversal_model_rejects_acceleration_kernel(monkeypatch, environmen
 def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
     for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)
-    config = _model_config()
+    config = _time_reversal_model_config()
     config["product_basis"]["correlation"] = 3
     model = e3nnTACE(**config)
 
@@ -204,10 +213,52 @@ def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
+def test_time_even_o2_model_keeps_automatic_acceleration(monkeypatch):
+    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
+        monkeypatch.delenv(name, raising=False)
+    config = _model_config()
+    config["mmax"] = 1
+    config["atomic_basis"]["type"] = ["o2"]
+    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
+    model = e3nnTACE(**config)
+
+    assert model.representation.use_o2
+    assert not model.representation.use_time_reversal
+    assert all(
+        ir.t == 1
+        for ir, _ in model.representation.interactions[0].rejector.local_irreps_out
+    )
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
+def test_time_reversal_model_supports_o2_interactions(monkeypatch):
+    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
+        monkeypatch.delenv(name, raising=False)
+    config = _time_reversal_model_config()
+    config["mmax"] = 1
+    config["atomic_basis"]["type"] = ["o2"]
+    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
+    model = e3nnTACE(**config)
+
+    assert model.representation.use_o2
+    assert model.representation.use_time_reversal
+    assert all(
+        ir.t == 1
+        for ir, _ in model.representation.interactions[0].rejector.local_irreps_out
+    )
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
 def test_time_reversal_model_uses_e3nn_equivariant_operations(monkeypatch):
     for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)
-    model = e3nnTACE(**_model_config())
+    model = e3nnTACE(**_time_reversal_model_config())
     representation = model.representation
     interaction = representation.interactions[0]
 

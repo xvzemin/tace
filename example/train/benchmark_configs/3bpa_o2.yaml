@@ -87,7 +87,6 @@ model:
       edge_nonlinear: gate
       scalar_act: [silu, tanh]
       tensor_act: sigmoid
-      use_asymmetric_contraction: false
       use_radial_rotary_attention: true
 
     product_basis:

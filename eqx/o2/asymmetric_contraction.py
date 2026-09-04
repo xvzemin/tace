@@ -52,7 +52,8 @@ class AsymmetricContraction(torch.nn.Module):
     -----
     Inputs and outputs use flattened ``ir_mul`` layout. Weights are always
     supplied externally and are applied directly to the enumerated paths.
-    ``weight_numel`` gives the required trailing weight dimension.
+    ``weight_numel`` gives the required trailing weight dimension. Every path
+    multiplies the time parities of its leaves; external weights are invariant.
     """
 
     def __init__(

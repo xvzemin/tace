@@ -18,12 +18,12 @@ from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mag import MagneticBasis
 from ..radial import RadialBasis
+from ..time_reversal import spherical_harmonics_irreps, supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import INTERACTION
 from .layer_norm import get_normalization_layer
 from .node import NODE_EMBEDDING
 from .prod import PRODUCT
-from ..time_reversal import spherical_harmonics_irreps, supports_time_reversal
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
 
@@ -93,7 +93,23 @@ class Representation(torch.nn.Module):
             or node_embedding["type"] == "so2_tensor"
         )
         self.use_so2 = self.use_legacy_so2 or self.use_o2
-        self.use_time_reversal = supports_time_reversal() and not self.use_so2
+        magnetic_interactions = {"w6j_mag", "o2_mag"}
+        uses_magnetic_interaction = any(
+            interaction in magnetic_interactions
+            for interaction in atomic_basis["type"]
+        )
+        uses_time_odd_property = any(
+            PROPERTY[name].get("time_reversal", 1) == -1
+            for name in self.invariant_property + self.equivariant_property
+        )
+        self.use_time_reversal = (
+            supports_time_reversal() and not self.use_legacy_so2
+            and (
+                uses_magnetic_interaction
+                or use_one_body_magmoms
+                or uses_time_odd_property
+            )
+        )
         if self.use_time_reversal:
             time_odd_scalars = [
                 name
@@ -120,15 +136,9 @@ class Representation(torch.nn.Module):
             any(t != "so2" for t in atomic_basis["type"])
             or node_embedding["type"] == "tensor"
         )
-        self.use_magnetic_radial_basis = any(
-            interaction in {"w6j_mag", "o2_mag"}
-            for interaction in atomic_basis["type"]
-        )
+        self.use_magnetic_radial_basis = uses_magnetic_interaction
         self.use_one_body_magmoms = use_one_body_magmoms
-        self.use_magnetic_node_attrs = any(
-            interaction in {"w6j_mag", "o2_mag"}
-            for interaction in atomic_basis["type"]
-        )
+        self.use_magnetic_node_attrs = uses_magnetic_interaction
         self.magnetic_irreps = spherical_harmonics_irreps(
             mag_Lmax,
             p=1,

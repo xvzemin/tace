@@ -30,7 +30,7 @@ def circular_harmonics(
     -------
     torch.Tensor
         Tensor with shape ``(..., 1 + 2 * mmax)`` in contiguous order from
-        ``0e`` through ``mmax``. Every positive-order entry stores its real
+        ``0ee`` through ``mmax``. Every positive-order entry stores its real
         cosine-like and sine-like components in that order.
     """
     if not isinstance(mmax, int):
@@ -61,7 +61,7 @@ def circular_harmonics(
 
 
 class CircularHarmonics(torch.nn.Module):
-    """Construct real O(2) circular harmonics from two-dimensional vectors.
+    """Construct real O(2) harmonics with optional time-reversal parity.
 
     Parameters
     ----------
@@ -70,14 +70,23 @@ class CircularHarmonics(torch.nn.Module):
     normalize : bool, optional
         If ``True``, normalize each input vector so the output depends only on
         direction. If ``False``, return homogeneous circular solid harmonics.
+    time_reversal : bool, optional
+        If ``True``, treat the input vector as time odd. Order ``m`` then has
+        time parity ``(-1)**m``.
 
     Notes
     -----
-    The output follows flattened ``ir_mul`` order from ``0e`` through
+    The output follows flattened ``ir_mul`` order from ``0ee`` through
     ``mmax`` and has representation metadata in :attr:`irreps_out`.
     """
 
-    def __init__(self, mmax: int, *, normalize: bool = True) -> None:
+    def __init__(
+        self,
+        mmax: int,
+        *,
+        normalize: bool = True,
+        time_reversal: bool = False,
+    ) -> None:
         super().__init__()
         if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
@@ -85,9 +94,15 @@ class CircularHarmonics(torch.nn.Module):
             raise ValueError("mmax must be non-negative.")
         self.mmax = mmax
         self.normalize = bool(normalize)
-        self.irreps_in = Irreps("1m")
+        self.time_reversal = bool(time_reversal)
+        input_time_parity = -1 if self.time_reversal else 1
+        self.irreps_in = Irreps([(Irrep(1, 0, input_time_parity), 1)])
         self.irreps_out = Irreps(
-            [(Irrep("0e"), 1)] + [(Irrep(order, 0), 1) for order in range(1, mmax + 1)]
+            [(Irrep("0ee"), 1)]
+            + [
+                (Irrep(order, 0, input_time_parity**order), 1)
+                for order in range(1, mmax + 1)
+            ]
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -110,4 +125,7 @@ class CircularHarmonics(torch.nn.Module):
         )
 
     def extra_repr(self) -> str:
-        return f"mmax={self.mmax}, normalize={self.normalize}"
+        return (
+            f"mmax={self.mmax}, normalize={self.normalize}, "
+            f"time_reversal={self.time_reversal}"
+        )

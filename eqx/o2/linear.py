@@ -19,7 +19,7 @@ class Instruction(NamedTuple):
 
 
 class Linear(torch.nn.Module):
-    """Linear operation equivariant to O(2).
+    """Linear operation equivariant to O(2) and time reversal.
 
     Parameters
     ----------
@@ -41,7 +41,7 @@ class Linear(torch.nn.Module):
         connected.
     biases : bool or sequence of bool, optional
         Enable biases globally or per output entry. Biases are permitted only
-        for reflection-even scalar outputs.
+        for scalar outputs even under reflection and time reversal.
     path_normalization : {"element", "path"}, optional
         Normalization applied when several paths contribute to one output.
         ``"element"`` normalizes by the total input multiplicity, while
@@ -114,14 +114,18 @@ class Linear(torch.nn.Module):
             )
 
         if isinstance(biases, bool):
-            bias_list = [biases and ir.is_even_scalar() for ir, _ in self.irreps_out]
+            bias_list = [
+                biases and ir.is_invariant_scalar() for ir, _ in self.irreps_out
+            ]
         else:
             bias_list = list(biases)
             if len(bias_list) != len(self.irreps_out):
                 raise ValueError("biases must have one value per output entry.")
         for bias, (ir, _) in zip(bias_list, self.irreps_out):
-            if bias and not ir.is_even_scalar():
-                raise ValueError("Only reflection-even scalars can have biases.")
+            if bias and not ir.is_invariant_scalar():
+                raise ValueError(
+                    "Only reflection- and time-reversal-even scalars can have biases."
+                )
 
         bias_instructions = [
             Instruction(-1, i_out, (mul,), 1.0)

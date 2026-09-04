@@ -7,12 +7,13 @@ This page documents the public EquivariantX API directly from the installed
 implementation. The tensor layouts and representation conventions are
 described in :ref:`equivariantx-tutorials`.
 
-O(2) representations
----------------------
+O(2) representations with time reversal
+----------------------------------------
 
 Representation metadata defines the flattened ``ir_mul`` feature axis used by
-all :mod:`eqx.o2` layers. Iterating over :class:`eqx.o2.Irreps` yields
-``(irrep, multiplicity)`` entries.
+all :mod:`eqx.o2` layers. Every irrep carries reflection and time-reversal
+parity. Iterating over :class:`eqx.o2.Irreps` yields ``(irrep, multiplicity)``
+entries.
 
 .. autoclass:: eqx.o2.Irrep
    :members:

@@ -11,8 +11,8 @@ from e3nn.math import normalize2mom
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
-def _parity_order(ir: Irrep) -> tuple[int, int]:
-    return ir.m, {1: 0, -1: 1, 0: 2}[ir.p]
+def _parity_order(ir: Irrep) -> tuple[int, int, int]:
+    return ir.m, {1: 0, -1: 1, 0: 2}[ir.p], {1: 0, -1: 1}[ir.t]
 
 
 def _quarter_turn(features: torch.Tensor) -> torch.Tensor:
@@ -30,7 +30,7 @@ class Activation(torch.nn.Module):
     acts : sequence of torch.nn.Module or None
         One activation per input entry. ``None`` leaves that entry unchanged.
         Each activation is rescaled to preserve second moments, and its parity
-        determines the corresponding output scalar parity.
+        determines the corresponding output reflection and time parity.
 
     Notes
     -----
@@ -85,10 +85,20 @@ class Activation(torch.nn.Module):
             even = (positive - negative).abs().max() <= 1.0e-5 * scale
             odd = (positive + negative).abs().max() <= 1.0e-5 * scale
             activation_parity = 1 if even else -1 if odd else 0
-            output_parity = activation_parity if ir.p == -1 else ir.p
-            if output_parity == 0:
-                raise ValueError("Odd scalar activation must be either even or odd.")
-            irreps_out.append((Irrep(0, output_parity), mul))
+            if activation_parity == 0 and (ir.p == -1 or ir.t == -1):
+                raise ValueError(
+                    "An activation acting on a reflection- or time-reversal-odd "
+                    "scalar must be either even or odd."
+                )
+            if activation_parity == -1:
+                output_parity = ir.p
+                output_time_parity = ir.t
+            else:
+                output_parity = 1
+                output_time_parity = 1
+            irreps_out.append(
+                (Irrep(0, output_parity, output_time_parity), mul)
+            )
 
         self.irreps_out = Irreps(irreps_out)
         self.acts = torch.nn.ModuleList(normalized_acts)
@@ -133,7 +143,7 @@ class _GatePath(NamedTuple):
 
 
 class Gate(torch.nn.Module):
-    """Apply scalar activations and scalar gates to O(2) features.
+    """Apply time-reversal-aware scalar activations and gates to O(2) features.
 
     Parameters
     ----------
@@ -143,7 +153,8 @@ class Gate(torch.nn.Module):
         One normalized activation for each scalar entry.
     irreps_gates : IrrepsLike
         Order-zero entries used as gates. Their total multiplicity must equal
-        the total multiplicity in ``irreps_gated``.
+        the total multiplicity in ``irreps_gated``. Reflection and time parity
+        are multiplied into the corresponding gated representations.
     act_gates : sequence of torch.nn.Module or None
         One normalized activation for each gate entry.
     irreps_gated : IrrepsLike

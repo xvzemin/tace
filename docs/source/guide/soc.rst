@@ -107,10 +107,13 @@ Local O(2) frame (experimental)
 -------------------------------
 
 The local-:math:`O(2)` interaction converts global :math:`O(3)` irreps to local
-:math:`O(2)` irreps, uses the complete local representation to modulate the
-magnetic interaction, and then converts the result back to global
-:math:`O(3)` irreps. The angular cutoffs must currently satisfy
-``mmax = Lmax = lmax``:
+:math:`O(2)` irreps, uses the local representation to modulate the magnetic
+interaction, and then converts the result back to global :math:`O(3)` irreps.
+Time parity is retained during this restriction. In particular,
+``1eo -> 0oo + 1mo`` for a non-collinear magnetic moment. Local linear maps
+preserve time parity, while gates multiply the time parities of their inputs.
+Consequently, pairs of time-odd magnetic features contribute to time-even
+energy features. Biases and radial weights remain ``0ee``.
 
 .. code-block:: yaml
 
@@ -127,22 +130,17 @@ magnetic interaction, and then converts the result back to global
 
        atomic_basis:
          type: o2_mag
-         use_asymmetric_contraction: true
          use_radial_rotary_attention: true
 
        universal_embedding:
          initial_noncollinear_magmoms:
            enable: false
 
-The asymmetric-contraction correlation order follows
-``product_basis.correlation``. It replaces the O(2) gate rather than following
-it. The first O(2) linear jointly generates its independent features and
-``0e`` path coefficients, which use ``scalar_act`` (``silu`` by default and
-scaled internally). The gated path uses the same first linear to generate its ``0e`` gate
-scalars. Radial rotary attention uses ``atomic_basis.num_head``, separate O(2)
-query and key projections, and a zero-initialized real radial scale-and-shift
-projection. The scale uses a sigmoid and the shift is additive; no complex
-phase is applied.
+The O(2) path applies a local linear, gate, and output linear. Radial rotary
+attention uses ``atomic_basis.num_head``, separate O(2) query and key
+projections, and a zero-initialized real radial scale-and-shift projection.
+The scale uses a sigmoid and the shift is additive; no complex phase is
+applied.
 
 This path is also experimental; its theoretical and implementation
 details will be documented with the formal paper.

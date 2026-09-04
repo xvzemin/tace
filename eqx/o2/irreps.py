@@ -10,7 +10,13 @@ import torch
 from e3nn import o3
 
 Parity = Union[int, str]
-IrrepLike = Union["Irrep", str, Tuple[int, Parity]]
+TimeParity = Union[int, str]
+IrrepLike = Union[
+    "Irrep",
+    str,
+    Tuple[int, Parity],
+    Tuple[int, Parity, TimeParity],
+]
 IrrepsLike = Union[
     "Irreps",
     "Irrep",
@@ -21,56 +27,78 @@ IrrepsLike = Union[
 
 @dataclass(frozen=True, init=False)
 class Irrep:
-    """A real irreducible representation of O(2).
+    """A real irreducible representation of O(2) with time reversal.
 
     Parameters
     ----------
     m : int, str, tuple, or Irrep
-        Non-negative order, canonical name such as ``"0e"`` or ``"2m"``,
-        ``(order, parity)`` pair, or an existing instance.
+        Non-negative order, name such as ``"0ee"`` or ``"2mo"``,
+        ``(order, parity[, time_parity])`` tuple, or an existing instance.
     p : {-1, 0, 1, "o", "m", "e"}, optional
         Reflection parity when ``m`` is supplied as an integer. Order zero
         uses ``+1`` or ``-1``; positive orders use ``0``.
+    t : {-1, 1, "o", "e"}, optional
+        Time-reversal parity. Defaults to ``+1``.
 
     Notes
     -----
-    ``0e`` and ``0o`` are the one-dimensional reflection-even and
-    reflection-odd irreps. Every positive order is a two-dimensional real
-    irrep denoted by ``m``, for example ``1m`` or ``3m``.
+    ``0ee`` and ``0oe`` are the one-dimensional reflection-even and
+    reflection-odd time-even irreps. Every positive order is a two-dimensional
+    real irrep denoted by ``m``. The final ``e`` or ``o`` denotes time parity.
+    Legacy names such as ``0e``, ``0o``, and ``1m`` denote time-even irreps.
     """
 
     m: int
     p: int
+    t: int
 
     def __init__(
         self,
-        m: Union[int, str, Tuple[int, Parity], "Irrep"],
+        m: Union[
+            int,
+            str,
+            Tuple[int, Parity],
+            Tuple[int, Parity, TimeParity],
+            "Irrep",
+        ],
         p: Optional[Parity] = None,
+        t: TimeParity = 1,
     ) -> None:
         if isinstance(m, Irrep):
-            if p is not None:
+            if p is not None or t != 1:
                 raise TypeError("Do not provide parity when copying an Irrep.")
-            order, parity = m.m, m.p
+            order, parity, time_parity = m.m, m.p, m.t
         elif isinstance(m, str):
-            if p is not None:
+            if p is not None or t != 1:
                 raise TypeError("Do not provide parity with an O(2) irrep string.")
             name = m.strip()
             try:
-                order = int(name[:-1])
-                parity = {"e": 1, "o": -1, "m": 0}[name[-1]]
+                if len(name) >= 3 and name[-2] in "eom" and name[-1] in "eo":
+                    order = int(name[:-2])
+                    parity = {"e": 1, "o": -1, "m": 0}[name[-2]]
+                    time_parity = {"e": 1, "o": -1}[name[-1]]
+                else:
+                    order = int(name[:-1])
+                    parity = {"e": 1, "o": -1, "m": 0}[name[-1]]
+                    time_parity = 1
             except (IndexError, KeyError, ValueError):
                 raise ValueError(
-                    "O(2) irreps must be written as 0e, 0o, or <positive>m."
+                    "O(2) irreps must be written as 0ee, 0oe, or <positive>me/mo."
                 ) from None
         elif isinstance(m, tuple):
-            if p is not None or len(m) != 2:
-                raise TypeError("An Irrep tuple must be (m, p).")
-            order, parity = m
+            if p is not None or t != 1 or len(m) not in (2, 3):
+                raise TypeError("An Irrep tuple must be (m, p) or (m, p, t).")
+            if len(m) == 2:
+                order, parity = m
+                time_parity = 1
+            else:
+                order, parity, time_parity = m
         else:
             if p is None:
                 raise TypeError("Parity is required when constructing Irrep(m, p).")
             order = m
             parity = p
+            time_parity = t
 
         if isinstance(parity, str):
             try:
@@ -86,6 +114,20 @@ class Irrep:
         ):
             raise ValueError("O(2) parity must be -1/'o', 0/'m', or +1/'e'.")
 
+        if isinstance(time_parity, str):
+            try:
+                time_parity = {"e": 1, "o": -1}[time_parity]
+            except KeyError:
+                raise ValueError(
+                    "Time-reversal parity must be -1/'o' or +1/'e'."
+                ) from None
+        if (
+            not isinstance(time_parity, int)
+            or isinstance(time_parity, bool)
+            or time_parity not in (-1, 1)
+        ):
+            raise ValueError("Time-reversal parity must be -1/'o' or +1/'e'.")
+
         if not isinstance(order, int) or isinstance(order, bool) or order < 0:
             raise ValueError("O(2) order m must be a non-negative integer.")
         if order == 0 and parity not in (-1, 1):
@@ -95,6 +137,7 @@ class Irrep:
 
         object.__setattr__(self, "m", order)
         object.__setattr__(self, "p", parity)
+        object.__setattr__(self, "t", time_parity)
 
     @property
     def dim(self) -> int:
@@ -104,10 +147,12 @@ class Irrep:
     def __iter__(self) -> Iterator[int]:
         yield self.m
         yield self.p
+        yield self.t
 
     def __str__(self) -> str:
-        suffix = "e" if self.p == 1 else "o" if self.p == -1 else "m"
-        return f"{self.m}{suffix}"
+        parity = "e" if self.p == 1 else "o" if self.p == -1 else "m"
+        time_parity = "e" if self.t == 1 else "o"
+        return f"{self.m}{parity}{time_parity}"
 
     def __repr__(self) -> str:
         return str(self)
@@ -120,28 +165,38 @@ class Irrep:
         """Return whether this is the reflection-odd scalar irrep."""
         return self.m == 0 and self.p == -1
 
+    def is_invariant_scalar(self) -> bool:
+        """Return whether this is even under reflection and time reversal."""
+        return self.m == 0 and self.p == 1 and self.t == 1
+
     def __mul__(self, other):
         try:
             other = Irrep(other)
         except (TypeError, ValueError):
             return NotImplemented
+        time_parity = self.t * other.t
         if self.m == 0 and other.m == 0:
-            return (Irrep(0, self.p * other.p),)
+            return (Irrep(0, self.p * other.p, time_parity),)
         if self.m == 0:
-            return (other,)
+            return (Irrep(other.m, other.p, time_parity),)
         if other.m == 0:
-            return (self,)
+            return (Irrep(self.m, self.p, time_parity),)
         if self.m == other.m:
-            return (Irrep("0e"), Irrep("0o"), Irrep(2 * self.m, 0))
+            return (
+                Irrep(0, 1, time_parity),
+                Irrep(0, -1, time_parity),
+                Irrep(2 * self.m, 0, time_parity),
+            )
         return (
-            Irrep(abs(self.m - other.m), 0),
-            Irrep(self.m + other.m, 0),
+            Irrep(abs(self.m - other.m), 0, time_parity),
+            Irrep(self.m + other.m, 0, time_parity),
         )
 
     def D_from_angle(
         self,
         angle,
         reflected: bool = False,
+        time_reversal: bool = False,
         *,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
@@ -154,6 +209,8 @@ class Irrep:
             Rotation angle in radians.
         reflected : bool, optional
             Compose the rotation with the canonical reflection.
+        time_reversal : bool, optional
+            Apply time reversal to the representation.
         dtype : torch.dtype, optional
             Requested floating-point dtype.
         device : torch.device, optional
@@ -167,11 +224,15 @@ class Irrep:
         """
         if not isinstance(reflected, bool):
             raise TypeError("reflected must be a bool.")
+        if not isinstance(time_reversal, bool):
+            raise TypeError("time_reversal must be a bool.")
         angle = torch.as_tensor(angle, dtype=dtype, device=device)
         if not angle.is_floating_point():
             angle = angle.to(dtype=torch.get_default_dtype())
         if self.m == 0:
             sign = -1.0 if reflected and self.p == -1 else 1.0
+            if time_reversal:
+                sign *= self.t
             return angle.new_ones(angle.shape + (1, 1)) * sign
 
         cosine = torch.cos(self.m * angle)
@@ -186,6 +247,8 @@ class Irrep:
         if reflected:
             matrix = matrix.clone()
             matrix[..., 1, :] *= -1
+        if time_reversal:
+            matrix = matrix * self.t
         return matrix
 
 
@@ -392,12 +455,14 @@ class Irreps:
 
     def sort(self) -> "Irreps":
         parity_order = {1: 0, -1: 1, 0: 2}
+        time_parity_order = {1: 0, -1: 1}
         return Irreps(
             sorted(
                 self._irreps,
                 key=lambda ir_mul: (
                     ir_mul.ir.m,
                     parity_order[ir_mul.ir.p],
+                    time_parity_order[ir_mul.ir.t],
                 ),
             )
         )
@@ -483,6 +548,7 @@ class Irreps:
         self,
         angle,
         reflected: bool = False,
+        time_reversal: bool = False,
         *,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
@@ -495,6 +561,8 @@ class Irreps:
             Rotation angle in radians.
         reflected : bool, optional
             Compose the rotation with the canonical reflection.
+        time_reversal : bool, optional
+            Apply time reversal to every irrep.
         dtype : torch.dtype, optional
             Requested floating-point dtype.
         device : torch.device, optional
@@ -508,12 +576,14 @@ class Irreps:
         """
         if not isinstance(reflected, bool):
             raise TypeError("reflected must be a bool.")
+        if not isinstance(time_reversal, bool):
+            raise TypeError("time_reversal must be a bool.")
         angle = torch.as_tensor(angle, dtype=dtype, device=device)
         if not angle.is_floating_point():
             angle = angle.to(dtype=torch.get_default_dtype())
         output = angle.new_zeros(angle.shape + (self.dim, self.dim))
         for (ir, mul), ir_slice in zip(self, self.slices()):
-            matrix = ir.D_from_angle(angle, reflected)
+            matrix = ir.D_from_angle(angle, reflected, time_reversal)
             identity = torch.eye(mul, dtype=matrix.dtype, device=matrix.device)
             matrix = (
                 matrix[..., :, None, :, None] * identity[..., None, :, None, :]

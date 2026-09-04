@@ -105,24 +105,19 @@ class O2ScatterTensorProduct(torch.nn.Module):
         num_channel: int,
         lmax: int,
         mmax: int,
-        act_0e: torch.nn.Module,
-        act_0o: Optional[torch.nn.Module],
-        act_lm: torch.nn.Module,
-        correlation: int,
+        even_scalar_act: torch.nn.Module,
+        odd_scalar_act: Optional[torch.nn.Module],
+        tensor_act: torch.nn.Module,
         num_head: int,
         num_radial_basis: int,
-        use_asymmetric_contraction: bool,
         use_radial_rotary_attention: bool,
-        edge_ace_hidden: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
         self.num_channel = num_channel
-        self.edge_ace_hidden = edge_ace_hidden or num_channel
         self.lmax = lmax
         self.mmax = min(self.irreps_in.lmax, mmax)
-        self.correlation = correlation
         self.num_head = num_head
         if not (
             o2.Irreps.common_multiplicity(self.irreps_in)
@@ -146,74 +141,40 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_irreps_in = 2 * self.node_irreps
         self.local_irreps_out = self.local_frame_out.irreps_out
-        self.use_asymmetric_contraction = (
-            use_asymmetric_contraction and self.irreps_in.lmax > 0
+        hidden_irreps = self.local_irreps_out.filter(
+            keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
         )
-
-        if self.use_asymmetric_contraction:
-            self.nonlinearity = None
-            contraction_irreps = o2.Irreps(
-                [(ir, self.edge_ace_hidden) for ir, _ in self.local_irreps_out]
-            )
-            self.asymmetric_contraction = o2.AsymmetricContraction(
-                contraction_irreps,
-                contraction_irreps,
-                correlation,
-                algorithm="edge",
-            )
-            projection_irreps = o2.Irreps(
-                [
-                    (ir, correlation * self.edge_ace_hidden)
-                    for ir, _ in contraction_irreps
-                ]
-                + [(o2.Irrep("0e"), self.asymmetric_contraction.weight_numel)]
-            )
-            self.linear_up = o2.Linear(
-                self.local_irreps_in,
-                projection_irreps,
-            )
-        else:
-            self.asymmetric_contraction = None
-            hidden_irreps = self.local_irreps_out.filter(
-                keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
-            )
-            scalar_entries = []
-            scalar_acts = []
-            gated_entries = []
-            for ir, mul in hidden_irreps:
-                if ir.is_even_scalar():
-                    scalar_entries.append((ir, mul))
-                    scalar_acts.append(act_0e)
-                elif ir.is_odd_scalar() and act_0o is not None:
-                    scalar_entries.append((ir, mul))
-                    scalar_acts.append(act_0o)
-                else:
-                    gated_entries.append((ir, mul))
-            irreps_gated = o2.Irreps(gated_entries)
-            irreps_gates = (
-                o2.Irreps([(o2.Irrep("0e"), irreps_gated.num_irreps)])
-                if irreps_gated.num_irreps
-                else o2.Irreps()
-            )
-            self.nonlinearity = o2.Gate(
-                o2.Irreps(scalar_entries),
-                scalar_acts,
-                irreps_gates,
-                [act_lm] if len(irreps_gates) else [],
-                irreps_gated,
-            )
-            self.linear_up = o2.Linear(
-                self.local_irreps_in,
-                self.nonlinearity.irreps_in,
-            )
-
-        hidden_irreps = (
-            self.asymmetric_contraction.irreps_out
-            if self.asymmetric_contraction is not None
-            else self.nonlinearity.irreps_out
+        scalar_entries = []
+        scalar_acts = []
+        gated_entries = []
+        for ir, mul in hidden_irreps:
+            if ir.is_invariant_scalar():
+                scalar_entries.append((ir, mul))
+                scalar_acts.append(even_scalar_act)
+            elif ir.m == 0 and odd_scalar_act is not None:
+                scalar_entries.append((ir, mul))
+                scalar_acts.append(odd_scalar_act)
+            else:
+                gated_entries.append((ir, mul))
+        irreps_gated = o2.Irreps(gated_entries)
+        irreps_gates = (
+            o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
+            if irreps_gated.num_irreps
+            else o2.Irreps()
+        )
+        self.nonlinearity = o2.Gate(
+            o2.Irreps(scalar_entries),
+            scalar_acts,
+            irreps_gates,
+            [tensor_act] if len(irreps_gates) else [],
+            irreps_gated,
+        )
+        self.linear_up = o2.Linear(
+            self.local_irreps_in,
+            self.nonlinearity.irreps_in,
         )
         self.linear_down = o2.Linear(
-            hidden_irreps,
+            self.nonlinearity.irreps_out,
             self.local_irreps_out,
         )
         self.weight_numel = self.local_irreps_in.num_irreps
@@ -279,37 +240,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if offset != conv_weights.size(-1):
             raise ValueError("Invalid O2 convolution weight size.")
         projected = self.linear_up(torch.cat(weighted, dim=-1))
-
-        if self.asymmetric_contraction is not None:
-            contraction_inputs = [[] for _ in range(self.correlation)]
-            projected_slices = self.linear_up.irreps_out.slices()
-            contraction_entries = len(self.asymmetric_contraction.irreps_in)
-            for index, ((ir, _), ir_slice) in enumerate(
-                zip(self.linear_up.irreps_out, projected_slices)
-            ):
-                if index == contraction_entries:
-                    contraction_weights = projected[..., ir_slice]
-                    break
-                values = projected[..., ir_slice].reshape(
-                    projected.size(0),
-                    ir.dim,
-                    self.correlation,
-                    self.edge_ace_hidden,
-                )
-                for order in range(self.correlation):
-                    contraction_inputs[order].append(
-                        values[..., order, :].reshape(
-                            projected.size(0), ir.dim * self.edge_ace_hidden
-                        )
-                    )
-            else:
-                raise RuntimeError("Missing asymmetric-contraction weights.")
-            hidden = self.asymmetric_contraction(
-                [torch.cat(values, dim=-1) for values in contraction_inputs],
-                contraction_weights,
-            )
-        else:
-            hidden = self.nonlinearity(projected)
+        hidden = self.nonlinearity(projected)
         message = self.linear_down(hidden)
         if self.attention is not None:
             if edge_radial_basis is None:
@@ -375,8 +306,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
 
 
 class O2ScatterMagneticTensorProduct(torch.nn.Module):
-    ece_path_mode: str = "expand"
-
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -386,25 +315,20 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         num_channel: int,
         lmax: int,
         mmax: int,
-        act_0e: torch.nn.Module,
-        act_0o: Optional[torch.nn.Module],
-        act_lm: torch.nn.Module,
-        correlation: int,
+        even_scalar_act: torch.nn.Module,
+        odd_scalar_act: Optional[torch.nn.Module],
+        tensor_act: torch.nn.Module,
         num_head: int,
         num_radial_basis: int,
-        use_asymmetric_contraction: bool,
         use_radial_rotary_attention: bool,
-        edge_ace_hidden: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
         self.magnetic_irreps = o3.Irreps(magnetic_irreps)
         self.num_channel = num_channel
-        self.edge_ace_hidden = edge_ace_hidden or num_channel
         self.lmax = lmax
         self.mmax = min(max(self.irreps_in.lmax, self.magnetic_irreps.lmax), mmax)
-        self.correlation = correlation
         self.num_head = num_head
         if not (
             o2.Irreps.common_multiplicity(self.irreps_in)
@@ -442,77 +366,73 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             + self.local_magnetic_irreps
         ).regroup()
         self.local_irreps_out = self.local_frame_out.irreps_out
-        self.use_asymmetric_contraction = (
-            use_asymmetric_contraction and self.irreps_in.lmax > 0
+        self.use_time_reversal = any(
+            ir.t == -1 for ir, _ in self.local_irreps_in
         )
+        hidden_irreps = self.local_irreps_out.filter(
+            keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
+        )
+        scalar_entries = []
+        scalar_acts = []
+        gated_entries = []
+        for ir, mul in hidden_irreps:
+            if ir.is_invariant_scalar():
+                scalar_entries.append((ir, mul))
+                scalar_acts.append(even_scalar_act)
+            elif ir.m == 0 and odd_scalar_act is not None:
+                scalar_entries.append((ir, mul))
+                scalar_acts.append(odd_scalar_act)
+            else:
+                gated_entries.append((ir, mul))
 
-        if self.use_asymmetric_contraction:
-            self.nonlinearity = None
-            contraction_irreps = o2.Irreps(
-                [(ir, self.edge_ace_hidden) for ir, _ in self.local_irreps_out]
-            )
-            self.asymmetric_contraction = o2.AsymmetricContraction(
-                contraction_irreps,
-                contraction_irreps,
-                correlation,
-                algorithm="edge",
-                path_mode=self.ece_path_mode,
-            )
-            projection_irreps = o2.Irreps(
-                [
-                    (ir, correlation * self.edge_ace_hidden)
-                    for ir, _ in contraction_irreps
-                ]
-                + [(o2.Irrep("0e"), self.asymmetric_contraction.weight_numel)]
-            )
-            self.linear_up = o2.Linear(
-                self.local_irreps_in,
-                projection_irreps,
-                biases=True,
-            )
-        else:
-            self.asymmetric_contraction = None
-            hidden_irreps = self.local_irreps_out.filter(
-                keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
-            )
-            scalar_entries = []
-            scalar_acts = []
-            gated_entries = []
-            for ir, mul in hidden_irreps:
-                if ir.is_even_scalar():
-                    scalar_entries.append((ir, mul))
-                    scalar_acts.append(act_0e)
-                elif ir.is_odd_scalar() and act_0o is not None:
-                    scalar_entries.append((ir, mul))
-                    scalar_acts.append(act_0o)
-                else:
-                    gated_entries.append((ir, mul))
+        irreps_gated = o2.Irreps(gated_entries)
+        if self.use_time_reversal:
+            gate_entries = [(o2.Irrep("0ee"), mul) for _, mul in gated_entries]
+            gate_acts = [tensor_act] * len(gate_entries)
+            time_odd_scalars = [
+                ir for ir, _ in self.local_irreps_in if ir.m == 0 and ir.t == -1
+            ]
+            time_odd_irreps = [
+                ir for ir, _ in self.local_irreps_in if ir.t == -1
+            ]
+            for ir_out, mul in self.local_irreps_out:
+                path = next(
+                    (
+                        (ir_gate, ir_gated)
+                        for ir_gate in time_odd_scalars
+                        for ir_gated in time_odd_irreps
+                        if ir_gated * ir_gate == (ir_out,)
+                    ),
+                    None,
+                )
+                if path is not None:
+                    ir_gate, ir_gated = path
+                    gate_entries.append((ir_gate, mul))
+                    gate_acts.append(odd_scalar_act)
+                    gated_entries.append((ir_gated, mul))
             irreps_gated = o2.Irreps(gated_entries)
+            irreps_gates = o2.Irreps(gate_entries)
+        else:
             irreps_gates = (
-                o2.Irreps([(o2.Irrep("0e"), irreps_gated.num_irreps)])
+                o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
                 if irreps_gated.num_irreps
                 else o2.Irreps()
             )
-            self.nonlinearity = o2.Gate(
-                o2.Irreps(scalar_entries),
-                scalar_acts,
-                irreps_gates,
-                [act_lm] if len(irreps_gates) else [],
-                irreps_gated,
-            )
-            self.linear_up = o2.Linear(
-                self.local_irreps_in,
-                self.nonlinearity.irreps_in,
-                biases=True,
-            )
-
-        hidden_irreps = (
-            self.asymmetric_contraction.irreps_out
-            if self.asymmetric_contraction is not None
-            else self.nonlinearity.irreps_out
+            gate_acts = [tensor_act] if len(irreps_gates) else []
+        self.nonlinearity = o2.Gate(
+            o2.Irreps(scalar_entries),
+            scalar_acts,
+            irreps_gates,
+            gate_acts,
+            irreps_gated,
+        )
+        self.linear_up = o2.Linear(
+            self.local_irreps_in,
+            self.nonlinearity.irreps_in,
+            biases=True,
         )
         self.linear_down = o2.Linear(
-            hidden_irreps,
+            self.nonlinearity.irreps_out,
             self.local_irreps_out,
             biases=True,
         )
@@ -609,37 +529,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         if offset != conv_weights.size(-1):
             raise ValueError("Invalid O2 convolution weight size.")
         projected = self.linear_up(torch.cat(weighted, dim=-1))
-
-        if self.asymmetric_contraction is not None:
-            contraction_inputs = [[] for _ in range(self.correlation)]
-            projected_slices = self.linear_up.irreps_out.slices()
-            contraction_entries = len(self.asymmetric_contraction.irreps_in)
-            for index, ((ir, _), ir_slice) in enumerate(
-                zip(self.linear_up.irreps_out, projected_slices)
-            ):
-                if index == contraction_entries:
-                    contraction_weights = projected[..., ir_slice]
-                    break
-                values = projected[..., ir_slice].reshape(
-                    projected.size(0),
-                    ir.dim,
-                    self.correlation,
-                    self.edge_ace_hidden,
-                )
-                for order in range(self.correlation):
-                    contraction_inputs[order].append(
-                        values[..., order, :].reshape(
-                            projected.size(0), ir.dim * self.edge_ace_hidden
-                        )
-                    )
-            else:
-                raise RuntimeError("Missing asymmetric-contraction weights.")
-            hidden = self.asymmetric_contraction(
-                [torch.cat(values, dim=-1) for values in contraction_inputs],
-                contraction_weights,
-            )
-        else:
-            hidden = self.nonlinearity(projected)
+        hidden = self.nonlinearity(projected)
         message = self.linear_down(hidden)
         if self.attention is not None:
             if edge_radial_basis is None:
