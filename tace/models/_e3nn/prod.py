@@ -266,8 +266,16 @@ class CgtpACE(Product):
 
 
 PRODUCT: Dict[str, torch.nn.Module] = {
-    "spatial": CgtpACE,
-    "coupled": CgtpACE,
     "cgtp": CgtpACE,
-    "glu": CgtpACE,
 }
+
+product_aliases = {
+    "coupled": "cgtp",
+}
+
+PRODUCT.update(
+    {
+        alias: PRODUCT[target]
+        for alias, target in product_aliases.items()
+    }
+)

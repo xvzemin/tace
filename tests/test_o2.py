@@ -12,7 +12,10 @@ from e3nn import o3
 
 from eqx import o2
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-from tace.models._e3nn.o2 import O2ScatterTensorProduct
+from tace.models._e3nn.o2 import (
+    O2ScatterMagneticTensorProduct,
+    O2ScatterTensorProduct,
+)
 from tace.models._e3nn.representation import Representation
 from tace.models.layout import LayoutTransform
 
@@ -29,6 +32,13 @@ def _transform(features, irreps, angle, reflected=False, time_reversal=False):
         device=features.device,
     )
     return torch.matmul(features, matrix.transpose(-1, -2))
+
+
+def _time_reverse(features: torch.Tensor, irreps) -> torch.Tensor:
+    output = features.clone()
+    for ir_mul, ir_slice in zip(irreps, irreps.slices()):
+        output[..., ir_slice] *= ir_mul.ir.t
+    return output
 
 
 @pytest.mark.parametrize(
@@ -150,8 +160,19 @@ def test_local_frame_trailing_axes_and_empty_batch():
 def test_o2_irrep_and_irreps_metadata():
     assert o2.Irrep("0e") == o2.Irrep("0ee") == o2.Irrep(0, 1)
     assert o2.Irrep("0o") == o2.Irrep("0oe") == o2.Irrep((0, -1))
+    assert o2.Irrep("0eo") == o2.Irrep((0, 1, -1))
+    assert o2.Irrep("1mo") == o2.Irrep(1, 0, -1)
+    assert str(o2.Irrep("0eo")) == "0eo"
+    assert str(o2.Irrep("2mo")) == "2mo"
     assert o2.Irrep("3m").dim == 2
     assert o2.Irrep("0e").is_invariant_scalar()
+
+    angle = torch.tensor(0.37, dtype=DTYPE)
+    time_odd = o2.Irrep("1mo")
+    torch.testing.assert_close(
+        time_odd.D_from_angle(angle, time_reversal=True),
+        -time_odd.D_from_angle(angle),
+    )
 
     irreps = o2.Irreps("2x0e+0o+3x1m+2m")
     assert irreps.dim == 11
@@ -176,6 +197,16 @@ def test_o2_irrep_products_and_restriction():
         o2.Irrep("0e"),
         o2.Irrep("0o"),
         o2.Irrep("4m"),
+    )
+    assert o2.Irrep("0oo") * o2.Irrep("1mo") == (o2.Irrep("1me"),)
+    assert o2.Irrep("1mo") * o2.Irrep("1mo") == (
+        o2.Irrep("0ee"),
+        o2.Irrep("0oe"),
+        o2.Irrep("2me"),
+    )
+    assert o2.Irrep("1me") * o2.Irrep("2mo") == (
+        o2.Irrep("1mo"),
+        o2.Irrep("3mo"),
     )
     assert o2.LocalFrame.restrict("2x1e+0o") == o2.Irreps("3x0o+2x1m")
 
@@ -460,6 +491,204 @@ def test_o2_scatter_supports_empty_edges():
     )
     output = module(
         module.irreps_in.randn(3, -1, dtype=DTYPE, device=DEVICE),
+        torch.empty(0, module.weight_numel, dtype=DTYPE, device=DEVICE),
+        edge_index,
+        wigner,
+        wigner_inv,
+        edge_cutoff=torch.empty(0, 1, dtype=DTYPE, device=DEVICE),
+    )
+    torch.testing.assert_close(output, torch.zeros_like(output))
+
+
+def test_time_odd_circular_harmonics_alternate_time_parity():
+    harmonics = o2.CircularHarmonics(4, time_reversal=True).to(DEVICE, DTYPE)
+    assert harmonics.irreps_in == o2.Irreps("1mo")
+    assert harmonics.irreps_out == o2.Irreps("0ee+1mo+2me+3mo+4me")
+    vectors = torch.randn(8, 2, dtype=DTYPE, device=DEVICE)
+    torch.testing.assert_close(
+        harmonics(-vectors),
+        _time_reverse(harmonics(vectors), harmonics.irreps_out),
+    )
+
+
+def test_o2_linear_preserves_time_parity():
+    irreps = o2.Irreps("2x0ee+3x0eo+2x1me+3x1mo")
+    linear = o2.Linear(irreps, irreps, biases=True).to(DEVICE, DTYPE)
+    assert linear.bias_numel == 2
+    assert all(
+        linear.irreps_in[instruction.i_in].ir.t
+        == linear.irreps_out[instruction.i_out].ir.t
+        for instruction in linear._weight_instructions
+    )
+    features = irreps.randn(5, -1, dtype=DTYPE, device=DEVICE)
+    torch.testing.assert_close(
+        linear(_time_reverse(features, irreps)),
+        _time_reverse(linear(features), irreps),
+    )
+
+
+def test_o2_activation_and_gate_preserve_time_parity():
+    odd_activation = o2.Activation("3x0eo", [torch.nn.Tanh()])
+    features = torch.randn(4, 3, dtype=DTYPE)
+    torch.testing.assert_close(odd_activation(-features), -odd_activation(features))
+    with pytest.raises(ValueError, match="time-reversal-odd"):
+        o2.Activation("0eo", [torch.nn.SiLU()])
+
+    gate = o2.Gate(
+        "2x0ee",
+        [torch.nn.SiLU()],
+        "3x0oo",
+        [torch.nn.Tanh()],
+        "3x1mo",
+    ).to(DEVICE, DTYPE)
+    features = gate.irreps_in.randn(7, -1, dtype=DTYPE, device=DEVICE)
+    torch.testing.assert_close(
+        gate(_time_reverse(features, gate.irreps_in)),
+        _time_reverse(gate(features), gate.irreps_out),
+    )
+
+
+def test_o2_tensor_product_preserves_time_parity():
+    irreps_in = o2.Irreps("2x1mo")
+    irreps_out = o2.Irreps("2x0ee+2x0oe+2x2me")
+    tensor_product = o2.TensorProduct(
+        irreps_in,
+        irreps_in,
+        irreps_out,
+        [(0, 0, i_out, "uuu", False) for i_out in range(len(irreps_out))],
+    ).to(DEVICE, DTYPE)
+    first = irreps_in.randn(6, -1, dtype=DTYPE, device=DEVICE)
+    second = irreps_in.randn(6, -1, dtype=DTYPE, device=DEVICE)
+    output = tensor_product(first, second)
+    torch.testing.assert_close(
+        tensor_product(
+            _time_reverse(first, irreps_in),
+            _time_reverse(second, irreps_in),
+        ),
+        _time_reverse(output, irreps_out),
+    )
+
+
+def test_o2_asymmetric_contraction_preserves_time_parity():
+    irreps_in = o2.Irreps("2x0ee+2x0oo+2x1mo")
+    contraction = o2.AsymmetricContraction(
+        irreps_in,
+        "2x0ee+2x1me",
+        correlation=2,
+        algorithm="edge",
+    ).to(DEVICE, DTYPE)
+    inputs = [
+        irreps_in.randn(5, -1, dtype=DTYPE, device=DEVICE) for _ in range(2)
+    ]
+    weights = torch.randn(
+        5, contraction.weight_numel, dtype=DTYPE, device=DEVICE
+    )
+    output = contraction(inputs, weights)
+    torch.testing.assert_close(
+        contraction([_time_reverse(value, irreps_in) for value in inputs], weights),
+        _time_reverse(output, contraction.irreps_out),
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(o3.Irrep("0e"), "t"),
+    reason="The installed e3nn does not expose time-reversal irreps.",
+)
+def test_local_frame_preserves_time_parity():
+    irreps = o3.Irreps("2x1eo+2x2ee")
+    frame = o2.LocalFrame(irreps, lmax=2).to(DEVICE, DTYPE)
+    edge_vectors = torch.randn(6, 3, dtype=DTYPE, device=DEVICE)
+    wigner, _ = o2.WignerD(mmax=2, lmax=2).to(DEVICE, DTYPE).get_wigner(
+        edge_vectors
+    )
+    features = torch.randn(6, irreps.dim, dtype=DTYPE, device=DEVICE)
+    local = frame.to_local(features, wigner)
+    torch.testing.assert_close(
+        frame.to_local(_time_reverse(features, irreps), wigner),
+        _time_reverse(local, frame.irreps_out),
+    )
+
+
+def _magnetic_scatter_module(use_attention: bool):
+    irreps = o3.Irreps("2x0ee+2x1oe")
+    magnetic_irreps = o3.Irreps("0ee+1eo")
+    module = O2ScatterMagneticTensorProduct(
+        irreps,
+        irreps,
+        magnetic_irreps,
+        num_channel=2,
+        lmax=1,
+        mmax=1,
+        even_scalar_act=torch.nn.SiLU(),
+        odd_scalar_act=torch.nn.Tanh(),
+        tensor_act=torch.nn.Sigmoid(),
+        num_head=1,
+        num_radial_basis=4,
+        use_radial_rotary_attention=use_attention,
+    ).to(DEVICE, DTYPE)
+    return module, irreps, magnetic_irreps
+
+
+@pytest.mark.parametrize("use_attention", [False, True])
+@pytest.mark.skipif(
+    not hasattr(o3.Irrep("0e"), "t"),
+    reason="The installed e3nn does not expose time-reversal irreps.",
+)
+def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
+    module, irreps, magnetic_irreps = _magnetic_scatter_module(use_attention)
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE
+    )
+    num_edges = edge_index.size(1)
+    node_features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)
+    magnetic = torch.randn(
+        4, magnetic_irreps.dim, dtype=DTYPE, device=DEVICE
+    )
+    conv_weights = torch.randn(
+        num_edges, module.weight_numel, dtype=DTYPE, device=DEVICE
+    )
+    edge_vectors = torch.randn(num_edges, 3, dtype=DTYPE, device=DEVICE)
+    wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(
+        DEVICE, DTYPE
+    ).get_wigner(edge_vectors)
+    edge_cutoff = torch.rand(num_edges, 1, dtype=DTYPE, device=DEVICE)
+    edge_radial_basis = torch.randn(
+        num_edges, 4, dtype=DTYPE, device=DEVICE
+    )
+
+    def apply(magnetic_features):
+        return module(
+            node_features,
+            magnetic_features,
+            conv_weights,
+            edge_index,
+            wigner,
+            wigner_inv,
+            edge_radial_basis=edge_radial_basis,
+            edge_cutoff=edge_cutoff,
+        )
+
+    output = apply(magnetic)
+    torch.testing.assert_close(
+        apply(_time_reverse(magnetic, magnetic_irreps)),
+        output,
+    )
+    assert not torch.allclose(output, apply(torch.zeros_like(magnetic)))
+
+
+@pytest.mark.skipif(
+    not hasattr(o3.Irrep("0e"), "t"),
+    reason="The installed e3nn does not expose time-reversal irreps.",
+)
+def test_o2_magnetic_scatter_supports_empty_edges():
+    module, irreps, magnetic_irreps = _magnetic_scatter_module(False)
+    edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
+    wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(
+        DEVICE, DTYPE
+    ).get_wigner(torch.empty(0, 3, dtype=DTYPE, device=DEVICE))
+    output = module(
+        torch.randn(3, irreps.dim, dtype=DTYPE, device=DEVICE),
+        torch.randn(3, magnetic_irreps.dim, dtype=DTYPE, device=DEVICE),
         torch.empty(0, module.weight_numel, dtype=DTYPE, device=DEVICE),
         edge_index,
         wigner,

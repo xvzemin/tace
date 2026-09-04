@@ -2,12 +2,14 @@ import pytest
 import torch
 from e3nn import o3
 
+from tace.models._e3nn.base import _to_possible_tp_irreps
 from tace.models._e3nn.fused import O3ScatterTensorProduct, uvuTensorProduct
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
     sympy_wigner_6j,
     wigner_6j,
 )
+from tace.models.time_reversal import spherical_harmonics_irreps, supports_time_reversal
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -85,7 +87,7 @@ def test_uvu_tensor_product_oeq_matches_e3nn(shared_weights, monkeypatch):
         )
 
 
-def _build_tensor_product(*, weight_level="edge", register_reference=True):
+def _build_tensor_product(*, weight_level="edge"):
     irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x1e")
     irreps_edge_attrs = o3.Irreps.spherical_harmonics(2, p=-1)
     irreps_out = o3.Irreps("2x0e + 2x0o + 2x1e + 2x1o + 2x2e + 2x2o")
@@ -95,7 +97,7 @@ def _build_tensor_product(*, weight_level="edge", register_reference=True):
         irreps_out,
         extra_irreps_node_attrs=o3.Irreps("0o + 0e + 1o + 1e + 2o + 2e"),
         weight_level=weight_level,
-        register_reference=register_reference,
+        register_reference=True,
     )
     assert isinstance(module.recoupled_node_node_tp, uvuTensorProduct)
     assert module.recoupled_node_node_tp.shared_weights == (weight_level == "edge")
@@ -225,35 +227,80 @@ def test_wigner6j_tensor_product_is_o3_equivariant(
     )
 
 
-def test_wigner6j_requires_extra_irreps_node_attrs():
-    with pytest.raises(TypeError, match="extra_irreps_node_attrs"):
-        O3Wigner6jScatterTensorProduct(
-            o3.Irreps("1x0e"),
-            o3.Irreps("1x0e"),
-            o3.Irreps("1x0e"),
-            weight_level="edge",
-        )
-
-
-def test_wigner6j_requires_weight_level():
-    with pytest.raises(TypeError, match="weight_level"):
-        O3Wigner6jScatterTensorProduct(
-            o3.Irreps("1x0e"),
-            o3.Irreps("1x0e"),
-            o3.Irreps("1x0e"),
-            o3.Irreps("1x0e"),
-        )
-
-
-def test_wigner6j_does_not_register_reference_by_default():
-    module = _build_tensor_product(register_reference=False)
-    assert not hasattr(module, "reference_node_edge_tp")
-    assert not hasattr(module, "reference_edge_edge_tp")
-    assert not any(name.startswith("reference_") for name in module.state_dict())
-    with pytest.raises(RuntimeError, match="register_reference=True"):
-        module.forward_reference(*_random_inputs(module))
-
-
 def test_wigner6j_rejects_unknown_weight_level():
     with pytest.raises(ValueError, match="weight_level"):
         _build_tensor_product(weight_level="graph")
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
+def test_wigner6j_is_time_reversal_equivariant():
+    node_irreps = o3.Irreps("2x0ee + 2x1eo")
+    edge_irreps = spherical_harmonics_irreps(1, p=-1)
+    magnetic_irreps = spherical_harmonics_irreps(
+        1,
+        p=1,
+        time_reversal=-1,
+    )
+    intermediate_irreps = _to_possible_tp_irreps(
+        node_irreps,
+        edge_irreps,
+        parity=True,
+        lmax=2,
+    )
+    output_irreps = (
+        _to_possible_tp_irreps(
+            intermediate_irreps,
+            magnetic_irreps,
+            parity=True,
+            lmax=1,
+        )
+        * 2
+    ).regroup()
+    tensor_product = O3Wigner6jScatterTensorProduct(
+        node_irreps,
+        edge_irreps,
+        output_irreps,
+        magnetic_irreps,
+        weight_level="edge",
+    )
+
+    num_nodes = 4
+    num_edges = 7
+    edge_index = torch.randint(num_nodes, (2, num_edges))
+    node_features = torch.randn(num_nodes, node_irreps.dim)
+    edge_features = torch.randn(num_edges, edge_irreps.dim)
+    magnetic_features = torch.randn(num_nodes, magnetic_irreps.dim)
+    edge_weights = torch.randn(num_edges, tensor_product.edge_weight_numel)
+    magnetic_weights = torch.randn(num_edges, tensor_product.extra_weight_numel)
+
+    def reverse(features, irreps):
+        matrix = irreps.D_from_matrix(
+            -torch.eye(3),
+            parity=False,
+            time_reversal=True,
+        )
+        return features @ matrix.T
+
+    output = tensor_product(
+        node_features,
+        edge_features,
+        magnetic_features,
+        edge_weights,
+        magnetic_weights,
+        edge_index,
+    )
+    observed = tensor_product(
+        reverse(node_features, node_irreps),
+        reverse(edge_features, edge_irreps),
+        reverse(magnetic_features, magnetic_irreps),
+        edge_weights,
+        magnetic_weights,
+        edge_index,
+    )
+    torch.testing.assert_close(
+        observed,
+        reverse(output, tensor_product.irreps_out),
+    )

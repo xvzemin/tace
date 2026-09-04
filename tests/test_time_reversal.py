@@ -8,7 +8,6 @@ from e3nn import o3
 from e3nn.nn import Gate
 
 from tace.dataset.quantity import PROPERTY
-from tace.models._e3nn.base import _to_possible_tp_irreps
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.fused import (
     O3ScatterTensorProduct,
@@ -20,7 +19,6 @@ from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
 from tace.models._e3nn.tace import e3nnTACE
 from tace.models._e3nn.ue import UniversalEquivariantEmbedding
-from tace.models._e3nn.wigner6j import O3Wigner6jScatterTensorProduct
 from tace.models.angular import SolidHarmonics
 from tace.models.layout import LayoutTransform
 from tace.models.linear import e3nnLinear
@@ -402,67 +400,3 @@ def test_time_odd_irreps_reject_oeq_tensor_product(monkeypatch):
             instructions,
             shared_weights=False,
         )
-
-
-@pytest.mark.skipif(
-    not supports_time_reversal(),
-    reason="the installed e3nn does not represent time-reversal parity",
-)
-def test_wigner6j_is_time_reversal_equivariant():
-    node_irreps = o3.Irreps("2x0ee + 2x1eo")
-    edge_irreps = spherical_harmonics_irreps(1, p=-1)
-    magnetic_irreps = spherical_harmonics_irreps(
-        1,
-        p=1,
-        time_reversal=-1,
-    )
-    intermediate_irreps = _to_possible_tp_irreps(
-        node_irreps,
-        edge_irreps,
-        parity=True,
-        lmax=2,
-    )
-    output_irreps = (
-        _to_possible_tp_irreps(
-            intermediate_irreps,
-            magnetic_irreps,
-            parity=True,
-            lmax=1,
-        )
-        * 2
-    ).regroup()
-    tensor_product = O3Wigner6jScatterTensorProduct(
-        node_irreps,
-        edge_irreps,
-        output_irreps,
-        magnetic_irreps,
-        weight_level="edge",
-    )
-
-    num_nodes = 4
-    num_edges = 7
-    edge_index = torch.randint(num_nodes, (2, num_edges))
-    node_features = torch.randn(num_nodes, node_irreps.dim)
-    edge_features = torch.randn(num_edges, edge_irreps.dim)
-    magnetic_features = torch.randn(num_nodes, magnetic_irreps.dim)
-    edge_weights = torch.randn(num_edges, tensor_product.edge_weight_numel)
-    magnetic_weights = torch.randn(num_edges, tensor_product.extra_weight_numel)
-
-    output = tensor_product(
-        node_features,
-        edge_features,
-        magnetic_features,
-        edge_weights,
-        magnetic_weights,
-        edge_index,
-    )
-    observed = tensor_product(
-        node_features @ _time_reversal_matrix(node_irreps).T,
-        edge_features @ _time_reversal_matrix(edge_irreps).T,
-        magnetic_features @ _time_reversal_matrix(magnetic_irreps).T,
-        edge_weights,
-        magnetic_weights,
-        edge_index,
-    )
-    expected = output @ _time_reversal_matrix(tensor_product.irreps_out).T
-    torch.testing.assert_close(observed, expected)
