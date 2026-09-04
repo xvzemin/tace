@@ -44,7 +44,7 @@ DEFAULT_MODEL_CONFIG = {
     },
     "angular_basis": {},
     "atomic_basis": {
-        "type": "cgtp",
+        "type": "ictp",
         "l1l2": None,
         "scatter_norm": "avg_num_neighbors",
         "nonlinear": "gate",
@@ -68,7 +68,7 @@ DEFAULT_MODEL_CONFIG = {
         "use_first_pre_norm": False,
     },
     "product_basis": {
-        "type": "cgtp",
+        "type": "ictp",
         "l1l2": None,
         "correlation": 2,
         "return_components": None,
