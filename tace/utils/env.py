@@ -38,7 +38,7 @@ def enable_acceleration(
     """Enable accelerations, preserving existing settings unless forced.
 
     ``enable_eqx`` selects the EQX operator path. Until the general EQX O(3),
-    O(2), Wigner-6j, and Cartesian operators are available, supported calls
+    O(2), and Cartesian operators are available, supported calls
     are routed to the temporary kernels in :mod:`tace.models.triton_ops`.
     """
     enabled_accelerations = {

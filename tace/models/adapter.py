@@ -383,7 +383,7 @@ class TensorModel(torch.nn.Module):
         if isinstance(atomic_basis_type, str):
             atomic_basis_type = [atomic_basis_type]
         if atomic_basis_type is not None and any(
-            interaction in {"w6j_mag", "o2_mag"}
+            interaction == "o2_mag"
             for interaction in atomic_basis_type
         ):
             embedding_property.add("initial_noncollinear_magmoms")

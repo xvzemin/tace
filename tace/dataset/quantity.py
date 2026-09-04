@@ -891,7 +891,7 @@ def get_embedding_property(cfg: Dict) -> List[str]:
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
     if atomic_basis_type is not None and any(
-        interaction in {"w6j_mag", "o2_mag"} for interaction in atomic_basis_type
+        interaction == "o2_mag" for interaction in atomic_basis_type
     ):
         if "initial_noncollinear_magmoms" not in embedding_property:
             embedding_property.append("initial_noncollinear_magmoms")

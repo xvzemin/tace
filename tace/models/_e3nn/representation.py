@@ -93,7 +93,7 @@ class Representation(torch.nn.Module):
             or node_embedding["type"] == "so2_tensor"
         )
         self.use_so2 = self.use_legacy_so2 or self.use_o2
-        magnetic_interactions = {"w6j_mag", "o2_mag"}
+        magnetic_interactions = {"o2_mag"}
         uses_magnetic_interaction = any(
             interaction in magnetic_interactions
             for interaction in atomic_basis["type"]

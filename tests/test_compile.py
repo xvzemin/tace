@@ -219,7 +219,6 @@ def test_trace_to_fx_removes_full_dynamic_slice_scatter():
 @pytest.mark.parametrize(
     ("embedding_property", "atomic_basis_type"),
     [
-        pytest.param([], "w6j_mag", id="wigner6j-magnetic"),
         pytest.param([], "o2_mag", id="o2-magnetic"),
         pytest.param(
             ["initial_noncollinear_magmoms"],
