@@ -111,7 +111,7 @@ def test_magnetic_basis_normalization_validation():
         )
 
 
-def test_universal_embedding_rejects_noncollinear_magmoms():
+def test_universal_embedding_is_filtered_by_default_config():
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config["statistics"] = [
         {
@@ -125,8 +125,9 @@ def test_universal_embedding_rejects_noncollinear_magmoms():
         "normalizer": 1.0,
     }
 
-    with pytest.raises(ValueError, match="only supports electric_field"):
-        check_model_config(config)
+    filtered = check_model_config(config)["universal_embedding"]
+
+    assert filtered == DEFAULT_MODEL_CONFIG["universal_embedding"]
 
 
 def _transform(features, irreps, angle, reflected=False, time_reversal=False):

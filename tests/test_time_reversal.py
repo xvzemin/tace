@@ -167,23 +167,6 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
-@pytest.mark.parametrize(
-    "environment",
-    ["TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"],
-)
-def test_time_reversal_model_rejects_acceleration_kernel(monkeypatch, environment):
-    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv(environment, "1")
-
-    with pytest.raises(ValueError, match="Time-reversal models do not support"):
-        e3nnTACE(**_time_reversal_model_config())
-
-
-@pytest.mark.skipif(
-    not supports_time_reversal(),
-    reason="the installed e3nn does not represent time-reversal parity",
-)
 def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
     for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)

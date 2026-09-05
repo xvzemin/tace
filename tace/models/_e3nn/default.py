@@ -206,16 +206,15 @@ def check_model_config(cfg: dict[str, Any]):
     # Update default config with user config
     cfg = recursive_update(cfg)
 
-    supported_universal_embeddings = {"electric_field", "magnetic_field"}
-    unsupported_universal_embeddings = (
-        set(cfg["universal_embedding"]) - supported_universal_embeddings
-    )
-    if unsupported_universal_embeddings:
-        raise ValueError(
-            "universal_embedding only supports electric_field and "
-            f"magnetic_field, got {sorted(unsupported_universal_embeddings)}."
-        )
-
+    universal_embedding = cfg.get("universal_embedding")
+    if isinstance(universal_embedding, Mapping):
+        cfg = cfg.copy()
+        cfg["universal_embedding"] = {
+            name: value
+            for name, value in universal_embedding.items()
+            if name in DEFAULT_MODEL_CONFIG["universal_embedding"]
+        }
+        
     if "magnetic_basis" in cfg["angular_basis"]:
         raise ValueError(
             "angular_basis.magnetic_basis was replaced by the flat "

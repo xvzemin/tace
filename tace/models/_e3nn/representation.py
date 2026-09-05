@@ -13,7 +13,7 @@ from e3nn import o3
 from eqx.o2 import WignerD
 
 from ...dataset.quantity import PROPERTY
-from ...utils.env import acceleration_enabled, get_tace_use_dens
+from ...utils.env import get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
@@ -123,16 +123,6 @@ class Representation(torch.nn.Module):
                 if name not in time_odd_scalars
             ]
             self.equivariant_property.extend(time_odd_scalars)
-        enabled_kernels = [
-            name
-            for name in ("eqt", "cue", "oeq", "eqx")
-            if acceleration_enabled(name)
-        ]
-        if self.use_time_reversal and enabled_kernels:
-            raise ValueError(
-                "Time-reversal models do not support accelerated equivariant "
-                f"kernels: {', '.join(enabled_kernels)}. Disable these kernels."
-            )
         self.use_o3 = (
             any(t != "so2" for t in atomic_basis["type"])
             or node_embedding["type"] == "tensor"
