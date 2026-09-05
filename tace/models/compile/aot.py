@@ -1,5 +1,12 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
+import logging
 import importlib
 import json
+import logging
 import shutil
 import zipfile
 from contextlib import nullcontext
@@ -208,6 +215,7 @@ def export_aotinductor(
     output_path: Union[str, Path],
     sample_data: Union[Dict[str, torch.Tensor], None] = None,
 ) -> str:
+    logging.info("[AOTI 1/5] Preparing model and example inputs...")
     model.eval()
     compile_model = _as_compile_tensor_model(model)
     CompileTensorModel._validate_compile_properties(compile_model.readout_fn)
@@ -227,6 +235,7 @@ def export_aotinductor(
     custom_ops_libs = _custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
     with _size_oblivious_export():
+        logging.info("[AOTI 2/5] Tracing the forward and derivative graph...")
         traced = trace_to_fx(
             flat_model,
             inputs,
@@ -236,6 +245,7 @@ def export_aotinductor(
             input_keys,
             num_graphs=sample_data["ptr"].numel() - 1,
         )
+        logging.info("[AOTI 3/5] Exporting the dynamic graph...")
         exported = torch.export.export(
             traced,
             inputs,
@@ -264,11 +274,15 @@ def export_aotinductor(
         }
     )
     _ensure_cxx_compiler()
+    logging.info(
+        "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
+    )
     out_path = torch._inductor.aoti_compile_and_package(
         exported,
         package_path=output_path,
         inductor_configs=inductor_configs,
     )
+    logging.info("[AOTI 5/5] Finalizing the package...")
     _embed_custom_ops_libs(out_path, custom_ops_libs)
     return str(out_path)
 
@@ -293,6 +307,7 @@ def export_lammps_aotinductor(
     output_path: Union[str, Path],
     sample_data: Union[Dict[str, torch.Tensor], None] = None,
 ) -> str:
+    logging.info("[AOTI 1/5] Preparing model and example inputs...")
     model.eval()
     compile_model = _as_compile_tensor_model(model)
     CompileTensorModel._validate_compile_properties(compile_model.readout_fn)
@@ -309,7 +324,9 @@ def export_lammps_aotinductor(
     custom_ops_libs = _custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
     with _size_oblivious_export():
+        logging.info("[AOTI 2/5] Tracing the forward and derivative graph...")
         traced = trace_to_fx(flat_model, inputs)
+        logging.info("[AOTI 3/5] Exporting the dynamic graph...")
         exported = torch.export.export(
             traced,
             inputs,
@@ -339,12 +356,16 @@ def export_lammps_aotinductor(
         }
     )
     _ensure_cxx_compiler()
+    logging.info(
+        "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
+    )
     with _size_oblivious_export():
         out_path = torch._inductor.aoti_compile_and_package(
             exported,
             package_path=output_path,
             inductor_configs=inductor_configs,
         )
+    logging.info("[AOTI 5/5] Finalizing the package...")
     _embed_custom_ops_libs(out_path, custom_ops_libs)
     return str(out_path)
 

@@ -1,3 +1,8 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
 from typing import Dict, Sequence, Union
 
 import torch

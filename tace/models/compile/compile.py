@@ -1,3 +1,8 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
 import operator
 import sys
 from contextlib import contextmanager
