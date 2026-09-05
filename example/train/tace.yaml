@@ -334,7 +334,7 @@ model:
     radial_basis:
       radial_basis: j0   # [j0, jn, gaussian]
       num_radial_basis: 8 # (int) 8-10 for j0 and jn, 8-64 for gaussian
-      num_mag_radial_basis: 10 # magnetic Chebyshev basis including the constant term
+      num_mag_radial_basis: 10 # magnetic Chebyshev basis excluding the constant term
       distance_transform: null # [null, Agnesi, Soft], this plug-in from mace, if you do not know what it means, never use
       cutoff_fn: c2poly # [c2poly, c3poly, mollifier, cosine]
       polynomial_cutoff: 5 # (int)
@@ -344,12 +344,11 @@ model:
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
       bias: true  # (bool)
-      magnetic_normalization: rational # stable: [clamp]: not-table: [clamp]
+      magnetic_normalization: rational # [rational, clamp]
 
     angular_basis:
-      magnetic_basis:
-        Lmax: 2 # Maximum degree of magnetic solid harmonics, in [1, Lmax] recommend >=2.
-        normalization: element # [element, integral, component]
+      magnetic_Lmax: 2 # Maximum degree of magnetic solid harmonics, recommend >=2.
+      magnetic_normalization: element # [element, integral, component]
 
     resnet:
       type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect
@@ -388,10 +387,9 @@ model:
       agnostic: false
 
     readout_emlp:
-      bias: false
+      bias: false # recommended always false
       hidden: [16]
-      use_alllayer: false # (bool) recommended true, if true, evergy layer has readout, else, only last layer has
-      use_uie: false # (bool) whether use uie readout
+      use_alllayer: false # (bool) recommended false
       use_one_body_magmoms: true
 
     scale_shift:
@@ -432,21 +430,11 @@ model:
           use_epsilon_r_scaling: false
 
     universal_embedding:
-      charges:
-        enable: false
-
-      total_charge:
-        enable: false
-
       electric_field:
         enable: false
         normalizer: 1.0 # (float)
 
       magnetic_field:
-        enable: false
-        normalizer: 1.0 # (float)
-
-      initial_noncollinear_magmoms:
         enable: false
         normalizer: 1.0 # (float)
 

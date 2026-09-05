@@ -16,7 +16,6 @@ from ..utils import compute_fixed_charge_dipole, get_target_irreps
 from .basis_change import DirectPolarizability, DirectVirials
 from .default import check_model_config
 from .les import TACELES, required_les_irreps
-from .linear import Linear
 from .readout import (
     build_scalar_readout,
     build_tensor_readout,
@@ -170,14 +169,6 @@ class cartTACE(torch.nn.Module):
                     cfg["scale_shift"],
                     atomic_numbers=cfg["atomic_numbers"],
                 )
-            # uie base
-            if cfg["readout_emlp"]["use_uie"] and len(cfg["invariant_property"]) > 0:
-                self.uie_readout = Linear(
-                    f"{cfg['num_channel']}x0e",
-                    "1x0e",
-                    bias=False,
-                )
-
             # === Short range ===
             if cfg["short_range"]["zbl"]["enable"]:
                 self.zbl = ZBLBasis(
@@ -335,10 +326,6 @@ class cartTACE(torch.nn.Module):
                 )
             if hasattr(self, "zbl") and not self.scale_zbl:
                 e_node = e_node + e_zbl_node
-            # === uie ===
-            if hasattr(self, "uie_readout"):
-                e_uie_node = self.uie_readout(from_representation["uie_feats"])
-                e_node = e_node + e_uie_node[num_atoms_arange, 0]
             e_graph = scatter_sum(e_node, batch, dim=-1, dim_size=num_graphs)
             e_node = e_base_node + e_node
             E = e_base_graph + e_graph

@@ -3,7 +3,7 @@ Magnetic TACE
 
 ``Magnetic TACE (mTACE)`` describes non-collinear magnetic moments and atomic
 geometry in one equivariant model. It is intended for magnetic potential
-energy surfaces ``with/without spin--orbit coupling (SOC)``. The model enforces
+energy surfaces ``with/without spin-orbit coupling (SOC)``. The model enforces
 :math:`O(3)\times\mathbb Z_2^T`: proper rotations, spatial inversion, and
 global time reversal.
 
@@ -234,15 +234,16 @@ Radial and Angular normalization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The default uses the per-element RMS magnitude together with
-``normalization: element`` and ``magnetic_normalization: rational`` for
-dimensionless, smooth, bounded learned magnetic features. The positive
-quartic tail supplies the separate large-moment stability guarantee.
+``angular_basis.magnetic_normalization: element`` and
+``radial_basis.magnetic_normalization: rational`` for dimensionless, smooth,
+bounded learned magnetic features.
 
 The magnetic Chebyshev basis is evaluated on a coordinate in
 :math:`[-1,1]`. ``radial_basis.magnetic_normalization`` controls the mapping.
+``radial_basis.num_mag_radial_basis`` is the number of returned non-constant
+basis functions; the constant Chebyshev mode is not included.
 
 ``rational``
-   The globally smooth alternative is
 
    .. math::
 
@@ -250,9 +251,7 @@ The magnetic Chebyshev basis is evaluated on a coordinate in
 
    It uses only :math:`\lVert\mathbf{m}_i\rVert^2`, is smooth in the Cartesian
    components at zero, requires no clipping, and approaches :math:`-1`
-   continuously for large moments. This compactification is used only for the
-   bounded learned correction; it is not responsible for stabilizing the
-   large-moment energy.
+   continuously for large moments.
 
 ``clamp``
 
@@ -266,7 +265,8 @@ The magnetic Chebyshev basis is evaluated on a coordinate in
    :math:`u=1`.
 
 
-``angular_basis.magnetic_basis.normalization`` accepts three modes:
+``angular_basis.magnetic_Lmax`` selects the maximum magnetic solid-harmonic
+degree. ``angular_basis.magnetic_normalization`` accepts three modes:
 
 ``integral``
    Uses e3nn integral-normalized regular solid harmonics.
@@ -275,7 +275,10 @@ The magnetic Chebyshev basis is evaluated on a coordinate in
    Uses e3nn component-normalized regular solid harmonics.
 
 ``element``
-   Uses the integral convention and the dimensionless element-scaled vector.
+   Uses the component convention and the dimensionless element-scaled vector.
+   Element scaling already controls the species-dependent magnitude; an
+   additional integral factor would uniformly reduce every component variance
+   by :math:`4\pi` without adding a physical constraint.
 
 For every mode, the learned angular representation is the bounded rational
 solid harmonic
@@ -294,34 +297,26 @@ arbitrarily large moments.
 Magnetic one-body energy
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The learned one-body basis omits the constant Chebyshev mode and is anchored
-at zero moment:
+The magnetic interaction basis contains :math:`T_1,\ldots,T_{N_{\mathrm{mag}}}`.
+The one-body path prepends :math:`T_0=1` and passes the complete basis directly
+to the element-dependent linear readout:
 
 .. math::
 
-   \widetilde T_n(x_i)=T_n(x_i)-T_n(1)=T_n(x_i)-1.
+   E_{\mathrm{1b}}
+   =\sum_i\sum_{n=0}^{N_{\mathrm{mag}}}
+   W_{Z_i n}\,T_n(x_i).
 
-Consequently, the magnetic one-body energy is zero at
-:math:`\mathbf{m}_i=0` and cannot absorb an arbitrary element-dependent atomic
-reference energy. The learned term uses the same energy scale as the main
-readout, without receiving its additive shift.
+Here :math:`W_{Zn}` are the trainable one-body readout weights. No bias,
+zero-moment correction, or separately parameterized magnetic term is added.
+Since :math:`T_n(1)=1`, the value at zero moment is
+:math:`\sum_n W_{Zn}` and is learned together with the element-dependent atomic
+reference energy. The one-body contribution is added after the main energy
+transformation and therefore receives neither its multiplicative scale nor its
+additive shift.
 
-The bounded learned correction is supplemented by
-
-.. math::
-
-   E_{\mathrm{conf}}
-   =\sum_i \kappa_{Z_i}
-   \left(\frac{\lVert\mathbf{m}_i\rVert^2}{M_{Z_i}^2}\right)^2,
-   \qquad
-   \kappa_Z=\kappa_{\min}+\operatorname{softplus}(\theta_Z)>0.
-
-This element-dependent quartic tail is in energy units and guarantees that the
-energy tends to positive infinity when any magnetic moment diverges. Its
-coefficient is initialized from the configuration and may be trained while
-remaining strictly positive.
-
-When this strict confinement is enabled, the raw noncollinear moment cannot
-also be injected through ``universal_embedding`` because that unbounded path
-would invalidate the guarantee. Magnetic moments instead enter the learned
-interaction through ``MagneticBasis``.
+Because both the rational coordinate and the Chebyshev expansion are bounded,
+the one-body contribution approaches a finite value at arbitrarily large
+moment. It therefore does not impose a coercive large-moment prior; such
+behavior can only be fitted over the magnetic-moment range represented in the
+training data, while the asymptote remains finite.

@@ -83,7 +83,6 @@ DEFAULT_MODEL_CONFIG = {
         "bias": False,
         "hidden": [16],
         "use_alllayer": False,
-        "use_uie": False,
     },
     "scale_shift": {
         "enable": True,
@@ -119,19 +118,11 @@ DEFAULT_MODEL_CONFIG = {
         },
     },
     "universal_embedding": {
-        "charges": {
-            "enable": False,
-            "act": "silu",
-        },
-        "total_charge": {
-            "enable": False,
-            "act": "silu",
-        },
-        "spin_multiplicity": {
-            "enable": False,
-            "num_embeddings": -1,
-        },
         "electric_field": {
+            "enable": False,
+            "normalizer": 1.0,
+        },
+        "magnetic_field": {
             "enable": False,
             "normalizer": 1.0,
         },
@@ -203,6 +194,16 @@ def check_model_config(cfg: dict[str, Any]):
 
     # Update default config with user config
     cfg = recursive_update(cfg)
+
+    supported_universal_embeddings = {"electric_field", "magnetic_field"}
+    unsupported_universal_embeddings = (
+        set(cfg["universal_embedding"]) - supported_universal_embeddings
+    )
+    if unsupported_universal_embeddings:
+        raise ValueError(
+            "universal_embedding only supports electric_field and "
+            f"magnetic_field, got {sorted(unsupported_universal_embeddings)}."
+        )
 
     if cfg.get("max_neighbors") is not None:
         raise ValueError(

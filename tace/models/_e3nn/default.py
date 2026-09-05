@@ -49,10 +49,8 @@ DEFAULT_MODEL_CONFIG = {
         "magnetic_normalization": "rational",
     },
     "angular_basis": {
-        "magnetic_basis": {
-            "Lmax": 2,
-            "normalization": "element",
-        },
+        "magnetic_Lmax": 2,
+        "magnetic_normalization": "element",
     },
     "atomic_basis": {
         "type": "cgtp",
@@ -94,7 +92,6 @@ DEFAULT_MODEL_CONFIG = {
         "bias": False,
         "hidden": [16],
         "use_alllayer": False,
-        "use_uie": False,
         "use_one_body_magmoms": True,
     },
     "scale_shift": {
@@ -132,22 +129,6 @@ DEFAULT_MODEL_CONFIG = {
         },
     },
     "universal_embedding": {
-        "charges": {
-            "enable": False,
-            "act": "silu",
-        },
-        "total_charge": {
-            "enable": False,
-            "act": "silu",
-        },
-        "spin_multiplicity": {
-            "enable": False,
-            "num_embeddings": -1,
-        },
-        "initial_noncollinear_magmoms": {
-            "enable": False,
-            "normalizer": 1.0,
-        },
         "electric_field": {
             "enable": False,
             "normalizer": 1.0,
@@ -225,29 +206,47 @@ def check_model_config(cfg: dict[str, Any]):
     # Update default config with user config
     cfg = recursive_update(cfg)
 
-    magnetic_basis = cfg["angular_basis"]["magnetic_basis"]
-    magnetic_lmax = magnetic_basis["Lmax"]
+    supported_universal_embeddings = {"electric_field", "magnetic_field"}
+    unsupported_universal_embeddings = (
+        set(cfg["universal_embedding"]) - supported_universal_embeddings
+    )
+    if unsupported_universal_embeddings:
+        raise ValueError(
+            "universal_embedding only supports electric_field and "
+            f"magnetic_field, got {sorted(unsupported_universal_embeddings)}."
+        )
+
+    if "magnetic_basis" in cfg["angular_basis"]:
+        raise ValueError(
+            "angular_basis.magnetic_basis was replaced by the flat "
+            "magnetic_Lmax and magnetic_normalization fields."
+        )
+    if "radial_normalization" in cfg["radial_basis"]:
+        raise ValueError(
+            "radial_basis.radial_normalization was renamed to "
+            "magnetic_normalization."
+        )
+    magnetic_lmax = cfg["angular_basis"]["magnetic_Lmax"]
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
     uses_magnetic_interaction = "o2_mag" in atomic_basis_type
     if (
         not isinstance(magnetic_lmax, int)
-        or isinstance(magnetic_lmax, bool)
         or magnetic_lmax < 1
         or (uses_magnetic_interaction and magnetic_lmax > cfg["Lmax"])
     ):
         raise ValueError(
-            "angular_basis.magnetic_basis.Lmax must be positive and must not "
+            "angular_basis.magnetic_Lmax must be positive and must not "
             "exceed model.config.Lmax when o2_mag is used."
         )
-    if magnetic_basis["normalization"] not in (
+    if cfg["angular_basis"]["magnetic_normalization"] not in (
         "integral",
         "component",
         "element",
     ):
         raise ValueError(
-            "angular_basis.magnetic_basis.normalization must be "
+            "angular_basis.magnetic_normalization must be "
             "'integral', 'component', or 'element'."
         )
     if cfg["radial_basis"]["magnetic_normalization"] not in (
@@ -257,6 +256,9 @@ def check_model_config(cfg: dict[str, Any]):
         raise ValueError(
             "radial_basis.magnetic_normalization must be 'clamp' or 'rational'."
         )
+    num_mag_radial_basis = cfg["radial_basis"]["num_mag_radial_basis"]
+    if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:
+        raise ValueError("radial_basis.num_mag_radial_basis must be positive.")
 
     if cfg.get("max_neighbors") is not None:
         raise ValueError(

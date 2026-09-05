@@ -16,12 +16,12 @@ from ...dataset.quantity import PROPERTY
 from ...utils.env import acceleration_enabled, get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
-from ..magnetic import MagneticBasis
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE, MAGNETIC_EDGE_UPDATE
 from .inter import INTERACTION
 from .layer_norm import get_normalization_layer
+from .magnetic import MagneticBasis
 from .node import NODE_EMBEDDING
 from .prod import PRODUCT
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
@@ -34,7 +34,7 @@ class Representation(torch.nn.Module):
         atomic_numbers: List[int],
         cutoff: float,
         avg_num_neighbors: float,
-        magmoms_scale_by_element,
+        scale,
         mmax: int,
         Lmax: int,
         lmax: int,
@@ -142,15 +142,13 @@ class Representation(torch.nn.Module):
         self.magnetic_node_irreps_out = None
         self.magnetic_edge_irreps_out = None
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
-            magnetic_basis = angular_basis["magnetic_basis"]
             self.magnetic_basis = MagneticBasis(
-                magmoms_scale_by_element,
-                num_basis=radial_basis["num_mag_radial_basis"],
-                Lmax=magnetic_basis["Lmax"],
+                scale,
+                num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
+                Lmax=angular_basis["magnetic_Lmax"],
                 atomic_numbers=atomic_numbers,
-                num_elements=self.num_elements,
                 time_reversal=self.use_time_reversal,
-                normalization=magnetic_basis["normalization"],
+                angular_normalization=angular_basis["magnetic_normalization"],
                 radial_normalization=radial_basis["magnetic_normalization"],
             )
             self.magnetic_node_irreps_out = (
@@ -222,7 +220,7 @@ class Representation(torch.nn.Module):
                         "type", "element"
                     )](
                         num_elements=self.num_elements,
-                        num_radial_basis=radial_basis["num_mag_radial_basis"] - 1,
+                        num_radial_basis=radial_basis["num_mag_radial_basis"],
                         num_channel=num_channel,
                         bias=radial_basis["bias"],
                     )
@@ -244,7 +242,7 @@ class Representation(torch.nn.Module):
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "num_radial_basis": radial_basis["num_radial_basis"],
-            "num_mag_radial_basis": radial_basis["num_mag_radial_basis"] - 1,
+            "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
             "l1l2": atomic_basis["l1l2"],
@@ -419,14 +417,13 @@ class Representation(torch.nn.Module):
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
         magnetic_edge_attrs = None
-        one_body_magmoms_basis = None
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             if initial_noncollinear_magmoms is None:
                 raise ValueError(
                     "A magnetic model requires initial_noncollinear_magmoms"
-                )
+            )
             (
-                magnetic_basis,
+                magnetic_radial_basis,
                 _,
                 magnetic_edge_attrs,
             ) = self.magnetic_basis(
@@ -434,10 +431,7 @@ class Representation(torch.nn.Module):
                 data["node_attrs"],
                 data["edge_index"],
             )
-        if self.use_magnetic_radial_basis:
-            magnetic_radial_basis = magnetic_basis[..., 1:]
-        if self.use_one_body_magmoms:
-            one_body_magmoms_basis = magnetic_basis
+
         # === representation Learning ===
         prev_feats = []
         for idx, (edge_update, inter, prod) in enumerate(
@@ -500,7 +494,7 @@ class Representation(torch.nn.Module):
             "uie_feats": uie_feats,
             "noise_mask_tensor": noise_mask_tensor,
             "dens_batch_mask_tensor": dens_batch_mask_tensor,
-            "one_body_magmoms_basis": one_body_magmoms_basis,
+            "magnetic_radial_basis": magnetic_radial_basis,
         }
 
     def _generate_dens_data(self, data: Dict[str, torch.Tensor]):

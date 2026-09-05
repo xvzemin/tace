@@ -57,10 +57,7 @@ def _model_config() -> dict:
 
 def _time_reversal_model_config() -> dict:
     config = _model_config()
-    config["universal_embedding"]["initial_collinear_magmoms"] = {
-        "enable": True,
-        "normalizer": 1.0,
-    }
+    config["universal_embedding"]["magnetic_field"]["enable"] = True
     return config
 
 
@@ -133,20 +130,20 @@ def test_universal_embedding_uses_property_time_reversal_metadata():
         irreps_in=o3.Irreps("2x0e"),
         num_channel=2,
         num_elements=2,
-        config={"initial_noncollinear_magmoms": {"normalizer": 1.0}},
+        config={"magnetic_field": {"normalizer": 1.0}},
         time_reversal=True,
     )
-    input_irrep = embedding.uee["initial_noncollinear_magmoms"].irreps_in[0].ir
+    input_irrep = embedding.uee["magnetic_field"].irreps_in[0].ir
     assert getattr(input_irrep, "t", 1) == (-1 if supports_time_reversal() else 1)
 
     legacy_embedding = UniversalEquivariantEmbedding(
         irreps_in=o3.Irreps("2x0e"),
         num_channel=2,
         num_elements=2,
-        config={"initial_noncollinear_magmoms": {"normalizer": 1.0}},
+        config={"magnetic_field": {"normalizer": 1.0}},
         time_reversal=False,
     )
-    legacy_irrep = legacy_embedding.uee["initial_noncollinear_magmoms"].irreps_in[0].ir
+    legacy_irrep = legacy_embedding.uee["magnetic_field"].irreps_in[0].ir
     assert getattr(legacy_irrep, "t", 1) == 1
 
 
@@ -154,21 +151,16 @@ def test_universal_embedding_uses_property_time_reversal_metadata():
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
-def test_time_odd_scalar_uses_equivariant_embedding():
+def test_magnetic_field_uses_time_odd_equivariant_embedding():
     config = _model_config()
-    config["universal_embedding"]["initial_collinear_magmoms"] = {
-        "enable": True,
-        "normalizer": 1.0,
-    }
+    config["universal_embedding"]["magnetic_field"]["enable"] = True
     model = e3nnTACE(**config)
     representation = model.representation
 
-    assert "initial_collinear_magmoms" not in representation.invariant_property
-    assert "initial_collinear_magmoms" in representation.equivariant_property
-    ir = representation.uee_embeddings[0].uee[
-        "initial_collinear_magmoms"
-    ].irreps_in[0].ir
-    assert ir.l == 0 and ir.p == 1 and ir.t == -1
+    assert representation.invariant_property == []
+    assert representation.equivariant_property == ["magnetic_field"]
+    ir = representation.uee_embeddings[0].uee["magnetic_field"].irreps_in[0].ir
+    assert ir.l == 1 and ir.p == 1 and ir.t == -1
 
 
 @pytest.mark.skipif(
