@@ -391,7 +391,8 @@ model:
 
     scale_shift:
       enable: true
-      scale_type: rms_forces # [null, rms_forces, rms_forces_by_element]
+      # rms_forces uses the RMS over xyz components; *_norm uses vector norms.
+      scale_type: rms_forces # [null, rms_forces, rms_forces_by_element, rms_forces_norm, rms_forces_norm_by_element]
       shift_type: null # [null, mean_energy_per_atom, mean_delta_energy_per_atom, forces]
       scale_trainable: false # (bool)
       shift_trainable: false # (bool)

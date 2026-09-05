@@ -553,6 +553,19 @@ def _compute_statistics(
             _, forces_mean, forces_std, forces_rms = (
                 value[level] for value in forces_summary
             )
+            rms_forces = torch.sqrt(forces_rms[:3].square().mean())
+            safe_rms_forces = torch.where(
+                torch.isfinite(rms_forces) & (rms_forces > 0),
+                rms_forces,
+                1.0,
+            )
+            mean_squared_forces_xyz = forces_rms_by_element[:, :3].square().mean(dim=-1)
+            rms_forces_by_element = torch.sqrt(mean_squared_forces_xyz)
+            safe_rms_forces_by_element = torch.where(
+                torch.isfinite(rms_forces_by_element) & (rms_forces_by_element > 0),
+                rms_forces_by_element,
+                1.0,
+            )
             rms_forces_norm = forces_rms[3]
             safe_rms_forces_norm = torch.where(
                 torch.isfinite(rms_forces_norm) & (rms_forces_norm > 0),
@@ -567,7 +580,6 @@ def _compute_statistics(
                 1.0,
             )
             num_forces = forces_count_by_element[:, 0]
-            mean_squared_forces_xyz = forces_rms_by_element[:, :3].square().mean(dim=-1)
             alphas = (0, 0.25, 0.5, 0.75, 1.0)
             recommended_forces_element_weights = {
                 f"alpha_{alpha:g}": balanced_element_weights(
@@ -614,10 +626,14 @@ def _compute_statistics(
                     "std_forces_norm_by_element": _by_element(
                         forces_std_by_element[:, 3], atomic_numbers
                     ),
-                    "rms_forces": {
+                    "rms_forces": {z: float(safe_rms_forces) for z in atomic_numbers},
+                    "rms_forces_by_element": _by_element(
+                        safe_rms_forces_by_element, atomic_numbers
+                    ),
+                    "rms_forces_norm": {
                         z: float(safe_rms_forces_norm) for z in atomic_numbers
                     },
-                    "rms_forces_by_element": _by_element(
+                    "rms_forces_norm_by_element": _by_element(
                         safe_rms_forces_norm_by_element, atomic_numbers
                     ),
                     "num_forces_by_element": _by_element(num_forces, atomic_numbers),

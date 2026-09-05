@@ -164,9 +164,10 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
     ):
         assert isinstance(update, MAGNETIC_EDGE_UPDATE[update_type])
         assert interaction.edge_info.dims[0] == representation.edge_updates[0].out_dim
-        assert interaction.magnetic_edge_info.dims[:2] == [
+        assert interaction.magnetic_edge_info.dims == [
             update.out_dim,
-            num_mag_radial_basis,
+            *config["radial_basis"]["hidden"],
+            interaction.magnetic_linear.weight_numel,
         ]
         assert all(
             mul == representation.num_channel
@@ -732,7 +733,7 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
         magnetic_node_attrs[source],
     )
 
-    assert basis.angular_basis.normalization == "component"
+    assert basis.angular_basis.normalization == "integral"
     assert not basis.angular_basis.normalize
     assert basis.magnetic_edge_tensor_product.weight_numel == 0
     assert basis.magnetic_node_irreps_out.lmax == Lmax

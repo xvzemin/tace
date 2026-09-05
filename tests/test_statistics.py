@@ -224,11 +224,34 @@ def test_forces_statistics_use_canonical_names(monkeypatch):
     assert stats["std_forces_norm_by_element"] == {1: 1.0, 2: 0.0}
     torch.testing.assert_close(
         torch.tensor(list(stats["rms_forces"].values())),
-        torch.full((2,), math.sqrt(35.0 / 3.0)),
+        torch.full((2,), math.sqrt(35.0 / 9.0)),
     )
     torch.testing.assert_close(
         torch.tensor(list(stats["rms_forces_by_element"].values())),
+        torch.tensor([math.sqrt(5.0 / 3.0), math.sqrt(25.0 / 3.0)]),
+    )
+    torch.testing.assert_close(
+        torch.tensor(list(stats["rms_forces_norm"].values())),
+        torch.full((2,), math.sqrt(35.0 / 3.0)),
+    )
+    torch.testing.assert_close(
+        torch.tensor(list(stats["rms_forces_norm_by_element"].values())),
         torch.tensor([math.sqrt(5.0), 5.0]),
+    )
+    scale_shift = ScaleShift.build_from_config(
+        [stats],
+        {
+            "scale_type": "rms_forces",
+            "shift_type": None,
+            "scale_trainable": False,
+            "shift_trainable": False,
+            "all_atoms": True,
+        },
+        atomic_numbers=[1, 2],
+    )
+    torch.testing.assert_close(
+        scale_shift.scale,
+        torch.full((1, 2), math.sqrt(35.0 / 9.0)),
     )
     assert stats["num_forces_by_element"] == {1: 2, 2: 1}
     torch.testing.assert_close(
