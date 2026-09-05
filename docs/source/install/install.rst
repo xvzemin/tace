@@ -28,9 +28,7 @@ To install the current source tree instead:
 
 .. code-block:: bash
 
-   git clone https://github.com/xvzemin/tace.git
-   cd tace
-   pip install .
+   pip install git+https://github.com/xvzemin/tace.git@main
 
 The core installation uses the standard e3nn implementation. Acceleration
 libraries and simulation interfaces are optional and can be installed
