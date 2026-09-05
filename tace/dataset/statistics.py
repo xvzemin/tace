@@ -13,7 +13,41 @@ from torch_geometric.loader import DataLoader
 
 from ..utils.utils import log_statistics_to_yaml
 from .element import TorchElement
-from .quantity import KeySpecification
+from .quantity import KeySpecification, get_need_property
+
+
+def missing_model_statistics(
+    statistics: Sequence[Dict],
+    model_config: Dict,
+    target_property: Sequence[str],
+    embedding_property: Sequence[str],
+) -> set[str]:
+    """Return model-requested statistics missing from any fidelity."""
+
+    required = set()
+    scale_shift = model_config.get("scale_shift", {})
+    if scale_shift.get("enable") and "energy" in target_property:
+        required.update(
+            value
+            for key in ("scale_type", "shift_type")
+            if (value := scale_shift.get(key)) is not None
+        )
+
+    needed_property = get_need_property(
+        list(target_property),
+        list(embedding_property),
+        training=True,
+    )
+    if "initial_noncollinear_magmoms" in needed_property:
+        magmoms_scale_type = scale_shift.get("magmoms_scale_type")
+        if magmoms_scale_type is not None:
+            required.add(magmoms_scale_type)
+
+    return {
+        name
+        for name in required
+        if any(name not in fidelity_statistics for fidelity_statistics in statistics)
+    }
 
 
 def balanced_element_weights(

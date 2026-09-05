@@ -14,6 +14,33 @@ from tace.dataset.quantity import KeySpecification
 from tace.models.blocks import ScaleShift
 
 
+def test_missing_model_statistics_only_checks_requested_inputs():
+    model_config = {
+        "scale_shift": {
+            "enable": True,
+            "scale_type": "rms_forces",
+            "shift_type": None,
+            "magmoms_scale_type": (
+                "max_initial_noncollinear_magmoms_norm_by_element"
+            ),
+        }
+    }
+    cached_statistics = [{"rms_forces": {26: 1.0}}]
+
+    assert not statistics_module.missing_model_statistics(
+        cached_statistics,
+        model_config,
+        target_property=["energy"],
+        embedding_property=[],
+    )
+    assert statistics_module.missing_model_statistics(
+        cached_statistics,
+        model_config,
+        target_property=["energy"],
+        embedding_property=["initial_noncollinear_magmoms"],
+    ) == {"max_initial_noncollinear_magmoms_norm_by_element"}
+
+
 def test_statistics_dataloader_overrides_training_batch_size():
     dataset = [
         Data(

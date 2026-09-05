@@ -34,11 +34,10 @@ class Representation(torch.nn.Module):
         atomic_numbers: List[int],
         cutoff: float,
         avg_num_neighbors: float,
-        magmoms_norm_by_element,
+        magmoms_scale_by_element,
         mmax: int,
         Lmax: int,
         lmax: int,
-        mag_Lmax: int,
         num_channel: int,
         target_irreps: o3.Irreps,
         node_embedding: Dict,
@@ -56,6 +55,7 @@ class Representation(torch.nn.Module):
         parity: bool,
         use_one_body_magmoms: bool,
         magnetic_edge_update: Union[Dict, None] = None,
+        angular_basis: Union[Dict, None] = None,
     ):
         super().__init__()
 
@@ -142,13 +142,15 @@ class Representation(torch.nn.Module):
         self.magnetic_node_irreps_out = None
         self.magnetic_edge_irreps_out = None
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
+            magnetic_basis = angular_basis["magnetic_basis"]
             self.magnetic_basis = MagneticBasis(
-                magmoms_norm_by_element,
+                magmoms_scale_by_element,
                 num_basis=radial_basis["num_mag_radial_basis"],
-                Lmax=mag_Lmax,
+                Lmax=magnetic_basis["Lmax"],
                 atomic_numbers=atomic_numbers,
                 num_elements=self.num_elements,
                 time_reversal=self.use_time_reversal,
+                normalization=magnetic_basis["normalization"],
             )
             self.magnetic_node_irreps_out = (
                 self.magnetic_basis.magnetic_node_irreps_out
@@ -238,7 +240,6 @@ class Representation(torch.nn.Module):
             "mmax": mmax,
             "Lmax": Lmax,
             "lmax": lmax,
-            "mag_Lmax": mag_Lmax,
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "num_radial_basis": radial_basis["num_radial_basis"],

@@ -327,7 +327,6 @@ model:
     mmax: 3 # Truncation for SO2 irreps, 3 is recommended.
     Lmax: 2 # Truncation for node, 2 is recommended.
     lmax: 3 # Truncation for edge, 3 is recommended.
-    mag_Lmax: 1 # Maximum degree of magnetic solid harmonics, in [1, Lmax].
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
     num_channel: 48 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
     parity: false # (bool) in test, not for users, always false
@@ -345,6 +344,11 @@ model:
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
       bias: true  # (bool)
+
+    angular_basis:
+      magnetic_basis:
+        Lmax: 1 # Maximum degree of magnetic solid harmonics, in [1, Lmax].
+        normalization: integral # [integral, component]
 
     resnet:
       type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect
@@ -394,6 +398,7 @@ model:
       # rms_forces uses the RMS over xyz components; *_norm uses vector norms.
       scale_type: rms_forces # [null, rms_forces, rms_forces_by_element, rms_forces_norm, rms_forces_norm_by_element]
       shift_type: null # [null, mean_energy_per_atom, mean_delta_energy_per_atom, forces]
+      magmoms_scale_type: max_initial_noncollinear_magmoms_norm_by_element
       scale_trainable: false # (bool)
       shift_trainable: false # (bool)
       all_atoms: false

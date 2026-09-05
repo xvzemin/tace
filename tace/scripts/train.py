@@ -18,10 +18,10 @@ from tace.dataset.quantity import (
     KEYS,
     KeySpecification,
     get_embedding_property,
-    get_need_property,
     get_target_property,
     update_keyspec_from_kwargs,
 )
+from tace.dataset.statistics import missing_model_statistics
 from tace.lightning.lit_model import finetune, load_tace
 from tace.lightning.torch_model import create_model
 from tace.lightning.trainer import train
@@ -69,11 +69,6 @@ def build(cfg: DictConfig):
     )
     target_property = get_target_property(cfg)
     embedding_property = get_embedding_property(cfg)
-    needs_noncollinear_magmoms = "initial_noncollinear_magmoms" in get_need_property(
-        target_property,
-        embedding_property,
-        training=True,
-    )
     userKeys = copy.deepcopy(KEYS)
     userKeys.update(cfg["dataset"].get("keys", {}))
     keyspec = KeySpecification()
@@ -94,14 +89,16 @@ def build(cfg: DictConfig):
                 with open(yaml_file, "r") as f:
                     statistics_data = yaml.safe_load(f)
                     statistics.append(statistics_data)
-            if needs_noncollinear_magmoms and any(
-                "max_initial_noncollinear_magmoms_norm_by_element" not in stats
-                for stats in statistics
-            ):
+            missing_statistics = missing_model_statistics(
+                statistics,
+                cfg["model"]["config"],
+                target_property,
+                embedding_property,
+            )
+            if missing_statistics:
                 logging.info(
-                    "Cached statistics do not contain noncollinear magnetic-moment "
-                    "scales; "
-                    "recomputing statistics for the noncollinear magnetic input"
+                    "Cached statistics are missing %s; recomputing statistics",
+                    ", ".join(sorted(missing_statistics)),
                 )
                 statistics = None
             else:

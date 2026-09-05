@@ -1,4 +1,4 @@
-# Magnetic TECE inherits TACE and only overrides its magnetic architecture,
+# Magnetic TACE inherits TACE and only overrides its magnetic architecture,
 # dataset keys, loss, and validation metric.
 defaults:
   - tace
@@ -50,11 +50,14 @@ model:
     magnetic_edge_update:
       type: identity # [identity, element, element2], when num_elements > 1, use element or element2
 
+    angular_basis:
+      magnetic_basis:
+        Lmax: 1
+        normalization: integral
+
+    scale_shift:
+      magmoms_scale_type: max_initial_noncollinear_magmoms_norm_by_element
+
     atomic_basis:
       type: o2_mag
       use_radial_rotary_attention: true
-
-    product_basis:
-      nonlinear: null
-      scalar_act: null
-      agnostic: false

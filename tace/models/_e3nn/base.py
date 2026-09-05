@@ -151,7 +151,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         num_mag_radial_basis: int = 8,
         magnetic_edge_feats_channel: int = 0,
         magnetic_edge_irreps: o3.Irreps = None,
-        mag_Lmax: int = 1,
     ) -> None:
         super().__init__()
 
@@ -217,7 +216,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.num_mag_radial_basis = num_mag_radial_basis
         self.magnetic_edge_feats_channel = magnetic_edge_feats_channel
         self.magnetic_edge_irreps = magnetic_edge_irreps
-        self.mag_Lmax = mag_Lmax
 
         self.irreps_in = irreps_in
         self.irreps_sh = o3.Irreps.spherical_harmonics(lmax=self.lmax, p=-1)

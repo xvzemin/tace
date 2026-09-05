@@ -29,7 +29,11 @@ initial moments with ``initial_noncollinear_magmoms_key``:
    model:
      config:
        parity: true
-       mag_Lmax: 1
+
+       angular_basis:
+         magnetic_basis:
+           Lmax: 1
+           normalization: integral
 
 If non-collinear magnetic forces are trained, include
 ``noncollinear_magnetic_forces`` in ``loss.loss_property`` together with its
@@ -82,7 +86,11 @@ energy features. Biases and radial weights remain ``0ee``.
        mmax: 3
        Lmax: 3
        lmax: 3
-       mag_Lmax: 1
+
+       angular_basis:
+         magnetic_basis:
+           Lmax: 1
+           normalization: integral
 
        radial_basis:
          num_mag_radial_basis: 10
@@ -99,3 +107,11 @@ The O(2) path applies a local linear, gate, and output linear. Radial rotary
 attention uses ``atomic_basis.num_head``, separate O(2) query and key
 projections, and a zero-initialized real radial scale-and-shift projection.
 The scale uses a sigmoid and the shift is additive.
+
+``scale_shift.magmoms_scale_type`` selects the per-element magnetic-moment
+statistic used by the magnetic radial transform.  Its default is
+``max_initial_noncollinear_magmoms_norm_by_element``.  If the selected value is
+:math:`s_Z` for element :math:`Z`, the baseline maps the magnitude using the
+fixed range :math:`1.2s_Z+0.1`.  ``normalization`` controls only the fixed
+normalization of the regular solid harmonics; it never converts a magnetic
+moment to a unit vector.

@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from collections.abc import Mapping
 from typing import Any
 
 from ...dataset.quantity import PROPERTY
@@ -11,7 +12,6 @@ DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
     "Lmax": 2,
     "lmax": 3,
-    "mag_Lmax": 1,
     "parity": False,
     "num_channel": 64,
     "num_layers": 2,
@@ -47,7 +47,12 @@ DEFAULT_MODEL_CONFIG = {
         "hidden": [64, 64, 64],
         "gaussian_width": 2.0,
     },
-    "angular_basis": {},
+    "angular_basis": {
+        "magnetic_basis": {
+            "Lmax": 2,
+            "normalization": "integral",
+        },
+    },
     "atomic_basis": {
         "type": "cgtp",
         "l1l2": None,
@@ -99,6 +104,7 @@ DEFAULT_MODEL_CONFIG = {
         "shift_trainable": False,
         "all_atoms": False,
         "scale_zbl": True,
+        "magmoms_scale_type": "max_initial_noncollinear_magmoms_norm_by_element",
     },
     "short_range": {
         "zbl": {
@@ -218,12 +224,27 @@ def check_model_config(cfg: dict[str, Any]):
     # Update default config with user config
     cfg = recursive_update(cfg)
 
+    magnetic_basis = cfg["angular_basis"]["magnetic_basis"]
+    magnetic_lmax = magnetic_basis["Lmax"]
+    atomic_basis_type = cfg["atomic_basis"]["type"]
+    if isinstance(atomic_basis_type, str):
+        atomic_basis_type = [atomic_basis_type]
+    uses_magnetic_interaction = "o2_mag" in atomic_basis_type
     if (
-        not isinstance(cfg["mag_Lmax"], int)
-        or isinstance(cfg["mag_Lmax"], bool)
-        or not 1 <= cfg["mag_Lmax"] <= cfg["Lmax"]
+        not isinstance(magnetic_lmax, int)
+        or isinstance(magnetic_lmax, bool)
+        or magnetic_lmax < 1
+        or (uses_magnetic_interaction and magnetic_lmax > cfg["Lmax"])
     ):
-        raise ValueError("mag_Lmax must satisfy 1 <= mag_Lmax <= Lmax.")
+        raise ValueError(
+            "angular_basis.magnetic_basis.Lmax must be positive and must not "
+            "exceed model.config.Lmax when o2_mag is used."
+        )
+    if magnetic_basis["normalization"] not in ("integral", "component"):
+        raise ValueError(
+            "angular_basis.magnetic_basis.normalization must be "
+            "'integral' or 'component'."
+        )
 
     if cfg.get("max_neighbors") is not None:
         raise ValueError(
@@ -240,15 +261,22 @@ def check_model_config(cfg: dict[str, Any]):
         s["avg_num_neighbors"] for s in cfg["statistics"]
     ) / len(cfg["statistics"])
 
+    magmoms_scale_type = cfg["scale_shift"]["magmoms_scale_type"]
+    if not isinstance(magmoms_scale_type, str):
+        raise TypeError("scale_shift.magmoms_scale_type must be a string.")
     magnetic_statistics = [
-        stats["max_initial_noncollinear_magmoms_norm_by_element"]
+        stats[magmoms_scale_type]
         for stats in cfg["statistics"]
-        if "max_initial_noncollinear_magmoms_norm_by_element" in stats
+        if magmoms_scale_type in stats
     ]
-    cfg["magmoms_norm_by_element"] = (
+    cfg["magmoms_scale_by_element"] = (
         {
             z: max(
-                float(stats.get(z, stats.get(str(z), 0.0)))
+                (
+                    float(stats.get(z, stats.get(str(z), 0.0)))
+                    if isinstance(stats, Mapping)
+                    else float(stats)
+                )
                 for stats in magnetic_statistics
             )
             for z in cfg["atomic_numbers"]
