@@ -4,7 +4,6 @@
 ################################################################################
 
 import logging
-import math
 from typing import Dict, List, Optional, Sequence
 
 import ase
@@ -12,7 +11,6 @@ import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
 
-from ..utils.torch_scatter import scatter
 from ..utils.utils import log_statistics_to_yaml
 from .element import TorchElement
 from .quantity import KeySpecification
@@ -64,9 +62,7 @@ def balanced_element_weights(
         upper_scale *= 2.0
     for _ in range(64):
         scale = 0.5 * (lower_scale + upper_scale)
-        weighted_mean = torch.sum(
-            frequencies * (raw * scale).clamp(minimum, maximum)
-        )
+        weighted_mean = torch.sum(frequencies * (raw * scale).clamp(minimum, maximum))
         if weighted_mean < 1:
             lower_scale = scale
         else:
@@ -82,149 +78,149 @@ def _canonical_atomic_energy(
     return {int(z): values.get(int(z), 0.0) for z in atomic_numbers}
 
 
-class OneHotToAtomicEnergy(torch.nn.Module):
+class _GroupedMoments:
+    """Numerically stable streaming moments for indexed groups."""
+
     def __init__(
-        self,
-        atomic_energies: List[Dict[int, float]],
-        atomic_numbers: Sequence[int],
+        self, num_groups: int, num_features: int, device: torch.device
     ) -> None:
-        super().__init__()
-        if atomic_energies is None:
-            raise ValueError("atomic_energies must be provided")
-        atomic_energy_list = [
-            list(_canonical_atomic_energy(energy, atomic_numbers).values())
-            for energy in atomic_energies
-        ]
-        self.register_buffer(
-            "atomic_energy",
-            torch.tensor(atomic_energy_list, dtype=torch.get_default_dtype()),
+        self.num_groups = num_groups
+        self.num_features = num_features
+        self.count = torch.zeros(num_groups, dtype=torch.int64, device=device)
+        self.mean = torch.zeros(
+            (num_groups, num_features), dtype=torch.float64, device=device
+        )
+        self.m2 = torch.zeros_like(self.mean)
+
+    def update(self, values: torch.Tensor, groups: torch.Tensor) -> None:
+        values = values.detach().reshape(-1, self.num_features).to(torch.float64)
+        groups = groups.detach().reshape(-1).to(dtype=torch.int64)
+        if values.shape[0] != groups.numel():
+            raise ValueError("values and groups must have the same leading dimension")
+        if groups.numel() == 0:
+            return
+
+        batch_count = torch.bincount(groups, minlength=self.num_groups)
+        batch_sum = torch.zeros_like(self.mean).index_add_(0, groups, values)
+        batch_mean = batch_sum / batch_count.clamp_min(1).unsqueeze(-1)
+        batch_m2 = torch.zeros_like(self.m2).index_add_(
+            0,
+            groups,
+            (values - batch_mean[groups]).square(),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.matmul(x, self.atomic_energy.T)
-
-    def __repr__(self):
-        values = [f"{x:.4f}" for x in self.atomic_energy.reshape(-1).tolist()]
-        return f"{self.__class__.__name__}(atomic_energies={values})"
-
-
-class _RunningMoments:
-    """Constant-memory population moments merged one batch at a time."""
-
-    def __init__(self) -> None:
-        self.count = 0
-        self.mean: Optional[torch.Tensor] = None
-        self.m2: Optional[torch.Tensor] = None
-
-    def update(self, values: torch.Tensor) -> None:
-        values = values.detach().to(dtype=torch.float64)
-        if values.ndim == 0:
-            values = values.reshape(1)
-        if values.shape[0] == 0:
-            return
-
-        batch_count = int(values.shape[0])
-        batch_mean = values.mean(dim=0).cpu()
-        batch_m2 = ((values - batch_mean.to(values.device)) ** 2).sum(dim=0).cpu()
-        if self.count == 0:
-            self.count = batch_count
-            self.mean = batch_mean
-            self.m2 = batch_m2
-            return
-
+        count = self.count + batch_count
         delta = batch_mean - self.mean
-        new_count = self.count + batch_count
-        self.mean = self.mean + delta * (batch_count / new_count)
-        self.m2 = (
-            self.m2 + batch_m2 + delta.square() * (self.count * batch_count / new_count)
+        self.mean += delta * (batch_count / count.clamp_min(1)).unsqueeze(-1)
+        self.m2 += batch_m2 + delta.square() * (
+            self.count * batch_count / count.clamp_min(1)
+        ).unsqueeze(-1)
+        self.count = count
+
+    def statistics(self, group_size: Optional[int] = None, unbiased: bool = False):
+        count = self.count
+        mean = self.mean
+        m2 = self.m2
+        if group_size is not None:
+            if self.num_groups % group_size:
+                raise ValueError("group_size must divide num_groups")
+            count_by_group = count.reshape(-1, group_size)
+            mean_by_group = mean.reshape(-1, group_size, self.num_features)
+            m2_by_group = m2.reshape(-1, group_size, self.num_features)
+            count = count_by_group.sum(dim=1)
+            mean = (mean_by_group * count_by_group.unsqueeze(-1)).sum(
+                dim=1
+            ) / count.clamp_min(1).unsqueeze(-1)
+            m2 = (
+                m2_by_group
+                + count_by_group.unsqueeze(-1)
+                * (mean_by_group - mean.unsqueeze(1)).square()
+            ).sum(dim=1)
+
+        denominator = count - 1 if unbiased else count
+        std = torch.where(
+            (denominator > 0).unsqueeze(-1),
+            torch.sqrt(torch.clamp(m2 / denominator.clamp_min(1).unsqueeze(-1), min=0)),
+            0.0,
         )
-        self.count = new_count
-
-    def mean_or_zeros(self, shape=()):
-        if self.count == 0:
-            return torch.zeros(shape, dtype=torch.float64)
-        return self.mean
-
-    def std_or_zeros(self, shape=(), unbiased: bool = False):
-        if self.count == 0 or (unbiased and self.count == 1):
-            return torch.zeros(shape, dtype=torch.float64)
-        denominator = self.count - 1 if unbiased else self.count
-        return torch.sqrt(torch.clamp(self.m2 / denominator, min=0.0))
-
-    def rms_or_zeros(self, shape=()):
-        if self.count == 0:
-            return torch.zeros(shape, dtype=torch.float64)
-        mean_square = self.m2 / self.count + self.mean.square()
-        return torch.sqrt(torch.clamp(mean_square, min=0.0))
-
-    def sum_squares_or_zeros(self, shape=()):
-        if self.count == 0:
-            return torch.zeros(shape, dtype=torch.float64)
-        return self.m2 + self.count * self.mean.square()
+        rms = torch.where(
+            (count > 0).unsqueeze(-1),
+            torch.sqrt(
+                torch.clamp(
+                    m2 / count.clamp_min(1).unsqueeze(-1) + mean.square(),
+                    min=0,
+                )
+            ),
+            0.0,
+        )
+        return count, mean, std, rms
 
 
-def _compute_atomic_energy(
-    points: Sequence[ase.Atoms],
+def _by_element(values: torch.Tensor, atomic_numbers: Sequence[int]) -> Dict:
+    return dict(zip(atomic_numbers, values.tolist()))
+
+
+def compute_atomic_energies(
+    atoms_list: Sequence[ase.Atoms],
     element: TorchElement,
     keyspec: KeySpecification,
-) -> Dict[int, float]:
-    energy_key = keyspec.info_keys["energy"]
-    points = [atoms for atoms in points if energy_key in atoms.info]
-    if not points:
-        return {z: 0.0 for z in element.zs}
-
-    matrix = np.zeros((len(points), len(element)), dtype=np.float64)
-    energies = np.zeros(len(points), dtype=np.float64)
-    for row, atoms in enumerate(points):
-        energies[row] = float(atoms.info[energy_key])
-        atomic_numbers = atoms.get_atomic_numbers()
-        for column, z in enumerate(element.zs):
-            matrix[row, column] = np.count_nonzero(atomic_numbers == z)
-
-    try:
-        solution, _, rank, _ = np.linalg.lstsq(matrix, energies, rcond=None)
-    except np.linalg.LinAlgError:
-        logging.warning(
-            "Failed to fit isolated atomic energies; using 0.0 for every element"
-        )
-        return {z: 0.0 for z in element.zs}
-
-    if rank < min(matrix.shape):
-        logging.warning(
-            "Atomic-energy composition matrix is rank deficient (%s < %s); "
-            "unconstrained values use the least-squares minimum-norm solution",
-            rank,
-            min(matrix.shape),
-        )
-    return {z: float(solution[idx]) for idx, z in enumerate(element.zs)}
-
-
-def compute_atomic_energy(
-    atomsList: Sequence[ase.Atoms],
-    element: TorchElement,
-    keyspec: KeySpecification,
-    fidelity_idx: int,
-) -> Dict[int, float]:
+    fidelity_indices: Sequence[int],
+) -> Dict[int, Dict[int, float]]:
+    """Fit isolated atomic energies for several fidelities in one data pass."""
+    fidelity_indices = tuple(dict.fromkeys(int(idx) for idx in fidelity_indices))
     fidelity_key = keyspec.info_keys["fidelity_idx"]
-    this_atoms_list = [
-        atoms
-        for atoms in atomsList
-        if int(atoms.info.get(fidelity_key, 0)) == fidelity_idx
-    ]
-    if this_atoms_list:
-        return _compute_atomic_energy(this_atoms_list, element, keyspec)
+    energy_key = keyspec.info_keys["energy"]
+    element_indices = np.full(max(element.zs) + 1, -1, dtype=np.int64)
+    element_indices[element.zs] = np.arange(len(element), dtype=np.int64)
+    compositions = {idx: [] for idx in fidelity_indices}
+    energies = {idx: [] for idx in fidelity_indices}
 
-    logging.warning(
-        "No training structures found for fidelity %s; using atomic energy 0.0",
-        fidelity_idx,
-    )
-    return {z: 0.0 for z in element.zs}
+    for atoms in atoms_list:
+        fidelity_idx = int(atoms.info.get(fidelity_key, 0))
+        if fidelity_idx not in compositions or energy_key not in atoms.info:
+            continue
+        composition = np.bincount(
+            element_indices[atoms.get_atomic_numbers()], minlength=len(element)
+        ).astype(np.float64, copy=False)
+        compositions[fidelity_idx].append(composition)
+        energies[fidelity_idx].append(float(atoms.info[energy_key]))
 
+    results = {}
+    for fidelity_idx in fidelity_indices:
+        if not compositions[fidelity_idx]:
+            logging.warning(
+                "No training structures found for fidelity %s; using atomic energy 0.0",
+                fidelity_idx,
+            )
+            results[fidelity_idx] = {z: 0.0 for z in element.zs}
+            continue
 
-def _finite_scale(value: float) -> float:
-    if not math.isfinite(value):
-        return 1.0
-    return value
+        matrix = np.stack(compositions[fidelity_idx])
+        target = np.asarray(energies[fidelity_idx], dtype=np.float64)
+        try:
+            solution, _, rank, _ = np.linalg.lstsq(matrix, target, rcond=None)
+        except np.linalg.LinAlgError:
+            logging.warning(
+                "Failed to fit isolated atomic energies for fidelity %s; using "
+                "0.0 for every element",
+                fidelity_idx,
+            )
+            results[fidelity_idx] = {z: 0.0 for z in element.zs}
+            continue
+
+        if rank < min(matrix.shape):
+            logging.warning(
+                "Atomic-energy composition matrix for fidelity %s is rank deficient "
+                "(%s < %s); unconstrained values use the least-squares "
+                "minimum-norm solution",
+                fidelity_idx,
+                rank,
+                min(matrix.shape),
+            )
+        results[fidelity_idx] = {
+            z: float(solution[idx]) for idx, z in enumerate(element.zs)
+        }
+    return results
 
 
 def _compute_statistics(
@@ -238,119 +234,149 @@ def _compute_statistics(
     if num_fidelities < 1:
         raise ValueError("At least one fidelity must be configured")
 
-    graph_counts = torch.zeros(num_fidelities, dtype=torch.int64)
-    atom_counts = torch.zeros(num_fidelities, dtype=torch.int64)
-    neighbor_moments = _RunningMoments()
-    neighbor_by_element = [_RunningMoments() for _ in atomic_numbers]
+    needs_energy = "energy" in target_property
+    needs_forces = "forces" in target_property or "direct_forces" in target_property
+    if needs_energy and (
+        atomic_energies is None or len(atomic_energies) != num_fidelities
+    ):
+        raise ValueError("One atomic-energy mapping is required for every fidelity")
 
-    energy_moments = [_RunningMoments() for _ in range(num_fidelities)]
-    energy_per_atom_moments = [_RunningMoments() for _ in range(num_fidelities)]
-    delta_per_atom_moments = [_RunningMoments() for _ in range(num_fidelities)]
-    force_moments = [_RunningMoments() for _ in range(num_fidelities)]
-    force_norm_moments = [_RunningMoments() for _ in range(num_fidelities)]
-    force_by_element = [
-        [_RunningMoments() for _ in atomic_numbers] for _ in range(num_fidelities)
-    ]
-    force_norm_by_element = [
-        [_RunningMoments() for _ in atomic_numbers] for _ in range(num_fidelities)
-    ]
-    magmoms_norm_by_element = torch.zeros(len(atomic_numbers), dtype=torch.float64)
+    stats_device = torch.device(device)
+    num_elements = len(atomic_numbers)
+    num_node_groups = num_fidelities * num_elements
+    element_lookup = torch.full(
+        (max(atomic_numbers) + 1,), -1, dtype=torch.int64, device=stats_device
+    )
+    element_lookup[
+        torch.tensor(atomic_numbers, dtype=torch.int64, device=stats_device)
+    ] = torch.arange(num_elements, device=stats_device)
+    graph_counts = torch.zeros(num_fidelities, dtype=torch.int64, device=stats_device)
+    atom_counts = torch.zeros_like(graph_counts)
+    min_fidelity = torch.full(
+        (), num_fidelities, dtype=torch.int64, device=stats_device
+    )
+    max_fidelity = torch.full((), -1, dtype=torch.int64, device=stats_device)
+    neighbor_moments = _GroupedMoments(num_elements, 1, stats_device)
+    energy_moments = (
+        _GroupedMoments(num_fidelities, 3, stats_device) if needs_energy else None
+    )
+    forces_moments = (
+        _GroupedMoments(num_node_groups, 4, stats_device) if needs_forces else None
+    )
+    noncollinear_magmoms_moments = _GroupedMoments(num_node_groups, 4, stats_device)
+    max_noncollinear_magmoms_norm = torch.zeros(
+        num_node_groups, dtype=torch.float64, device=stats_device
+    )
     has_noncollinear_magmoms = False
 
-    atomic_energy_fn = None
-    if "energy" in target_property:
-        if atomic_energies is None:
-            raise ValueError("atomic_energies are required for energy statistics")
-        atomic_energy_fn = OneHotToAtomicEnergy(atomic_energies, atomic_numbers).to(
-            device
+    atomic_energy_table = None
+    if needs_energy:
+        atomic_energy_table = torch.tensor(
+            [
+                list(_canonical_atomic_energy(energy, atomic_numbers).values())
+                for energy in atomic_energies
+            ],
+            dtype=torch.float64,
+            device=stats_device,
         )
 
     with torch.no_grad():
         for data in dataloader_train:
-            data = data.to(device)
-            num_graphs = int(data.ptr.numel() - 1)
-            num_nodes = data.ptr[1:] - data.ptr[:-1]
-            element_idx = data["node_attrs"].argmax(dim=-1)
+            num_graphs = data.ptr.numel() - 1
+            batch = data["batch"].to(stats_device, non_blocking=True)
+            num_nodes = torch.bincount(batch, minlength=num_graphs)
+            node_atomic_numbers = data["atomic_numbers"].to(
+                stats_device, non_blocking=True
+            )
+            element_idx = element_lookup[node_atomic_numbers]
 
             fidelity_idx = data.get("fidelity_idx")
             if fidelity_idx is None:
                 fidelity_idx = torch.zeros(
-                    num_graphs, dtype=torch.int64, device=data.ptr.device
+                    num_graphs, dtype=torch.int64, device=stats_device
                 )
             else:
-                fidelity_idx = fidelity_idx.reshape(-1).to(dtype=torch.int64)
+                fidelity_idx = fidelity_idx.reshape(-1).to(
+                    device=stats_device,
+                    dtype=torch.int64,
+                    non_blocking=True,
+                )
             if fidelity_idx.numel() != num_graphs:
                 raise ValueError(
                     "fidelity_idx must contain exactly one value per structure"
                 )
-            if fidelity_idx.numel() and (
-                int(fidelity_idx.min()) < 0 or int(fidelity_idx.max()) >= num_fidelities
-            ):
-                raise ValueError(
-                    "fidelity_idx values must be in "
-                    f"[0, {num_fidelities - 1}], got "
-                    f"[{int(fidelity_idx.min())}, {int(fidelity_idx.max())}]"
-                )
+            min_fidelity = torch.minimum(min_fidelity, fidelity_idx.min())
+            max_fidelity = torch.maximum(max_fidelity, fidelity_idx.max())
+            fidelity_idx = fidelity_idx.clamp(0, num_fidelities - 1)
 
-            node_fidelity = fidelity_idx[data["batch"]]
-            graph_counts += torch.bincount(fidelity_idx.cpu(), minlength=num_fidelities)
-            atom_counts += torch.bincount(node_fidelity.cpu(), minlength=num_fidelities)
+            node_fidelity = fidelity_idx[batch]
+            node_groups = node_fidelity * num_elements + element_idx
+            graph_counts += torch.bincount(fidelity_idx, minlength=num_fidelities)
+            atom_counts += torch.bincount(node_fidelity, minlength=num_fidelities)
 
-            source = data.edge_index[0]
-            neighbor_counts = torch.bincount(source, minlength=data.batch.size(0)).to(
-                torch.float64
+            neighbor_counts = torch.bincount(
+                data.edge_index[0].to(stats_device, non_blocking=True),
+                minlength=batch.numel(),
             )
-            neighbor_moments.update(neighbor_counts)
-            for element_id in element_idx.unique().tolist():
-                neighbor_by_element[element_id].update(
-                    neighbor_counts[element_idx == element_id]
-                )
+            neighbor_moments.update(neighbor_counts, element_idx)
 
             initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
             if initial_noncollinear_magmoms is not None:
                 has_noncollinear_magmoms = True
-                magnetic_norm = torch.linalg.vector_norm(
-                    initial_noncollinear_magmoms,
+                initial_noncollinear_magmoms = initial_noncollinear_magmoms.to(
+                    stats_device, non_blocking=True
+                )
+                noncollinear_magmoms_norm = torch.linalg.vector_norm(
+                    initial_noncollinear_magmoms, dim=-1
+                )
+                noncollinear_magmoms_moments.update(
+                    torch.cat(
+                        (
+                            initial_noncollinear_magmoms,
+                            noncollinear_magmoms_norm.unsqueeze(-1),
+                        ),
+                        dim=-1,
+                    ),
+                    node_groups,
+                )
+                max_noncollinear_magmoms_norm.scatter_reduce_(
+                    0,
+                    node_groups,
+                    noncollinear_magmoms_norm.to(torch.float64),
+                    reduce="amax",
+                    include_self=True,
+                )
+
+            if needs_energy:
+                e0_node_energy = atomic_energy_table[node_fidelity, element_idx]
+                e0 = torch.zeros(
+                    num_graphs,
+                    dtype=e0_node_energy.dtype,
+                    device=stats_device,
+                ).index_add_(0, batch, e0_node_energy)
+                batch_energy = (
+                    data["energy"].reshape(-1).to(stats_device, non_blocking=True)
+                )
+                energy_values = torch.stack(
+                    (
+                        batch_energy,
+                        batch_energy / num_nodes,
+                        (batch_energy - e0) / num_nodes,
+                    ),
                     dim=-1,
                 )
-                for element_id in element_idx.unique().tolist():
-                    element_mask = element_idx == element_id
-                    magmoms_norm_by_element[element_id] = torch.maximum(
-                        magmoms_norm_by_element[element_id],
-                        magnetic_norm[element_mask].max().cpu(),
-                    )
-
-            if "energy" in target_property:
-                num_atoms_arange = torch.arange(
-                    data["node_attrs"].size(0),
-                    device=data["node_attrs"].device,
-                    dtype=torch.int64,
-                )
-                e0_node_energy = atomic_energy_fn(data["node_attrs"])[
-                    num_atoms_arange, node_fidelity
-                ]
-                e0 = scatter(
-                    e0_node_energy,
-                    data["batch"],
-                    dim=0,
-                    dim_size=num_graphs,
-                    reduce="sum",
-                )
-                energy = data["energy"].reshape(-1)
-                energy_per_atom = energy / num_nodes
-                delta_per_atom = (energy - e0) / num_nodes
                 energy_weight = data.get("energy_weight")
-                if energy_weight is None:
-                    valid_energy = torch.ones_like(fidelity_idx, dtype=torch.bool)
-                else:
-                    valid_energy = energy_weight.reshape(-1) > 0
-                for level in fidelity_idx.unique().tolist():
-                    mask = (fidelity_idx == level) & valid_energy
-                    energy_moments[level].update(energy[mask])
-                    energy_per_atom_moments[level].update(energy_per_atom[mask])
-                    delta_per_atom_moments[level].update(delta_per_atom[mask])
+                valid_energy = (
+                    torch.ones_like(fidelity_idx, dtype=torch.bool)
+                    if energy_weight is None
+                    else energy_weight.reshape(-1).to(stats_device, non_blocking=True)
+                    > 0
+                )
+                energy_moments.update(
+                    energy_values[valid_energy], fidelity_idx[valid_energy]
+                )
 
-            if "forces" in target_property or "direct_forces" in target_property:
+            if needs_forces:
                 forces = data.get("forces")
                 if forces is None and "direct_forces" in target_property:
                     forces = data.get("direct_forces")
@@ -358,104 +384,83 @@ def _compute_statistics(
                     raise KeyError(
                         "Force statistics requested but no forces were found"
                     )
-                force_norm = torch.linalg.vector_norm(forces, dim=1)
-                force_weight = data.get("forces_weight")
-                if force_weight is None and "direct_forces" in target_property:
-                    force_weight = data.get("direct_forces_weight")
-                if force_weight is None:
-                    valid_force = torch.ones_like(node_fidelity, dtype=torch.bool)
-                else:
-                    valid_force = force_weight.reshape(-1)[data["batch"]] > 0
-                for level in node_fidelity.unique().tolist():
-                    level_mask = (node_fidelity == level) & valid_force
-                    level_forces = forces[level_mask]
-                    level_elements = element_idx[level_mask]
-                    level_norms = force_norm[level_mask]
-                    force_moments[level].update(level_forces)
-                    force_norm_moments[level].update(level_norms)
-                    for element_id in level_elements.unique().tolist():
-                        element_mask = level_elements == element_id
-                        force_by_element[level][element_id].update(
-                            level_forces[element_mask]
-                        )
-                        force_norm_by_element[level][element_id].update(
-                            level_norms[element_mask]
-                        )
-    if neighbor_moments.count == 0:
+                forces = forces.to(stats_device, non_blocking=True)
+                forces_weight = data.get("forces_weight")
+                if forces_weight is None and "direct_forces" in target_property:
+                    forces_weight = data.get("direct_forces_weight")
+                valid_forces = (
+                    torch.ones_like(node_fidelity, dtype=torch.bool)
+                    if forces_weight is None
+                    else forces_weight.reshape(-1).to(stats_device, non_blocking=True)[
+                        batch
+                    ]
+                    > 0
+                )
+                forces_moments.update(
+                    torch.cat(
+                        (
+                            forces,
+                            torch.linalg.vector_norm(forces, dim=-1, keepdim=True),
+                        ),
+                        dim=-1,
+                    )[valid_forces],
+                    node_groups[valid_forces],
+                )
+
+    if not torch.any(neighbor_moments.count):
         raise ValueError("Cannot compute statistics from an empty training dataset")
 
-    avg_num_neighbors = float(neighbor_moments.mean.item())
-    avg_neighbors_by_element = {
-        z: float(neighbor_by_element[idx].mean_or_zeros().item())
-        for idx, z in enumerate(atomic_numbers)
-    }
+    min_fidelity = int(min_fidelity.cpu())
+    max_fidelity = int(max_fidelity.cpu())
+    if min_fidelity < 0 or max_fidelity >= num_fidelities:
+        raise ValueError(
+            "fidelity_idx values must be in "
+            f"[0, {num_fidelities - 1}], got "
+            f"[{min_fidelity}, {max_fidelity}]"
+        )
+
+    graph_counts = graph_counts.cpu()
+    atom_counts = atom_counts.cpu()
+    _, neighbor_mean_by_element, _, _ = neighbor_moments.statistics()
+    _, neighbor_mean, _, _ = neighbor_moments.statistics(group_size=num_elements)
+    avg_num_neighbors = float(neighbor_mean[0, 0].cpu())
+    avg_neighbors_by_element = _by_element(
+        neighbor_mean_by_element[:, 0].cpu(), atomic_numbers
+    )
+
+    energy_summary = None
+    if needs_energy:
+        energy_summary = tuple(
+            value.cpu() for value in energy_moments.statistics(unbiased=True)
+        )
+
+    forces_by_element_summary = None
+    forces_summary = None
+    if needs_forces:
+        forces_by_element_summary = tuple(
+            value.reshape(num_fidelities, num_elements, -1).cpu()
+            for value in forces_moments.statistics()
+        )
+        forces_summary = tuple(
+            value.cpu() for value in forces_moments.statistics(group_size=num_elements)
+        )
+
+    noncollinear_magmoms_by_element_summary = None
+    noncollinear_magmoms_summary = None
     if has_noncollinear_magmoms:
-        logging.info(
-            "Automatically computed magmoms_norm_by_element: %s",
-            {
-                z: float(magmoms_norm_by_element[idx])
-                for idx, z in enumerate(atomic_numbers)
-            },
+        noncollinear_magmoms_by_element_summary = tuple(
+            value.reshape(num_fidelities, num_elements, -1).cpu()
+            for value in noncollinear_magmoms_moments.statistics()
         )
-
-    force_atom_counts_by_element = None
-    force_mse_by_element = None
-    recommended_force_element_weights = None
-    if "forces" in target_property or "direct_forces" in target_property:
-        force_atom_counts = torch.tensor(
-            [
-                sum(
-                    force_by_element[level][element_id].count
-                    for level in range(num_fidelities)
-                )
-                for element_id in range(len(atomic_numbers))
-            ],
-            dtype=torch.float64,
+        noncollinear_magmoms_summary = tuple(
+            value.cpu()
+            for value in noncollinear_magmoms_moments.statistics(
+                group_size=num_elements
+            )
         )
-        force_square_sums = torch.stack(
-            [
-                sum(
-                    (
-                        force_by_element[level][element_id]
-                        .sum_squares_or_zeros((3,))
-                        .sum()
-                    )
-                    for level in range(num_fidelities)
-                )
-                for element_id in range(len(atomic_numbers))
-            ]
-        )
-        force_mse = torch.where(
-            force_atom_counts > 0,
-            force_square_sums / (3.0 * force_atom_counts.clamp_min(1.0)),
-            0.0,
-        )
-        force_atom_counts_by_element = {
-            z: int(force_atom_counts[idx]) for idx, z in enumerate(atomic_numbers)
-        }
-        force_mse_by_element = {
-            z: float(force_mse[idx]) for idx, z in enumerate(atomic_numbers)
-        }
-
-        alphas = (0, 0.25, 0.5, 0.75, 1.0)
-        recommended_force_element_weights = {
-            f"alpha_{alpha:g}": balanced_element_weights(
-                force_atom_counts,
-                force_mse,
-                alpha=alpha,
-            ).tolist()
-            for alpha in alphas
-        }
-        weight_lines = []
-        for alpha in alphas:
-            weights = recommended_force_element_weights[f"alpha_{alpha:g}"]
-            values = ", ".join(f"{weight:.4f}" for weight in weights)
-            weight_lines.append(f"- alpha={alpha:.2f}: [{values}]")
-        logging.info(
-            "Recommended force element weights (atomic-number order %s):\n%s",
-            atomic_numbers,
-            "\n".join(weight_lines),
-        )
+        max_noncollinear_magmoms_norm = max_noncollinear_magmoms_norm.reshape(
+            num_fidelities, num_elements
+        ).cpu()
 
     per_level_stats = []
     for level in range(num_fidelities):
@@ -469,107 +474,158 @@ def _compute_statistics(
             "avg_num_neighbors": avg_num_neighbors,
             "avg_neighbors_by_element": avg_neighbors_by_element,
         }
-        if has_noncollinear_magmoms:
-            stats["magmoms_norm_by_element"] = {
-                z: float(magmoms_norm_by_element[idx])
-                for idx, z in enumerate(atomic_numbers)
-            }
 
-        if "energy" in target_property:
-            energy_mean = float(energy_moments[level].mean_or_zeros().item())
-            energy_std = float(energy_moments[level].std_or_zeros(unbiased=True).item())
-            energy_per_atom_mean = float(
-                energy_per_atom_moments[level].mean_or_zeros().item()
-            )
-            delta_per_atom_mean = float(
-                delta_per_atom_moments[level].mean_or_zeros().item()
-            )
-            canonical_energy = _canonical_atomic_energy(
-                atomic_energies[level], atomic_numbers
+        if has_noncollinear_magmoms:
+            (
+                mag_count_by_element,
+                mag_mean_by_element,
+                mag_std_by_element,
+                mag_rms_by_element,
+            ) = (value[level] for value in noncollinear_magmoms_by_element_summary)
+            _, mag_mean, mag_std, mag_rms = (
+                value[level] for value in noncollinear_magmoms_summary
             )
             stats.update(
                 {
-                    "__mean_energy": energy_mean,
-                    "__std_energy": energy_std,
-                    "__mean_energy_per_atom": energy_per_atom_mean,
-                    "__mean_delta_energy_per_atom": delta_per_atom_mean,
-                    "atomic_energy": canonical_energy,
-                    "scalar_mean_energy_per_atom": energy_per_atom_mean,
-                    "mean_energy": {z: energy_mean for z in atomic_numbers},
-                    "mean_energy_by_element": {z: energy_mean for z in atomic_numbers},
-                    "std_energy": {z: energy_std for z in atomic_numbers},
-                    "std_energy_by_element": {z: energy_std for z in atomic_numbers},
+                    "mean_initial_noncollinear_magmoms_xyz": mag_mean[:3].tolist(),
+                    "std_initial_noncollinear_magmoms_xyz": mag_std[:3].tolist(),
+                    "rms_initial_noncollinear_magmoms_xyz": mag_rms[:3].tolist(),
+                    "mean_initial_noncollinear_magmoms_norm": float(mag_mean[3]),
+                    "std_initial_noncollinear_magmoms_norm": float(mag_std[3]),
+                    "rms_initial_noncollinear_magmoms_norm": float(mag_rms[3]),
+                    "max_initial_noncollinear_magmoms_norm": float(
+                        max_noncollinear_magmoms_norm[level].max()
+                    ),
+                    "mean_initial_noncollinear_magmoms_xyz_by_element": _by_element(
+                        mag_mean_by_element[:, :3], atomic_numbers
+                    ),
+                    "std_initial_noncollinear_magmoms_xyz_by_element": _by_element(
+                        mag_std_by_element[:, :3], atomic_numbers
+                    ),
+                    "rms_initial_noncollinear_magmoms_xyz_by_element": _by_element(
+                        mag_rms_by_element[:, :3], atomic_numbers
+                    ),
+                    "mean_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                        mag_mean_by_element[:, 3], atomic_numbers
+                    ),
+                    "std_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                        mag_std_by_element[:, 3], atomic_numbers
+                    ),
+                    "rms_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                        mag_rms_by_element[:, 3], atomic_numbers
+                    ),
+                    "max_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                        max_noncollinear_magmoms_norm[level], atomic_numbers
+                    ),
+                    "num_initial_noncollinear_magmoms_by_element": _by_element(
+                        mag_count_by_element[:, 0], atomic_numbers
+                    ),
+                }
+            )
+
+        if needs_energy:
+            _, energy_mean, energy_std, _ = (value[level] for value in energy_summary)
+            mean_energy_per_atom = float(energy_mean[1])
+            mean_delta_energy_per_atom = float(energy_mean[2])
+            stats.update(
+                {
+                    "mean_energy": float(energy_mean[0]),
+                    "std_energy": float(energy_std[0]),
+                    "atomic_energy": _canonical_atomic_energy(
+                        atomic_energies[level], atomic_numbers
+                    ),
                     "mean_energy_per_atom": {
-                        z: energy_per_atom_mean for z in atomic_numbers
-                    },
-                    "mean_energy_per_atom_by_element": {
-                        z: energy_per_atom_mean for z in atomic_numbers
+                        z: mean_energy_per_atom for z in atomic_numbers
                     },
                     "mean_delta_energy_per_atom": {
-                        z: delta_per_atom_mean for z in atomic_numbers
-                    },
-                    "mean_delta_energy_per_atom_by_element": {
-                        z: delta_per_atom_mean for z in atomic_numbers
+                        z: mean_delta_energy_per_atom for z in atomic_numbers
                     },
                 }
             )
 
-        if "forces" in target_property or "direct_forces" in target_property:
-            force_mean = force_moments[level].mean_or_zeros((3,))
-            force_std = force_moments[level].std_or_zeros((3,), unbiased=True)
-            force_rms = force_moments[level].rms_or_zeros((3,))
-            norm_mean = float(force_norm_moments[level].mean_or_zeros().item())
-            norm_std = float(
-                force_norm_moments[level].std_or_zeros(unbiased=True).item()
+        if needs_forces:
+            (
+                forces_count_by_element,
+                forces_mean_by_element,
+                forces_std_by_element,
+                forces_rms_by_element,
+            ) = (value[level] for value in forces_by_element_summary)
+            _, forces_mean, forces_std, forces_rms = (
+                value[level] for value in forces_summary
             )
-            norm_rms = float(force_norm_moments[level].rms_or_zeros().item())
-
-            mean_3d_by_element = {}
-            std_3d_by_element = {}
-            rms_3d_by_element = {}
-            mean_1d_by_element = {}
-            std_1d_by_element = {}
-            rms_1d_by_element = {}
-            scale_rms_by_element = {}
-            scale_std_by_element = {}
-            for element_id, z in enumerate(atomic_numbers):
-                element_force = force_by_element[level][element_id]
-                element_norm = force_norm_by_element[level][element_id]
-                mean_3d_by_element[z] = element_force.mean_or_zeros((3,)).tolist()
-                std_3d_by_element[z] = element_force.std_or_zeros((3,)).tolist()
-                rms_3d_by_element[z] = element_force.rms_or_zeros((3,)).tolist()
-                mean_1d_by_element[z] = float(element_norm.mean_or_zeros().item())
-                std_value = float(element_norm.std_or_zeros().item())
-                rms_value = float(element_norm.rms_or_zeros().item())
-                std_1d_by_element[z] = std_value
-                rms_1d_by_element[z] = rms_value
-                scale_std_by_element[z] = _finite_scale(std_value)
-                scale_rms_by_element[z] = _finite_scale(rms_value)
-
+            rms_forces_norm = forces_rms[3]
+            safe_rms_forces_norm = torch.where(
+                torch.isfinite(rms_forces_norm) & (rms_forces_norm > 0),
+                rms_forces_norm,
+                1.0,
+            )
+            rms_forces_norm_by_element = forces_rms_by_element[:, 3]
+            safe_rms_forces_norm_by_element = torch.where(
+                torch.isfinite(rms_forces_norm_by_element)
+                & (rms_forces_norm_by_element > 0),
+                rms_forces_norm_by_element,
+                1.0,
+            )
+            num_forces = forces_count_by_element[:, 0]
+            mean_squared_forces_xyz = forces_rms_by_element[:, :3].square().mean(dim=-1)
+            alphas = (0, 0.25, 0.5, 0.75, 1.0)
+            recommended_forces_element_weights = {
+                f"alpha_{alpha:g}": balanced_element_weights(
+                    num_forces, mean_squared_forces_xyz, alpha=alpha
+                ).tolist()
+                for alpha in alphas
+            }
+            logging.info(
+                "Recommended forces element weights for fidelity %s "
+                "(atomic-number order %s):\n%s",
+                level,
+                atomic_numbers,
+                "\n".join(
+                    f"- alpha={alpha:.2f}: ["
+                    + ", ".join(
+                        f"{weight:.4f}"
+                        for weight in recommended_forces_element_weights[
+                            f"alpha_{alpha:g}"
+                        ]
+                    )
+                    + "]"
+                    for alpha in alphas
+                ),
+            )
             stats.update(
                 {
-                    "__mean_forces_3d": force_mean.tolist(),
-                    "__std_forces_3d": force_std.tolist(),
-                    "__rms_forces_3d": force_rms.tolist(),
-                    "__mean_forces_1d": norm_mean,
-                    "__std_forces_1d": norm_std,
-                    "__rms_forces_1d": norm_rms,
-                    "__mean_forces_3d_by_element": mean_3d_by_element,
-                    "__std_forces_3d_by_element": std_3d_by_element,
-                    "__rms_forces_3d_by_element": rms_3d_by_element,
-                    "__mean_forces_1d_by_element": mean_1d_by_element,
-                    "__std_forces_1d_by_element": std_1d_by_element,
-                    "__rms_forces_1d_by_element": rms_1d_by_element,
-                    "mean_forces_for_normalize": norm_mean,
-                    "std_forces_for_normalize": norm_std,
-                    "rms_forces": {z: _finite_scale(norm_rms) for z in atomic_numbers},
-                    "std_forces": {z: _finite_scale(norm_std) for z in atomic_numbers},
-                    "rms_forces_by_element": scale_rms_by_element,
-                    "std_forces_by_element": scale_std_by_element,
-                    "force_atom_counts_by_element": force_atom_counts_by_element,
-                    "force_mse_by_element": force_mse_by_element,
-                    "recommended_force_element_weights": (
-                        recommended_force_element_weights
+                    "mean_forces_xyz": forces_mean[:3].tolist(),
+                    "std_forces_xyz": forces_std[:3].tolist(),
+                    "rms_forces_xyz": forces_rms[:3].tolist(),
+                    "mean_forces_norm": float(forces_mean[3]),
+                    "std_forces_norm": float(forces_std[3]),
+                    "mean_forces_xyz_by_element": _by_element(
+                        forces_mean_by_element[:, :3], atomic_numbers
+                    ),
+                    "std_forces_xyz_by_element": _by_element(
+                        forces_std_by_element[:, :3], atomic_numbers
+                    ),
+                    "rms_forces_xyz_by_element": _by_element(
+                        forces_rms_by_element[:, :3], atomic_numbers
+                    ),
+                    "mean_forces_norm_by_element": _by_element(
+                        forces_mean_by_element[:, 3], atomic_numbers
+                    ),
+                    "std_forces_norm_by_element": _by_element(
+                        forces_std_by_element[:, 3], atomic_numbers
+                    ),
+                    "rms_forces": {
+                        z: float(safe_rms_forces_norm) for z in atomic_numbers
+                    },
+                    "rms_forces_by_element": _by_element(
+                        safe_rms_forces_norm_by_element, atomic_numbers
+                    ),
+                    "num_forces_by_element": _by_element(num_forces, atomic_numbers),
+                    "mean_squared_forces_xyz_by_element": _by_element(
+                        mean_squared_forces_xyz, atomic_numbers
+                    ),
+                    "recommended_forces_element_weights": (
+                        recommended_forces_element_weights
                     ),
                 }
             )

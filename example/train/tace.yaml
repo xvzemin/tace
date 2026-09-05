@@ -170,6 +170,10 @@ dataset:
     drop_last: false
     num_workers: 4 # If the batch size is large, you need to set up multiple workers
 
+  # Increase this value as far as device memory permits.
+  statistics_dataloader:
+    batch_size: 512
+
   valid_dataloader:
     _target_: torch_geometric.loader.DataLoader
     batch_size: 2
@@ -387,8 +391,8 @@ model:
 
     scale_shift:
       enable: true
-      scale_type: rms_forces # [null, rms_forces, rms_forcesrms_forces_by_element]
-      shift_type: null # [null, mean_delta_energy_per_atom, forces, mean_delta_energy_per_atom_by_element]
+      scale_type: rms_forces # [null, rms_forces, rms_forces_by_element]
+      shift_type: null # [null, mean_energy_per_atom, mean_delta_energy_per_atom, forces]
       scale_trainable: false # (bool)
       shift_trainable: false # (bool)
       all_atoms: false

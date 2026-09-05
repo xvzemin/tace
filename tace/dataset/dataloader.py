@@ -3,9 +3,8 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-import gc
 import logging
-from typing import Dict, List, Union
+from typing import Dict, List, Sequence, Union
 
 from hydra.utils import instantiate
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
@@ -14,7 +13,47 @@ from .element import TorchElement, build_element_lookup
 from .graph import from_atoms
 from .quantity import KeySpecification
 from .read import tace_read_all_files
-from .statistics import _compute_statistics, compute_atomic_energy
+from .statistics import _compute_statistics, compute_atomic_energies
+
+
+def build_statistics_dataloader(
+    cfg: Dict,
+    dataset,
+    target_property: Sequence[str] = (),
+):
+    """Build a large, deterministic loader containing only statistics inputs."""
+    config = {
+        key: value
+        for key, value in cfg["dataset"]["train_dataloader"].items()
+        if key != "extra"
+    }
+    config.update(cfg["dataset"].get("statistics_dataloader", {}))
+    config.pop("extra", None)
+    config["shuffle"] = False
+    config["drop_last"] = False
+    config.setdefault(
+        "pin_memory",
+        str(cfg.get("misc", {}).get("device", "cpu")).startswith("cuda"),
+    )
+
+    required_keys = {
+        "atomic_numbers",
+        "edge_index",
+        "fidelity_idx",
+        "initial_noncollinear_magmoms",
+        "num_nodes",
+    }
+    if "energy" in target_property:
+        required_keys.update(("energy", "energy_weight"))
+    if "forces" in target_property:
+        required_keys.update(("forces", "forces_weight"))
+    if "direct_forces" in target_property:
+        required_keys.update(("direct_forces", "direct_forces_weight"))
+    if len(dataset):
+        excluded_keys = set(config.get("exclude_keys") or ())
+        excluded_keys.update(set(dataset[0].keys()) - required_keys)
+        config["exclude_keys"] = sorted(excluded_keys - required_keys)
+    return instantiate(config, dataset=dataset)
 
 
 @rank_zero_only
@@ -86,27 +125,32 @@ def build_atomsList(
         )
         element = build_element_lookup(atomic_numbers_from_dataset)
 
+        missing_energy = [
+            idx
+            for idx, atomic_energy in enumerate(atomic_energies_cfg)
+            if atomic_energy is None
+        ]
+        for idx in missing_energy:
+            logging.info(
+                "Computing isolated atomic energy automatically for fidelity %s",
+                fidelity[idx]["name"],
+            )
+        computed_atomic_energies = (
+            compute_atomic_energies(threeAtomsList[0], element, keyspec, missing_energy)
+            if missing_energy
+            else {}
+        )
+
         atomic_energies = []
-        for idx, this_energy_cfg in enumerate(atomic_energies_cfg):
-            if this_energy_cfg is None:
-                logging.info(
-                    f"Computing isolated atomic energy automatically "
-                    f"for fidelity {fidelity[idx]['name']}"
-                )
-                atomic_energies.append(
-                    compute_atomic_energy(
-                        threeAtomsList[0],
-                        element,
-                        keyspec,
-                        idx,
-                    )
-                )
+        for idx, atomic_energy_cfg in enumerate(atomic_energies_cfg):
+            if atomic_energy_cfg is None:
+                atomic_energies.append(computed_atomic_energies[idx])
             else:
                 atomic_energy = {
-                    z: float(this_energy_cfg.get(z, 0.0)) for z in element.zs
+                    z: float(atomic_energy_cfg.get(z, 0.0)) for z in element.zs
                 }
                 for z in element.zs:
-                    if z not in this_energy_cfg:
+                    if z not in atomic_energy_cfg:
                         logging.warning(
                             f"Fidelity {fidelity[idx]['name']}: No isolated atomic energy "
                             f"provided for Z={z}, using 0.0 as default."
@@ -149,13 +193,8 @@ def compute_statistics(
         dataset_train = create_graphs_for_main_rank(
             threeAtomsList[0], element, for_dataset, "train"
         )
-        dataloader_train = instantiate(
-            {
-                k: v
-                for k, v in cfg["dataset"]["train_dataloader"].items()
-                if k != "extra"
-            },
-            dataset=dataset_train,
+        dataloader_train = build_statistics_dataloader(
+            cfg, dataset_train, target_property
         )
 
     statistics = _compute_statistics(
@@ -166,8 +205,5 @@ def compute_statistics(
         device=cfg.get("misc", {}).get("device", "cpu"),
         num_fidelities=len(fidelity),
     )
-
-    del dataloader_train
-    gc.collect()
 
     return statistics

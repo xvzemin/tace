@@ -20,6 +20,7 @@ from lightning.pytorch import LightningDataModule
 from lightning.pytorch.utilities.rank_zero import rank_zero_info, rank_zero_only
 from torch.utils.data import Dataset
 
+from .dataloader import build_statistics_dataloader
 from .element import TorchElement, build_element_lookup
 from .graph import from_atoms
 from .quantity import KeySpecification
@@ -647,14 +648,9 @@ class GraphDataModule(LightningDataModule):
         )
 
     def statistics_dataloader(self):
-        config = {
-            key: value
-            for key, value in self.cfg["dataset"]["train_dataloader"].items()
-            if key != "extra"
-        }
-        config["shuffle"] = False
-        config["drop_last"] = False
-        return instantiate(config, dataset=self.train_dataset)
+        return build_statistics_dataloader(
+            self.cfg, self.train_dataset, self.target_property
+        )
 
     def val_dataloader(self):
         if self.no_valid_set or self.val_dataset is None:

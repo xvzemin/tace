@@ -62,12 +62,6 @@ The construction is described in the
 ``normalizer`` controls the fixed scale applied to the input magnetic moments.
 This method is the current recommendation.
 
-Whenever noncollinear magnetic moments are model inputs, TACE automatically
-computes the element-wise ``max(|m|)`` from the training set and stores it as
-``magmoms_norm_by_element`` in ``statistics_*.yaml``. Inside the model, the
-magnetic-moment normalizer uses ``1.2 * magmoms_norm_by_element + 0.1`` as the
-effective scale like mMACE.
-
 Local O(2) frame (experimental)
 -------------------------------
 

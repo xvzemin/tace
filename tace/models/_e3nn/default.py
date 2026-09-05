@@ -240,11 +240,10 @@ def check_model_config(cfg: dict[str, Any]):
         s["avg_num_neighbors"] for s in cfg["statistics"]
     ) / len(cfg["statistics"])
 
-    # TODO
     magnetic_statistics = [
-        stats["magmoms_norm_by_element"]
+        stats["max_initial_noncollinear_magmoms_norm_by_element"]
         for stats in cfg["statistics"]
-        if "magmoms_norm_by_element" in stats
+        if "max_initial_noncollinear_magmoms_norm_by_element" in stats
     ]
     cfg["magmoms_norm_by_element"] = (
         {

@@ -95,10 +95,12 @@ def build(cfg: DictConfig):
                     statistics_data = yaml.safe_load(f)
                     statistics.append(statistics_data)
             if needs_noncollinear_magmoms and any(
-                "magmoms_norm_by_element" not in stats for stats in statistics
+                "max_initial_noncollinear_magmoms_norm_by_element" not in stats
+                for stats in statistics
             ):
                 logging.info(
-                    "Cached statistics do not contain magmoms_norm_by_element; "
+                    "Cached statistics do not contain noncollinear magnetic-moment "
+                    "scales; "
                     "recomputing statistics for the noncollinear magnetic input"
                 )
                 statistics = None
