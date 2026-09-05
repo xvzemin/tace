@@ -51,6 +51,7 @@ DEFAULT_MODEL_CONFIG = {
     "angular_basis": {
         "magnetic_Lmax": 2,
         "magnetic_normalization": "element",
+        "magnetic_use_soc": True,
     },
     "atomic_basis": {
         "type": "cgtp",

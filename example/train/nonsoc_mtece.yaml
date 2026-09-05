@@ -5,8 +5,9 @@ defaults:
   - _self_
 
 dataset:
-  train_file: ${oc.env:HOME}/dataset/LCAO/lcao_train.xyz
-  valid_file: ${oc.env:HOME}/dataset/LCAO/lcao_val.xyz
+  train_file: ${oc.env:HOME}/dataset/FeAl/collinear_FeAl.xyz
+  valid_file: null
+  valid_ratio: 0.1
   keys:
     energy_key: energy
     forces_key: forces
@@ -20,10 +21,10 @@ dataset:
 
   valid_dataloader:
     batch_size: 8
-
+    
   storage_mode: lmdb
   shard_dirs: 
-    - ${oc.env:HOME}/dataset/LCAO/graphCache
+    - ${oc.env:HOME}/dataset/FeAl/graphCache
 
 loss:
   loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
@@ -53,6 +54,7 @@ model:
     angular_basis:
       magnetic_Lmax: 2
       magnetic_normalization: element
+      magnetic_use_soc: true
 
     radial_basis:
       magnetic_normalization: rational

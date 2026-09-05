@@ -516,8 +516,8 @@ class O2MagneticInteraction(O2Interaction):
             raise ValueError("o2_mag requires parity: true for full O(3)")
         if self.magnetic_edge_irreps is None:
             raise ValueError("o2_mag requires magnetic_edge_irreps.")
-        if not 1 <= self.magnetic_edge_irreps.lmax <= self.Lmax:
-            raise ValueError("magnetic edge irreps must satisfy 1 <= lmax <= Lmax.")
+        if not 0 <= self.magnetic_edge_irreps.lmax <= self.Lmax:
+            raise ValueError("magnetic edge irreps must satisfy 0 <= lmax <= Lmax.")
         self.magnetic_edge_irreps_out = o3.Irreps(
             [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
         ).regroup()

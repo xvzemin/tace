@@ -9,9 +9,9 @@ from numbers import Real
 import torch
 from e3nn import o3
 
-from ..time_reversal import spherical_harmonics_irreps
-from ..radial import MagneticChebyshevBasis
 from ..angular import SolidHarmonics
+from ..radial import MagneticChebyshevBasis
+from ..time_reversal import make_irrep, spherical_harmonics_irreps
 from .fused import uuuTensorProduct
 
 
@@ -30,6 +30,7 @@ class MagneticBasis(torch.nn.Module):
         time_reversal: bool = False,
         angular_normalization: str = "element",
         radial_normalization: str = "rational",
+        magnetic_use_soc: bool = True,
     ) -> None:
         super().__init__()
 
@@ -48,6 +49,7 @@ class MagneticBasis(torch.nn.Module):
         self.num_mag_radial_basis = num_mag_radial_basis
         self.angular_normalization = angular_normalization
         self.radial_normalization = radial_normalization
+        self.magnetic_use_soc = magnetic_use_soc
         self.register_buffer(
             "scale",
             1.0 / (self.a * self._resolve_scale(scale, atomic_numbers) + self.b),
@@ -70,18 +72,23 @@ class MagneticBasis(torch.nn.Module):
             ),
         )
 
-        magnetic_edge_irrep_list = []
-        for _, ir1 in self.magnetic_node_irreps_out:
-            for _, ir2 in self.magnetic_node_irreps_out:
-                for ir_out in ir1 * ir2:
-                    if (
-                        ir_out.l <= Lmax
-                        and ir_out not in magnetic_edge_irrep_list
-                    ):
-                        magnetic_edge_irrep_list.append(ir_out)
-        magnetic_edge_irreps = o3.Irreps(
-            [(1, ir) for ir in magnetic_edge_irrep_list]
-        ).regroup()
+        if magnetic_use_soc:
+            magnetic_edge_irrep_list = []
+            for _, ir1 in self.magnetic_node_irreps_out:
+                for _, ir2 in self.magnetic_node_irreps_out:
+                    for ir_out in ir1 * ir2:
+                        if (
+                            ir_out.l <= Lmax
+                            and ir_out not in magnetic_edge_irrep_list
+                        ):
+                            magnetic_edge_irrep_list.append(ir_out)
+            magnetic_edge_irreps = o3.Irreps(
+                [(1, ir) for ir in magnetic_edge_irrep_list]
+            ).regroup()
+        else:
+            magnetic_edge_irreps = o3.Irreps(
+                [(1, make_irrep(0, 1, 1))]
+            )
         self.magnetic_edge_tensor_product = uuuTensorProduct(
             self.magnetic_node_irreps_out,
             self.magnetic_node_irreps_out,
@@ -161,6 +168,7 @@ class MagneticBasis(torch.nn.Module):
             f"  Lmax={self.Lmax},\n"
             f"  angular_normalization={self.angular_normalization!r},\n"
             f"  radial_normalization={self.radial_normalization!r},\n"
+            f"  magnetic_use_soc={self.magnetic_use_soc},\n"
             f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"
             f"  magnetic_edge_irreps_out={self.magnetic_edge_irreps_out}\n"
             ")"

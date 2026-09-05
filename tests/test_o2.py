@@ -56,6 +56,7 @@ def test_magnetic_basis_normalization_validation():
     assert DEFAULT_MODEL_CONFIG["angular_basis"] == {
         "magnetic_Lmax": 2,
         "magnetic_normalization": "element",
+        "magnetic_use_soc": True,
     }
     assert DEFAULT_MODEL_CONFIG["radial_basis"]["magnetic_normalization"] == (
         "rational"
@@ -244,6 +245,7 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
         angular_basis={
             "magnetic_Lmax": 1,
             "magnetic_normalization": "integral",
+            "magnetic_use_soc": False,
         },
         num_channel=2,
         target_irreps=o3.Irreps("0e"),
@@ -266,6 +268,11 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
 
     num_mag_radial_basis = config["radial_basis"]["num_mag_radial_basis"]
     assert len(representation.magnetic_edge_updates) == 2
+    assert representation.magnetic_edge_irreps_out.num_irreps == 2
+    assert all(
+        ir.l == 0 and ir.p == 1
+        for _, ir in representation.magnetic_edge_irreps_out
+    )
     assert representation.magnetic_edge_updates[0] is not (
         representation.magnetic_edge_updates[1]
     )
@@ -869,6 +876,7 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, normalization):
         f"  Lmax={Lmax},",
         f"  angular_normalization='{normalization}',",
         "  radial_normalization='rational',",
+        "  magnetic_use_soc=True,",
         f"  magnetic_node_irreps_out={basis.magnetic_node_irreps_out},",
         f"  magnetic_edge_irreps_out={basis.magnetic_edge_irreps_out}",
         ")",
@@ -943,6 +951,43 @@ def test_magnetic_basis_rational_and_element_normalization():
     torch.testing.assert_close(zero_gradient, torch.zeros_like(zero_gradient))
     zero_second_derivative = torch.autograd.grad(zero_gradient.sum(), magmoms)[0][0]
     assert torch.isfinite(zero_second_derivative).all()
+
+
+@pytest.mark.parametrize("Lmax", [1, 2, 3])
+def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
+    basis = MagneticBasis(
+        {26: 2.0},
+        num_mag_radial_basis=4,
+        Lmax=Lmax,
+        atomic_numbers=[26],
+        time_reversal=hasattr(o3.Irrep("0e"), "t"),
+        magnetic_use_soc=False,
+    ).to(DEVICE, DTYPE)
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
+        device=DEVICE,
+    )
+    magmoms = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    node_attrs = torch.ones(4, 1, dtype=DTYPE, device=DEVICE)
+
+    _, _, edge_scalars = basis(magmoms, node_attrs, edge_index)
+    rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
+    _, _, rotated_edge_scalars = basis(
+        magmoms @ rotation.T,
+        node_attrs,
+        edge_index,
+    )
+    _, _, reversed_edge_scalars = basis(-magmoms, node_attrs, edge_index)
+
+    assert not basis.magnetic_use_soc
+    assert basis.magnetic_edge_irreps_out.num_irreps == Lmax + 1
+    assert len(basis.magnetic_edge_tensor_product.instructions) == Lmax + 1
+    assert all(
+        ir.l == 0 and ir.p == 1 and getattr(ir, "t", 1) == 1
+        for _, ir in basis.magnetic_edge_irreps_out
+    )
+    torch.testing.assert_close(rotated_edge_scalars, edge_scalars)
+    torch.testing.assert_close(reversed_edge_scalars, edge_scalars)
 
 
 def test_magnetic_basis_is_bounded_and_has_no_constant_mode():

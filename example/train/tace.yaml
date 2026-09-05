@@ -172,7 +172,7 @@ dataset:
 
   # Increase this value as far as device memory permits.
   statistics_dataloader:
-    batch_size: 512
+    batch_size: 256
 
   valid_dataloader:
     _target_: torch_geometric.loader.DataLoader
@@ -349,6 +349,7 @@ model:
     angular_basis:
       magnetic_Lmax: 2 # Maximum degree of magnetic solid harmonics, recommend >=2.
       magnetic_normalization: element # [element, integral, component]
+      magnetic_use_soc: true # false keeps only spin-scalar magnetic edge paths
 
     resnet:
       type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect

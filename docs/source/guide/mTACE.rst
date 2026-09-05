@@ -1,15 +1,61 @@
 Magnetic TACE
 =============
 
-``Magnetic TACE (mTACE)`` describes non-collinear magnetic moments and atomic
-geometry in one equivariant model. It is intended for magnetic potential
-energy surfaces ``with/without spin-orbit coupling (SOC)``. The model enforces
-:math:`O(3)\times\mathbb Z_2^T`: proper rotations, spatial inversion, and
-global time reversal.
+``Magnetic TACE (mTACE)`` describes collinear/noncollinear magnetic moments and atomic
+geometry in one equivariant model. It provides constructions for
+potential-energy surfaces with and without spin--orbit coupling (SOC). The two
+constructions do not have the same symmetry group and should not be
+interchanged.
+
+Symmetry groups
+---------------
+
+SOC symmetry
+~~~~~~~~~~~~
+
+With SOC, spatial rotations act jointly on the structure and axial magnetic
+moments. In the absence of an external time-reversal-breaking field, the group
+is
+
+.. math::
+
+   G_{\mathrm{SOC}}=O(3)\times\mathbb Z_2^{\mathcal T}.
+
+For :math:`Q\in O(3)` and :math:`\tau\in\{+1,-1\}`, the inputs transform as
+
+.. math::
+
+   \mathbf r_{ij}\mapsto Q\mathbf r_{ij},\qquad
+   \mathbf m_i\mapsto\tau\det(Q)Q\mathbf m_i.
+
+The magnetic orientation relative to the lattice is physical. Consequently,
+SOC mTACE may represent magnetocrystalline anisotropy and other lattice-locked
+spin interactions.
+
+Non-SOC symmetry
+~~~~~~~~~~~~~~~~
+
+Without SOC, coordinate and spin rotations are independent:
+
+.. math::
+
+   G_{\mathrm{nonSOC}}
+   =O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+   \times\mathbb Z_2^{\mathcal T}.
+
+For independent :math:`Q_r\in O(3)` and :math:`Q_s\in SO(3)`, the energy obeys
+
+.. math::
+
+   E(\{Q_r\mathbf r_{ij}\},\{Q_s\mathbf m_i\})
+   =E(\{\mathbf r_{ij}\},\{\mathbf m_i\}),
+   \qquad
+   E(\{\mathbf r_{ij}\},\{-\mathbf m_i\})
+   =E(\{\mathbf r_{ij}\},\{\mathbf m_i\}).
 
 
-:math:`O(3)\times\mathbb Z_2^T` representations throught Local O(2) Frame
--------------------------------------------------------------------------
+Representations and local frames
+--------------------------------
 
 Irrep labels
 ~~~~~~~~~~~~
@@ -50,12 +96,6 @@ The principal quantities used by mTACE are:
      - unchanged
      - changes sign
 
-The spatial and time operations are independent. In particular, spatial
-inversion does not reverse an axial magnetic moment, whereas time reversal
-does. For an SOC model, a spatial rotation acts on positions and magnetic
-moments together; an independent rotation of magnetic moments alone is not a
-required symmetry. In contrast, for a non-SOC model, the spatial and magnetic
-moments may be rotated independently.
 
 Regular solid harmonics
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -106,15 +146,29 @@ scalar correlation :math:`\mathbf{m}_i\cdot\mathbf{m}_j`.
 
 Equivariant linear maps only mix copies with identical :math:`(l,p,t)`. Gates
 and tensor products multiply both spatial and time parities. The predicted
-energy are restricted to ``0ee``.
+energy is restricted to ``0ee``.
 
-Global :math:`O(3)` and local :math:`O(2)` interaction
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SOC architecture
+~~~~~~~~~~~~~~~~
 
-For each spatial edge, mTACE rotates global :math:`O(3)` node features into a
-edge-aligned local frame. Restricting an :math:`O(3)` irrep to local
-:math:`O(2)` preserves its time label while separating its magnetic orders.
-For the magnetic solid-harmonic basis truncated at :math:`L_{\max}=2`,
+For each atom, the SOC construction first evaluates the magnetic solid
+harmonics
+
+.. math::
+
+   \mathcal M_i=\bigoplus_{l=0}^{L_{\mathrm{mag}}}
+   \widetilde{\mathcal R}^{(l)}(\mathbf m_i).
+
+The two endpoint representations are coupled with an unweighted tensor
+product, retaining all symmetry-allowed magnetic edge irreps up to
+:math:`L_{\mathrm{mag}}`. A bias-free equivariant linear map then projects
+these edge attributes to the model channels. Its edge-dependent weights are
+generated from the source and target magnetic radial bases.
+
+Node features and the projected magnetic edge tensors are rotated with the
+bond frame into local :math:`O(2)`. Restricting an :math:`O(3)` irrep preserves
+its time label while separating its magnetic orders. For
+:math:`L_{\mathrm{mag}}=2`,
 
 .. math::
 
@@ -127,12 +181,70 @@ For the magnetic solid-harmonic basis truncated at :math:`L_{\max}=2`,
 
 The two local ``0ee`` blocks come from the global :math:`l=0` block and the
 :math:`m=0` component of the global :math:`l=2` block, respectively.
-For the magnetic edge input, mTACE first constructs solid harmonics for the two
-endpoint moments and couples them with an unweighted tensor product. The
-resulting magnetic edge irreps are projected to the model channels using
-weights generated from endpoint magnetic radial bases. These projected edge
-attributes enter the local-:math:`O(2)` interaction together with the spatial
-edge frame. This is where geometry and magnetic moments interact in the model.
+Because non-scalar magnetic edge tensors share the bond frame with the spatial
+features, this branch permits the magnetic orientation relative to the lattice
+to affect the message.
+
+This is the default mode, corresponding to
+``angular_basis.magnetic_use_soc: true``.
+
+Non-SOC architecture
+~~~~~~~~~~~~~~~~~~~~
+
+The implemented non-SOC branch follows the rank-zero spin construction. It
+uses the same smooth magnetic node basis, but the endpoint tensor product
+retains only the independent paths
+
+.. math::
+
+   \chi_{ij}^{(l)}=
+   \left[
+   \widetilde{\mathcal R}^{(l)}(\mathbf m_i)\otimes
+   \widetilde{\mathcal R}^{(l)}(\mathbf m_j)
+   \right]_{0ee},
+   \qquad 0\le l\le L_{\mathrm{mag}}.
+
+Hence the magnetic edge representation is
+
+.. math::
+
+   (L_{\mathrm{mag}}+1)\times\mathrm{0ee}.
+
+For example, :math:`L_{\mathrm{mag}}=2` produces three distinct ``0ee``
+paths, rather than one scalar obtained by summing them. They contain the
+constant, bilinear, and quadrupolar angular correlations. The same
+radial-conditioned linear map mixes these paths into channel-wise magnetic
+scalars. They enter the ordinary spatial local-:math:`O(2)` interaction and
+are unchanged by the bond-frame rotation. No spin tensor index is therefore
+contracted with a spatial index.
+
+Set the architecture with:
+
+.. code-block:: yaml
+
+   model:
+     config:
+       atomic_basis:
+         type: o2_mag
+       angular_basis:
+         magnetic_use_soc: false
+
+The rank-zero construction represents exchange and higher polynomial
+functions of pairwise spin correlations, while excluding lattice-locked SOC
+terms. A fully general product-group network could retain :math:`l_s>0`
+intermediate spin irreps, but it would require separate spatial and spin
+indices and substantially greater computational cost.
+
+Shared local update
+~~~~~~~~~~~~~~~~~~~
+
+Both branches gather the source and target node features, rotate their spatial
+irreps into the bond frame, and apply path weights followed by
+``O2Linear -> O2Gate -> O2Linear``. Radial rotary attention is optional. The
+message is then rotated back, scattered to the target node, and passed to the
+TACE product basis for the explicit many-body expansion. The only difference
+is the magnetic input: the SOC branch rotates complete magnetic edge tensors,
+whereas the non-SOC branch inserts bond-frame-independent ``0ee`` scalars.
 
 
 Installation requirements
@@ -159,9 +271,14 @@ irrep label can be checked with:
 
    python -c "from e3nn import o3; print(o3.Irrep('1eo'))"
 
-This e3nn variant is required for an mTACE model that strictly enforces time
-reversal. With standard e3nn, TACE can still construct a spatially
-:math:`O(3)`-equivariant model, but the time-reversal label is not represented.
+This e3nn variant is required for the SOC branch to propagate time parity
+through its non-scalar magnetic intermediate features. With standard e3nn,
+TACE can still construct a spatially :math:`O(3)`-equivariant model, but the
+time-reversal label is not represented. The non-SOC rank-zero magnetic edge
+features are themselves time even by construction; the time-reversal e3nn
+variant is nevertheless recommended for a consistent magnetic workflow and is
+required as soon as time-odd intermediate features, inputs, or outputs are
+used.
 
 Time-reversal models use the time-reversal implementation for irreps, solid
 harmonics, linear maps, gates, and tensor products. Accelerated equivariant
@@ -230,7 +347,7 @@ The characteristic range used by the magnetic basis is
 For multiple fidelities, TACE uses the largest selected value for each element
 to obtain one common model scale.
 
-Radial and Angular normalization
+Radial and angular normalization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The default uses the per-element RMS magnitude together with

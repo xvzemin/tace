@@ -140,6 +140,7 @@ class Representation(torch.nn.Module):
                 time_reversal=self.use_time_reversal,
                 angular_normalization=angular_basis["magnetic_normalization"],
                 radial_normalization=radial_basis["magnetic_normalization"],
+                magnetic_use_soc=angular_basis.get("magnetic_use_soc", True),
             )
             self.magnetic_node_irreps_out = (
                 self.magnetic_basis.magnetic_node_irreps_out
