@@ -344,11 +344,12 @@ model:
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
       bias: true  # (bool)
+      magnetic_normalization: rational # stable: [clamp]: not-table: [clamp]
 
     angular_basis:
       magnetic_basis:
-        Lmax: 1 # Maximum degree of magnetic solid harmonics, in [1, Lmax].
-        normalization: integral # [integral, component]
+        Lmax: 2 # Maximum degree of magnetic solid harmonics, in [1, Lmax] recommend >=2.
+        normalization: element # [element, integral, component]
 
     resnet:
       type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect
@@ -395,14 +396,14 @@ model:
 
     scale_shift:
       enable: true
-      # rms_forces uses the RMS over xyz components; *_norm uses vector norms.
-      scale_type: rms_forces # [null, rms_forces, rms_forces_by_element, rms_forces_norm, rms_forces_norm_by_element]
-      shift_type: null # [null, mean_energy_per_atom, mean_delta_energy_per_atom, forces]
-      magmoms_scale_type: max_initial_noncollinear_magmoms_norm_by_element
+      scale_type: rms_forces # [null, rms_forces, rms_forces_by_element]
+      shift_type: null # [null, mean_delta_energy_per_atom]
       scale_trainable: false # (bool)
       shift_trainable: false # (bool)
       all_atoms: false
       scale_zbl: false
+      # [max_noncollinear_magmoms_norm_by_element, rms_noncollinear_magmoms_norm_by_element]
+      magmoms_scale_type: rms_noncollinear_magmoms_norm_by_element
 
     short_range:
       zbl: # metal units

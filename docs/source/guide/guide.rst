@@ -34,7 +34,7 @@ and `Hydra <https://hydra.cc/>`_.
    torchSim.rst
    scripts.rst
    les.rst
-   soc.rst
+   mTACE.rst
    magnetic_relax.rst
    qeq.rst
    scf.rst

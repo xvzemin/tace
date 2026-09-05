@@ -84,16 +84,22 @@ class MagneticBasis(torch.nn.Module):
         atomic_numbers: list[int],
         num_elements: int,
         time_reversal: bool = False,
-        normalization: str = "integral",
+        normalization: str = "element",
+        radial_normalization: str = "rational",
     ) -> None:
         super().__init__()
         if not isinstance(Lmax, int) or isinstance(Lmax, bool) or Lmax < 0:
             raise ValueError("Lmax must be a non-negative integer.")
         self.num_basis = num_basis
         self.Lmax = Lmax
-        if normalization not in ("integral", "component"):
-            raise ValueError("normalization must be 'integral' or 'component'.")
+        if normalization not in ("integral", "component", "element"):
+            raise ValueError(
+                "normalization must be 'integral', 'component', or 'element'."
+            )
         self.normalization = normalization
+        if radial_normalization not in ("clamp", "rational"):
+            raise ValueError("radial_normalization must be 'clamp' or 'rational'.")
+        self.radial_normalization = radial_normalization
 
         self.register_buffer(
             "scale",
@@ -116,7 +122,9 @@ class MagneticBasis(torch.nn.Module):
         ).regroup()
         self.angular_basis = SolidHarmonics(
             self.magnetic_node_irreps_out,
-            normalization=normalization,
+            normalization=(
+                "integral" if normalization == "element" else normalization
+            ),
         )
 
         magnetic_edge_irrep_list = []
@@ -148,18 +156,30 @@ class MagneticBasis(torch.nn.Module):
         edge_index: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         scale = self.scale[node_attrs.argmax(dim=-1)].unsqueeze(-1)
-        magnetic_norm = initial_noncollinear_magmoms.norm(dim=-1, keepdim=True)
-        magnetic_norm = (
-            1.0
-            - 2.0
-            * torch.clamp(
-                magnetic_norm * scale,
+        scaled_magmoms = None
+        if (
+            self.radial_normalization == "rational"
+            or self.normalization == "element"
+        ):
+            scaled_magmoms = initial_noncollinear_magmoms * scale
+        if self.radial_normalization == "clamp":
+            radial_coordinate = 1.0 - 2.0 * torch.clamp(
+                initial_noncollinear_magmoms.norm(dim=-1, keepdim=True) * scale,
                 min=0.0,
                 max=1.0,
             ).square()
-        )
-        magnetic_radial_basis = self.radial_basis(magnetic_norm)
-        magnetic_node_attrs = self.angular_basis(initial_noncollinear_magmoms)
+        else:
+            assert scaled_magmoms is not None
+            squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
+            radial_coordinate = (1.0 - squared_magnitude) / (
+                1.0 + squared_magnitude
+            )
+        magnetic_radial_basis = self.radial_basis(radial_coordinate)
+        if self.normalization == "element":
+            assert scaled_magmoms is not None
+            magnetic_node_attrs = self.angular_basis(scaled_magmoms)
+        else:
+            magnetic_node_attrs = self.angular_basis(initial_noncollinear_magmoms)
         source, target = edge_index
         magnetic_edge_attrs = self.magnetic_edge_tensor_product(
             magnetic_node_attrs[target],
@@ -175,6 +195,7 @@ class MagneticBasis(torch.nn.Module):
             f"  num_basis={self.num_basis},\n"
             f"  Lmax={self.Lmax},\n"
             f"  normalization={self.normalization!r},\n"
+            f"  radial_normalization={self.radial_normalization!r},\n"
             f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"
             f"  magnetic_edge_irreps_out={self.magnetic_edge_irreps_out}\n"
             ")"

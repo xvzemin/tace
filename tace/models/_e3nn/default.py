@@ -46,11 +46,12 @@ DEFAULT_MODEL_CONFIG = {
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
         "gaussian_width": 2.0,
+        "magnetic_normalization": "rational",
     },
     "angular_basis": {
         "magnetic_basis": {
             "Lmax": 2,
-            "normalization": "integral",
+            "normalization": "element",
         },
     },
     "atomic_basis": {
@@ -104,7 +105,7 @@ DEFAULT_MODEL_CONFIG = {
         "shift_trainable": False,
         "all_atoms": False,
         "scale_zbl": True,
-        "magmoms_scale_type": "max_initial_noncollinear_magmoms_norm_by_element",
+        "magmoms_scale_type": "rms_noncollinear_magmoms_norm_by_element",
     },
     "short_range": {
         "zbl": {
@@ -240,10 +241,21 @@ def check_model_config(cfg: dict[str, Any]):
             "angular_basis.magnetic_basis.Lmax must be positive and must not "
             "exceed model.config.Lmax when o2_mag is used."
         )
-    if magnetic_basis["normalization"] not in ("integral", "component"):
+    if magnetic_basis["normalization"] not in (
+        "integral",
+        "component",
+        "element",
+    ):
         raise ValueError(
             "angular_basis.magnetic_basis.normalization must be "
-            "'integral' or 'component'."
+            "'integral', 'component', or 'element'."
+        )
+    if cfg["radial_basis"]["magnetic_normalization"] not in (
+        "clamp",
+        "rational",
+    ):
+        raise ValueError(
+            "radial_basis.magnetic_normalization must be 'clamp' or 'rational'."
         )
 
     if cfg.get("max_neighbors") is not None:

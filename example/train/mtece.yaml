@@ -52,11 +52,14 @@ model:
 
     angular_basis:
       magnetic_basis:
-        Lmax: 1
-        normalization: integral
+        Lmax: 2
+        normalization: element
+
+    radial_basis:
+      magnetic_normalization: rational
 
     scale_shift:
-      magmoms_scale_type: max_initial_noncollinear_magmoms_norm_by_element
+      magmoms_scale_type: rms_noncollinear_magmoms_norm_by_element
 
     atomic_basis:
       type: o2_mag

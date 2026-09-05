@@ -519,39 +519,81 @@ def _compute_statistics(
             _, mag_mean, mag_std, mag_rms = (
                 value[level] for value in noncollinear_magmoms_summary
             )
+            rms_noncollinear_magmoms = torch.sqrt(mag_rms[:3].square().mean())
+            safe_rms_noncollinear_magmoms = torch.where(
+                torch.isfinite(rms_noncollinear_magmoms)
+                & (rms_noncollinear_magmoms > 0),
+                rms_noncollinear_magmoms,
+                1.0,
+            )
+            rms_noncollinear_magmoms_by_element = torch.sqrt(
+                mag_rms_by_element[:, :3].square().mean(dim=-1)
+            )
+            safe_rms_noncollinear_magmoms_by_element = torch.where(
+                torch.isfinite(rms_noncollinear_magmoms_by_element)
+                & (rms_noncollinear_magmoms_by_element > 0),
+                rms_noncollinear_magmoms_by_element,
+                1.0,
+            )
+            rms_noncollinear_magmoms_norm = mag_rms[3]
+            safe_rms_noncollinear_magmoms_norm = torch.where(
+                torch.isfinite(rms_noncollinear_magmoms_norm)
+                & (rms_noncollinear_magmoms_norm > 0),
+                rms_noncollinear_magmoms_norm,
+                1.0,
+            )
+            rms_noncollinear_magmoms_norm_by_element = mag_rms_by_element[:, 3]
+            safe_rms_noncollinear_magmoms_norm_by_element = torch.where(
+                torch.isfinite(rms_noncollinear_magmoms_norm_by_element)
+                & (rms_noncollinear_magmoms_norm_by_element > 0),
+                rms_noncollinear_magmoms_norm_by_element,
+                1.0,
+            )
             stats.update(
                 {
-                    "mean_initial_noncollinear_magmoms_xyz": mag_mean[:3].tolist(),
-                    "std_initial_noncollinear_magmoms_xyz": mag_std[:3].tolist(),
-                    "rms_initial_noncollinear_magmoms_xyz": mag_rms[:3].tolist(),
-                    "mean_initial_noncollinear_magmoms_norm": float(mag_mean[3]),
-                    "std_initial_noncollinear_magmoms_norm": float(mag_std[3]),
-                    "rms_initial_noncollinear_magmoms_norm": float(mag_rms[3]),
-                    "max_initial_noncollinear_magmoms_norm": float(
+                    "mean_noncollinear_magmoms_xyz": mag_mean[:3].tolist(),
+                    "std_noncollinear_magmoms_xyz": mag_std[:3].tolist(),
+                    "rms_noncollinear_magmoms_xyz": mag_rms[:3].tolist(),
+                    "mean_noncollinear_magmoms_norm": float(mag_mean[3]),
+                    "std_noncollinear_magmoms_norm": float(mag_std[3]),
+                    "max_noncollinear_magmoms_norm": float(
                         max_noncollinear_magmoms_norm[level].max()
                     ),
-                    "mean_initial_noncollinear_magmoms_xyz_by_element": _by_element(
+                    "mean_noncollinear_magmoms_xyz_by_element": _by_element(
                         mag_mean_by_element[:, :3], atomic_numbers
                     ),
-                    "std_initial_noncollinear_magmoms_xyz_by_element": _by_element(
+                    "std_noncollinear_magmoms_xyz_by_element": _by_element(
                         mag_std_by_element[:, :3], atomic_numbers
                     ),
-                    "rms_initial_noncollinear_magmoms_xyz_by_element": _by_element(
+                    "rms_noncollinear_magmoms_xyz_by_element": _by_element(
                         mag_rms_by_element[:, :3], atomic_numbers
                     ),
-                    "mean_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                    "mean_noncollinear_magmoms_norm_by_element": _by_element(
                         mag_mean_by_element[:, 3], atomic_numbers
                     ),
-                    "std_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                    "std_noncollinear_magmoms_norm_by_element": _by_element(
                         mag_std_by_element[:, 3], atomic_numbers
                     ),
-                    "rms_initial_noncollinear_magmoms_norm_by_element": _by_element(
-                        mag_rms_by_element[:, 3], atomic_numbers
+                    "rms_noncollinear_magmoms": {
+                        z: float(safe_rms_noncollinear_magmoms)
+                        for z in atomic_numbers
+                    },
+                    "rms_noncollinear_magmoms_by_element": _by_element(
+                        safe_rms_noncollinear_magmoms_by_element,
+                        atomic_numbers,
                     ),
-                    "max_initial_noncollinear_magmoms_norm_by_element": _by_element(
+                    "rms_noncollinear_magmoms_norm": {
+                        z: float(safe_rms_noncollinear_magmoms_norm)
+                        for z in atomic_numbers
+                    },
+                    "rms_noncollinear_magmoms_norm_by_element": _by_element(
+                        safe_rms_noncollinear_magmoms_norm_by_element,
+                        atomic_numbers,
+                    ),
+                    "max_noncollinear_magmoms_norm_by_element": _by_element(
                         max_noncollinear_magmoms_norm[level], atomic_numbers
                     ),
-                    "num_initial_noncollinear_magmoms_by_element": _by_element(
+                    "num_noncollinear_magmoms_by_element": _by_element(
                         mag_count_by_element[:, 0], atomic_numbers
                     ),
                 }

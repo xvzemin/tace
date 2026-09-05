@@ -21,7 +21,7 @@ def test_missing_model_statistics_only_checks_requested_inputs():
             "scale_type": "rms_forces",
             "shift_type": None,
             "magmoms_scale_type": (
-                "max_initial_noncollinear_magmoms_norm_by_element"
+                "max_noncollinear_magmoms_norm_by_element"
             ),
         }
     }
@@ -38,7 +38,7 @@ def test_missing_model_statistics_only_checks_requested_inputs():
         model_config,
         target_property=["energy"],
         embedding_property=["initial_noncollinear_magmoms"],
-    ) == {"max_initial_noncollinear_magmoms_norm_by_element"}
+    ) == {"max_noncollinear_magmoms_norm_by_element"}
 
 
 def test_statistics_dataloader_overrides_training_batch_size():
@@ -340,45 +340,74 @@ def test_initial_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch
     )[0]
 
     torch.testing.assert_close(
-        torch.tensor(stats["mean_initial_noncollinear_magmoms_xyz"]),
+        torch.tensor(stats["mean_noncollinear_magmoms_xyz"]),
         torch.tensor([0.0, 5.0 / 3.0, 2.0]),
     )
     torch.testing.assert_close(
-        torch.tensor(stats["std_initial_noncollinear_magmoms_xyz"]),
+        torch.tensor(stats["std_noncollinear_magmoms_xyz"]),
         torch.tensor(
             [math.sqrt(2.0 / 3.0), math.sqrt(14.0) / 3.0, math.sqrt(8.0 / 3.0)]
         ),
     )
     torch.testing.assert_close(
-        torch.tensor(stats["rms_initial_noncollinear_magmoms_xyz"]),
+        torch.tensor(stats["rms_noncollinear_magmoms_xyz"]),
         torch.tensor(
             [math.sqrt(2.0 / 3.0), math.sqrt(13.0 / 3.0), math.sqrt(20.0 / 3.0)]
         ),
     )
-    assert stats["mean_initial_noncollinear_magmoms_norm"] == 3.0
-    assert stats["std_initial_noncollinear_magmoms_norm"] == math.sqrt(8.0 / 3.0)
-    assert stats["rms_initial_noncollinear_magmoms_norm"] == math.sqrt(35.0 / 3.0)
-    assert stats["max_initial_noncollinear_magmoms_norm"] == 5.0
-    assert stats["mean_initial_noncollinear_magmoms_xyz_by_element"] == {
+    torch.testing.assert_close(
+        torch.tensor(list(stats["rms_noncollinear_magmoms"].values())),
+        torch.full((2,), math.sqrt(35.0) / 3.0),
+    )
+    torch.testing.assert_close(
+        torch.tensor(list(stats["rms_noncollinear_magmoms_by_element"].values())),
+        torch.tensor([math.sqrt(5.0 / 3.0), 5.0 / math.sqrt(3.0)]),
+    )
+    torch.testing.assert_close(
+        torch.tensor(list(stats["rms_noncollinear_magmoms_norm"].values())),
+        torch.full((2,), math.sqrt(35.0 / 3.0)),
+    )
+    assert stats["mean_noncollinear_magmoms_norm"] == 3.0
+    assert stats["std_noncollinear_magmoms_norm"] == math.sqrt(8.0 / 3.0)
+    assert stats["max_noncollinear_magmoms_norm"] == 5.0
+    assert stats["mean_noncollinear_magmoms_xyz_by_element"] == {
         1: [0.0, 1.0, 1.0],
         2: [0.0, 3.0, 4.0],
     }
-    assert stats["std_initial_noncollinear_magmoms_xyz_by_element"] == {
+    assert stats["std_noncollinear_magmoms_xyz_by_element"] == {
         1: [1.0, 1.0, 1.0],
         2: [0.0, 0.0, 0.0],
     }
     torch.testing.assert_close(
         torch.tensor(
-            list(stats["rms_initial_noncollinear_magmoms_norm_by_element"].values())
+            list(stats["rms_noncollinear_magmoms_norm_by_element"].values())
         ),
         torch.tensor([math.sqrt(5.0), 5.0]),
     )
-    assert stats["max_initial_noncollinear_magmoms_norm_by_element"] == {
+    component_rms = torch.tensor(
+        list(stats["rms_noncollinear_magmoms_by_element"].values())
+    )
+    norm_rms = torch.tensor(
+        list(stats["rms_noncollinear_magmoms_norm_by_element"].values())
+    )
+    torch.testing.assert_close(norm_rms, math.sqrt(3.0) * component_rms)
+    global_component_rms = torch.tensor(
+        list(stats["rms_noncollinear_magmoms"].values())
+    )
+    global_norm_rms = torch.tensor(
+        list(stats["rms_noncollinear_magmoms_norm"].values())
+    )
+    torch.testing.assert_close(
+        global_norm_rms,
+        math.sqrt(3.0) * global_component_rms,
+    )
+    assert stats["max_noncollinear_magmoms_norm_by_element"] == {
         1: 3.0,
         2: 5.0,
     }
-    assert stats["num_initial_noncollinear_magmoms_by_element"] == {1: 2, 2: 1}
+    assert stats["num_noncollinear_magmoms_by_element"] == {1: 2, 2: 1}
     assert "magmoms_norm_by_element" not in stats
+    assert not any("initial_noncollinear_magmoms" in name for name in stats)
 
 
 def test_initial_noncollinear_magmoms_statistics_are_per_fidelity(monkeypatch):
@@ -409,5 +438,5 @@ def test_initial_noncollinear_magmoms_statistics_are_per_fidelity(monkeypatch):
         num_fidelities=2,
     )
 
-    assert stats[0]["max_initial_noncollinear_magmoms_norm_by_element"] == {26: 1.0}
-    assert stats[1]["max_initial_noncollinear_magmoms_norm_by_element"] == {26: 5.0}
+    assert stats[0]["max_noncollinear_magmoms_norm_by_element"] == {26: 1.0}
+    assert stats[1]["max_noncollinear_magmoms_norm_by_element"] == {26: 5.0}
