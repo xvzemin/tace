@@ -351,6 +351,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
         node_embedding=config["node_embedding"],
         edge_embedding=config["edge_embedding"],
         edge_update=config["edge_update"],
+        magnetic_edge_update=config["magnetic_edge_update"],
         radial_basis=config["radial_basis"],
         atomic_basis=config["atomic_basis"],
         resnet=config["resnet"],

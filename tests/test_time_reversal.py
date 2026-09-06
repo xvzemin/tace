@@ -181,6 +181,11 @@ def test_spin_node_embedding_registers_magnetic_input(
     config = _model_config()
     config["node_embedding"]["type"] = embedding_name
     config["fidelity"][0]["magnetic_scale"] = {1: 2.0}
+    config["mmax"] = 1
+    config["parity"] = True
+    config["angular_basis"]["magnetic_Lmax"] = 1
+    config["atomic_basis"]["type"] = ["o2_mag"]
+    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
     model = e3nnTACE(**config)
 
     assert isinstance(model.representation.node_embedding, embedding_type)

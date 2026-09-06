@@ -131,10 +131,10 @@ class Representation(torch.nn.Module):
                 if name not in time_odd_scalars
             ]
             self.equivariant_property.extend(time_odd_scalars)
-        self.use_magnetic_radial_basis = uses_magnetic_interaction
+        self.use_magnetic_interaction = uses_magnetic_interaction
         self.magnetic_node_irreps_out = None
         self.magnetic_edge_irreps_out = None
-        if self.use_magnetic_radial_basis:
+        if self.use_magnetic_interaction:
             self.magnetic_basis = MagneticBasis(
                 magnetic_scale,
                 num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
@@ -380,7 +380,7 @@ class Representation(torch.nn.Module):
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
         magnetic_edge_attrs = None
-        if self.use_magnetic_radial_basis:
+        if self.use_magnetic_interaction:
             if initial_noncollinear_magmoms is None:
                 raise ValueError(
                     "A magnetic model requires initial_noncollinear_magmoms"
