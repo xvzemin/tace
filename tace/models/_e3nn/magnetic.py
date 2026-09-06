@@ -18,19 +18,16 @@ from .fused import uuuTensorProduct
 class MagneticBasis(torch.nn.Module):
     """Construct radial, node, and edge magnetic representations."""
 
-    a = 1.2
-    b = 0.1
-
     def __init__(
         self,
-        scale,
+        magnetic_scale,
         num_mag_radial_basis: int,
         Lmax: int,
         atomic_numbers: list[int],
         time_reversal: bool = False,
-        angular_normalization: str = "element",
-        radial_normalization: str = "rational",
-        magnetic_use_soc: bool = True,
+        angular_normalization: str = "integral",
+        radial_normalization: str = "clamp",
+        use_spin_orbit_coupling: bool = True,
     ) -> None:
         super().__init__()
 
@@ -38,21 +35,19 @@ class MagneticBasis(torch.nn.Module):
             raise ValueError("Lmax must be a non-negative integer.")
         if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:
             raise ValueError("num_mag_radial_basis must be a positive integer.")
-        if angular_normalization not in ("integral", "component", "element"):
-            raise ValueError(
-                "angular_normalization must be 'integral', 'component', or 'element'."
-            )
-        if radial_normalization not in ("rational", "clamp"):
-            raise ValueError("radial_normalization must be 'clamp' or 'rational'.")
+        if angular_normalization != "integral":
+            raise ValueError("angular_normalization currently only supports 'integral'.")
+        if radial_normalization != "clamp":
+            raise ValueError("radial_normalization currently only supports 'clamp'.")
 
         self.Lmax = Lmax
         self.num_mag_radial_basis = num_mag_radial_basis
         self.angular_normalization = angular_normalization
         self.radial_normalization = radial_normalization
-        self.magnetic_use_soc = magnetic_use_soc
+        self.use_spin_orbit_coupling = use_spin_orbit_coupling
         self.register_buffer(
-            "scale",
-            1.0 / (self.a * self._resolve_scale(scale, atomic_numbers) + self.b),
+            "magnetic_scale",
+            self._resolve_magnetic_scale(magnetic_scale, atomic_numbers),
         )
         self.radial_basis = MagneticChebyshevBasis(
             num_basis=num_mag_radial_basis,
@@ -65,14 +60,10 @@ class MagneticBasis(torch.nn.Module):
         ).regroup()
         self.angular_basis = SolidHarmonics(
             self.magnetic_node_irreps_out,
-            normalization=(
-                "component"
-                if angular_normalization == "element"
-                else angular_normalization
-            ),
+            normalization=angular_normalization,
         )
 
-        if magnetic_use_soc:
+        if use_spin_orbit_coupling:
             magnetic_edge_irrep_list = []
             for _, ir1 in self.magnetic_node_irreps_out:
                 for _, ir2 in self.magnetic_node_irreps_out:
@@ -100,23 +91,31 @@ class MagneticBasis(torch.nn.Module):
         )
 
     @staticmethod
-    def _resolve_scale(scale, atomic_numbers: list[int]) -> torch.Tensor:
-        if isinstance(scale, Mapping):
+    def _resolve_magnetic_scale(
+        magnetic_scale, atomic_numbers: list[int]
+    ) -> torch.Tensor:
+        if isinstance(magnetic_scale, Mapping):
             values = []
             for atomic_number in atomic_numbers:
-                value = scale.get(atomic_number, scale.get(str(atomic_number)))
+                value = magnetic_scale.get(
+                    atomic_number, magnetic_scale.get(str(atomic_number))
+                )
                 if value is None:
-                    raise ValueError(f"scale is missing atomic number {atomic_number}")
+                    raise ValueError(
+                        f"magnetic_scale is missing atomic number {atomic_number}"
+                    )
                 values.append(float(value))
-        elif isinstance(scale, Real):
-            values = [float(scale)] * len(atomic_numbers)
+        elif isinstance(magnetic_scale, Real):
+            values = [float(magnetic_scale)] * len(atomic_numbers)
         else:
-            raise TypeError("scale must be a scalar or an element-dependent mapping")
+            raise TypeError(
+                "magnetic_scale must be a scalar or an element-dependent mapping"
+            )
 
-        scale_tensor = torch.tensor(values, dtype=torch.get_default_dtype())
-        if not torch.isfinite(scale_tensor).all() or (scale_tensor < 0.0).any():
-            raise ValueError("all scale values must be finite and non-negative")
-        return scale_tensor
+        magnetic_scale = torch.tensor(values, dtype=torch.get_default_dtype())
+        if not torch.isfinite(magnetic_scale).all() or (magnetic_scale <= 0.0).any():
+            raise ValueError("all magnetic_scale values must be finite and positive")
+        return magnetic_scale
 
     def forward(
         self,
@@ -124,30 +123,16 @@ class MagneticBasis(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        scale = self.scale[node_attrs.argmax(dim=-1)].unsqueeze(-1)
-        scaled_magmoms = initial_noncollinear_magmoms * scale
+        magnetic_scale = self.magnetic_scale[node_attrs.argmax(dim=-1)].unsqueeze(-1)
+        scaled_magmoms = initial_noncollinear_magmoms / magnetic_scale
         squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
-        if self.radial_normalization == "clamp":
-            radial_coordinate = 1.0 - 2.0 * torch.clamp(
-                squared_magnitude,
-                min=0.0,
-                max=1.0,
-            )
-        else:
-            radial_coordinate = 2.0 / (1.0 + squared_magnitude) - 1.0
-        magnetic_radial_basis = self.radial_basis(radial_coordinate)
-        if self.angular_normalization == "element":
-            angular_input = scaled_magmoms
-            angular_squared_magnitude = squared_magnitude
-        else:
-            angular_input = initial_noncollinear_magmoms
-            angular_squared_magnitude = angular_input.square().sum(
-                dim=-1, keepdim=True
-            )
-        bounded_angular_input = angular_input * torch.rsqrt(
-            1.0 + angular_squared_magnitude
+        radial_coordinate = 1.0 - 2.0 * torch.clamp(
+            squared_magnitude,
+            min=0.0,
+            max=1.0,
         )
-        magnetic_node_attrs = self.angular_basis(bounded_angular_input)
+        magnetic_radial_basis = self.radial_basis(radial_coordinate)
+        magnetic_node_attrs = self.angular_basis(initial_noncollinear_magmoms)
         source, target = edge_index
         magnetic_edge_attrs = self.magnetic_edge_tensor_product(
             magnetic_node_attrs[target],
@@ -163,13 +148,13 @@ class MagneticBasis(torch.nn.Module):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(\n"
-            f"  scale={self.scale.tolist()},\n"
+            f"  use_spin_orbit_coupling={self.use_spin_orbit_coupling},\n"
             f"  num_mag_radial_basis={self.num_mag_radial_basis},\n"
-            f"  Lmax={self.Lmax},\n"
-            f"  angular_normalization={self.angular_normalization!r},\n"
-            f"  radial_normalization={self.radial_normalization!r},\n"
-            f"  magnetic_use_soc={self.magnetic_use_soc},\n"
             f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"
             f"  magnetic_edge_irreps_out={self.magnetic_edge_irreps_out}\n"
+            f"  magnetic_scale={self.magnetic_scale.tolist()},\n"
+            # f"  Lmax={self.Lmax},\n"
+            # f"  angular_normalization={self.angular_normalization!r},\n"
+            # f"  radial_normalization={self.radial_normalization!r},\n"
             ")"
         )

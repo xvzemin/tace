@@ -186,7 +186,7 @@ features, this branch permits the magnetic orientation relative to the lattice
 to affect the message.
 
 This is the default mode, corresponding to
-``angular_basis.magnetic_use_soc: true``.
+``angular_basis.use_spin_orbit_coupling: true``.
 
 Non-SOC architecture
 ~~~~~~~~~~~~~~~~~~~~
@@ -227,7 +227,7 @@ Set the architecture with:
        atomic_basis:
          type: o2_mag
        angular_basis:
-         magnetic_use_soc: false
+         use_spin_orbit_coupling: false
 
 The rank-zero construction represents exchange and higher polynomial
 functions of pairwise spin correlations, while excluding lattice-locked SOC
@@ -318,25 +318,24 @@ from ``example/train`` after updating its dataset paths.
      train_file: /path/to/train.xyz
      valid_file: /path/to/valid.xyz
 
-Magnetic normalization
+Magnetic basis scaling
 ----------------------
 
 Element scales and statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``scale_shift.magmoms_scale_type`` selects a per-element statistic :math:`s_Z`.
-The two common choices are:
+``magnetic_scale`` is configured for each fidelity next to ``atomic_energy``:
 
-``max_noncollinear_magmoms_norm_by_element``
-   Maximum :math:`\lVert\mathbf{m}_i\rVert` for each element. This avoids mapping
-   ordinary training samples far outside the characteristic range, but it is
-   sensitive to outliers.
+.. code-block:: yaml
 
-``rms_noncollinear_magmoms_norm_by_element``
-   RMS of magnetic-vector magnitudes for each element. This is the default and
-   describes the typical magnitude without being controlled by a single
-   outlier. Values above the characteristic range remain smooth because the
-   default radial map is rational rather than clamped.
+   fidelity:
+     - name: PBE
+       atomic_energy: null
+       magnetic_scale: null
+
+It may be a scalar or an element-dependent mapping. A supplied value is used
+directly. When it is ``null``, TACE obtains the maximum magnetic-vector
+magnitude :math:`s_Z` of every element from the training statistics and sets
 
 The characteristic range used by the magnetic basis is
 
@@ -344,72 +343,34 @@ The characteristic range used by the magnetic basis is
 
    M_Z=1.2s_Z+0.1.
 
-For multiple fidelities, TACE uses the largest selected value for each element
-to obtain one common model scale.
+For multiple fidelities, TACE uses the largest final scale for each element to
+obtain one common model scale. The factor and offset are applied only to scales
+inferred from statistics; manually specified scales are not transformed.
+Magnetic statistics are always computed when magnetic moments are model inputs,
+including when every scale is supplied explicitly.
 
 Radial and angular normalization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The default uses the per-element RMS magnitude together with
-``angular_basis.magnetic_normalization: element`` and
-``radial_basis.magnetic_normalization: rational`` for dimensionless, smooth,
-bounded learned magnetic features.
-
 The magnetic Chebyshev basis is evaluated on a coordinate in
-:math:`[-1,1]`. ``radial_basis.magnetic_normalization`` controls the mapping.
-``radial_basis.num_mag_radial_basis`` is the number of returned non-constant
-basis functions; the constant Chebyshev mode is not included.
-
-``rational``
-
-   .. math::
-
-      x_i=\frac{1-u_i^2}{1+u_i^2}.
-
-   It uses only :math:`\lVert\mathbf{m}_i\rVert^2`, is smooth in the Cartesian
-   components at zero, requires no clipping, and approaches :math:`-1`
-   continuously for large moments.
-
-``clamp``
-
-   .. math::
-
-      u_i=\frac{\lVert\mathbf{m}_i\rVert}{M_{Z_i}},\qquad
-      x_i=1-2\min(u_i,1)^2.
-
-   It is smooth at zero because it depends quadratically on the magnitude. It
-   saturates at :math:`x=-1` and has a derivative discontinuity at
-   :math:`u=1`.
-
-
-``angular_basis.magnetic_Lmax`` selects the maximum magnetic solid-harmonic
-degree. ``angular_basis.magnetic_normalization`` accepts three modes:
-
-``integral``
-   Uses e3nn integral-normalized regular solid harmonics.
-
-``component``
-   Uses e3nn component-normalized regular solid harmonics.
-
-``element``
-   Uses the component convention and the dimensionless element-scaled vector.
-   Element scaling already controls the species-dependent magnitude; an
-   additional integral factor would uniformly reduce every component variance
-   by :math:`4\pi` without adding a physical constraint.
-
-For every mode, the learned angular representation is the bounded rational
-solid harmonic
+:math:`[-1,1]` using the fixed ``clamp`` mapping
 
 .. math::
 
-   \widetilde{\mathcal R}^{(l)}(\mathbf{q}_i)
-   =\frac{\mathcal R^{(l)}(\mathbf{q}_i)}
-   {(1+\lVert\mathbf{q}_i\rVert^2)^{l/2}},
+   u_i=\frac{\lVert\mathbf{m}_i\rVert}{M_{Z_i}},\qquad
+   x_i=1-2\min(u_i^2,1).
 
-where :math:`\mathbf{q}_i=\mathbf{m}_i/M_{Z_i}` for ``element`` and
-:math:`\mathbf{q}_i=\mathbf{m}_i` otherwise. Near zero it has the same leading
-behavior as the regular solid harmonic, while it remains bounded for
-arbitrarily large moments.
+It is smooth at zero because it depends on the squared Cartesian components. It
+saturates at :math:`x=-1` and has a derivative discontinuity at :math:`u=1`.
+``radial_basis.num_mag_radial_basis`` is the number of returned non-constant
+basis functions; the constant Chebyshev mode is not included.
+
+
+``angular_basis.magnetic_Lmax`` selects the maximum magnetic solid-harmonic
+degree. The angular representation uses ``integral``-normalized regular solid
+harmonics of the unscaled magnetic vector. The radial and angular normalization
+options are not exposed by the model configuration; ``MagneticBasis`` currently
+supports only ``clamp`` and ``integral``, respectively.
 
 Magnetic one-body energy
 ~~~~~~~~~~~~~~~~~~~~~~~~

@@ -3,7 +3,9 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import math
 from collections.abc import Mapping
+from numbers import Real
 from typing import Any
 
 from ...dataset.quantity import PROPERTY
@@ -20,6 +22,7 @@ DEFAULT_MODEL_CONFIG = {
     "fidelity": {
         "name": "PBE",
         "atomic_energy": None,
+        "magnetic_scale": None,
     },
     "node_embedding": {
         "type": "linear",
@@ -46,12 +49,10 @@ DEFAULT_MODEL_CONFIG = {
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
         "gaussian_width": 2.0,
-        "magnetic_normalization": "rational",
     },
     "angular_basis": {
         "magnetic_Lmax": 2,
-        "magnetic_normalization": "element",
-        "magnetic_use_soc": True,
+        "use_spin_orbit_coupling": True,
     },
     "atomic_basis": {
         "type": "cgtp",
@@ -103,7 +104,6 @@ DEFAULT_MODEL_CONFIG = {
         "shift_trainable": False,
         "all_atoms": False,
         "scale_zbl": True,
-        "magmoms_scale_type": "rms_noncollinear_magmoms_norm_by_element",
     },
     "short_range": {
         "zbl": {
@@ -216,16 +216,6 @@ def check_model_config(cfg: dict[str, Any]):
             if name in DEFAULT_MODEL_CONFIG["universal_embedding"]
         }
         
-    if "magnetic_basis" in cfg["angular_basis"]:
-        raise ValueError(
-            "angular_basis.magnetic_basis was replaced by the flat "
-            "magnetic_Lmax and magnetic_normalization fields."
-        )
-    if "radial_normalization" in cfg["radial_basis"]:
-        raise ValueError(
-            "radial_basis.radial_normalization was renamed to "
-            "magnetic_normalization."
-        )
     magnetic_lmax = cfg["angular_basis"]["magnetic_Lmax"]
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
@@ -239,22 +229,6 @@ def check_model_config(cfg: dict[str, Any]):
         raise ValueError(
             "angular_basis.magnetic_Lmax must be positive and must not "
             "exceed model.config.Lmax when o2_mag is used."
-        )
-    if cfg["angular_basis"]["magnetic_normalization"] not in (
-        "integral",
-        "component",
-        "element",
-    ):
-        raise ValueError(
-            "angular_basis.magnetic_normalization must be "
-            "'integral', 'component', or 'element'."
-        )
-    if cfg["radial_basis"]["magnetic_normalization"] not in (
-        "clamp",
-        "rational",
-    ):
-        raise ValueError(
-            "radial_basis.magnetic_normalization must be 'clamp' or 'rational'."
         )
     num_mag_radial_basis = cfg["radial_basis"]["num_mag_radial_basis"]
     if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:
@@ -275,27 +249,54 @@ def check_model_config(cfg: dict[str, Any]):
         s["avg_num_neighbors"] for s in cfg["statistics"]
     ) / len(cfg["statistics"])
 
-    magmoms_scale_type = cfg["scale_shift"]["magmoms_scale_type"]
-    if not isinstance(magmoms_scale_type, str):
-        raise TypeError("scale_shift.magmoms_scale_type must be a string.")
-    magnetic_statistics = [
-        stats[magmoms_scale_type]
-        for stats in cfg["statistics"]
-        if magmoms_scale_type in stats
-    ]
-    cfg["magmoms_scale_by_element"] = (
-        {
-            z: max(
-                (
-                    float(stats.get(z, stats.get(str(z), 0.0)))
-                    if isinstance(stats, Mapping)
-                    else float(stats)
-                )
-                for stats in magnetic_statistics
+    fidelity = cfg["fidelity"]
+    if isinstance(fidelity, Mapping):
+        fidelity = [fidelity]
+    magnetic_scales = []
+    for idx, fidelity_config in enumerate(fidelity):
+        magnetic_scale = fidelity_config.get("magnetic_scale")
+        if magnetic_scale is None:
+            if idx >= len(cfg["statistics"]):
+                magnetic_scales = []
+                break
+            magnetic_scale = cfg["statistics"][idx].get(
+                "max_noncollinear_magmoms_norm_by_element"
             )
+            if magnetic_scale is None:
+                magnetic_scales = []
+                break
+            if isinstance(magnetic_scale, Mapping):
+                magnetic_scale = {
+                    z: 1.2
+                    * float(magnetic_scale.get(z, magnetic_scale.get(str(z), 0.0)))
+                    + 0.1
+                    for z in cfg["atomic_numbers"]
+                }
+            else:
+                magnetic_scale = 1.2 * float(magnetic_scale) + 0.1
+        if isinstance(magnetic_scale, Mapping):
+            values = {}
+            for z in cfg["atomic_numbers"]:
+                value = magnetic_scale.get(z, magnetic_scale.get(str(z)))
+                if value is None:
+                    raise ValueError(f"magnetic_scale is missing atomic number {z}")
+                values[z] = float(value)
+        elif isinstance(magnetic_scale, Real):
+            values = {z: float(magnetic_scale) for z in cfg["atomic_numbers"]}
+        else:
+            raise TypeError(
+                "fidelity.magnetic_scale must be null, a scalar, or an "
+                "element-dependent mapping"
+            )
+        if any(not math.isfinite(value) or value <= 0.0 for value in values.values()):
+            raise ValueError("all magnetic_scale values must be finite and positive")
+        magnetic_scales.append(values)
+    cfg["magnetic_scale"] = (
+        {
+            z: max(scale[z] for scale in magnetic_scales)
             for z in cfg["atomic_numbers"]
         }
-        if magnetic_statistics
+        if magnetic_scales
         else None
     )
 

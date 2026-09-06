@@ -39,9 +39,7 @@ def missing_model_statistics(
         training=True,
     )
     if "initial_noncollinear_magmoms" in needed_property:
-        magmoms_scale_type = scale_shift.get("magmoms_scale_type")
-        if magmoms_scale_type is not None:
-            required.add(magmoms_scale_type)
+        required.add("max_noncollinear_magmoms_norm_by_element")
 
     return {
         name

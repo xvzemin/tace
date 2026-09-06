@@ -25,53 +25,67 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-def test_magnetic_scale_type_selects_statistics():
+def test_null_magnetic_scale_uses_maximum_statistics():
     config = check_model_config(
         {
             "statistics": [
                 {
                     "atomic_numbers": [26],
                     "avg_num_neighbors": 2.0,
-                    "rms_noncollinear_magmoms_norm_by_element": {26: 2.0},
+                    "max_noncollinear_magmoms_norm_by_element": {26: 2.0},
                 },
                 {
                     "atomic_numbers": [26],
                     "avg_num_neighbors": 4.0,
-                    "rms_noncollinear_magmoms_norm_by_element": {26: 3.0},
+                    "max_noncollinear_magmoms_norm_by_element": {26: 3.0},
                 },
             ],
             "target_property": [],
-            "scale_shift": {
-                "magmoms_scale_type": (
-                    "rms_noncollinear_magmoms_norm_by_element"
-                )
-            },
+            "fidelity": [
+                {"name": "PBE", "magnetic_scale": None},
+                {"name": "SCAN", "magnetic_scale": None},
+            ],
         }
     )
 
-    assert config["magmoms_scale_by_element"] == {26: 3.0}
+    assert config["magnetic_scale"] == pytest.approx({26: 3.7})
+
+
+def test_manual_magnetic_scale_is_used_without_rescaling():
+    config = check_model_config(
+        {
+            "statistics": [
+                {
+                    "atomic_numbers": [26],
+                    "avg_num_neighbors": 2.0,
+                    "max_noncollinear_magmoms_norm_by_element": {26: 9.0},
+                }
+            ],
+            "target_property": [],
+            "fidelity": [
+                {"name": "PBE", "magnetic_scale": {26: 2.0}},
+            ],
+        }
+    )
+
+    assert config["magnetic_scale"] == {26: 2.0}
 
 
 def test_magnetic_basis_normalization_validation():
     assert DEFAULT_MODEL_CONFIG["angular_basis"] == {
         "magnetic_Lmax": 2,
-        "magnetic_normalization": "element",
-        "magnetic_use_soc": True,
+        "use_spin_orbit_coupling": True,
     }
-    assert DEFAULT_MODEL_CONFIG["radial_basis"]["magnetic_normalization"] == (
-        "rational"
-    )
-    assert DEFAULT_MODEL_CONFIG["scale_shift"]["magmoms_scale_type"] == (
-        "rms_noncollinear_magmoms_norm_by_element"
-    )
+    assert "magnetic_normalization" not in DEFAULT_MODEL_CONFIG["radial_basis"]
+    assert "magmoms_scale_type" not in DEFAULT_MODEL_CONFIG["scale_shift"]
     basis = MagneticBasis(
         {26: 2.0},
         num_mag_radial_basis=4,
         Lmax=1,
         atomic_numbers=[26],
     )
-    assert basis.angular_normalization == "element"
-    assert basis.radial_normalization == "rational"
+    assert basis.angular_normalization == "integral"
+    assert basis.radial_normalization == "clamp"
     assert basis.num_mag_radial_basis == 4
 
     shared_scale_basis = MagneticBasis(
@@ -81,34 +95,32 @@ def test_magnetic_basis_normalization_validation():
         atomic_numbers=[26, 28],
     )
     torch.testing.assert_close(
-        shared_scale_basis.scale,
-        torch.full_like(shared_scale_basis.scale, 1.0 / 2.5),
+        shared_scale_basis.magnetic_scale,
+        torch.full_like(shared_scale_basis.magnetic_scale, 2.0),
     )
 
-    with pytest.raises(
-        ValueError, match="angular_normalization.*'integral', 'component', or 'element'"
-    ):
+    with pytest.raises(ValueError, match="only supports 'integral'"):
         MagneticBasis(
             {26: 2.0},
             num_mag_radial_basis=4,
             Lmax=1,
             atomic_numbers=[26],
-            angular_normalization="norm",
+            angular_normalization="component",
         )
-    with pytest.raises(TypeError, match="scale must be a scalar or"):
+    with pytest.raises(TypeError, match="magnetic_scale must be a scalar or"):
         MagneticBasis(
             [2.0],
             num_mag_radial_basis=4,
             Lmax=1,
             atomic_numbers=[26],
         )
-    with pytest.raises(ValueError, match="radial_normalization"):
+    with pytest.raises(ValueError, match="only supports 'clamp'"):
         MagneticBasis(
             {26: 2.0},
             num_mag_radial_basis=4,
             Lmax=1,
             atomic_numbers=[26],
-            radial_normalization="smooth",
+            radial_normalization="rational",
         )
 
 
@@ -189,13 +201,12 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
         atomic_numbers=[1],
         cutoff=3.0,
         avg_num_neighbors=2.0,
-        scale=None,
+        magnetic_scale=None,
         mmax=2,
         Lmax=Lmax,
         lmax=lmax,
         angular_basis={
             "magnetic_Lmax": 1,
-            "magnetic_normalization": "integral",
         },
         num_channel=2,
         target_irreps=o3.Irreps("0e"),
@@ -238,14 +249,13 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
         atomic_numbers=[26],
         cutoff=3.0,
         avg_num_neighbors=2.0,
-        scale={26: 2.0},
+        magnetic_scale={26: 2.0},
         mmax=1,
         Lmax=1,
         lmax=1,
         angular_basis={
             "magnetic_Lmax": 1,
-            "magnetic_normalization": "integral",
-            "magnetic_use_soc": False,
+            "use_spin_orbit_coupling": False,
         },
         num_channel=2,
         target_irreps=o3.Irreps("0e"),
@@ -823,8 +833,7 @@ def test_local_frame_preserves_time_parity():
 
 
 @pytest.mark.parametrize("Lmax", [1, 2])
-@pytest.mark.parametrize("normalization", ["integral", "component", "element"])
-def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, normalization):
+def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
     time_reversal = hasattr(o3.Irrep("0e"), "t")
     basis = MagneticBasis(
         {26: 2.0},
@@ -832,7 +841,6 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, normalization):
         Lmax=Lmax,
         atomic_numbers=[26],
         time_reversal=time_reversal,
-        angular_normalization=normalization,
     ).to(DEVICE, DTYPE)
     edge_index = torch.tensor(
         [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
@@ -851,34 +859,31 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, normalization):
         magnetic_node_attrs[target],
         magnetic_node_attrs[source],
     )
-    scaled_magmoms = magmoms * basis.scale[0]
+    scaled_magmoms = magmoms / basis.magnetic_scale[0]
     squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
-    expected_radial_coordinate = (1.0 - squared_magnitude) / (
-        1.0 + squared_magnitude
+    expected_radial_coordinate = 1.0 - 2.0 * torch.clamp(
+        squared_magnitude,
+        min=0.0,
+        max=1.0,
     )
 
-    assert basis.angular_basis.normalization == (
-        "component" if normalization == "element" else normalization
-    )
+    assert basis.angular_basis.normalization == "integral"
     assert not basis.angular_basis.normalize
-    assert basis.radial_normalization == "rational"
+    assert basis.radial_normalization == "clamp"
     torch.testing.assert_close(
-        basis.scale,
-        torch.tensor([1.0 / 2.5], dtype=DTYPE, device=DEVICE),
+        basis.magnetic_scale,
+        torch.tensor([2.0], dtype=DTYPE, device=DEVICE),
     )
     assert basis.magnetic_edge_tensor_product.weight_numel == 0
     assert basis.magnetic_node_irreps_out.lmax == Lmax
     assert basis.magnetic_edge_irreps_out.lmax == Lmax
     assert repr(basis).splitlines() == [
         "MagneticBasis(",
-        f"  scale={basis.scale.tolist()},",
+        "  use_spin_orbit_coupling=True,",
         "  num_mag_radial_basis=4,",
-        f"  Lmax={Lmax},",
-        f"  angular_normalization='{normalization}',",
-        "  radial_normalization='rational',",
-        "  magnetic_use_soc=True,",
         f"  magnetic_node_irreps_out={basis.magnetic_node_irreps_out},",
         f"  magnetic_edge_irreps_out={basis.magnetic_edge_irreps_out}",
+        f"  magnetic_scale={basis.magnetic_scale.tolist()},",
         ")",
     ]
     assert basis.magnetic_edge_tensor_product.irreps_out.simplify() == (
@@ -891,6 +896,10 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, normalization):
         basis.magnetic_edge_irreps_out.dim,
     )
     torch.testing.assert_close(radial, basis.radial_basis(expected_radial_coordinate))
+    torch.testing.assert_close(
+        magnetic_node_attrs,
+        basis.angular_basis(magmoms),
+    )
     torch.testing.assert_close(magnetic_edge_attrs, expected)
 
     if time_reversal:
@@ -910,14 +919,12 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, normalization):
         )
 
 
-def test_magnetic_basis_rational_and_element_normalization():
+def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
     basis = MagneticBasis(
         {26: 2.0, 28: 4.0},
         num_mag_radial_basis=4,
         Lmax=2,
         atomic_numbers=[26, 28],
-        angular_normalization="element",
-        radial_normalization="rational",
     ).to(DEVICE, DTYPE)
     magmoms = torch.tensor(
         [[0.0, 0.0, 0.0], [1.0, -2.0, 3.0]],
@@ -931,19 +938,20 @@ def test_magnetic_basis_rational_and_element_normalization():
     radial, magnetic_node_attrs, _ = basis(
         magmoms, node_attrs, edge_index
     )
-    scale = basis.scale.unsqueeze(-1)
-    scaled_magmoms = magmoms * scale
+    magnetic_scale = basis.magnetic_scale.unsqueeze(-1)
+    scaled_magmoms = magmoms / magnetic_scale
     squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
-    radial_coordinate = (1.0 - squared_magnitude) / (1.0 + squared_magnitude)
+    radial_coordinate = 1.0 - 2.0 * torch.clamp(
+        squared_magnitude,
+        min=0.0,
+        max=1.0,
+    )
 
-    assert basis.angular_basis.normalization == "component"
+    assert basis.angular_basis.normalization == "integral"
     torch.testing.assert_close(radial, basis.radial_basis(radial_coordinate))
     torch.testing.assert_close(
         magnetic_node_attrs,
-        basis.angular_basis(
-            scaled_magmoms
-            * torch.rsqrt(1.0 + squared_magnitude)
-        ),
+        basis.angular_basis(magmoms),
     )
     zero_gradient = torch.autograd.grad(
         radial[0].sum(), magmoms, create_graph=True
@@ -961,7 +969,7 @@ def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
         Lmax=Lmax,
         atomic_numbers=[26],
         time_reversal=hasattr(o3.Irrep("0e"), "t"),
-        magnetic_use_soc=False,
+        use_spin_orbit_coupling=False,
     ).to(DEVICE, DTYPE)
     edge_index = torch.tensor(
         [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
@@ -979,7 +987,7 @@ def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
     )
     _, _, reversed_edge_scalars = basis(-magmoms, node_attrs, edge_index)
 
-    assert not basis.magnetic_use_soc
+    assert not basis.use_spin_orbit_coupling
     assert basis.magnetic_edge_irreps_out.num_irreps == Lmax + 1
     assert len(basis.magnetic_edge_tensor_product.instructions) == Lmax + 1
     assert all(
@@ -990,7 +998,7 @@ def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
     torch.testing.assert_close(reversed_edge_scalars, edge_scalars)
 
 
-def test_magnetic_basis_is_bounded_and_has_no_constant_mode():
+def test_magnetic_radial_basis_is_bounded_and_has_no_constant_mode():
     basis = MagneticBasis(
         {26: 2.0},
         num_mag_radial_basis=4,
@@ -1010,7 +1018,7 @@ def test_magnetic_basis_is_bounded_and_has_no_constant_mode():
     assert not basis.radial_basis.include_constant
     torch.testing.assert_close(radial[0], torch.ones_like(radial[0]))
     assert torch.isfinite(angular).all()
-    assert angular[1].abs().max() < 2.0
+    torch.testing.assert_close(angular, basis.angular_basis(magmoms))
 
 
 @pytest.mark.parametrize("update_type", ["identity", "element", "element2"])

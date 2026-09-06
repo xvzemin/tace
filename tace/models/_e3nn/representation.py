@@ -34,7 +34,7 @@ class Representation(torch.nn.Module):
         atomic_numbers: List[int],
         cutoff: float,
         avg_num_neighbors: float,
-        scale,
+        magnetic_scale,
         mmax: int,
         Lmax: int,
         lmax: int,
@@ -133,14 +133,12 @@ class Representation(torch.nn.Module):
         self.magnetic_edge_irreps_out = None
         if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
             self.magnetic_basis = MagneticBasis(
-                scale,
+                magnetic_scale,
                 num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
                 Lmax=angular_basis["magnetic_Lmax"],
                 atomic_numbers=atomic_numbers,
                 time_reversal=self.use_time_reversal,
-                angular_normalization=angular_basis["magnetic_normalization"],
-                radial_normalization=radial_basis["magnetic_normalization"],
-                magnetic_use_soc=angular_basis.get("magnetic_use_soc", True),
+                use_spin_orbit_coupling=angular_basis["use_spin_orbit_coupling"],
             )
             self.magnetic_node_irreps_out = (
                 self.magnetic_basis.magnetic_node_irreps_out

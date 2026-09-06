@@ -52,14 +52,7 @@ model:
 
     angular_basis:
       magnetic_Lmax: 2
-      magnetic_normalization: element
-      magnetic_use_soc: true
-
-    radial_basis:
-      magnetic_normalization: rational
-
-    scale_shift:
-      magmoms_scale_type: rms_noncollinear_magmoms_norm_by_element
+      use_spin_orbit_coupling: true
 
     atomic_basis:
       type: o2_mag

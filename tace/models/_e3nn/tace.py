@@ -134,7 +134,7 @@ class e3nnTACE(torch.nn.Module):
             atomic_numbers=cfg["atomic_numbers"],
             cutoff=cfg["cutoff"],
             avg_num_neighbors=cfg["avg_num_neighbors"],
-            scale=cfg["magmoms_scale_by_element"],
+            magnetic_scale=cfg["magnetic_scale"],
             mmax=cfg["mmax"],
             Lmax=cfg["Lmax"],
             lmax=cfg["lmax"],

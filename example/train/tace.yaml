@@ -309,7 +309,8 @@ model:
     fidelity:
       - {
         name: PBE, # (str) custom name
-        atomic_energy: null # (null, Dict[int, float]), {1: -13.587222780835477, 6: -1029.4889999855063, 7: -1484.9814568572233, 8: -2041.9816003861047}
+        atomic_energy: null, # (null, Dict[int, float]), {1: -13.587222780835477, 6: -1029.4889999855063, 7: -1484.9814568572233, 8: -2041.9816003861047}
+        magnetic_scale: null # (null, Dict[int, float]), null uses 1.2 * max magnetic moment by element + 0.1
       }
 
     node_embedding:
@@ -344,12 +345,10 @@ model:
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
       bias: true  # (bool)
-      magnetic_normalization: rational # [rational, clamp]
 
     angular_basis:
       magnetic_Lmax: 2 # Maximum degree of magnetic solid harmonics, recommend >=2.
-      magnetic_normalization: element # [element, integral, component]
-      magnetic_use_soc: true # false keeps only spin-scalar magnetic edge paths
+      use_spin_orbit_coupling: true # true for soc model, false for non-soc model
 
     resnet:
       type: BB # [BB, AB, BAB] A = atomic_basis, B = product_basis, control how resnet connect
@@ -401,8 +400,6 @@ model:
       shift_trainable: false # (bool)
       all_atoms: false
       scale_zbl: false
-      # [max_noncollinear_magmoms_norm_by_element, rms_noncollinear_magmoms_norm_by_element]
-      magmoms_scale_type: rms_noncollinear_magmoms_norm_by_element
 
     short_range:
       zbl: # metal units

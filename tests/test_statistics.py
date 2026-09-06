@@ -16,13 +16,11 @@ from tace.models.blocks import ScaleShift
 
 def test_missing_model_statistics_only_checks_requested_inputs():
     model_config = {
+        "fidelity": [{"name": "PBE", "magnetic_scale": None}],
         "scale_shift": {
             "enable": True,
             "scale_type": "rms_forces",
             "shift_type": None,
-            "magmoms_scale_type": (
-                "max_noncollinear_magmoms_norm_by_element"
-            ),
         }
     }
     cached_statistics = [{"rms_forces": {26: 1.0}}]
@@ -39,6 +37,22 @@ def test_missing_model_statistics_only_checks_requested_inputs():
         target_property=["energy"],
         embedding_property=["initial_noncollinear_magmoms"],
     ) == {"max_noncollinear_magmoms_norm_by_element"}
+
+    model_config["fidelity"][0]["magnetic_scale"] = {26: 2.0}
+    assert statistics_module.missing_model_statistics(
+        cached_statistics,
+        model_config,
+        target_property=["energy"],
+        embedding_property=["initial_noncollinear_magmoms"],
+    ) == {"max_noncollinear_magmoms_norm_by_element"}
+
+    cached_statistics[0]["max_noncollinear_magmoms_norm_by_element"] = {26: 3.0}
+    assert not statistics_module.missing_model_statistics(
+        cached_statistics,
+        model_config,
+        target_property=["energy"],
+        embedding_property=["initial_noncollinear_magmoms"],
+    )
 
 
 def test_statistics_dataloader_overrides_training_batch_size():
