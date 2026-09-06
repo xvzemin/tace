@@ -152,7 +152,7 @@ class MagneticBasis(torch.nn.Module):
             f"  num_mag_radial_basis={self.num_mag_radial_basis},\n"
             f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"
             f"  magnetic_edge_irreps_out={self.magnetic_edge_irreps_out}\n"
-            f"  magnetic_scale={self.magnetic_scale.tolist()},\n"
+            f"  magnetic_scale=[{', '.join(f'{x:.4f}' for x in self.magnetic_scale.tolist())}],\n"
             # f"  Lmax={self.Lmax},\n"
             # f"  angular_normalization={self.angular_normalization!r},\n"
             # f"  radial_normalization={self.radial_normalization!r},\n"

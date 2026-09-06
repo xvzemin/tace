@@ -45,6 +45,13 @@ synth_metric:
 
 model:
   config:
+
+    fidelity:
+      - name: PBE
+        atomic_energy: null
+        magnetic_scale:
+          26: 5.0
+
     parity: true
 
     magnetic_edge_update:
