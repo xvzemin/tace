@@ -35,6 +35,7 @@ class NodeEmbedding(torch.nn.Module):
         self,
         num_elements: int,
         num_radial_basis: int,
+        num_mag_radial_basis: int,
         num_channel: int,
         Lmax: int,
         lmax: int,
@@ -45,6 +46,7 @@ class NodeEmbedding(torch.nn.Module):
 
         self.num_elements = num_elements
         self.num_radial_basis = num_radial_basis
+        self.num_mag_radial_basis = num_mag_radial_basis
         self.num_channel = num_channel
         self.bias = bias
         self.Lmax = Lmax

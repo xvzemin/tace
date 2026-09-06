@@ -28,8 +28,7 @@ class WignerD(torch.nn.Module):
         Largest global O(3) degree represented by the matrices.
     use_opt_einsum_fx : bool, optional
         If ``True``, pre-optimize the recursive contractions for degrees two
-        and above. This may reduce repeated eager execution cost at the expense
-        of additional module setup.
+        and above.
 
     Notes
     -----
@@ -46,9 +45,9 @@ class WignerD(torch.nn.Module):
     ):
         super().__init__()
 
-        if isinstance(lmax, bool) or not isinstance(lmax, int):
+        if not isinstance(lmax, int):
             raise TypeError("lmax must be an integer.")
-        if isinstance(mmax, bool) or not isinstance(mmax, int):
+        if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
         if lmax < 0:
             raise ValueError("lmax must be non-negative.")
@@ -68,8 +67,16 @@ class WignerD(torch.nn.Module):
             self.lmax, self.mmax
         )
 
-        self.register_buffer("wigner_index_to_m_array", wigner_index_to_m_array)
-        self.register_buffer("wigner_inv_rescale", wigner_inv_rescale)  # [1, 16, 14]
+        self.register_buffer(
+            "wigner_index_to_m_array",
+            wigner_index_to_m_array,
+            persistent=False,
+        )
+        self.register_buffer(
+            "wigner_inv_rescale",
+            wigner_inv_rescale,
+            persistent=False,
+        )  # [1, 16, 14]
 
     @staticmethod
     def _build_o2_layout(lmax: int, mmax: int) -> tuple[torch.Tensor, torch.Tensor]:

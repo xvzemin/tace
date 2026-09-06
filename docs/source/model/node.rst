@@ -12,7 +12,11 @@ However, based on our current experiments, the linear approach remains the most 
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.NonLinearNodeEmbedding
+.. autoclass:: tace.models._e3nn.node.LinearSpinNodeEmbedding
+   :no-members:
+   :show-inheritance:
+
+.. autoclass:: tace.models._e3nn.node.NonLinearSpinNodeEmbedding
    :no-members:
    :show-inheritance:
 
@@ -20,6 +24,6 @@ However, based on our current experiments, the linear approach remains the most 
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.SO2TensorNodeEmbedding
+.. autoclass:: tace.models._e3nn.node.O2TensorNodeEmbedding
    :no-members:
    :show-inheritance:

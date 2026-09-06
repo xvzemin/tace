@@ -15,6 +15,10 @@ from tace.models._e3nn.fused import (
     uvuTensorProduct,
 )
 from tace.models._e3nn.layer_norm import get_normalization_layer
+from tace.models._e3nn.node import (
+    LinearSpinNodeEmbedding,
+    NonLinearSpinNodeEmbedding,
+)
 from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
 from tace.models._e3nn.tace import e3nnTACE
@@ -161,6 +165,26 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     assert representation.equivariant_property == ["magnetic_field"]
     ir = representation.uee_embeddings[0].uee["magnetic_field"].irreps_in[0].ir
     assert ir.l == 1 and ir.p == 1 and ir.t == -1
+
+
+@pytest.mark.parametrize(
+    ("embedding_name", "embedding_type"),
+    [
+        ("linear_spin", LinearSpinNodeEmbedding),
+        ("nonlinear_spin", NonLinearSpinNodeEmbedding),
+    ],
+)
+def test_spin_node_embedding_registers_magnetic_input(
+    embedding_name,
+    embedding_type,
+):
+    config = _model_config()
+    config["node_embedding"]["type"] = embedding_name
+    config["fidelity"][0]["magnetic_scale"] = {1: 2.0}
+    model = e3nnTACE(**config)
+
+    assert isinstance(model.representation.node_embedding, embedding_type)
+    assert "initial_noncollinear_magmoms" in model.embedding_property
 
 
 @pytest.mark.skipif(

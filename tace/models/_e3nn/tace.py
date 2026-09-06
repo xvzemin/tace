@@ -86,6 +86,7 @@ class e3nnTACE(torch.nn.Module):
         uses_magnetic_model = (
             "initial_noncollinear_magmoms" in cfg["embedding_property"]
             or "initial_noncollinear_magmoms" in self.embedding_property
+            or cfg["node_embedding"]["type"] in {"linear_spin", "nonlinear_spin"}
             or any(
                 interaction in magnetic_interactions
                 for interaction in cfg["atomic_basis"]["type"]

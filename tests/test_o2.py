@@ -14,6 +14,12 @@ from eqx import o2
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
 from tace.models._e3nn.edge import MAGNETIC_EDGE_UPDATE
 from tace.models._e3nn.magnetic import MagneticBasis
+from tace.models._e3nn.node import (
+    NODE_EMBEDDING,
+    LinearSpinNodeEmbedding,
+    NonLinearSpinNodeEmbedding,
+    O2TensorNodeEmbedding,
+)
 from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
     O2ScatterTensorProduct,
@@ -124,6 +130,138 @@ def test_magnetic_basis_normalization_validation():
         )
 
 
+def _spin_node_embedding(embedding_type):
+    return embedding_type(
+        num_elements=2,
+        num_radial_basis=4,
+        num_mag_radial_basis=3,
+        num_channel=5,
+        Lmax=1,
+        lmax=1,
+        avg_num_neighbors=2.0,
+        bias=False,
+    )
+
+
+def test_linear_spin_node_embedding():
+    embedding = _spin_node_embedding(LinearSpinNodeEmbedding)
+    node_attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    magnetic_radial_basis = torch.tensor([[0.2, -0.1, 0.4], [0.3, 0.5, -0.2]])
+
+    output = embedding(
+        node_attrs,
+        torch.empty(0),
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0),
+        None,
+        None,
+        None,
+        magnetic_radial_basis,
+    )
+    expected = (
+        embedding.element_embedding(node_attrs)
+        + embedding.spin_embedding(magnetic_radial_basis)
+    ) / (2.0**0.5)
+
+    assert NODE_EMBEDDING["linear_spin"] is LinearSpinNodeEmbedding
+    assert embedding.spin_embedding.irreps_in == o3.Irreps("3x0e")
+    torch.testing.assert_close(output, expected)
+
+
+def test_nonlinear_spin_node_embedding():
+    embedding = _spin_node_embedding(NonLinearSpinNodeEmbedding)
+    node_attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    magnetic_radial_basis = torch.tensor([[0.2, -0.1, 0.4], [0.3, 0.5, -0.2]])
+
+    output = embedding(
+        node_attrs,
+        torch.empty(0),
+        torch.empty(0, dtype=torch.long),
+        torch.empty(0),
+        None,
+        None,
+        None,
+        magnetic_radial_basis,
+    )
+    linear_output = (
+        embedding.element_embedding(node_attrs)
+        + embedding.spin_embedding(magnetic_radial_basis)
+    ) / (2.0**0.5)
+
+    assert NODE_EMBEDDING["nonlinear_spin"] is NonLinearSpinNodeEmbedding
+    torch.testing.assert_close(output, embedding.activation(linear_output))
+
+
+def test_o2_tensor_node_embedding_is_equivariant():
+    embedding = O2TensorNodeEmbedding(
+        num_elements=2,
+        num_radial_basis=4,
+        num_mag_radial_basis=3,
+        num_channel=3,
+        Lmax=2,
+        lmax=2,
+        avg_num_neighbors=2.0,
+        bias=False,
+    ).to(DEVICE, DTYPE)
+    node_attrs = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+    edge_index = torch.tensor(
+        [[0, 1, 2, 0], [1, 2, 0, 2]],
+        device=DEVICE,
+    )
+    edge_vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    edge_feats = torch.randn(4, 4, dtype=DTYPE, device=DEVICE)
+    edge_cutoff = torch.rand(4, 1, dtype=DTYPE, device=DEVICE)
+    wigner_module = o2.WignerD(2, 2).to(DEVICE, DTYPE)
+    wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
+    output = embedding(
+        node_attrs,
+        edge_feats,
+        edge_index,
+        torch.empty(4, 0, dtype=DTYPE, device=DEVICE),
+        edge_cutoff,
+        wigner,
+        wigner_inv,
+    )
+
+    rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
+    rotated_wigner, rotated_wigner_inv = wigner_module.get_wigner(
+        edge_vectors @ rotation.T
+    )
+    rotated_output = embedding(
+        node_attrs,
+        edge_feats,
+        edge_index,
+        torch.empty(4, 0, dtype=DTYPE, device=DEVICE),
+        edge_cutoff,
+        rotated_wigner,
+        rotated_wigner_inv,
+    )
+
+    assert NODE_EMBEDDING["o2_tensor"] is O2TensorNodeEmbedding
+    assert embedding.irreps_out == o3.Irreps("3x0e+3x1o+3x2e")
+    assert torch.isfinite(
+        embedding(
+            node_attrs,
+            edge_feats,
+            edge_index,
+            torch.empty(4, 0, dtype=DTYPE, device=DEVICE),
+            None,
+            wigner,
+            wigner_inv,
+        )
+    ).all()
+    torch.testing.assert_close(
+        rotated_output,
+        output @ embedding.irreps_out.D_from_matrix(rotation).T,
+        atol=1.0e-6,
+        rtol=1.0e-5,
+    )
+
+
 def test_universal_embedding_is_filtered_by_default_config():
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config["statistics"] = [
@@ -228,10 +366,26 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
 
     common_lmax = max(Lmax, lmax)
     assert representation.use_o2
-    assert not representation.use_legacy_so2
+    assert not representation.use_so2
     assert not representation.use_time_reversal
-    assert representation.so2_angular_basis.lmax == common_lmax
+    assert representation.o2_angular_basis.lmax == common_lmax
     assert representation.interactions[0].rejector.local_frame_in.lmax == common_lmax
+
+    model = torch.nn.ModuleDict({"representation": representation})
+    state_dict = model.state_dict()
+    assert not any("o2_angular_basis" in key for key in state_dict)
+    for angular_basis in ("so2_angular_basis", "o2_angular_basis"):
+        state_dict[
+            f"representation.{angular_basis}.wigner_index_to_m_array"
+        ] = (
+            representation.o2_angular_basis.wigner_index_to_m_array.clone()
+        )
+        state_dict[f"representation.{angular_basis}.wigner_inv_rescale"] = (
+            representation.o2_angular_basis.wigner_inv_rescale.clone()
+        )
+    incompatible = model.load_state_dict(state_dict, strict=True)
+    assert incompatible.missing_keys == []
+    assert incompatible.unexpected_keys == []
 
 
 @pytest.mark.parametrize("update_type", ["identity", "element", "element2"])

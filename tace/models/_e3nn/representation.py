@@ -85,15 +85,16 @@ class Representation(torch.nn.Module):
         )
 
         # === angular basis ===
-        self.use_o2 = any(
-            interaction in ("o2", "o2_mag") for interaction in atomic_basis["type"]
+        uses_so2_interaction = any(
+            interaction.endswith("so2") or interaction.endswith("attn")
+            for interaction in atomic_basis["type"]
         )
-        self.use_legacy_so2 = (
-            any(t.endswith("so2") for t in atomic_basis["type"])
-            or any(t.endswith("attn") for t in atomic_basis["type"])
-            or node_embedding["type"] == "so2_tensor"
+        uses_o2_interaction = any(
+            interaction in ("o2", "o2_mag")
+            for interaction in atomic_basis["type"]
         )
-        self.use_so2 = self.use_legacy_so2 or self.use_o2
+        self.use_so2 = uses_so2_interaction
+        self.use_o2 = node_embedding["type"] == "o2_tensor" or uses_o2_interaction
         magnetic_interactions = {"o2_mag"}
         uses_magnetic_interaction = any(
             interaction in magnetic_interactions
@@ -104,10 +105,9 @@ class Representation(torch.nn.Module):
             for name in self.invariant_property + self.equivariant_property
         )
         self.use_time_reversal = (
-            supports_time_reversal() and not self.use_legacy_so2
+            supports_time_reversal() and not self.use_so2
             and (
                 uses_magnetic_interaction
-                or use_one_body_magmoms
                 or uses_time_odd_property
             )
         )
@@ -131,7 +131,10 @@ class Representation(torch.nn.Module):
         self.use_one_body_magmoms = use_one_body_magmoms
         self.magnetic_node_irreps_out = None
         self.magnetic_edge_irreps_out = None
-        if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
+        if (
+            self.use_magnetic_radial_basis
+            or self.use_one_body_magmoms
+        ):
             self.magnetic_basis = MagneticBasis(
                 magnetic_scale,
                 num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
@@ -147,11 +150,15 @@ class Representation(torch.nn.Module):
                 self.magnetic_basis.magnetic_edge_irreps_out
             )
         if self.use_so2:
-            if self.use_legacy_so2 and Lmax != lmax:
+            if Lmax != lmax:
                 raise ValueError("Legacy SO2 interactions require Lmax == lmax.")
-            self.so2_angular_basis = WignerD(mmax, max(Lmax, lmax))
+        if self.use_so2 or self.use_o2:
+            self.o2_angular_basis = WignerD(
+                mmax if uses_so2_interaction or uses_o2_interaction else 0,
+                max(Lmax, lmax),
+            )
         else:
-            self.so2_angular_basis = None
+            self.o2_angular_basis = None
         if self.use_o3:
             self.o3_angular_basis = o3.SphericalHarmonics(
                 o3.Irreps.spherical_harmonics(lmax, p=-1),
@@ -163,6 +170,7 @@ class Representation(torch.nn.Module):
         self.node_embedding = NODE_EMBEDDING[node_embedding["type"]](
             num_elements=self.num_elements,
             num_radial_basis=self.radial_basis.num_basis,
+            num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
             num_channel=num_channel,
             Lmax=Lmax,
             lmax=lmax,
@@ -362,14 +370,35 @@ class Representation(torch.nn.Module):
         edge_attrs = None
         edge_wigner = None
         edge_wigner_inv = None
-        if self.use_so2:
-            edge_wigner, edge_wigner_inv = self.so2_angular_basis.get_wigner(
+        if self.use_so2 or self.use_o2:
+            edge_wigner, edge_wigner_inv = self.o2_angular_basis.get_wigner(
                 graph.edge_vector
             )
         if self.use_o3:
             edge_attrs = self.o3_angular_basis(
                 graph.edge_vector / graph.edge_length
             )  # have added eps in adapter.py
+
+        initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
+        magnetic_radial_basis = None
+        magnetic_edge_attrs = None
+        if (
+            self.use_magnetic_radial_basis
+            or self.use_one_body_magmoms
+        ):
+            if initial_noncollinear_magmoms is None:
+                raise ValueError(
+                    "A magnetic model requires initial_noncollinear_magmoms"
+                )
+            (
+                magnetic_radial_basis,
+                _,
+                magnetic_edge_attrs,
+            ) = self.magnetic_basis(
+                initial_noncollinear_magmoms,
+                data["node_attrs"],
+                data["edge_index"],
+            )
 
         # === node initialize ===
         node_feats = self.node_embedding(
@@ -380,6 +409,7 @@ class Representation(torch.nn.Module):
             edge_cutoff,
             edge_wigner,
             edge_wigner_inv,
+            magnetic_radial_basis,
         )
         if hasattr(self, "uie_embedding"):
             uie_feats = self.uie_embedding(data)
@@ -401,24 +431,6 @@ class Representation(torch.nn.Module):
         if self.training and self.use_dens:
             forces_embedding, noise_mask_tensor, dens_batch_mask_tensor = (
                 self._forward_dens_forces_encoding(data)
-            )
-
-        initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
-        magnetic_radial_basis = None
-        magnetic_edge_attrs = None
-        if self.use_magnetic_radial_basis or self.use_one_body_magmoms:
-            if initial_noncollinear_magmoms is None:
-                raise ValueError(
-                    "A magnetic model requires initial_noncollinear_magmoms"
-            )
-            (
-                magnetic_radial_basis,
-                _,
-                magnetic_edge_attrs,
-            ) = self.magnetic_basis(
-                initial_noncollinear_magmoms,
-                data["node_attrs"],
-                data["edge_index"],
             )
 
         # === representation Learning ===
@@ -526,3 +538,32 @@ class Representation(torch.nn.Module):
         forces_embedding = self.forces_embedding(forces_embedding)
         forces_embedding = forces_embedding * noise_mask
         return forces_embedding, noise_mask, dens_batch_mask
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        for angular_basis in ("so2_angular_basis", "o2_angular_basis"):
+            state_dict.pop(
+                f"{prefix}{angular_basis}.wigner_index_to_m_array",
+                None,
+            )
+            state_dict.pop(
+                f"{prefix}{angular_basis}.wigner_inv_rescale",
+                None,
+            )
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
