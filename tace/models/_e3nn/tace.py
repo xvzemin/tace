@@ -92,11 +92,6 @@ class e3nnTACE(torch.nn.Module):
                 for interaction in cfg["atomic_basis"]["type"]
             )
         )
-        self.use_one_body_magmoms = bool(
-            cfg["readout_emlp"]["use_one_body_magmoms"]
-            and "energy" in cfg["target_property"]
-            and uses_magnetic_model
-        )
         if uses_magnetic_model:
             self.embedding_property = list(
                 dict.fromkeys(
@@ -156,9 +151,13 @@ class e3nnTACE(torch.nn.Module):
             layer_norm=cfg["layer_norm"],
             dropout=cfg["dropout"],
             parity=cfg["parity"],
-            use_one_body_magmoms=self.use_one_body_magmoms,
         )
         self.use_time_reversal = self.representation.use_time_reversal
+        self.use_one_body_magmoms = bool(
+            cfg["readout_emlp"]["use_one_body_magmoms"]
+            and "energy" in cfg["target_property"]
+            and self.representation.use_magnetic_radial_basis
+        )
 
         # === Readout ===
         if self.representation.use_dens:

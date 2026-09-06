@@ -3,7 +3,6 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-
 import math
 from typing import Dict, List, Union
 
@@ -19,10 +18,15 @@ from ..linear import e3nnLinear
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE, MAGNETIC_EDGE_UPDATE
-from .inter import INTERACTION
+from .inter import (
+    INTERACTION,
+    O2Interaction,
+    O2MagneticInteraction,
+    uvSO2Interaction,
+)
 from .layer_norm import get_normalization_layer
 from .magnetic import MagneticBasis
-from .node import NODE_EMBEDDING
+from .node import NODE_EMBEDDING, O2TensorNodeEmbedding
 from .prod import PRODUCT
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
@@ -43,7 +47,9 @@ class Representation(torch.nn.Module):
         node_embedding: Dict,
         edge_embedding: Dict,
         edge_update: Dict,
+        magnetic_edge_update: Union[Dict, None],
         radial_basis: Dict,
+        angular_basis: Union[Dict, None],
         atomic_basis: Dict,
         resnet: Dict,
         product_basis: Dict,
@@ -53,9 +59,6 @@ class Representation(torch.nn.Module):
         layer_norm: Dict,
         dropout: Dict,
         parity: bool,
-        use_one_body_magmoms: bool,
-        magnetic_edge_update: Union[Dict, None] = None,
-        angular_basis: Union[Dict, None] = None,
     ):
         super().__init__()
 
@@ -67,7 +70,6 @@ class Representation(torch.nn.Module):
         self.register_buffer(
             "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
         )
-        self.resnet_type = resnet["type"]
         self.use_dens = get_tace_use_dens() == "1"
 
         # === radial basis ===
@@ -84,28 +86,34 @@ class Representation(torch.nn.Module):
             gaussian_width=radial_basis["gaussian_width"],
         )
 
-        # === angular basis ===
+        # === module classes ===
+        node_embedding_cls = NODE_EMBEDDING[node_embedding["type"]]
+        interaction_classes = [
+            INTERACTION[interaction] for interaction in atomic_basis["type"]
+        ]
         uses_so2_interaction = any(
-            interaction.endswith("so2") or interaction.endswith("attn")
-            for interaction in atomic_basis["type"]
+            issubclass(interaction_cls, uvSO2Interaction)
+            for interaction_cls in interaction_classes
         )
         uses_o2_interaction = any(
-            interaction in ("o2", "o2_mag")
-            for interaction in atomic_basis["type"]
+            issubclass(interaction_cls, O2Interaction)
+            for interaction_cls in interaction_classes
         )
         self.use_so2 = uses_so2_interaction
-        self.use_o2 = node_embedding["type"] == "o2_tensor" or uses_o2_interaction
-        magnetic_interactions = {"o2_mag"}
+        self.use_o2 = (
+            issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+            or uses_o2_interaction
+        )
         uses_magnetic_interaction = any(
-            interaction in magnetic_interactions
-            for interaction in atomic_basis["type"]
+            issubclass(interaction_cls, O2MagneticInteraction)
+            for interaction_cls in interaction_classes
         )
         uses_time_odd_property = any(
             PROPERTY[name].get("time_reversal", 1) == -1
             for name in self.invariant_property + self.equivariant_property
         )
         self.use_time_reversal = (
-            supports_time_reversal() and not self.use_so2
+            supports_time_reversal() and not uses_so2_interaction
             and (
                 uses_magnetic_interaction
                 or uses_time_odd_property
@@ -123,18 +131,10 @@ class Representation(torch.nn.Module):
                 if name not in time_odd_scalars
             ]
             self.equivariant_property.extend(time_odd_scalars)
-        self.use_o3 = (
-            any(t != "so2" for t in atomic_basis["type"])
-            or node_embedding["type"] == "tensor"
-        )
         self.use_magnetic_radial_basis = uses_magnetic_interaction
-        self.use_one_body_magmoms = use_one_body_magmoms
         self.magnetic_node_irreps_out = None
         self.magnetic_edge_irreps_out = None
-        if (
-            self.use_magnetic_radial_basis
-            or self.use_one_body_magmoms
-        ):
+        if self.use_magnetic_radial_basis:
             self.magnetic_basis = MagneticBasis(
                 magnetic_scale,
                 num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
@@ -149,9 +149,10 @@ class Representation(torch.nn.Module):
             self.magnetic_edge_irreps_out = (
                 self.magnetic_basis.magnetic_edge_irreps_out
             )
-        if self.use_so2:
-            if Lmax != lmax:
-                raise ValueError("Legacy SO2 interactions require Lmax == lmax.")
+
+        # === angular basis ===
+        if self.use_so2 and Lmax != lmax:
+            raise ValueError("Legacy SO2 interactions require Lmax == lmax.")
         if self.use_so2 or self.use_o2:
             self.o2_angular_basis = WignerD(
                 mmax if uses_so2_interaction or uses_o2_interaction else 0,
@@ -159,15 +160,14 @@ class Representation(torch.nn.Module):
             )
         else:
             self.o2_angular_basis = None
-        if self.use_o3:
-            self.o3_angular_basis = o3.SphericalHarmonics(
-                o3.Irreps.spherical_harmonics(lmax, p=-1),
-                normalize=False,
-                normalization="component",
-            )
+        self.o3_angular_basis = o3.SphericalHarmonics(
+            o3.Irreps.spherical_harmonics(lmax, p=-1),
+            normalize=False,
+            normalization="component",
+        )
 
         # === node/edge embedding ===
-        self.node_embedding = NODE_EMBEDDING[node_embedding["type"]](
+        self.node_embedding = node_embedding_cls(
             num_elements=self.num_elements,
             num_radial_basis=self.radial_basis.num_basis,
             num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
@@ -273,7 +273,7 @@ class Representation(torch.nn.Module):
         for layer in range(num_layers):
             # === Interaction ===
             self.interactions.append(
-                INTERACTION[atomic_basis["type"][layer]](
+                interaction_classes[layer](
                     **for_interactions,
                     layer=layer,
                     edge_feats_channel=self.edge_updates[layer].out_dim,
@@ -367,25 +367,20 @@ class Representation(torch.nn.Module):
         )
 
         # === angular basis ===
-        edge_attrs = None
         edge_wigner = None
         edge_wigner_inv = None
         if self.use_so2 or self.use_o2:
             edge_wigner, edge_wigner_inv = self.o2_angular_basis.get_wigner(
                 graph.edge_vector
             )
-        if self.use_o3:
-            edge_attrs = self.o3_angular_basis(
-                graph.edge_vector / graph.edge_length
-            )  # have added eps in adapter.py
+        edge_attrs = self.o3_angular_basis(
+            graph.edge_vector / graph.edge_length
+        )  # have added eps in adapter.py
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
         magnetic_edge_attrs = None
-        if (
-            self.use_magnetic_radial_basis
-            or self.use_one_body_magmoms
-        ):
+        if self.use_magnetic_radial_basis:
             if initial_noncollinear_magmoms is None:
                 raise ValueError(
                     "A magnetic model requires initial_noncollinear_magmoms"

@@ -361,7 +361,6 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
         layer_norm=config["layer_norm"],
         dropout=config["dropout"],
         parity=False,
-        use_one_body_magmoms=False,
     )
 
     common_lmax = max(Lmax, lmax)
@@ -427,7 +426,6 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
         layer_norm=config["layer_norm"],
         dropout=config["dropout"],
         parity=True,
-        use_one_body_magmoms=False,
     )
 
     num_mag_radial_basis = config["radial_basis"]["num_mag_radial_basis"]
