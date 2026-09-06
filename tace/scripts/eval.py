@@ -10,7 +10,6 @@ from typing import Dict
 
 import ase.io
 import torch
-from e3nn.util.jit import compile
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
@@ -81,13 +80,11 @@ def parse_args():
         choices=["ase", "matscipy", "vesin", "alchemiops"],
         help="nl_backend",
     )
-    # parser.add_argument("-c", "--compile", type=int, default=0, help="Compile to jit-model, not support know")
 
     # Keys for properties, if need print test metrics
     for k, v in PROPERTY.items():
         if v["enable_prediction"] or v["enable_embedding"]:
             parser.add_argument(f"--{k}_key", type=str, default=f"{k}")
-
     return parser.parse_args()
 
 

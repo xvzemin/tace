@@ -460,7 +460,7 @@ PROPERTY = {
         "default_value_fn": default_value_for_rank0_atom,
         "must_be_with": ["total_charge"],
         "enable_prediction": True,
-        "enable_embedding": False,
+        "enable_embedding": True,
         "first_derivative": False,
         "second_derivative": False,
         "requires_grad_with": [],
@@ -480,7 +480,7 @@ PROPERTY = {
         "default_value_fn": default_value_for_rank0_graph,
         "must_be_with": [],
         "enable_prediction": False,
-        "enable_embedding": False,
+        "enable_embedding": True,
         "first_derivative": False,
         "second_derivative": False,
         "requires_grad_with": [],
@@ -519,7 +519,7 @@ PROPERTY = {
         "default_value_fn": default_value_for_rank0_atom,
         "must_be_with": [],
         "enable_prediction": False,
-        "enable_embedding": False,
+        "enable_embedding": True,
         "first_derivative": False,
         "second_derivative": False,
         "requires_grad_with": [],
@@ -619,7 +619,7 @@ PROPERTY = {
         "default_value_fn": default_value_for_rank1_atom,
         "must_be_with": [],
         "enable_prediction": False,
-        "enable_embedding": False,
+        "enable_embedding": True,
         "first_derivative": False,
         "second_derivative": False,
         "requires_grad_with": [],
@@ -883,10 +883,18 @@ def get_embedding_property(cfg: Dict) -> List[str]:
     embedding_property = []
     for p, v in cfg["model"]["config"].get("universal_embedding", {}).items():
         if v["enable"]:
-            assert p in SUPPORT_EMBEDDING_PROPERTY, (
-                f"Universal_embedding allowed property are {SUPPORT_EMBEDDING_PROPERTY}"
-            )
             embedding_property.append(p)
+    for target in get_target_property(cfg):
+        required = PROPERTY[target]["must_be_with"] + PROPERTY[target][
+            "requires_grad_with"
+        ]
+        for p in required:
+            if (
+                p in PROPERTY
+                and PROPERTY[p]["enable_embedding"]
+                and p not in embedding_property
+            ):
+                embedding_property.append(p)
     atomic_basis_type = cfg["model"]["config"].get("atomic_basis", {}).get("type")
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]

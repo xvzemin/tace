@@ -376,6 +376,15 @@ class TensorModel(torch.nn.Module):
 
     def get_embedding_property(self) -> list[str]:
         embedding_property = set(self.readout_fn.embedding_property)
+        for target in self.get_target_property():
+            required = PROPERTY[target]["must_be_with"] + PROPERTY[target][
+                "requires_grad_with"
+            ]
+            embedding_property.update(
+                p
+                for p in required
+                if p in PROPERTY and PROPERTY[p]["enable_embedding"]
+            )
         atomic_basis = getattr(self.readout_fn, "model_config", {}).get(
             "atomic_basis", {}
         )

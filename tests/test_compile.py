@@ -7,7 +7,11 @@ import pytest
 import torch
 
 import tace.models.compile.wrapper as compile_wrapper
-from tace.dataset.quantity import get_need_property
+from tace.dataset.quantity import (
+    SUPPORT_EMBEDDING_PROPERTY,
+    get_embedding_property,
+    get_need_property,
+)
 from tace.lightning.torch_model import (
     _prune_removed_keys,
     _should_warn_without_aoti,
@@ -21,6 +25,43 @@ from tace.models.compile.aot import (
 )
 from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
+
+
+def test_model_input_properties_support_embedding():
+    assert {
+        "charges",
+        "total_charge",
+        "initial_collinear_magmoms",
+        "initial_noncollinear_magmoms",
+    }.issubset(SUPPORT_EMBEDDING_PROPERTY)
+
+
+def test_target_inputs_are_added_to_embedding_properties():
+    cfg = {
+        "loss": {
+            "loss_property": [
+                "charges",
+                "collinear_magnetic_forces",
+                "noncollinear_magnetic_forces",
+            ]
+        },
+        "model": {
+            "config": {
+                "universal_embedding": {
+                    "electric_field": {"enable": True},
+                    "magnetic_field": {"enable": False},
+                },
+                "atomic_basis": {"type": "cgtp"},
+            }
+        },
+    }
+
+    assert get_embedding_property(cfg) == [
+        "electric_field",
+        "total_charge",
+        "initial_collinear_magmoms",
+        "initial_noncollinear_magmoms",
+    ]
 
 
 def test_model_loading_prunes_removed_architecture_keys():
