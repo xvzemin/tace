@@ -20,6 +20,7 @@ from lightning.pytorch import LightningDataModule
 from lightning.pytorch.utilities.rank_zero import rank_zero_info, rank_zero_only
 from torch.utils.data import Dataset
 
+from .augmentation import AugmentedDataset, validate_augmentations
 from .dataloader import build_statistics_dataloader
 from .element import TorchElement, build_element_lookup
 from .graph import from_atoms
@@ -385,6 +386,9 @@ class GraphDataModule(LightningDataModule):
         self.element = element
         self.target_property = target_property
         self.embedding_property = embedding_property
+        self.augmentation = validate_augmentations(
+            cfg.get("dataset", {}).get("augmentation", [])
+        )
 
         self.train_dataset = None
         self.val_dataset = None
@@ -643,9 +647,10 @@ class GraphDataModule(LightningDataModule):
                 gc.collect()
 
     def train_dataloader(self):
-        return instantiate(
-            self.cfg["dataset"]["train_dataloader"], dataset=self.train_dataset
-        )
+        dataset = self.train_dataset
+        if self.augmentation:
+            dataset = AugmentedDataset(dataset, self.augmentation)
+        return instantiate(self.cfg["dataset"]["train_dataloader"], dataset=dataset)
 
     def statistics_dataloader(self):
         return build_statistics_dataloader(

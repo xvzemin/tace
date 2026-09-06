@@ -766,6 +766,9 @@ PROPERTY = {
 
 SUPPORT_PREDICT_PROPERTY = [k for k, v in PROPERTY.items() if v["enable_prediction"]]
 SUPPORT_EMBEDDING_PROPERTY = [k for k, v in PROPERTY.items() if v["enable_embedding"]]
+TIME_ODD_PROPERTIES = tuple(
+    name for name, config in PROPERTY.items() if config["time_reversal"] == -1
+)
 KEYS = {f"{k}_key": k for k in PROPERTY}
 
 
@@ -885,9 +888,9 @@ def get_embedding_property(cfg: Dict) -> List[str]:
         if v["enable"]:
             embedding_property.append(p)
     for target in get_target_property(cfg):
-        required = PROPERTY[target]["must_be_with"] + PROPERTY[target][
-            "requires_grad_with"
-        ]
+        required = (
+            PROPERTY[target]["must_be_with"] + PROPERTY[target]["requires_grad_with"]
+        )
         for p in required:
             if (
                 p in PROPERTY

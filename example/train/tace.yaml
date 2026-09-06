@@ -113,6 +113,7 @@ callbacks:
 
 dataset:
   type: ase # ase or ase-db
+  augmentation: [] # [spin_rotation, time_reversal], applied only to training samples
   split_seed: ${misc.global_seed} # this random seed is useful if auto split
   train_file: ../data/BaTiO3.xyz
   valid_file: null

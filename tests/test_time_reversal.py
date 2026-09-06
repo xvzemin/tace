@@ -6,8 +6,10 @@ import pytest
 import torch
 from e3nn import o3
 from e3nn.nn import Gate
+from torch_geometric.data import Data
 
-from tace.dataset.quantity import PROPERTY
+from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
+from tace.dataset.quantity import PROPERTY, TIME_ODD_PROPERTIES
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.fused import (
     O3ScatterTensorProduct,
@@ -85,12 +87,7 @@ def test_magnetic_property_metadata_is_separate_from_spatial_irreps():
     assert PROPERTY["initial_noncollinear_magmoms"]["time_reversal"] == -1
     assert PROPERTY["abs_final_collinear_magmoms"]["time_reversal"] == 1
 
-    time_odd = {
-        name
-        for name, quantity in PROPERTY.items()
-        if quantity["time_reversal"] == -1
-    }
-    assert time_odd == {
+    assert set(TIME_ODD_PROPERTIES) == {
         "initial_collinear_magmoms",
         "final_collinear_magmoms",
         "collinear_magnetic_forces",
@@ -105,6 +102,70 @@ def test_magnetic_property_metadata_is_separate_from_spatial_irreps():
         assert str(with_time_reversal("1x0e", -1)) == "1x0eo"
         assert str(with_time_reversal("1x1e", -1)) == "1x1eo"
         assert str(with_time_reversal("1x0e", 1)) == "1x0ee"
+
+
+def test_spin_rotation_augmentation_uses_one_rotation_per_structure():
+    moments = torch.eye(3, dtype=torch.float64)
+    magnetic_forces = 2 * moments
+    positions = torch.randn(3, 3, dtype=torch.float64)
+    data = Data(
+        positions=positions,
+        initial_noncollinear_magmoms=moments,
+        noncollinear_magnetic_forces=magnetic_forces,
+    )
+
+    transformed = AugmentedDataset([data], ["spin_rotation"])[0]
+    rotation_transpose = transformed.initial_noncollinear_magmoms
+
+    assert torch.allclose(rotation_transpose @ rotation_transpose.mT, moments)
+    assert torch.allclose(
+        transformed.noncollinear_magnetic_forces,
+        2 * transformed.initial_noncollinear_magmoms,
+    )
+    assert torch.equal(transformed.positions, positions)
+    assert torch.equal(data.initial_noncollinear_magmoms, moments)
+
+
+def test_time_reversal_augmentation_flips_all_time_odd_properties(monkeypatch):
+    monkeypatch.setattr(
+        torch,
+        "rand",
+        lambda *size, **kwargs: torch.zeros(*size, **kwargs),
+    )
+    data = Data(
+        energy=torch.tensor([2.0]),
+        initial_collinear_magmoms=torch.tensor([1.0, -2.0]),
+        initial_noncollinear_magmoms=torch.tensor([[1.0, 2.0, 3.0]]),
+        noncollinear_magnetic_forces=torch.tensor([[4.0, 5.0, 6.0]]),
+        magnetic_field=torch.tensor([[0.1, 0.2, 0.3]]),
+    )
+
+    transformed = AugmentedDataset([data], ["time_reversal"])[0]
+
+    assert torch.equal(transformed.energy, data.energy)
+    for name in ("initial_noncollinear_magmoms", "noncollinear_magnetic_forces"):
+        assert torch.equal(getattr(transformed, name), -getattr(data, name))
+    assert torch.equal(
+        transformed.initial_collinear_magmoms,
+        data.initial_collinear_magmoms,
+    )
+    assert torch.equal(transformed.magnetic_field, data.magnetic_field)
+
+
+def test_dataset_augmentation_configuration_is_a_unique_known_list():
+    assert validate_augmentations(None) == ()
+    assert validate_augmentations([]) == ()
+    assert validate_augmentations("spin_rotation") == ("spin_rotation",)
+    assert validate_augmentations(["spin_rotation", "time_reversal"]) == (
+        "spin_rotation",
+        "time_reversal",
+    )
+    with pytest.raises(TypeError, match="string or a list"):
+        validate_augmentations(1)
+    with pytest.raises(ValueError, match="Unknown"):
+        validate_augmentations(["random_noise"])
+    with pytest.raises(ValueError, match="duplicates"):
+        validate_augmentations(["time_reversal", "time_reversal"])
 
 
 def test_time_reversal_helpers_support_both_e3nn_variants():

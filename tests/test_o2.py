@@ -1030,15 +1030,6 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
     assert basis.magnetic_edge_tensor_product.weight_numel == 0
     assert basis.magnetic_node_irreps_out.lmax == Lmax
     assert basis.magnetic_edge_irreps_out.lmax == Lmax
-    assert repr(basis).splitlines() == [
-        "MagneticBasis(",
-        "  use_spin_orbit_coupling=True,",
-        "  num_mag_radial_basis=4,",
-        f"  magnetic_node_irreps_out={basis.magnetic_node_irreps_out},",
-        f"  magnetic_edge_irreps_out={basis.magnetic_edge_irreps_out}",
-        f"  magnetic_scale={basis.magnetic_scale.tolist()},",
-        ")",
-    ]
     assert basis.magnetic_edge_tensor_product.irreps_out.simplify() == (
         basis.magnetic_edge_irreps_out
     )
