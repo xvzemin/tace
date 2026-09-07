@@ -11,11 +11,12 @@ import torch
 from e3nn import o3
 
 from eqx import o2
+from tace.models._e3nn.base import NodeUpdate
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models._e3nn.edge import MAGNETIC_EDGE_UPDATE
 from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models._e3nn.magnetic import MagneticBasis
 from tace.models._e3nn.node import (
+    NODE_UPDATE,
     NODE_EMBEDDING,
     LinearSpinNodeEmbedding,
     NonLinearSpinNodeEmbedding,
@@ -369,7 +370,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
         node_embedding=config["node_embedding"],
         edge_embedding=config["edge_embedding"],
         edge_update=config["edge_update"],
-        magnetic_edge_update=config["magnetic_edge_update"],
+        node_update=config["node_update"],
         radial_basis=config["radial_basis"],
         atomic_basis=config["atomic_basis"],
         resnet=config["resnet"],
@@ -406,20 +407,10 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     assert incompatible.unexpected_keys == []
 
 
-@pytest.mark.parametrize("update_type", ["identity", "element", "element2"])
-@pytest.mark.parametrize("magnetic_weight_type", ["node", "edge"])
-def test_magnetic_edge_update_is_independent_per_interaction(
-    update_type,
-    magnetic_weight_type,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        O2MagneticInteraction,
-        "magnetic_weight_type",
-        magnetic_weight_type,
-    )
+@pytest.mark.parametrize("magnetic_type", ["identity", "element", "element2"])
+def test_node_update_is_independent_per_interaction(magnetic_type):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
-    config["magnetic_edge_update"]["type"] = update_type
+    config["node_update"]["magnetic_type"] = magnetic_type
     config["atomic_basis"]["type"] = ["o2_mag", "o2_mag"]
     config["atomic_basis"]["nonlinear"] = ["gate", "gate"]
     config["atomic_basis"]["edge_nonlinear"] = ["gate", "gate"]
@@ -444,7 +435,7 @@ def test_magnetic_edge_update_is_independent_per_interaction(
         node_embedding=config["node_embedding"],
         edge_embedding=config["edge_embedding"],
         edge_update=config["edge_update"],
-        magnetic_edge_update=config["magnetic_edge_update"],
+        node_update=config["node_update"],
         radial_basis=config["radial_basis"],
         atomic_basis=config["atomic_basis"],
         resnet=config["resnet"],
@@ -458,36 +449,29 @@ def test_magnetic_edge_update_is_independent_per_interaction(
     )
 
     num_mag_radial_basis = config["radial_basis"]["num_mag_radial_basis"]
-    assert len(representation.magnetic_edge_updates) == 2
+    assert len(representation.node_updates) == 2
     assert representation.magnetic_edge_irreps_out.num_irreps == 2
     assert all(
         ir.l == 0 and ir.p == 1
         for _, ir in representation.magnetic_edge_irreps_out
     )
-    assert representation.magnetic_edge_updates[0] is not (
-        representation.magnetic_edge_updates[1]
+    assert representation.node_updates[0] is not (
+        representation.node_updates[1]
     )
     for update, interaction in zip(
-        representation.magnetic_edge_updates,
+        representation.node_updates,
         representation.interactions,
     ):
-        assert isinstance(update, MAGNETIC_EDGE_UPDATE[update_type])
+        assert isinstance(update, NodeUpdate)
+        assert isinstance(update, NODE_UPDATE[magnetic_type])
         assert interaction.edge_info.dims[0] == representation.edge_updates[0].out_dim
-        magnetic_weight_input_dim = (
-            update.out_dim // 2
-            if magnetic_weight_type == "node"
-            else update.out_dim
-        )
         expected_mlp_dims = [
-            magnetic_weight_input_dim,
+            update.out_dim,
             *config["radial_basis"]["hidden"],
             interaction.magnetic_linear.weight_numel,
         ]
-        if magnetic_weight_type == "node":
-            assert interaction.source_magnetic_weight_mlp.dims == expected_mlp_dims
-            assert interaction.target_magnetic_weight_mlp.dims == expected_mlp_dims
-        else:
-            assert interaction.magnetic_edge_weight_mlp.dims == expected_mlp_dims
+        assert interaction.source_magnetic_weight_mlp.dims == expected_mlp_dims
+        assert interaction.target_magnetic_weight_mlp.dims == expected_mlp_dims
         assert all(
             mul == representation.num_channel
             for mul, _ in interaction.magnetic_edge_irreps_out
@@ -497,25 +481,23 @@ def test_magnetic_edge_update_is_independent_per_interaction(
         edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]])
         magnetic_radial_basis = torch.randn(3, num_mag_radial_basis)
         node_attrs = torch.ones(3, 1)
-        magnetic_edge_feats = update(
+        magnetic_node_feats = update(
             magnetic_radial_basis,
             node_attrs,
-            edge_index,
         )
         magnetic_edge_attrs = torch.randn(
             edge_index.size(1),
             interaction.magnetic_edge_irreps.dim,
         )
-        magnetic_weights = interaction._magnetic_weights(magnetic_edge_feats)
-        if magnetic_weight_type == "node":
-            source_feats, target_feats = magnetic_edge_feats.chunk(2, dim=-1)
-            expected_weights = interaction.source_magnetic_weight_mlp(
-                source_feats
-            ) * interaction.target_magnetic_weight_mlp(target_feats)
-        else:
-            expected_weights = interaction.magnetic_edge_weight_mlp(
-                magnetic_edge_feats
-            )
+        magnetic_weights = interaction._magnetic_weights(
+            magnetic_node_feats,
+            edge_index,
+        )
+        source_feats, target_feats = magnetic_node_feats
+        source, target = edge_index
+        expected_weights = interaction.source_magnetic_weight_mlp(
+            source_feats[source]
+        ) * interaction.target_magnetic_weight_mlp(target_feats[target])
         torch.testing.assert_close(magnetic_weights, expected_weights)
         projected = interaction.magnetic_linear(
             magnetic_edge_attrs,
@@ -1213,9 +1195,9 @@ def test_magnetic_radial_basis_is_bounded_and_has_no_constant_mode():
     torch.testing.assert_close(angular, basis.angular_basis(magmoms))
 
 
-@pytest.mark.parametrize("update_type", ["identity", "element", "element2"])
-def test_magnetic_edge_update_gathers_source_and_target(update_type):
-    update = MAGNETIC_EDGE_UPDATE[update_type](
+@pytest.mark.parametrize("magnetic_type", ["identity", "element", "element2"])
+def test_node_update_returns_source_and_target_features(magnetic_type):
+    update = NODE_UPDATE[magnetic_type](
         num_elements=2,
         num_radial_basis=3,
         num_channel=5,
@@ -1226,16 +1208,10 @@ def test_magnetic_edge_update_gathers_source_and_target(update_type):
         dtype=DTYPE,
         device=DEVICE,
     )
-    edge_index = torch.tensor(
-        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
-        device=DEVICE,
-    )
-
-    output = update(magnetic_radial_basis, node_attrs, edge_index)
-    source, target = edge_index
-    if update_type == "identity":
+    output = update(magnetic_radial_basis, node_attrs)
+    if magnetic_type == "identity":
         source_features = target_features = magnetic_radial_basis
-    elif update_type == "element":
+    elif magnetic_type == "element":
         source_features = target_features = update.embedding(
             magnetic_radial_basis,
             node_attrs,
@@ -1244,10 +1220,10 @@ def test_magnetic_edge_update_gathers_source_and_target(update_type):
         source_features = update.source_embedding(magnetic_radial_basis, node_attrs)
         target_features = update.target_embedding(magnetic_radial_basis, node_attrs)
 
-    feature_dim = 3 if update_type == "identity" else 5
-    assert output.shape == (edge_index.size(1), update.out_dim)
-    torch.testing.assert_close(output[..., :feature_dim], source_features[source])
-    torch.testing.assert_close(output[..., feature_dim:], target_features[target])
+    assert output[0].shape == (magnetic_radial_basis.size(0), update.out_dim)
+    assert output[1].shape == (magnetic_radial_basis.size(0), update.out_dim)
+    torch.testing.assert_close(output[0], source_features)
+    torch.testing.assert_close(output[1], target_features)
 
 
 def _magnetic_scatter_module(use_attention: bool):

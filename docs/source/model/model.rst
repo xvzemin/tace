@@ -11,8 +11,9 @@ Only the components recommended for users will be presented; components that are
    :maxdepth: 2
    :caption: Contents
 
-   node.rst
+   node_embedding.rst
    edge_embedding.rst
+   node_update.rst
    edge_update.rst
    inter.rst
    prod.rst
