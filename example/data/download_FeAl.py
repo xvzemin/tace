@@ -7,6 +7,8 @@ import numpy as np
 from ase import Atoms
 from ase.io.extxyz import write_extxyz
 
+MAGNETIC_AXIS = "z"  # "x", "y", or "z"
+
 URL = (
     "https://gitlab.com/ivannovikov/datasets_for_magnetic_MTP/-/raw/main/"
     "Fe_Al_fitting_to_magnetic_forces/training_set/"
@@ -19,6 +21,10 @@ SYMBOLS = {0: "Al", 1: "Fe"}
 
 
 def main():
+    if MAGNETIC_AXIS not in "xyz":
+        raise ValueError("MAGNETIC_AXIS must be 'x', 'y', or 'z'.")
+    magnetic_axis = "xyz".index(MAGNETIC_AXIS)
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not CFG_FILE.exists():
         print(f"Downloading {URL}")
@@ -60,10 +66,15 @@ def main():
                 pbc=True,
             )
             atoms.arrays["forces"] = data[:, 5:8]
-            atoms.arrays["initial_noncollinear_magmoms"] = data[:, 8:11]
+
+            magmoms = np.zeros_like(data[:, 8:11])
+            magmoms[:, magnetic_axis] = data[:, 8]
+            atoms.arrays["initial_noncollinear_magmoms"] = magmoms
 
             # en_der_m is already -dE/dm, the TACE magnetic-force convention.
-            atoms.arrays["noncollinear_magnetic_forces"] = data[:, 11:14]
+            magnetic_forces = np.zeros_like(data[:, 11:14])
+            magnetic_forces[:, magnetic_axis] = data[:, 11]
+            atoms.arrays["noncollinear_magnetic_forces"] = magnetic_forces
             atoms.info["energy"] = energy
 
             # MLIP PlusStress is the virial W; TACE uses stress = -W / V.
