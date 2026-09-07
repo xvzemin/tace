@@ -15,7 +15,11 @@ independent choices. ``angular_basis.use_spin_orbit_coupling`` controls whether
 non-scalar spin tensors may couple to the lattice. The installed e3nn package
 controls whether the additional time-reversal label is represented exactly.
 TACE detects the latter automatically; there is no separate configuration
-flag for it.
+flag for it. ``parity: false`` keeps only natural spatial parity
+:math:`p=(-1)^l` throughout the model and treats physical quantities with
+non-natural parity as their natural-parity counterparts. ``parity: true``
+retains their physical spatial parity and enables the complete :math:`O(3)`
+representation space. Neither setting changes the time-reversal label.
 
 :math:`O(3)\times\mathbb Z_2^{\mathcal T}` model with SOC data
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -36,6 +40,7 @@ Install the time-reversal e3nn branch described in
 
    model:
      config:
+       parity: true
        atomic_basis:
          type: o2_mag
        angular_basis:
@@ -64,6 +69,7 @@ dependence:
 
    model:
      config:
+       parity: true
        atomic_basis:
          type: o2_mag
        angular_basis:
@@ -99,6 +105,7 @@ For zero-field SOC data, teach global time reversal with:
 
    model:
      config:
+       parity: true
        atomic_basis:
          type: o2_mag
        angular_basis:
@@ -113,6 +120,7 @@ For non-SOC data, teach both independent spin rotations and time reversal:
 
    model:
      config:
+       parity: true
        atomic_basis:
          type: o2_mag
        angular_basis:
@@ -143,6 +151,7 @@ orientation, but cannot lock a spin direction to the lattice.
 
    model:
      config:
+       parity: false
        atomic_basis:
          type: o2_mag
        angular_basis:

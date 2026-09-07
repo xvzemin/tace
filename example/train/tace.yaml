@@ -331,7 +331,7 @@ model:
     lmax: 3 # Truncation for edge, 3 is recommended.
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
     num_channel: 48 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
-    parity: false # (bool) in test, not for users, always false
+    parity: false # false: O(3) natural parity only, when pesduo occur -> SO(3), true: complete O(3) parity
 
     radial_basis:
       radial_basis: j0   # [j0, jn, gaussian]
