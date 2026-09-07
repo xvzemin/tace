@@ -12,6 +12,7 @@ from tace.utils.torch_scatter import scatter_sum
 
 from ..blocks import OneHotToAtomicEnergy, ScaleShift
 from ..radial import ZBLBasis
+from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps
 from .basis_change import DirectPolarizability, DirectVirials
 from .default import check_model_config
@@ -106,6 +107,8 @@ class e3nnTACE(torch.nn.Module):
             target_irreps.extend(cfg["product_basis"]["return_components"])
         target_irreps = list(set(target_irreps))
         self.target_irreps = o3.Irreps(target_irreps).regroup()
+        if not cfg["parity"]:
+            self.target_irreps = with_natural_parity(self.target_irreps)
 
         # === Representation/Descriptor ===
         self.representation = Representation(

@@ -511,9 +511,9 @@ class O2Interaction(O3CgtpInteraction):
 class O2MagneticInteraction(O2Interaction):
     """Local-O2 interaction augmented by magnetic edge attributes."""
 
+    magnetic_weight_type = "node"  # node or edge
+
     def _prepare_setup(self) -> None:
-        if not self.parity:
-            raise ValueError("o2_mag requires parity: true for full O(3)")
         if self.magnetic_edge_irreps is None:
             raise ValueError("o2_mag requires magnetic_edge_irreps.")
         if not 0 <= self.magnetic_edge_irreps.lmax <= self.Lmax:
@@ -529,14 +529,14 @@ class O2MagneticInteraction(O2Interaction):
         edge_irreps = _to_possible_tp_irreps(
             self.magnetic_edge_irreps,
             self.irreps_sh,
-            parity=True,
+            parity=self.parity,
             lmax=self.magnetic_edge_irreps.lmax + self.irreps_sh.lmax,
         )
         output_lmax = self.Lmax if self.correlation == 1 else self.lmax
         self.irrreps_tp_out = _to_possible_tp_irreps(
             self.irreps_in,
             edge_irreps,
-            parity=True,
+            parity=self.parity,
             lmax=output_lmax,
         )
         self.irreps_out = (
@@ -555,7 +555,7 @@ class O2MagneticInteraction(O2Interaction):
             irreps_sc = _to_possible_tp_irreps(
                 self.irreps_out,
                 self.irreps_out,
-                parity=True,
+                parity=self.parity,
                 lmax=self.Lmax,
             )
         self.irreps_sc = (irreps_sc * self.num_channel).regroup()
@@ -601,14 +601,54 @@ class O2MagneticInteraction(O2Interaction):
             bias=False,
             internal_weights=False,
         )
-        self.magnetic_edge_info = MLP(
-            [self.magnetic_edge_feats_channel]
+        if self.magnetic_weight_type not in {"node", "edge"}:
+            raise ValueError(
+                "magnetic_weight_type must be either 'node' or 'edge'."
+            )
+        if (
+            self.magnetic_weight_type == "node"
+            and self.magnetic_edge_feats_channel % 2 != 0
+        ):
+            raise ValueError(
+                "node magnetic weights require equal source and target features."
+            )
+        magnetic_weight_input_dim = self.magnetic_edge_feats_channel
+        if self.magnetic_weight_type == "node":
+            magnetic_weight_input_dim //= 2
+        magnetic_weight_channels = (
+            [magnetic_weight_input_dim]
             + self.radial_mlp
-            + [self.magnetic_linear.weight_numel],
-            bias=self.radial_bias,
-            # layer_norm=self.radial_layer_norm,
-            act="silu",
+            + [self.magnetic_linear.weight_numel]
         )
+        if self.magnetic_weight_type == "node":
+            self.source_magnetic_weight_mlp = MLP(
+                magnetic_weight_channels,
+                bias=self.radial_bias,
+                act="silu",
+            )
+            self.target_magnetic_weight_mlp = MLP(
+                magnetic_weight_channels,
+                bias=self.radial_bias,
+                act="silu",
+            )
+        else:
+            self.magnetic_edge_weight_mlp = MLP(
+                magnetic_weight_channels,
+                bias=self.radial_bias,
+                act="silu",
+            )
+
+    def _magnetic_weights(
+        self,
+        magnetic_edge_feats: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.magnetic_weight_type == "edge":
+            return self.magnetic_edge_weight_mlp(magnetic_edge_feats)
+        source_feats, target_feats = magnetic_edge_feats.chunk(2, dim=-1)
+        source_weights = self.source_magnetic_weight_mlp(source_feats)
+        target_weights = self.target_magnetic_weight_mlp(target_feats)
+        return source_weights * target_weights
+
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
@@ -627,7 +667,7 @@ class O2MagneticInteraction(O2Interaction):
             )
         magnetic_edge_attrs = self.magnetic_linear(
             magnetic_edge_attrs,
-            self.magnetic_edge_info(magnetic_edge_feats),
+            self._magnetic_weights(magnetic_edge_feats),
         )
         return self.rejector(
             node_feats,

@@ -12,17 +12,23 @@ from e3nn.nn import Activation
 from ...dataset.quantity import PROPERTY
 from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import ACTIVATION, MLP
-from ..time_reversal import with_time_reversal
+from ..time_reversal import with_natural_parity, with_time_reversal
 
 
-def _property_irreps(name: str, time_reversal: bool) -> o3.Irreps:
+def _property_irreps(
+    name: str,
+    time_reversal: bool,
+    parity: bool = True,
+) -> o3.Irreps:
     irreps = o3.Irreps(PROPERTY[name]["irreps"])
-    if not time_reversal:
-        return irreps
-    return with_time_reversal(
-        irreps,
-        PROPERTY[name].get("time_reversal", 1),
-    )
+    if time_reversal:
+        irreps = with_time_reversal(
+            irreps,
+            PROPERTY[name].get("time_reversal", 1),
+        )
+    if not parity:
+        irreps = with_natural_parity(irreps)
+    return irreps
 
 
 class UniversalInvariantEmbedding(torch.nn.Module):
@@ -83,6 +89,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
         num_elements: int,
         config: dict[str, Union[bool, str, int]],
         time_reversal: bool = True,
+        parity: bool = True,
     ):
         super().__init__()
 
@@ -90,7 +97,11 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
         self.irreps_in = irreps_in
         irreps_out = irreps_in
         for p in config.keys():
-            irreps_out += _property_irreps(p, time_reversal)
+            irreps_out += _property_irreps(
+                p,
+                time_reversal,
+                parity,
+            )
         irreps_out = irreps_out.regroup()
         self.irreps_out = o3.Irreps([(num_channel, ir) for _, ir in irreps_out])
 
@@ -98,7 +109,11 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
         self.uee = torch.nn.ModuleDict()
         for k, v in config.items():
             self.uee[k] = e3nnElementLinear(
-                _property_irreps(k, time_reversal),
+                _property_irreps(
+                    k,
+                    time_reversal,
+                    parity,
+                ),
                 self.irreps_out,
                 bias=True,
                 num_elements=num_elements,

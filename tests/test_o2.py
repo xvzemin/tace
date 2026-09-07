@@ -13,6 +13,7 @@ from e3nn import o3
 from eqx import o2
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
 from tace.models._e3nn.edge import MAGNETIC_EDGE_UPDATE
+from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models._e3nn.magnetic import MagneticBasis
 from tace.models._e3nn.node import (
     NODE_EMBEDDING,
@@ -93,6 +94,23 @@ def test_magnetic_basis_normalization_validation():
     assert basis.angular_normalization == "integral"
     assert basis.radial_normalization == "clamp"
     assert basis.num_mag_radial_basis == 4
+
+    natural_basis = MagneticBasis(
+        {26: 2.0},
+        num_mag_radial_basis=4,
+        Lmax=2,
+        atomic_numbers=[26],
+        parity=False,
+    )
+    assert [ir.p for _, ir in natural_basis.magnetic_node_irreps_out] == [
+        1,
+        -1,
+        1,
+    ]
+    assert all(
+        ir.p == (-1) ** ir.l
+        for _, ir in natural_basis.magnetic_edge_irreps_out
+    )
 
     shared_scale_basis = MagneticBasis(
         2.0,
@@ -389,7 +407,17 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
 
 
 @pytest.mark.parametrize("update_type", ["identity", "element", "element2"])
-def test_magnetic_edge_update_is_independent_per_interaction(update_type):
+@pytest.mark.parametrize("magnetic_weight_type", ["node", "edge"])
+def test_magnetic_edge_update_is_independent_per_interaction(
+    update_type,
+    magnetic_weight_type,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        O2MagneticInteraction,
+        "magnetic_weight_type",
+        magnetic_weight_type,
+    )
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config["magnetic_edge_update"]["type"] = update_type
     config["atomic_basis"]["type"] = ["o2_mag", "o2_mag"]
@@ -445,11 +473,21 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
     ):
         assert isinstance(update, MAGNETIC_EDGE_UPDATE[update_type])
         assert interaction.edge_info.dims[0] == representation.edge_updates[0].out_dim
-        assert interaction.magnetic_edge_info.dims == [
-            update.out_dim,
+        magnetic_weight_input_dim = (
+            update.out_dim // 2
+            if magnetic_weight_type == "node"
+            else update.out_dim
+        )
+        expected_mlp_dims = [
+            magnetic_weight_input_dim,
             *config["radial_basis"]["hidden"],
             interaction.magnetic_linear.weight_numel,
         ]
+        if magnetic_weight_type == "node":
+            assert interaction.source_magnetic_weight_mlp.dims == expected_mlp_dims
+            assert interaction.target_magnetic_weight_mlp.dims == expected_mlp_dims
+        else:
+            assert interaction.magnetic_edge_weight_mlp.dims == expected_mlp_dims
         assert all(
             mul == representation.num_channel
             for mul, _ in interaction.magnetic_edge_irreps_out
@@ -468,7 +506,17 @@ def test_magnetic_edge_update_is_independent_per_interaction(update_type):
             edge_index.size(1),
             interaction.magnetic_edge_irreps.dim,
         )
-        magnetic_weights = interaction.magnetic_edge_info(magnetic_edge_feats)
+        magnetic_weights = interaction._magnetic_weights(magnetic_edge_feats)
+        if magnetic_weight_type == "node":
+            source_feats, target_feats = magnetic_edge_feats.chunk(2, dim=-1)
+            expected_weights = interaction.source_magnetic_weight_mlp(
+                source_feats
+            ) * interaction.target_magnetic_weight_mlp(target_feats)
+        else:
+            expected_weights = interaction.magnetic_edge_weight_mlp(
+                magnetic_edge_feats
+            )
+        torch.testing.assert_close(magnetic_weights, expected_weights)
         projected = interaction.magnetic_linear(
             magnetic_edge_attrs,
             magnetic_weights,

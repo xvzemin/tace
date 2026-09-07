@@ -23,6 +23,7 @@ from tace.models._e3nn.node import (
 )
 from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
+from tace.models._e3nn.readout import TensorReadOut
 from tace.models._e3nn.tace import e3nnTACE
 from tace.models._e3nn.ue import UniversalEquivariantEmbedding
 from tace.models.angular import SolidHarmonics
@@ -31,6 +32,7 @@ from tace.models.linear import e3nnLinear
 from tace.models.time_reversal import (
     spherical_harmonics_irreps,
     supports_time_reversal,
+    with_natural_parity,
     with_time_reversal,
 )
 
@@ -190,6 +192,32 @@ def test_time_reversal_helpers_support_both_e3nn_variants():
     )
 
 
+def test_natural_parity_preserves_time_reversal_labels():
+    irreps = with_time_reversal("1x0o + 1x1e + 1x2o", -1)
+    natural_irreps = with_natural_parity(irreps)
+
+    assert [ir.p for _, ir in natural_irreps] == [1, -1, 1]
+    assert _time_parities(natural_irreps) == _time_parities(irreps)
+
+
+def test_readout_uses_selected_spatial_parity():
+    readout_kwargs = {
+        "layer": 0,
+        "num_layers": 2,
+        "hidden_channel": [],
+        "bias": False,
+        "num_elements": 1,
+        "num_fidelities": 1,
+        "irreps_in": o3.Irreps("2x1o"),
+        "irreps_out": o3.Irreps("1e"),
+    }
+    natural_readout = TensorReadOut(parity=False, **readout_kwargs)
+    complete_readout = TensorReadOut(parity=True, **readout_kwargs)
+
+    assert natural_readout.irreps_out[0].ir.p == -1
+    assert complete_readout.irreps_out[0].ir.p == 1
+
+
 def test_universal_embedding_uses_property_time_reversal_metadata():
     embedding = UniversalEquivariantEmbedding(
         irreps_in=o3.Irreps("2x0e"),
@@ -225,7 +253,47 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     assert representation.invariant_property == []
     assert representation.equivariant_property == ["magnetic_field"]
     ir = representation.uee_embeddings[0].uee["magnetic_field"].irreps_in[0].ir
-    assert ir.l == 1 and ir.p == 1 and ir.t == -1
+    assert ir.l == 1 and ir.p == -1 and ir.t == -1
+
+    config["parity"] = True
+    full_o3_model = e3nnTACE(**config)
+    full_o3_ir = (
+        full_o3_model.representation.uee_embeddings[0]
+        .uee["magnetic_field"]
+        .irreps_in[0]
+        .ir
+    )
+    assert full_o3_ir.l == 1 and full_o3_ir.p == 1 and full_o3_ir.t == -1
+
+
+def test_parity_selects_natural_or_complete_magnetic_paths():
+    config = _model_config()
+    config["atomic_basis"]["type"] = "o2_mag"
+    config["angular_basis"]["magnetic_Lmax"] = 1
+    config["fidelity"][0]["magnetic_scale"] = 2.0
+    config["mmax"] = 1
+
+    natural_model = e3nnTACE(**config)
+    natural_representation = natural_model.representation
+    for irreps in (
+        natural_representation.magnetic_node_irreps_out,
+        natural_representation.magnetic_edge_irreps_out,
+        natural_representation.interactions[0].irreps_out,
+        natural_representation.products[0].irreps_out,
+    ):
+        assert all(ir.p == (-1) ** ir.l for _, ir in irreps)
+
+    config["parity"] = True
+    complete_model = e3nnTACE(**config)
+    complete_representation = complete_model.representation
+    assert any(
+        ir.p != (-1) ** ir.l
+        for _, ir in complete_representation.magnetic_node_irreps_out
+    )
+    assert any(
+        ir.p != (-1) ** ir.l
+        for _, ir in complete_representation.magnetic_edge_irreps_out
+    )
 
 
 @pytest.mark.parametrize(

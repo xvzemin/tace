@@ -142,6 +142,7 @@ class Representation(torch.nn.Module):
                 atomic_numbers=atomic_numbers,
                 time_reversal=self.use_time_reversal,
                 use_spin_orbit_coupling=angular_basis["use_spin_orbit_coupling"],
+                parity=parity,
             )
             self.magnetic_node_irreps_out = (
                 self.magnetic_basis.magnetic_node_irreps_out
@@ -304,6 +305,7 @@ class Representation(torch.nn.Module):
                             if k in self.equivariant_property
                         },
                         time_reversal=self.use_time_reversal,
+                        parity=parity,
                     ),
                 )
                 prod_irreps_in = self.uee_embeddings[layer].irreps_out

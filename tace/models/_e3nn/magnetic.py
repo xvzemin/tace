@@ -28,6 +28,7 @@ class MagneticBasis(torch.nn.Module):
         angular_normalization: str = "integral",
         radial_normalization: str = "clamp",
         use_spin_orbit_coupling: bool = True,
+        parity: bool = True,
     ) -> None:
         super().__init__()
 
@@ -45,6 +46,7 @@ class MagneticBasis(torch.nn.Module):
         self.angular_normalization = angular_normalization
         self.radial_normalization = radial_normalization
         self.use_spin_orbit_coupling = use_spin_orbit_coupling
+        self.parity = parity
         self.register_buffer(
             "magnetic_scale",
             self._resolve_magnetic_scale(magnetic_scale, atomic_numbers),
@@ -55,7 +57,7 @@ class MagneticBasis(torch.nn.Module):
         )
         self.magnetic_node_irreps_out = spherical_harmonics_irreps(
             Lmax,
-            p=1,
+            p=1 if parity else -1,
             time_reversal=-1 if time_reversal else 1,
         ).regroup()
         self.angular_basis = SolidHarmonics(
@@ -70,6 +72,7 @@ class MagneticBasis(torch.nn.Module):
                     for ir_out in ir1 * ir2:
                         if (
                             ir_out.l <= Lmax
+                            and (parity or ir_out.p == (-1) ** ir_out.l)
                             and ir_out not in magnetic_edge_irrep_list
                         ):
                             magnetic_edge_irrep_list.append(ir_out)
@@ -148,6 +151,7 @@ class MagneticBasis(torch.nn.Module):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(\n"
+            f"  parity={self.parity},\n"
             f"  use_spin_orbit_coupling={self.use_spin_orbit_coupling},\n"
             f"  num_mag_radial_basis={self.num_mag_radial_basis},\n"
             f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"

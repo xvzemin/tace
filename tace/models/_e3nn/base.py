@@ -11,6 +11,7 @@ import torch
 from e3nn import o3
 
 from ..lammps import e3nnGhostExchangeMixin
+from ..time_reversal import with_natural_parity
 
 
 def _to_possible_tp_irreps(
@@ -397,7 +398,10 @@ class ReadOut(torch.nn.Module):
         self.num_fidelities = num_fidelities
         self.parity = parity
         self.irreps_in = o3.Irreps(irreps_in)
-        self.irreps_out = (o3.Irreps(irreps_out) * num_fidelities).regroup()
+        irreps_out = o3.Irreps(irreps_out)
+        if not parity:
+            irreps_out = with_natural_parity(irreps_out)
+        self.irreps_out = (irreps_out * num_fidelities).regroup()
         self.scalar_act = (
             "tanh"
             if any(ir.l == 0 and not ir.is_scalar() for _, ir in self.irreps_out)
