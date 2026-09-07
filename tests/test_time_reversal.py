@@ -257,6 +257,66 @@ def test_spin_node_embedding_registers_magnetic_input(
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
+def test_o2_magnetic_interactions_keep_complete_soc_irreps():
+    config = _model_config()
+    config.update(
+        num_layers=2,
+        num_channel=2,
+        Lmax=2,
+        lmax=3,
+        mmax=2,
+        parity=True,
+    )
+    config["fidelity"][0]["magnetic_scale"] = {1: 2.0}
+    config["angular_basis"].update(
+        magnetic_Lmax=2,
+        use_spin_orbit_coupling=True,
+    )
+    config["atomic_basis"].update(
+        type="o2_mag",
+        nonlinear="gate",
+        edge_nonlinear="gate",
+        use_radial_rotary_attention=False,
+    )
+    config["product_basis"].update(type="cgtp", correlation=2)
+    model = e3nnTACE(**config)
+
+    for interaction in model.representation.interactions:
+        output_lmax = (
+            interaction.Lmax
+            if interaction.correlation == 1
+            else interaction.lmax
+        )
+        expected = {
+            ir_out
+            for _, ir_node in interaction.irreps_in
+            for _, ir_mag in interaction.magnetic_edge_irreps
+            for _, ir_spatial in interaction.irreps_sh
+            for ir_edge in ir_mag * ir_spatial
+            for ir_out in ir_node * ir_edge
+            if ir_out.l <= output_lmax
+        }
+        assert {ir for _, ir in interaction.irrreps_tp_out} == expected
+        assert interaction.rejector.local_frame_out.global_irreps == (
+            interaction.irreps_out
+        )
+
+    first_irreps = {
+        str(ir) for _, ir in model.representation.interactions[0].irrreps_tp_out
+    }
+    assert first_irreps == {
+        f"{l}{parity}{time_parity}"
+        for l in range(4)
+        for parity in "oe"
+        for time_parity in "oe"
+    }
+    assert "1eo" in first_irreps
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
 def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
     for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)

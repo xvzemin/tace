@@ -1,10 +1,10 @@
 from ._e3nn import e3nnTACE
 from .adapter import TensorModel
 from .compile import CompileTensorModel
-try:
-    from ._cart import cartTACE
-except Exception:
-    cartTACE = None
+
+# Compatibility export for configurations created before cartTACE was removed.
+cartTACE = None
+
 try:
     from .scf import SCFTACE
 except Exception:

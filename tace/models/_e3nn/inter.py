@@ -14,7 +14,7 @@ from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
-from .base import Interaction
+from .base import Interaction, _to_possible_tp_irreps
 from .fused import O3ScatterTensorProduct
 from .layer_norm import get_normalization_layer
 from .legacy_so2 import uvSO2Convolution
@@ -521,6 +521,44 @@ class O2MagneticInteraction(O2Interaction):
         self.magnetic_edge_irreps_out = o3.Irreps(
             [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
         ).regroup()
+
+        # A magnetic SOC edge carries both the spatial bond harmonics and the
+        # magnetic source-target tensor product.  We do not truncate their
+        # intermediate product: higher intermediate l can couple with the
+        # node field back into the retained output range.
+        edge_irreps = _to_possible_tp_irreps(
+            self.magnetic_edge_irreps,
+            self.irreps_sh,
+            parity=True,
+            lmax=self.magnetic_edge_irreps.lmax + self.irreps_sh.lmax,
+        )
+        output_lmax = self.Lmax if self.correlation == 1 else self.lmax
+        self.irrreps_tp_out = _to_possible_tp_irreps(
+            self.irreps_in,
+            edge_irreps,
+            parity=True,
+            lmax=output_lmax,
+        )
+        self.irreps_out = (
+            self.irrreps_tp_out * self.num_channel
+        ).regroup()
+
+        # Match the skip connection to the product-basis output constructed
+        # from the corrected interaction irreps.
+        if self.layer == self.num_layers - 1:
+            irreps_sc = o3.Irreps(self.target_irreps)
+        elif self.correlation == 1:
+            irreps_sc = o3.Irreps(
+                [(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax]
+            ).regroup()
+        else:
+            irreps_sc = _to_possible_tp_irreps(
+                self.irreps_out,
+                self.irreps_out,
+                parity=True,
+                lmax=self.Lmax,
+            )
+        self.irreps_sc = (irreps_sc * self.num_channel).regroup()
         super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:

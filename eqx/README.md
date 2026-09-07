@@ -2,7 +2,7 @@
 
 EQX is a library for equivariant PyTorch operators. Its current
 focus is real O(2) representation theory, conversion between global
-O(3) and local O(2) features, and Cartesian O(3) operators.
+O(3) and local O(2) features.
 
 > [!WARNING]
 > **EquivariantX is under active development.**
@@ -27,19 +27,5 @@ conversion, please cite:
   archivePrefix={arXiv},
   primaryClass={physics.chem-ph},
   url={https://arxiv.org/abs/2608.16592},
-}
-```
-
-If you use Cartesian O(3) method please cite:
-
-```bibtex
-@misc{xu2026spectralspatialtensoratomiccluster,
-   title={Spectral/Spatial Tensor Atomic Cluster Expansion with Universal Embeddings in Cartesian Space}, 
-   author={Zemin Xu and Wenbo Xie and P. Hu},
-   year={2026},
-   eprint={2509.14961},
-   archivePrefix={arXiv},
-   primaryClass={stat.ML},
-   url={https://arxiv.org/abs/2509.14961}, 
 }
 ```
