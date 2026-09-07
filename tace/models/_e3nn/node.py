@@ -273,7 +273,7 @@ class O2TensorNodeEmbedding(NodeEmbedding):
 
 
 class IdentityNodeUpdate(NodeUpdate):
-    """Return the magnetic radial node features for both endpoints."""
+    """Return the magnetic radial node information for both endpoints."""
 
     def _setup(self) -> None:
         self.out_dim = self.num_radial_basis
@@ -303,8 +303,8 @@ class ElementNodeUpdate(NodeUpdate):
         magnetic_radial_basis: torch.Tensor,
         node_attrs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        node_features = self.embedding(magnetic_radial_basis, node_attrs)
-        return node_features, node_features
+        node_info = self.embedding(magnetic_radial_basis, node_attrs)
+        return node_info, node_info
 
 
 class Element2NodeUpdate(NodeUpdate):

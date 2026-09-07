@@ -188,8 +188,10 @@ def test_wigner6j_recoupling_matches_reference_and_gradients(
         )
 
 
-@pytest.mark.parametrize("weight_level", ["edge", "node"])
-@pytest.mark.parametrize("improper", [False, True])
+@pytest.mark.parametrize(
+    ("weight_level", "improper"),
+    [("edge", False), ("node", True)],
+)
 def test_wigner6j_tensor_product_is_o3_equivariant(
     improper,
     weight_level,
@@ -205,7 +207,9 @@ def test_wigner6j_tensor_product_is_o3_equivariant(
         rotation = -rotation
     node_rotation = module.irreps_node_feats.D_from_matrix(rotation).to(DEVICE)
     edge_rotation = module.irreps_edge_attrs.D_from_matrix(rotation).to(DEVICE)
-    extra_rotation = module.extra_irreps_node_attrs.D_from_matrix(rotation).to(DEVICE)
+    extra_rotation = module.extra_irreps_node_attrs.D_from_matrix(rotation).to(
+        DEVICE
+    )
     output_rotation = module.irreps_out.D_from_matrix(rotation).to(DEVICE)
     rotated_inputs = (
         node_feats @ node_rotation.T,

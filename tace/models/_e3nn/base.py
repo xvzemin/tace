@@ -174,7 +174,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         use_asymmetric_contraction: bool = True,
         use_radial_rotary_attention: bool = True,
         num_mag_radial_basis: int = 8,
-        magnetic_node_feats_channel: int = 0,
+        magnetic_node_info_channel: int = 0,
         magnetic_edge_irreps: o3.Irreps = None,
     ) -> None:
         super().__init__()
@@ -239,7 +239,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.parity = parity
         self.num_head = num_head or 1
         self.num_mag_radial_basis = num_mag_radial_basis
-        self.magnetic_node_feats_channel = magnetic_node_feats_channel
+        self.magnetic_node_info_channel = magnetic_node_info_channel
         self.magnetic_edge_irreps = magnetic_edge_irreps
 
         self.irreps_in = irreps_in

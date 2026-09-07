@@ -278,7 +278,7 @@ class Representation(torch.nn.Module):
                     **for_interactions,
                     layer=layer,
                     edge_feats_channel=self.edge_updates[layer].out_dim,
-                    magnetic_node_feats_channel=(
+                    magnetic_node_info_channel=(
                         self.node_updates[layer].out_dim
                         if self.node_updates is not None
                         else 0
@@ -444,7 +444,7 @@ class Representation(torch.nn.Module):
                 data["edge_index"],
                 edge_cutoff,
             )
-            magnetic_node_feats = (
+            magnetic_node_info = (
                 self.node_updates[idx](
                     magnetic_radial_basis,
                     node_attrs_total,
@@ -465,7 +465,7 @@ class Representation(torch.nn.Module):
                 edge_cutoff,
                 edge_wigner,
                 edge_wigner_inv,
-                magnetic_node_feats,
+                magnetic_node_info,
                 magnetic_edge_attrs,
                 data["batch"],
                 graph,
