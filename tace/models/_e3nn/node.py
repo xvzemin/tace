@@ -10,9 +10,9 @@ from typing import Union
 import torch
 from e3nn import o3
 
-from ..linear import e3nnLinear
+from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import MLP, get_scaled_activation
-from .base import NodeEmbedding
+from .base import NodeEmbedding, NodeUpdate
 from .fused import O3ScatterTensorProduct
 from .o2 import O2ScatterTensorProduct
 
@@ -272,10 +272,82 @@ class O2TensorNodeEmbedding(NodeEmbedding):
         return node_feats
 
 
+class IdentityNodeUpdate(NodeUpdate):
+    """Return the magnetic radial node features for both endpoints."""
+
+    def _setup(self) -> None:
+        self.out_dim = self.num_radial_basis
+
+    def forward(
+        self,
+        magnetic_radial_basis: torch.Tensor,
+        node_attrs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return magnetic_radial_basis, magnetic_radial_basis
+
+
+class ElementNodeUpdate(NodeUpdate):
+    """Apply one shared element-dependent map to both endpoints."""
+
+    def _setup(self) -> None:
+        self.out_dim = self.num_channel
+        self.embedding = e3nnElementLinear(
+            f"{self.num_radial_basis}x0e",
+            f"{self.num_channel}x0e",
+            num_elements=self.num_elements,
+            bias=self.use_bias,
+        )
+
+    def forward(
+        self,
+        magnetic_radial_basis: torch.Tensor,
+        node_attrs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        node_features = self.embedding(magnetic_radial_basis, node_attrs)
+        return node_features, node_features
+
+
+class Element2NodeUpdate(NodeUpdate):
+    """Apply independent element-dependent maps to the two endpoints."""
+
+    def _setup(self) -> None:
+        self.out_dim = self.num_channel
+        irreps_in = f"{self.num_radial_basis}x0e"
+        irreps_out = f"{self.num_channel}x0e"
+        self.source_embedding = e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            num_elements=self.num_elements,
+            bias=self.use_bias,
+        )
+        self.target_embedding = e3nnElementLinear(
+            irreps_in,
+            irreps_out,
+            num_elements=self.num_elements,
+            bias=self.use_bias,
+        )
+
+    def forward(
+        self,
+        magnetic_radial_basis: torch.Tensor,
+        node_attrs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            self.source_embedding(magnetic_radial_basis, node_attrs),
+            self.target_embedding(magnetic_radial_basis, node_attrs),
+        )
+
+
 NODE_EMBEDDING = {
     "linear": LinearNodeEmbedding,
     "linear_spin": LinearSpinNodeEmbedding,
     "nonlinear_spin": NonLinearSpinNodeEmbedding,
     "tensor": TensorNodeEmbedding,
     "o2_tensor": O2TensorNodeEmbedding,
+}
+
+NODE_UPDATE = {
+    "identity": IdentityNodeUpdate,
+    "element": ElementNodeUpdate,
+    "element2": Element2NodeUpdate,
 }

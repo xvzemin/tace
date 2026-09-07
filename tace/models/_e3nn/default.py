@@ -33,8 +33,8 @@ DEFAULT_MODEL_CONFIG = {
     "edge_update": {
         "type": "identity",
     },
-    "magnetic_edge_update": {
-        "type": "identity",
+    "node_update": {
+        "magnetic_type": "identity",
     },
     "radial_basis": {
         "bias": False,

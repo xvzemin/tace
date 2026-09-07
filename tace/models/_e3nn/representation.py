@@ -17,7 +17,7 @@ from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
-from .edge import EDGE_EMBEDDING, EDGE_UPDATE, MAGNETIC_EDGE_UPDATE
+from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import (
     INTERACTION,
     O2Interaction,
@@ -26,7 +26,7 @@ from .inter import (
 )
 from .layer_norm import get_normalization_layer
 from .magnetic import MagneticBasis
-from .node import NODE_EMBEDDING, O2TensorNodeEmbedding
+from .node import NODE_EMBEDDING, NODE_UPDATE, O2TensorNodeEmbedding
 from .prod import PRODUCT
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
@@ -47,7 +47,7 @@ class Representation(torch.nn.Module):
         node_embedding: Dict,
         edge_embedding: Dict,
         edge_update: Dict,
-        magnetic_edge_update: Union[Dict, None],
+        node_update: Union[Dict, None],
         radial_basis: Dict,
         angular_basis: Union[Dict, None],
         atomic_basis: Dict,
@@ -211,11 +211,11 @@ class Representation(torch.nn.Module):
                 for layer in range(num_layers)
             ]
         )
-        self.magnetic_edge_updates = (
+        self.node_updates = (
             torch.nn.ModuleList(
                 [
-                    MAGNETIC_EDGE_UPDATE[(magnetic_edge_update or {}).get(
-                        "type", "element"
+                    NODE_UPDATE[(node_update or {}).get(
+                        "magnetic_type", "identity"
                     )](
                         num_elements=self.num_elements,
                         num_radial_basis=radial_basis["num_mag_radial_basis"],
@@ -278,9 +278,9 @@ class Representation(torch.nn.Module):
                     **for_interactions,
                     layer=layer,
                     edge_feats_channel=self.edge_updates[layer].out_dim,
-                    magnetic_edge_feats_channel=(
-                        self.magnetic_edge_updates[layer].out_dim
-                        if self.magnetic_edge_updates is not None
+                    magnetic_node_feats_channel=(
+                        self.node_updates[layer].out_dim
+                        if self.node_updates is not None
                         else 0
                     ),
                     nonlinear=atomic_basis["nonlinear"][layer],
@@ -444,13 +444,12 @@ class Representation(torch.nn.Module):
                 data["edge_index"],
                 edge_cutoff,
             )
-            magnetic_edge_feats = (
-                self.magnetic_edge_updates[idx](
+            magnetic_node_feats = (
+                self.node_updates[idx](
                     magnetic_radial_basis,
                     node_attrs_total,
-                    data["edge_index"],
                 )
-                if self.magnetic_edge_updates is not None
+                if self.node_updates is not None
                 else None
             )
             if graph.lmp and idx > 0:
@@ -466,7 +465,7 @@ class Representation(torch.nn.Module):
                 edge_cutoff,
                 edge_wigner,
                 edge_wigner_inv,
-                magnetic_edge_feats,
+                magnetic_node_feats,
                 magnetic_edge_attrs,
                 data["batch"],
                 graph,
