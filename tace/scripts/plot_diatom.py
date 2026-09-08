@@ -39,6 +39,11 @@ def parse_args():
     parser.add_argument(
         "--forces_key", default="forces", help="DFT forces key in atoms.arrays"
     )
+    parser.add_argument(
+        "--heteronuclear",
+        action="store_true",
+        help="Include heteronuclear diatomic pairs",
+    )
     return parser.parse_args()
 
 
@@ -59,15 +64,15 @@ def _distance_and_direction(atoms):
     return distance, vector / distance
 
 
-def _read_reference(path, atomic_numbers, energy_key, forces_key):
+def _read_reference(
+    path, atomic_numbers, energy_key, forces_key, include_heteronuclear=False
+):
     reference = {}
     for index, atoms in enumerate(ase.io.read(path, index=":")):
         numbers = atoms.get_atomic_numbers()
-        if (
-            len(numbers) != 2
-            or numbers[0] != numbers[1]
-            or numbers[0] not in atomic_numbers
-        ):
+        if len(numbers) != 2 or any(z not in atomic_numbers for z in numbers):
+            continue
+        if not include_heteronuclear and numbers[0] != numbers[1]:
             continue
         if energy_key not in atoms.info:
             raise KeyError(f"Structure {index} has no atoms.info[{energy_key!r}].")
@@ -80,7 +85,8 @@ def _read_reference(path, atomic_numbers, energy_key, forces_key):
             raise ValueError(
                 f"Structure {index} forces have shape {forces.shape}, expected (2, 3)."
             )
-        reference.setdefault(int(numbers[0]), []).append(
+        element_pair = tuple(sorted(int(z) for z in numbers))
+        reference.setdefault(element_pair, []).append(
             (
                 distance,
                 atoms,
@@ -91,9 +97,8 @@ def _read_reference(path, atomic_numbers, energy_key, forces_key):
         )
 
     if not reference:
-        raise ValueError(
-            "The input contains no supported homonuclear diatomic structures."
-        )
+        kind = "diatomic" if include_heteronuclear else "homonuclear diatomic"
+        raise ValueError(f"The input contains no supported {kind} structures.")
     for values in reference.values():
         values.sort(key=lambda value: value[0])
     return reference
@@ -226,12 +231,20 @@ def main():
 
     if args.input:
         reference = _read_reference(
-            args.input, atomic_numbers, args.energy_key, args.forces_key
+            args.input,
+            atomic_numbers,
+            args.energy_key,
+            args.forces_key,
+            include_heteronuclear=args.heteronuclear,
         )
-        element_pairs = [(z, z) for z in sorted(reference)]
+        element_pairs = sorted(reference)
     else:
         reference = None
-        element_pairs = list(combinations_with_replacement(atomic_numbers, 2))
+        element_pairs = (
+            list(combinations_with_replacement(atomic_numbers, 2))
+            if args.heteronuclear
+            else [(z, z) for z in atomic_numbers]
+        )
 
     curves = []
     cutoff = model.get_cutoff()
@@ -249,7 +262,7 @@ def main():
             reference_energies = None
             reference_forces = None
         else:
-            values = reference[z1]
+            values = reference[(z1, z2)]
             distances = np.asarray([value[0] for value in values])
             atoms_list = [value[1] for value in values]
             reference_energies = np.asarray([value[2] for value in values])

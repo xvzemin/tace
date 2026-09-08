@@ -54,7 +54,7 @@ Script Overview
    * - ``tace-average``
      - Average parameters from models with identical architectures
    * - ``tace-plot-diatom``
-     - Plot energy and force curves for all element pairs in a model
+     - Plot energy and force curves for every homonuclear pair in a model
    * - ``tace-clean``
      - Remove standard training outputs from the current directory
 
@@ -215,11 +215,15 @@ Diatomic Curves
 ---------------
 
 ``tace-plot-diatom`` reads the supported elements and cutoff directly from a
-model and evaluates every element pair from 0 to cutoff:
+model and evaluates each supported homonuclear pair from 0 to cutoff:
 
 .. code-block:: bash
 
    tace-plot-diatom -m model.ckpt
+
+Pass ``--heteronuclear`` to include all supported unlike-element pairs as
+well. This option applies both to the automatic scan and to structures selected
+from a DFT input file.
 
 The command selects CUDA when available, otherwise CPU, and writes
 ``diatom.png`` in the current directory.
