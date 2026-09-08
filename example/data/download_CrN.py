@@ -1,6 +1,7 @@
-"""Download the CrN collinear magnetic dataset and write one extxyz file."""
+"""Download and split the CrN collinear magnetic dataset."""
 
 import urllib.request
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ from ase import Atoms
 from ase.io.extxyz import write_extxyz
 
 MAGNETIC_AXIS = "x"  # "x", "y", or "z"
+SEED = 42
 
 URL = (
     "https://gitlab.com/ivannovikov/datasets_for_magnetic_MTP/-/raw/main/"
@@ -15,7 +17,10 @@ URL = (
 )
 DATA_DIR = Path.home() / "dataset" / "CrN"
 CFG_FILE = DATA_DIR / "training_set.cfg"
-XYZ_FILE = DATA_DIR / "collinear_CrN.xyz"
+XYZ_FILES = {
+    split: DATA_DIR / f"collinear_CrN_{split}.xyz"
+    for split in ("train", "val", "test")
+}
 SYMBOLS = {0: "Cr", 1: "N"}
 
 
@@ -30,8 +35,21 @@ def main():
         urllib.request.urlretrieve(URL, CFG_FILE)
 
     blocks = CFG_FILE.read_text().split("BEGIN_CFG")[1:]
-    with XYZ_FILE.open("w") as output:
-        for block in blocks:
+    indices = np.random.default_rng(SEED).permutation(len(blocks))
+    num_train = round(0.8 * len(blocks))
+    num_val = round(0.1 * len(blocks))
+    splits = np.empty(len(blocks), dtype=np.int8)
+    splits[indices[:num_train]] = 0
+    splits[indices[num_train : num_train + num_val]] = 1
+    splits[indices[num_train + num_val :]] = 2
+    split_names = tuple(XYZ_FILES)
+
+    with ExitStack() as stack:
+        outputs = {
+            name: stack.enter_context(path.open("w"))
+            for name, path in XYZ_FILES.items()
+        }
+        for index, block in enumerate(blocks):
             lines = [line.strip() for line in block.splitlines() if line.strip()]
 
             size_index = lines.index("Size")
@@ -89,9 +107,13 @@ def main():
                 _, name, value = feature.split(maxsplit=2)
                 atoms.info[name] = float(value)
 
-            write_extxyz(output, atoms, write_results=False)
+            write_extxyz(
+                outputs[split_names[splits[index]]], atoms, write_results=False
+            )
 
-    print(f"Wrote {len(blocks)} configurations to {XYZ_FILE}")
+    counts = np.bincount(splits, minlength=3)
+    for name, count in zip(split_names, counts):
+        print(f"Wrote {count} configurations to {XYZ_FILES[name]}")
 
 
 if __name__ == "__main__":

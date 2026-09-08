@@ -5,8 +5,8 @@ defaults:
   - _self_
 
 dataset:
-  train_file: ${oc.env:HOME}/dataset/LCAO/lcao_train.xyz
-  valid_file: ${oc.env:HOME}/dataset/LCAO/lcao_val.xyz
+  train_file: ${oc.env:HOME}/dataset/Fe-DeepSpin/lcao_train.xyz
+  valid_file: ${oc.env:HOME}/dataset/Fe-DeepSpin/lcao_val.xyz
   keys:
     energy_key: energy
     forces_key: forces
@@ -23,7 +23,7 @@ dataset:
 
   storage_mode: lmdb
   shard_dirs: 
-    - ${oc.env:HOME}/dataset/LCAO/graphCache
+    - ${oc.env:HOME}/dataset/Fe-DeepSpin/graphCache
 
 loss:
   loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
@@ -46,8 +46,15 @@ synth_metric:
 model:
   config:
 
+    mmax: 3
+    Lmax: 2
+    lmax: 3
+    cutoff: 5.0
+    num_layers: 3
+    num_channel: 64
+
     fidelity:
-      - name: PBE
+      - name: LCAO
         atomic_energy: null
         magnetic_scale:
           26: 5.0
@@ -55,7 +62,7 @@ model:
     parity: true
 
     node_update:
-      magnetic_type: element # [identity, element, element2]
+      magnetic_type: element
 
     angular_basis:
       magnetic_Lmax: 2

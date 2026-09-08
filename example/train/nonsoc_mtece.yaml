@@ -5,9 +5,8 @@ defaults:
   - _self_
 
 dataset:
-  train_file: ${oc.env:HOME}/dataset/FeAl/collinear_FeAl.xyz
-  valid_file: null
-  valid_ratio: 0.1
+  train_file: ${oc.env:HOME}/dataset/CrN/collinear_CrN_train.xyz
+  valid_file: ${oc.env:HOME}/dataset/CrN/collinear_CrN_val.xyz
   keys:
     energy_key: energy
     forces_key: forces
@@ -24,7 +23,7 @@ dataset:
     
   storage_mode: lmdb
   shard_dirs: 
-    - ${oc.env:HOME}/dataset/FeAl/graphCache
+    - ${oc.env:HOME}/dataset/CrN/graphCache
 
 loss:
   loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
@@ -47,19 +46,19 @@ synth_metric:
 model:
   config:
 
-    mmax: 2
+    mmax: 3
     Lmax: 2
-    lmax: 2
+    lmax: 3
     cutoff: 5.0
-    num_layers: 6
+    num_layers: 3
     num_channel: 64
 
     fidelity:
       - name: PBE
         atomic_energy: null
         magnetic_scale:
-          13: 0.3
-          26: 4.0
+          7: 0.3
+          24: 3.5
 
     parity: true
 
