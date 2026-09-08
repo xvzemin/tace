@@ -53,6 +53,8 @@ Script Overview
      - Update model statistics such as atomic energies, scale, and shift
    * - ``tace-average``
      - Average parameters from models with identical architectures
+   * - ``tace-plot-diatom``
+     - Plot energy and force curves for all element pairs in a model
    * - ``tace-clean``
      - Remove standard training outputs from the current directory
 
@@ -208,6 +210,25 @@ architectures:
 The command writes ``average_model-state.pt``. This is a manual stochastic
 weight averaging workflow. EMA is disabled by default and should generally
 remain disabled when averaging multiple time-adjacent checkpoints.
+
+Diatomic Curves
+---------------
+
+``tace-plot-diatom`` reads the supported elements and cutoff directly from a
+model and evaluates every element pair from 0 to cutoff:
+
+.. code-block:: bash
+
+   tace-plot-diatom -m model.ckpt
+
+The command selects CUDA when available, otherwise CPU, and writes
+``diatom.png`` in the current directory.
+An optional DFT dataset may be supplied as follows:
+
+.. code-block:: bash
+
+   tace-plot-diatom -m model.ckpt -i diatoms.xyz \
+     --energy_key energy --forces_key forces
 
 Inspection and Maintenance
 --------------------------

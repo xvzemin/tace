@@ -22,6 +22,7 @@ dependencies = [
     "scipy",
     "configargparse",
     "pandas",
+    "matplotlib",
     "lmdb",
     "huggingface_hub",
     #  "wandb",
@@ -104,6 +105,7 @@ tace-update = "tace.scripts.update:main"
 tace-finetune = "tace.scripts.finetune:main"
 tace-convert = "tace.scripts.convert:main"
 tace-average = "tace.scripts.average:main"
+tace-plot-diatom = "tace.scripts.plot_diatom:main"
 tace-uspex-relax = "tace.interface.uspex.relax:main"
 
 [tool.setuptools.packages.find]
