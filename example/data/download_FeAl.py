@@ -7,7 +7,7 @@ import numpy as np
 from ase import Atoms
 from ase.io.extxyz import write_extxyz
 
-MAGNETIC_AXIS = "z"  # "x", "y", or "z"
+MAGNETIC_AXIS = "x"  # "x", "y", or "z"
 
 URL = (
     "https://gitlab.com/ivannovikov/datasets_for_magnetic_MTP/-/raw/main/"

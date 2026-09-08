@@ -20,15 +20,25 @@ empty list disable augmentation. The available entries are:
   ``noncollinear_magnetic_forces`` together. This enforces global time
   reversal while preserving the consistency of the input and its derivative.
 
-For a standard-e3nn :math:`O(3)` model, non-SOC data can use
-``augmentation: [spin_rotation, time_reversal]`` and zero-field SOC data can
-use ``augmentation: [time_reversal]``. An
-:math:`O(3)\times\mathbb Z_2^{\mathcal T}` model already enforces time reversal,
-so only ``spin_rotation`` is needed when it is fitted to non-SOC data. The
-explicit non-SOC model requires neither augmentation. No transformation acts
-on validation, test, or statistics loaders. Spin rotations and reversals are
-global per structure; independent per-atom transformations would change the
-physical exchange interactions.
+The SOC architecture permits the broadest function space because it enforces
+only coupled space--spin rotations. When it is fitted to non-SOC data,
+``spin_rotation`` is required to sample the independent
+:math:`SO(3)_{\mathrm{spin}}` symmetry. If the installed e3nn does not track
+time-reversal parity, ``time_reversal`` is required as well. These
+augmentations sample
+:math:`O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+\times\mathbb Z_2^{\mathcal T}` in the training data; they do not make it an
+exact architectural symmetry.
+
+The explicit non-SOC architecture already enforces the full group
+:math:`O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+\times\mathbb Z_2^{\mathcal T}` and therefore requires neither augmentation.
+For zero-field SOC data, the complete time-reversal model requires no
+augmentation, whereas the standard-e3nn SOC model uses ``time_reversal``.
+
+No transformation acts on validation, test, or statistics loaders. Spin
+rotations and reversals are global per structure; independent per-atom
+transformations would change the physical exchange interactions.
 
 
 .. note::

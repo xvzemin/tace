@@ -3,35 +3,38 @@ Magnetic TACE
 
 ``Magnetic TACE (mTACE)`` describes collinear/noncollinear magnetic moments and atomic
 geometry in one equivariant model. It provides constructions for
-potential-energy surfaces with and without spin--orbit coupling (SOC). The two
-constructions do not have the same symmetry group and should not be
-interchanged.
+potential-energy surfaces with and without spin--orbit coupling (SOC).
 
 Model configurations
 --------------------
 
-The magnetic angular architecture and the treatment of time reversal are two
-independent choices. ``angular_basis.use_spin_orbit_coupling`` controls whether
-non-scalar spin tensors may couple to the lattice. The installed e3nn package
-controls whether the additional time-reversal label is represented exactly.
-TACE detects the latter automatically; there is no separate configuration
-flag for it. ``parity: false`` keeps only natural spatial parity
-:math:`p=(-1)^l` throughout the model and treats physical quantities with
-non-natural parity as their natural-parity counterparts. ``parity: true``
-retains their physical spatial parity and enables the complete :math:`O(3)`
-representation space. Neither setting changes the time-reversal label.
+The architecture determines the exact model symmetry; data augmentation only
+samples additional transformations during training. The two mechanisms must
+therefore not be interpreted as equivalent.
 
-:math:`O(3)\times\mathbb Z_2^{\mathcal T}` model with SOC data
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``angular_basis.use_spin_orbit_coupling`` selects the magnetic architecture.
+When it is ``true``, non-scalar spin tensors may couple to the lattice. When it
+is ``false``, only independently spin-rotation-invariant magnetic scalars enter
+the spatial interaction. The installed e3nn package determines whether
+time-reversal parity is represented explicitly. TACE detects this capability
+automatically; there is no separate configuration flag.
 
-This is the physically complete choice for zero-field SOC data. Spatial
-transformations act jointly on positions and axial magnetic moments, while
-time reversal is tracked independently. The model can represent
-magnetocrystalline anisotropy, anisotropic exchange, and other lattice-locked
-spin interactions, but its energy is restricted to the time-even sector.
+``parity: true`` retains physical spatial parity and the complete
+:math:`O(3)` irrep space. ``parity: false`` retains only natural spatial parity
+:math:`p=(-1)^l` and represents quantities with non-natural parity by their
+natural-parity counterparts. This setting does not change a time-reversal
+label when that label is available.
 
-Install the time-reversal e3nn branch described in
-`Installation requirements`_ and use:
+SOC architecture
+~~~~~~~~~~~~~~~~
+
+The SOC architecture has the broadest physically relevant function space. Its
+exact symmetry constrains spatial and spin rotations only through the same
+space--spin transformation, so it can
+represent magnetocrystalline anisotropy, anisotropic exchange, and other
+lattice-locked interactions that are forbidden without SOC.
+
+For zero-field SOC data, the complete configuration is:
 
 .. code-block:: yaml
 
@@ -46,20 +49,14 @@ Install the time-reversal e3nn branch described in
        angular_basis:
          use_spin_orbit_coupling: true
 
-No augmentation is required: joint spatial :math:`O(3)` and time reversal are
-both imposed by the representation. In particular, independently rotating the
-moments while holding the lattice fixed is not a symmetry of SOC data.
+With the time-reversal e3nn installation, the exact group is
+:math:`O(3)_{\mathrm{space+spin}}\times\mathbb Z_2^{\mathcal T}` and no augmentation
+is required. Independently rotating the moments while fixing the lattice is
+not a symmetry of SOC data.
 
-**Time-reversal e3nn required:** yes.
-
-:math:`O(3)\times\mathbb Z_2^{\mathcal T}` model with non-SOC data
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The same SOC-capable architecture may be fitted to data calculated without
-SOC. Its exact symmetry still permits dependence on the orientation of the
-moments relative to the lattice, so its allowed function space is larger than
-the physical non-SOC space. Randomly rotating the complete spin configuration
-relative to the fixed lattice teaches the network to suppress this unwanted
+The same architecture can be trained on non-SOC data, but its function space
+is then too broad. ``spin_rotation`` samples the missing independent
+:math:`SO(3)_{\mathrm{spin}}` action and suppresses lattice-locked spin
 dependence:
 
 .. code-block:: yaml
@@ -75,74 +72,63 @@ dependence:
        angular_basis:
          use_spin_orbit_coupling: true
 
-``spin_rotation`` samples one global :math:`SO(3)_{\mathrm{spin}}` rotation per
-training-sample access and applies it to both
-``initial_noncollinear_magmoms`` and ``noncollinear_magnetic_forces``. Time
-reversal is already exact in this model, so ``time_reversal`` augmentation is
-unnecessary.
+The transformation is shared by the complete spin configuration and is
+applied to both ``initial_noncollinear_magmoms`` and
+``noncollinear_magnetic_forces``. It restricts the function learned from the
+training distribution, but does not make independent spin rotation an exact
+architectural symmetry. This approximate invariance should be checked on
+independently rotated validation structures.
 
-This augmentation reduces the function space selected by the training data,
-not the formal function space of the architecture. Independent spin-rotation
-invariance is therefore approximate and should be measured on randomly
-rotated validation structures.
+The complete SOC-architecture catalogue for a non-SOC target is:
 
-**Time-reversal e3nn required:** yes.
+.. list-table:: SOC architecture trained on non-SOC data
+   :header-rows: 1
+   :widths: 16 20 38 26
 
-:math:`O(3)` model with data augmentation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   * - Spatial parity
+     - Time-reversal parity
+     - Exact architectural group
+     - Required augmentation
+   * - full
+     - on
+     - :math:`O(3)_{\mathrm{space+spin}}\times\mathbb Z_2^{\mathcal T}`
+     - ``spin_rotation``
+   * - full
+     - off
+     - :math:`O(3)_{\mathrm{space+spin}}`
+     - ``spin_rotation`` and ``time_reversal``
+   * - natural
+     - on
+     - :math:`O(3)_{\mathrm{space+spin}}\times\mathbb Z_2^{\mathcal T}`
+       in the natural-parity irrep space
+     - ``spin_rotation``
+   * - natural
+     - off
+     - :math:`SO(3)_{\mathrm{space+spin}}\times\mathbb Z_2^{P\mathcal T}`
+     - ``spin_rotation`` and ``time_reversal``; equivalently,
+       ``spin_rotation`` and spatial inversion when that augmentation is
+       available
 
-With standard e3nn, the same magnetic architecture tracks spatial parity but
-does not distinguish time-even and time-odd channels. It consequently has the
-largest formal function space. Symmetry-related samples can be used to select
-a smaller effective function space during training.
+Every row targets the sampled group
+:math:`\widetilde{O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+\times\mathbb Z_2^{\mathcal T}}`. The tilde emphasizes that this is an
+augmentation objective, not an exact symmetry of the SOC architecture. With
+standard e3nn, time-reversal parity is off; with time-reversal e3nn it is on.
 
-For zero-field SOC data, teach global time reversal with:
+Non-SOC architecture
+~~~~~~~~~~~~~~~~~~~~
 
-.. code-block:: yaml
+The explicit non-SOC architecture contracts equal-degree endpoint magnetic
+solid harmonics to independent-spin-rotation scalars before the spatial
+interaction. It therefore excludes lattice-locked SOC terms by construction
+and exactly enforces
 
-   dataset:
-     augmentation: [time_reversal]
+.. math::
 
-   model:
-     config:
-       parity: true
-       atomic_basis:
-         type: o2_mag
-       angular_basis:
-         use_spin_orbit_coupling: true
+   O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+   \times\mathbb Z_2^{\mathcal T}.
 
-For non-SOC data, teach both independent spin rotations and time reversal:
-
-.. code-block:: yaml
-
-   dataset:
-     augmentation: [spin_rotation, time_reversal]
-
-   model:
-     config:
-       parity: true
-       atomic_basis:
-         type: o2_mag
-       angular_basis:
-         use_spin_orbit_coupling: true
-
-The latter samples :math:`SO(3)_{\mathrm{spin}}\times\mathbb Z_2^{\mathcal T}`;
-the matrices acting on the spin vectors cover both components of
-:math:`O(3)_{\mathrm{spin}}`. Neither time reversal nor independent spin
-rotation is guaranteed exactly by this architecture, regardless of the amount
-of augmentation.
-
-**Time-reversal e3nn required:** no. This configuration specifically uses the
-standard e3nn package and can use spatial :math:`O(3)` acceleration kernels.
-
-Non-SOC model
-~~~~~~~~~~~~~
-
-The explicit non-SOC branch removes all non-scalar magnetic edge irreps before
-they enter the spatial interaction. It retains separate scalar paths obtained
-from equal-degree endpoint solid harmonics. These scalars describe pairwise
-isotropic exchange and higher polynomial functions of relative spin
-orientation, but cannot lock a spin direction to the lattice.
+Use:
 
 .. code-block:: yaml
 
@@ -157,15 +143,45 @@ orientation, but cannot lock a spin direction to the lattice.
        angular_basis:
          use_spin_orbit_coupling: false
 
-Independent global spin rotation and global time reversal are exact for this
-rank-zero magnetic construction, so neither augmentation is required. This is
-more restrictive than the augmented SOC-capable models, but it is also less
-general than a full product-group network retaining non-scalar intermediate
-spin irreps.
+No spin-rotation or time-reversal augmentation is required. This remains true
+with standard e3nn because the equal-degree magnetic contractions entering the
+spatial interaction are already time-even spin scalars. The standard package
+is therefore sufficient, although the time-reversal variant is also accepted.
 
-**Time-reversal e3nn required:** no. Both e3nn variants are accepted, but the
-standard package is sufficient because the magnetic information entering the
-spatial interaction is time-even and scalar.
+.. list-table:: Explicit non-SOC architecture trained on non-SOC data
+   :header-rows: 1
+   :widths: 16 20 44 20
+
+   * - Spatial parity
+     - Time-reversal parity
+     - Exact architectural group
+     - Required augmentation
+   * - full
+     - on
+     - :math:`O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+       \times\mathbb Z_2^{\mathcal T}`
+     - none
+   * - full
+     - off
+     - :math:`O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+       \times\mathbb Z_2^{\mathcal T}`
+     - none
+   * - natural
+     - on
+     - :math:`O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+       \times\mathbb Z_2^{\mathcal T}`
+     - none
+   * - natural
+     - off
+     - :math:`O(3)_{\mathrm{space}}\times SO(3)_{\mathrm{spin}}
+       \times\mathbb Z_2^{\mathcal T}`
+     - none
+
+Complete parity provides more intermediate irrep paths than natural parity,
+but both choices have the same exact non-SOC group for the polar structural
+inputs considered here. The implemented rank-zero construction is more
+restrictive than a full product-group network retaining non-scalar spin
+intermediates, but is substantially less expensive.
 
 Symmetry groups
 ---------------
@@ -173,7 +189,7 @@ Symmetry groups
 SOC symmetry
 ~~~~~~~~~~~~
 
-With SOC, spatial rotations act jointly on the structure and axial magnetic
+With SOC, the same space--spin rotation acts on the structure and axial magnetic
 moments. In the absence of an external time-reversal-breaking field, the group
 is
 
