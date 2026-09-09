@@ -1,5 +1,5 @@
-ASE Calculator Tutorial
-=======================
+ASE Calculator
+==============
 
 This tutorial demonstrates how to use a TACE model as a calculator within ASE (Atomic Simulation Environment).
 

@@ -1,7 +1,7 @@
 .. _acceleration-tutorial:
 
-Acceleration Tutorial
-=====================
+Acceleration
+============
 
 TACE provides several composable acceleration layers:
 
