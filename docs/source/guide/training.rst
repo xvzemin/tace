@@ -1,5 +1,5 @@
-Training Tutorial
-=================
+Training
+========
 
 .. note::
 

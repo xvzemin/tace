@@ -1,5 +1,5 @@
-USPEX Tutorial
-==============
+USPEX
+=====
 
 This tutorial demonstrates how to use a TACE model within USPEX.
 

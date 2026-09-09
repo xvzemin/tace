@@ -1,15 +1,16 @@
 Magnetic TACE
 =============
 
-mTACE learns magnetic potential-energy surfaces with or without spin--orbit
-coupling (SOC). This tutorial uses ``atomic_basis.type: o2_mag`` and assumes
-no external time-reversal-breaking field.
+mTACE learns magnetic potential energy surfaces with or without spin--orbit
+coupling (SOC).
 
 Installation
 ------------
 
-Install TACE following :doc:`../install/install`. For SOC models with explicit
-time-reversal symmetry, install the ``time-reversal`` branch of e3nn:
+If explicit time-reversal symmetry is required, the time-reversal version of 
+e3nn should be installed.
+If time-reversal symmetry is instead incorporated through data augmentation, 
+or if a non-SOC model is used, the standard e3nn package is sufficient.
 
 .. code-block:: bash
 
@@ -17,16 +18,12 @@ time-reversal symmetry, install the ``time-reversal`` branch of e3nn:
      "e3nn @ git+https://github.com/xvzemin/e3nn.git@time-reversal"
    python -c "from e3nn import o3; print(o3.Irrep('1eo'))"
 
+
 Time-reversal e3nn supplies :math:`O(3)\times\mathbb Z_2^{\mathcal T}`
 operations; EquivariantX supplies the local
 :math:`O(2)\times\mathbb Z_2^{\mathcal T}` operations. EquivariantX is bundled
 with TACE, and time-reversal support is detected automatically.
 
-Standard e3nn is sufficient for the explicit non-SOC construction below,
-whose magnetic inputs to the spatial interaction are already time-even
-scalars. Optional accelerated :math:`O(3)` kernels do not support time-odd
-paths; keep them disabled for this tutorial. This restriction does not apply
-to the native ``eqx.o2`` operators used by ``o2_mag``.
 
 Training
 --------
@@ -46,53 +43,24 @@ Collinear moments can use the same vector field, for example
 
 Start from ``example/train/soc_mtece.yaml`` or
 ``example/train/nonsoc_mtece.yaml``. Update the dataset paths, field mapping,
-LMDB shard directories, and fidelity settings for your data. The examples
-include magnetic-force losses and validation metrics; remove these entries
+LMDB shard directories, and magnetic cutoff (scale) settings for your data. 
+The examples include magnetic-force losses and validation metrics; remove these entries
 if those labels are unavailable.
 
 Run the appropriate configuration from ``example/train``:
 
 .. code-block:: bash
 
+   cd example/data
+   python download_FeDeepSpin.py
    cd example/train
    tace-train -cn soc_mtece.yaml
+
    # For non-SOC data, use instead:
+   # cd example/data
+   # python download_CrN.py
+   # cd example/train
    # tace-train -cn nonsoc_mtece.yaml
-
-Model settings
-~~~~~~~~~~~~~~
-
-Both examples inherit ``tace.yaml``. The core magnetic settings are:
-
-.. code-block:: yaml
-
-   dataset:
-     augmentation: []
-
-   model:
-     config:
-       num_channel: 64
-       Lmax: 2
-       parity: true
-       atomic_basis:
-         type: o2_mag
-         use_radial_rotary_attention: false
-       angular_basis:
-         magnetic_Lmax: 2
-         use_spin_orbit_coupling: true  # false for non-SOC
-       radial_basis:
-         num_mag_radial_basis: 10
-       node_update:
-         magnetic_type: element
-       fidelity:
-         - name: PBE
-           atomic_energy: null
-           magnetic_scale: null
-
-``magnetic_Lmax`` controls both input and output magnetic angular degrees;
-it must be positive and no larger than ``model.config.Lmax``.
-``parity: true`` retains physical spatial parity, including axial magnetic
-moments.
 
 .. list-table:: Architecture selection
    :header-rows: 1

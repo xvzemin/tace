@@ -1,5 +1,5 @@
-TACE Scripts Tutorial
-=====================
+TACE Scripts
+============
 
 TACE installs command-line scripts for training, inference, data preparation,
 model conversion, and deployment. Most scripts use ``argparse`` and support

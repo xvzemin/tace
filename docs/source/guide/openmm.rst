@@ -1,5 +1,5 @@
-OpenMM Tutorial
-===============
+OpenMM
+======
 
 This tutorial demonstrates how to use a TACE model as a calculator within OpenMM. 
 We integrate OpenMM via the ASE interface provided by openmm-ml. Example usage is shown below, 

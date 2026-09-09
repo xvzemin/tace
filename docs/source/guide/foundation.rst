@@ -1,5 +1,5 @@
-Foundational Model Tutorial
-===========================
+Foundational Model
+==================
 
 This tutorial demonstrates how to **load a pretrained foundational model** and attach it as an ASE calculator.
 

@@ -1,5 +1,5 @@
-TorchSim Calculator Tutorial
-============================
+TorchSim Calculator
+===================
 
 This tutorial demonstrates how to use a TACE model as a calculator within TorchSim.
 

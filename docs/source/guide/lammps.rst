@@ -1,5 +1,5 @@
-LAMMPS ML-IAP Tutorial
-======================
+LAMMPS ML-IAP
+=============
 
 TACE runs in LAMMPS through the unified Python interface of
 ``pair_style mliap`` and its Kokkos accelerator variant ``mliap/kk``. The
