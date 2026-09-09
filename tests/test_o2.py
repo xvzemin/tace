@@ -33,7 +33,15 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-def test_null_magnetic_scale_uses_maximum_statistics():
+@pytest.mark.parametrize(
+    ("magnetic_scales", "expected_scales"),
+    [
+        ([None, None], [2.5, 3.7]),
+        ([2.0, {26: 4.0}], [2.0, 4.0]),
+        ([None, {"26": 4.0}], [2.5, 4.0]),
+    ],
+)
+def test_magnetic_scale_is_resolved_per_fidelity(magnetic_scales, expected_scales):
     config = check_model_config(
         {
             "statistics": [
@@ -50,16 +58,19 @@ def test_null_magnetic_scale_uses_maximum_statistics():
             ],
             "target_property": [],
             "fidelity": [
-                {"name": "PBE", "magnetic_scale": None},
-                {"name": "SCAN", "magnetic_scale": None},
+                {"name": "PBE", "magnetic_scale": magnetic_scales[0]},
+                {"name": "SCAN", "magnetic_scale": magnetic_scales[1]},
             ],
         }
     )
 
-    assert config["magnetic_scale"] == pytest.approx({26: 3.7})
+    assert [scale[26] for scale in config["magnetic_scale"]] == pytest.approx(
+        expected_scales
+    )
 
 
-def test_manual_magnetic_scale_is_used_without_rescaling():
+@pytest.mark.parametrize("magnetic_scale", [2.0, {26: 2.0}])
+def test_manual_magnetic_scale_is_used_without_rescaling(magnetic_scale):
     config = check_model_config(
         {
             "statistics": [
@@ -71,7 +82,7 @@ def test_manual_magnetic_scale_is_used_without_rescaling():
             ],
             "target_property": [],
             "fidelity": [
-                {"name": "PBE", "magnetic_scale": {26: 2.0}},
+                {"name": "PBE", "magnetic_scale": magnetic_scale},
             ],
         }
     )
@@ -134,7 +145,7 @@ def test_magnetic_basis_normalization_validation():
         )
     with pytest.raises(TypeError, match="magnetic_scale must be a scalar or"):
         MagneticBasis(
-            [2.0],
+            "2.0",
             num_mag_radial_basis=4,
             Lmax=1,
             atomic_numbers=[26],
@@ -147,6 +158,47 @@ def test_magnetic_basis_normalization_validation():
             atomic_numbers=[26],
             radial_normalization="rational",
         )
+
+
+@pytest.mark.parametrize("num_nodes", [0, 4])
+def test_magnetic_basis_selects_fidelity_and_element(num_nodes):
+    basis = MagneticBasis(
+        [2.0, {26: 4.0, 28: 3.0}],
+        num_mag_radial_basis=4,
+        Lmax=1,
+        atomic_numbers=[26, 28],
+    ).to(DEVICE, DTYPE)
+    magmoms = torch.tensor(
+        [[0.3, -0.4, 0.5]] * num_nodes,
+        dtype=DTYPE,
+        device=DEVICE,
+    ).reshape(num_nodes, 3).requires_grad_()
+    node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)[
+        torch.tensor([1, 0, 0, 1], device=DEVICE)[:num_nodes]
+    ]
+    node_fidelity = torch.tensor([0, 1, 0, 1], device=DEVICE)[:num_nodes]
+    edge_index = torch.tensor(
+        [[0, 2, 1, 3], [2, 0, 3, 1]], device=DEVICE
+    )[:, :num_nodes]
+
+    radial, node_attrs_out, edge_attrs_out = basis(
+        magmoms, node_attrs, edge_index, node_fidelity
+    )
+    magnetic_scale = torch.tensor(
+        [2.0, 4.0, 2.0, 3.0], dtype=DTYPE, device=DEVICE
+    )[:num_nodes, None]
+    squared_magnitude = (magmoms / magnetic_scale).square().sum(-1, keepdim=True)
+    expected_radial = basis.radial_basis(1.0 - 2.0 * squared_magnitude.clamp(max=1.0))
+    torch.testing.assert_close(radial, expected_radial)
+    torch.testing.assert_close(
+        torch.autograd.grad(radial.sum(), magmoms)[0],
+        torch.autograd.grad(expected_radial.sum(), magmoms)[0],
+    )
+    torch.testing.assert_close(node_attrs_out, basis.angular_basis(magmoms))
+    assert edge_attrs_out.shape == (num_nodes, basis.magnetic_edge_irreps_out.dim)
+    assert "[[2.0000, 2.0000], [4.0000, 3.0000]]" in repr(basis)
+    with pytest.raises(ValueError, match="node_fidelity is required"):
+        basis(magmoms, node_attrs, edge_index)
 
 
 def _spin_node_embedding(embedding_type):

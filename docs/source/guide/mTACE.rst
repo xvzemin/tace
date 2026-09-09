@@ -99,13 +99,17 @@ directly. With ``null``, the training statistics give
    m_{\mathrm{cut},Z}
    =1.2\max_{i\in\mathcal D_Z}\|\mathbf m_i\|+0.1,
 
-where :math:`\mathcal D_Z` contains training moments of element :math:`Z`.
+where :math:`\mathcal D_Z` contains training moments of element :math:`Z`
+within the corresponding fidelity. Each fidelity uses its own cutoff.
 The cutoff acts only on the radial magnitude map:
 
 .. math::
 
-   u_i=\frac{\|\mathbf m_i\|}{m_{\mathrm{cut},Z_i}}
-   
+   u_i=\frac{\|\mathbf m_i\|}{m_{\mathrm{cut},Z_i}},\qquad
+   \widetilde m_i=1-2\min(u_i^2,1),\qquad
+   T(\widetilde m_i)
+   =\left(T_1(\widetilde m_i),\ldots,T_{N_{\mathrm{mag}}}(\widetilde m_i)\right).
+
 The squared-magnitude dependence is smooth at zero. For
 :math:`\|\mathbf m_i\|\ge m_{\mathrm{cut},Z_i}`, the radial features are
 constant, with a derivative discontinuity at the cutoff. The angular solid
@@ -122,4 +126,3 @@ readout, which restores :math:`T_0=1`:
    E_{\mathrm{1b}}=\sum_i\left(
    W_{Z_i0}+\sum_{n=1}^{N_{\mathrm{mag}}}W_{Z_i n}T_n(\widetilde m_i)
    \right).
-

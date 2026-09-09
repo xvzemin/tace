@@ -26,6 +26,7 @@ from tace.models._e3nn.paths import generate_paths
 from tace.models._e3nn.readout import TensorReadOut
 from tace.models._e3nn.tace import e3nnTACE
 from tace.models._e3nn.ue import UniversalEquivariantEmbedding
+from tace.models.adapter import TensorModel
 from tace.models.angular import SolidHarmonics
 from tace.models.layout import LayoutTransform
 from tace.models.linear import e3nnLinear
@@ -294,6 +295,51 @@ def test_parity_selects_natural_or_complete_magnetic_paths():
         ir.p != (-1) ** ir.l
         for _, ir in complete_representation.magnetic_edge_irreps_out
     )
+
+
+def test_magnetic_representation_uses_node_fidelity():
+    config = _model_config()
+    config["atomic_basis"]["type"] = "o2_mag"
+    config["angular_basis"]["magnetic_Lmax"] = 1
+    config["radial_basis"]["apply_cutoff"] = False
+    config["mmax"] = 1
+    config["statistics"] *= 2
+    config["fidelity"] = [
+        {"name": "PBE", "magnetic_scale": 2.0},
+        {"name": "SCAN", "magnetic_scale": 4.0},
+    ]
+    model = TensorModel(e3nnTACE(**config)).double().eval()
+    representation = model.readout_fn.representation
+    data = {
+        "positions": torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]] * 2, dtype=torch.float64
+        ),
+        "node_attrs": torch.ones(4, 1, dtype=torch.float64),
+        "edge_index": torch.tensor([[0, 1, 2, 3], [1, 0, 3, 2]]),
+        "edge_shifts": torch.zeros(4, 3, dtype=torch.float64),
+        "lattice": torch.eye(3, dtype=torch.float64).repeat(2, 1, 1) * 10.0,
+        "batch": torch.tensor([0, 0, 1, 1]),
+        "ptr": torch.tensor([0, 2, 4]),
+        "fidelity_idx": torch.tensor([1, 0]),
+        "initial_noncollinear_magmoms": torch.tensor(
+            [[1.0, 0.0, 0.0]] * 4, dtype=torch.float64
+        ),
+    }
+    graph = model.prepare_graph(data)
+    output = representation(data, graph)
+    expected = representation.magnetic_basis.radial_basis(
+        torch.tensor([[0.875], [0.875], [0.5], [0.5]], dtype=torch.float64)
+    )
+    torch.testing.assert_close(output["magnetic_radial_basis"], expected)
+
+    data.pop("fidelity_idx")
+    for fidelity_idx in range(2):
+        model.reset_fidelity_idx(fidelity_idx)
+        output = representation(data, model.prepare_graph(data))
+        torch.testing.assert_close(
+            output["magnetic_radial_basis"],
+            expected[2 - 2 * fidelity_idx].expand(4, -1),
+        )
 
 
 @pytest.mark.parametrize(

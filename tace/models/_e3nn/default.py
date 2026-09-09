@@ -292,12 +292,9 @@ def check_model_config(cfg: dict[str, Any]):
             raise ValueError("all magnetic_scale values must be finite and positive")
         magnetic_scales.append(values)
     cfg["magnetic_scale"] = (
-        {
-            z: max(scale[z] for scale in magnetic_scales)
-            for z in cfg["atomic_numbers"]
-        }
-        if magnetic_scales
-        else None
+        magnetic_scales[0]
+        if len(magnetic_scales) == 1
+        else magnetic_scales or None
     )
 
     cfg["atomic_energies"] = (

@@ -5,11 +5,13 @@
 
 from collections.abc import Mapping
 from numbers import Real
+from typing import Optional
 
 import torch
 from e3nn import o3
 
 from ..angular import SolidHarmonics
+from ..blocks import format_list
 from ..radial import MagneticChebyshevBasis
 from ..time_reversal import make_irrep, spherical_harmonics_irreps
 from .fused import uuuTensorProduct
@@ -97,6 +99,13 @@ class MagneticBasis(torch.nn.Module):
     def _resolve_magnetic_scale(
         magnetic_scale, atomic_numbers: list[int]
     ) -> torch.Tensor:
+        if isinstance(magnetic_scale, (list, tuple)):
+            return torch.stack(
+                [
+                    MagneticBasis._resolve_magnetic_scale(scale, atomic_numbers)
+                    for scale in magnetic_scale
+                ]
+            )
         if isinstance(magnetic_scale, Mapping):
             values = []
             for atomic_number in atomic_numbers:
@@ -112,7 +121,8 @@ class MagneticBasis(torch.nn.Module):
             values = [float(magnetic_scale)] * len(atomic_numbers)
         else:
             raise TypeError(
-                "magnetic_scale must be a scalar or an element-dependent mapping"
+                "magnetic_scale must be a scalar or an element-dependent mapping, "
+                "or a per-fidelity list of these"
             )
 
         magnetic_scale = torch.tensor(values, dtype=torch.get_default_dtype())
@@ -125,8 +135,18 @@ class MagneticBasis(torch.nn.Module):
         initial_noncollinear_magmoms: torch.Tensor,
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
+        node_fidelity: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        magnetic_scale = self.magnetic_scale[node_attrs.argmax(dim=-1)].unsqueeze(-1)
+        node_elements = node_attrs.argmax(dim=-1)
+        if self.magnetic_scale.ndim == 1:
+            magnetic_scale = self.magnetic_scale[node_elements]
+        else:
+            if node_fidelity is None:
+                raise ValueError(
+                    "node_fidelity is required for per-fidelity magnetic_scale"
+                )
+            magnetic_scale = self.magnetic_scale[node_fidelity, node_elements]
+        magnetic_scale = magnetic_scale.unsqueeze(-1)
         scaled_magmoms = initial_noncollinear_magmoms / magnetic_scale
         squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
         radial_coordinate = 1.0 - 2.0 * torch.clamp(
@@ -155,7 +175,7 @@ class MagneticBasis(torch.nn.Module):
             f"  num_mag_radial_basis={self.num_mag_radial_basis},\n"
             f"  magnetic_node_irreps_out={self.magnetic_node_irreps_out},\n"
             f"  magnetic_edge_irreps_out={self.magnetic_edge_irreps_out}\n"
-            f"  magnetic_scale=[{', '.join(f'{x:.4f}' for x in self.magnetic_scale.tolist())}],\n"
+            f"  magnetic_scale={format_list(self.magnetic_scale.tolist())},\n"
             # f"  Lmax={self.Lmax},\n"
             # f"  angular_normalization={self.angular_normalization!r},\n"
             # f"  radial_normalization={self.radial_normalization!r},\n"

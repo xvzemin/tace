@@ -395,6 +395,9 @@ class Representation(torch.nn.Module):
                 initial_noncollinear_magmoms,
                 data["node_attrs"],
                 data["edge_index"],
+                node_fidelity=(
+                    graph.node_fidelity[:1] if graph.lmp else graph.node_fidelity
+                ),
             )
 
         # === node initialize ===
