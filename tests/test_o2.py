@@ -36,6 +36,7 @@ DTYPE = torch.float64
 @pytest.mark.parametrize(
     ("magnetic_scales", "expected_scales"),
     [
+        ([None], [2.5]),
         ([None, None], [2.5, 3.7]),
         ([2.0, {26: 4.0}], [2.0, 4.0]),
         ([None, {"26": 4.0}], [2.5, 4.0]),
@@ -55,11 +56,11 @@ def test_magnetic_scale_is_resolved_per_fidelity(magnetic_scales, expected_scale
                     "avg_num_neighbors": 4.0,
                     "max_noncollinear_magmoms_norm_by_element": {26: 3.0},
                 },
-            ],
+            ][:len(magnetic_scales)],
             "target_property": [],
             "fidelity": [
-                {"name": "PBE", "magnetic_scale": magnetic_scales[0]},
-                {"name": "SCAN", "magnetic_scale": magnetic_scales[1]},
+                {"name": name, "magnetic_scale": scale}
+                for name, scale in zip(("PBE", "SCAN"), magnetic_scales)
             ],
         }
     )
@@ -87,7 +88,7 @@ def test_manual_magnetic_scale_is_used_without_rescaling(magnetic_scale):
         }
     )
 
-    assert config["magnetic_scale"] == {26: 2.0}
+    assert config["magnetic_scale"] == [{26: 2.0}]
 
 
 def test_magnetic_basis_normalization_validation():
@@ -98,7 +99,7 @@ def test_magnetic_basis_normalization_validation():
     assert "magnetic_normalization" not in DEFAULT_MODEL_CONFIG["radial_basis"]
     assert "magmoms_scale_type" not in DEFAULT_MODEL_CONFIG["scale_shift"]
     basis = MagneticBasis(
-        {26: 2.0},
+        [{26: 2.0}],
         num_mag_radial_basis=4,
         Lmax=1,
         atomic_numbers=[26],
@@ -108,7 +109,7 @@ def test_magnetic_basis_normalization_validation():
     assert basis.num_mag_radial_basis == 4
 
     natural_basis = MagneticBasis(
-        {26: 2.0},
+        [{26: 2.0}],
         num_mag_radial_basis=4,
         Lmax=2,
         atomic_numbers=[26],
@@ -125,11 +126,12 @@ def test_magnetic_basis_normalization_validation():
     )
 
     shared_scale_basis = MagneticBasis(
-        2.0,
+        [2.0],
         num_mag_radial_basis=1,
         Lmax=1,
         atomic_numbers=[26, 28],
     )
+    assert shared_scale_basis.magnetic_scale.shape == (1, 2)
     torch.testing.assert_close(
         shared_scale_basis.magnetic_scale,
         torch.full_like(shared_scale_basis.magnetic_scale, 2.0),
@@ -137,22 +139,23 @@ def test_magnetic_basis_normalization_validation():
 
     with pytest.raises(ValueError, match="only supports 'integral'"):
         MagneticBasis(
-            {26: 2.0},
+            [{26: 2.0}],
             num_mag_radial_basis=4,
             Lmax=1,
             atomic_numbers=[26],
             angular_normalization="component",
         )
-    with pytest.raises(TypeError, match="magnetic_scale must be a scalar or"):
-        MagneticBasis(
-            "2.0",
-            num_mag_radial_basis=4,
-            Lmax=1,
-            atomic_numbers=[26],
-        )
+    for invalid_scale in (2.0, {26: 2.0}, "2.0", []):
+        with pytest.raises(TypeError, match="per-fidelity sequence"):
+            MagneticBasis(
+                invalid_scale,
+                num_mag_radial_basis=4,
+                Lmax=1,
+                atomic_numbers=[26],
+            )
     with pytest.raises(ValueError, match="only supports 'clamp'"):
         MagneticBasis(
-            {26: 2.0},
+            [{26: 2.0}],
             num_mag_radial_basis=4,
             Lmax=1,
             atomic_numbers=[26],
@@ -161,9 +164,10 @@ def test_magnetic_basis_normalization_validation():
 
 
 @pytest.mark.parametrize("num_nodes", [0, 4])
-def test_magnetic_basis_selects_fidelity_and_element(num_nodes):
+@pytest.mark.parametrize("num_fidelities", [1, 2])
+def test_magnetic_basis_selects_fidelity_and_element(num_nodes, num_fidelities):
     basis = MagneticBasis(
-        [2.0, {26: 4.0, 28: 3.0}],
+        [2.0, {26: 4.0, 28: 3.0}][:num_fidelities],
         num_mag_radial_basis=4,
         Lmax=1,
         atomic_numbers=[26, 28],
@@ -176,7 +180,7 @@ def test_magnetic_basis_selects_fidelity_and_element(num_nodes):
     node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)[
         torch.tensor([1, 0, 0, 1], device=DEVICE)[:num_nodes]
     ]
-    node_fidelity = torch.tensor([0, 1, 0, 1], device=DEVICE)[:num_nodes]
+    node_fidelity = torch.tensor([0, 1, 0, 1], device=DEVICE)[:num_nodes] % num_fidelities
     edge_index = torch.tensor(
         [[0, 2, 1, 3], [2, 0, 3, 1]], device=DEVICE
     )[:, :num_nodes]
@@ -185,7 +189,9 @@ def test_magnetic_basis_selects_fidelity_and_element(num_nodes):
         magmoms, node_attrs, edge_index, node_fidelity
     )
     magnetic_scale = torch.tensor(
-        [2.0, 4.0, 2.0, 3.0], dtype=DTYPE, device=DEVICE
+        [2.0] * 4 if num_fidelities == 1 else [2.0, 4.0, 2.0, 3.0],
+        dtype=DTYPE,
+        device=DEVICE,
     )[:num_nodes, None]
     squared_magnitude = (magmoms / magnetic_scale).square().sum(-1, keepdim=True)
     expected_radial = basis.radial_basis(1.0 - 2.0 * squared_magnitude.clamp(max=1.0))
@@ -196,9 +202,34 @@ def test_magnetic_basis_selects_fidelity_and_element(num_nodes):
     )
     torch.testing.assert_close(node_attrs_out, basis.angular_basis(magmoms))
     assert edge_attrs_out.shape == (num_nodes, basis.magnetic_edge_irreps_out.dim)
-    assert "[[2.0000, 2.0000], [4.0000, 3.0000]]" in repr(basis)
-    with pytest.raises(ValueError, match="node_fidelity is required"):
-        basis(magmoms, node_attrs, edge_index)
+    assert basis.magnetic_scale.shape == (num_fidelities, 2)
+    assert "magnetic_scale=[[" in repr(basis)
+
+
+@pytest.mark.parametrize(
+    ("num_fidelities", "legacy"), [(1, True), (1, False), (2, False)]
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_magnetic_basis_loads_scale_fidelity_axis(num_fidelities, legacy, nested):
+    basis = MagneticBasis(
+        [1.0] * num_fidelities,
+        num_mag_radial_basis=4,
+        Lmax=1,
+        atomic_numbers=[26, 28],
+    ).to(DEVICE, DTYPE)
+    module = torch.nn.ModuleDict({"magnetic_basis": basis}) if nested else basis
+    key = "magnetic_basis.magnetic_scale" if nested else "magnetic_scale"
+    expected = torch.arange(
+        2, 2 + num_fidelities * 2, dtype=DTYPE, device=DEVICE
+    ).view(num_fidelities, 2)
+    state_dict = module.state_dict()
+    state_dict[key] = expected[0] if legacy else expected
+
+    incompatible = module.load_state_dict(state_dict, strict=True)
+
+    assert incompatible.missing_keys == []
+    assert incompatible.unexpected_keys == []
+    torch.testing.assert_close(basis.magnetic_scale, expected)
 
 
 def _spin_node_embedding(embedding_type):
@@ -489,7 +520,7 @@ def test_magnetic_info_is_independent_per_interaction(
         atomic_numbers=[26],
         cutoff=3.0,
         avg_num_neighbors=2.0,
-        magnetic_scale={26: 2.0},
+        magnetic_scale=[{26: 2.0}],
         mmax=1,
         Lmax=1,
         lmax=1,
@@ -1100,7 +1131,7 @@ def test_local_frame_preserves_time_parity():
 def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
     time_reversal = hasattr(o3.Irrep("0e"), "t")
     basis = MagneticBasis(
-        {26: 2.0},
+        [{26: 2.0}],
         num_mag_radial_basis=4,
         Lmax=Lmax,
         atomic_numbers=[26],
@@ -1112,11 +1143,13 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
     )
     magmoms = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
     node_attrs = torch.ones(4, 1, dtype=DTYPE, device=DEVICE)
+    node_fidelity = torch.zeros(4, dtype=torch.long, device=DEVICE)
 
     radial, magnetic_node_attrs, magnetic_edge_attrs = basis(
         magmoms,
         node_attrs,
         edge_index,
+        node_fidelity,
     )
     source, target = edge_index
     expected = basis.magnetic_edge_tensor_product(
@@ -1136,7 +1169,7 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
     assert basis.radial_normalization == "clamp"
     torch.testing.assert_close(
         basis.magnetic_scale,
-        torch.tensor([2.0], dtype=DTYPE, device=DEVICE),
+        torch.tensor([[2.0]], dtype=DTYPE, device=DEVICE),
     )
     assert basis.magnetic_edge_tensor_product.weight_numel == 0
     assert basis.magnetic_node_irreps_out.lmax == Lmax
@@ -1162,6 +1195,7 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
             -magmoms,
             node_attrs,
             edge_index,
+            node_fidelity,
         )
         torch.testing.assert_close(reversed_radial, radial)
         torch.testing.assert_close(
@@ -1176,7 +1210,7 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
 
 def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
     basis = MagneticBasis(
-        {26: 2.0, 28: 4.0},
+        [{26: 2.0, 28: 4.0}],
         num_mag_radial_basis=4,
         Lmax=2,
         atomic_numbers=[26, 28],
@@ -1189,11 +1223,12 @@ def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
     )
     node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)
     edge_index = torch.tensor([[0, 1], [1, 0]], device=DEVICE)
+    node_fidelity = torch.zeros(2, dtype=torch.long, device=DEVICE)
 
     radial, magnetic_node_attrs, _ = basis(
-        magmoms, node_attrs, edge_index
+        magmoms, node_attrs, edge_index, node_fidelity
     )
-    magnetic_scale = basis.magnetic_scale.unsqueeze(-1)
+    magnetic_scale = basis.magnetic_scale[0].unsqueeze(-1)
     scaled_magmoms = magmoms / magnetic_scale
     squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
     radial_coordinate = 1.0 - 2.0 * torch.clamp(
@@ -1221,7 +1256,7 @@ def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
     orders = torch.arange(
         1, basis.num_mag_radial_basis + 1, dtype=DTYPE, device=DEVICE
     )
-    expected_curvature = -4.0 * orders.square().sum() / basis.magnetic_scale[0].square()
+    expected_curvature = -4.0 * orders.square().sum() / basis.magnetic_scale[0, 0].square()
     torch.testing.assert_close(
         zero_hessian,
         expected_curvature * torch.eye(3, dtype=DTYPE, device=DEVICE),
@@ -1231,7 +1266,7 @@ def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
 @pytest.mark.parametrize("Lmax", [1, 2, 3])
 def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
     basis = MagneticBasis(
-        {26: 2.0},
+        [{26: 2.0}],
         num_mag_radial_basis=4,
         Lmax=Lmax,
         atomic_numbers=[26],
@@ -1244,15 +1279,17 @@ def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
     )
     magmoms = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
     node_attrs = torch.ones(4, 1, dtype=DTYPE, device=DEVICE)
+    node_fidelity = torch.zeros(4, dtype=torch.long, device=DEVICE)
 
-    _, _, edge_scalars = basis(magmoms, node_attrs, edge_index)
+    _, _, edge_scalars = basis(magmoms, node_attrs, edge_index, node_fidelity)
     rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
     _, _, rotated_edge_scalars = basis(
         magmoms @ rotation.T,
         node_attrs,
         edge_index,
+        node_fidelity,
     )
-    _, _, reversed_edge_scalars = basis(-magmoms, node_attrs, edge_index)
+    _, _, reversed_edge_scalars = basis(-magmoms, node_attrs, edge_index, node_fidelity)
 
     assert not basis.use_spin_orbit_coupling
     assert basis.magnetic_edge_irreps_out.num_irreps == Lmax + 1
@@ -1267,20 +1304,21 @@ def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
 
 def test_magnetic_radial_basis_is_bounded_and_has_no_constant_mode():
     basis = MagneticBasis(
-        {26: 2.0},
+        [{26: 2.0}],
         num_mag_radial_basis=4,
         Lmax=2,
         atomic_numbers=[26],
     ).to(DEVICE, DTYPE)
     node_attrs = torch.ones(2, 1, dtype=DTYPE, device=DEVICE)
     edge_index = torch.tensor([[0], [1]], device=DEVICE)
+    node_fidelity = torch.zeros(2, dtype=torch.long, device=DEVICE)
     magmoms = torch.tensor(
         [[0.0, 0.0, 0.0], [1.0e8, -2.0e8, 3.0e8]],
         dtype=DTYPE,
         device=DEVICE,
     )
 
-    radial, angular, _ = basis(magmoms, node_attrs, edge_index)
+    radial, angular, _ = basis(magmoms, node_attrs, edge_index, node_fidelity)
 
     assert not basis.radial_basis.include_constant
     torch.testing.assert_close(radial[0], torch.ones_like(radial[0]))

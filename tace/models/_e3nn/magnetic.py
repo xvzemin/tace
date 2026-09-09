@@ -5,7 +5,6 @@
 
 from collections.abc import Mapping
 from numbers import Real
-from typing import Optional
 
 import torch
 from e3nn import o3
@@ -18,7 +17,11 @@ from .fused import uuuTensorProduct
 
 
 class MagneticBasis(torch.nn.Module):
-    """Construct radial, node, and edge magnetic representations."""
+    """Construct radial, node, and edge magnetic representations.
+
+    Magnetic scales are given as one scalar or element-dependent mapping per
+    fidelity and stored with shape ``(num_fidelities, num_elements)``.
+    """
 
     def __init__(
         self,
@@ -99,31 +102,29 @@ class MagneticBasis(torch.nn.Module):
     def _resolve_magnetic_scale(
         magnetic_scale, atomic_numbers: list[int]
     ) -> torch.Tensor:
-        if isinstance(magnetic_scale, (list, tuple)):
-            return torch.stack(
-                [
-                    MagneticBasis._resolve_magnetic_scale(scale, atomic_numbers)
-                    for scale in magnetic_scale
-                ]
-            )
-        if isinstance(magnetic_scale, Mapping):
-            values = []
-            for atomic_number in atomic_numbers:
-                value = magnetic_scale.get(
-                    atomic_number, magnetic_scale.get(str(atomic_number))
-                )
-                if value is None:
-                    raise ValueError(
-                        f"magnetic_scale is missing atomic number {atomic_number}"
-                    )
-                values.append(float(value))
-        elif isinstance(magnetic_scale, Real):
-            values = [float(magnetic_scale)] * len(atomic_numbers)
-        else:
+        if not isinstance(magnetic_scale, (list, tuple)) or not magnetic_scale:
             raise TypeError(
-                "magnetic_scale must be a scalar or an element-dependent mapping, "
-                "or a per-fidelity list of these"
+                "magnetic_scale must be a non-empty per-fidelity sequence"
             )
+        values = []
+        for scale in magnetic_scale:
+            if isinstance(scale, Mapping):
+                row = []
+                for atomic_number in atomic_numbers:
+                    value = scale.get(atomic_number, scale.get(str(atomic_number)))
+                    if value is None:
+                        raise ValueError(
+                            f"magnetic_scale is missing atomic number {atomic_number}"
+                        )
+                    row.append(float(value))
+            elif isinstance(scale, Real):
+                row = [float(scale)] * len(atomic_numbers)
+            else:
+                raise TypeError(
+                    "each magnetic_scale entry must be a scalar or an "
+                    "element-dependent mapping"
+                )
+            values.append(row)
 
         magnetic_scale = torch.tensor(values, dtype=torch.get_default_dtype())
         if not torch.isfinite(magnetic_scale).all() or (magnetic_scale <= 0.0).any():
@@ -135,18 +136,11 @@ class MagneticBasis(torch.nn.Module):
         initial_noncollinear_magmoms: torch.Tensor,
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
-        node_fidelity: Optional[torch.Tensor] = None,
+        node_fidelity: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        node_elements = node_attrs.argmax(dim=-1)
-        if self.magnetic_scale.ndim == 1:
-            magnetic_scale = self.magnetic_scale[node_elements]
-        else:
-            if node_fidelity is None:
-                raise ValueError(
-                    "node_fidelity is required for per-fidelity magnetic_scale"
-                )
-            magnetic_scale = self.magnetic_scale[node_fidelity, node_elements]
-        magnetic_scale = magnetic_scale.unsqueeze(-1)
+        magnetic_scale = self.magnetic_scale[
+            node_fidelity, node_attrs.argmax(dim=-1)
+        ].unsqueeze(-1)
         scaled_magmoms = initial_noncollinear_magmoms / magnetic_scale
         squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
         radial_coordinate = 1.0 - 2.0 * torch.clamp(
@@ -180,4 +174,27 @@ class MagneticBasis(torch.nn.Module):
             # f"  angular_normalization={self.angular_normalization!r},\n"
             # f"  radial_normalization={self.radial_normalization!r},\n"
             ")"
+        )
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        key = f"{prefix}magnetic_scale"
+        if key in state_dict and state_dict[key].ndim == 1:
+            state_dict[key] = state_dict[key].unsqueeze(0)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )

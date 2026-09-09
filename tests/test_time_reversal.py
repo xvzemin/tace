@@ -297,19 +297,21 @@ def test_parity_selects_natural_or_complete_magnetic_paths():
     )
 
 
-def test_magnetic_representation_uses_node_fidelity():
+@pytest.mark.parametrize("num_fidelities", [1, 2])
+def test_magnetic_representation_uses_node_fidelity(num_fidelities):
     config = _model_config()
     config["atomic_basis"]["type"] = "o2_mag"
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["radial_basis"]["apply_cutoff"] = False
     config["mmax"] = 1
-    config["statistics"] *= 2
+    config["statistics"] *= num_fidelities
     config["fidelity"] = [
         {"name": "PBE", "magnetic_scale": 2.0},
         {"name": "SCAN", "magnetic_scale": 4.0},
-    ]
+    ][:num_fidelities]
     model = TensorModel(e3nnTACE(**config)).double().eval()
     representation = model.readout_fn.representation
+    assert representation.magnetic_basis.magnetic_scale.shape == (num_fidelities, 1)
     data = {
         "positions": torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]] * 2, dtype=torch.float64
@@ -320,7 +322,7 @@ def test_magnetic_representation_uses_node_fidelity():
         "lattice": torch.eye(3, dtype=torch.float64).repeat(2, 1, 1) * 10.0,
         "batch": torch.tensor([0, 0, 1, 1]),
         "ptr": torch.tensor([0, 2, 4]),
-        "fidelity_idx": torch.tensor([1, 0]),
+        "fidelity_idx": torch.tensor([1 % num_fidelities, 0]),
         "initial_noncollinear_magmoms": torch.tensor(
             [[1.0, 0.0, 0.0]] * 4, dtype=torch.float64
         ),
@@ -328,12 +330,15 @@ def test_magnetic_representation_uses_node_fidelity():
     graph = model.prepare_graph(data)
     output = representation(data, graph)
     expected = representation.magnetic_basis.radial_basis(
-        torch.tensor([[0.875], [0.875], [0.5], [0.5]], dtype=torch.float64)
+        torch.tensor(
+            [[0.5]] * 4 if num_fidelities == 1 else [[0.875], [0.875], [0.5], [0.5]],
+            dtype=torch.float64,
+        )
     )
     torch.testing.assert_close(output["magnetic_radial_basis"], expected)
 
     data.pop("fidelity_idx")
-    for fidelity_idx in range(2):
+    for fidelity_idx in range(num_fidelities):
         model.reset_fidelity_idx(fidelity_idx)
         output = representation(data, model.prepare_graph(data))
         torch.testing.assert_close(
