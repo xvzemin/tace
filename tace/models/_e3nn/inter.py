@@ -508,7 +508,7 @@ class O2Interaction(O3CgtpInteraction):
 class O2MagneticInteraction(O2Interaction):
     """Local-O2 interaction augmented by magnetic edge attributes."""
 
-    magnetic_info_type = "edge"  # "node" or "edge"
+    magnetic_info_type = "node"  # "node" or "edge"
 
     def _prepare_setup(self) -> None:
         if self.magnetic_edge_irreps is None:

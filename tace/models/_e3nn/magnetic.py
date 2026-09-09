@@ -131,7 +131,6 @@ class MagneticBasis(torch.nn.Module):
         squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
         radial_coordinate = 1.0 - 2.0 * torch.clamp(
             squared_magnitude,
-            min=0.0,
             max=1.0,
         )
         magnetic_radial_basis = self.radial_basis(radial_coordinate)

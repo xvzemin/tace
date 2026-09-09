@@ -1156,8 +1156,20 @@ def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
         radial[0].sum(), magmoms, create_graph=True
     )[0][0]
     torch.testing.assert_close(zero_gradient, torch.zeros_like(zero_gradient))
-    zero_second_derivative = torch.autograd.grad(zero_gradient.sum(), magmoms)[0][0]
-    assert torch.isfinite(zero_second_derivative).all()
+    zero_hessian = torch.stack(
+        [
+            torch.autograd.grad(zero_gradient[axis], magmoms, retain_graph=True)[0][0]
+            for axis in range(3)
+        ]
+    )
+    orders = torch.arange(
+        1, basis.num_mag_radial_basis + 1, dtype=DTYPE, device=DEVICE
+    )
+    expected_curvature = -4.0 * orders.square().sum() / basis.magnetic_scale[0].square()
+    torch.testing.assert_close(
+        zero_hessian,
+        expected_curvature * torch.eye(3, dtype=DTYPE, device=DEVICE),
+    )
 
 
 @pytest.mark.parametrize("Lmax", [1, 2, 3])

@@ -25,12 +25,6 @@ dataset:
   shard_dirs: 
     - ${oc.env:HOME}/dataset/Fe-DeepSpin/graphCache
 
-optimizer:
-  _target_: torch.optim.Adam
-  lr: 5e-3
-  weight_decay: 0.0
-  amsgrad: true
-
 loss:
   loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
   loss_function_name:
@@ -52,11 +46,11 @@ synth_metric:
 model:
   config:
 
-    mmax: 3
+    mmax: 2
     Lmax: 2
-    lmax: 3
+    lmax: 2
     cutoff: 5.0
-    num_layers: 5
+    num_layers: 6
     num_channel: 64
 
     fidelity:
