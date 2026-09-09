@@ -508,7 +508,7 @@ class O2Interaction(O3CgtpInteraction):
 class O2MagneticInteraction(O2Interaction):
     """Local-O2 interaction augmented by magnetic edge attributes."""
 
-    magnetic_info_type = "node"  # "node" or "edge"
+    magnetic_info_type = "node"  # Only "node" is currently implemented.
 
     def _prepare_setup(self) -> None:
         if self.magnetic_edge_irreps is None:
@@ -592,41 +592,31 @@ class O2MagneticInteraction(O2Interaction):
         return rejector
 
     def _setup_additional_modules(self) -> None:
+        if self.magnetic_info_type != "node":
+            raise NotImplementedError(
+                "Only magnetic_info_type='node' is currently implemented."
+            )
         self.magnetic_linear = e3nnLinear(
             self.magnetic_edge_irreps,
             self.magnetic_edge_irreps_out,
             bias=False,
             internal_weights=False,
         )
-        if self.magnetic_info_type not in {"node", "edge"}:
-            raise ValueError("magnetic_info_type must be either 'node' or 'edge'.")
-        if self.magnetic_info_type == "node":
-            magnetic_info_channels = (
-                [self.magnetic_node_info_channel]
-                + self.radial_mlp
-                + [self.magnetic_linear.weight_numel]
-            )
-            self.source_magnetic_info = MLP(
-                magnetic_info_channels,
-                bias=self.radial_bias,
-                act="silu",
-            )
-            self.target_magnetic_info = MLP(
-                magnetic_info_channels,
-                bias=self.radial_bias,
-                act="silu",
-            )
-        else:
-            magnetic_info_channels = (
-                [2 * self.magnetic_node_info_channel]
-                + self.radial_mlp
-                + [self.magnetic_linear.weight_numel]
-            )
-            self.magnetic_edge_info = MLP(
-                magnetic_info_channels,
-                bias=self.radial_bias,
-                act="silu",
-            )
+        magnetic_info_channels = (
+            [self.magnetic_node_info_channel]
+            + self.radial_mlp
+            + [self.magnetic_linear.weight_numel]
+        )
+        self.source_magnetic_info = MLP(
+            magnetic_info_channels,
+            bias=self.radial_bias,
+            act="silu",
+        )
+        self.target_magnetic_info = MLP(
+            magnetic_info_channels,
+            bias=self.radial_bias,
+            act="silu",
+        )
 
     def _magnetic_weights(
         self,
@@ -635,10 +625,6 @@ class O2MagneticInteraction(O2Interaction):
     ) -> torch.Tensor:
         source_info, target_info = magnetic_node_info
         source, target = edge_index
-        if self.magnetic_info_type == "edge":
-            return self.magnetic_edge_info(
-                torch.cat((source_info[source], target_info[target]), dim=-1)
-            )
         return self.source_magnetic_info(source_info)[source] * (
             self.target_magnetic_info(target_info)[target]
         )

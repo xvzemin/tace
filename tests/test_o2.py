@@ -410,10 +410,12 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
 @pytest.mark.parametrize(
     "magnetic_info_type",
     [None, "node"],
-    ids=["default-edge", "node"],
+    ids=["default", "node"],
 )
+@pytest.mark.parametrize("magnetic_type", ["identity", "element", "element2"])
 def test_magnetic_info_is_independent_per_interaction(
     magnetic_info_type,
+    magnetic_type,
     monkeypatch,
 ):
     if magnetic_info_type is not None:
@@ -422,9 +424,8 @@ def test_magnetic_info_is_independent_per_interaction(
             "magnetic_info_type",
             magnetic_info_type,
         )
-    magnetic_info_type = O2MagneticInteraction.magnetic_info_type
     config = deepcopy(DEFAULT_MODEL_CONFIG)
-    config["node_update"]["magnetic_type"] = "element2"
+    config["node_update"]["magnetic_type"] = magnetic_type
     config["atomic_basis"]["type"] = ["o2_mag", "o2_mag"]
     config["atomic_basis"]["nonlinear"] = ["gate", "gate"]
     config["atomic_basis"]["edge_nonlinear"] = ["gate", "gate"]
@@ -477,21 +478,18 @@ def test_magnetic_info_is_independent_per_interaction(
         representation.interactions,
     ):
         assert isinstance(update, NodeUpdate)
-        assert isinstance(update, NODE_UPDATE["element2"])
+        assert isinstance(update, NODE_UPDATE[magnetic_type])
         assert (
             interaction.edge_info.dims[0]
             == representation.edge_updates[0].out_dim
         )
         expected_info_dims = [
-            update.out_dim * (2 if magnetic_info_type == "edge" else 1),
+            update.out_dim,
             *config["radial_basis"]["hidden"],
             interaction.magnetic_linear.weight_numel,
         ]
-        if magnetic_info_type == "node":
-            assert interaction.source_magnetic_info.dims == expected_info_dims
-            assert interaction.target_magnetic_info.dims == expected_info_dims
-        else:
-            assert interaction.magnetic_edge_info.dims == expected_info_dims
+        assert interaction.source_magnetic_info.dims == expected_info_dims
+        assert interaction.target_magnetic_info.dims == expected_info_dims
         assert all(
             mul == representation.num_channel
             for mul, _ in interaction.magnetic_edge_irreps_out
@@ -499,7 +497,7 @@ def test_magnetic_info_is_independent_per_interaction(
         assert interaction.magnetic_linear.bias is None
 
         edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]])
-        magnetic_radial_basis = torch.randn(3, num_mag_radial_basis)
+        magnetic_radial_basis = torch.randn(3, num_mag_radial_basis, requires_grad=True)
         node_attrs = torch.ones(3, 1)
         magnetic_info = update(
             magnetic_radial_basis,
@@ -515,14 +513,9 @@ def test_magnetic_info_is_independent_per_interaction(
         )
         source_info, target_info = magnetic_info
         source, target = edge_index
-        if magnetic_info_type == "node":
-            expected_weights = interaction.source_magnetic_info(source_info)[
-                source
-            ] * interaction.target_magnetic_info(target_info)[target]
-        else:
-            expected_weights = interaction.magnetic_edge_info(
-                torch.cat((source_info[source], target_info[target]), dim=-1)
-            )
+        expected_weights = interaction.source_magnetic_info(source_info)[
+            source
+        ] * interaction.target_magnetic_info(target_info)[target]
         torch.testing.assert_close(magnetic_weights, expected_weights)
         projected = interaction.magnetic_linear(
             magnetic_edge_attrs,
@@ -532,6 +525,17 @@ def test_magnetic_info_is_independent_per_interaction(
             edge_index.size(1),
             interaction.magnetic_edge_irreps_out.dim,
         )
+        projected.square().sum().backward()
+        assert torch.isfinite(magnetic_radial_basis.grad).all()
+        for num_nodes in (0, 3):
+            empty_edge_weights = interaction._magnetic_weights(
+                update(magnetic_radial_basis[:num_nodes], node_attrs[:num_nodes]),
+                edge_index[:, :0],
+            )
+            assert empty_edge_weights.shape == (
+                0,
+                interaction.magnetic_linear.weight_numel,
+            )
 
 
 def test_o2_does_not_import_tace():

@@ -177,13 +177,14 @@ Magnetic local O(2) convolution
 
 Let :math:`\widetilde m_i` be the transformed scalar magnitude defined below,
 and :math:`T(\widetilde m_i)` its magnetic radial feature vector. With
-``node_update.magnetic_type: element``, the paper's edge-conditioned form is
+``node_update.magnetic_type: element``, the node-conditioned weights are
 
 .. math::
 
-   W_{ij}^{(t)}=\operatorname{MLP}^{(t)}
-   \left(W_{Z_i}^{(t)}T(\widetilde m_i)
-   \oplus W_{Z_j}^{(t)}T(\widetilde m_j)\right),\qquad
+   W_{ij}^{(t)}=\operatorname{MLP}_{\rm tgt}^{(t)}
+   \left(W_{Z_i}^{(t)}T(\widetilde m_i)\right)
+   \odot\operatorname{MLP}_{\rm src}^{(t)}
+   \left(W_{Z_j}^{(t)}T(\widetilde m_j)\right),\qquad
    \widetilde{\mathcal M}_{ij}^{(t)}
    =\operatorname{Linear}\left(\mathcal M_{ij};W_{ij}^{(t)}\right).
 
@@ -192,10 +193,11 @@ model channels. Together with the unweighted product, it realizes a weighted
 ``uuw`` coupling. Raw angular attributes are shared across layers; the
 element embeddings and MLP parameters are layer-specific.
 
-``O2MagneticInteraction.magnetic_info_type`` selects ``edge`` (the form above)
-or ``node``. The current ``node`` setting applies independent endpoint MLPs
-before gathering and multiplies their gathered outputs to obtain
-:math:`W_{ij}^{(t)}`. This is a class-level setting, not a YAML option.
+``O2MagneticInteraction.magnetic_info_type`` remains a class-level selector,
+not a YAML option. Only ``node`` is currently implemented: independent
+endpoint MLPs run before gathering, and their gathered outputs are multiplied
+element-wise to obtain :math:`W_{ij}^{(t)}`. Other values raise
+``NotImplementedError`` during model construction.
 
 ``magnetic_type: identity`` uses the radial features directly.
 ``element`` uses one element-dependent map shared by both endpoints;
