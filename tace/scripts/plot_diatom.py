@@ -24,7 +24,7 @@ from tace.lightning import load_tace
 
 NUM_POINTS = 256
 BATCH_SIZE = 128
-OUTPUT_PATH = "diatom.png"
+OUTPUT_PATH = "diatom_{label}.png"
 
 
 def parse_args():
@@ -56,7 +56,7 @@ def _key_spec(energy_key="energy", forces_key="forces"):
     return key_spec
 
 
-def _distance_and_direction(atoms):
+def distance_and_direction(atoms):
     vector = atoms.get_distance(0, 1, mic=bool(np.any(atoms.pbc)), vector=True)
     distance = np.linalg.norm(vector)
     if distance == 0.0:
@@ -64,7 +64,7 @@ def _distance_and_direction(atoms):
     return distance, vector / distance
 
 
-def _read_reference(
+def read_reference(
     path, atomic_numbers, energy_key, forces_key, include_heteronuclear=False
 ):
     reference = {}
@@ -79,7 +79,7 @@ def _read_reference(
         if forces_key not in atoms.arrays:
             raise KeyError(f"Structure {index} has no atoms.arrays[{forces_key!r}].")
 
-        distance, direction = _distance_and_direction(atoms)
+        distance, direction = distance_and_direction(atoms)
         forces = np.asarray(atoms.arrays[forces_key])
         if forces.shape != (2, 3):
             raise ValueError(
@@ -104,7 +104,7 @@ def _read_reference(
     return reference
 
 
-def _generated_atoms(z1, z2, distances, fidelity_idx):
+def generated_atoms(z1, z2, distances, fidelity_idx):
     atoms_list = []
     for distance in distances:
         atoms = Atoms(
@@ -117,7 +117,7 @@ def _generated_atoms(z1, z2, distances, fidelity_idx):
     return atoms_list
 
 
-def _build_dataset(model, atoms_list, key_spec):
+def build_dataset(model, atoms_list, key_spec):
     element = model.get_torch_element()
     embedding_property = model.get_embedding_property()
     fidelity_key = key_spec.info_keys["fidelity_idx"]
@@ -141,7 +141,7 @@ def _build_dataset(model, atoms_list, key_spec):
     return dataset
 
 
-def _predict(model, dataset, directions, device):
+def predict(model, dataset, directions, device):
     energies = []
     radial_forces = []
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -168,12 +168,13 @@ def _predict(model, dataset, directions, device):
     return torch.cat(energies).numpy(), torch.cat(radial_forces).numpy()
 
 
-def _plot(curves):
-    figure, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+def plot(curves):
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for index, curve in enumerate(curves):
+        figure, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
         color = colors[index % len(colors)]
         label = curve["label"]
+        figure.suptitle(label)
         axes[0].plot(
             curve["distances"], curve["energies"], color=color, label=label
         )
@@ -198,17 +199,19 @@ def _plot(curves):
                 zorder=3,
             )
 
-    axes[0].set_title("Diatomic energy")
-    axes[0].set_ylabel("Energy (eV)")
-    axes[1].set_title("Diatomic radial force")
-    axes[1].set_ylabel(r"$F_{2,r}$ (eV/$\AA$)")
-    for axis in axes:
-        axis.set_xlabel(r"Distance ($\AA$)")
-        axis.grid(alpha=0.25)
-        axis.legend(frameon=False)
+        axes[0].set_title("Diatomic energy")
+        axes[0].set_ylabel("Energy (eV)")
+        axes[1].set_title("Diatomic forces")
+        axes[1].set_ylabel(r"$F_{2,r}$ (eV/$\AA$)")
+        for axis in axes:
+            axis.set_xlabel(r"Distance ($\AA$)")
+            axis.grid(alpha=0.25)
+            axis.legend(frameon=False)
 
-    figure.savefig(OUTPUT_PATH, dpi=300)
-    plt.close(figure)
+        output_path = OUTPUT_PATH.format(label=label)
+        figure.savefig(output_path, dpi=300)
+        plt.close(figure)
+        print(f"Diatomic curves written to {output_path}")
 
 
 def main():
@@ -230,7 +233,7 @@ def main():
     key_spec = _key_spec(args.energy_key, args.forces_key)
 
     if args.input:
-        reference = _read_reference(
+        reference = read_reference(
             args.input,
             atomic_numbers,
             args.energy_key,
@@ -253,9 +256,9 @@ def main():
         print(f"[{index}/{len(element_pairs)}] {label}")
         if reference is None:
             distances = np.linspace(
-                max(1.0e-3, cutoff * 1.0e-3), cutoff, NUM_POINTS
+                0.5, cutoff, NUM_POINTS
             )
-            atoms_list = _generated_atoms(
+            atoms_list = generated_atoms(
                 z1, z2, distances, model.get_fidelity_idx()
             )
             directions = np.tile((1.0, 0.0, 0.0), (len(distances), 1))
@@ -269,9 +272,9 @@ def main():
             reference_forces = np.asarray([value[3] for value in values])
             directions = np.asarray([value[4] for value in values])
 
-        energies, radial_forces = _predict(
+        energies, radial_forces = predict(
             model,
-            _build_dataset(model, atoms_list, key_spec),
+            build_dataset(model, atoms_list, key_spec),
             directions,
             device,
         )
@@ -286,8 +289,7 @@ def main():
             }
         )
 
-    _plot(curves)
-    print(f"Diatomic curves written to {OUTPUT_PATH}")
+    plot(curves)
 
 
 if __name__ == "__main__":

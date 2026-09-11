@@ -214,25 +214,17 @@ remain disabled when averaging multiple time-adjacent checkpoints.
 Diatomic Curves
 ---------------
 
-``tace-plot-diatom`` reads the supported elements and cutoff directly from a
-model and evaluates each supported homonuclear pair from 0 to cutoff:
+``tace-plot-diatom`` reads the supported elements and cutoff from a
+model and evaluates each supported homonuclear pair from 0.5 to cutoff:
 
 .. code-block:: bash
 
    tace-plot-diatom -m model.ckpt
-
-Pass ``--heteronuclear`` to include all supported unlike-element pairs as
-well. This option applies both to the automatic scan and to structures selected
-from a DFT input file.
-
-The command selects CUDA when available, otherwise CPU, and writes
-``diatom.png`` in the current directory.
-An optional DFT dataset may be supplied as follows:
-
-.. code-block:: bash
-
-   tace-plot-diatom -m model.ckpt -i diatoms.xyz \
+   # or
+   tace-plot-diatom -m model.ckpt -i dft_diatoms.xyz \
      --energy_key energy --forces_key forces
+
+Pass ``--heteronuclear`` to include all pairs as well. 
 
 Inspection and Maintenance
 --------------------------
