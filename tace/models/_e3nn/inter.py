@@ -21,6 +21,7 @@ from .legacy_so2 import uvSO2Convolution
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2ScatterMagneticTensorProduct, O2ScatterTensorProduct
 from .residual import get_resnet_layer
+from .wigner6j import O3Wigner6jScatterTensorProduct
 
 
 class O3CgtpInteraction(Interaction):
@@ -176,9 +177,11 @@ class O3CgtpInteraction(Interaction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
         magnetic_node_info: Union[
             tuple[torch.Tensor, torch.Tensor], None
         ] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
@@ -198,9 +201,11 @@ class O3CgtpInteraction(Interaction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None],
         edge_wigner_inv: Union[torch.Tensor, None],
+        magnetic_radial_basis: Union[torch.Tensor, None],
         magnetic_node_info: Union[
             tuple[torch.Tensor, torch.Tensor], None
         ],
+        magnetic_node_attrs: Union[torch.Tensor, None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         batch: torch.Tensor,
         graph: Graph,
@@ -245,7 +250,9 @@ class O3CgtpInteraction(Interaction):
                     edge_cutoff,
                     edge_wigner,
                     edge_wigner_inv,
+                    magnetic_radial_basis,
                     magnetic_node_info,
+                    magnetic_node_attrs,
                     magnetic_edge_attrs,
                 ),
                 nlocal,
@@ -372,9 +379,11 @@ class uvSO2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
         magnetic_node_info: Union[
             tuple[torch.Tensor, torch.Tensor], None
         ] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         return self.rejector(
@@ -486,9 +495,11 @@ class O2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
         magnetic_node_info: Union[
             tuple[torch.Tensor, torch.Tensor], None
         ] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         conv_weights = self.edge_info(edge_feats)
@@ -505,10 +516,120 @@ class O2Interaction(O3CgtpInteraction):
         )
 
 
-class O2MagneticInteraction(O2Interaction):
-    """Local-O2 interaction augmented by magnetic edge attributes."""
+class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
+    """Magnetic interaction evaluated by Wigner-6j recoupling."""
 
-    magnetic_info_type = "node"  # Only "node" is currently implemented.
+    def _prepare_setup(self) -> None:
+        if self.magnetic_node_irreps is None:
+            raise ValueError("w6j_mag requires magnetic_node_irreps.")
+        self.magnetic_node_irreps = o3.Irreps(self.magnetic_node_irreps)
+        if any(mul != 1 for mul, _ in self.magnetic_node_irreps):
+            raise ValueError("magnetic_node_irreps must have multiplicity one.")
+        if self.magnetic_node_irreps.lmax > self.Lmax:
+            raise ValueError("magnetic node irreps must not exceed Lmax.")
+
+        message_lmax = self.Lmax if self.correlation == 1 else self.lmax
+        intermediate_irreps = _to_possible_tp_irreps(
+            self.irreps_in,
+            self.irreps_sh,
+            self.parity,
+            lmax=message_lmax + self.magnetic_node_irreps.lmax,
+        )
+        self.irrreps_tp_out = _to_possible_tp_irreps(
+            intermediate_irreps,
+            self.magnetic_node_irreps,
+            self.parity,
+            lmax=message_lmax,
+        )
+        self.irreps_out = (
+            self.irrreps_tp_out * self.num_channel
+        ).regroup()
+
+        if self.layer != self.num_layers - 1:
+            intermediate_irreps = _to_possible_tp_irreps(
+                self.irreps_in,
+                self.irreps_sh,
+                self.parity,
+                lmax=self.Lmax + self.magnetic_node_irreps.lmax,
+            )
+            self.irreps_sc = _to_possible_tp_irreps(
+                intermediate_irreps,
+                self.magnetic_node_irreps,
+                self.parity,
+                lmax=self.Lmax,
+            )
+            self.irreps_sc = (self.irreps_sc * self.num_channel).regroup()
+
+    def _build_rejector(self) -> torch.nn.Module:
+        return O3Wigner6jScatterTensorProduct(
+            self.irreps_in,
+            self.irreps_sh,
+            self.irreps_out,
+            extra_irreps_node_attrs=self.magnetic_node_irreps,
+            weight_level="edge",
+            l1l2=self.l1l2,
+        )
+
+    def _edge_weight_input_dim(self) -> int:
+        return self.edge_feats_channel + self.num_mag_radial_basis
+
+    def _edge_weight_numel(self) -> int:
+        return self.rejector.edge_weight_numel
+
+    def _setup_additional_modules(self) -> None:
+        self.magnetic_info = MLP(
+            [
+                self._edge_weight_input_dim(),
+                self.rejector.extra_weight_numel,
+            ],
+            bias=self.radial_bias,
+            act=None,
+        )
+
+    def _compute_messages(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs_total: torch.Tensor,
+        edge_radial_basis: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None] = None,
+        edge_wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
+        magnetic_node_attrs: Union[torch.Tensor, None] = None,
+        magnetic_edge_attrs: Union[torch.Tensor, None] = None,
+    ) -> torch.Tensor:
+        if magnetic_node_attrs is None:
+            raise ValueError("w6j_mag requires magnetic node attributes.")
+        if magnetic_radial_basis is None:
+            raise ValueError("w6j_mag requires magnetic radial basis.")
+
+        source = edge_index[0]
+        weight_inputs = torch.cat(
+            (edge_feats, magnetic_radial_basis[source]),
+            dim=-1,
+        )
+        conv_weights = self.edge_info(weight_inputs)
+        if edge_cutoff is not None:
+            conv_weights = conv_weights * edge_cutoff
+        magnetic_weights = self.magnetic_info(weight_inputs)
+        return self.rejector(
+            node_feats,
+            edge_attrs,
+            magnetic_node_attrs,
+            conv_weights,
+            magnetic_weights,
+            edge_index,
+        )
+
+
+class O2MagneticInteraction(O2Interaction):
+    """Magnetic interaction evaluated by local O(2) frame."""
+
+    magnetic_info_type = "node"  # [node]
 
     def _prepare_setup(self) -> None:
         if self.magnetic_edge_irreps is None:
@@ -669,6 +790,7 @@ INTERACTION: Dict[str, type[Interaction]] = {
     "so2": uvSO2Interaction,
     "o2": O2Interaction,
     "o2_mag": O2MagneticInteraction,
+    "w6j_mag": O3Wigner6jMagneticInteraction,
 }
 
 interaction_aliases = {

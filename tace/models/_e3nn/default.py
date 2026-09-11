@@ -215,12 +215,14 @@ def check_model_config(cfg: dict[str, Any]):
             for name, value in universal_embedding.items()
             if name in DEFAULT_MODEL_CONFIG["universal_embedding"]
         }
-        
+
     magnetic_lmax = cfg["angular_basis"]["magnetic_Lmax"]
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
-    uses_magnetic_interaction = "o2_mag" in atomic_basis_type
+    uses_magnetic_interaction = any(
+        interaction in {"o2_mag", "w6j_mag"} for interaction in atomic_basis_type
+    )
     if (
         not isinstance(magnetic_lmax, int)
         or magnetic_lmax < 1
@@ -228,7 +230,7 @@ def check_model_config(cfg: dict[str, Any]):
     ):
         raise ValueError(
             "angular_basis.magnetic_Lmax must be positive and must not "
-            "exceed model.config.Lmax when o2_mag is used."
+            "exceed model.config.Lmax when a magnetic interaction is used."
         )
     num_mag_radial_basis = cfg["radial_basis"]["num_mag_radial_basis"]
     if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:

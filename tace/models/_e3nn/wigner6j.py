@@ -12,8 +12,10 @@ from typing import Union
 import torch
 from e3nn import o3
 
+from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
+from ..time_reversal import contains_time_odd_irreps
 from .fused import O3ScatterTensorProduct, uvuTensorProduct
 from .paths import satisfy
 
@@ -118,6 +120,19 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         self.extra_irreps_node_attrs = o3.Irreps(extra_irreps_node_attrs)
         if any(multiplicity != 1 for multiplicity, _ in self.extra_irreps_node_attrs):
             raise ValueError("extra_irreps_node_attrs must have multiplicity one")
+        if contains_time_odd_irreps(
+            self.irreps_node_feats,
+            self.irreps_edge_attrs,
+            requested_irreps_out,
+            self.extra_irreps_node_attrs,
+        ):
+            for kernel in ("oeq", "cue"):
+                if acceleration_enabled(kernel):
+                    raise ValueError(
+                        f"{kernel.upper()} does not support time-reversal "
+                        "Wigner-6j scatter tensor products. Disable the "
+                        "accelerated scatter kernel."
+                    )
         self.weight_level = weight_level
         self.register_reference = register_reference
 

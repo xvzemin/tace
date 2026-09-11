@@ -1,14 +1,20 @@
+from copy import deepcopy
+
 import pytest
 import torch
 from e3nn import o3
 
 from tace.models._e3nn.base import _to_possible_tp_irreps
+from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.fused import O3ScatterTensorProduct, uvuTensorProduct
+from tace.models._e3nn.inter import O3Wigner6jMagneticInteraction
+from tace.models._e3nn.tace import e3nnTACE
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
     sympy_wigner_6j,
     wigner_6j,
 )
+from tace.models.adapter import TensorModel
 from tace.models.time_reversal import spherical_harmonics_irreps, supports_time_reversal
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -207,9 +213,7 @@ def test_wigner6j_tensor_product_is_o3_equivariant(
         rotation = -rotation
     node_rotation = module.irreps_node_feats.D_from_matrix(rotation).to(DEVICE)
     edge_rotation = module.irreps_edge_attrs.D_from_matrix(rotation).to(DEVICE)
-    extra_rotation = module.extra_irreps_node_attrs.D_from_matrix(rotation).to(
-        DEVICE
-    )
+    extra_rotation = module.extra_irreps_node_attrs.D_from_matrix(rotation).to(DEVICE)
     output_rotation = module.irreps_out.D_from_matrix(rotation).to(DEVICE)
     rotated_inputs = (
         node_feats @ node_rotation.T,
@@ -269,6 +273,12 @@ def test_wigner6j_is_time_reversal_equivariant():
         output_irreps,
         magnetic_irreps,
         weight_level="edge",
+        register_reference=True,
+    )
+    assert (
+        tensor_product.recoupled_node_edge_tp.irreps_out
+        == tensor_product.reference_edge_edge_tp.irreps_out
+        == tensor_product.irreps_out
     )
 
     num_nodes = 4
@@ -296,6 +306,15 @@ def test_wigner6j_is_time_reversal_equivariant():
         magnetic_weights,
         edge_index,
     )
+    reference = tensor_product.forward_reference(
+        node_features,
+        edge_features,
+        magnetic_features,
+        edge_weights,
+        magnetic_weights,
+        edge_index,
+    )
+    torch.testing.assert_close(output, reference)
     observed = tensor_product(
         reverse(node_features, node_irreps),
         reverse(edge_features, edge_irreps),
@@ -308,3 +327,111 @@ def test_wigner6j_is_time_reversal_equivariant():
         observed,
         reverse(output, tensor_product.irreps_out),
     )
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
+@pytest.mark.parametrize(
+    ("kernel", "environment"),
+    [("CUE", "TACE_USE_CUE"), ("OEQ", "TACE_USE_OEQ")],
+)
+def test_time_reversal_wigner6j_rejects_scatter_acceleration(
+    monkeypatch,
+    kernel,
+    environment,
+):
+    for variable in ("TACE_USE_CUE", "TACE_USE_OEQ"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv(environment, "1")
+    with pytest.raises(ValueError, match=f"{kernel} does not support"):
+        O3Wigner6jScatterTensorProduct(
+            o3.Irreps("2x0ee + 2x1eo"),
+            spherical_harmonics_irreps(1, p=-1),
+            o3.Irreps("2x0ee + 2x1eo"),
+            spherical_harmonics_irreps(1, p=1, time_reversal=-1),
+            weight_level="edge",
+        )
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
+def test_w6j_mag_model_is_time_reversal_invariant(monkeypatch):
+    for environment in ("TACE_USE_CUE", "TACE_USE_OEQ"):
+        monkeypatch.delenv(environment, raising=False)
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        statistics=[
+            {
+                "atomic_numbers": [26],
+                "avg_num_neighbors": 2.0,
+                "atomic_energy": {26: 0.0},
+            }
+        ],
+        num_layers=1,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        parity=True,
+        target_property=["energy"],
+    )
+    config["fidelity"] = [{"name": "PBE", "atomic_energy": None, "magnetic_scale": 2.0}]
+    config["atomic_basis"]["type"] = "w6j_mag"
+    config["radial_basis"]["hidden"] = [4]
+    config["angular_basis"]["magnetic_Lmax"] = 1
+    config["readout_emlp"]["hidden"] = [2]
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    config["scale_shift"]["enable"] = False
+
+    model = TensorModel(e3nnTACE(**config)).double().eval()
+    representation = model.readout_fn.representation
+    interaction = representation.interactions[0]
+    assert isinstance(interaction, O3Wigner6jMagneticInteraction)
+    assert representation.use_time_reversal
+    assert representation.node_updates is None
+    assert representation.magnetic_edge_irreps_out is None
+    assert {str(ir) for _, ir in interaction.irrreps_tp_out} == {
+        "0ee",
+        "0oo",
+        "1eo",
+        "1oe",
+        "1oo",
+    }
+    assert interaction.edge_info.dims == [
+        representation.edge_updates[0].out_dim
+        + config["radial_basis"]["num_mag_radial_basis"],
+        *config["radial_basis"]["hidden"],
+        interaction.rejector.edge_weight_numel,
+    ]
+    assert interaction.magnetic_info.dims == [
+        interaction.edge_info.dims[0],
+        interaction.rejector.extra_weight_numel,
+    ]
+
+    moments = torch.tensor(
+        [[1.0, 0.2, 0.3], [-0.4, 0.5, 0.6]],
+        dtype=torch.float64,
+    )
+    data = {
+        "positions": torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            dtype=torch.float64,
+        ),
+        "node_attrs": torch.ones(2, 1, dtype=torch.float64),
+        "edge_index": torch.tensor([[0, 1], [1, 0]]),
+        "edge_shifts": torch.zeros(2, 3, dtype=torch.float64),
+        "lattice": torch.eye(3, dtype=torch.float64).unsqueeze(0) * 10.0,
+        "batch": torch.zeros(2, dtype=torch.int64),
+        "ptr": torch.tensor([0, 2]),
+        "initial_noncollinear_magmoms": moments,
+    }
+    energy = model(data)["energy"]
+    data["initial_noncollinear_magmoms"] = -moments
+    reversed_energy = model(data)["energy"]
+    torch.testing.assert_close(reversed_energy, energy)

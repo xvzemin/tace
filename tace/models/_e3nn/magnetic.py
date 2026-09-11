@@ -5,6 +5,7 @@
 
 from collections.abc import Mapping
 from numbers import Real
+from typing import Union
 
 import torch
 from e3nn import o3
@@ -34,6 +35,7 @@ class MagneticBasis(torch.nn.Module):
         radial_normalization: str = "clamp",
         use_spin_orbit_coupling: bool = True,
         parity: bool = True,
+        use_magnetic_edge_attrs: bool = True,
     ) -> None:
         super().__init__()
 
@@ -51,6 +53,7 @@ class MagneticBasis(torch.nn.Module):
         self.angular_normalization = angular_normalization
         self.radial_normalization = radial_normalization
         self.use_spin_orbit_coupling = use_spin_orbit_coupling
+        self.use_magnetic_edge_attrs = use_magnetic_edge_attrs
         self.parity = parity
         self.register_buffer(
             "magnetic_scale",
@@ -88,15 +91,18 @@ class MagneticBasis(torch.nn.Module):
             magnetic_edge_irreps = o3.Irreps(
                 [(1, make_irrep(0, 1, 1))]
             )
-        self.magnetic_edge_tensor_product = uuuTensorProduct(
-            self.magnetic_node_irreps_out,
-            self.magnetic_node_irreps_out,
-            magnetic_edge_irreps,
-            trainable=False,
-        )
-        self.magnetic_edge_irreps_out = (
-            self.magnetic_edge_tensor_product.irreps_out.regroup()
-        )
+        if use_magnetic_edge_attrs:
+            self.magnetic_edge_tensor_product = uuuTensorProduct(
+                self.magnetic_node_irreps_out,
+                self.magnetic_node_irreps_out,
+                magnetic_edge_irreps,
+                trainable=False,
+            )
+            self.magnetic_edge_irreps_out = (
+                self.magnetic_edge_tensor_product.irreps_out.regroup()
+            )
+        else:
+            self.magnetic_edge_irreps_out = None
 
     @staticmethod
     def _resolve_magnetic_scale(
@@ -137,7 +143,7 @@ class MagneticBasis(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         node_fidelity: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Union[torch.Tensor, None]]:
         magnetic_scale = self.magnetic_scale[
             node_fidelity, node_attrs.argmax(dim=-1)
         ].unsqueeze(-1)
@@ -149,11 +155,13 @@ class MagneticBasis(torch.nn.Module):
         )
         magnetic_radial_basis = self.radial_basis(radial_coordinate)
         magnetic_node_attrs = self.angular_basis(initial_noncollinear_magmoms)
-        source, target = edge_index
-        magnetic_edge_attrs = self.magnetic_edge_tensor_product(
-            magnetic_node_attrs[target],
-            magnetic_node_attrs[source],
-        )
+        magnetic_edge_attrs = None
+        if self.use_magnetic_edge_attrs:
+            source, target = edge_index
+            magnetic_edge_attrs = self.magnetic_edge_tensor_product(
+                magnetic_node_attrs[target],
+                magnetic_node_attrs[source],
+            )
 
         return (
             magnetic_radial_basis,
