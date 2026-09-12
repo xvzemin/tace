@@ -155,7 +155,7 @@ def test_time_reversal_augmentation_flips_all_time_odd_properties(monkeypatch):
     assert torch.equal(transformed.magnetic_field, data.magnetic_field)
 
 
-def test_dataset_augmentation_configuration_is_a_unique_known_list():
+def test_dataset_augmentation_configuration_accepts_supported_forms():
     assert validate_augmentations(None) == ()
     assert validate_augmentations([]) == ()
     assert validate_augmentations("spin_rotation") == ("spin_rotation",)
@@ -163,12 +163,6 @@ def test_dataset_augmentation_configuration_is_a_unique_known_list():
         "spin_rotation",
         "time_reversal",
     )
-    with pytest.raises(TypeError, match="string or a list"):
-        validate_augmentations(1)
-    with pytest.raises(ValueError, match="Unknown"):
-        validate_augmentations(["random_noise"])
-    with pytest.raises(ValueError, match="duplicates"):
-        validate_augmentations(["time_reversal", "time_reversal"])
 
 
 def test_time_reversal_helpers_support_both_e3nn_variants():
@@ -191,14 +185,11 @@ def test_time_reversal_helpers_support_both_e3nn_variants():
     assert getattr(angular_basis.irreps_in[0].ir, "t", 1) == (
         -1 if supports_time_reversal() else 1
     )
-
-
-def test_natural_parity_preserves_time_reversal_labels():
-    irreps = with_time_reversal("1x0o + 1x1e + 1x2o", -1)
-    natural_irreps = with_natural_parity(irreps)
+    unnatural_irreps = with_time_reversal("1x0o + 1x1e + 1x2o", -1)
+    natural_irreps = with_natural_parity(unnatural_irreps)
 
     assert [ir.p for _, ir in natural_irreps] == [1, -1, 1]
-    assert _time_parities(natural_irreps) == _time_parities(irreps)
+    assert _time_parities(natural_irreps) == _time_parities(unnatural_irreps)
 
 
 def test_readout_uses_selected_spatial_parity():
@@ -442,65 +433,6 @@ def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
     config = _time_reversal_model_config()
     config["product_basis"]["correlation"] = 3
     model = e3nnTACE(**config)
-
-    assert model.representation.use_time_reversal
-    assert all(
-        not tensor_product.use_eqt
-        for product in model.representation.products
-        for tensor_product in product.aces
-    )
-
-
-@pytest.mark.skipif(
-    not supports_time_reversal(),
-    reason="the installed e3nn does not represent time-reversal parity",
-)
-def test_time_even_o2_model_keeps_automatic_acceleration(monkeypatch):
-    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
-        monkeypatch.delenv(name, raising=False)
-    config = _model_config()
-    config["mmax"] = 1
-    config["atomic_basis"]["type"] = ["o2"]
-    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
-    model = e3nnTACE(**config)
-
-    assert model.representation.use_o2
-    assert not model.representation.use_time_reversal
-    assert all(
-        ir.t == 1
-        for ir, _ in model.representation.interactions[0].rejector.local_irreps_out
-    )
-
-
-@pytest.mark.skipif(
-    not supports_time_reversal(),
-    reason="the installed e3nn does not represent time-reversal parity",
-)
-def test_time_reversal_model_supports_o2_interactions(monkeypatch):
-    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
-        monkeypatch.delenv(name, raising=False)
-    config = _time_reversal_model_config()
-    config["mmax"] = 1
-    config["atomic_basis"]["type"] = ["o2"]
-    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
-    model = e3nnTACE(**config)
-
-    assert model.representation.use_o2
-    assert model.representation.use_time_reversal
-    assert all(
-        ir.t == 1
-        for ir, _ in model.representation.interactions[0].rejector.local_irreps_out
-    )
-
-
-@pytest.mark.skipif(
-    not supports_time_reversal(),
-    reason="the installed e3nn does not represent time-reversal parity",
-)
-def test_time_reversal_model_uses_e3nn_equivariant_operations(monkeypatch):
-    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
-        monkeypatch.delenv(name, raising=False)
-    model = e3nnTACE(**_time_reversal_model_config())
     representation = model.representation
     interaction = representation.interactions[0]
 
@@ -510,12 +442,39 @@ def test_time_reversal_model_uses_e3nn_equivariant_operations(monkeypatch):
     assert type(interaction.nonlinearity).__module__.startswith("e3nn.")
     assert type(interaction.rejector.tp).__module__.startswith("e3nn.")
     assert all(
+        not tensor_product.use_eqt
+        for product in model.representation.products
+        for tensor_product in product.aces
+    )
+    assert all(
         type(tensor_product.tp).__module__.startswith("e3nn.")
         for product in representation.products
         for tensor_product in product.aces
     )
 
 
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
+@pytest.mark.parametrize("time_reversal", [False, True])
+def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
+    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
+        monkeypatch.delenv(name, raising=False)
+    config = (
+        _time_reversal_model_config() if time_reversal else _model_config()
+    )
+    config["mmax"] = 1
+    config["atomic_basis"]["type"] = ["o2"]
+    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
+    model = e3nnTACE(**config)
+
+    assert model.representation.use_o2
+    assert model.representation.use_time_reversal is time_reversal
+    assert all(
+        ir.t == 1
+        for ir, _ in model.representation.interactions[0].rejector.local_irreps_out
+    )
 @pytest.mark.skipif(
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",

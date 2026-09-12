@@ -27,16 +27,13 @@ from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
 
 
-def test_model_input_properties_support_embedding():
+def test_model_input_properties_include_required_embeddings():
     assert {
         "charges",
         "total_charge",
         "initial_collinear_magmoms",
         "initial_noncollinear_magmoms",
     }.issubset(SUPPORT_EMBEDDING_PROPERTY)
-
-
-def test_target_inputs_are_added_to_embedding_properties():
     cfg = {
         "loss": {
             "loss_property": [

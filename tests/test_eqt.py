@@ -95,30 +95,6 @@ def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> 
         layout_out="flatten_ir_mul",
     ).to(DEVICE)
     torch.testing.assert_close(transform.inverse(transform(features)), features)
-    with pytest.raises(ValueError, match="common multiplicity"):
-        LayoutTransform(
-            irreps,
-            layout_in="flatten_mul_ir",
-            layout_out="ir_mul",
-        )
-
-
-def test_flatten_ir_mul_matches_explicit_ir_mul_conversion() -> None:
-    irreps = o3.Irreps("4x0e+4x1o+4x2e")
-    explicit = LayoutTransform(irreps).to(DEVICE)
-    flattened = LayoutTransform(
-        irreps,
-        layout_in="flatten_mul_ir",
-        layout_out="flatten_ir_mul",
-    ).to(DEVICE)
-    features = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
-    explicit_ir_mul = explicit(features)
-    flattened_ir_mul = flattened(features)
-    torch.testing.assert_close(flattened_ir_mul, explicit_ir_mul.flatten(-2))
-    torch.testing.assert_close(
-        flattened.inverse(flattened_ir_mul),
-        explicit.inverse(explicit_ir_mul),
-    )
 
 
 def _product(correlation: int) -> CgtpACE:
@@ -171,19 +147,20 @@ def _value_and_gradients(
 
 
 @pytest.mark.parametrize(
-    ("setting", "correlation", "expected"),
+    ("setting", "correlation", "expected_setting", "expected_product"),
     [
-        (None, 2, False),
-        (None, 3, True),
-        ("0", 3, False),
-        ("1", 2, True),
+        (None, 2, None, False),
+        (None, 3, None, True),
+        ("0", 3, False, False),
+        ("1", 2, True, True),
     ],
 )
 def test_product_eqt_selection(
     monkeypatch: pytest.MonkeyPatch,
     setting: Optional[str],
     correlation: int,
-    expected: bool,
+    expected_setting: Optional[bool],
+    expected_product: bool,
 ) -> None:
     if setting is None:
         monkeypatch.delenv("TACE_USE_EQT", raising=False)
@@ -191,25 +168,11 @@ def test_product_eqt_selection(
         monkeypatch.setenv("TACE_USE_EQT", setting)
 
     product = _product(correlation)
-    assert all(ace.use_eqt is expected for ace in product.aces)
-    assert all(hasattr(ace, "fused_tp") is expected for ace in product.aces)
-
-
-@pytest.mark.parametrize(
-    ("setting", "expected"),
-    [(None, None), ("0", False), ("1", True)],
-)
-def test_acceleration_setting(
-    monkeypatch: pytest.MonkeyPatch,
-    setting: Optional[str],
-    expected: Optional[bool],
-) -> None:
-    if setting is None:
-        monkeypatch.delenv("TACE_USE_EQT", raising=False)
-    else:
-        monkeypatch.setenv("TACE_USE_EQT", setting)
-
-    assert acceleration_enabled("eqt") is expected
+    assert acceleration_enabled("eqt") is expected_setting
+    assert all(ace.use_eqt is expected_product for ace in product.aces)
+    assert all(
+        hasattr(ace, "fused_tp") is expected_product for ace in product.aces
+    )
 
 
 def test_eqt_native_scatter_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

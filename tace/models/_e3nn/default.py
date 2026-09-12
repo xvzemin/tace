@@ -220,6 +220,11 @@ def check_model_config(cfg: dict[str, Any]):
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
+    if (
+        "w6j_mag" in atomic_basis_type
+        and not cfg["angular_basis"]["use_spin_orbit_coupling"]
+    ):
+        raise ValueError("w6j_mag only supports spin-orbit-coupled interactions.")
     uses_magnetic_interaction = any(
         interaction in {"o2_mag", "w6j_mag"} for interaction in atomic_basis_type
     )

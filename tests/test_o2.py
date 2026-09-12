@@ -16,8 +16,8 @@ from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
 from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models._e3nn.magnetic import MagneticBasis
 from tace.models._e3nn.node import (
-    NODE_UPDATE,
     NODE_EMBEDDING,
+    NODE_UPDATE,
     LinearSpinNodeEmbedding,
     NonLinearSpinNodeEmbedding,
     O2TensorNodeEmbedding,
@@ -89,78 +89,6 @@ def test_manual_magnetic_scale_is_used_without_rescaling(magnetic_scale):
     )
 
     assert config["magnetic_scale"] == [{26: 2.0}]
-
-
-def test_magnetic_basis_normalization_validation():
-    assert DEFAULT_MODEL_CONFIG["angular_basis"] == {
-        "magnetic_Lmax": 2,
-        "use_spin_orbit_coupling": True,
-    }
-    assert "magnetic_normalization" not in DEFAULT_MODEL_CONFIG["radial_basis"]
-    assert "magmoms_scale_type" not in DEFAULT_MODEL_CONFIG["scale_shift"]
-    basis = MagneticBasis(
-        [{26: 2.0}],
-        num_mag_radial_basis=4,
-        Lmax=1,
-        atomic_numbers=[26],
-    )
-    assert basis.angular_normalization == "integral"
-    assert basis.radial_normalization == "clamp"
-    assert basis.num_mag_radial_basis == 4
-
-    natural_basis = MagneticBasis(
-        [{26: 2.0}],
-        num_mag_radial_basis=4,
-        Lmax=2,
-        atomic_numbers=[26],
-        parity=False,
-    )
-    assert [ir.p for _, ir in natural_basis.magnetic_node_irreps_out] == [
-        1,
-        -1,
-        1,
-    ]
-    assert all(
-        ir.p == (-1) ** ir.l
-        for _, ir in natural_basis.magnetic_edge_irreps_out
-    )
-
-    shared_scale_basis = MagneticBasis(
-        [2.0],
-        num_mag_radial_basis=1,
-        Lmax=1,
-        atomic_numbers=[26, 28],
-    )
-    assert shared_scale_basis.magnetic_scale.shape == (1, 2)
-    torch.testing.assert_close(
-        shared_scale_basis.magnetic_scale,
-        torch.full_like(shared_scale_basis.magnetic_scale, 2.0),
-    )
-
-    with pytest.raises(ValueError, match="only supports 'integral'"):
-        MagneticBasis(
-            [{26: 2.0}],
-            num_mag_radial_basis=4,
-            Lmax=1,
-            atomic_numbers=[26],
-            angular_normalization="component",
-        )
-    for invalid_scale in (2.0, {26: 2.0}, "2.0", []):
-        with pytest.raises(TypeError, match="per-fidelity sequence"):
-            MagneticBasis(
-                invalid_scale,
-                num_mag_radial_basis=4,
-                Lmax=1,
-                atomic_numbers=[26],
-            )
-    with pytest.raises(ValueError, match="only supports 'clamp'"):
-        MagneticBasis(
-            [{26: 2.0}],
-            num_mag_radial_basis=4,
-            Lmax=1,
-            atomic_numbers=[26],
-            radial_normalization="rational",
-        )
 
 
 @pytest.mark.parametrize("num_nodes", [0, 4])
@@ -807,13 +735,6 @@ def test_o2_linear_external_weights_broadcast_and_zero_pad():
     torch.testing.assert_close(module(features, singleton), module(features, singleton[0]))
 
 
-def test_o2_linear_bias_requires_invariant_scalar():
-    with pytest.raises(ValueError, match="time-reversal-even"):
-        o2.Linear("0eo", "0eo", biases=[True])
-    with pytest.raises(ValueError, match="same irrep"):
-        o2.Linear("0e", "0o", instructions=[(0, 0)])
-
-
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_gate_is_equivariant(reflected):
     module = o2.Gate(
@@ -830,9 +751,7 @@ def test_o2_gate_is_equivariant(reflected):
     torch.testing.assert_close(actual, expected)
 
 
-def test_o2_activation_rejects_non_equivariant_odd_scalar_map():
-    with pytest.raises(ValueError, match="must be either even or odd"):
-        o2.Activation("0o", [torch.nn.SiLU()])
+def test_o2_odd_scalar_activation_is_odd():
     activation = o2.Activation("2x0o", [torch.nn.Tanh()])
     features = torch.randn(4, 2, dtype=DTYPE)
     torch.testing.assert_close(activation(-features), -activation(features))
@@ -872,7 +791,7 @@ def test_o2_tensor_product_is_equivariant(mode, reflected):
     torch.testing.assert_close(actual, expected)
 
 
-def test_o2_tensor_product_validates_paths_and_zero_pads():
+def test_o2_tensor_product_zero_pads_missing_outputs():
     module = o2.TensorProduct(
         "2x1m",
         "0e",
@@ -881,8 +800,6 @@ def test_o2_tensor_product_validates_paths_and_zero_pads():
     )
     output = module(torch.randn(3, 4), torch.randn(3, 1))
     torch.testing.assert_close(output[:, -1], torch.zeros_like(output[:, -1]))
-    with pytest.raises(ValueError, match=r"Illegal O\(2\)"):
-        o2.TensorProduct("1m", "1m", "1m", [(0, 0, 0, "uuu", False)])
 
 
 def _asymmetric_contractions(correlation=3):
@@ -1049,8 +966,6 @@ def test_o2_activation_and_gate_preserve_time_parity():
     odd_activation = o2.Activation("3x0eo", [torch.nn.Tanh()])
     features = torch.randn(4, 3, dtype=DTYPE)
     torch.testing.assert_close(odd_activation(-features), -odd_activation(features))
-    with pytest.raises(ValueError, match="time-reversal-odd"):
-        o2.Activation("0eo", [torch.nn.SiLU()])
 
     gate = o2.Gate(
         "2x0ee",

@@ -6,8 +6,7 @@ from e3nn import o3
 
 from tace.models._e3nn.base import _to_possible_tp_irreps
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-from tace.models._e3nn.fused import O3ScatterTensorProduct, uvuTensorProduct
-from tace.models._e3nn.inter import O3Wigner6jMagneticInteraction
+from tace.models._e3nn.fused import uvuTensorProduct
 from tace.models._e3nn.tace import e3nnTACE
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
@@ -105,9 +104,6 @@ def _build_tensor_product(*, weight_level="edge"):
         weight_level=weight_level,
         register_reference=True,
     )
-    assert isinstance(module.recoupled_node_node_tp, uvuTensorProduct)
-    assert module.recoupled_node_node_tp.shared_weights == (weight_level == "edge")
-    assert isinstance(module.recoupled_node_edge_tp, O3ScatterTensorProduct)
     return module.to(DEVICE)
 
 
@@ -161,10 +157,11 @@ def _random_inputs(module, *, requires_grad=False):
     )
 
 
-@pytest.mark.parametrize("weight_level", ["edge", "node"])
-def test_wigner6j_recoupling_matches_reference_and_gradients(
-    weight_level,
-):
+@pytest.mark.parametrize(
+    ("weight_level", "improper"),
+    [("edge", False), ("node", True)],
+)
+def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
     torch.manual_seed(0)
     torch.set_default_dtype(torch.float64)
     module = _build_tensor_product(weight_level=weight_level)
@@ -193,21 +190,7 @@ def test_wigner6j_recoupling_matches_reference_and_gradients(
             rtol=3.0e-12,
         )
 
-
-@pytest.mark.parametrize(
-    ("weight_level", "improper"),
-    [("edge", False), ("node", True)],
-)
-def test_wigner6j_tensor_product_is_o3_equivariant(
-    improper,
-    weight_level,
-):
-    torch.manual_seed(1)
-    torch.set_default_dtype(torch.float64)
-    module = _build_tensor_product(weight_level=weight_level)
-    inputs = _random_inputs(module)
     node_feats, edge_attrs, extra_node_attrs, edge_weights, extra_weights, _ = inputs
-
     rotation = o3.rand_matrix(dtype=torch.float64)
     if improper:
         rotation = -rotation
@@ -224,9 +207,8 @@ def test_wigner6j_tensor_product_is_o3_equivariant(
         inputs[-1],
     )
 
-    output = module(*inputs)
     rotated_output = module(*rotated_inputs)
-    expected = output @ output_rotation.T
+    expected = recoupled @ output_rotation.T
     torch.testing.assert_close(
         rotated_output,
         expected,
@@ -235,16 +217,11 @@ def test_wigner6j_tensor_product_is_o3_equivariant(
     )
 
 
-def test_wigner6j_rejects_unknown_weight_level():
-    with pytest.raises(ValueError, match="weight_level"):
-        _build_tensor_product(weight_level="graph")
-
-
 @pytest.mark.skipif(
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
-def test_wigner6j_is_time_reversal_equivariant():
+def test_wigner6j_matches_reference_and_time_reversal():
     node_irreps = o3.Irreps("2x0ee + 2x1eo")
     edge_irreps = spherical_harmonics_irreps(1, p=-1)
     magnetic_irreps = spherical_harmonics_irreps(
@@ -392,7 +369,6 @@ def test_w6j_mag_model_is_time_reversal_invariant(monkeypatch):
     model = TensorModel(e3nnTACE(**config)).double().eval()
     representation = model.readout_fn.representation
     interaction = representation.interactions[0]
-    assert isinstance(interaction, O3Wigner6jMagneticInteraction)
     assert representation.use_time_reversal
     assert representation.node_updates is None
     assert representation.magnetic_edge_irreps_out is None

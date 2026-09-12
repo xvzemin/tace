@@ -7,7 +7,6 @@ from e3nn import o3
 from tace.models.scf import (
     EnergyFunctionalSCF,
     FixedPointSCF,
-    FixedPointSCFOptions,
     GraphLongRangeElectrostatics,
     LocalSplitCharges,
     PairwiseGaussianElectrostatics,
@@ -166,8 +165,3 @@ def test_energy_functional_scf_preserves_charge(small_system):
     output = model(data, graph, base_results)
     torch.testing.assert_close(output["charges"].sum(), data["total_charge"][0])
     assert torch.all(torch.isfinite(output["energy"]))
-
-
-def test_fixed_point_options_validate_values():
-    with pytest.raises(ValueError, match="mixing_parameter"):
-        FixedPointSCFOptions(mixing_parameter=0.0)

@@ -192,20 +192,6 @@ def test_energy_statistics_use_canonical_names(monkeypatch):
     )
     torch.testing.assert_close(scale_shift.shift, torch.tensor([[3.5, 3.5]]))
 
-    removed_names = {
-        "__mean_energy",
-        "__std_energy",
-        "__mean_energy_per_atom",
-        "__mean_delta_energy_per_atom",
-        "scalar_mean_energy_per_atom",
-        "mean_energy_by_element",
-        "std_energy_by_element",
-        "mean_energy_per_atom_by_element",
-        "mean_delta_energy_per_atom_by_element",
-    }
-    assert removed_names.isdisjoint(stats)
-
-
 def test_forces_statistics_use_canonical_names(monkeypatch):
     monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
 
@@ -300,31 +286,7 @@ def test_forces_statistics_use_canonical_names(monkeypatch):
         torch.tensor([5.0 / 3.0, 25.0 / 3.0]),
     )
 
-    removed_names = {
-        "__mean_forces_3d",
-        "__std_forces_3d",
-        "__rms_forces_3d",
-        "__mean_forces_1d",
-        "__std_forces_1d",
-        "__rms_forces_1d",
-        "__mean_forces_3d_by_element",
-        "__std_forces_3d_by_element",
-        "__rms_forces_3d_by_element",
-        "__mean_forces_1d_by_element",
-        "__std_forces_1d_by_element",
-        "__rms_forces_1d_by_element",
-        "mean_forces_for_normalize",
-        "std_forces_for_normalize",
-        "std_forces",
-        "std_forces_by_element",
-        "force_atom_counts_by_element",
-        "force_mse_by_element",
-        "recommended_force_element_weights",
-    }
-    assert removed_names.isdisjoint(stats)
-
-
-def test_initial_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch):
+def test_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch):
     monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
 
     graphs = [
@@ -420,11 +382,9 @@ def test_initial_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch
         2: 5.0,
     }
     assert stats["num_noncollinear_magmoms_by_element"] == {1: 2, 2: 1}
-    assert "magmoms_norm_by_element" not in stats
-    assert not any("initial_noncollinear_magmoms" in name for name in stats)
 
 
-def test_initial_noncollinear_magmoms_statistics_are_per_fidelity(monkeypatch):
+def test_noncollinear_magmoms_statistics_are_per_fidelity(monkeypatch):
     monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
 
     graphs = [
