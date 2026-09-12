@@ -56,3 +56,4 @@ _cart/
 !tace/models/_cart/
 !tace/models/_cart/*.py
 !example/data/liquid-64.xyz
+!o2.svg
