@@ -230,7 +230,9 @@ time-odd vector restricts as ``1eo -> 0oo + 1mo``.
 matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies
 those matrices. Its global input and local output both use flattened
 ``ir_mul`` layout. ``mmax`` may truncate local positive orders while inverse
-rescaling preserves the intended variance.
+rescaling preserves the intended variance. ``LocalFrame`` derives its required
+degree from the irreps and the supplied Wigner layout from the matrix shapes;
+it does not take ``lmax``. A shared matrix may cover additional degrees or orders.
 
 .. code-block:: python
 
@@ -248,7 +250,6 @@ rescaling preserves the intended variance.
    D, D_inv = wigner.get_wigner(edge_vectors)
    frame = o2.LocalFrame(
        global_irreps,
-       lmax=lmax,
        mmax=mmax,
    )
    node_feats = torch.randn(16, frame.global_irreps.dim)
@@ -314,9 +315,12 @@ for example to reproduce unnormalized solid harmonics.
    weights = torch.randn(32, tensor_product.weight_numel)
    output = tensor_product(features, D, D_inv, weights)
 
-The Wigner matrices can be shared across layers. Adjacent identical output
-irreps share a rotation across their channels, while the public output retains
-the declared irrep-entry order.
+The Wigner matrices can be shared across layers with different angular degrees.
+No ``lmax`` argument is needed: the feature and output irreps determine the
+required rotation coverage. All their local orders must be present, even if
+higher, unused degrees of the shared matrix are truncated. Adjacent identical
+output irreps share a rotation across their channels, while the public output
+retains the declared irrep-entry order.
 
 Asymmetric contraction
 ~~~~~~~~~~~~~~~~~~~~~~

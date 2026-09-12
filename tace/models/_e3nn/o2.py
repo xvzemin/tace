@@ -105,7 +105,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
         irreps_out: o3.Irreps,
         *,
         num_channel: int,
-        lmax: int,
         mmax: int,
         even_scalar_act: torch.nn.Module,
         odd_scalar_act: Optional[torch.nn.Module],
@@ -118,7 +117,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
         self.num_channel = num_channel
-        self.lmax = lmax
         self.mmax = min(self.irreps_in.lmax, mmax)
         self.num_head = num_head
         if not (
@@ -127,11 +125,10 @@ class O2ScatterTensorProduct(torch.nn.Module):
             == num_channel
         ):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
-        self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
+        self.local_frame_in = o2.LocalFrame(self.irreps_in, mmax=self.mmax)
         self.local_frame_out = o2.LocalFrame(
             self.irreps_out,
-            lmax,
-            self.mmax,
+            mmax=self.mmax,
             reverse=True,
         )
         self.reshape_in = LayoutTransform(
@@ -322,7 +319,6 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         magnetic_edge_irreps: o3.Irreps,
         *,
         num_channel: int,
-        lmax: int,
         mmax: int,
         even_scalar_act: torch.nn.Module,
         odd_scalar_act: Optional[torch.nn.Module],
@@ -336,7 +332,6 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         self.irreps_out = o3.Irreps(irreps_out)
         self.magnetic_edge_irreps = o3.Irreps(magnetic_edge_irreps)
         self.num_channel = num_channel
-        self.lmax = lmax
         self.mmax = min(
             max(self.irreps_in.lmax, self.magnetic_edge_irreps.lmax),
             mmax,
@@ -356,17 +351,15 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
                 "magnetic_edge_irreps multiplicity must equal num_channel."
             )
 
-        self.local_frame_in = o2.LocalFrame(self.irreps_in, lmax, self.mmax)
+        self.local_frame_in = o2.LocalFrame(self.irreps_in, mmax=self.mmax)
         self.local_frame_out = o2.LocalFrame(
             self.irreps_out,
-            lmax,
-            self.mmax,
+            mmax=self.mmax,
             reverse=True,
         )
         self.magnetic_frame = o2.LocalFrame(
             self.magnetic_edge_irreps,
-            lmax,
-            self.mmax,
+            mmax=self.mmax,
         )
         self.reshape_in = LayoutTransform(
             self.irreps_in,

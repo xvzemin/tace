@@ -61,9 +61,6 @@ class O3TensorProduct(torch.nn.Module):
         Share one weight vector across edges. Defaults to ``True``.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization. Defaults to ``"component"``.
-    lmax : int, optional
-        Maximum degree of the supplied Wigner matrices. Defaults to the largest
-        input-feature or output degree. All local orders must be retained.
 
     Notes
     -----
@@ -73,6 +70,9 @@ class O3TensorProduct(torch.nn.Module):
     Only nonzero couplings with ``m_in = +/- m_out`` are stored. The forward
     pass uses indexed products and sparse summation, without evaluating or
     rotating spherical harmonics or contracting a dense CG tensor.
+    Rotation degrees follow the feature and output irreps. Shared Wigner
+    matrices may cover additional degrees, but must retain all orders needed
+    by those representations.
     """
 
     def __init__(
@@ -90,7 +90,6 @@ class O3TensorProduct(torch.nn.Module):
         shared_weights: Optional[bool] = None,
         *,
         normalization: str = "component",
-        lmax: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.irreps_in1 = o3.Irreps(irreps_in1)
@@ -137,21 +136,12 @@ class O3TensorProduct(torch.nn.Module):
             self.register_buffer("weight", metadata.weight)
         self.register_buffer("output_mask", metadata.output_mask)
 
-        if lmax is None:
-            lmax = max(
-                (
-                    entry.ir.l
-                    for irreps in (self.irreps_in1, self.irreps_out)
-                    for entry in irreps
-                ),
-                default=0,
-            )
-        self.lmax = lmax
-        self.local_frame_in = LocalFrame(self.irreps_in1, lmax)
-        output_frame = LocalFrame(self.irreps_out, lmax, reverse=True)
+        self.local_frame_in = LocalFrame(self.irreps_in1)
+        output_frame = LocalFrame(self.irreps_out, reverse=True)
         self.local_frame_out = LocalFrame(
-            self.irreps_out.simplify(), lmax, reverse=True
+            self.irreps_out.simplify(), reverse=True
         )
+        self.lmax = max(self.local_frame_in.lmax, self.local_frame_out.lmax)
         # Adjacent equal irreps share a single rotation over their channels.
         # The public output still preserves the declared, unsimplified layout.
         output_index = []
@@ -313,16 +303,10 @@ class O3TensorProduct(torch.nn.Module):
 
         Features have shape ``(edges, ..., irreps_in1.dim)``. Wigner matrices
         must align the harmonic direction to the positive y-axis and retain
-        every order through ``lmax``. Weights follow the original instruction
-        order, shared or broadcast over the leading feature dimensions.
+        every order of the feature and output irreps. Their layout is inferred
+        from their shapes. Weights follow the original instruction order,
+        shared or broadcast over the leading feature dimensions.
         """
-        if (
-            wigner.shape[-2:] != ((self.lmax + 1) ** 2,) * 2
-            or wigner_inv.shape[-2:] != ((self.lmax + 1) ** 2,) * 2
-        ):
-            raise ValueError(
-                "O3TensorProduct requires full, untruncated Wigner matrices."
-            )
         features = self.local_frame_in.to_local(features, wigner)
         features = self.forward_local(features, weight, harmonic_scale)
         features = self.local_frame_out.to_global(features, wigner_inv)

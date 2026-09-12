@@ -457,7 +457,6 @@ class O2Interaction(O3CgtpInteraction):
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
-            lmax=max(self.Lmax, self.lmax),
             mmax=self.mmax,
             even_scalar_act=ACTIVATION[
                 (
@@ -734,7 +733,6 @@ class O2MagneticInteraction(O2Interaction):
             self.irreps_out,
             self.magnetic_edge_irreps_out,
             num_channel=self.num_channel,
-            lmax=max(self.Lmax, self.lmax),
             mmax=self.mmax,
             even_scalar_act=ACTIVATION[
                 (

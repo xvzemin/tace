@@ -213,7 +213,6 @@ class O2TensorNodeEmbedding(NodeEmbedding):
             self.node_embedding.irreps_out,
             self.irreps_out,
             num_channel=self.num_channel,
-            lmax=max(self.Lmax, self.lmax),
             mmax=0,
             even_scalar_act=torch.nn.SiLU(),
             odd_scalar_act=torch.nn.Tanh(),

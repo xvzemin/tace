@@ -29,11 +29,9 @@ class LocalFrame(torch.nn.Module):
     irreps : O(3) irreps-like
         Global input representation, including time parity when present.
         Every entry is stored in flattened ``ir_mul`` order.
-    lmax : int
-        Maximum global degree covered by the supplied Wigner matrices. It must
-        be at least the largest degree in ``irreps``.
     mmax : int, optional
-        Largest local O(2) order to retain. Defaults to ``lmax``.
+        Largest local O(2) order to retain. Defaults to the largest degree in
+        ``irreps``; larger values have no effect.
     reverse : bool, optional
         Reverse the global/local order in the module representation. This only
         changes how the module is displayed.
@@ -43,6 +41,8 @@ class LocalFrame(torch.nn.Module):
     The first tensor dimension is the rotation batch. Additional leading
     dimensions, such as a source/target axis, are preserved. The local output
     representation is available as :attr:`irreps_out`.
+    Wigner layout is inferred from the matrix dimensions. Matrices shared
+    across representations may contain additional degrees or local orders.
     """
 
     @staticmethod
@@ -66,7 +66,7 @@ class LocalFrame(torch.nn.Module):
         """
         irreps = o3.Irreps(irreps)
         if mmax is None:
-            mmax = irreps.lmax
+            mmax = irreps.lmax if irreps else 0
         if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
         if mmax < 0:
@@ -87,28 +87,23 @@ class LocalFrame(torch.nn.Module):
     def __init__(
         self,
         irreps: o3.Irreps,
-        lmax: int,
         mmax: Optional[int] = None,
         reverse: bool = False,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps)
-        if not isinstance(lmax, int):
-            raise TypeError("lmax must be an integer.")
-        if self.irreps_in.lmax > lmax:
-            raise ValueError("lmax must cover every O(3) irrep.")
+        self.lmax = self.irreps_in.lmax if self.irreps_in else 0
         if mmax is None:
-            mmax = lmax
+            mmax = self.lmax
         if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
-        if not 0 <= mmax <= lmax:
-            raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
+        if mmax < 0:
+            raise ValueError("mmax must be non-negative.")
         if not isinstance(reverse, bool):
             raise TypeError("reverse must be a boolean.")
-        self.lmax = lmax
-        self.mmax = mmax
+        self.mmax = min(mmax, self.lmax)
         self.reverse = reverse
-        self.irreps_out = self.restrict(self.irreps_in, mmax)
+        self.irreps_out = self.restrict(self.irreps_in, self.mmax)
         self.global_irreps = self.irreps_in
         self.local_irreps = self.irreps_out
         self.input_dim = self.irreps_in.dim
@@ -119,10 +114,11 @@ class LocalFrame(torch.nn.Module):
         local_offsets = [0] * len(self.irreps_out)
         entries = []
         wigner_rows = []
+        wigner_row_strides = []
         wigner_columns = []
         for global_slice, global_entry in zip(global_slices, self.irreps_in):
             ir, mul = global_entry.ir, global_entry.mul
-            retained_mmax = min(ir.l, mmax)
+            retained_mmax = min(ir.l, self.mmax)
             time_parity = getattr(ir, "t", 1)
             local_irrep_list = [
                 Irrep(0, ir.p * ((-1) ** ir.l), time_parity)
@@ -140,22 +136,17 @@ class LocalFrame(torch.nn.Module):
                 entry_local_slices.append(slice(start, start + mul))
                 local_offsets[index] += mul
             rows = [ir.l]
+            row_strides = [0]
             for order in range(1, retained_mmax + 1):
-                offset = (
-                    lmax
-                    + 1
-                    + sum(
-                        2 * (lmax + 1 - lower_order) for lower_order in range(1, order)
-                    )
-                )
-                degree_offset = ir.l - order
                 rows.extend(
                     (
-                        offset + degree_offset,
-                        offset + (lmax + 1 - order) + degree_offset,
+                        ir.l + (2 * order - 1) * (self.lmax + 1) - order**2,
+                        ir.l + 2 * order * (self.lmax + 1) - order * (order + 1),
                     )
                 )
+                row_strides.extend((2 * order - 1, 2 * order))
             wigner_rows.append(torch.tensor(rows, dtype=torch.long))
+            wigner_row_strides.append(torch.tensor(row_strides, dtype=torch.long))
             wigner_columns.append(torch.arange(ir.l**2, (ir.l + 1) ** 2))
             entries.append(
                 _FrameEntry(
@@ -184,6 +175,11 @@ class LocalFrame(torch.nn.Module):
             self.register_buffer(
                 f"wigner_rows_{group_index}",
                 torch.cat([wigner_rows[index] for index in indices]),
+                persistent=False,
+            )
+            self.register_buffer(
+                f"wigner_row_strides_{group_index}",
+                torch.cat([wigner_row_strides[index] for index in indices]),
                 persistent=False,
             )
             self.register_buffer(
@@ -224,7 +220,9 @@ class LocalFrame(torch.nn.Module):
             flattened ``ir_mul`` order.
         wigner : torch.Tensor
             Global-to-local matrices with shape
-            ``(batch, local_wigner_dim, (lmax + 1)**2)``.
+            ``(batch, local_wigner_dim, (L + 1)**2)``. The global degree ``L``
+            and retained local orders are inferred from these dimensions and
+            must cover the representation used by this module.
 
         Returns
         -------
@@ -236,8 +234,9 @@ class LocalFrame(torch.nn.Module):
                 "LocalFrame input trailing dimension must be "
                 f"{self.input_dim}, got {tuple(features.shape)}."
             )
-        if features.size(0) != wigner.size(0):
+        if wigner.ndim != 3 or features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
+        lmax, _ = self._wigner_orders(wigner.size(-1), wigner.size(-2))
         outputs = [[] for _ in self.irreps_out]
         for group_index, indices in enumerate(self._rotation_groups):
             values = torch.cat(
@@ -252,6 +251,10 @@ class LocalFrame(torch.nn.Module):
                 dim=-2,
             )
             rows = getattr(self, f"wigner_rows_{group_index}")
+            if lmax != self.lmax and self.mmax:
+                rows = rows + (lmax - self.lmax) * getattr(
+                    self, f"wigner_row_strides_{group_index}"
+                )
             columns = getattr(self, f"wigner_columns_{group_index}")
             rotation = wigner.index_select(1, rows).index_select(2, columns)
             values = self._apply_rotation(rotation, values)
@@ -286,7 +289,7 @@ class LocalFrame(torch.nn.Module):
                 )
                 flattened.append(values.view(*features.shape[:-1], ir.dim * mul))
             return torch.cat(flattened, dim=-1)
-        return features.new_empty(*features.shape[:-1], 0)
+        return features.new_empty((*features.shape[:-1], 0))
 
     def forward(
         self,
@@ -296,16 +299,19 @@ class LocalFrame(torch.nn.Module):
         """Alias for :meth:`to_local`."""
         return self.to_local(features, wigner)
 
-    def _wigner_mmax(self, local_dim: int) -> int:
-        for candidate in range(self.mmax, self.lmax + 1):
-            expected = (
-                self.lmax
-                + 1
-                + sum(2 * (self.lmax + 1 - order) for order in range(1, candidate + 1))
-            )
-            if local_dim == expected:
-                return candidate
-        raise ValueError("Wigner inverse has an incompatible local dimension.")
+    def _wigner_orders(self, global_dim: int, local_dim: int) -> tuple[int, int]:
+        lmax = int(math.sqrt(global_dim)) - 1
+        if (lmax + 1) ** 2 != global_dim or lmax < self.lmax:
+            raise ValueError("Wigner global dimension must cover every O(3) degree.")
+        missing = global_dim - local_dim
+        if missing < 0:
+            raise ValueError("Wigner has an incompatible local dimension.")
+        # Removing the highest local orders removes n * (n + 1) rows.
+        omitted = (int(math.sqrt(4 * missing + 1)) - 1) // 2
+        mmax = lmax - omitted
+        if omitted * (omitted + 1) != missing or not self.mmax <= mmax <= lmax:
+            raise ValueError("Wigner local dimension must cover all required orders.")
+        return lmax, mmax
 
     def to_global(
         self,
@@ -320,8 +326,9 @@ class LocalFrame(torch.nn.Module):
             Local features with shape ``(batch, ..., irreps_out.dim)``.
         wigner_inv : torch.Tensor
             Local-to-global matrices with shape
-            ``(batch, (lmax + 1)**2, local_wigner_dim)``. A matrix retaining
-            more local orders than this module is accepted and rescaled.
+            ``(batch, (L + 1)**2, local_wigner_dim)``. The layout is inferred
+            from these dimensions. Additional degrees are ignored; additional
+            local orders are accepted with the corresponding inverse rescaling.
 
         Returns
         -------
@@ -334,11 +341,11 @@ class LocalFrame(torch.nn.Module):
                 "LocalFrame input trailing dimension must be "
                 f"{self.output_dim}, got {tuple(features.shape)}."
             )
-        if features.size(0) != wigner_inv.size(0):
+        if wigner_inv.ndim != 3 or features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        if wigner_inv.size(-2) != (self.lmax + 1) ** 2:
-            raise ValueError("Wigner inverse has an incompatible global dimension.")
-        wigner_mmax = self._wigner_mmax(wigner_inv.size(-1))
+        lmax, wigner_mmax = self._wigner_orders(
+            wigner_inv.size(-2), wigner_inv.size(-1)
+        )
         local_values = [
             features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
             for (ir, mul), ir_slice in zip(
@@ -369,6 +376,10 @@ class LocalFrame(torch.nn.Module):
                 group_values.append(values * math.sqrt(source / retained))
             values = torch.cat(group_values, dim=-2)
             rows = getattr(self, f"wigner_rows_{group_index}")
+            if lmax != self.lmax and self.mmax:
+                rows = rows + (lmax - self.lmax) * getattr(
+                    self, f"wigner_row_strides_{group_index}"
+                )
             columns = getattr(self, f"wigner_columns_{group_index}")
             rotation = wigner_inv.index_select(1, columns).index_select(2, rows)
             values = self._apply_rotation(rotation, values)
@@ -383,4 +394,4 @@ class LocalFrame(torch.nn.Module):
                 offset += width
         if outputs:
             return torch.cat(outputs, dim=-1)
-        return features.new_empty(*features.shape[:-1], 0)
+        return features.new_empty((*features.shape[:-1], 0))

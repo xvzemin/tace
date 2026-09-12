@@ -4,7 +4,6 @@
 ################################################################################
 
 import logging
-import math
 from typing import Union
 
 import torch
@@ -13,10 +12,10 @@ from e3nn import o3
 from eqx.o2 import O3TensorProduct
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
+
 from ..layout import LayoutTransform
 from ..time_reversal import contains_time_odd_irreps
 from .paths import generate_paths
-
 
 
 class uuuTensorProduct(torch.nn.Module):
@@ -321,7 +320,6 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
         irreps_in = o3.Irreps(irreps_in)
         irreps_sh = o3.Irreps(irreps_sh)
         irreps_out = o3.Irreps(irreps_out)
-        lmax = max(irreps_in.lmax, irreps_sh.lmax, irreps_out.lmax)
         instructions, self.irreps_out = generate_paths(
             irreps_out,
             irreps_in,
@@ -336,7 +334,6 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             instructions,
             internal_weights=False,
             shared_weights=False,
-            lmax=lmax,
         )
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
@@ -354,35 +351,8 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             torch.tensor([ir.l for _, ir in irreps_sh]),
             persistent=False,
         )
-        self.register_buffer(
-            "wigner_rows", torch.arange((lmax + 1) ** 2), persistent=False
-        )
-        self.register_buffer(
-            "wigner_row_stride",
-            torch.tensor(
-                [0] * (lmax + 1)
-                + [
-                    stride
-                    for m in range(1, lmax + 1)
-                    for stride in (2 * m - 1, 2 * m)
-                    for _ in range(lmax + 1 - m)
-                ]
-            ),
-            persistent=False,
-        )
 
     def forward(self, node_feats, conv_weights, edge_index, wigner, wigner_inv, graph):
-        if wigner.size(-1) != self.wigner_rows.numel():
-            # Shared matrices may contain degrees unused by this interaction.
-            # Each preceding signed-m sector adds one row per extra degree.
-            lmax = math.isqrt(wigner.size(-1)) - 1
-            if lmax < self.tp.lmax or wigner.size(-2) != wigner.size(-1):
-                raise ValueError(
-                    "Wigner matrices must retain all required degrees and orders."
-                )
-            rows = self.wigner_rows + (lmax - self.tp.lmax) * self.wigner_row_stride
-            wigner = wigner[..., : self.wigner_rows.numel()].index_select(1, rows)
-            wigner_inv = wigner_inv[:, : self.wigner_rows.numel()].index_select(2, rows)
         # Keep the original r / (|r| + eps) convention, including its derivative.
         harmonic_scale = (
             graph.edge_vector.square().sum(-1, keepdim=True).sqrt() / graph.edge_length

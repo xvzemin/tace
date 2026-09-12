@@ -399,7 +399,8 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     assert not representation.use_so2
     assert not representation.use_time_reversal
     assert representation.o2_angular_basis.lmax == common_lmax
-    assert representation.interactions[0].rejector.local_frame_in.lmax == common_lmax
+    rejector = representation.interactions[0].rejector
+    assert rejector.local_frame_in.lmax == rejector.irreps_in.lmax
 
     model = torch.nn.ModuleDict({"representation": representation})
     state_dict = model.state_dict()
@@ -557,24 +558,27 @@ def test_o2_does_not_import_tace():
         assert "import tace" not in source
 
 
-def test_local_frame_roundtrip_flattened_ir_mul():
-    irreps = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
-    frame = o2.LocalFrame(irreps, lmax=2).to(DEVICE, DTYPE)
+@pytest.mark.parametrize("wigner_lmax", [2, 4])
+def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax):
+    irreps = o3.Irreps("2x0e+1x0o+3x1e+2x1o+1x2e+3x2o")
+    frame = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
     layout = LayoutTransform(
         irreps,
         layout_in="flatten_mul_ir",
         layout_out="flatten_ir_mul",
     ).to(DEVICE)
     vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
-    wigner, wigner_inv = o2.WignerD(2, 2).to(DEVICE, DTYPE).get_wigner(vectors)
+    wigner, wigner_inv = (
+        o2.WignerD(wigner_lmax, wigner_lmax).to(DEVICE, DTYPE).get_wigner(vectors)
+    )
     features = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
 
     local = frame(layout(features), wigner)
-    assert frame.irreps_out == o2.Irreps("6x0e+6x0o+8x1m+4x2m")
+    assert frame.irreps_out == o2.Irreps("5x0e+7x0o+9x1m+4x2m")
     assert repr(frame) == (
         f"LocalFrame({frame.global_irreps} -> {frame.local_irreps})(mmax=2)"
     )
-    reverse_frame = o2.LocalFrame(irreps, lmax=2, reverse=True)
+    reverse_frame = o2.LocalFrame(irreps, reverse=True)
     assert repr(reverse_frame) == (
         f"LocalFrame({frame.local_irreps} -> {frame.global_irreps})(mmax=2)"
     )
@@ -585,20 +589,79 @@ def test_local_frame_roundtrip_flattened_ir_mul():
     )
 
 
-def test_local_frame_trailing_axes_and_empty_batch():
+@pytest.mark.parametrize("mmax", [0, 1])
+@pytest.mark.parametrize(("wigner_mmax", "wigner_lmax"), [(1, 2), (1, 4), (2, 4), (4, 4)])
+def test_local_frame_trailing_axes_and_empty_batch(mmax, wigner_mmax, wigner_lmax):
     irreps = o3.Irreps("2x0e+2x1o+2x2e")
-    frame = o2.LocalFrame(irreps, lmax=2, mmax=1).to(DEVICE, DTYPE)
+    frame = o2.LocalFrame(irreps, mmax=mmax).to(DEVICE, DTYPE)
     vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
-    wigner, wigner_inv = o2.WignerD(1, 2).to(DEVICE, DTYPE).get_wigner(vectors)
+    wigner, wigner_inv = (
+        o2.WignerD(wigner_mmax, wigner_lmax).to(DEVICE, DTYPE).get_wigner(vectors)
+    )
+    reference, reference_inv = (
+        o2.WignerD(mmax, 2).to(DEVICE, DTYPE).get_wigner(vectors)
+    )
     features = torch.randn(4, 2, irreps.dim, dtype=DTYPE, device=DEVICE)
 
     local = frame.to_local(features, wigner)
     assert local.shape == (4, 2, frame.irreps_out.dim)
-    assert frame.to_global(local, wigner_inv).shape == features.shape
+    torch.testing.assert_close(local, frame.to_local(features, reference))
+    torch.testing.assert_close(
+        frame.to_global(local, wigner_inv), frame.to_global(local, reference_inv)
+    )
 
     empty = frame.to_local(features[:0], wigner[:0])
     assert empty.shape == (0, 2, frame.irreps_out.dim)
     assert frame.to_global(empty, wigner_inv[:0]).shape == (0, 2, irreps.dim)
+
+
+@pytest.mark.parametrize(
+    ("local_dim", "global_dim", "message"),
+    [(4, 4, "degree"), (9, 10, "degree"), (5, 9, "orders"), (6, 9, "orders")],
+)
+def test_local_frame_rejects_incompatible_wigner_layout(local_dim, global_dim, message):
+    frame = o2.LocalFrame("2x2e", mmax=4)
+    assert frame.mmax == 2
+    wigner = torch.zeros(3, local_dim, global_dim)
+    with pytest.raises(ValueError, match=message):
+        frame.to_local(torch.zeros(3, frame.input_dim), wigner)
+    with pytest.raises(ValueError, match=message):
+        frame.to_global(torch.zeros(3, frame.output_dim), wigner.transpose(1, 2))
+
+
+def test_local_frame_empty_irreps():
+    frame = o2.LocalFrame("")
+    d, di = o2.WignerD(2, 2).get_wigner(torch.randn(3, 3))
+    for batch_size in (3, 0):
+        features = torch.empty(batch_size, 2, 0)
+        local = frame(features, d[:batch_size])
+        assert local.shape == features.shape
+        assert frame.to_global(local, di[:batch_size]).shape == features.shape
+
+
+def test_local_frame_truncation_compiles_with_shared_wigner(cgtp_dtype):
+    frame = o2.LocalFrame("2x0e+1x1e+2x2o", mmax=1)
+
+    def roundtrip(features, wigner, wigner_inv):
+        return frame.to_global(frame.to_local(features, wigner), wigner_inv)
+
+    compiled = torch.compile(roundtrip, backend="aot_eager", fullgraph=True, dynamic=True)
+    for mmax, lmax in ((1, 2), (2, 4)):
+        for batch_size in (3, 1, 0):
+            x = torch.randn(batch_size, 2, frame.input_dim, requires_grad=True)
+            r = torch.randn(batch_size, 3, requires_grad=True)
+            d, di = o2.WignerD(mmax, lmax).get_wigner(r)
+            actual = compiled(x, d, di)
+            x_ref = x.detach().requires_grad_()
+            r_ref = r.detach().requires_grad_()
+            d, di = o2.WignerD(mmax, lmax).get_wigner(r_ref)
+            expected = roundtrip(x_ref, d, di)
+            torch.testing.assert_close(actual, expected)
+            for actual_grad, expected_grad in zip(
+                torch.autograd.grad(actual.square().sum(), (x, r)),
+                torch.autograd.grad(expected.square().sum(), (x_ref, r_ref)),
+            ):
+                torch.testing.assert_close(actual_grad, expected_grad)
 
 
 def test_o2_irrep_and_irreps_metadata():
@@ -959,13 +1022,14 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(cgtp_dtype
     )
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
     d, di = o2.WignerD(1, 2).get_wigner(r)
-    with pytest.raises(ValueError, match="untruncated"):
+    with pytest.raises(ValueError, match="orders"):
         module(layout_in(x), d, di)
     with pytest.raises(ValueError, match="spherical harmonics"):
         o2.O3TensorProduct("1o", "1e", "0o", [(0, 0, 0, "uvu", True)])
 
 
-def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(cgtp_dtype):
+@pytest.mark.parametrize("wigner_lmax", [2, 4])
+def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(cgtp_dtype, wigner_lmax):
     module = o2.O3TensorProduct(
         "2x1o",
         "1o",
@@ -978,7 +1042,7 @@ def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(cgtp_dtype):
     for batch_size in (3, 1, 0):
         x = torch.randn(batch_size, 6, requires_grad=True)
         w = torch.randn(batch_size, module.weight_numel, requires_grad=True)
-        d, di = o2.WignerD(2, 2).get_wigner(torch.randn(batch_size, 3))
+        d, di = o2.WignerD(2, wigner_lmax).get_wigner(torch.randn(batch_size, 3))
         actual, expected = compiled(x, d, di, w), module(x, d, di, w)
         torch.testing.assert_close(actual, expected)
         for actual_grad, expected_grad in zip(
@@ -1030,7 +1094,7 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
         monkeypatch.setenv(name, "0")
     module = O2CgtpScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
     reference = O3ScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
-    lmax = max(o3.Irreps(irreps).lmax for irreps in (irreps_in, irreps_sh, irreps_out))
+    lmax = max(o3.Irreps(irreps).lmax for irreps in (irreps_in, irreps_out))
     assert module.tp.lmax == lmax
     assert module.irreps_out == reference.irreps_out
     assert module.weight_numel == reference.weight_numel
@@ -1282,7 +1346,6 @@ def _scatter_module(use_attention):
         irreps,
         irreps,
         num_channel=2,
-        lmax=1,
         mmax=1,
         even_scalar_act=torch.nn.SiLU(),
         odd_scalar_act=torch.nn.Tanh(),
@@ -1450,7 +1513,7 @@ def test_o2_asymmetric_contraction_preserves_time_parity():
 )
 def test_local_frame_preserves_time_parity():
     irreps = o3.Irreps("2x1eo+2x2ee")
-    frame = o2.LocalFrame(irreps, lmax=2).to(DEVICE, DTYPE)
+    frame = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
     edge_vectors = torch.randn(6, 3, dtype=DTYPE, device=DEVICE)
     wigner, _ = o2.WignerD(mmax=2, lmax=2).to(DEVICE, DTYPE).get_wigner(
         edge_vectors
@@ -1707,7 +1770,6 @@ def _magnetic_scatter_module(use_attention: bool):
         irreps,
         magnetic_edge_irreps,
         num_channel=2,
-        lmax=1,
         mmax=1,
         even_scalar_act=torch.nn.SiLU(),
         odd_scalar_act=torch.nn.Tanh(),
