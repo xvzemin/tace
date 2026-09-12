@@ -37,11 +37,12 @@ while backward compatibility for the O(2) implementation is not currently guaran
 <img src="fig/o2.svg" width="100%" align="center">
 
 ```math
-\left.(l,p)_{O(3)}\right\downarrow_{O(2)}
+\left.(l,p,t)_{O(3)\times\mathbb Z_2^{\mathcal T}}
+\right\downarrow_{O(2)\times\mathbb Z_2^{\mathcal T}}
 =
-\underbrace{\bigl(0,p(-1)^l\bigr)}_{\text{1D},\,m=0}
+\underbrace{\bigl(0,p(-1)^l,t\bigr)}_{\text{1D},\,m=0}
 \oplus
-\underbrace{\bigoplus_{m=1}^{l}(m,0)}_{\text{2D},\,m>0}.
+\underbrace{\bigoplus_{m=1}^{l}(m,0,t)}_{\text{2D},\,m>0}.
 ````
 
 
