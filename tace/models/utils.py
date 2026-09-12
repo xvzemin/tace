@@ -116,6 +116,43 @@ def compute_atomic_virials_stresses(
     return atomic_virials, atomic_stresses
 
 
+def compute_forces_stress_from_edge_forces(
+    edge_forces: torch.Tensor,
+    edge_vector: torch.Tensor,
+    edge_index: torch.Tensor,
+    batch: torch.Tensor,
+    lattice: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert edge forces to atomic forces and per-structure stress."""
+    source = edge_index[0]
+    target = edge_index[1]
+    forces = torch.zeros(
+        (batch.shape[0], 3),
+        dtype=edge_forces.dtype,
+        device=edge_forces.device,
+    )
+    forces = forces.index_add(0, source, edge_forces)
+    forces = forces.index_add(0, target, -edge_forces)
+
+    edge_virials = edge_vector.unsqueeze(-1) * edge_forces.unsqueeze(-2)
+    edge_batch = batch[source]
+    virials = torch.zeros(
+        (lattice.shape[0], 3, 3),
+        dtype=edge_virials.dtype,
+        device=edge_virials.device,
+    ).index_add(0, edge_batch, -edge_virials)
+    virials = 0.5 * (virials + virials.transpose(-1, -2))
+
+    volume = torch.linalg.det(lattice).abs().view(-1, 1, 1)
+    stress = -virials / volume
+    stress = torch.where(
+        torch.abs(stress) < 1e10,
+        stress,
+        torch.zeros_like(stress),
+    )
+    return forces, stress
+
+
 def compute_hessians_vmap(
     forces: torch.Tensor,
     positions: torch.Tensor,
