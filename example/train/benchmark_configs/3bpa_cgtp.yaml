@@ -1,11 +1,7 @@
 # Reproduce the 3BPA CGTP setup while inheriting the current TACE defaults.
 
-hydra:
-  searchpath:
-    - file://..
-
 defaults:
-  - tace
+  - ../tace@_global_
   - _self_
 
 misc:

@@ -1,7 +1,7 @@
 # Magnetic TACE inherits TACE and only overrides its magnetic architecture,
 # dataset keys, loss, and validation metric.
 defaults:
-  - tace
+  - tace@_global_
   - _self_
 
 dataset:

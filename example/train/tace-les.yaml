@@ -1,7 +1,7 @@
 # TACE-LES shares the complete training workflow with TACE and only overrides
 # architecture parameters that differ from example/train/tace.yaml.
 defaults:
-  - tace
+  - tace@_global_
   - _self_
 
 model:

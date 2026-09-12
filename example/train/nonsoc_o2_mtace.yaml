@@ -1,77 +1,25 @@
-# Magnetic TACE inherits TACE and only overrides its magnetic architecture,
-# dataset keys, loss, and validation metric.
+# Share the magnetic training setup and override the CrN data and non-SOC settings.
 defaults:
-  - tace
+  - soc_o2_mtace@_global_
   - _self_
 
 dataset:
   train_file: ${oc.env:HOME}/dataset/CrN/collinear_CrN_train.xyz
   valid_file: ${oc.env:HOME}/dataset/CrN/collinear_CrN_val.xyz
-  keys:
-    energy_key: energy
-    forces_key: forces
-    stress_key: stress
-    virials_key: virials
-    initial_noncollinear_magmoms_key: initial_noncollinear_magmoms
-    noncollinear_magnetic_forces_key: noncollinear_magnetic_forces
-
   train_dataloader:
     batch_size: 4
-
   valid_dataloader:
     batch_size: 4
-    
-  storage_mode: lmdb
-  shard_dirs: 
+  shard_dirs:
     - ${oc.env:HOME}/dataset/CrN/graphCache
-
-loss:
-  loss_property: [energy, forces, stress, noncollinear_magnetic_forces]
-  loss_function_name:
-    - mse_energy_per_atom
-    - mse_forces
-    - mse_stress
-    - mse_noncollinear_magnetic_forces
-  loss_property_weights: [1.0, 5.0, 1.0, 10.0]
-  loss_function_kwargs:
-    - {}
-    - {}
-    - {}
-    - {}
-
-synth_metric:
-  val/noncollinear_magnetic_forces_mae: 5.0
-  val/noncollinear_magnetic_forces_rmse: 1.0
 
 model:
   config:
-
-    mmax: 2
-    Lmax: 2
-    lmax: 2
-    cutoff: 5.0
-    num_layers: 6
-    num_channel: 64
-
     fidelity:
       - name: PBE
         atomic_energy: null
         magnetic_scale:
           7: 0.3
           24: 3.5
-
-    parity: true
-
-    node_update:
-      magnetic_type: element # [identity, element, element2]
-
     angular_basis:
-      magnetic_Lmax: 2
       use_spin_orbit_coupling: false
-
-    atomic_basis:
-      type: o2_mag
-      use_radial_rotary_attention: true
-
-    readout_emlp:
-      use_one_body_magmoms: true

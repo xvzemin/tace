@@ -3,14 +3,15 @@ Training
 
 .. note::
 
-  Example config yaml files are provided in the `GitHub repository example <https://github.com/xvzemin/tace/tree/main/example/train>`_. 
+  Example config yaml files are provided in the 
+  `GitHub repository example <https://github.com/xvzemin/tace/tree/main/example/train>`_. 
 
-  During the process of using TACE, what you need to do is to modify the default yaml files we provide instead of writing a new one yourself.
+  Inherit the supplied base configuration and override only the settings needed
+  for your experiment. See :doc:`details/defaults` for examples of configuration
+  inheritance and merging.
 
   - Be aware that Python's ``None`` must be written as ``null`` in YAML format.
   - Bool values are recommended to be written as ``true`` or ``false`` in YAML format.
-  - Not all fields in the ``YAML`` file are allowed to be omitted. We recommend using the official input file as much as possible and making only minimal modifications.
-  
 
 Once you have prepared the input files, you can start training using the command:
 
@@ -58,9 +59,9 @@ synchronized with the actual training configuration.
 Field Descriptions
 ^^^^^^^^^^^^^^^^^^
 
-- **defaults** (Hydra feature)  
-  If you are not familiar with Hydra, you can safely ignore this field and keep the default configuration. 
-  We will not cover it here.
+- **defaults** (Hydra feature)
+  Selects inherited YAML files and their merge order. Keep ``_self_`` last so
+  the current file overrides its bases; see :doc:`details/defaults`.
 
 - **resume_from_model** 
   Path to a previously saved checkpoint. The model specified here must end with .ckpt 
@@ -173,7 +174,6 @@ During training, **TACE** automatically generates several directories and files 
 .. note::
   Automatically reading the statistics is equivalent to running the dataloader once in advance, which may sometimes 
   cause subtle effects, though in most cases these can be ignored.
-
 
 
 

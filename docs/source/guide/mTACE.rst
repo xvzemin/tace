@@ -41,8 +41,9 @@ Collinear moments can use the same vector field, for example
    \mathbf F_i^{\mathrm{mag}}
    =-\frac{\partial E}{\partial\mathbf m_i}.
 
-Start from ``example/train/soc_mtece.yaml`` or
-``example/train/nonsoc_mtece.yaml``. Update the dataset paths, field mapping,
+Start from ``example/train/soc_o2_mtace.yaml`` or
+``example/train/nonsoc_o2_mtace.yaml``. Keep their base configurations alongside
+them as described in :doc:`details/defaults`. Update the dataset paths, field mapping,
 LMDB shard directories, and magnetic cutoff (scale) settings for your data. 
 The examples include magnetic-force losses and validation metrics; remove these entries
 if those labels are unavailable.
@@ -53,14 +54,14 @@ Run the appropriate configuration from ``example/train``:
 
    cd example/data
    python download_FeDeepSpin.py
-   cd example/train
-   tace-train -cn soc_mtece.yaml
+   cd ../train
+   tace-train -cn soc_o2_mtace.yaml
 
    # For non-SOC data, use instead:
-   # cd example/data
+   # cd ../data
    # python download_CrN.py
-   # cd example/train
-   # tace-train -cn nonsoc_mtece.yaml
+   # cd ../train
+   # tace-train -cn nonsoc_o2_mtace.yaml
 
 .. list-table:: Architecture selection
    :header-rows: 1
