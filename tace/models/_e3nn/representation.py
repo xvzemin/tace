@@ -20,6 +20,7 @@ from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import (
     INTERACTION,
+    O2CgtpInteraction,
     O2Interaction,
     O2MagneticInteraction,
     O3Wigner6jMagneticInteraction,
@@ -27,7 +28,7 @@ from .inter import (
 )
 from .layer_norm import get_normalization_layer
 from .magnetic import MagneticBasis
-from .node import NODE_EMBEDDING, NODE_UPDATE, O2TensorNodeEmbedding
+from .node import NODE_EMBEDDING, NODE_UPDATE, O2TensorNodeEmbedding, TensorNodeEmbedding
 from .prod import PRODUCT
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
@@ -100,10 +101,21 @@ class Representation(torch.nn.Module):
             issubclass(interaction_cls, O2Interaction)
             for interaction_cls in interaction_classes
         )
+        uses_o2_cgtp_interaction = any(
+            issubclass(interaction_cls, O2CgtpInteraction)
+            for interaction_cls in interaction_classes
+        )
+        self.use_o3_angular_basis = issubclass(
+            node_embedding_cls, TensorNodeEmbedding
+        ) or any(
+            not issubclass(interaction_cls, O2CgtpInteraction)
+            for interaction_cls in interaction_classes
+        )
         self.use_so2 = uses_so2_interaction
         self.use_o2 = (
             issubclass(node_embedding_cls, O2TensorNodeEmbedding)
             or uses_o2_interaction
+            or uses_o2_cgtp_interaction
         )
         uses_o2_magnetic_interaction = any(
             issubclass(interaction_cls, O2MagneticInteraction)
@@ -163,9 +175,13 @@ class Representation(torch.nn.Module):
         # === angular basis ===
         if self.use_so2 and Lmax != lmax:
             raise ValueError("Legacy SO2 interactions require Lmax == lmax.")
+        if uses_o2_cgtp_interaction and self.use_so2 and mmax != lmax:
+            raise ValueError("Mixing o2_cgtp with legacy so2 requires mmax == lmax.")
         if self.use_so2 or self.use_o2:
             self.o2_angular_basis = WignerD(
-                mmax if uses_so2_interaction or uses_o2_interaction else 0,
+                max(Lmax, lmax)
+                if uses_o2_cgtp_interaction
+                else mmax if uses_so2_interaction or uses_o2_interaction else 0,
                 max(Lmax, lmax),
             )
         else:
@@ -385,9 +401,11 @@ class Representation(torch.nn.Module):
             edge_wigner, edge_wigner_inv = self.o2_angular_basis.get_wigner(
                 graph.edge_vector
             )
-        edge_attrs = self.o3_angular_basis(
-            graph.edge_vector / graph.edge_length
-        )  # have added eps in adapter.py
+        edge_attrs = (
+            self.o3_angular_basis(graph.edge_vector / graph.edge_length)
+            if self.use_o3_angular_basis
+            else graph.edge_vector.new_empty(graph.edge_vector.size(0), 0)
+        )
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None

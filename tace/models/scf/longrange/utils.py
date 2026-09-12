@@ -4,6 +4,8 @@ import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
 
+from tace.utils.torch_scatter import scatter_sum
+
 # internal units are (electon, Volt, Angstrom)
 # 5.526349406 * 1e-3 is the value of epsilon_0 in (electon, Volt, Angstrom) units. see docs.
 FIELD_CONSTANT = 1 / (5.526349406 * 1e-3)
@@ -68,31 +70,6 @@ def _broadcast(src: torch.Tensor, other: torch.Tensor, dim: int):
         src = src.unsqueeze(-1)
     src = src.expand_as(other)
     return src
-
-
-@torch.jit.script
-def scatter_sum(
-    src: torch.Tensor,
-    index: torch.Tensor,
-    dim: int = -1,
-    out: Optional[torch.Tensor] = None,
-    dim_size: Optional[int] = None,
-    reduce: str = "sum",
-) -> torch.Tensor:
-    assert reduce == "sum"  # for now, TODO
-    index = _broadcast(index, src, dim)
-    if out is None:
-        size = list(src.size())
-        if dim_size is not None:
-            size[dim] = dim_size
-        elif index.numel() == 0:
-            size[dim] = 0
-        else:
-            size[dim] = int(index.max()) + 1
-        out = torch.zeros(size, dtype=src.dtype, device=src.device)
-        return out.scatter_add_(dim, index, src)
-    else:
-        return out.scatter_add_(dim, index, src)
 
 
 @torch.jit.script

@@ -802,6 +802,385 @@ def test_o2_tensor_product_zero_pads_missing_outputs():
     torch.testing.assert_close(output[:, -1], torch.zeros_like(output[:, -1]))
 
 
+@pytest.fixture
+def cgtp_dtype():
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(DTYPE)
+    yield
+    torch.set_default_dtype(previous)
+
+
+@pytest.mark.parametrize("mode", ["uvu", "uvw"])
+@pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
+@pytest.mark.parametrize("batch_size", [0, 5])
+def test_o3_tensor_product_matches_edge_cgtp(
+    cgtp_dtype, mode, normalization, batch_size
+):
+    from tace.models._e3nn.paths import generate_paths
+
+    irreps_in = o3.Irreps("2x0e+2x1o+3x1e+3x2o+2x3e")
+    irreps_sh = o3.Irreps.spherical_harmonics(4)
+    irreps_out = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o+2x3e+2x3o")
+    instructions, irreps_out = generate_paths(
+        irreps_out,
+        irreps_in,
+        irreps_sh,
+        e3nn_mode=mode,
+        trainable=True,
+    )
+    kwargs = dict(internal_weights=False, shared_weights=False)
+    reference = o3.TensorProduct(
+        irreps_in, irreps_sh, irreps_out, instructions, **kwargs
+    )
+    module = o2.O3TensorProduct(
+        irreps_in,
+        irreps_sh,
+        irreps_out,
+        instructions,
+        normalization=normalization,
+        **kwargs,
+    )
+    x = torch.randn(batch_size, irreps_in.dim, requires_grad=True)
+    r = torch.randn(batch_size, 3, requires_grad=True)
+    w = torch.randn(batch_size, module.weight_numel, requires_grad=True)
+    layout_in = LayoutTransform(
+        irreps_in,
+        layout_in="flatten_mul_ir",
+        layout_out="flatten_ir_mul",
+    )
+    layout_out = LayoutTransform(
+        irreps_out,
+        layout_in="flatten_ir_mul",
+        layout_out="flatten_mul_ir",
+    )
+    d, di = o2.WignerD(3, 3).get_wigner(r)
+    actual = layout_out(module(layout_in(x), d, di, w))
+    expected = reference(
+        x, o3.spherical_harmonics(irreps_sh, r, True, normalization), w
+    )
+    assert module.weight_numel == reference.weight_numel
+    assert not any(isinstance(child, o3.TensorProduct) for child in module.modules())
+    torch.testing.assert_close(module.output_mask, reference.output_mask)
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    if batch_size:
+        for actual_grad, expected_grad in zip(
+            torch.autograd.grad(actual.square().sum(), (x, r, w)),
+            torch.autograd.grad(expected.square().sum(), (x, r, w)),
+        ):
+            torch.testing.assert_close(actual_grad, expected_grad, atol=2e-8, rtol=2e-9)
+
+
+@pytest.mark.parametrize("irrep_normalization", ["component", "norm", "none"])
+@pytest.mark.parametrize("path_normalization", ["element", "path", "none"])
+def test_o3_tensor_product_normalization_and_second_derivatives(
+    cgtp_dtype,
+    irrep_normalization,
+    path_normalization,
+):
+    irreps_in = o3.Irreps("2x1o")
+    irreps_sh = o3.Irreps.spherical_harmonics(2)
+    irreps_out = o3.Irreps("2x1o+2x1e+2x2e+2x0o")
+    instructions = [
+        (0, 0, 0, "uvu", True, 0.7),
+        (0, 2, 0, "uvu", True, 1.3),
+        (0, 1, 1, "uvu", False, 0.9),
+        (0, 1, 2, "uvu", True, 1.1),
+    ]
+    kwargs = dict(
+        irrep_normalization=irrep_normalization,
+        path_normalization=path_normalization,
+        in1_var=[0.8],
+        in2_var=[1.2, 0.9, 1.5],
+        out_var=[0.7, 1.1, 1.3, 1.0],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    reference = o3.TensorProduct(
+        irreps_in, irreps_sh, irreps_out, instructions, **kwargs
+    )
+    module = o2.O3TensorProduct(
+        irreps_in, irreps_sh, irreps_out, instructions, **kwargs
+    )
+    x = torch.randn(4, irreps_in.dim, requires_grad=True)
+    r = torch.randn(4, 3, requires_grad=True)
+    weight = torch.randn(1, module.weight_numel, requires_grad=True)
+    layout_in = LayoutTransform(
+        irreps_in, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
+    )
+    layout_out = LayoutTransform(
+        irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+    )
+    d, di = o2.WignerD(2, 2).get_wigner(r)
+    # A nonunit input vector tests the optional per-degree amplitude and its gradient.
+    scale = r.square().sum(-1, keepdim=True).sqrt().pow(torch.arange(3))
+    actual = layout_out(module(layout_in(x), d, di, weight, scale))
+    expected = reference(
+        x, o3.spherical_harmonics(irreps_sh, r, False, "component"), weight
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    grads = [
+        torch.autograd.grad(value.square().sum(), (x, r, weight), create_graph=True)
+        for value in (actual, expected)
+    ]
+    for actual_grad, expected_grad in zip(*grads):
+        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-8, rtol=2e-9)
+    for actual_grad, expected_grad in zip(
+        torch.autograd.grad(grads[0][1].square().sum(), (x, r, weight)),
+        torch.autograd.grad(grads[1][1].square().sum(), (x, r, weight)),
+    ):
+        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-6, rtol=2e-8)
+
+
+def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(cgtp_dtype):
+    module = o2.O3TensorProduct(
+        "2x1o",
+        "1x1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, "uvu", True) for i in range(3)],
+    )
+    reference = o3.TensorProduct(
+        module.irreps_in1,
+        module.irreps_in2,
+        module.irreps_out,
+        [(0, 0, i, "uvu", True) for i in range(3)],
+    )
+    r = torch.cat((torch.eye(3), -torch.eye(3)))
+    x = torch.randn(6, 3, 6)
+    layout_in = LayoutTransform(
+        module.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
+    )
+    layout_out = LayoutTransform(
+        module.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+    )
+    d, di = o2.WignerD(2, 2).get_wigner(r)
+    actual = layout_out(module(layout_in(x), d, di))
+    expected = reference(
+        x, o3.spherical_harmonics([1], r, True, "component")[:, None], module.weight
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    d, di = o2.WignerD(1, 2).get_wigner(r)
+    with pytest.raises(ValueError, match="untruncated"):
+        module(layout_in(x), d, di)
+    with pytest.raises(ValueError, match="spherical harmonics"):
+        o2.O3TensorProduct("1o", "1e", "0o", [(0, 0, 0, "uvu", True)])
+
+
+def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(cgtp_dtype):
+    module = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for batch_size in (3, 1, 0):
+        x = torch.randn(batch_size, 6, requires_grad=True)
+        w = torch.randn(batch_size, module.weight_numel, requires_grad=True)
+        d, di = o2.WignerD(2, 2).get_wigner(torch.randn(batch_size, 3))
+        actual, expected = compiled(x, d, di, w), module(x, d, di, w)
+        torch.testing.assert_close(actual, expected)
+        for actual_grad, expected_grad in zip(
+            torch.autograd.grad(actual.square().sum(), (x, w)),
+            torch.autograd.grad(expected.square().sum(), (x, w)),
+        ):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.skipif(
+    not hasattr(o3.Irrep("0e"), "t"),
+    reason="The installed O(3) irreps do not expose time-reversal parity.",
+)
+def test_o3_tensor_product_time_reversal(cgtp_dtype):
+    from tace.models.time_reversal import with_time_reversal
+
+    irreps_in = with_time_reversal(o3.Irreps("2x1e"), -1)
+    irreps_out = with_time_reversal(o3.Irreps("2x0o+2x1o+2x2o"), -1)
+    module = o2.O3TensorProduct(
+        irreps_in,
+        o3.Irreps.spherical_harmonics(1)[1:],
+        irreps_out,
+        [(0, 0, i, "uvu", True) for i in range(3)],
+    )
+    x = torch.randn(4, irreps_in.dim)
+    d, di = o2.WignerD(2, 2).get_wigner(torch.randn(4, 3))
+    torch.testing.assert_close(module(-x, d, di), -module(x, d, di))
+
+
+@pytest.mark.parametrize(
+    ("irreps_in", "irreps_sh", "irreps_out"),
+    [
+        ("2x3o", "0e+1o", "2x2e"),
+        ("2x1o", "0e+1o+2e+3o", "2x2e"),
+        ("2x1o", "0e+1o", "2x2e"),
+    ],
+)
+def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
+    cgtp_dtype, monkeypatch, irreps_in, irreps_sh, irreps_out
+):
+    from types import SimpleNamespace
+
+    from tace.models._e3nn.fused import (
+        O2CgtpScatterTensorProduct,
+        O3ScatterTensorProduct,
+    )
+
+    for name in ("TACE_USE_OEQ", "TACE_USE_CUE"):
+        monkeypatch.setenv(name, "0")
+    module = O2CgtpScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
+    reference = O3ScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
+    lmax = max(o3.Irreps(irreps).lmax for irreps in (irreps_in, irreps_sh, irreps_out))
+    assert module.tp.lmax == lmax
+    assert module.irreps_out == reference.irreps_out
+    assert module.weight_numel == reference.weight_numel
+
+    x = torch.randn(3, o3.Irreps(irreps_in).dim, requires_grad=True)
+    r = torch.randn(6, 3, requires_grad=True)
+    w = torch.randn(6, module.weight_numel, requires_grad=True)
+    edge_index = torch.tensor([[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]])
+    graph = SimpleNamespace(
+        edge_vector=r,
+        edge_length=r.square().sum(-1, keepdim=True).sqrt() + 1e-9,
+    )
+    d, di = o2.WignerD(lmax + 2, lmax + 2).get_wigner(r)
+    actual = module(x, w, edge_index, d, di, graph)
+    expected = reference(
+        x,
+        o3.spherical_harmonics(
+            o3.Irreps(irreps_sh), r / graph.edge_length, False, "component"
+        ),
+        w,
+        edge_index,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    for actual_grad, expected_grad in zip(
+        torch.autograd.grad(actual.square().sum(), (x, r, w), retain_graph=True),
+        torch.autograd.grad(expected.square().sum(), (x, r, w)),
+    ):
+        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-8, rtol=2e-9)
+
+
+@pytest.mark.parametrize(
+    ("interaction", "node_embedding", "Lmax", "lmax"),
+    [
+        ("o2_cgtp", "linear", 2, 2),
+        (["cgtp", "o2_cgtp"], "linear", 2, 2),
+        ("o2_cgtp", "tensor", 2, 2),
+        ("o2_cgtp", "linear", 4, 2),
+        ("o2_cgtp", "linear", 1, 3),
+    ],
+)
+def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
+    cgtp_dtype,
+    monkeypatch,
+    interaction,
+    node_embedding,
+    Lmax,
+    lmax,
+):
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE"):
+        monkeypatch.setenv(name, "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        num_layers=2,
+        num_channel=3,
+        Lmax=Lmax,
+        lmax=lmax,
+        mmax=0,
+        parity=True,
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["node_embedding"]["type"] = node_embedding
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    config["radial_basis"]["hidden"] = [4]
+    config["readout_emlp"]["hidden"] = [2]
+    config["scale_shift"]["enable"] = False
+    reference = TensorModel(e3nnTACE(**deepcopy(config))).train()
+    config["atomic_basis"]["type"] = interaction
+    module = TensorModel(e3nnTACE(**config)).train()
+    reference_parameters = dict(reference.named_parameters())
+    assert reference_parameters.keys() == dict(module.named_parameters()).keys()
+    with torch.no_grad():
+        for name, parameter in module.named_parameters():
+            parameter.copy_(reference_parameters[name])
+    representation = module.readout_fn.representation
+    assert representation.o2_angular_basis.mmax == max(Lmax, lmax)
+    if interaction == "o2_cgtp" and node_embedding == "linear":
+        assert not representation.use_o3_angular_basis
+
+        def no_spherical_harmonics(*args):
+            raise AssertionError("o2_cgtp should not evaluate spherical harmonics")
+
+        monkeypatch.setattr(
+            representation.o3_angular_basis, "forward", no_spherical_harmonics
+        )
+
+    data = dict(
+        positions=torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.3, 0.2],
+                [0.4, 1.1, -0.2],
+                [0.2, 0.1, 0.3],
+                [0.7, -0.3, 1.1],
+            ]
+        ),
+        node_attrs=torch.ones(5, 1),
+        edge_index=torch.tensor([[0, 1, 0, 2, 1, 2, 3, 4], [1, 0, 2, 0, 2, 1, 4, 3]]),
+        edge_shifts=torch.zeros(8, 3),
+        lattice=torch.eye(3).repeat(2, 1, 1) * 8,
+        batch=torch.tensor([0, 0, 0, 1, 1]),
+        ptr=torch.tensor([0, 3, 5]),
+        fidelity_idx=torch.zeros(2, dtype=torch.long),
+    )
+    expected = reference({key: value.clone() for key, value in data.items()})
+    actual = module({key: value.clone() for key, value in data.items()})
+    for key in ("energy", "forces", "stress", "virials"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
+    for model, output in ((reference, expected), (module, actual)):
+        sum(
+            output[key].square().sum() for key in ("energy", "forces", "stress")
+        ).backward()
+    for name, parameter in module.named_parameters():
+        expected_grad = reference_parameters[name].grad
+        if expected_grad is not None:
+            torch.testing.assert_close(
+                parameter.grad, expected_grad, atol=2e-8, rtol=2e-7
+            )
+
+    if interaction == "o2_cgtp" and node_embedding == "linear":
+        from tace.models.compile.compile import trace_to_fx
+        from tace.models.compile.wrapper import (
+            CompileTensorModel,
+            _FlatE3nnCompileModel,
+        )
+
+        compiled_model = CompileTensorModel(module.readout_fn).eval()
+        input_keys = compiled_model._input_keys(data)
+        output_keys = compiled_model._output_keys()
+        flat_model = _FlatE3nnCompileModel(compiled_model, input_keys, output_keys)
+        inputs = tuple(data[key] for key in input_keys)
+        traced = trace_to_fx(flat_model, inputs)
+        for key, output in zip(output_keys, traced(*inputs)):
+            torch.testing.assert_close(output, actual[key], atol=2e-9, rtol=2e-8)
+
+    data["edge_index"] = torch.empty(2, 0, dtype=torch.long)
+    data["edge_shifts"] = torch.empty(0, 3)
+    expected = reference({key: value.clone() for key, value in data.items()})
+    actual = module({key: value.clone() for key, value in data.items()})
+    for key in ("energy", "forces", "stress", "virials"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
+
+
 def _asymmetric_contractions(correlation=3):
     irreps_in = o2.Irreps("2x0e+2x0o+2x1m")
     irreps_out = o2.Irreps("2x0e+2x0o+2x1m+2x2m")
@@ -853,6 +1232,48 @@ def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
         for features in inputs
     ]
     torch.testing.assert_close(module(transformed, weights), expected)
+
+
+@pytest.mark.parametrize(
+    ("shape", "dim", "use_ptr"),
+    [
+        ((5, 3), 0, False),
+        ((3, 5), 1, False),
+        ((3, 5), -1, False),
+        ((5, 3), 0, True),
+        ((0, 3), 0, False),
+        ((0, 3), 0, True),
+    ],
+)
+def test_graph_softmax_matches_groupwise_sums_and_gradients(shape, dim, use_ptr):
+    from tace.models.softmax import GraphSoftmax
+
+    module = GraphSoftmax()
+    src = torch.randn(shape, dtype=DTYPE, device=DEVICE, requires_grad=True)
+    scale = torch.rand_like(src, requires_grad=True)
+    counts = [2, 0, 3, 0] if src.size(dim) else [0, 0, 0, 0]
+    count = torch.tensor(counts, device=DEVICE)
+    index = torch.arange(len(counts), device=DEVICE).repeat_interleave(count)
+    ptr = torch.cat((count.new_zeros(1), count.cumsum(0)))
+    actual = module(
+        src,
+        dim=dim,
+        exp_rescale=scale,
+        **({"ptr": ptr} if use_ptr else {"index": index, "num_nodes": len(counts)}),
+    )
+    expected = []
+    for value, weight in zip(src.split(counts, dim), scale.split(counts, dim)):
+        if value.size(dim):
+            value = (value - value.detach().amax(dim, keepdim=True)).exp()
+        value = value * weight
+        expected.append(value / (value.sum(dim, keepdim=True) + module.eps))
+    expected = torch.cat(expected, dim=dim)
+    torch.testing.assert_close(actual, expected)
+    for actual_grad, expected_grad in zip(
+        torch.autograd.grad(actual.square().sum(), (src, scale)),
+        torch.autograd.grad(expected.square().sum(), (src, scale)),
+    ):
+        torch.testing.assert_close(actual_grad, expected_grad)
 
 
 def _scatter_module(use_attention):

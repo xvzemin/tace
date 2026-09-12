@@ -3,7 +3,8 @@ from typing import List, Optional, Union
 
 import torch
 
-from ..torch_scatter import scatter
+from tace.utils.torch_scatter import scatter_max, scatter_sum
+
 from .common import apply_element_weights, voigt6_stress
 from .mse_fn import register_loss
 
@@ -121,7 +122,7 @@ def add_gaussian_noise_to_position(
         else:
             forces_data = batch["forces"]
         forces_norm = torch.norm(forces_data, dim=-1)
-        forces_norm_max_reduce = scatter(forces_norm, batch_index, 0, reduce="max")
+        forces_norm_max_reduce = scatter_max(forces_norm, batch_index, 0)
         noise_mask = forces_norm_max_reduce <= max_forces_norm
         dens_batch_mask = dens_batch_mask * noise_mask
         noise_mask = noise_mask[batch_index]
@@ -153,7 +154,7 @@ def add_gaussian_noise_to_position(
             forces_data = batch["direct_forces"]
         else:
             forces_data = batch["forces"]
-        forces_reduce = scatter(src=forces_data, index=batch_index, dim=0, reduce="sum")
+        forces_reduce = scatter_sum(src=forces_data, index=batch_index, dim=0)
         forces_reduce_norm = torch.norm(forces_reduce, dim=-1)
         noise_mask = forces_reduce_norm <= max_mean_forces_norm
         dens_batch_mask = dens_batch_mask * noise_mask

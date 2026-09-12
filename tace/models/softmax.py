@@ -12,6 +12,8 @@ import torch
 from torch_geometric.utils import scatter, segment
 from torch_geometric.utils.num_nodes import maybe_num_nodes
 
+from tace.utils.torch_scatter import scatter_sum
+
 
 class SoftCap(torch.nn.Module):
     def __init__(self, cap):
@@ -63,7 +65,7 @@ class SoftCap(torch.nn.Module):
 #             out = out.exp()
 #             if exp_rescale is not None:
 #                 out = out * exp_rescale
-#             out_sum = scatter(out, index, dim, dim_size=N, reduce='sum') + self.eps
+#             out_sum = scatter_sum(out, index, dim, dim_size=N) + self.eps
 #             out_sum = out_sum.index_select(dim, index)
 #         else:
 #             raise NotImplementedError
@@ -95,7 +97,10 @@ class GraphSoftmax(torch.nn.Module):
             out = (src - src_max).exp()
             if exp_rescale is not None:
                 out = out * exp_rescale
-            out_sum = segment(out, ptr, reduce="sum") + self.eps
+            index = torch.arange(count.numel(), device=ptr.device).repeat_interleave(
+                count, output_size=out.size(dim)
+            )
+            out_sum = scatter_sum(out, index, dim, dim_size=count.numel()) + self.eps
             out_sum = out_sum.repeat_interleave(count, dim=dim)
         elif index is not None:
             N = maybe_num_nodes(index, num_nodes)
@@ -104,7 +109,7 @@ class GraphSoftmax(torch.nn.Module):
             out = out.exp()
             if exp_rescale is not None:
                 out = out * exp_rescale
-            out_sum = scatter(out, index, dim, dim_size=N, reduce="sum") + self.eps
+            out_sum = scatter_sum(out, index, dim, dim_size=N) + self.eps
             out_sum = out_sum.index_select(dim, index)
         else:
             raise NotImplementedError

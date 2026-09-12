@@ -3,6 +3,7 @@ import torch
 
 from tace.dataset.statistics import balanced_element_weights
 from tace.utils.loss.dens import (
+    add_gaussian_noise_to_position,
     huber_dens_forces,
     l2mae_dens_forces,
     mae_dens_forces,
@@ -12,6 +13,26 @@ from tace.utils.loss.huber_fn import huber_forces
 from tace.utils.loss.mse_fn import mse_forces
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
+
+
+def test_dens_masks_graphs_by_summed_forces():
+    batch = {
+        "positions": torch.zeros(3, 3),
+        "node_attrs": torch.ones(3, 1),
+        "ptr": torch.tensor([0, 2, 3]),
+        "batch": torch.tensor([0, 0, 1]),
+        "forces": torch.tensor([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+    }
+    result = add_gaussian_noise_to_position(
+        batch,
+        prob=1.0,
+        corrupt_ratio=None,
+        strict_max_ratio=None,
+        max_forces_norm=None,
+        max_mean_forces_norm=1.0,
+    )
+    torch.testing.assert_close(result["dens_batch_mask"], torch.tensor([True, False]))
+    torch.testing.assert_close(result["noise_vec"][2], torch.zeros(3))
 
 
 def _dens_inputs():

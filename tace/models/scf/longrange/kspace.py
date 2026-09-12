@@ -4,11 +4,6 @@ import torch
 from e3nn import nn, o3
 from scipy.constants import pi
 
-from .utils import (
-    scatter_mean,
-    scatter_sum,
-)
-
 
 def compute_k_vectors_flat(
     cutoff: float,

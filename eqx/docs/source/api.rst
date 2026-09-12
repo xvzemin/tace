@@ -41,6 +41,9 @@ module is configured without shared internal weights.
 .. autoclass:: eqx.o2.TensorProduct
    :members: forward, weight_view_for_instruction, weight_views
 
+.. autoclass:: eqx.o2.O3TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
 .. autoclass:: eqx.o2.AsymmetricContraction
    :members: forward
 
