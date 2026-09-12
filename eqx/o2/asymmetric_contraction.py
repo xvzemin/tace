@@ -3,27 +3,18 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from dataclasses import dataclass
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 import torch
 
 from .irreps import Irrep, Irreps, IrrepsLike
-from .tensor_product import _cg_product, _cg_product_uuu
+from .tensor_product import _cg_product
 
 
-@dataclass(frozen=True)
-class _Path:
+class _Path(NamedTuple):
     leaves: tuple[int, ...]
     intermediates: tuple[Irrep, ...]
     output_index: int
-
-
-def _cg_tensor(irrep1: Irrep, irrep2: Irrep, irrep_out: Irrep) -> torch.Tensor:
-    input1 = torch.eye(irrep1.dim, dtype=torch.float64)
-    input2 = torch.eye(irrep2.dim, dtype=torch.float64)
-    product = _cg_product(input1, irrep1, input2, irrep2, irrep_out)
-    return product.permute(1, 2, 0).contiguous()
 
 
 class AsymmetricContraction(torch.nn.Module):
@@ -31,18 +22,18 @@ class AsymmetricContraction(torch.nn.Module):
 
     Parameters
     ----------
-    irreps_in : IrrepsLike
+    irreps_in : Irreps, str, or sequence
         Representation of every independent input. All entries must have one
         common multiplicity, which is interpreted as the channel count.
-    irreps_out : IrrepsLike
+    irreps_out : Irreps, str, or sequence
         Requested output types. Their multiplicities must equal the common
         input multiplicity.
     correlation : int
         Highest correlation order to enumerate. The module consumes one
         independent input tensor for every order up to this value.
-    algorithm : {"edge", "node"}
-        Evaluation strategy. ``"edge"`` recursively contracts individual
-        paths; ``"node"`` evaluates precomputed generalized coupling tensors.
+    algorithm : {"recursive", "dense"}
+        Evaluation strategy. ``"recursive"`` recursively contracts individual
+        paths; ``"dense"`` evaluates precomputed generalized coupling tensors.
     path_mode : {"sum", "expand"}, optional
         ``"sum"`` accumulates equivalent paths into each requested output
         type with variance normalization. ``"expand"`` preserves every path
@@ -67,20 +58,23 @@ class AsymmetricContraction(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.irreps_in = Irreps(irreps_in)
-        self.channels = Irreps.common_multiplicity(self.irreps_in)
+        muls = {mul for _, mul in self.irreps_in}
+        if len(muls) != 1:
+            raise ValueError("Input irreps must have one common multiplicity.")
+        self.num_channels = muls.pop()
         self._input_irreps = tuple(ir for ir, _ in self.irreps_in)
         requested_irreps_out = Irreps(irreps_out)
-        if any(mul != self.channels for _, mul in requested_irreps_out):
+        if any(mul != self.num_channels for _, mul in requested_irreps_out):
             raise ValueError(
                 "AsymmetricContraction input and requested output entries must "
                 "use the same multiplicity."
             )
-        if not isinstance(correlation, int) or isinstance(correlation, bool):
+        if not isinstance(correlation, int):
             raise TypeError("correlation must be an integer.")
         if correlation < 1:
             raise ValueError("correlation must be positive.")
-        if algorithm not in ("edge", "node"):
-            raise ValueError("algorithm must be 'edge' or 'node'.")
+        if algorithm not in ("recursive", "dense"):
+            raise ValueError("algorithm must be 'recursive' or 'dense'.")
         if path_mode not in ("sum", "expand"):
             raise ValueError("path_mode must be 'sum' or 'expand'.")
         self.correlation = correlation
@@ -91,7 +85,7 @@ class AsymmetricContraction(torch.nn.Module):
         for ir, _ in requested_irreps_out:
             if ir not in output_types:
                 output_types.append(ir)
-        self.irreps_out_types = Irreps([(ir, self.channels) for ir in output_types])
+        self.irreps_out_types = Irreps([(ir, self.num_channels) for ir in output_types])
         allowed_outputs = set(output_types)
         filtered_states = tuple(
             tuple(
@@ -138,12 +132,12 @@ class AsymmetricContraction(torch.nn.Module):
 
         self._base_irreps_out = base_irreps_out
         self.irreps_out = Irreps(
-            [(ir, mul * self.channels) for ir, mul in base_irreps_out]
+            [(ir, mul * self.num_channels) for ir, mul in base_irreps_out]
         )
         self._paths_by_order = tuple(paths_by_order)
         self.order_num_paths = tuple(len(paths) for paths in self._paths_by_order)
         self.num_paths = sum(self.order_num_paths)
-        self.weight_numel = self.num_paths * self.channels
+        self.weight_numel = self.num_paths * self.num_channels
         self.weight_shape = (self.weight_numel,)
 
         if path_mode == "sum":
@@ -163,16 +157,13 @@ class AsymmetricContraction(torch.nn.Module):
         order_weight_slices = []
         offset = 0
         for num_paths in self.order_num_paths:
-            width = num_paths * self.channels
+            width = num_paths * self.num_channels
             order_weight_slices.append(slice(offset, offset + width))
             offset += width
         self._order_weight_slices = tuple(order_weight_slices)
-        self._input_slices = self.irreps_in.slices()
         self._base_input_slices = Irreps(self._input_irreps).slices()
-        self._base_output_slices = tuple(
-            slice(start, start + ir.dim)
-            for start, ir in self._expanded_offsets(base_irreps_out)
-        )
+        self._base_input_dim = sum(ir.dim for ir in self._input_irreps)
+        self._base_output_slices = Irreps(base_irreps_out.expanded()).slices()
         paths_by_output = [[] for _ in range(base_irreps_out.num_irreps)]
         for order_index, paths in enumerate(self._paths_by_order):
             for path_index, path in enumerate(paths):
@@ -180,15 +171,8 @@ class AsymmetricContraction(torch.nn.Module):
                     (order_index, path_index, path)
                 )
         self._paths_by_output = tuple(tuple(paths) for paths in paths_by_output)
-        if algorithm == "node":
-            self._setup_generalized_cg()
-
-    @staticmethod
-    def _expanded_offsets(irreps: Irreps):
-        offset = 0
-        for ir in irreps.expanded():
-            yield offset, ir
-            offset += ir.dim
+        if algorithm == "dense":
+            self._register_coupling_tensors()
 
     def _enumerate_states(self):
         previous = tuple(
@@ -207,14 +191,22 @@ class AsymmetricContraction(torch.nn.Module):
             states_by_order.append(previous)
         return tuple(states_by_order)
 
-    def _compact_generalized_cg(self, path: _Path) -> torch.Tensor:
+    def _coupling_tensor(self, path: _Path) -> torch.Tensor:
         first_ir = self._input_irreps[path.leaves[0]]
         coefficient = torch.eye(first_ir.dim, dtype=torch.float64)
         for order_index in range(1, len(path.leaves)):
-            pair = _cg_tensor(
-                path.intermediates[order_index - 1],
-                self._input_irreps[path.leaves[order_index]],
-                path.intermediates[order_index],
+            ir1 = path.intermediates[order_index - 1]
+            ir2 = self._input_irreps[path.leaves[order_index]]
+            pair = (
+                _cg_product(
+                    torch.eye(ir1.dim, dtype=torch.float64),
+                    ir1,
+                    torch.eye(ir2.dim, dtype=torch.float64),
+                    ir2,
+                    path.intermediates[order_index],
+                )
+                .permute(1, 2, 0)
+                .contiguous()
             )
             coefficient = torch.tensordot(
                 coefficient,
@@ -223,9 +215,9 @@ class AsymmetricContraction(torch.nn.Module):
             ).contiguous()
         return coefficient
 
-    def _setup_generalized_cg(self) -> None:
-        input_dim = sum(ir.dim for ir in self._input_irreps)
-        output_dim = sum(ir.dim for ir in self._base_irreps_out.expanded())
+    def _register_coupling_tensors(self) -> None:
+        input_dim = self._base_input_dim
+        output_dim = self._base_irreps_out.dim
         for order_index, paths in enumerate(self._paths_by_order):
             order = order_index + 1
             coefficient = torch.zeros(
@@ -235,7 +227,7 @@ class AsymmetricContraction(torch.nn.Module):
             for path_index, (path, scale) in enumerate(
                 zip(paths, self._path_scales[order_index])
             ):
-                compact = self._compact_generalized_cg(path)
+                compact = self._coupling_tensor(path)
                 compact = compact.permute(
                     compact.ndim - 1,
                     *range(compact.ndim - 1),
@@ -253,127 +245,63 @@ class AsymmetricContraction(torch.nn.Module):
                 persistent=False,
             )
 
-    def _validate_inputs(self, inputs, weights):
-        if not isinstance(inputs, (list, tuple)):
-            raise TypeError("inputs must be a list or tuple of tensors.")
-        if len(inputs) != self.correlation:
-            raise ValueError(
-                f"Expected {self.correlation} independent input tensors, "
-                f"got {len(inputs)}."
-            )
-        for features in inputs:
-            if not isinstance(features, torch.Tensor):
-                raise TypeError("Every contraction input must be a torch.Tensor.")
-            if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
-                raise ValueError(
-                    "Contraction input trailing dimension must be "
-                    f"{self.irreps_in.dim}, got {tuple(features.shape)}."
-                )
-        if not isinstance(weights, torch.Tensor):
-            raise TypeError("External weights must be a torch.Tensor.")
-        if weights.is_complex():
-            raise TypeError("AsymmetricContraction supports real weights only.")
-        if weights.ndim < 1 or weights.size(-1) != self.weight_numel:
-            raise ValueError(
-                "External weights must have trailing dimension "
-                f"{self.weight_numel}, got {tuple(weights.shape)}."
-            )
-        try:
-            leading_shape = torch.broadcast_shapes(
-                *(features.shape[:-1] for features in inputs),
-                weights.shape[:-1],
-            )
-        except RuntimeError as error:
-            raise ValueError(
-                "Contraction input and weight batch dimensions do not broadcast."
-            ) from error
-        inputs = tuple(
-            features.expand(*leading_shape, self.irreps_in.dim) for features in inputs
-        )
-        weights = weights.expand(*leading_shape, self.weight_numel)
-        return inputs, weights, leading_shape
-
-    def _order_weights(self, weights: torch.Tensor, order_index: int):
-        return weights[..., self._order_weight_slices[order_index]].reshape(
-            *weights.shape[:-1],
-            self.order_num_paths[order_index],
-            self.channels,
-        )
-
-    def _entry(self, features: torch.Tensor, index: int) -> torch.Tensor:
-        ir = self._input_irreps[index]
-        return features[..., self._input_slices[index]].reshape(
-            *features.shape[:-1], ir.dim, self.channels
-        )
-
-    def _contract_edge_path(self, inputs, path):
-        value = self._entry(inputs[0], path.leaves[0])
-        for order_index in range(1, len(path.leaves)):
-            input_index = path.leaves[order_index]
-            value = _cg_product_uuu(
-                value,
-                path.intermediates[order_index - 1],
-                self._entry(inputs[order_index], input_index),
-                self._input_irreps[input_index],
-                path.intermediates[order_index],
-            )
-        return value
-
-    def _flatten_base(self, features: torch.Tensor) -> torch.Tensor:
+    def _flatten_output(self, features: torch.Tensor) -> torch.Tensor:
         outputs = []
         offset = 0
         for ir, mul in self._base_irreps_out:
-            values = []
-            for _ in range(mul):
-                values.append(features[..., offset : offset + ir.dim, :])
-                offset += ir.dim
+            width = ir.dim * mul
+            values = features[..., offset : offset + width, :].reshape(
+                *features.shape[:-2], mul, ir.dim, self.num_channels
+            )
             outputs.append(
-                torch.cat(values, dim=-1).reshape(
-                    *features.shape[:-2], ir.dim * mul * self.channels
+                values.transpose(-3, -2).reshape(
+                    *features.shape[:-2], ir.dim * mul * self.num_channels
                 )
             )
-        return (
-            torch.cat(outputs, dim=-1)
-            if outputs
-            else features.new_empty(*features.shape[:-2], 0)
-        )
+            offset += width
+        if outputs:
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return features.flatten(-2)
 
-    def _forward_edge(self, inputs, weights, leading_shape):
+    def _forward_recursive(self, inputs, order_weights):
+        leading_shape = inputs[0].shape[:-2]
+        zero = sum(features[..., :0].sum() for features in inputs)
+        zero = zero + sum(weight[..., :0].sum() for weight in order_weights)
         outputs = []
-        zero = sum(features.sum() * 0 for features in inputs) + weights.sum() * 0
-        order_weights = tuple(
-            self._order_weights(weights, index) for index in range(self.correlation)
-        )
         for output_index, ir_out in enumerate(self._base_irreps_out.expanded()):
             output = (
-                inputs[0].new_zeros(*leading_shape, ir_out.dim, self.channels) + zero
+                inputs[0].new_zeros((*leading_shape, ir_out.dim, self.num_channels))
+                + zero
             )
             for order_index, path_index, path in self._paths_by_output[output_index]:
-                value = self._contract_edge_path(inputs, path)
+                value = inputs[0][..., self._base_input_slices[path.leaves[0]], :]
+                for i in range(1, len(path.leaves)):
+                    i_in = path.leaves[i]
+                    value = _cg_product(
+                        value,
+                        path.intermediates[i - 1],
+                        inputs[i][..., self._base_input_slices[i_in], :],
+                        self._input_irreps[i_in],
+                        path.intermediates[i],
+                        elementwise=True,
+                    )
                 output = output + (
                     value
                     * order_weights[order_index][..., path_index, :].unsqueeze(-2)
                     * self._path_scales[order_index][path_index]
                 )
             outputs.append(output)
-        base = (
+        output = (
             torch.cat(outputs, dim=-2)
             if outputs
-            else inputs[0].new_empty(*leading_shape, 0, self.channels)
+            else inputs[0].new_empty((*leading_shape, 0, self.num_channels)) + zero
         )
-        return self._flatten_base(base)
+        return self._flatten_output(output)
 
-    def _to_base_layout(self, features: torch.Tensor) -> torch.Tensor:
-        return torch.cat(
-            [self._entry(features, index) for index in range(len(self.irreps_in))],
-            dim=-2,
-        )
-
-    def _forward_node(self, inputs, weights):
+    def _forward_dense(self, inputs, order_weights):
         letters = "abdefghijklmnqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         if self.correlation > len(letters):
-            raise RuntimeError("correlation is too large for the CG einsum.")
-        base_inputs = tuple(self._to_base_layout(features) for features in inputs)
+            raise ValueError("correlation exceeds the number of einsum indices.")
         output = None
         for order_index in range(self.correlation):
             order = order_index + 1
@@ -386,43 +314,68 @@ class AsymmetricContraction(torch.nn.Module):
             )
             coefficient = getattr(self, f"generalized_cg_{order}").to(inputs[0])
             contribution = torch.einsum(
-                equation,
-                coefficient,
-                *base_inputs[:order],
-                self._order_weights(weights, order_index),
+                equation, coefficient, *inputs[:order], order_weights[order_index]
             )
             output = contribution if output is None else output + contribution
-        if output is None:
-            raise RuntimeError("AsymmetricContraction produced no orders.")
-        return self._flatten_base(output)
+        return self._flatten_output(output)
 
     def forward(
         self,
         inputs: Sequence[torch.Tensor],
-        weights: torch.Tensor,
+        weight: torch.Tensor,
     ) -> torch.Tensor:
         """Evaluate all correlation orders.
 
         Parameters
         ----------
         inputs : sequence of torch.Tensor
-            Exactly ``correlation`` independent tensors. Every tensor has
-            shape ``(..., irreps_in.dim)``; their leading dimensions must
-            broadcast.
-        weights : torch.Tensor
-            Real external path weights with shape ``(..., weight_numel)``.
+            Exactly ``correlation`` independent tensors with shape
+            ``(..., irreps_in.dim)``. Leading dimensions must broadcast.
+        weight : torch.Tensor
+            External path weights with shape ``(..., weight_numel)``.
             Leading dimensions broadcast with all inputs.
 
         Returns
         -------
         torch.Tensor
-            Contracted features with shape ``(..., irreps_out.dim)`` over the
-            broadcast leading shape.
+            Contracted features with shape ``(..., irreps_out.dim)``.
         """
-        inputs, weights, leading_shape = self._validate_inputs(inputs, weights)
-        if self.algorithm == "edge":
-            return self._forward_edge(inputs, weights, leading_shape)
-        return self._forward_node(inputs, weights)
+        if len(inputs) != self.correlation:
+            raise ValueError(
+                f"Expected {self.correlation} independent inputs, got {len(inputs)}."
+            )
+        for features in inputs:
+            if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
+                raise ValueError(
+                    f"Input trailing dimension must be {self.irreps_in.dim}."
+                )
+            if features.is_complex():
+                raise TypeError("AsymmetricContraction requires real inputs.")
+        if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
+            raise ValueError(f"Weight trailing dimension must be {self.weight_numel}.")
+        if weight.is_complex():
+            raise TypeError("AsymmetricContraction requires real weights.")
+        leading_shape = torch.broadcast_shapes(
+            *(features.shape[:-1] for features in inputs), weight.shape[:-1]
+        )
+        inputs = tuple(
+            features.expand(*leading_shape, self.irreps_in.dim).reshape(
+                *leading_shape, self._base_input_dim, self.num_channels
+            )
+            for features in inputs
+        )
+        weight = weight.expand(*leading_shape, self.weight_numel)
+        order_weights = tuple(
+            weight[..., weight_slice].reshape(
+                *leading_shape, num_paths, self.num_channels
+            )
+            for weight_slice, num_paths in zip(
+                self._order_weight_slices, self.order_num_paths
+            )
+        )
+        if self.algorithm == "recursive":
+            return self._forward_recursive(inputs, order_weights)
+        return self._forward_dense(inputs, order_weights)
 
     def extra_repr(self) -> str:
         return (

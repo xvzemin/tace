@@ -398,7 +398,7 @@ class Representation(torch.nn.Module):
         edge_wigner = None
         edge_wigner_inv = None
         if self.use_so2 or self.use_o2:
-            edge_wigner, edge_wigner_inv = self.o2_angular_basis.get_wigner(
+            edge_wigner, edge_wigner_inv = self.o2_angular_basis(
                 graph.edge_vector
             )
         edge_attrs = (

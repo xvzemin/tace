@@ -3,17 +3,14 @@
 API Reference
 =============
 
-This page documents the public EquivariantX API directly from the installed
-implementation. The tensor layouts and representation conventions are
-described in :ref:`equivariantx-tutorials`.
+See :ref:`equivariantx-tutorials` for representation conventions and examples.
 
-O(2) representations with time reversal
-----------------------------------------
+Representations
+---------------
 
 Representation metadata defines the flattened ``ir_mul`` feature axis used by
-all :mod:`eqx.o2` layers. Every irrep carries reflection and time-reversal
-parity. Iterating over :class:`eqx.o2.Irreps` yields ``(irrep, multiplicity)``
-entries.
+all :mod:`eqx.o2` layers. Iterating over :class:`eqx.o2.Irreps` yields
+``(ir, mul)`` entries.
 
 .. autoclass:: eqx.o2.Irrep
    :members:
@@ -22,12 +19,11 @@ entries.
 .. autoclass:: eqx.o2.Irreps
    :members:
 
-O(2) layers
-------------
+Layers
+------
 
 These layers accept real tensors with trailing shape ``(irreps.dim,)``.
-External weights may carry leading batch dimensions when the corresponding
-module is configured without shared internal weights.
+External weights may carry leading dimensions that broadcast with the inputs.
 
 .. autoclass:: eqx.o2.Linear
    :members: forward, weight_view_for_instruction, weight_views
@@ -47,8 +43,8 @@ module is configured without shared internal weights.
 .. autoclass:: eqx.o2.AsymmetricContraction
    :members: forward
 
-O(2) angular and local-frame tools
-----------------------------------
+Harmonics and rotations
+-----------------------
 
 Circular harmonics operate directly in two dimensions. ``WignerD`` and
 ``LocalFrame`` convert global three-dimensional features to edge-aligned local
@@ -66,7 +62,7 @@ features and back while retaining flattened ``ir_mul`` storage.
 .. autofunction:: eqx.o2.rotation_matrix_to_z_axis
 
 .. autoclass:: eqx.o2.WignerD
-   :members: get_wigner
+   :members: forward
 
 .. autoclass:: eqx.o2.LocalFrame
-   :members: restrict, to_local, to_global
+   :members: restrict, forward, to_local, to_global

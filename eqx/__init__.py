@@ -1,3 +1,5 @@
-from . import co3, o2
+"""Equivariant representation algebra and PyTorch operators."""
 
-__all__ = ["co3", "o2"]
+from . import o2
+
+__all__ = ["o2"]

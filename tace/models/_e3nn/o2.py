@@ -119,11 +119,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.num_channel = num_channel
         self.mmax = min(self.irreps_in.lmax, mmax)
         self.num_head = num_head
-        if not (
-            o2.Irreps.common_multiplicity(self.irreps_in)
-            == o2.Irreps.common_multiplicity(self.irreps_out)
-            == num_channel
-        ):
+        if any(entry.mul != num_channel for entry in self.irreps_in + self.irreps_out):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
         self.local_frame_in = o2.LocalFrame(self.irreps_in, mmax=self.mmax)
         self.local_frame_out = o2.LocalFrame(
@@ -337,16 +333,9 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             mmax,
         )
         self.num_head = num_head
-        if not (
-            o2.Irreps.common_multiplicity(self.irreps_in)
-            == o2.Irreps.common_multiplicity(self.irreps_out)
-            == num_channel
-        ):
+        if any(entry.mul != num_channel for entry in self.irreps_in + self.irreps_out):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
-        if (
-            o2.Irreps.common_multiplicity(self.magnetic_edge_irreps)
-            != num_channel
-        ):
+        if any(entry.mul != num_channel for entry in self.magnetic_edge_irreps):
             raise ValueError(
                 "magnetic_edge_irreps multiplicity must equal num_channel."
             )

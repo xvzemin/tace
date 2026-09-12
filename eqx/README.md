@@ -1,17 +1,21 @@
-# EQX
+# EquivariantX
 
-EQX is a library for equivariant PyTorch operators. Its current
-focus is real O(2) representation theory, conversion between global
-O(3) and local O(2) features.
+EquivariantX provides real O(2) representations, equivariant PyTorch
+operators, and transformations between global O(3) and local O(2) features.
+Irreps include time-reversal parity. Features use a flattened `ir_mul`
+layout, with the multiplicity axis last within each irrep entry.
 
-> [!WARNING]
-> **EquivariantX is under active development.**
->
-> APIs, module names, and behaviors may change without notice, and backward compatibility is not guaranteed at this stage.
->
-> A stable release will be published as a separate package.
+The library is bundled with TACE. See the [tutorials](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html)
+and [API reference](https://tace.readthedocs.io/en/latest/equivariantx/api.html).
 
-See [EquivariantX](https://tace.readthedocs.io/en/latest/equivariantx.html) for a tutorial.
+```python
+import torch
+from eqx import o2
+
+linear = o2.Linear("8x0e + 4x1m", "4x0e + 2x1m")
+features = linear.irreps_in.randn(32, -1)
+output = linear(features)
+```
 
 ## Citation
 

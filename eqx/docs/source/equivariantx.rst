@@ -3,22 +3,9 @@
 Tutorials
 =========
 
-EquivariantX (``eqx``) provides real :math:`O(2)` operators and conversion
-between global :math:`O(3)` features and local :math:`O(2)` frames.
-
-.. note::
-
-   **EquivariantX is under active development.**
-
-   APIs, module names, and behaviors may change without notice, and backward
-   compatibility is not guaranteed at this stage.
-
-   A stable release will be published as a separate package.
-
-``eqx.o2``
-   General real :math:`O(2)\times\mathbb{Z}_2^T` irreps and operations, plus the specialized
-   conversion between global spherical :math:`O(3)` features and local
-   :math:`O(2)` frames.
+EquivariantX (``eqx``) provides real :math:`O(2)\times\mathbb{Z}_2^T`
+representations, equivariant operators, and transformations between global
+:math:`O(3)` and local :math:`O(2)` features.
 
 Quick start
 -----------
@@ -29,10 +16,14 @@ Quick start
 
    from eqx import o2
 
-   irreps_o2 = o2.Irreps("8x0ee + 4x0oe + 6x1me + 3x2me")
+   irreps = o2.Irreps("8x0ee + 4x0oe + 6x1me + 3x2me")
+   linear = o2.Linear(irreps, "4x0ee + 2x1me")
+   features = irreps.randn(32, -1)
+   output = linear(features)
+   assert output.shape == (32, linear.irreps_out.dim)
 
-Common tensor conventions
--------------------------
+Tensor layout
+-------------
 
 The :mod:`eqx.o2` operators use one flattened feature axis:
 
@@ -54,8 +45,8 @@ inputs, one for each correlation order. Inputs, internal parameters, and
 external weights use real floating-point dtypes unless an API states
 otherwise.
 
-Real O(2) with time reversal
------------------------------
+O(2) and time reversal
+----------------------
 
 Representations
 ~~~~~~~~~~~~~~~
@@ -71,12 +62,17 @@ reflection parity and an independent time-reversal parity:
    One-dimensional pseudoscalars odd under reflection.
 
 ``1me``, ``1mo``, ``2me``, ``2mo``, ...
-   Two-dimensional real irreps. The components are stored as the cosine-like
-   and sine-like pair for positive order :math:`m`. ``m`` denotes the spatial
+   Two-dimensional real irreps. The components are stored as the cosine
+   and sine pair for positive order :math:`m`. ``m`` denotes the spatial
    representation and the final letter denotes time parity.
 
-The legacy names ``0e``, ``0o``, ``1m``, ``2m``, and so on remain accepted
-and denote their time-even counterparts.
+The names ``0e``, ``0o``, ``1m``, and ``2m`` omit the even time parity.
+
+``Irreps.sort()`` returns ``(irreps, p, inv)``: the sorted representation,
+the original-to-sorted entry permutation, and its inverse. Entries are sorted
+by order, reflection parity, and time parity, with even parity first.
+``simplify()`` merges adjacent identical entries; ``regroup()`` sorts and
+then simplifies. These operations change representation metadata, not tensors.
 
 For a rotation by :math:`\theta`, a positive-order block transforms as
 
@@ -127,12 +123,12 @@ are returned as differentiable zeros; only ``0ee`` can receive a bias.
 
 :class:`eqx.o2.Gate` applies an arbitrary scalar activation to ``0ee``. An
 activation acting on a scalar that is odd under reflection or time reversal
-must itself be even or odd. Gate products multiply both reflection and time
-parities.
+must itself be even or odd. Gated outputs follow the tensor-product rules
+for the activated gate and the gated irrep.
 
-:class:`eqx.o2.TensorProduct` supports three channel contracts:
+:class:`eqx.o2.TensorProduct` supports three connection modes:
 
-.. list-table:: Tensor-product path modes
+.. list-table:: Tensor-product connection modes
    :header-rows: 1
    :widths: 18 32 50
 
@@ -149,7 +145,13 @@ parities.
      - No equality constraint
      - Dense :math:`C_1\times C_2\times C_3` weights
 
-A minimal nonlinear block is
+Activations are rescaled so that :math:`\mathbb{E}[\phi(z)^2]=1` for
+:math:`z\sim\mathcal{N}(0,1)`. Linear and tensor-product path normalization
+uses the declared input variances and unit-variance weight initialization.
+``path_normalization="element"`` normalizes by the total number of contributing
+input elements; ``"path"`` assigns equal variance to each contributing path.
+
+A gated update can be constructed as follows:
 
 .. code-block:: python
 
@@ -182,7 +184,7 @@ A minimal nonlinear block is
 Circular harmonics
 ~~~~~~~~~~~~~~~~~~
 
-:class:`eqx.o2.CircularHarmonics` constructs native two-dimensional angular
+:class:`eqx.o2.CircularHarmonics` constructs two-dimensional angular
 features. With ``normalize=True`` the output depends only on direction. With
 ``normalize=False``, order :math:`m` is homogeneous of degree :math:`m` in the
 input vector. ``time_reversal=True`` declares a time-odd input and assigns
@@ -230,24 +232,25 @@ time-odd vector restricts as ``1eo -> 0oo + 1mo``.
 matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies
 those matrices. Its global input and local output both use flattened
 ``ir_mul`` layout. ``mmax`` may truncate local positive orders while inverse
-rescaling preserves the intended variance. ``LocalFrame`` derives its required
-degree from the irreps and the supplied Wigner layout from the matrix shapes;
-it does not take ``lmax``. A shared matrix may cover additional degrees or orders.
+rescaling preserves the intended variance. ``LocalFrame`` derives the required
+degree from its irreps and the Wigner layout from matrix shapes. Shared
+matrices may cover additional degrees or orders.
 
 .. code-block:: python
 
-   channels = 64
+   num_channels = 64
    lmax = 3
    mmax = 2
-   global_irreps = (
-       "64x0e + 64x0o + 64x1o + 64x1e + "
-       "64x2e + 64x2o + 64x3o + 64x3e"
+   global_irreps = " + ".join(
+       f"{num_channels}x{l}{p}"
+       for l in range(lmax + 1)
+       for p in ("e", "o")
    )
    edge_index = torch.randint(0, 16, (2, 48))
    edge_vectors = torch.randn(48, 3)
 
    wigner = o2.WignerD(lmax=lmax, mmax=mmax)
-   D, D_inv = wigner.get_wigner(edge_vectors)
+   D, D_inv = wigner(edge_vectors)
    frame = o2.LocalFrame(
        global_irreps,
        mmax=mmax,
@@ -265,7 +268,7 @@ Sparse edge tensor products
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`eqx.o2.O3TensorProduct` evaluates a feature--spherical-harmonic
-CGTP in an edge-aligned frame. At the positive y-axis,
+Clebsch--Gordan tensor product in an edge-aligned frame. At the positive y-axis,
 
 .. math::
 
@@ -284,11 +287,10 @@ for component-normalized harmonics. The local coupling therefore reduces to
        \widetilde x^{(l_i)}_{m_i}.
 
 In the real basis, only ``m_i = +/- m_o`` can contribute. The module stores
-only the nonzero coefficients and evaluates indexed products followed by PyG
-sparse summation. Harmonics are neither evaluated nor rotated at runtime.
-The input features are rotated into the frame and the output is rotated back.
-All original angular paths, weights, and normalization factors are retained;
-this is not an unconstrained local linear layer or a magnetic-order truncation.
+only nonzero coefficients and evaluates indexed products followed by sparse
+summation. Spherical harmonics enter through their values on the y-axis;
+the feature inputs and outputs are rotated. Angular paths, weights, and
+normalization factors follow the declared tensor-product instructions.
 
 The second input must be time-even edge spherical harmonics with multiplicity
 one. Channelwise ``uvu`` and channel-mixing ``uvw`` paths are supported.
@@ -297,9 +299,10 @@ for example to reproduce unnormalized solid harmonics.
 
 .. code-block:: python
 
-   from e3nn import o3
-   from eqx import o2
    import torch
+   from e3nn import o3
+
+   from eqx import o2
 
    irreps_in = o3.Irreps("8x1o")
    irreps_sh = o3.Irreps("1x1o")
@@ -311,27 +314,23 @@ for example to reproduce unnormalized solid harmonics.
    )
    edge_vectors = torch.randn(32, 3)
    features = torch.randn(32, irreps_in.dim)  # flattened ir_mul
-   D, D_inv = o2.WignerD(2, 2).get_wigner(edge_vectors)
+   D, D_inv = o2.WignerD(2, 2)(edge_vectors)
    weights = torch.randn(32, tensor_product.weight_numel)
    output = tensor_product(features, D, D_inv, weights)
 
-The Wigner matrices can be shared across layers with different angular degrees.
-No ``lmax`` argument is needed: the feature and output irreps determine the
-required rotation coverage. All their local orders must be present, even if
-higher, unused degrees of the shared matrix are truncated. Adjacent identical
-output irreps share a rotation across their channels, while the public output
-retains the declared irrep-entry order.
+Shared Wigner matrices must retain all local orders of the feature and output
+irreps. Adjacent identical output irreps share a rotation across their channels;
+the output tensor retains the declared irrep-entry order.
 
 Asymmetric contraction
 ~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`eqx.o2.AsymmetricContraction` contracts independent input features up
 to a requested correlation order. All weights are supplied externally.
-``algorithm="edge"`` recursively evaluates paths and minimizes coefficient
-storage. ``algorithm="node"`` stores generalized CG tensors and evaluates
-larger dense contractions, trading memory for node-level speed. Both
-algorithms enumerate the same paths. ``path_mode="sum"`` is the default and
-accumulates paths with the same output irrep using variance-preserving
-normalization. ``path_mode="expand"`` retains every path as an output
-multiplicity so that a following :class:`eqx.o2.Linear` performs the
-compression.
+``algorithm="recursive"`` evaluates successive channel-wise tensor products.
+``algorithm="dense"`` contracts precomputed generalized Clebsch--Gordan
+tensors, using more coefficient storage. Both enumerate the same paths and
+accept inputs at any batch size. ``path_mode="sum"`` sums paths to each output
+irrep and scales by the inverse square root of the path count.
+``path_mode="expand"`` retains paths in the output multiplicity, allowing a
+following :class:`eqx.o2.Linear` to mix them.

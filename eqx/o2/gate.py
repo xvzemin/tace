@@ -3,20 +3,13 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import NamedTuple, Optional, Sequence
+from typing import Callable, NamedTuple, Optional, Sequence
 
 import torch
 from e3nn.math import normalize2mom
 
 from .irreps import Irrep, Irreps, IrrepsLike
-
-
-def _parity_order(ir: Irrep) -> tuple[int, int, int]:
-    return ir.m, {1: 0, -1: 1, 0: 2}[ir.p], {1: 0, -1: 1}[ir.t]
-
-
-def _quarter_turn(features: torch.Tensor) -> torch.Tensor:
-    return torch.stack((-features[..., 1, :], features[..., 0, :]), dim=-2)
+from .tensor_product import _quarter_turn
 
 
 class Activation(torch.nn.Module):
@@ -24,13 +17,13 @@ class Activation(torch.nn.Module):
 
     Parameters
     ----------
-    irreps_in : IrrepsLike
+    irreps_in : Irreps, str, or sequence
         Input representation. Non-``None`` activations are valid only for
         order-zero entries.
-    acts : sequence of torch.nn.Module or None
+    acts : sequence of callable or None
         One activation per input entry. ``None`` leaves that entry unchanged.
-        Each activation is rescaled to preserve second moments, and its parity
-        determines the corresponding output reflection and time parity.
+        Each activation is rescaled to unit second moment for standard-normal
+        inputs. Its parity determines the output reflection and time parity.
 
     Notes
     -----
@@ -41,7 +34,7 @@ class Activation(torch.nn.Module):
     def __init__(
         self,
         irreps_in: IrrepsLike,
-        acts: Sequence[Optional[torch.nn.Module]],
+        acts: Sequence[Optional[Callable]],
     ) -> None:
         super().__init__()
         self.irreps_in = Irreps(irreps_in)
@@ -61,6 +54,9 @@ class Activation(torch.nn.Module):
                 continue
             if ir.m != 0:
                 raise ValueError("Activation functions can only act on scalars.")
+            if ir.is_invariant_scalar():
+                irreps_out.append((ir, mul))
+                continue
             reference = next(act.parameters(), None)
             if reference is None:
                 reference = next(act.buffers(), None)
@@ -96,9 +92,7 @@ class Activation(torch.nn.Module):
             else:
                 output_parity = 1
                 output_time_parity = 1
-            irreps_out.append(
-                (Irrep(0, output_parity, output_time_parity), mul)
-            )
+            irreps_out.append((Irrep(0, output_parity, output_time_parity), mul))
 
         self.irreps_out = Irreps(irreps_out)
         self.acts = torch.nn.ModuleList(normalized_acts)
@@ -127,8 +121,12 @@ class Activation(torch.nn.Module):
             values = features[..., ir_slice]
             outputs.append(values if act is None else act(values))
         if outputs:
-            return torch.cat(outputs, dim=-1)
-        return features.new_empty(*features.shape[:-1], 0)
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return features[..., :0]
+
+    def __repr__(self) -> str:
+        acts = "".join("x" if act is not None else " " for act in self.acts)
+        return f"{self.__class__.__name__} [{acts}] ({self.irreps_in} -> {self.irreps_out})"
 
 
 class _GatePath(NamedTuple):
@@ -143,21 +141,21 @@ class _GatePath(NamedTuple):
 
 
 class Gate(torch.nn.Module):
-    """Apply time-reversal-aware scalar activations and gates to O(2) features.
+    """Apply scalar activations and scalar gates to O(2) features.
 
     Parameters
     ----------
-    irreps_scalars : IrrepsLike
+    irreps_scalars : Irreps, str, or sequence
         Scalar entries transformed directly by ``act_scalars``.
-    act_scalars : sequence of torch.nn.Module or None
+    act_scalars : sequence of callable or None
         One normalized activation for each scalar entry.
-    irreps_gates : IrrepsLike
+    irreps_gates : Irreps, str, or sequence
         Order-zero entries used as gates. Their total multiplicity must equal
-        the total multiplicity in ``irreps_gated``. Reflection and time parity
-        are multiplied into the corresponding gated representations.
-    act_gates : sequence of torch.nn.Module or None
+        the total multiplicity in ``irreps_gated``. Output irreps follow the
+        tensor product of each activated gate and its gated entry.
+    act_gates : sequence of callable or None
         One normalized activation for each gate entry.
-    irreps_gated : IrrepsLike
+    irreps_gated : Irreps, str, or sequence
         Entries multiplied channel-wise by the activated gates.
 
     Notes
@@ -170,9 +168,9 @@ class Gate(torch.nn.Module):
     def __init__(
         self,
         irreps_scalars: IrrepsLike,
-        act_scalars: Sequence[Optional[torch.nn.Module]],
+        act_scalars: Sequence[Optional[Callable]],
         irreps_gates: IrrepsLike,
-        act_gates: Sequence[Optional[torch.nn.Module]],
+        act_gates: Sequence[Optional[Callable]],
         irreps_gated: IrrepsLike,
     ) -> None:
         super().__init__()
@@ -195,46 +193,24 @@ class Gate(torch.nn.Module):
         self.irreps_gates = irreps_gates
         self.irreps_gated = irreps_gated
 
-        tagged_entries = (
-            [
-                ("scalar", index, mul, ir)
-                for index, (ir, mul) in enumerate(irreps_scalars)
-            ]
-            + [("gate", index, mul, ir) for index, (ir, mul) in enumerate(irreps_gates)]
-            + [
-                ("gated", index, mul, ir)
-                for index, (ir, mul) in enumerate(irreps_gated)
-            ]
-        )
-        tagged_entries.sort(key=lambda item: _parity_order(item[3]))
-        self.irreps_in = Irreps([(ir, mul) for _, _, mul, ir in tagged_entries])
-        input_locations = {
-            (kind, index): location
-            for location, (kind, index, _, _) in enumerate(tagged_entries)
-        }
-        self._scalar_locations = tuple(
-            input_locations[("scalar", index)] for index in range(len(irreps_scalars))
-        )
-        self._gate_locations = tuple(
-            input_locations[("gate", index)] for index in range(len(irreps_gates))
-        )
-        self._gated_locations = tuple(
-            input_locations[("gated", index)] for index in range(len(irreps_gated))
-        )
+        self.irreps_in, p, _ = (irreps_scalars + irreps_gates + irreps_gated).sort()
+        scalar_end = len(irreps_scalars)
+        gate_end = scalar_end + len(irreps_gates)
+        self._scalar_locations = p[:scalar_end]
+        self._gate_locations = p[scalar_end:gate_end]
+        self._gated_locations = p[gate_end:]
         self._input_slices = self.irreps_in.slices()
+        self._gate_slices = self.act_gates.irreps_out.slices()
 
         paths = []
         output_irrep_list = []
         i_gate = i_gated = 0
         gate_start = gated_start = 0
         while i_gate < len(self.act_gates.irreps_out):
-            gate_ir, gate_mul = self.act_gates.irreps_out[i_gate]
-            gated_ir, gated_mul = irreps_gated[i_gated]
-            count = min(gate_mul - gate_start, gated_mul - gated_start)
-            product = gated_ir * gate_ir
-            if len(product) != 1:
-                raise RuntimeError("A scalar gate must produce one O(2) irrep.")
-            ir_out = product[0]
+            ir_gate, mul_gate = self.act_gates.irreps_out[i_gate]
+            ir_gated, mul_gated = irreps_gated[i_gated]
+            count = min(mul_gate - gate_start, mul_gated - gated_start)
+            (ir_out,) = ir_gated * ir_gate
             paths.append(
                 _GatePath(
                     i_gate,
@@ -242,18 +218,18 @@ class Gate(torch.nn.Module):
                     i_gated,
                     gated_start,
                     count,
-                    gate_ir,
-                    gated_ir,
+                    ir_gate,
+                    ir_gated,
                     ir_out,
                 )
             )
             output_irrep_list.append((ir_out, count))
             gate_start += count
             gated_start += count
-            if gate_start == gate_mul:
+            if gate_start == mul_gate:
                 i_gate += 1
                 gate_start = 0
-            if gated_start == gated_mul:
+            if gated_start == mul_gated:
                 i_gated += 1
                 gated_start = 0
         self._paths = tuple(paths)
@@ -265,7 +241,9 @@ class Gate(torch.nn.Module):
         locations: tuple[int, ...],
     ) -> torch.Tensor:
         if not locations:
-            return features.new_empty(*features.shape[:-1], 0)
+            return features[..., :0]
+        if len(locations) == 1:
+            return features[..., self._input_slices[locations[0]]]
         return torch.cat(
             [features[..., self._input_slices[index]] for index in locations],
             dim=-1,
@@ -295,17 +273,14 @@ class Gate(torch.nn.Module):
         if not self._paths:
             return scalars
         gates = self.act_gates(self._select_entries(features, self._gate_locations))
-        gated = self._select_entries(features, self._gated_locations)
-        gate_slices = self.act_gates.irreps_out.slices()
-        gated_slices = self.irreps_gated.slices()
         outputs = [scalars]
         for path in self._paths:
-            gate = gates[..., gate_slices[path.i_gate]].reshape(
-                *gates.shape[:-1],
-                self.act_gates.irreps_out[path.i_gate].mul,
-            )[..., path.gate_start : path.gate_start + path.mul]
-            values = gated[..., gated_slices[path.i_gated]].reshape(
-                *gated.shape[:-1],
+            gate = gates[..., self._gate_slices[path.i_gate]][
+                ..., path.gate_start : path.gate_start + path.mul
+            ]
+            i_in = self._gated_locations[path.i_gated]
+            values = features[..., self._input_slices[i_in]].reshape(
+                *features.shape[:-1],
                 path.ir_gated.dim,
                 self.irreps_gated[path.i_gated].mul,
             )[..., path.gated_start : path.gated_start + path.mul]

@@ -35,16 +35,16 @@ def _entry_components(frame: LocalFrame, index: int):
 
 
 class O3TensorProduct(torch.nn.Module):
-    r"""Couple features to edge spherical harmonics using sparse local CG maps.
+    r"""Couple O(3) features to spherical harmonics in an edge-aligned frame.
 
     Parameters
     ----------
-    irreps_in1 : O(3) irreps-like
+    irreps_in1 : o3.Irreps or str
         Feature representation, stored in flattened ``ir_mul`` order.
-    irreps_in2 : O(3) irreps-like
+    irreps_in2 : o3.Irreps or str
         Edge spherical-harmonic representation. Each entry must have one
         channel, natural spatial parity, and even time parity.
-    irreps_out : O(3) irreps-like
+    irreps_out : o3.Irreps or str
         Output representation, stored in flattened ``ir_mul`` order.
     instructions : sequence of tuple
         Paths ``(i_in1, i_in2, i_out, mode, train[, path_weight])``.
@@ -56,7 +56,8 @@ class O3TensorProduct(torch.nn.Module):
     path_normalization : {"element", "path", "none"}, optional
         Normalization across paths reaching the same output entry.
     internal_weights : bool, optional
-        Store trainable weights internally. Defaults to ``shared_weights``.
+        Store trainable weights internally. The default is inferred from
+        ``shared_weights`` and the weighted instructions.
     shared_weights : bool, optional
         Share one weight vector across edges. Defaults to ``True``.
     normalization : {"component", "integral", "norm"}, optional
@@ -128,6 +129,7 @@ class O3TensorProduct(torch.nn.Module):
         )
         self.instructions = metadata.instructions
         self.weight_numel = metadata.weight_numel
+        self.weight_shape = (self.weight_numel,)
         self.internal_weights = metadata.internal_weights
         self.shared_weights = metadata.shared_weights
         if self.internal_weights and self.weight_numel:
@@ -138,16 +140,15 @@ class O3TensorProduct(torch.nn.Module):
 
         self.local_frame_in = LocalFrame(self.irreps_in1)
         output_frame = LocalFrame(self.irreps_out, reverse=True)
-        self.local_frame_out = LocalFrame(
-            self.irreps_out.simplify(), reverse=True
-        )
+        simplified_irreps_out = self.irreps_out.simplify()
+        self.local_frame_out = LocalFrame(simplified_irreps_out, reverse=True)
         self.lmax = max(self.local_frame_in.lmax, self.local_frame_out.lmax)
         # Adjacent equal irreps share a single rotation over their channels.
         # The public output still preserves the declared, unsimplified layout.
         output_index = []
         simplified_offset = 0
         entry_index = 0
-        for entry in self.irreps_out.simplify():
+        for entry in simplified_irreps_out:
             ir, mul = entry.ir, entry.mul
             channel_offset = 0
             while channel_offset < mul:
@@ -160,7 +161,7 @@ class O3TensorProduct(torch.nn.Module):
                 channel_offset += width
                 entry_index += 1
             simplified_offset += ir.dim * mul
-        self._simplify_output = self.irreps_out != self.irreps_out.simplify()
+        self._simplify_output = self.irreps_out != simplified_irreps_out
         self.register_buffer(
             "output_index",
             torch.tensor(output_index, dtype=torch.long),
@@ -171,7 +172,14 @@ class O3TensorProduct(torch.nn.Module):
         self.num_harmonics = len(self.irreps_in2)
         self._has_unweighted = any(not ins.has_weight for ins in self.instructions)
 
-        plans = {}
+        input_components = tuple(
+            _entry_components(self.local_frame_in, i)
+            for i in range(len(self.irreps_in1))
+        )
+        output_components = tuple(
+            _entry_components(output_frame, i) for i in range(len(self.irreps_out))
+        )
+        contractions = {}
         offset = 0
         for ins in self.instructions:
             ir1, mul1 = self.irreps_in1[ins.i_in1].ir, self.irreps_in1[ins.i_in1].mul
@@ -190,11 +198,9 @@ class O3TensorProduct(torch.nn.Module):
             if not mul1 or not mul_out or not ins.path_weight:
                 continue
             key = (ins.connection_mode, mul1, mul_out)
-            plan = plans.setdefault(
+            contraction = contractions.setdefault(
                 key, dict(input=[], output=[], weight=[], scale=[], harmonic=[])
             )
-            input_components = _entry_components(self.local_frame_in, ins.i_in1)
-            output_components = _entry_components(output_frame, ins.i_out)
             cg = o3.wigner_3j(ir1.l, ir2.l, ir_out.l, dtype=torch.float64)[:, ir2.l, :]
             pole = math.sqrt(2 * ir2.l + 1) if normalization != "norm" else 1.0
             if normalization == "integral":
@@ -205,19 +211,21 @@ class O3TensorProduct(torch.nn.Module):
                     coefficient = float(cg[ir1.l + m_in, ir_out.l + m_out])
                     if coefficient == 0.0:
                         continue
-                    input_start, input_sign = input_components[m_in]
-                    output_start, output_sign = output_components[m_out]
-                    plan["input"].extend(range(input_start, input_start + mul1))
-                    plan["output"].extend(range(output_start, output_start + mul_out))
-                    plan["weight"].extend(weight_indices)
-                    plan["scale"].append(
+                    input_start, input_sign = input_components[ins.i_in1][m_in]
+                    output_start, output_sign = output_components[ins.i_out][m_out]
+                    contraction["input"].extend(range(input_start, input_start + mul1))
+                    contraction["output"].extend(
+                        range(output_start, output_start + mul_out)
+                    )
+                    contraction["weight"].extend(weight_indices)
+                    contraction["scale"].append(
                         coefficient * pole * ins.path_weight * input_sign * output_sign
                     )
-                    plan["harmonic"].append(ins.i_in2)
+                    contraction["harmonic"].append(ins.i_in2)
 
-        self._plans = tuple(plans)
-        for index, plan in enumerate(plans.values()):
-            for name, values in plan.items():
+        self._contractions = tuple(contractions)
+        for index, contraction in enumerate(contractions.values()):
+            for name, values in contraction.items():
                 self.register_buffer(
                     f"{name}_{index}",
                     torch.tensor(
@@ -229,10 +237,10 @@ class O3TensorProduct(torch.nn.Module):
                     persistent=False,
                 )
 
-    def extra_repr(self) -> str:
+    def __repr__(self) -> str:
         return (
-            f"{self.irreps_in1} x Y({self.irreps_in2}) -> {self.irreps_out} | "
-            f"{self.weight_numel} weights"
+            f"{self.__class__.__name__}({self.irreps_in1} x Y({self.irreps_in2}) "
+            f"-> {self.irreps_out} | {self.weight_numel} weights)"
         )
 
     def forward_local(
@@ -241,29 +249,53 @@ class O3TensorProduct(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
         harmonic_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Apply the reduced CG map to already-local features.
+        """Apply the tensor product in the local frame.
 
-        ``features`` uses ``local_frame_in.irreps_out``. ``harmonic_scale``,
-        when supplied, contains one invariant multiplier per harmonic entry,
-        with shape ``(..., len(irreps_in2))``; unit multipliers are implicit.
+        Parameters
+        ----------
+        features : torch.Tensor
+            Local features with shape ``(..., local_frame_in.irreps_out.dim)``.
+        weight : torch.Tensor, optional
+            External weights with shape ``(..., weight_numel)``. Leading
+            dimensions broadcast with the features.
+        harmonic_scale : torch.Tensor, optional
+            Invariant amplitude for each spherical-harmonic entry, with shape
+            ``(..., len(irreps_in2))``. Defaults to one.
+
+        Returns
+        -------
+        torch.Tensor
+            Features with shape ``(..., local_frame_out.irreps_out.dim)``.
         """
+        if features.ndim < 1 or features.shape[-1] != self.local_frame_in.output_dim:
+            raise ValueError(
+                f"Local feature trailing dimension must be {self.local_frame_in.output_dim}."
+            )
         if weight is None:
             if not self.internal_weights and self.weight_numel:
-                raise ValueError("External weights are required.")
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights=False."
+                )
             weight = self.weight
-        if weight.shape[-1] != self.weight_numel:
+        if weight.ndim < 1 or weight.shape[-1] != self.weight_numel:
             raise ValueError(f"Expected {self.weight_numel} weights.")
-        if (
-            harmonic_scale is not None
-            and harmonic_scale.shape[-1] != self.num_harmonics
+        if harmonic_scale is not None and (
+            harmonic_scale.ndim < 1 or harmonic_scale.shape[-1] != self.num_harmonics
         ):
             raise ValueError(
                 "harmonic_scale must contain one value per harmonic entry."
             )
+        leading_shape = torch.broadcast_shapes(
+            features.shape[:-1],
+            weight.shape[:-1],
+            () if harmonic_scale is None else harmonic_scale.shape[:-1],
+        )
         if self._has_unweighted:
-            weight = torch.cat((weight, weight.new_ones(*weight.shape[:-1], 1)), dim=-1)
+            weight = torch.cat(
+                (weight, weight.new_ones((*weight.shape[:-1], 1))), dim=-1
+            )
         output = None
-        for index, (mode, mul1, mul_out) in enumerate(self._plans):
+        for index, (mode, mul1, mul_out) in enumerate(self._contractions):
             scale = getattr(self, f"scale_{index}")
             count = scale.numel()
             values = features.index_select(-1, getattr(self, f"input_{index}"))
@@ -288,8 +320,11 @@ class O3TensorProduct(torch.nn.Module):
             )
             output = contribution if output is None else output + contribution
         if output is None:
-            return features.new_zeros(*features.shape[:-1], self.local_output_dim)
-        return output
+            zero = features[..., :0].sum() + weight[..., :0].sum()
+            if harmonic_scale is not None:
+                zero = zero + harmonic_scale[..., :0].sum()
+            return features.new_zeros((*leading_shape, self.local_output_dim)) + zero
+        return output.expand(*leading_shape, self.local_output_dim)
 
     def forward(
         self,
@@ -299,13 +334,28 @@ class O3TensorProduct(torch.nn.Module):
         weight: Optional[torch.Tensor] = None,
         harmonic_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Rotate features, apply the sparse CG map, and rotate the output back.
+        """Rotate features, apply the tensor product, and rotate back.
 
-        Features have shape ``(edges, ..., irreps_in1.dim)``. Wigner matrices
-        must align the harmonic direction to the positive y-axis and retain
-        every order of the feature and output irreps. Their layout is inferred
-        from their shapes. Weights follow the original instruction order,
-        shared or broadcast over the leading feature dimensions.
+        Parameters
+        ----------
+        features : torch.Tensor
+            Global features with shape ``(batch, ..., irreps_in1.dim)``.
+        wigner : torch.Tensor
+            Global-to-local matrices with shape ``(batch, local_dim, global_dim)``.
+            They must align the harmonic direction to the positive y-axis and
+            retain all orders of the input and output representations.
+        wigner_inv : torch.Tensor
+            Local-to-global matrices with shape ``(batch, global_dim, local_dim)``.
+        weight : torch.Tensor, optional
+            External weights with shape ``(..., weight_numel)`` in instruction
+            order. Leading dimensions broadcast with the features.
+        harmonic_scale : torch.Tensor, optional
+            Invariant amplitudes with shape ``(..., len(irreps_in2))``.
+
+        Returns
+        -------
+        torch.Tensor
+            Global output with shape ``(batch, ..., irreps_out.dim)``.
         """
         features = self.local_frame_in.to_local(features, wigner)
         features = self.forward_local(features, weight, harmonic_scale)

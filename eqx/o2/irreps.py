@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Iterator, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
-from e3nn import o3
 
 Parity = Union[int, str]
 TimeParity = Union[int, str]
@@ -45,7 +44,7 @@ class Irrep:
     ``0ee`` and ``0oe`` are the one-dimensional reflection-even and
     reflection-odd time-even irreps. Every positive order is a two-dimensional
     real irrep denoted by ``m``. The final ``e`` or ``o`` denotes time parity.
-    Legacy names such as ``0e``, ``0o``, and ``1m`` denote time-even irreps.
+    Names such as ``0e``, ``0o``, and ``1m`` omit the even time parity.
     """
 
     m: int
@@ -107,11 +106,7 @@ class Irrep:
                 raise ValueError(
                     "O(2) parity must be -1/'o', 0/'m', or +1/'e'."
                 ) from None
-        if (
-            not isinstance(parity, int)
-            or isinstance(parity, bool)
-            or parity not in (-1, 0, 1)
-        ):
+        if not isinstance(parity, int) or parity not in (-1, 0, 1):
             raise ValueError("O(2) parity must be -1/'o', 0/'m', or +1/'e'.")
 
         if isinstance(time_parity, str):
@@ -121,14 +116,10 @@ class Irrep:
                 raise ValueError(
                     "Time-reversal parity must be -1/'o' or +1/'e'."
                 ) from None
-        if (
-            not isinstance(time_parity, int)
-            or isinstance(time_parity, bool)
-            or time_parity not in (-1, 1)
-        ):
+        if not isinstance(time_parity, int) or time_parity not in (-1, 1):
             raise ValueError("Time-reversal parity must be -1/'o' or +1/'e'.")
 
-        if not isinstance(order, int) or isinstance(order, bool) or order < 0:
+        if not isinstance(order, int) or order < 0:
             raise ValueError("O(2) order m must be a non-negative integer.")
         if order == 0 and parity not in (-1, 1):
             raise ValueError("Order zero must be either 0e or 0o.")
@@ -191,6 +182,12 @@ class Irrep:
             Irrep(abs(self.m - other.m), 0, time_parity),
             Irrep(self.m + other.m, 0, time_parity),
         )
+
+    def __rmul__(self, mul: int) -> "Irreps":
+        return Irreps(self) * mul
+
+    def __add__(self, other: IrrepsLike) -> "Irreps":
+        return Irreps(self) + Irreps(other)
 
     def D_from_angle(
         self,
@@ -261,12 +258,18 @@ class _IrMul(NamedTuple):
         return self.mul * self.ir.dim
 
 
+class _SortResult(NamedTuple):
+    irreps: "Irreps"
+    p: tuple[int, ...]
+    inv: tuple[int, ...]
+
+
 class Irreps:
     """A direct sum of real O(2) irreps.
 
     Parameters
     ----------
-    irreps : IrrepsLike, optional
+    irreps : Irreps, Irrep, str, or sequence, optional
         Representation specification. Accepted forms include canonical strings,
         individual irreps, ``(irrep, multiplicity)`` pairs, and sequences of
         those pairs.
@@ -282,9 +285,10 @@ class Irreps:
 
     def __init__(self, irreps: IrrepsLike = "") -> None:
         if isinstance(irreps, Irreps):
-            irrep_list = tuple(irreps)
+            object.__setattr__(self, "_irreps", irreps._irreps)
+            return
         elif isinstance(irreps, Irrep):
-            irrep_list = ((irreps, 1),)
+            irreps = ((irreps, 1),)
         elif isinstance(irreps, str):
             irrep_list = []
             compact = irreps.replace(" ", "")
@@ -292,67 +296,43 @@ class Irreps:
                 for term in compact.split("+"):
                     try:
                         if "x" in term:
-                            multiplicity, name = term.split("x")
-                            multiplicity = int(multiplicity)
+                            mul, name = term.split("x")
+                            mul = int(mul)
                         else:
-                            multiplicity, name = 1, term
-                        irrep = Irrep(name)
+                            mul, name = 1, term
                     except (TypeError, ValueError):
                         raise ValueError(
                             f"Invalid O(2) irreps term: {term!r}."
                         ) from None
-                    if multiplicity < 1:
-                        raise ValueError("Irrep multiplicities must be positive.")
-                    irrep_list.append((irrep, multiplicity))
-            irrep_list = tuple(irrep_list)
+                    irrep_list.append((name, mul))
+            irreps = irrep_list
         elif (
             isinstance(irreps, tuple)
             and len(irreps) == 2
             and isinstance(irreps[1], int)
         ):
-            irrep_list = (self._from_ir_mul(irreps),)
-        elif isinstance(irreps, Sequence):
-            irrep_list = tuple(self._from_ir_mul(item) for item in irreps)
-        else:
-            raise TypeError("Unsupported Irreps input.")
-        object.__setattr__(
-            self,
-            "_irreps",
-            tuple(self._from_ir_mul(item) for item in irrep_list),
-        )
+            irreps = (irreps,)
+        elif irreps is None:
+            irreps = ()
 
-    @staticmethod
-    def _from_ir_mul(item) -> _IrMul:
-        if isinstance(item, (Irrep, str)):
-            return _IrMul(Irrep(item), 1)
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise TypeError(
-                "Each Irreps entry must be an irrep or an (irrep, multiplicity) pair."
-            )
-        irrep, multiplicity = item
-        if not isinstance(multiplicity, int) or isinstance(multiplicity, bool):
-            raise TypeError("Irrep multiplicity must be an integer.")
-        if multiplicity < 1:
-            raise ValueError("Irrep multiplicities must be positive.")
-        return _IrMul(Irrep(irrep), multiplicity)
+        irrep_list = []
+        for item in irreps:
+            if isinstance(item, (Irrep, str)):
+                ir, mul = item, 1
+            else:
+                ir, mul = item
+            if not isinstance(mul, int):
+                raise TypeError("Irrep multiplicity must be an integer.")
+            if mul < 1:
+                raise ValueError("Irrep multiplicities must be positive.")
+            irrep_list.append(_IrMul(Irrep(ir), mul))
+        object.__setattr__(self, "_irreps", tuple(irrep_list))
 
     def __setattr__(self, name, value) -> None:
         raise AttributeError("Irreps metadata is immutable.")
 
-    @staticmethod
-    def common_multiplicity(
-        irreps: Union[o3.Irreps, "Irreps"],
-    ) -> int:
-        """Return the multiplicity shared by all irrep entries."""
-        if isinstance(irreps, o3.Irreps):
-            multiplicities = {entry.mul for entry in irreps}
-        else:
-            multiplicities = {mul for _, mul in irreps}
-        if not multiplicities:
-            raise ValueError("Irreps must contain at least one entry.")
-        if len(multiplicities) != 1:
-            raise ValueError("Irreps must use one common multiplicity.")
-        return next(iter(multiplicities))
+    def __reduce__(self):
+        return type(self), (self._irreps,)
 
     @property
     def dim(self) -> int:
@@ -367,6 +347,7 @@ class Irreps:
         return max((ir.m for ir, _ in self), default=-1)
 
     def expanded(self) -> Tuple[Irrep, ...]:
+        """Return one irrep for each multiplicity channel."""
         return tuple(ir for ir, mul in self for _ in range(mul))
 
     def slices(self) -> Tuple[slice, ...]:
@@ -412,7 +393,7 @@ class Irreps:
             raise ValueError("Specify only one of keep, drop, or mmax.")
 
         if mmax is not None:
-            if not isinstance(mmax, int) or isinstance(mmax, bool):
+            if not isinstance(mmax, int):
                 raise TypeError("mmax must be an integer.")
             if mmax < 0:
                 raise ValueError("mmax must be non-negative.")
@@ -453,26 +434,32 @@ class Irreps:
         irrep_list.append((ir, mul))
         return Irreps(irrep_list)
 
-    def sort(self) -> "Irreps":
-        parity_order = {1: 0, -1: 1, 0: 2}
-        time_parity_order = {1: 0, -1: 1}
-        return Irreps(
+    def sort(self) -> _SortResult:
+        """Sort by order, reflection parity, and time parity, with even parity first.
+
+        Returns
+        -------
+        irreps : Irreps
+            Sorted representation without merging entries.
+        p : tuple of int
+            Map each original entry index to its sorted position.
+        inv : tuple of int
+            Original entry indices in sorted order.
+        """
+        inv = tuple(
             sorted(
-                self._irreps,
-                key=lambda ir_mul: (
-                    ir_mul.ir.m,
-                    parity_order[ir_mul.ir.p],
-                    time_parity_order[ir_mul.ir.t],
-                ),
+                range(len(self)),
+                key=lambda i: (self[i].ir.m, -self[i].ir.p, -self[i].ir.t),
             )
         )
+        p = [0] * len(self)
+        for i, j in enumerate(inv):
+            p[j] = i
+        return _SortResult(Irreps([self[i] for i in inv]), tuple(p), inv)
 
     def regroup(self) -> "Irreps":
         """Collect equal irreps and return them in canonical order."""
-        counts = {}
-        for ir, mul in self:
-            counts[ir] = counts.get(ir, 0) + mul
-        return Irreps(list(counts.items())).sort()
+        return self.sort().irreps.simplify()
 
     def randn(
         self,
@@ -541,6 +528,7 @@ class Irreps:
         return output.requires_grad_(requires_grad)
 
     def count(self, irrep: IrrepLike) -> int:
+        """Return the total multiplicity of an irrep."""
         irrep = Irrep(irrep)
         return sum(mul for ir, mul in self if ir == irrep)
 
@@ -602,14 +590,21 @@ class Irreps:
             return Irreps(self._irreps[index])
         return self._irreps[index]
 
+    def __contains__(self, irrep: IrrepLike) -> bool:
+        irrep = Irrep(irrep)
+        return any(ir == irrep for ir, _ in self)
+
     def __add__(self, other: IrrepsLike) -> "Irreps":
         return Irreps(self._irreps + tuple(Irreps(other)))
 
     def __mul__(self, multiplicity: int) -> "Irreps":
-        if not isinstance(multiplicity, int) or isinstance(multiplicity, bool):
+        """Multiply each entry's multiplicity by a non-negative integer."""
+        if not isinstance(multiplicity, int):
             return NotImplemented
-        if multiplicity < 1:
-            raise ValueError("Irreps can only be multiplied by a positive integer.")
+        if multiplicity < 0:
+            raise ValueError("Irreps can only be multiplied by a non-negative integer.")
+        if multiplicity == 0:
+            return Irreps()
         return Irreps([(ir, multiplicity * mul) for ir, mul in self._irreps])
 
     __rmul__ = __mul__

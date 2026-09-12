@@ -56,7 +56,7 @@ def test_magnetic_scale_is_resolved_per_fidelity(magnetic_scales, expected_scale
                     "avg_num_neighbors": 4.0,
                     "max_noncollinear_magmoms_norm_by_element": {26: 3.0},
                 },
-            ][:len(magnetic_scales)],
+            ][: len(magnetic_scales)],
             "target_property": [],
             "fidelity": [
                 {"name": name, "magnetic_scale": scale}
@@ -100,18 +100,24 @@ def test_magnetic_basis_selects_fidelity_and_element(num_nodes, num_fidelities):
         Lmax=1,
         atomic_numbers=[26, 28],
     ).to(DEVICE, DTYPE)
-    magmoms = torch.tensor(
-        [[0.3, -0.4, 0.5]] * num_nodes,
-        dtype=DTYPE,
-        device=DEVICE,
-    ).reshape(num_nodes, 3).requires_grad_()
+    magmoms = (
+        torch.tensor(
+            [[0.3, -0.4, 0.5]] * num_nodes,
+            dtype=DTYPE,
+            device=DEVICE,
+        )
+        .reshape(num_nodes, 3)
+        .requires_grad_()
+    )
     node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)[
         torch.tensor([1, 0, 0, 1], device=DEVICE)[:num_nodes]
     ]
-    node_fidelity = torch.tensor([0, 1, 0, 1], device=DEVICE)[:num_nodes] % num_fidelities
-    edge_index = torch.tensor(
-        [[0, 2, 1, 3], [2, 0, 3, 1]], device=DEVICE
-    )[:, :num_nodes]
+    node_fidelity = (
+        torch.tensor([0, 1, 0, 1], device=DEVICE)[:num_nodes] % num_fidelities
+    )
+    edge_index = torch.tensor([[0, 2, 1, 3], [2, 0, 3, 1]], device=DEVICE)[
+        :, :num_nodes
+    ]
 
     radial, node_attrs_out, edge_attrs_out = basis(
         magmoms, node_attrs, edge_index, node_fidelity
@@ -147,9 +153,9 @@ def test_magnetic_basis_loads_scale_fidelity_axis(num_fidelities, legacy, nested
     ).to(DEVICE, DTYPE)
     module = torch.nn.ModuleDict({"magnetic_basis": basis}) if nested else basis
     key = "magnetic_basis.magnetic_scale" if nested else "magnetic_scale"
-    expected = torch.arange(
-        2, 2 + num_fidelities * 2, dtype=DTYPE, device=DEVICE
-    ).view(num_fidelities, 2)
+    expected = torch.arange(2, 2 + num_fidelities * 2, dtype=DTYPE, device=DEVICE).view(
+        num_fidelities, 2
+    )
     state_dict = module.state_dict()
     state_dict[key] = expected[0] if legacy else expected
 
@@ -246,7 +252,7 @@ def test_o2_tensor_node_embedding_is_equivariant():
     edge_feats = torch.randn(4, 4, dtype=DTYPE, device=DEVICE)
     edge_cutoff = torch.rand(4, 1, dtype=DTYPE, device=DEVICE)
     wigner_module = o2.WignerD(2, 2).to(DEVICE, DTYPE)
-    wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
+    wigner, wigner_inv = wigner_module(edge_vectors)
     output = embedding(
         node_attrs,
         edge_feats,
@@ -258,9 +264,7 @@ def test_o2_tensor_node_embedding_is_equivariant():
     )
 
     rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
-    rotated_wigner, rotated_wigner_inv = wigner_module.get_wigner(
-        edge_vectors @ rotation.T
-    )
+    rotated_wigner, rotated_wigner_inv = wigner_module(edge_vectors @ rotation.T)
     rotated_output = embedding(
         node_attrs,
         edge_feats,
@@ -406,14 +410,8 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
     state_dict = model.state_dict()
     assert not any("o2_angular_basis" in key for key in state_dict)
     for angular_basis in ("so2_angular_basis", "o2_angular_basis"):
-        state_dict[
-            f"representation.{angular_basis}.wigner_index_to_m_array"
-        ] = (
-            representation.o2_angular_basis.wigner_index_to_m_array.clone()
-        )
-        state_dict[f"representation.{angular_basis}.wigner_inv_rescale"] = (
-            representation.o2_angular_basis.wigner_inv_rescale.clone()
-        )
+        for name in ("wigner_index_to_m_array", "wigner_inv_rescale"):
+            state_dict[f"representation.{angular_basis}.{name}"] = torch.empty(0)
     incompatible = model.load_state_dict(state_dict, strict=True)
     assert incompatible.missing_keys == []
     assert incompatible.unexpected_keys == []
@@ -479,22 +477,16 @@ def test_magnetic_info_is_independent_per_interaction(
     assert len(representation.node_updates) == 2
     assert representation.magnetic_edge_irreps_out.num_irreps == 2
     assert all(
-        ir.l == 0 and ir.p == 1
-        for _, ir in representation.magnetic_edge_irreps_out
+        ir.l == 0 and ir.p == 1 for _, ir in representation.magnetic_edge_irreps_out
     )
-    assert representation.node_updates[0] is not (
-        representation.node_updates[1]
-    )
+    assert representation.node_updates[0] is not (representation.node_updates[1])
     for update, interaction in zip(
         representation.node_updates,
         representation.interactions,
     ):
         assert isinstance(update, NodeUpdate)
         assert isinstance(update, NODE_UPDATE[magnetic_type])
-        assert (
-            interaction.edge_info.dims[0]
-            == representation.edge_updates[0].out_dim
-        )
+        assert interaction.edge_info.dims[0] == representation.edge_updates[0].out_dim
         expected_info_dims = [
             update.out_dim,
             *config["radial_basis"]["hidden"],
@@ -525,9 +517,10 @@ def test_magnetic_info_is_independent_per_interaction(
         )
         source_info, target_info = magnetic_info
         source, target = edge_index
-        expected_weights = interaction.source_magnetic_info(source_info)[
-            source
-        ] * interaction.target_magnetic_info(target_info)[target]
+        expected_weights = (
+            interaction.source_magnetic_info(source_info)[source]
+            * interaction.target_magnetic_info(target_info)[target]
+        )
         torch.testing.assert_close(magnetic_weights, expected_weights)
         projected = interaction.magnetic_linear(
             magnetic_edge_attrs,
@@ -568,9 +561,7 @@ def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax):
         layout_out="flatten_ir_mul",
     ).to(DEVICE)
     vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
-    wigner, wigner_inv = (
-        o2.WignerD(wigner_lmax, wigner_lmax).to(DEVICE, DTYPE).get_wigner(vectors)
-    )
+    wigner, wigner_inv = o2.WignerD(wigner_lmax, wigner_lmax).to(DEVICE, DTYPE)(vectors)
     features = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
 
     local = frame(layout(features), wigner)
@@ -590,17 +581,15 @@ def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax):
 
 
 @pytest.mark.parametrize("mmax", [0, 1])
-@pytest.mark.parametrize(("wigner_mmax", "wigner_lmax"), [(1, 2), (1, 4), (2, 4), (4, 4)])
+@pytest.mark.parametrize(
+    ("wigner_mmax", "wigner_lmax"), [(1, 2), (1, 4), (2, 4), (4, 4)]
+)
 def test_local_frame_trailing_axes_and_empty_batch(mmax, wigner_mmax, wigner_lmax):
     irreps = o3.Irreps("2x0e+2x1o+2x2e")
     frame = o2.LocalFrame(irreps, mmax=mmax).to(DEVICE, DTYPE)
     vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
-    wigner, wigner_inv = (
-        o2.WignerD(wigner_mmax, wigner_lmax).to(DEVICE, DTYPE).get_wigner(vectors)
-    )
-    reference, reference_inv = (
-        o2.WignerD(mmax, 2).to(DEVICE, DTYPE).get_wigner(vectors)
-    )
+    wigner, wigner_inv = o2.WignerD(wigner_mmax, wigner_lmax).to(DEVICE, DTYPE)(vectors)
+    reference, reference_inv = o2.WignerD(mmax, 2).to(DEVICE, DTYPE)(vectors)
     features = torch.randn(4, 2, irreps.dim, dtype=DTYPE, device=DEVICE)
 
     local = frame.to_local(features, wigner)
@@ -631,7 +620,7 @@ def test_local_frame_rejects_incompatible_wigner_layout(local_dim, global_dim, m
 
 def test_local_frame_empty_irreps():
     frame = o2.LocalFrame("")
-    d, di = o2.WignerD(2, 2).get_wigner(torch.randn(3, 3))
+    d, di = o2.WignerD(2, 2)(torch.randn(3, 3))
     for batch_size in (3, 0):
         features = torch.empty(batch_size, 2, 0)
         local = frame(features, d[:batch_size])
@@ -645,16 +634,18 @@ def test_local_frame_truncation_compiles_with_shared_wigner(cgtp_dtype):
     def roundtrip(features, wigner, wigner_inv):
         return frame.to_global(frame.to_local(features, wigner), wigner_inv)
 
-    compiled = torch.compile(roundtrip, backend="aot_eager", fullgraph=True, dynamic=True)
+    compiled = torch.compile(
+        roundtrip, backend="aot_eager", fullgraph=True, dynamic=True
+    )
     for mmax, lmax in ((1, 2), (2, 4)):
         for batch_size in (3, 1, 0):
             x = torch.randn(batch_size, 2, frame.input_dim, requires_grad=True)
             r = torch.randn(batch_size, 3, requires_grad=True)
-            d, di = o2.WignerD(mmax, lmax).get_wigner(r)
+            d, di = o2.WignerD(mmax, lmax)(r)
             actual = compiled(x, d, di)
             x_ref = x.detach().requires_grad_()
             r_ref = r.detach().requires_grad_()
-            d, di = o2.WignerD(mmax, lmax).get_wigner(r_ref)
+            d, di = o2.WignerD(mmax, lmax)(r_ref)
             expected = roundtrip(x_ref, d, di)
             torch.testing.assert_close(actual, expected)
             for actual_grad, expected_grad in zip(
@@ -692,6 +683,32 @@ def test_o2_irrep_and_irreps_metadata():
         slice(9, 11),
     )
     assert irreps.regroup() == o2.Irreps("2x0e+0o+3x1m+2m")
+
+
+def test_o2_irreps_sort_and_serialization():
+    import pickle
+
+    irreps = o2.Irreps("2x1mo+0oo+3x0ee+1me+0eo")
+    result = irreps.sort()
+    assert result.irreps == o2.Irreps("3x0ee+0eo+0oo+1me+2x1mo")
+    for i, ir_mul in enumerate(irreps):
+        assert result.irreps[result.p[i]] == ir_mul
+        assert result.inv[result.p[i]] == i
+    assert deepcopy(irreps) == pickle.loads(pickle.dumps(irreps)) == irreps
+    assert o2.Irrep("1mo") in irreps
+    assert "2me" not in irreps
+    assert 3 * o2.Irrep("1mo") == o2.Irreps("3x1mo")
+    assert o2.Irrep("0ee") + o2.Irrep("1mo") == o2.Irreps("0ee+1mo")
+    assert 0 * irreps == o2.Irreps()
+    with pytest.raises(AttributeError, match="immutable"):
+        irreps._irreps = ()
+
+    module = o2.Linear(irreps, irreps)
+    features = irreps.randn(4, -1)
+    torch.testing.assert_close(deepcopy(module)(features), module(features))
+    torch.testing.assert_close(
+        pickle.loads(pickle.dumps(module))(features), module(features)
+    )
 
 
 def test_o2_irrep_products_and_restriction():
@@ -795,7 +812,9 @@ def test_o2_linear_external_weights_broadcast_and_zero_pad():
     torch.testing.assert_close(output[:, -1], torch.zeros_like(output[:, -1]))
 
     singleton = torch.randn(1, module.weight_numel, dtype=DTYPE, device=DEVICE)
-    torch.testing.assert_close(module(features, singleton), module(features, singleton[0]))
+    torch.testing.assert_close(
+        module(features, singleton), module(features, singleton[0])
+    )
 
 
 @pytest.mark.parametrize("reflected", [False, True])
@@ -916,7 +935,7 @@ def test_o3_tensor_product_matches_edge_cgtp(
         layout_in="flatten_ir_mul",
         layout_out="flatten_mul_ir",
     )
-    d, di = o2.WignerD(3, 3).get_wigner(r)
+    d, di = o2.WignerD(3, 3)(r)
     actual = layout_out(module(layout_in(x), d, di, w))
     expected = reference(
         x, o3.spherical_harmonics(irreps_sh, r, True, normalization), w
@@ -973,7 +992,7 @@ def test_o3_tensor_product_normalization_and_second_derivatives(
     layout_out = LayoutTransform(
         irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
     )
-    d, di = o2.WignerD(2, 2).get_wigner(r)
+    d, di = o2.WignerD(2, 2)(r)
     # A nonunit input vector tests the optional per-degree amplitude and its gradient.
     scale = r.square().sum(-1, keepdim=True).sqrt().pow(torch.arange(3))
     actual = layout_out(module(layout_in(x), d, di, weight, scale))
@@ -1015,13 +1034,13 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(cgtp_dtype
     layout_out = LayoutTransform(
         module.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
     )
-    d, di = o2.WignerD(2, 2).get_wigner(r)
+    d, di = o2.WignerD(2, 2)(r)
     actual = layout_out(module(layout_in(x), d, di))
     expected = reference(
         x, o3.spherical_harmonics([1], r, True, "component")[:, None], module.weight
     )
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
-    d, di = o2.WignerD(1, 2).get_wigner(r)
+    d, di = o2.WignerD(1, 2)(r)
     with pytest.raises(ValueError, match="orders"):
         module(layout_in(x), d, di)
     with pytest.raises(ValueError, match="spherical harmonics"):
@@ -1029,7 +1048,9 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(cgtp_dtype
 
 
 @pytest.mark.parametrize("wigner_lmax", [2, 4])
-def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(cgtp_dtype, wigner_lmax):
+def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(
+    cgtp_dtype, wigner_lmax
+):
     module = o2.O3TensorProduct(
         "2x1o",
         "1o",
@@ -1042,7 +1063,7 @@ def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(cgtp_dtype, w
     for batch_size in (3, 1, 0):
         x = torch.randn(batch_size, 6, requires_grad=True)
         w = torch.randn(batch_size, module.weight_numel, requires_grad=True)
-        d, di = o2.WignerD(2, wigner_lmax).get_wigner(torch.randn(batch_size, 3))
+        d, di = o2.WignerD(2, wigner_lmax)(torch.randn(batch_size, 3))
         actual, expected = compiled(x, d, di, w), module(x, d, di, w)
         torch.testing.assert_close(actual, expected)
         for actual_grad, expected_grad in zip(
@@ -1068,7 +1089,7 @@ def test_o3_tensor_product_time_reversal(cgtp_dtype):
         [(0, 0, i, "uvu", True) for i in range(3)],
     )
     x = torch.randn(4, irreps_in.dim)
-    d, di = o2.WignerD(2, 2).get_wigner(torch.randn(4, 3))
+    d, di = o2.WignerD(2, 2)(torch.randn(4, 3))
     torch.testing.assert_close(module(-x, d, di), -module(x, d, di))
 
 
@@ -1107,7 +1128,7 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
         edge_vector=r,
         edge_length=r.square().sum(-1, keepdim=True).sqrt() + 1e-9,
     )
-    d, di = o2.WignerD(lmax + 2, lmax + 2).get_wigner(r)
+    d, di = o2.WignerD(lmax + 2, lmax + 2)(r)
     actual = module(x, w, edge_index, d, di, graph)
     expected = reference(
         x,
@@ -1245,36 +1266,55 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
         torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
 
 
-def _asymmetric_contractions(correlation=3):
+def _asymmetric_contractions(correlation=3, path_mode="sum"):
     irreps_in = o2.Irreps("2x0e+2x0o+2x1m")
     irreps_out = o2.Irreps("2x0e+2x0o+2x1m+2x2m")
-    edge = o2.AsymmetricContraction(
+    recursive = o2.AsymmetricContraction(
         irreps_in,
         irreps_out,
         correlation,
-        algorithm="edge",
+        algorithm="recursive",
+        path_mode=path_mode,
     ).to(DEVICE, DTYPE)
-    node = o2.AsymmetricContraction(
+    dense = o2.AsymmetricContraction(
         irreps_in,
         irreps_out,
         correlation,
-        algorithm="node",
+        algorithm="dense",
+        path_mode=path_mode,
     ).to(DEVICE, DTYPE)
-    return edge, node
+    return recursive, dense
 
 
-def test_o2_asymmetric_contraction_algorithms_match():
-    edge, node = _asymmetric_contractions()
+@pytest.mark.parametrize("correlation", [2, 3])
+@pytest.mark.parametrize("path_mode", ["sum", "expand"])
+@pytest.mark.parametrize("batch_size", [0, 4])
+def test_o2_asymmetric_contraction_algorithms_match(correlation, path_mode, batch_size):
+    recursive, dense = _asymmetric_contractions(correlation, path_mode)
     inputs = [
-        edge.irreps_in.randn(4, -1, dtype=DTYPE, device=DEVICE)
-        for _ in range(3)
+        recursive.irreps_in.randn(
+            batch_size, -1, dtype=DTYPE, device=DEVICE, requires_grad=True
+        )
+        for _ in range(correlation)
     ]
-    weights = torch.randn(4, edge.weight_numel, dtype=DTYPE, device=DEVICE)
-    assert edge.order_num_paths == node.order_num_paths
-    torch.testing.assert_close(edge(inputs, weights), node(inputs, weights))
+    weights = torch.randn(
+        batch_size,
+        recursive.weight_numel,
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    assert recursive.order_num_paths == dense.order_num_paths
+    actual, expected = recursive(inputs, weights), dense(inputs, weights)
+    torch.testing.assert_close(actual, expected)
+    for a, b in zip(
+        torch.autograd.grad(actual.square().sum(), (*inputs, weights)),
+        torch.autograd.grad(expected.square().sum(), (*inputs, weights)),
+    ):
+        torch.testing.assert_close(a, b)
 
 
-@pytest.mark.parametrize("algorithm", ["edge", "node"])
+@pytest.mark.parametrize("algorithm", ["recursive", "dense"])
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
     module = o2.AsymmetricContraction(
@@ -1284,16 +1324,14 @@ def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
         algorithm=algorithm,
     ).to(DEVICE, DTYPE)
     inputs = [
-        module.irreps_in.randn(4, -1, dtype=DTYPE, device=DEVICE)
-        for _ in range(2)
+        module.irreps_in.randn(4, -1, dtype=DTYPE, device=DEVICE) for _ in range(2)
     ]
     weights = torch.randn(4, module.weight_numel, dtype=DTYPE, device=DEVICE)
     angle = torch.tensor(0.31, dtype=DTYPE, device=DEVICE)
     output = module(inputs, weights)
     expected = _transform(output, module.irreps_out, angle, reflected)
     transformed = [
-        _transform(features, module.irreps_in, angle, reflected)
-        for features in inputs
+        _transform(features, module.irreps_in, angle, reflected) for features in inputs
     ]
     torch.testing.assert_close(module(transformed, weights), expected)
 
@@ -1367,7 +1405,7 @@ def test_o2_scatter_is_o3_equivariant(use_attention):
     radial = torch.randn(4, 4, dtype=DTYPE, device=DEVICE)
     cutoff = torch.rand(4, 1, dtype=DTYPE, device=DEVICE)
     wigner_module = o2.WignerD(1, 1).to(DEVICE, DTYPE)
-    wigner, wigner_inv = wigner_module.get_wigner(edge_vectors)
+    wigner, wigner_inv = wigner_module(edge_vectors)
     output = module(
         node_features,
         weights,
@@ -1382,7 +1420,7 @@ def test_o2_scatter_is_o3_equivariant(use_attention):
     matrix = module.irreps_in.D_from_matrix(rotation)
     rotated_features = node_features @ matrix.T
     rotated_vectors = edge_vectors @ rotation.T
-    rotated_wigner, rotated_wigner_inv = wigner_module.get_wigner(rotated_vectors)
+    rotated_wigner, rotated_wigner_inv = wigner_module(rotated_vectors)
     rotated_output = module(
         rotated_features,
         weights,
@@ -1405,7 +1443,7 @@ def test_o2_scatter_supports_empty_edges():
     assert "reshape_in" not in repr(module)
     assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
-    wigner, wigner_inv = o2.WignerD(1, 1).to(DEVICE, DTYPE).get_wigner(
+    wigner, wigner_inv = o2.WignerD(1, 1).to(DEVICE, DTYPE)(
         torch.empty(0, 3, dtype=DTYPE, device=DEVICE)
     )
     output = module(
@@ -1417,6 +1455,236 @@ def test_o2_scatter_supports_empty_edges():
         edge_cutoff=torch.empty(0, 1, dtype=DTYPE, device=DEVICE),
     )
     torch.testing.assert_close(output, torch.zeros_like(output))
+
+
+@pytest.mark.parametrize("path_normalization", ["element", "path"])
+@pytest.mark.parametrize("shared_weights", [False, True])
+def test_o2_scalar_linear_matches_o3_normalization(
+    cgtp_dtype, path_normalization, shared_weights
+):
+    irreps_in, irreps_out = "2x0e+3x0e+2x0o", "4x0e+2x0o"
+    kwargs = dict(
+        internal_weights=False,
+        shared_weights=shared_weights,
+        biases=shared_weights,
+        path_normalization=path_normalization,
+    )
+    module = o2.Linear(irreps_in, irreps_out, **kwargs)
+    reference = o3.Linear(irreps_in, irreps_out, **kwargs)
+    assert module.weight_numel == reference.weight_numel
+    x = torch.randn(5, module.irreps_in.dim, requires_grad=True)
+    weight_shape = (
+        (module.weight_numel,) if shared_weights else (5, module.weight_numel)
+    )
+    weight = torch.randn(weight_shape, requires_grad=True)
+    bias = (
+        torch.randn(module.bias_numel, requires_grad=True) if shared_weights else None
+    )
+    actual, expected = module(x, weight, bias), reference(x, weight, bias)
+    torch.testing.assert_close(actual, expected)
+    inputs = (x, weight, bias) if shared_weights else (x, weight)
+    for a, b in zip(
+        torch.autograd.grad(actual.square().sum(), inputs),
+        torch.autograd.grad(expected.square().sum(), inputs),
+    ):
+        torch.testing.assert_close(a, b)
+
+
+@pytest.mark.parametrize("batch_size", [0, 3])
+def test_o2_linear_broadcasts_bias_and_unconnected_outputs(cgtp_dtype, batch_size):
+    module = o2.Linear(
+        "2x0e+1m",
+        "0e+1m+0o",
+        internal_weights=False,
+        shared_weights=False,
+        biases=True,
+    )
+    x = torch.randn(1, 1, module.irreps_in.dim, requires_grad=True)
+    weight = torch.randn(2, 1, module.weight_numel, requires_grad=True)
+    bias = torch.randn(1, batch_size, module.bias_numel, requires_grad=True)
+    output = module(x, weight, bias)
+    expected = module(
+        x.expand(2, batch_size, -1),
+        weight.expand(2, batch_size, -1),
+        bias.expand(2, batch_size, -1),
+    )
+    assert output.shape == (2, batch_size, module.irreps_out.dim)
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(output[..., -1], torch.zeros_like(output[..., -1]))
+    for grad in torch.autograd.grad(output.square().sum(), (x, weight, bias)):
+        assert torch.isfinite(grad).all()
+
+
+def test_o2_gated_linear_compiles_with_dynamic_batches(cgtp_dtype):
+    gate = o2.Gate(
+        "2x0ee+0oo",
+        [torch.nn.SiLU(), torch.tanh],
+        "4x0ee",
+        [torch.sigmoid],
+        "2x1me+2x1mo",
+    )
+    linear_up = o2.Linear(
+        "2x0ee+0oo+2x1me+2x1mo",
+        gate.irreps_in,
+        internal_weights=False,
+        shared_weights=False,
+    )
+    linear_down = o2.Linear(gate.irreps_out, linear_up.irreps_in)
+
+    def forward(features, weight):
+        return linear_down(gate(linear_up(features, weight)))
+
+    compiled = torch.compile(forward, backend="aot_eager", fullgraph=True, dynamic=True)
+    for batch_size in (3, 1, 0):
+        features = linear_up.irreps_in.randn(batch_size, -1, requires_grad=True)
+        weight = torch.randn(batch_size, linear_up.weight_numel, requires_grad=True)
+        actual, expected = compiled(features, weight), forward(features, weight)
+        torch.testing.assert_close(actual, expected)
+        inputs = (features, weight, linear_down.weight)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), inputs),
+            torch.autograd.grad(expected.square().sum(), inputs),
+        ):
+            torch.testing.assert_close(a, b)
+
+
+@pytest.mark.parametrize("irreps_out", ["", "0o"])
+def test_o2_disconnected_operators_have_zero_gradients(cgtp_dtype, irreps_out):
+    linear = o2.Linear("0e", irreps_out, instructions=[])
+    tp = o2.TensorProduct("0e", "0e", irreps_out, [])
+    for batch_size in (3, 0):
+        x = torch.randn(batch_size, 1, requires_grad=True)
+        y = torch.randn(batch_size, 1, requires_grad=True)
+        for output, inputs in ((linear(x), (x,)), (tp(x, y), (x, y))):
+            assert output.shape == (batch_size, linear.irreps_out.dim)
+            torch.testing.assert_close(output, torch.zeros_like(output))
+            for grad in torch.autograd.grad(output.sum(), inputs):
+                torch.testing.assert_close(grad, torch.zeros_like(grad))
+
+
+@pytest.mark.parametrize(
+    ("scalars", "gates", "gated"),
+    [("", "", ""), ("0o", "", ""), ("", "0o", "1m")],
+)
+def test_o2_gate_supports_empty_sectors(cgtp_dtype, scalars, gates, gated):
+    module = o2.Gate(
+        scalars,
+        [torch.tanh] if scalars else [],
+        gates,
+        [torch.tanh] if gates else [],
+        gated,
+    )
+    for batch_size in (4, 0):
+        features = module.irreps_in.randn(batch_size, -1, requires_grad=True)
+        output = module(features)
+        assert output.shape == (batch_size, module.irreps_out.dim)
+        transformed = _transform(features, module.irreps_in, torch.tensor(0.3), True)
+        torch.testing.assert_close(
+            module(transformed),
+            _transform(output, module.irreps_out, torch.tensor(0.3), True),
+        )
+        (grad,) = torch.autograd.grad(output.sum(), (features,))
+        assert torch.isfinite(grad).all()
+
+
+@pytest.mark.parametrize("normalization", ["component", "norm", "none"])
+@pytest.mark.parametrize(
+    ("ir1", "ir2", "ir_out"),
+    [
+        ("0o", "1m", "1m"),
+        ("1m", "1m", "0e"),
+        ("1m", "1m", "0o"),
+        ("1m", "2m", "1m"),
+        ("1m", "2m", "3m"),
+    ],
+)
+def test_o2_tensor_product_coupling_normalization(
+    cgtp_dtype, normalization, ir1, ir2, ir_out
+):
+    ir1, ir2, ir_out = o2.Irrep(ir1), o2.Irrep(ir2), o2.Irrep(ir_out)
+    module = o2.TensorProduct(
+        ir1,
+        ir2,
+        ir_out,
+        [(0, 0, 0, "uuu", False)],
+        irrep_normalization=normalization,
+        path_normalization="none",
+    )
+    coefficients = module(torch.eye(ir1.dim)[:, None], torch.eye(ir2.dim)[None, :])
+    squared_norm = {"component": ir_out.dim, "norm": ir1.dim * ir2.dim, "none": 1}
+    torch.testing.assert_close(
+        coefficients.square().sum(), torch.tensor(float(squared_norm[normalization]))
+    )
+
+
+@pytest.mark.parametrize("batch_size", [0, 4])
+@pytest.mark.parametrize(
+    ("ir1", "ir2"), [("0oo", "1mo"), ("1me", "1mo"), ("1mo", "2me")]
+)
+def test_o2_uuu_matches_diagonal_uvw(cgtp_dtype, batch_size, ir1, ir2):
+    channels = 16
+    ir1, ir2 = o2.Irrep(ir1), o2.Irrep(ir2)
+    irreps_out = o2.Irreps([(ir, channels) for ir in ir1 * ir2])
+    kwargs = dict(
+        internal_weights=False, shared_weights=False, path_normalization="none"
+    )
+    module = o2.TensorProduct(
+        channels * ir1,
+        channels * ir2,
+        irreps_out,
+        [(0, 0, i, "uuu", True) for i in range(len(irreps_out))],
+        **kwargs,
+    )
+    reference = o2.TensorProduct(
+        channels * ir1,
+        channels * ir2,
+        irreps_out,
+        [(0, 0, i, "uvw", True) for i in range(len(irreps_out))],
+        **kwargs,
+    )
+    x = torch.randn(batch_size, ir1.dim * channels, requires_grad=True)
+    y = torch.randn(batch_size, ir2.dim * channels, requires_grad=True)
+    weight = torch.randn(batch_size, module.weight_numel, requires_grad=True)
+    reference_weight = torch.einsum(
+        "bpu,uv,uw->bpuvw",
+        weight.reshape(batch_size, len(irreps_out), channels),
+        torch.eye(channels),
+        torch.eye(channels),
+    ).flatten(-4)
+    actual, expected = module(x, y, weight), reference(x, y, reference_weight)
+    torch.testing.assert_close(actual, expected)
+    for a, b in zip(
+        torch.autograd.grad(actual.square().sum(), (x, y, weight)),
+        torch.autograd.grad(expected.square().sum(), (x, y, weight)),
+    ):
+        torch.testing.assert_close(a, b)
+
+
+@pytest.mark.parametrize(("lmax", "mmax"), [(0, 0), (1, 1), (3, 1), (4, 2), (3, 3)])
+@pytest.mark.parametrize("optimize", [False, True])
+def test_wigner_matches_o3_rotation_matrices(cgtp_dtype, lmax, mmax, optimize):
+    vectors = torch.randn(3, 3, generator=torch.Generator().manual_seed(7))
+    rotation = o2.rotation_matrix_to_y_axis(vectors)
+    module = o2.WignerD(mmax, lmax, use_opt_einsum_fx=optimize)
+    actual, inverse = module(vectors)
+    full = torch.stack(
+        [
+            torch.block_diag(
+                *[o3.Irrep(l, 1).D_from_matrix(r) for l in range(lmax + 1)]
+            )
+            for r in rotation
+        ]
+    )
+    expected = full.index_select(1, module.local_indices)
+    # The reference converts the rotation matrix through Euler angles.
+    torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+    torch.testing.assert_close(
+        inverse, expected.transpose(1, 2) * module.inverse_scale, atol=2e-9, rtol=2e-9
+    )
+    assert not module.state_dict()
+    empty, empty_inverse = module(vectors[:0])
+    assert empty.shape == (0, *actual.shape[1:])
+    assert empty_inverse.shape == (0, *inverse.shape[1:])
 
 
 def test_time_odd_circular_harmonics_alternate_time_parity():
@@ -1492,14 +1760,10 @@ def test_o2_asymmetric_contraction_preserves_time_parity():
         irreps_in,
         "2x0ee+2x1me",
         correlation=2,
-        algorithm="edge",
+        algorithm="recursive",
     ).to(DEVICE, DTYPE)
-    inputs = [
-        irreps_in.randn(5, -1, dtype=DTYPE, device=DEVICE) for _ in range(2)
-    ]
-    weights = torch.randn(
-        5, contraction.weight_numel, dtype=DTYPE, device=DEVICE
-    )
+    inputs = [irreps_in.randn(5, -1, dtype=DTYPE, device=DEVICE) for _ in range(2)]
+    weights = torch.randn(5, contraction.weight_numel, dtype=DTYPE, device=DEVICE)
     output = contraction(inputs, weights)
     torch.testing.assert_close(
         contraction([_time_reverse(value, irreps_in) for value in inputs], weights),
@@ -1515,9 +1779,7 @@ def test_local_frame_preserves_time_parity():
     irreps = o3.Irreps("2x1eo+2x2ee")
     frame = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
     edge_vectors = torch.randn(6, 3, dtype=DTYPE, device=DEVICE)
-    wigner, _ = o2.WignerD(mmax=2, lmax=2).to(DEVICE, DTYPE).get_wigner(
-        edge_vectors
-    )
+    wigner, _ = o2.WignerD(mmax=2, lmax=2).to(DEVICE, DTYPE)(edge_vectors)
     features = torch.randn(6, irreps.dim, dtype=DTYPE, device=DEVICE)
     local = frame.to_local(features, wigner)
     torch.testing.assert_close(
@@ -1642,9 +1904,9 @@ def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
         magnetic_node_attrs,
         basis.angular_basis(magmoms),
     )
-    zero_gradient = torch.autograd.grad(
-        radial[0].sum(), magmoms, create_graph=True
-    )[0][0]
+    zero_gradient = torch.autograd.grad(radial[0].sum(), magmoms, create_graph=True)[0][
+        0
+    ]
     torch.testing.assert_close(zero_gradient, torch.zeros_like(zero_gradient))
     zero_hessian = torch.stack(
         [
@@ -1652,10 +1914,10 @@ def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
             for axis in range(3)
         ]
     )
-    orders = torch.arange(
-        1, basis.num_mag_radial_basis + 1, dtype=DTYPE, device=DEVICE
+    orders = torch.arange(1, basis.num_mag_radial_basis + 1, dtype=DTYPE, device=DEVICE)
+    expected_curvature = (
+        -4.0 * orders.square().sum() / basis.magnetic_scale[0, 0].square()
     )
-    expected_curvature = -4.0 * orders.square().sum() / basis.magnetic_scale[0, 0].square()
     torch.testing.assert_close(
         zero_hessian,
         expected_curvature * torch.eye(3, dtype=DTYPE, device=DEVICE),
@@ -1788,9 +2050,7 @@ def _magnetic_scatter_module(use_attention: bool):
 )
 def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
     module, irreps, magnetic_edge_irreps = _magnetic_scatter_module(use_attention)
-    edge_index = torch.tensor(
-        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE
-    )
+    edge_index = torch.tensor([[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE)
     num_edges = edge_index.size(1)
     node_features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)
     magnetic_edge_attrs = torch.randn(
@@ -1800,13 +2060,9 @@ def test_o2_magnetic_scatter_is_time_reversal_invariant(use_attention):
         num_edges, module.weight_numel, dtype=DTYPE, device=DEVICE
     )
     edge_vectors = torch.randn(num_edges, 3, dtype=DTYPE, device=DEVICE)
-    wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(
-        DEVICE, DTYPE
-    ).get_wigner(edge_vectors)
+    wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(DEVICE, DTYPE)(edge_vectors)
     edge_cutoff = torch.rand(num_edges, 1, dtype=DTYPE, device=DEVICE)
-    edge_radial_basis = torch.randn(
-        num_edges, 4, dtype=DTYPE, device=DEVICE
-    )
+    edge_radial_basis = torch.randn(num_edges, 4, dtype=DTYPE, device=DEVICE)
 
     def apply(edge_attrs):
         return module(
@@ -1837,9 +2093,9 @@ def test_o2_magnetic_scatter_supports_empty_edges():
     assert "reshape_in" not in repr(module)
     assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
-    wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(
-        DEVICE, DTYPE
-    ).get_wigner(torch.empty(0, 3, dtype=DTYPE, device=DEVICE))
+    wigner, wigner_inv = o2.WignerD(mmax=1, lmax=1).to(DEVICE, DTYPE)(
+        torch.empty(0, 3, dtype=DTYPE, device=DEVICE)
+    )
     output = module(
         torch.randn(3, irreps.dim, dtype=DTYPE, device=DEVICE),
         torch.empty(

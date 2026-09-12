@@ -26,7 +26,7 @@ class LocalFrame(torch.nn.Module):
 
     Parameters
     ----------
-    irreps : O(3) irreps-like
+    irreps : o3.Irreps or str
         Global input representation, including time parity when present.
         Every entry is stored in flattened ``ir_mul`` order.
     mmax : int, optional
@@ -51,7 +51,7 @@ class LocalFrame(torch.nn.Module):
 
         Parameters
         ----------
-        irreps : O(3) irreps-like
+        irreps : o3.Irreps or str
             Global representation to restrict.
         mmax : int, optional
             Largest positive local order to retain. If omitted, all orders up
@@ -75,9 +75,7 @@ class LocalFrame(torch.nn.Module):
         for entry in irreps:
             ir, mul = entry.ir, entry.mul
             time_parity = getattr(ir, "t", 1)
-            irrep_list.append(
-                (Irrep(0, ir.p * ((-1) ** ir.l), time_parity), mul)
-            )
+            irrep_list.append((Irrep(0, ir.p * ((-1) ** ir.l), time_parity), mul))
             irrep_list.extend(
                 (Irrep(order, 0, time_parity), mul)
                 for order in range(1, min(ir.l, mmax) + 1)
@@ -120,12 +118,9 @@ class LocalFrame(torch.nn.Module):
             ir, mul = global_entry.ir, global_entry.mul
             retained_mmax = min(ir.l, self.mmax)
             time_parity = getattr(ir, "t", 1)
-            local_irrep_list = [
-                Irrep(0, ir.p * ((-1) ** ir.l), time_parity)
-            ]
+            local_irrep_list = [Irrep(0, ir.p * ((-1) ** ir.l), time_parity)]
             local_irrep_list.extend(
-                Irrep(order, 0, time_parity)
-                for order in range(1, retained_mmax + 1)
+                Irrep(order, 0, time_parity) for order in range(1, retained_mmax + 1)
             )
             entry_local_indices = tuple(
                 local_indices[local_ir] for local_ir in local_irrep_list
@@ -195,8 +190,7 @@ class LocalFrame(torch.nn.Module):
             else (self.global_irreps, self.local_irreps)
         )
         return (
-            f"{self.__class__.__name__}({irreps_in} -> "
-            f"{irreps_out})(mmax={self.mmax})"
+            f"{self.__class__.__name__}({irreps_in} -> {irreps_out})(mmax={self.mmax})"
         )
 
     @staticmethod

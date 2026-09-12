@@ -31,7 +31,7 @@ def circular_harmonics(
     torch.Tensor
         Tensor with shape ``(..., 1 + 2 * mmax)`` in contiguous order from
         ``0ee`` through ``mmax``. Every positive-order entry stores its real
-        cosine-like and sine-like components in that order.
+        cosine and sine components in that order.
     """
     if not isinstance(mmax, int):
         raise TypeError("mmax must be an integer.")

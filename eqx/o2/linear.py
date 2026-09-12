@@ -23,9 +23,9 @@ class Linear(torch.nn.Module):
 
     Parameters
     ----------
-    irreps_in : IrrepsLike
+    irreps_in : Irreps, str, or sequence
         Representation carried by the input feature axis.
-    irreps_out : IrrepsLike
+    irreps_out : Irreps, str, or sequence
         Representation carried by the output feature axis.
     internal_weights : bool, optional
         If ``True``, store trainable weights and biases in the module. If
@@ -172,6 +172,14 @@ class Linear(torch.nn.Module):
             weight_offsets.append((offset, size))
             offset += size
         self._weight_offsets = tuple(weight_offsets)
+        self._instructions_by_output = tuple(
+            tuple(
+                i
+                for i, ins in enumerate(self._weight_instructions)
+                if ins.i_out == i_out
+            )
+            for i_out in range(len(self.irreps_out))
+        )
         bias_offsets = {}
         offset = 0
         for instruction in self._bias_instructions:
@@ -194,7 +202,7 @@ class Linear(torch.nn.Module):
             persistent=False,
         )
 
-    def _resolve_weight(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
+    def _get_weights(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
         if weight is None:
             if self.weight_numel > 0 and not self.internal_weights:
                 raise RuntimeError(
@@ -207,20 +215,6 @@ class Linear(torch.nn.Module):
                 f"{self.weight_numel}, got {tuple(weight.shape)}."
             )
         return weight
-
-    def _resolve_bias(self, bias: Optional[torch.Tensor]) -> torch.Tensor:
-        if bias is None:
-            if self.bias_numel > 0 and not self.internal_weights:
-                raise RuntimeError(
-                    "Biases must be provided when internal_weights=False."
-                )
-            bias = self.bias
-        if bias.ndim < 1 or bias.size(-1) != self.bias_numel:
-            raise ValueError(
-                "Linear bias trailing dimension must be "
-                f"{self.bias_numel}, got {tuple(bias.shape)}."
-            )
-        return bias
 
     def forward(
         self,
@@ -253,8 +247,17 @@ class Linear(torch.nn.Module):
                 "Linear feature trailing dimension must be "
                 f"{self.irreps_in.dim}, got {tuple(features.shape)}."
             )
-        weight = self._resolve_weight(weight)
-        bias = self._resolve_bias(bias)
+        weight = self._get_weights(weight)
+        if bias is None:
+            if self.bias_numel > 0 and not self.internal_weights:
+                raise RuntimeError(
+                    "Biases must be provided when internal_weights=False."
+                )
+            bias = self.bias
+        if bias.ndim < 1 or bias.size(-1) != self.bias_numel:
+            raise ValueError(
+                f"Linear bias trailing dimension must be {self.bias_numel}."
+            )
         try:
             leading_shape = torch.broadcast_shapes(
                 features.shape[:-1],
@@ -266,43 +269,50 @@ class Linear(torch.nn.Module):
                 "Linear feature, weight, and bias batch dimensions do not broadcast."
             ) from error
 
+        inputs = [
+            features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
+            for (ir, mul), ir_slice in zip(self.irreps_in, self._input_slices)
+        ]
         outputs = []
-        zero = features.sum() * 0 + weight.sum() * 0 + bias.sum() * 0
+        zero = None
         for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
             contributions = []
-            for instruction_index, instruction in enumerate(self._weight_instructions):
-                if instruction.i_out != i_out:
-                    continue
+            for instruction_index in self._instructions_by_output[i_out]:
+                instruction = self._weight_instructions[instruction_index]
                 mul_in, _ = instruction.path_shape
-                values = features[..., self._input_slices[instruction.i_in]].reshape(
-                    *features.shape[:-1], ir_out.dim, mul_in
-                )
                 offset, size = self._weight_offsets[instruction_index]
                 matrix = weight.narrow(-1, offset, size).reshape(
                     *weight.shape[:-1], mul_in, mul_out
                 )
                 contributions.append(
-                    torch.matmul(values, matrix) * instruction.path_weight
+                    torch.matmul(inputs[instruction.i_in], matrix)
+                    * instruction.path_weight
                 )
             if contributions:
                 output = sum(contributions[1:], contributions[0])
             else:
-                output = (
-                    features.new_zeros(
-                        *leading_shape,
-                        ir_out.dim,
-                        mul_out,
+                if zero is None:
+                    zero = (
+                        features[..., :0].sum()
+                        + weight[..., :0].sum()
+                        + bias[..., :0].sum()
                     )
-                    + zero
+                output = (
+                    features.new_zeros((*leading_shape, ir_out.dim, mul_out)) + zero
                 )
-            bias_specification = self._bias_offsets.get(i_out)
-            if bias_specification is not None:
-                offset, size = bias_specification
+            if i_out in self._bias_offsets:
+                offset, size = self._bias_offsets[i_out]
                 output = output + bias.narrow(-1, offset, size).unsqueeze(-2)
-            outputs.append(output.reshape(*leading_shape, mul_out * ir_out.dim))
+            outputs.append(
+                output.expand(*leading_shape, ir_out.dim, mul_out).reshape(
+                    *leading_shape, mul_out * ir_out.dim
+                )
+            )
         if outputs:
-            return torch.cat(outputs, dim=-1)
-        return features.new_empty(*leading_shape, 0) + zero
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return features.new_empty((*leading_shape, 0)) + (
+            features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
+        )
 
     def weight_view_for_instruction(
         self,
@@ -323,7 +333,7 @@ class Linear(torch.nn.Module):
         torch.Tensor
             A view with trailing shape ``(mul_in, mul_out)``.
         """
-        weight = self._resolve_weight(weight)
+        weight = self._get_weights(weight)
         weighted_instruction = self._weight_instructions[instruction]
         offset, size = self._weight_offsets[instruction]
         return weight.narrow(-1, offset, size).view(
