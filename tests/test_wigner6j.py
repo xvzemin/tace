@@ -107,14 +107,11 @@ def _build_tensor_product(*, weight_level="edge"):
     return module.to(DEVICE)
 
 
-def _random_inputs(module, *, requires_grad=False):
-    num_nodes = 5
-    num_edges = 11
-    edge_index = torch.stack(
-        [
-            torch.randint(num_nodes, (num_edges,), device=DEVICE),
-            torch.randint(num_nodes, (num_edges,), device=DEVICE),
-        ]
+def _random_inputs(module, *, requires_grad=False, num_nodes=5, num_edges=11):
+    edge_index = (
+        torch.randint(num_nodes, (2, num_edges), device=DEVICE)
+        if num_edges
+        else torch.empty(2, 0, dtype=torch.int64, device=DEVICE)
     )
     node_feats = torch.randn(
         num_nodes,
@@ -165,6 +162,27 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
     torch.manual_seed(0)
     torch.set_default_dtype(torch.float64)
     module = _build_tensor_product(weight_level=weight_level)
+    node_tp = module.recoupled_node_node_tp
+    couplings = [
+        (ins.i_in1, ins.i_in2, node_tp.irreps_out[ins.i_out].ir)
+        for ins in node_tp.instructions
+    ]
+    assert len(couplings) == len(set(couplings))
+    assert len(couplings) < len(module.recoupled_node_edge_tp.instructions)
+    assert node_tp.shared_weights
+    assert module.edge_weight_numel == module.reference_node_edge_tp.weight_numel
+    assert module.extra_weight_numel == module.reference_edge_edge_tp.weight_numel
+    state = module.state_dict()
+    # The old node TP stored one output per recoupling term, before sharing.
+    old_intermediate_dim = sum(
+        node_tp.irreps_out[ins[0]].dim
+        for ins in module.recoupled_node_edge_tp.instructions
+    )
+    state["recoupled_node_node_tp.tp.output_mask"] = torch.ones(old_intermediate_dim)
+    module.load_state_dict(state, strict=True)
+    assert (
+        module.recoupled_node_node_tp.tp.output_mask.numel() == node_tp.irreps_out.dim
+    )
     inputs = _random_inputs(module, requires_grad=True)
 
     recoupled = module(*inputs)
@@ -176,11 +194,12 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
     recoupled_grads = torch.autograd.grad(
         (recoupled * grad_output).sum(),
         differentiable_inputs,
-        retain_graph=True,
+        create_graph=True,
     )
     reference_grads = torch.autograd.grad(
         (reference * grad_output).sum(),
         differentiable_inputs,
+        create_graph=True,
     )
     for recoupled_grad, reference_grad in zip(recoupled_grads, reference_grads):
         torch.testing.assert_close(
@@ -189,6 +208,24 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
             atol=3.0e-12,
             rtol=3.0e-12,
         )
+
+    directions = [torch.randn_like(value) for value in differentiable_inputs]
+    recoupled_second_grads = torch.autograd.grad(
+        sum(
+            (grad * direction).sum()
+            for grad, direction in zip(recoupled_grads, directions)
+        ),
+        differentiable_inputs,
+    )
+    reference_second_grads = torch.autograd.grad(
+        sum(
+            (grad * direction).sum()
+            for grad, direction in zip(reference_grads, directions)
+        ),
+        differentiable_inputs,
+    )
+    for observed, expected in zip(recoupled_second_grads, reference_second_grads):
+        torch.testing.assert_close(observed, expected, atol=2.0e-11, rtol=2.0e-11)
 
     node_feats, edge_attrs, extra_node_attrs, edge_weights, extra_weights, _ = inputs
     rotation = o3.rand_matrix(dtype=torch.float64)
@@ -215,6 +252,98 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
         atol=3.0e-11,
         rtol=3.0e-11,
     )
+
+
+@pytest.mark.parametrize("weight_level", ["edge", "node"])
+def test_wigner6j_repeated_irreps_remain_independent(weight_level):
+    torch.manual_seed(1)
+    torch.set_default_dtype(torch.float64)
+    module = O3Wigner6jScatterTensorProduct(
+        "2x1o + 3x1o",
+        "0e + 1o",
+        "0o + 1e + 1o + 2e + 2o",
+        "1e + 1e",
+        weight_level=weight_level,
+        l1l2="==",
+        register_reference=True,
+    ).to(DEVICE)
+    inputs = _random_inputs(module, requires_grad=True)
+    observed = module(*inputs)
+    expected = module.forward_reference(*inputs)
+    torch.testing.assert_close(observed, expected, atol=2.0e-12, rtol=2.0e-12)
+    probe = torch.randn_like(expected)
+    observed_grads = torch.autograd.grad((observed * probe).sum(), inputs[:-1])
+    expected_grads = torch.autograd.grad((expected * probe).sum(), inputs[:-1])
+    for observed, expected in zip(observed_grads, expected_grads):
+        torch.testing.assert_close(observed, expected, atol=3.0e-12, rtol=3.0e-12)
+
+
+@pytest.mark.parametrize("weight_level", ["edge", "node"])
+@pytest.mark.parametrize("num_nodes", [0, 3])
+def test_wigner6j_empty_edges(weight_level, num_nodes):
+    module = O3Wigner6jScatterTensorProduct(
+        "2x0e + 2x1o",
+        "0e + 1o",
+        "0e + 1o",
+        "0e + 1e",
+        weight_level=weight_level,
+        register_reference=True,
+    ).to(DEVICE)
+    inputs = _random_inputs(
+        module, num_nodes=num_nodes, num_edges=0, requires_grad=True
+    )
+    observed = module(*inputs)
+    expected = module.forward_reference(*inputs)
+    assert observed.shape == (num_nodes, module.irreps_out.dim)
+    torch.testing.assert_close(observed, expected)
+    observed_grads = torch.autograd.grad(observed.sum(), inputs[:-1])
+    expected_grads = torch.autograd.grad(expected.sum(), inputs[:-1])
+    for observed, expected in zip(observed_grads, expected_grads):
+        torch.testing.assert_close(observed, expected)
+
+
+@pytest.mark.parametrize("weight_level", ["edge", "node"])
+def test_wigner6j_oeq_matches_reference(weight_level, monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("OEQ requires CUDA")
+    pytest.importorskip("openequivariance")
+    torch.manual_seed(2)
+    torch.set_default_dtype(torch.float64)
+    monkeypatch.setenv("TACE_USE_OEQ", "1")
+    monkeypatch.setenv("TACE_USE_CUE", "0")
+    module = _build_tensor_product(weight_level=weight_level)
+    assert module.recoupled_node_node_tp.use_oeq
+    assert module.recoupled_node_edge_tp.use_oeq
+    inputs = _random_inputs(module, requires_grad=True)
+    observed = module(*inputs)
+    expected = module.forward_reference(*inputs)
+    torch.testing.assert_close(observed, expected, atol=3.0e-12, rtol=3.0e-12)
+    probe = torch.randn_like(expected)
+    observed_grads = torch.autograd.grad(
+        (observed * probe).sum(), inputs[:-1], create_graph=True
+    )
+    expected_grads = torch.autograd.grad(
+        (expected * probe).sum(), inputs[:-1], create_graph=True
+    )
+    for observed, expected in zip(observed_grads, expected_grads):
+        torch.testing.assert_close(observed, expected, atol=5.0e-12, rtol=5.0e-12)
+    directions = [torch.randn_like(value) for value in inputs[:-1]]
+    observed_second = torch.autograd.grad(
+        sum(
+            (grad * direction).sum()
+            for grad, direction in zip(observed_grads, directions)
+        ),
+        inputs[:-1],
+    )
+    expected_second = torch.autograd.grad(
+        sum(
+            (grad * direction).sum()
+            for grad, direction in zip(expected_grads, directions)
+        ),
+        inputs[:-1],
+    )
+    for observed, expected in zip(observed_second, expected_second):
+        torch.testing.assert_close(observed, expected, atol=3.0e-11, rtol=3.0e-11)
 
 
 @pytest.mark.skipif(
