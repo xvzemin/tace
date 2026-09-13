@@ -163,6 +163,15 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
     torch.set_default_dtype(torch.float64)
     module = _build_tensor_product(weight_level=weight_level)
     node_tp = module.recoupled_node_node_tp
+    assert node_tp.irreps_out == node_tp.irreps_out.sort().irreps
+    if not node_tp.use_oeq:
+        for tp in (node_tp.tp, module.recoupled_node_edge_tp.tp):
+            forward = tp._compiled_main_left_right
+            if isinstance(forward, torch.fx.GraphModule):
+                assert any(
+                    node.op == "call_function" and node.target is torch.split
+                    for node in forward.graph.nodes
+                )
     couplings = [
         (ins.i_in1, ins.i_in2, node_tp.irreps_out[ins.i_out].ir)
         for ins in node_tp.instructions
@@ -276,6 +285,25 @@ def test_wigner6j_repeated_irreps_remain_independent(weight_level):
     expected_grads = torch.autograd.grad((expected * probe).sum(), inputs[:-1])
     for observed, expected in zip(observed_grads, expected_grads):
         torch.testing.assert_close(observed, expected, atol=3.0e-12, rtol=3.0e-12)
+
+
+def test_wigner6j_export_preserves_split_inputs():
+    module = O3Wigner6jScatterTensorProduct(
+        "2x0e + 2x1o",
+        "0e + 1o",
+        "0e + 1o",
+        "0e + 1e",
+        weight_level="edge",
+    ).to(DEVICE)
+    inputs = _random_inputs(module, requires_grad=True)
+    exported = torch.export.export(module, inputs, strict=True).module()
+    expected = module(*inputs)
+    observed = exported(*inputs)
+    torch.testing.assert_close(observed, expected)
+    expected_grads = torch.autograd.grad(expected.sum(), inputs[:-1])
+    observed_grads = torch.autograd.grad(observed.sum(), inputs[:-1])
+    for observed, expected in zip(observed_grads, expected_grads):
+        torch.testing.assert_close(observed, expected)
 
 
 @pytest.mark.parametrize("weight_level", ["edge", "node"])

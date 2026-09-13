@@ -6,6 +6,7 @@
 """Wigner-6j recoupling for O(3) interactions."""
 
 import math
+import operator
 from dataclasses import dataclass
 from typing import Union
 
@@ -18,6 +19,67 @@ from tace.utils.torch_scatter import scatter_sum
 from ..time_reversal import contains_time_odd_irreps
 from .fused import O3ScatterTensorProduct, uvuTensorProduct
 from .paths import satisfy
+
+
+def _split_tensor_product_inputs(tp: o3.TensorProduct) -> None:
+    """Read disjoint feature and weight slices through a shared split."""
+    forward = tp._compiled_main_left_right
+    if not isinstance(forward, torch.fx.GraphModule):
+        return
+
+    slices = {}
+    for node in forward.graph.nodes:
+        if node.op != "call_function" or node.target is not operator.getitem:
+            continue
+        tensor, index = node.args
+        if not (
+            isinstance(tensor, torch.fx.Node)
+            and tensor.op == "call_method"
+            and tensor.target == "reshape"
+            and len(tensor.args) == 3
+            and isinstance(tensor.args[2], int)
+            and isinstance(index, tuple)
+            and len(index) == 2
+            and index[0] == slice(None)
+            and isinstance(index[1], slice)
+            and index[1].step is None
+            and isinstance(index[1].start, int)
+            and isinstance(index[1].stop, int)
+            and index[1].stop > index[1].start
+        ):
+            continue
+        slices.setdefault(tensor, {}).setdefault(
+            (index[1].start, index[1].stop), []
+        ).append(node)
+
+    for tensor, intervals in slices.items():
+        if len(intervals) < 2:
+            continue
+        sizes = []
+        indices = {}
+        offset = 0
+        for start, stop in sorted(intervals):
+            if start < offset:
+                break
+            if start > offset:
+                sizes.append(start - offset)
+            indices[start, stop] = len(sizes)
+            sizes.append(stop - start)
+            offset = stop
+        else:
+            if offset < tensor.args[2]:
+                sizes.append(tensor.args[2] - offset)
+            with forward.graph.inserting_after(tensor):
+                split = forward.graph.call_function(
+                    torch.split, (tensor, sizes), {"dim": 1}
+                )
+            for interval, nodes in intervals.items():
+                for node in nodes:
+                    node.args = (split, indices[interval])
+
+    forward.graph.eliminate_dead_code()
+    forward.graph.lint()
+    forward.recompile()
 
 
 def sympy_wigner_6j(
@@ -280,6 +342,22 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                 recoupling_path_indices.append(path_index)
                 component_recoupling_coefficients.append(coefficient)
 
+        # Produce equal irreps contiguously, without a runtime permutation or
+        # summing independent channels. uvu instructions retain their slices.
+        sorted_intermediate = o3.Irreps(recoupled_intermediate).sort()
+        recoupled_intermediate = list(sorted_intermediate.irreps)
+        recoupled_node_node_instructions = sorted(
+            (
+                (i, j, sorted_intermediate.p[k], *rest)
+                for i, j, k, *rest in recoupled_node_node_instructions
+            ),
+            key=lambda ins: ins[2],
+        )
+        recoupled_node_edge_instructions = [
+            (sorted_intermediate.p[i], j, k, *rest)
+            for i, j, k, *rest in recoupled_node_edge_instructions
+        ]
+
         self.recoupled_node_node_tp = uvuTensorProduct(
             self.irreps_node_feats,
             self.extra_irreps_node_attrs,
@@ -293,6 +371,9 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             self.irreps_out,
             instructions=recoupled_node_edge_instructions,
         )
+        for tp in (self.recoupled_node_node_tp, self.recoupled_node_edge_tp):
+            if not hasattr(tp, "fused_tp"):
+                _split_tensor_product_inputs(tp.tp)
 
         recoupling_coefficients = []
         for instruction, path_index, coefficient in zip(
