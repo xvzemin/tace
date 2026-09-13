@@ -15,7 +15,7 @@ from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
-from .fused import O2CgtpScatterTensorProduct, O3ScatterTensorProduct
+from .fused import O3ScatterTensorProduct
 from .layer_norm import get_normalization_layer
 from .legacy_so2 import uvSO2Convolution
 from .nonlinear import get_nonlinear_layer
@@ -298,50 +298,6 @@ class O3CgtpInteraction(Interaction):
             sc = None
 
         return m_i, self.truncate_ghosts(sc, nlocal)
-
-
-class O2CgtpInteraction(O3CgtpInteraction):
-    """
-    Exact O(3) CGTP convolution using O(2) m=0 spherical harmonics harmonics 
-    and sparse CG maps.
-    """
-
-    def _build_rejector(self) -> torch.nn.Module:
-        return O2CgtpScatterTensorProduct(
-            self.irreps_in,
-            self.irreps_sh,
-            self.irreps_out,
-            l1l2=self.l1l2,
-        )
-
-    def _compute_messages(
-        self,
-        node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
-        edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_cutoff: Union[torch.Tensor, None],
-        edge_wigner: Union[torch.Tensor, None] = None,
-        edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
-        magnetic_node_attrs: Union[torch.Tensor, None] = None,
-        magnetic_edge_attrs: Union[torch.Tensor, None] = None,
-        graph: Union[Graph, None] = None,
-    ) -> torch.Tensor:
-        conv_weights = self.edge_info(edge_feats)
-        if edge_cutoff is not None:
-            conv_weights = conv_weights * edge_cutoff
-        return self.rejector(
-            node_feats,
-            conv_weights,
-            edge_index,
-            edge_wigner,
-            edge_wigner_inv,
-            graph,
-        )
 
 
 class uvSO2Interaction(O3CgtpInteraction):
@@ -834,7 +790,6 @@ class O2MagneticInteraction(O2Interaction):
 
 INTERACTION: Dict[str, type[Interaction]] = {
     "cgtp": O3CgtpInteraction,
-    "o2_cgtp": O2CgtpInteraction,
     "so2": uvSO2Interaction,
     "o2": O2Interaction,
     "o2_mag": O2MagneticInteraction,

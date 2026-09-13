@@ -43,7 +43,6 @@ For the benchmark examples, the files are arranged as follows:
      benchmark_configs/
        3bpa_cgtp.yaml
        3bpa_o2.yaml
-       3bpa_o2_cgtp.yaml
 
 ``3bpa_cgtp.yaml`` loads the base from the parent directory:
 
@@ -55,13 +54,14 @@ parent directory. ``@_global_`` controls where the contents are merged, not
 where the file is found.
 
 A variant can then inherit ``3bpa_cgtp.yaml`` from the same directory.
-For example, ``3bpa_o2_cgtp.yaml`` changes only the interaction type:
+For example, ``3bpa_o2.yaml`` selects a local O(2) interaction and adjusts its
+angular cutoff and nonlinearity:
 
-.. literalinclude:: ../../../../example/train/benchmark_configs/3bpa_o2_cgtp.yaml
+.. literalinclude:: ../../../../example/train/benchmark_configs/3bpa_o2.yaml
    :language: yaml
 
 The merge order is ``tace.yaml``, then ``3bpa_cgtp.yaml``, then
-``3bpa_o2_cgtp.yaml``. The magnetic examples follow the same pattern:
+``3bpa_o2.yaml``. The magnetic examples follow the same pattern:
 ``soc_o2_mtace.yaml`` supplies the shared magnetic settings, while
 ``nonsoc_o2_mtace.yaml`` and ``soc_w6j_mtace.yaml`` override their differences.
 
@@ -122,14 +122,14 @@ configuration:
 .. code-block:: bash
 
    cd example/train/benchmark_configs
-   tace-train -cn 3bpa_o2_cgtp.yaml --cfg job --resolve
+   tace-train -cn 3bpa_o2.yaml --cfg job --resolve
 
 This prints the merged configuration with interpolations resolved, without
 starting training. Command-line values can override the merged settings:
 
 .. code-block:: bash
 
-   tace-train -cn 3bpa_o2_cgtp.yaml model.config.num_channel=32 --cfg job --resolve
+   tace-train -cn 3bpa_o2.yaml model.config.num_channel=32 --cfg job --resolve
 
 Use ``--info defaults-tree`` to inspect the inheritance tree. Remove the
 inspection flags when ready to train. For more override syntax, see the

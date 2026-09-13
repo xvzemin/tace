@@ -1,8 +1,0 @@
-defaults:
-  - 3bpa_cgtp@_global_
-  - _self_
-
-model:
-  config:
-    atomic_basis:
-      type: o2_cgtp

@@ -17,13 +17,6 @@ O(3) Cgtp
    :no-members:
    :show-inheritance:
 
-O(2) O3Cgtp
------------
-
-.. autoclass:: tace.models._e3nn.inter.O2CgtpInteraction
-   :no-members:
-   :show-inheritance:
-
 O(2) Linear
 -----------
 

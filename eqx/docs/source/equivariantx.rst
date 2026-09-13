@@ -264,64 +264,6 @@ matrices may cover additional degrees or orders.
 entry. ``local_features`` follows ``frame.irreps_out`` in the same flattened
 order.
 
-Sparse edge tensor products
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-:class:`eqx.o2.O3TensorProduct` evaluates a feature--spherical-harmonic
-Clebsch--Gordan tensor product in an edge-aligned frame. At the positive y-axis,
-
-.. math::
-
-   Y^{(l_f)}_{m_f}(\widehat{\boldsymbol y})
-   = \sqrt{2l_f+1}\,\delta_{m_f0}
-
-for component-normalized harmonics. The local coupling therefore reduces to
-
-.. math::
-
-   \widetilde z^{(l_o)}_{m_o}
-   = \sum_{l_i,l_f,m_i}
-       W_{l_i l_f l_o}
-       C^{l_o m_o}_{l_i m_i,l_f0}
-       \sqrt{2l_f+1}\,
-       \widetilde x^{(l_i)}_{m_i}.
-
-In the real basis, only ``m_i = +/- m_o`` can contribute. The module stores
-only nonzero coefficients and evaluates indexed products followed by sparse
-summation. Spherical harmonics enter through their values on the y-axis;
-the feature inputs and outputs are rotated. Angular paths, weights, and
-normalization factors follow the declared tensor-product instructions.
-
-The second input must be time-even edge spherical harmonics with multiplicity
-one. Channelwise ``uvu`` and channel-mixing ``uvw`` paths are supported.
-An optional ``harmonic_scale`` supplies one invariant multiplier per degree,
-for example to reproduce unnormalized solid harmonics.
-
-.. code-block:: python
-
-   import torch
-   from e3nn import o3
-
-   from eqx import o2
-
-   irreps_in = o3.Irreps("8x1o")
-   irreps_sh = o3.Irreps("1x1o")
-   irreps_out = o3.Irreps("8x0e + 8x1e + 8x2e")
-   tensor_product = o2.O3TensorProduct(
-       irreps_in, irreps_sh, irreps_out,
-       [(0, 0, i, "uvu", True) for i in range(3)],
-       internal_weights=False, shared_weights=False,
-   )
-   edge_vectors = torch.randn(32, 3)
-   features = torch.randn(32, irreps_in.dim)  # flattened ir_mul
-   D, D_inv = o2.WignerD(2, 2)(edge_vectors)
-   weights = torch.randn(32, tensor_product.weight_numel)
-   output = tensor_product(features, D, D_inv, weights)
-
-Shared Wigner matrices must retain all local orders of the feature and output
-irreps. Adjacent identical output irreps share a rotation across their channels;
-the output tensor retains the declared irrep-entry order.
-
 Asymmetric contraction
 ~~~~~~~~~~~~~~~~~~~~~~
 

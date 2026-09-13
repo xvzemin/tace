@@ -9,11 +9,9 @@ from typing import Union
 import torch
 from e3nn import o3
 
-from eqx.o2 import O3TensorProduct
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
-from ..layout import LayoutTransform
 from ..time_reversal import contains_time_odd_irreps
 from .paths import generate_paths
 
@@ -311,55 +309,3 @@ class O3ScatterTensorProduct(torch.nn.Module):
         return scatter_sum(
             self.tp(x[edge_index[0]], y, w), edge_index[1], dim=0, dim_size=x.size(0)
         )
-
-
-class O2CgtpScatterTensorProduct(torch.nn.Module):
-
-    def __init__(self, irreps_in, irreps_sh, irreps_out, *, l1l2=None):
-        super().__init__()
-        irreps_in = o3.Irreps(irreps_in)
-        irreps_sh = o3.Irreps(irreps_sh)
-        irreps_out = o3.Irreps(irreps_out)
-        instructions, self.irreps_out = generate_paths(
-            irreps_out,
-            irreps_in,
-            irreps_sh,
-            l1l2=l1l2,
-            e3nn_mode="uvu",
-        )
-        self.tp = O3TensorProduct(
-            irreps_in,
-            irreps_sh,
-            self.irreps_out,
-            instructions,
-            internal_weights=False,
-            shared_weights=False,
-        )
-        self.weight_numel = self.tp.weight_numel
-        self.reshape_in = LayoutTransform(
-            irreps_in,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
-        )
-        self.reshape_out = LayoutTransform(
-            self.irreps_out.simplify(),
-            layout_in="flatten_ir_mul",
-            layout_out="flatten_mul_ir",
-        )
-        self.register_buffer(
-            "harmonic_degrees",
-            torch.tensor([ir.l for _, ir in irreps_sh]),
-            persistent=False,
-        )
-
-    def forward(self, node_feats, conv_weights, edge_index, wigner, wigner_inv, graph):
-        # Keep the original r / (|r| + eps) convention, including its derivative.
-        harmonic_scale = (
-            graph.edge_vector.square().sum(-1, keepdim=True).sqrt() / graph.edge_length
-        ).pow(self.harmonic_degrees)
-        node_feats = self.reshape_in(node_feats)
-        message = self.tp.local_frame_in.to_local(node_feats[edge_index[0]], wigner)
-        message = self.tp.forward_local(message, conv_weights, harmonic_scale)
-        message = self.tp.local_frame_out.to_global(message, wigner_inv)
-        message = scatter_sum(message, edge_index[1], dim=0, dim_size=node_feats.size(0))
-        return self.reshape_out(message)

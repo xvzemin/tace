@@ -362,7 +362,7 @@ model:
       use_first_pre_norm: false
 
     atomic_basis:
-      type: cgtp # (str or list[str]) stable: [cgtp, so2], dev: [o2_cgtp, o2, o2_mag, w6j_mag]
+      type: cgtp # (str or list[str]) stable: [cgtp, so2], dev: [o2, o2_mag, w6j_mag]
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [avg_num_neighbors, sqrt_avg_num_neighbors, density]
       nonlinear: gate # [null, gate]
