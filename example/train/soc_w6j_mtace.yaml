@@ -5,6 +5,7 @@ defaults:
 
 model:
   config:
+    parity: false
     num_layers: 2
     atomic_basis:
       type: w6j_mag

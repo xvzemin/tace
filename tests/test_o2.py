@@ -1415,7 +1415,8 @@ def test_local_frame_preserves_time_parity():
 
 
 @pytest.mark.parametrize("Lmax", [1, 2])
-def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
+@pytest.mark.parametrize("parity", [False, True])
+def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, parity):
     time_reversal = hasattr(o3.Irrep("0e"), "t")
     basis = MagneticBasis(
         [{26: 2.0}],
@@ -1423,6 +1424,7 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
         Lmax=Lmax,
         atomic_numbers=[26],
         time_reversal=time_reversal,
+        parity=parity,
     ).to(DEVICE, DTYPE)
     edge_index = torch.tensor(
         [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
@@ -1453,6 +1455,13 @@ def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax):
 
     assert basis.angular_basis.normalization == "integral"
     assert not basis.angular_basis.normalize
+    assert basis.angular_basis.irreps_in[0].ir.p == (1 if parity else -1)
+    assert basis.angular_basis.irreps_out == basis.magnetic_node_irreps_out
+    for _, ir in basis.magnetic_node_irreps_out:
+        assert ir.p == (1 if parity else (-1) ** ir.l)
+        assert getattr(ir, "t", 1) == ((-1) ** ir.l if time_reversal else 1)
+    if not parity:
+        assert all(ir.p == (-1) ** ir.l for _, ir in basis.magnetic_edge_irreps_out)
     assert basis.radial_normalization == "clamp"
     torch.testing.assert_close(
         basis.magnetic_scale,

@@ -258,34 +258,46 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     assert full_o3_ir.l == 1 and full_o3_ir.p == 1 and full_o3_ir.t == -1
 
 
-def test_parity_selects_natural_or_complete_magnetic_paths():
+@pytest.mark.parametrize("atomic_basis", ["o2_mag", "w6j_mag"])
+def test_parity_selects_natural_or_complete_magnetic_paths(atomic_basis):
     config = _model_config()
-    config["atomic_basis"]["type"] = "o2_mag"
+    config["atomic_basis"]["type"] = atomic_basis
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["fidelity"][0]["magnetic_scale"] = 2.0
     config["mmax"] = 1
 
     natural_model = e3nnTACE(**config)
     natural_representation = natural_model.representation
+    natural_basis = natural_representation.magnetic_basis.angular_basis
+    assert natural_basis.irreps_in[0].ir.p == -1
+    assert natural_basis.irreps_out == natural_representation.magnetic_node_irreps_out
     for irreps in (
         natural_representation.magnetic_node_irreps_out,
         natural_representation.magnetic_edge_irreps_out,
         natural_representation.interactions[0].irreps_out,
         natural_representation.products[0].irreps_out,
     ):
-        assert all(ir.p == (-1) ** ir.l for _, ir in irreps)
+        if irreps is not None:
+            assert all(ir.p == (-1) ** ir.l for _, ir in irreps)
 
     config["parity"] = True
     complete_model = e3nnTACE(**config)
     complete_representation = complete_model.representation
+    complete_basis = complete_representation.magnetic_basis.angular_basis
+    assert complete_basis.irreps_in[0].ir.p == 1
+    assert complete_basis.irreps_out == complete_representation.magnetic_node_irreps_out
+    assert _time_parities(natural_basis.irreps_out) == _time_parities(
+        complete_basis.irreps_out
+    )
     assert any(
         ir.p != (-1) ** ir.l
         for _, ir in complete_representation.magnetic_node_irreps_out
     )
-    assert any(
-        ir.p != (-1) ** ir.l
-        for _, ir in complete_representation.magnetic_edge_irreps_out
-    )
+    if complete_representation.magnetic_edge_irreps_out is not None:
+        assert any(
+            ir.p != (-1) ** ir.l
+            for _, ir in complete_representation.magnetic_edge_irreps_out
+        )
 
 
 @pytest.mark.parametrize("num_fidelities", [1, 2])
