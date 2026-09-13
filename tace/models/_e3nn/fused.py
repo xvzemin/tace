@@ -125,7 +125,7 @@ class uvuTensorProduct(torch.nn.Module):
         irreps_in1 = o3.Irreps(irreps_in1)
         irreps_in2 = o3.Irreps(irreps_in2)
         irreps_out = o3.Irreps(irreps_out)
-        if any(instruction[3] != "uvu" for instruction in instructions):
+        if any(ins[3] != "uvu" for ins in instructions):
             raise ValueError("uvuTensorProduct only accepts uvu instructions")
 
         self.tp = o3.TensorProduct(
@@ -144,9 +144,9 @@ class uvuTensorProduct(torch.nn.Module):
         self.weight_numel = self.tp.weight_numel
         self.shared_weights = shared_weights
         use_oeq = acceleration_enabled("oeq")
-        oeq_compatible = all(multiplicity == 1 for multiplicity, _ in irreps_in2)
+        oeq_compatible = all(mul == 1 for mul, _ in irreps_in2)
         oeq_compatible = oeq_compatible and all(
-            instruction[4] for instruction in instructions
+            ins[4] for ins in instructions
         )
         self.use_oeq = use_oeq and oeq_compatible
 

@@ -10,7 +10,6 @@ from tace.models._e3nn.fused import uvuTensorProduct
 from tace.models._e3nn.tace import e3nnTACE
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
-    sympy_wigner_6j,
     wigner_6j,
 )
 from tace.models.adapter import TensorModel
@@ -19,8 +18,7 @@ from tace.models.time_reversal import spherical_harmonics_irreps, supports_time_
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def test_standard_wigner_6j_symbol():
-    assert sympy_wigner_6j(1, 1, 1, 1, 1, 1) == pytest.approx(1.0 / 6.0)
+def test_wigner_6j_recoupling_coefficient():
     assert wigner_6j(1, 1, 1, 1, 1, 1) == pytest.approx(1.0 / 2.0)
 
 
@@ -92,15 +90,21 @@ def test_uvu_tensor_product_oeq_matches_e3nn(shared_weights, monkeypatch):
         )
 
 
-def _build_tensor_product(*, weight_level="edge"):
-    irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x1e")
+def _build_tensor_product(*, weight_level="edge", parity=True):
     irreps_edge_attrs = o3.Irreps.spherical_harmonics(2, p=-1)
-    irreps_out = o3.Irreps("2x0e + 2x0o + 2x1e + 2x1o + 2x2e + 2x2o")
+    if parity:
+        irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x1e")
+        irreps_out = o3.Irreps("2x0e + 2x0o + 2x1e + 2x1o + 2x2e + 2x2o")
+        extra_irreps = o3.Irreps("0o + 0e + 1o + 1e + 2o + 2e")
+    else:
+        irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x2e")
+        irreps_out = irreps_node_feats
+        extra_irreps = irreps_edge_attrs
     module = O3Wigner6jScatterTensorProduct(
         irreps_node_feats,
         irreps_edge_attrs,
         irreps_out,
-        extra_irreps_node_attrs=o3.Irreps("0o + 0e + 1o + 1e + 2o + 2e"),
+        extra_irreps_node_attrs=extra_irreps,
         weight_level=weight_level,
         register_reference=True,
     )
@@ -331,21 +335,31 @@ def test_wigner6j_empty_edges(weight_level, num_nodes):
 
 
 @pytest.mark.parametrize("weight_level", ["edge", "node"])
-def test_wigner6j_oeq_matches_reference(weight_level, monkeypatch):
+@pytest.mark.parametrize("parity", [False, True])
+def test_wigner6j_oeq_matches_reference(weight_level, parity, monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("OEQ requires CUDA")
     pytest.importorskip("openequivariance")
     torch.manual_seed(2)
     torch.set_default_dtype(torch.float64)
-    monkeypatch.setenv("TACE_USE_OEQ", "1")
     monkeypatch.setenv("TACE_USE_CUE", "0")
-    module = _build_tensor_product(weight_level=weight_level)
+    monkeypatch.setenv("TACE_USE_OEQ", "0")
+    native = _build_tensor_product(weight_level=weight_level, parity=parity)
+    monkeypatch.setenv("TACE_USE_OEQ", "1")
+    module = _build_tensor_product(weight_level=weight_level, parity=parity)
     assert module.recoupled_node_node_tp.use_oeq
     assert module.recoupled_node_edge_tp.use_oeq
+    assert module.irreps_out == native.irreps_out
+    assert module.edge_weight_numel == native.edge_weight_numel
+    assert module.extra_weight_numel == native.extra_weight_numel
+    for name in ("recoupled_node_node_tp", "recoupled_node_edge_tp"):
+        assert getattr(module, name).instructions == getattr(native, name).instructions
+    assert dict(module.named_parameters()) == dict(native.named_parameters()) == {}
     inputs = _random_inputs(module, requires_grad=True)
     observed = module(*inputs)
     expected = module.forward_reference(*inputs)
     torch.testing.assert_close(observed, expected, atol=3.0e-12, rtol=3.0e-12)
+    torch.testing.assert_close(observed, native(*inputs), atol=3.0e-12, rtol=3.0e-12)
     probe = torch.randn_like(expected)
     observed_grads = torch.autograd.grad(
         (observed * probe).sum(), inputs[:-1], create_graph=True

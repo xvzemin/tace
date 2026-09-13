@@ -3,19 +3,16 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-"""Wigner-6j recoupling for O(3) interactions."""
-
 import math
 import operator
-from dataclasses import dataclass
-from typing import Union
+from functools import lru_cache
+from typing import NamedTuple, Optional
 
 import torch
 from e3nn import o3
 
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
-
 from ..time_reversal import contains_time_odd_irreps
 from .fused import O3ScatterTensorProduct, uvuTensorProduct
 from .paths import satisfy
@@ -82,30 +79,7 @@ def _split_tensor_product_inputs(tp: o3.TensorProduct) -> None:
     forward.recompile()
 
 
-def sympy_wigner_6j(
-    l1: int,
-    l2: int,
-    l1l2: int,
-    l3: int,
-    L: int,
-    l23: int,
-) -> float:
-
-    from sympy import S
-    from sympy.physics import wigner
-
-    return float(
-        wigner.wigner_6j(
-            S(l1),
-            S(l2),
-            S(l1l2),
-            S(l3),
-            S(L),
-            S(l23),
-        )
-    )
-
-
+@lru_cache(maxsize=None)
 def wigner_6j(
     l1: int,
     l2: int,
@@ -114,50 +88,106 @@ def wigner_6j(
     L: int,
     l23: int,
 ) -> float:
-    r"""The generic angular-momentum labels map to:
+    r"""Wigner-6j coefficient for exchanging the edge and extra-node inputs.
 
-    - ``l1``: edge spherical harmonic
-    - ``l2``: node feature
-    - ``l1l2``: node-edge intermediate
-    - ``l3``: extra node attribute
-    - ``L``: output
-    - ``l23``: node-extra-attribute intermediate
+    Parameters
+    ----------
+    l1 : int
+        Angular degree of the edge input.
+    l2 : int
+        Angular degree of the node input.
+    l1l2 : int
+        Angular degree of the node-edge intermediate.
+    l3 : int
+        Angular degree of the extra node input.
+    L : int
+        Angular degree of the output.
+    l23 : int
+        Angular degree of the node-extra intermediate.
+
+    Returns
+    -------
+    float
+        Recoupling coefficient, including the phase and dimension factors.
+
+    Notes
+    -----
+    The coefficient is
+
+    .. math::
+
+        (-1)^{l_1+l_3+l_{12}+l_{23}}
+        \sqrt{(2l_{12}+1)(2l_{23}+1)}
+        \begin{Bmatrix}
+            l_1 & l_2 & l_{12} \\
+            l_3 & L & l_{23}
+        \end{Bmatrix}.
+
+    It converts ``(node x edge) x extra`` to ``(node x extra) x edge``
+    with component-normalized Clebsch-Gordan products. Path normalization
+    is applied separately by :class:`O3Wigner6jScatterTensorProduct`.
     """
+    from sympy.physics.wigner import wigner_6j as _wigner_6j
 
     return (
         (-1) ** (l1 + l3 + l1l2 + l23)
         * math.sqrt((2 * l1l2 + 1) * (2 * l23 + 1))
-        * sympy_wigner_6j(
-            l1,
-            l2,
-            l1l2,
-            l3,
-            L,
-            l23,
-        )
+        * float(_wigner_6j(l1, l2, l1l2, l3, L, l23))
     )
 
 
-@dataclass(frozen=True)
-class _CouplingPath:
-    node_index: int
-    edge_index: int
-    extra_index: int
-    node_edge_irrep: o3.Irrep
-    out_irrep: o3.Irrep
-    multiplicity: int
+class _CouplingPath(NamedTuple):
+    i_in1: int
+    i_in2: int
+    i_in3: int
+    ir12: o3.Irrep
+    ir_out: o3.Irrep
+    mul: int
     weight_offset: int
 
 
 class O3Wigner6jScatterTensorProduct(torch.nn.Module):
-    r"""
-    The reference tree is ``(node_feats x edge_attrs) x extra_node_attrs``. The
-    executed tree is ``(node_feats x extra_node_attrs) x edge_attrs``. Every
-    complete reference path remains separate, and all allowed first intermediate
-    irreps are summed with fixed Wigner-6j coefficients. Therefore the two trees
-    are algebraically identical. Each distinct node-node coupling is computed
-    once and shared by its downstream paths. Both scalar weights are applied in
-    the node-edge product, without tying the weights of different reference paths.
+    r"""Three-input tensor product with Wigner-6j recoupling and node aggregation.
+
+    Parameters
+    ----------
+    irreps_node_feats : `e3nn.o3.Irreps`
+        Irreps of the node features.
+    irreps_edge_attrs : `e3nn.o3.Irreps`
+        Irreps of the edge attributes. Each multiplicity must be one.
+    irreps_out : `e3nn.o3.Irreps`
+        Requested output irrep types. Each allowed coupling path produces a
+        separate output with the multiplicity of its node input; the supplied
+        output multiplicities are not used.
+    extra_irreps_node_attrs : `e3nn.o3.Irreps`
+        Irreps of the extra node attributes. Each multiplicity must be one.
+    weight_level : {'edge', 'node'}
+        Whether ``extra_weights`` are supplied per edge or per source node.
+        ``edge_weights`` are always supplied per edge.
+    l1l2 : {'<', '<=', '>', '>=', '==', '!='} or None
+        Restriction on the angular degrees of the node and edge inputs.
+        If ``None``, all allowed node-edge pairs are included.
+    register_reference : bool, default False
+        Retain the unrecoupled tensor products for :meth:`forward_reference`.
+
+    Attributes
+    ----------
+    irreps_out : `e3nn.o3.Irreps`
+        Output irreps in coupling-path order.
+    edge_weight_numel : int
+        Number of edge weights per edge.
+    extra_weight_numel : int
+        Number of extra weights per edge or node.
+
+    Notes
+    -----
+    The reference tree is ``(node_feats x edge_attrs) x extra_node_attrs``;
+    the executed tree is ``(node_feats x extra_node_attrs) x edge_attrs``.
+    Fixed Wigner-6j coefficients and path-normalization factors make the two
+    trees equivalent. Each distinct node-node coupling is evaluated once.
+    Independent reference paths retain separate weights and output channels.
+    Both weights are applied in the final node-edge product, whose results
+    are summed at the target nodes.
     """
 
     def __init__(
@@ -168,7 +198,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         extra_irreps_node_attrs: o3.Irreps,
         *,
         weight_level: str,
-        l1l2: Union[str, None] = None,
+        l1l2: Optional[str] = None,
         register_reference: bool = False,
     ) -> None:
         super().__init__()
@@ -180,14 +210,14 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
 
         self.irreps_node_feats = o3.Irreps(irreps_node_feats)
         self.irreps_edge_attrs = o3.Irreps(irreps_edge_attrs)
-        requested_irreps_out = o3.Irreps(irreps_out)
+        irreps_out = o3.Irreps(irreps_out)
         self.extra_irreps_node_attrs = o3.Irreps(extra_irreps_node_attrs)
-        if any(multiplicity != 1 for multiplicity, _ in self.extra_irreps_node_attrs):
+        if any(mul != 1 for mul, _ in self.extra_irreps_node_attrs):
             raise ValueError("extra_irreps_node_attrs must have multiplicity one")
         if contains_time_odd_irreps(
             self.irreps_node_feats,
             self.irreps_edge_attrs,
-            requested_irreps_out,
+            irreps_out,
             self.extra_irreps_node_attrs,
         ):
             for kernel in ("oeq", "cue"):
@@ -201,79 +231,53 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         self.register_reference = register_reference
 
         paths: list[_CouplingPath] = []
-        reference_intermediate = []
-        expanded_output = []
+        reference_irrep_list = []
+        irrep_list_out = []
         reference_node_edge_instructions = []
         reference_edge_edge_instructions = []
         weight_offset = 0
 
-        for _, (_, out_irrep) in enumerate(requested_irreps_out):
-            for node_index, (multiplicity, node_irrep) in enumerate(
-                self.irreps_node_feats
-            ):
-                for edge_index, (_, edge_irrep) in enumerate(self.irreps_edge_attrs):
-                    if not satisfy(node_irrep.l, edge_irrep.l, l1l2):
+        for _, ir_out in irreps_out:
+            for i1, (mul, ir1) in enumerate(self.irreps_node_feats):
+                for i2, (_, ir2) in enumerate(self.irreps_edge_attrs):
+                    if not satisfy(ir1.l, ir2.l, l1l2):
                         continue
-                    for node_edge_irrep in node_irrep * edge_irrep:
-                        for extra_index, (_, extra_irrep) in enumerate(
-                            self.extra_irreps_node_attrs
-                        ):
-                            if out_irrep not in node_edge_irrep * extra_irrep:
+                    for ir12 in ir1 * ir2:
+                        for i3, (_, ir3) in enumerate(self.extra_irreps_node_attrs):
+                            if ir_out not in ir12 * ir3:
                                 continue
 
-                            path_index = len(paths)
+                            i_out = len(paths)
                             paths.append(
                                 _CouplingPath(
-                                    node_index=node_index,
-                                    edge_index=edge_index,
-                                    extra_index=extra_index,
-                                    node_edge_irrep=node_edge_irrep,
-                                    out_irrep=out_irrep,
-                                    multiplicity=multiplicity,
-                                    weight_offset=weight_offset,
+                                    i1, i2, i3, ir12, ir_out, mul, weight_offset
                                 )
                             )
-                            reference_intermediate.append(
-                                (multiplicity, node_edge_irrep)
-                            )
-                            expanded_output.append((multiplicity, out_irrep))
+                            reference_irrep_list.append((mul, ir12))
+                            irrep_list_out.append((mul, ir_out))
                             reference_node_edge_instructions.append(
-                                (
-                                    node_index,
-                                    edge_index,
-                                    path_index,
-                                    "uvu",
-                                    True,
-                                    1.0,
-                                )
+                                (i1, i2, i_out, "uvu", True, 1.0)
                             )
                             reference_edge_edge_instructions.append(
-                                (
-                                    path_index,
-                                    extra_index,
-                                    path_index,
-                                    "uvu",
-                                    True,
-                                    1.0,
-                                )
+                                (i_out, i3, i_out, "uvu", True, 1.0)
                             )
-                            weight_offset += multiplicity
+                            weight_offset += mul
 
         if not paths:
             raise ValueError("No Wigner-6j coupling paths were generated")
 
-        self.irreps_out = o3.Irreps(expanded_output)
+        self.irreps_out = o3.Irreps(irrep_list_out)
 
         reference_node_edge_tp = o3.TensorProduct(
             self.irreps_node_feats,
             self.irreps_edge_attrs,
-            o3.Irreps(reference_intermediate),
+            o3.Irreps(reference_irrep_list),
             reference_node_edge_instructions,
             internal_weights=False,
             shared_weights=False,
         )
         reference_edge_edge_tp = o3.TensorProduct(
-            o3.Irreps(reference_intermediate),
+            o3.Irreps(reference_irrep_list),
             self.extra_irreps_node_attrs,
             self.irreps_out,
             reference_edge_edge_instructions,
@@ -281,7 +285,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             shared_weights=False,
         )
 
-        recoupled_intermediate = []
+        recoupled_irrep_list = []
         intermediate_indices = {}
         recoupled_node_node_instructions = []
         recoupled_node_edge_instructions = []
@@ -289,33 +293,33 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         recoupling_path_indices = []
         component_recoupling_coefficients = []
 
-        for path_index, path in enumerate(paths):
-            node_irrep = self.irreps_node_feats[path.node_index].ir
-            edge_irrep = self.irreps_edge_attrs[path.edge_index].ir
-            extra_irrep = self.extra_irreps_node_attrs[path.extra_index].ir
-            for node_extra_irrep in node_irrep * extra_irrep:
-                if path.out_irrep not in node_extra_irrep * edge_irrep:
+        for i_out, path in enumerate(paths):
+            ir1 = self.irreps_node_feats[path.i_in1].ir
+            ir2 = self.irreps_edge_attrs[path.i_in2].ir
+            ir3 = self.extra_irreps_node_attrs[path.i_in3].ir
+            for ir13 in ir1 * ir3:
+                if path.ir_out not in ir13 * ir2:
                     continue
 
                 coefficient = wigner_6j(
-                    edge_irrep.l,
-                    node_irrep.l,
-                    path.node_edge_irrep.l,
-                    extra_irrep.l,
-                    path.out_irrep.l,
-                    node_extra_irrep.l,
+                    ir2.l,
+                    ir1.l,
+                    path.ir12.l,
+                    ir3.l,
+                    path.ir_out.l,
+                    ir13.l,
                 )
                 if abs(coefficient) < 1.0e-14:
                     continue
 
-                key = (path.node_index, path.extra_index, node_extra_irrep)
+                key = (path.i_in1, path.i_in3, ir13)
                 if key not in intermediate_indices:
-                    intermediate_indices[key] = len(recoupled_intermediate)
-                    recoupled_intermediate.append((path.multiplicity, node_extra_irrep))
+                    intermediate_indices[key] = len(recoupled_irrep_list)
+                    recoupled_irrep_list.append((path.mul, ir13))
                     recoupled_node_node_instructions.append(
                         (
-                            path.node_index,
-                            path.extra_index,
+                            path.i_in1,
+                            path.i_in3,
                             intermediate_indices[key],
                             "uvu",
                             True,
@@ -326,8 +330,8 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                 recoupled_node_edge_instructions.append(
                     (
                         intermediate_index,
-                        path.edge_index,
-                        path_index,
+                        path.i_in2,
+                        i_out,
                         "uvu",
                         True,
                         1.0,
@@ -336,37 +340,36 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                 source_weight_indices.extend(
                     range(
                         path.weight_offset,
-                        path.weight_offset + path.multiplicity,
+                        path.weight_offset + path.mul,
                     )
                 )
-                recoupling_path_indices.append(path_index)
+                recoupling_path_indices.append(i_out)
                 component_recoupling_coefficients.append(coefficient)
 
         # Produce equal irreps contiguously, without a runtime permutation or
         # summing independent channels. uvu instructions retain their slices.
-        sorted_intermediate = o3.Irreps(recoupled_intermediate).sort()
-        recoupled_intermediate = list(sorted_intermediate.irreps)
+        irreps_mid, permutation, _ = o3.Irreps(recoupled_irrep_list).sort()
         recoupled_node_node_instructions = sorted(
             (
-                (i, j, sorted_intermediate.p[k], *rest)
+                (i, j, permutation[k], *rest)
                 for i, j, k, *rest in recoupled_node_node_instructions
             ),
             key=lambda ins: ins[2],
         )
         recoupled_node_edge_instructions = [
-            (sorted_intermediate.p[i], j, k, *rest)
+            (permutation[i], j, k, *rest)
             for i, j, k, *rest in recoupled_node_edge_instructions
         ]
 
         self.recoupled_node_node_tp = uvuTensorProduct(
             self.irreps_node_feats,
             self.extra_irreps_node_attrs,
-            o3.Irreps(recoupled_intermediate),
+            irreps_mid,
             instructions=recoupled_node_node_instructions,
             shared_weights=True,
         )
         self.recoupled_node_edge_tp = O3ScatterTensorProduct(
-            o3.Irreps(recoupled_intermediate),
+            irreps_mid,
             self.irreps_edge_attrs,
             self.irreps_out,
             instructions=recoupled_node_edge_instructions,
@@ -376,36 +379,29 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                 _split_tensor_product_inputs(tp.tp)
 
         recoupling_coefficients = []
-        for instruction, path_index, coefficient in zip(
+        for ins, i_out, coefficient in zip(
             self.recoupled_node_edge_tp.tp.instructions,
             recoupling_path_indices,
             component_recoupling_coefficients,
         ):
-            intermediate_index = instruction.i_in1
-            path = paths[path_index]
-            node_extra_irrep = recoupled_intermediate[intermediate_index][1]
+            path = paths[i_out]
+            ir13 = irreps_mid[ins.i_in1].ir
             reference_scale = (
-                reference_node_edge_tp.instructions[path_index].path_weight
-                * reference_edge_edge_tp.instructions[path_index].path_weight
+                reference_node_edge_tp.instructions[i_out].path_weight
+                * reference_edge_edge_tp.instructions[i_out].path_weight
             )
             recoupled_scale = (
-                self.recoupled_node_node_tp.instructions[intermediate_index].path_weight
-                * instruction.path_weight
+                self.recoupled_node_node_tp.instructions[ins.i_in1].path_weight
+                * ins.path_weight
             )
-            reference_component_scale = math.sqrt(
-                path.node_edge_irrep.dim * path.out_irrep.dim
-            )
-            recoupled_component_scale = math.sqrt(
-                node_extra_irrep.dim * path.out_irrep.dim
-            )
+            reference_component_scale = math.sqrt(path.ir12.dim * path.ir_out.dim)
+            recoupled_component_scale = math.sqrt(ir13.dim * path.ir_out.dim)
             reference_element_scale = reference_scale / reference_component_scale
             recoupled_element_scale = recoupled_scale / recoupled_component_scale
             normalized_coefficient = (
                 coefficient * reference_element_scale / recoupled_element_scale
             )
-            recoupling_coefficients.extend(
-                [normalized_coefficient] * paths[path_index].multiplicity
-            )
+            recoupling_coefficients.extend([normalized_coefficient] * path.mul)
 
         self.edge_weight_numel = reference_node_edge_tp.weight_numel
         self.extra_weight_numel = reference_edge_edge_tp.weight_numel
@@ -459,7 +455,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             error_msgs,
         )
 
-    def _recoupled(
+    def forward(
         self,
         node_feats: torch.Tensor,
         edge_attrs: torch.Tensor,
@@ -468,7 +464,32 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         extra_weights: torch.Tensor,
         edge_index: torch.Tensor,
     ) -> torch.Tensor:
-        indices = self.source_weight_indices
+        """Evaluate the recoupled tensor product and sum at target nodes.
+
+        Parameters
+        ----------
+        node_feats : torch.Tensor
+            Node features of shape ``(num_nodes, irreps_node_feats.dim)``.
+        edge_attrs : torch.Tensor
+            Edge attributes of shape ``(num_edges, irreps_edge_attrs.dim)``.
+        extra_node_attrs : torch.Tensor
+            Extra node attributes of shape
+            ``(num_nodes, extra_irreps_node_attrs.dim)``.
+        edge_weights : torch.Tensor
+            External weights of shape ``(num_edges, edge_weight_numel)``.
+        extra_weights : torch.Tensor
+            External weights of shape ``(num_edges, extra_weight_numel)``
+            when ``weight_level='edge'``, or ``(num_nodes, extra_weight_numel)``
+            when ``weight_level='node'``.
+        edge_index : torch.Tensor
+            Integer indices of shape ``(2, num_edges)``. Row zero contains
+            source nodes and row one contains target nodes.
+
+        Returns
+        -------
+        torch.Tensor
+            Node features of shape ``(num_nodes, irreps_out.dim)``.
+        """
         coefficients = self.recoupling_coefficients.to(dtype=edge_weights.dtype)
         if self.weight_level == "edge":
             if extra_weights.size(0) != edge_index.size(1):
@@ -479,7 +500,9 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             extra_weights = extra_weights.index_select(0, edge_index[0])
         # Scalar path weights commute with the CG contraction. Combine them
         # before expanding the reference paths into recoupling paths.
-        edge_weights = (edge_weights * extra_weights).index_select(-1, indices)
+        edge_weights = (edge_weights * extra_weights).index_select(
+            -1, self.source_weight_indices
+        )
         node_node_intermediate = self.recoupled_node_node_tp(
             node_feats,
             extra_node_attrs,
@@ -492,51 +515,6 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             edge_index,
         )
 
-    def _reference_edges(
-        self,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        extra_node_attrs: torch.Tensor,
-        edge_weights: torch.Tensor,
-        extra_weights: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> torch.Tensor:
-        source = edge_index[0]
-        node_edge_intermediate = self.reference_node_edge_tp(
-            node_feats[source], edge_attrs, edge_weights
-        )
-        if self.weight_level == "edge":
-            if extra_weights.size(0) != edge_index.size(1):
-                raise ValueError("edge weights must have one row per graph edge")
-            reference_extra_weights = extra_weights
-        else:
-            if extra_weights.size(0) != node_feats.size(0):
-                raise ValueError("node weights must have one row per graph node")
-            reference_extra_weights = extra_weights[source]
-        return self.reference_edge_edge_tp(
-            node_edge_intermediate,
-            extra_node_attrs[source],
-            reference_extra_weights,
-        )
-
-    def forward(
-        self,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        extra_node_attrs: torch.Tensor,
-        edge_weights: torch.Tensor,
-        extra_weights: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._recoupled(
-            node_feats,
-            edge_attrs,
-            extra_node_attrs,
-            edge_weights,
-            extra_weights,
-            edge_index,
-        )
-
     def forward_reference(
         self,
         node_feats: torch.Tensor,
@@ -546,23 +524,47 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         extra_weights: torch.Tensor,
         edge_index: torch.Tensor,
     ) -> torch.Tensor:
-        """Evaluate the reference tree for numerical validation."""
+        """Evaluate the unrecoupled tensor product and sum at target nodes.
 
+        Inputs and output have the same meaning and shapes as in :meth:`forward`.
+
+        Returns
+        -------
+        torch.Tensor
+            Node features of shape ``(num_nodes, irreps_out.dim)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the module was constructed with ``register_reference=False``.
+
+        See Also
+        --------
+        forward : Evaluate the same operation using Wigner-6j recoupling.
+        """
         if not self.register_reference:
             raise RuntimeError(
                 "forward_reference requires register_reference=True at construction"
             )
 
-        messages = self._reference_edges(
-            node_feats,
-            edge_attrs,
-            extra_node_attrs,
-            edge_weights,
+        source = edge_index[0]
+        node_edge_intermediate = self.reference_node_edge_tp(
+            node_feats[source], edge_attrs, edge_weights
+        )
+        if self.weight_level == "edge":
+            if extra_weights.size(0) != edge_index.size(1):
+                raise ValueError("edge weights must have one row per graph edge")
+        else:
+            if extra_weights.size(0) != node_feats.size(0):
+                raise ValueError("node weights must have one row per graph node")
+            extra_weights = extra_weights[source]
+        message = self.reference_edge_edge_tp(
+            node_edge_intermediate,
+            extra_node_attrs[source],
             extra_weights,
-            edge_index,
         )
         return scatter_sum(
-            messages,
+            message,
             edge_index[1],
             dim=0,
             dim_size=node_feats.size(0),

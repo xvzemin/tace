@@ -520,8 +520,7 @@ class O2Interaction(O3CgtpInteraction):
 
 
 class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
-    """Magnetic interaction evaluated by Wigner-6j recoupling."""
-
+    
     def _prepare_setup(self) -> None:
         if self.magnetic_node_irreps is None:
             raise ValueError("w6j_mag requires magnetic_node_irreps.")
