@@ -6,8 +6,8 @@ parameters that differ. TACE uses Hydra to compose the files.
 
 .. note::
 
-If you prefer, you can also manually merge all configuration options into
-a single configuration file.
+   If you prefer, you can also manually merge all configuration options into
+   a single configuration file.
 
 Inherit a configuration
 ~~~~~~~~~~~~~~~~~~~~~~~
