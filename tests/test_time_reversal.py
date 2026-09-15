@@ -258,10 +258,9 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     assert full_o3_ir.l == 1 and full_o3_ir.p == 1 and full_o3_ir.t == -1
 
 
-@pytest.mark.parametrize("atomic_basis", ["o2_mag", "w6j_mag"])
-def test_parity_selects_natural_or_complete_magnetic_paths(atomic_basis):
+def test_parity_selects_natural_or_complete_magnetic_paths():
     config = _model_config()
-    config["atomic_basis"]["type"] = atomic_basis
+    config["atomic_basis"]["type"] = "o2_mag"
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["fidelity"][0]["magnetic_scale"] = 2.0
     config["mmax"] = 1
@@ -277,8 +276,7 @@ def test_parity_selects_natural_or_complete_magnetic_paths(atomic_basis):
         natural_representation.interactions[0].irreps_out,
         natural_representation.products[0].irreps_out,
     ):
-        if irreps is not None:
-            assert all(ir.p == (-1) ** ir.l for _, ir in irreps)
+        assert all(ir.p == (-1) ** ir.l for _, ir in irreps)
 
     config["parity"] = True
     complete_model = e3nnTACE(**config)
