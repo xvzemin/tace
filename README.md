@@ -28,7 +28,7 @@ B_{\boldsymbol a v\boldsymbol j},
 \qquad l_3=l_1+l_2-2k-1.
 ````
 
-## Time-reversal O(3) Spherical/Wigner-6j/O(2) Architecture
+## Time-reversal O(3) Spherical/O(2)/Magnetic Architecture
 
 The SO(2) implementation in TACE will be gradually replaced by an O(2) formulation 
 to ensure complete parity support for O(3). Backward compatibility will be maintained for the SO(2) implementation, 
@@ -100,23 +100,16 @@ Currently, the officially supported properties include:
 - Atomic stresses (conservative, predict only)
 - Atomic virials (conservative, predict only)
 - Absolute final collinear magmoms
-- Noncollinear magnetic forces (SOC, full O(3))
-
-For embedding property, we support:
-
-- fidelity_idx (different computational levels)
-- charges
-- total charge
-- electric field
-- initial noncollinear magmoms (SOC, full O(3))
+- Collinear magnetic forces
+- Noncollinear magnetic forces
 
 ## Plugins
 
 TACE currently supports the following plugin:
 
+- **mTACE**    (Magnetic, with and without Spin-Orbit Coupling)
 - **TACE-LES** (Latent Ewald Summation)
-- **TACE-QEq** (Lagrangian)
-- **mTACE**    (Magnetic, Spin-Orbit Coupling)
+- **TACE-QEq** (Lagrangian, under reconstruction)
 
 ## Interfaces
 
