@@ -50,8 +50,8 @@ model:
     Lmax: 2
     lmax: 2
     cutoff: 5.0
-    num_layers: 6
-    num_channel: 64
+    num_layers: 3
+    num_channel: 48
 
     fidelity:
       - name: LCAO
