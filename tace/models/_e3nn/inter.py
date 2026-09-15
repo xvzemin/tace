@@ -568,7 +568,6 @@ class O3Wigner6jMagneticInteraction(O3CgtpInteraction):
             self.irreps_sh,
             self.irreps_out,
             extra_irreps_node_attrs=self.magnetic_node_irreps,
-            weight_level="edge",
             l1l2=self.l1l2,
         )
 

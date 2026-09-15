@@ -161,9 +161,6 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         output multiplicities are not used.
     extra_irreps_node_attrs : `e3nn.o3.Irreps`
         Irreps of the extra node attributes. Each multiplicity must be one.
-    weight_level : {'edge', 'node'}
-        Whether ``extra_weights`` are supplied per edge or per source node.
-        ``edge_weights`` are always supplied per edge.
     l1l2 : {'<', '<=', '>', '>=', '==', '!='} or None
         Restriction on the angular degrees of the node and edge inputs.
         If ``None``, all allowed node-edge pairs are included.
@@ -177,7 +174,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
     edge_weight_numel : int
         Number of edge weights per edge.
     extra_weight_numel : int
-        Number of extra weights per edge or node.
+        Number of extra weights per edge.
 
     Notes
     -----
@@ -197,16 +194,10 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         irreps_out: o3.Irreps,
         extra_irreps_node_attrs: o3.Irreps,
         *,
-        weight_level: str,
         l1l2: Optional[str] = None,
         register_reference: bool = False,
     ) -> None:
         super().__init__()
-
-        if weight_level not in {"edge", "node"}:
-            raise ValueError(
-                f"weight_level must be either 'edge' or 'node', got {weight_level!r}"
-            )
 
         self.irreps_node_feats = o3.Irreps(irreps_node_feats)
         self.irreps_edge_attrs = o3.Irreps(irreps_edge_attrs)
@@ -227,7 +218,6 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                         "Wigner-6j scatter tensor products. Disable the "
                         "accelerated scatter kernel."
                     )
-        self.weight_level = weight_level
         self.register_reference = register_reference
 
         paths: list[_CouplingPath] = []
@@ -361,26 +351,26 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             for i, j, k, *rest in recoupled_node_edge_instructions
         ]
 
-        self.recoupled_node_node_tp = uvuTensorProduct(
+        self.node_tp = uvuTensorProduct(
             self.irreps_node_feats,
             self.extra_irreps_node_attrs,
             irreps_mid,
             instructions=recoupled_node_node_instructions,
             shared_weights=True,
         )
-        self.recoupled_node_edge_tp = O3ScatterTensorProduct(
+        self.edge_tp = O3ScatterTensorProduct(
             irreps_mid,
             self.irreps_edge_attrs,
             self.irreps_out,
             instructions=recoupled_node_edge_instructions,
         )
-        for tp in (self.recoupled_node_node_tp, self.recoupled_node_edge_tp):
+        for tp in (self.node_tp, self.edge_tp):
             if not hasattr(tp, "fused_tp"):
                 _split_tensor_product_inputs(tp.tp)
 
         recoupling_coefficients = []
         for ins, i_out, coefficient in zip(
-            self.recoupled_node_edge_tp.tp.instructions,
+            self.edge_tp.tp.instructions,
             recoupling_path_indices,
             component_recoupling_coefficients,
         ):
@@ -391,7 +381,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
                 * reference_edge_edge_tp.instructions[i_out].path_weight
             )
             recoupled_scale = (
-                self.recoupled_node_node_tp.instructions[ins.i_in1].path_weight
+                self.node_tp.instructions[ins.i_in1].path_weight
                 * ins.path_weight
             )
             reference_component_scale = math.sqrt(path.ir12.dim * path.ir_out.dim)
@@ -416,7 +406,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
 
         self.register_buffer(
             "node_node_weights",
-            torch.ones(self.recoupled_node_node_tp.weight_numel),
+            torch.ones(self.node_tp.weight_numel),
             persistent=False,
         )
         self.register_buffer(
@@ -442,9 +432,9 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
     ) -> None:
         # This derived mask changes when repeated intermediates are shared;
         # learned weights and all other tensor-product buffers are unchanged.
-        key = f"{prefix}recoupled_node_node_tp.tp.output_mask"
+        key = f"{prefix}node_tp.tp.output_mask"
         if key in state_dict:
-            state_dict[key] = self.recoupled_node_node_tp.tp.output_mask
+            state_dict[key] = self.node_tp.tp.output_mask
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -478,9 +468,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         edge_weights : torch.Tensor
             External weights of shape ``(num_edges, edge_weight_numel)``.
         extra_weights : torch.Tensor
-            External weights of shape ``(num_edges, extra_weight_numel)``
-            when ``weight_level='edge'``, or ``(num_nodes, extra_weight_numel)``
-            when ``weight_level='node'``.
+            External weights of shape ``(num_edges, extra_weight_numel)``.
         edge_index : torch.Tensor
             Integer indices of shape ``(2, num_edges)``. Row zero contains
             source nodes and row one contains target nodes.
@@ -491,24 +479,19 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             Node features of shape ``(num_nodes, irreps_out.dim)``.
         """
         coefficients = self.recoupling_coefficients.to(dtype=edge_weights.dtype)
-        if self.weight_level == "edge":
-            if extra_weights.size(0) != edge_index.size(1):
-                raise ValueError("edge weights must have one row per graph edge")
-        else:
-            if extra_weights.size(0) != node_feats.size(0):
-                raise ValueError("node weights must have one row per graph node")
-            extra_weights = extra_weights.index_select(0, edge_index[0])
+        if extra_weights.size(0) != edge_index.size(1):
+            raise ValueError("edge weights must have one row per graph edge")
         # Scalar path weights commute with the CG contraction. Combine them
         # before expanding the reference paths into recoupling paths.
         edge_weights = (edge_weights * extra_weights).index_select(
             -1, self.source_weight_indices
         )
-        node_node_intermediate = self.recoupled_node_node_tp(
+        node_node_intermediate = self.node_tp(
             node_feats,
             extra_node_attrs,
             self.node_node_weights.to(dtype=node_feats.dtype),
         )
-        return self.recoupled_node_edge_tp(
+        return self.edge_tp(
             node_node_intermediate,
             edge_attrs,
             edge_weights * coefficients,
@@ -551,13 +534,8 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
         node_edge_intermediate = self.reference_node_edge_tp(
             node_feats[source], edge_attrs, edge_weights
         )
-        if self.weight_level == "edge":
-            if extra_weights.size(0) != edge_index.size(1):
-                raise ValueError("edge weights must have one row per graph edge")
-        else:
-            if extra_weights.size(0) != node_feats.size(0):
-                raise ValueError("node weights must have one row per graph node")
-            extra_weights = extra_weights[source]
+        if extra_weights.size(0) != edge_index.size(1):
+            raise ValueError("edge weights must have one row per graph edge")
         message = self.reference_edge_edge_tp(
             node_edge_intermediate,
             extra_node_attrs[source],

@@ -90,7 +90,7 @@ def test_uvu_tensor_product_oeq_matches_e3nn(shared_weights, monkeypatch):
         )
 
 
-def _build_tensor_product(*, weight_level="edge", parity=True):
+def _build_tensor_product(*, parity=True):
     irreps_edge_attrs = o3.Irreps.spherical_harmonics(2, p=-1)
     if parity:
         irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x1e")
@@ -105,7 +105,6 @@ def _build_tensor_product(*, weight_level="edge", parity=True):
         irreps_edge_attrs,
         irreps_out,
         extra_irreps_node_attrs=extra_irreps,
-        weight_level=weight_level,
         register_reference=True,
     )
     return module.to(DEVICE)
@@ -141,9 +140,8 @@ def _random_inputs(module, *, requires_grad=False, num_nodes=5, num_edges=11):
         device=DEVICE,
         requires_grad=requires_grad,
     )
-    num_extra_weights = num_edges if module.weight_level == "edge" else num_nodes
     extra_weights = torch.randn(
-        num_extra_weights,
+        num_edges,
         module.extra_weight_numel,
         device=DEVICE,
         requires_grad=requires_grad,
@@ -158,18 +156,17 @@ def _random_inputs(module, *, requires_grad=False, num_nodes=5, num_edges=11):
     )
 
 
-@pytest.mark.parametrize(
-    ("weight_level", "improper"),
-    [("edge", False), ("node", True)],
-)
-def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
+@pytest.mark.parametrize("improper", [False, True])
+def test_wigner6j_matches_reference_gradients_and_o3(improper):
     torch.manual_seed(0)
     torch.set_default_dtype(torch.float64)
-    module = _build_tensor_product(weight_level=weight_level)
-    node_tp = module.recoupled_node_node_tp
+    module = _build_tensor_product()
+    assert not hasattr(module, "weight_level")
+    assert {"node_tp", "edge_tp"}.issubset(dict(module.named_children()))
+    node_tp = module.node_tp
     assert node_tp.irreps_out == node_tp.irreps_out.sort().irreps
     if not node_tp.use_oeq:
-        for tp in (node_tp.tp, module.recoupled_node_edge_tp.tp):
+        for tp in (node_tp.tp, module.edge_tp.tp):
             forward = tp._compiled_main_left_right
             if isinstance(forward, torch.fx.GraphModule):
                 assert any(
@@ -181,7 +178,7 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
         for ins in node_tp.instructions
     ]
     assert len(couplings) == len(set(couplings))
-    assert len(couplings) < len(module.recoupled_node_edge_tp.instructions)
+    assert len(couplings) < len(module.edge_tp.instructions)
     assert node_tp.shared_weights
     assert module.edge_weight_numel == module.reference_node_edge_tp.weight_numel
     assert module.extra_weight_numel == module.reference_edge_edge_tp.weight_numel
@@ -189,13 +186,11 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
     # The old node TP stored one output per recoupling term, before sharing.
     old_intermediate_dim = sum(
         node_tp.irreps_out[ins[0]].dim
-        for ins in module.recoupled_node_edge_tp.instructions
+        for ins in module.edge_tp.instructions
     )
-    state["recoupled_node_node_tp.tp.output_mask"] = torch.ones(old_intermediate_dim)
+    state["node_tp.tp.output_mask"] = torch.ones(old_intermediate_dim)
     module.load_state_dict(state, strict=True)
-    assert (
-        module.recoupled_node_node_tp.tp.output_mask.numel() == node_tp.irreps_out.dim
-    )
+    assert module.node_tp.tp.output_mask.numel() == node_tp.irreps_out.dim
     inputs = _random_inputs(module, requires_grad=True)
 
     recoupled = module(*inputs)
@@ -267,8 +262,7 @@ def test_wigner6j_matches_reference_gradients_and_o3(weight_level, improper):
     )
 
 
-@pytest.mark.parametrize("weight_level", ["edge", "node"])
-def test_wigner6j_repeated_irreps_remain_independent(weight_level):
+def test_wigner6j_repeated_irreps_remain_independent():
     torch.manual_seed(1)
     torch.set_default_dtype(torch.float64)
     module = O3Wigner6jScatterTensorProduct(
@@ -276,7 +270,6 @@ def test_wigner6j_repeated_irreps_remain_independent(weight_level):
         "0e + 1o",
         "0o + 1e + 1o + 2e + 2o",
         "1e + 1e",
-        weight_level=weight_level,
         l1l2="==",
         register_reference=True,
     ).to(DEVICE)
@@ -291,13 +284,23 @@ def test_wigner6j_repeated_irreps_remain_independent(weight_level):
         torch.testing.assert_close(observed, expected, atol=3.0e-12, rtol=3.0e-12)
 
 
+@pytest.mark.parametrize("method", ["forward", "forward_reference"])
+def test_wigner6j_requires_edge_weights(method):
+    module = O3Wigner6jScatterTensorProduct(
+        "2x0e", "0e", "0e", "0e", register_reference=True
+    ).to(DEVICE)
+    inputs = list(_random_inputs(module, num_nodes=3, num_edges=5))
+    inputs[4] = inputs[4][:3]
+    with pytest.raises(ValueError, match="one row per graph edge"):
+        getattr(module, method)(*inputs)
+
+
 def test_wigner6j_export_preserves_split_inputs():
     module = O3Wigner6jScatterTensorProduct(
         "2x0e + 2x1o",
         "0e + 1o",
         "0e + 1o",
         "0e + 1e",
-        weight_level="edge",
     ).to(DEVICE)
     inputs = _random_inputs(module, requires_grad=True)
     exported = torch.export.export(module, inputs, strict=True).module()
@@ -310,15 +313,13 @@ def test_wigner6j_export_preserves_split_inputs():
         torch.testing.assert_close(observed, expected)
 
 
-@pytest.mark.parametrize("weight_level", ["edge", "node"])
 @pytest.mark.parametrize("num_nodes", [0, 3])
-def test_wigner6j_empty_edges(weight_level, num_nodes):
+def test_wigner6j_empty_edges(num_nodes):
     module = O3Wigner6jScatterTensorProduct(
         "2x0e + 2x1o",
         "0e + 1o",
         "0e + 1o",
         "0e + 1e",
-        weight_level=weight_level,
         register_reference=True,
     ).to(DEVICE)
     inputs = _random_inputs(
@@ -334,9 +335,8 @@ def test_wigner6j_empty_edges(weight_level, num_nodes):
         torch.testing.assert_close(observed, expected)
 
 
-@pytest.mark.parametrize("weight_level", ["edge", "node"])
 @pytest.mark.parametrize("parity", [False, True])
-def test_wigner6j_oeq_matches_reference(weight_level, parity, monkeypatch):
+def test_wigner6j_oeq_matches_reference(parity, monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("OEQ requires CUDA")
     pytest.importorskip("openequivariance")
@@ -344,15 +344,15 @@ def test_wigner6j_oeq_matches_reference(weight_level, parity, monkeypatch):
     torch.set_default_dtype(torch.float64)
     monkeypatch.setenv("TACE_USE_CUE", "0")
     monkeypatch.setenv("TACE_USE_OEQ", "0")
-    native = _build_tensor_product(weight_level=weight_level, parity=parity)
+    native = _build_tensor_product(parity=parity)
     monkeypatch.setenv("TACE_USE_OEQ", "1")
-    module = _build_tensor_product(weight_level=weight_level, parity=parity)
-    assert module.recoupled_node_node_tp.use_oeq
-    assert module.recoupled_node_edge_tp.use_oeq
+    module = _build_tensor_product(parity=parity)
+    assert module.node_tp.use_oeq
+    assert module.edge_tp.use_oeq
     assert module.irreps_out == native.irreps_out
     assert module.edge_weight_numel == native.edge_weight_numel
     assert module.extra_weight_numel == native.extra_weight_numel
-    for name in ("recoupled_node_node_tp", "recoupled_node_edge_tp"):
+    for name in ("node_tp", "edge_tp"):
         assert getattr(module, name).instructions == getattr(native, name).instructions
     assert dict(module.named_parameters()) == dict(native.named_parameters()) == {}
     inputs = _random_inputs(module, requires_grad=True)
@@ -420,11 +420,10 @@ def test_wigner6j_matches_reference_and_time_reversal():
         edge_irreps,
         output_irreps,
         magnetic_irreps,
-        weight_level="edge",
         register_reference=True,
     )
     assert (
-        tensor_product.recoupled_node_edge_tp.irreps_out
+        tensor_product.edge_tp.irreps_out
         == tensor_product.reference_edge_edge_tp.irreps_out
         == tensor_product.irreps_out
     )
@@ -499,7 +498,6 @@ def test_time_reversal_wigner6j_rejects_scatter_acceleration(
             spherical_harmonics_irreps(1, p=-1),
             o3.Irreps("2x0ee + 2x1eo"),
             spherical_harmonics_irreps(1, p=1, time_reversal=-1),
-            weight_level="edge",
         )
 
 
