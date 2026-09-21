@@ -248,6 +248,13 @@ rescaling preserves the intended variance. ``LocalFrame`` derives the required
 degree from its irreps and the Wigner layout from matrix shapes. Shared
 matrices may cover additional degrees or orders.
 
+By default, ``basis_change=True`` gives positive-order features a uniform
+reflection convention. Setting it to ``False`` retains the spherical harmonic
+basis without changing the regrouped layout. Channels with different reflection
+matrices must then be handled explicitly rather than mixed by standard O(2)
+operators. :class:`eqx.o2.O3TensorProduct` uses this setting to contract the
+original CG coefficients directly.
+
 .. code-block:: python
 
    num_channels = 64

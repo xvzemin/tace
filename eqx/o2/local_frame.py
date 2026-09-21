@@ -35,6 +35,10 @@ class LocalFrame(torch.nn.Module):
     reverse : bool, optional
         Reverse the global/local order in the module representation. This only
         changes how the module is displayed.
+    basis_change : bool, optional
+        Apply the fixed basis change to positive orders of unnatural-parity
+        entries. Defaults to ``True``. If ``False``, retain the spherical
+        harmonic basis while still regrouping features by local order.
 
     Notes
     -----
@@ -43,6 +47,9 @@ class LocalFrame(torch.nn.Module):
     representation is available as :attr:`irreps_out`.
     Wigner layout is inferred from the matrix dimensions. Matrices shared
     across representations may contain additional degrees or local orders.
+    With ``basis_change=False``, positive-order channels can have different
+    reflection matrices despite sharing an irrep label. Subsequent operators
+    must account for these bases rather than mix those channels directly.
     """
 
     @staticmethod
@@ -87,6 +94,7 @@ class LocalFrame(torch.nn.Module):
         irreps: o3.Irreps,
         mmax: Optional[int] = None,
         reverse: bool = False,
+        basis_change: bool = True,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps)
@@ -101,6 +109,7 @@ class LocalFrame(torch.nn.Module):
             raise TypeError("reverse must be a boolean.")
         self.mmax = min(mmax, self.lmax)
         self.reverse = reverse
+        self.basis_change = basis_change
         self.irreps_out = self.restrict(self.irreps_in, self.mmax)
         self.global_irreps = self.irreps_in
         self.local_irreps = self.irreps_out
@@ -189,9 +198,10 @@ class LocalFrame(torch.nn.Module):
             if self.reverse
             else (self.global_irreps, self.local_irreps)
         )
-        return (
-            f"{self.__class__.__name__}({irreps_in} -> {irreps_out})(mmax={self.mmax})"
-        )
+        options = f"mmax={self.mmax}"
+        if not self.basis_change:
+            options += ", basis_change=False"
+        return f"{self.__class__.__name__}({irreps_in} -> {irreps_out})({options})"
 
     @staticmethod
     def _apply_rotation(
@@ -266,7 +276,7 @@ class LocalFrame(torch.nn.Module):
                     entry.local_indices[1:], start=1
                 ):
                     pair = values[..., offset : offset + 2, :]
-                    if entry.odd:
+                    if self.basis_change and entry.odd:
                         pair = torch.cat((-pair[..., 1:2, :], pair[..., :1, :]), dim=-2)
                     outputs[local_index].append(
                         (entry.local_slices[local_position].start, pair)
@@ -361,7 +371,7 @@ class LocalFrame(torch.nn.Module):
                     entry.local_slices[1:],
                 ):
                     pair = local_values[local_index][..., local_slice]
-                    if entry.odd:
+                    if self.basis_change and entry.odd:
                         pair = torch.cat((pair[..., 1:2, :], -pair[..., :1, :]), dim=-2)
                     entry_values.append(pair)
                 values = torch.cat(entry_values, dim=-2)

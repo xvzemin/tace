@@ -69,9 +69,10 @@ def test_o2_does_not_import_tace():
 
 
 @pytest.mark.parametrize("wigner_lmax", [2, 4])
-def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax):
+@pytest.mark.parametrize("basis_change", [True, False])
+def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax, basis_change):
     irreps = o3.Irreps("2x0e+1x0o+3x1e+2x1o+1x2e+3x2o")
-    frame = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
+    frame = o2.LocalFrame(irreps, basis_change=basis_change).to(DEVICE, DTYPE)
     layout = LayoutTransform(
         irreps,
         layout_in="flatten_mul_ir",
@@ -83,13 +84,19 @@ def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax):
 
     local = frame(layout(features), wigner)
     assert frame.irreps_out == o2.Irreps("5x0e+7x0o+9x1m+4x2m")
+    options = "mmax=2" + ("" if basis_change else ", basis_change=False")
     assert repr(frame) == (
-        f"LocalFrame({frame.global_irreps} -> {frame.local_irreps})(mmax=2)"
+        f"LocalFrame({frame.global_irreps} -> {frame.local_irreps})({options})"
     )
-    reverse_frame = o2.LocalFrame(irreps, reverse=True)
+    reverse_frame = o2.LocalFrame(irreps, reverse=True, basis_change=basis_change)
     assert repr(reverse_frame) == (
-        f"LocalFrame({frame.local_irreps} -> {frame.global_irreps})(mmax=2)"
+        f"LocalFrame({frame.local_irreps} -> {frame.global_irreps})({options})"
     )
+    if basis_change:
+        default = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
+        torch.testing.assert_close(
+            default(layout(features), wigner), local, atol=0, rtol=0
+        )
     assert local.shape == (7, frame.irreps_out.dim)
     torch.testing.assert_close(
         layout.inverse(frame.to_global(local, wigner_inv)),
@@ -97,13 +104,45 @@ def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax):
     )
 
 
+@pytest.mark.parametrize("basis_change", [True, False])
+def test_local_frame_matches_degreewise_rotation(o2_dtype, basis_change):
+    irreps = o3.Irreps("2x0e+0o+2x1e+3x1o+2e+2x2o")
+    frame = o2.LocalFrame(irreps, basis_change=basis_change)
+    vectors = torch.randn(5, 3, generator=torch.Generator().manual_seed(7))
+    features = torch.randn(5, irreps.dim)
+    rotation = o2.rotation_matrix_to_y_axis(vectors)
+    wigner, _ = o2.WignerD(2, 2)(vectors)
+    expected = {ir: [] for ir, _ in frame.irreps_out}
+    for entry, ir_slice in zip(irreps, irreps.slices()):
+        ir, mul = entry.ir, entry.mul
+        values = features[:, ir_slice].reshape(5, ir.dim, mul)
+        values = torch.einsum("bij,bju->biu", ir.D_from_matrix(rotation), values)
+        parity = ir.p * (-1) ** ir.l
+        expected[o2.Irrep(0, parity)].append(values[:, ir.l : ir.l + 1])
+        for m in range(1, ir.l + 1):
+            pair = values[:, [ir.l + m, ir.l - m]]
+            if basis_change and parity == -1:
+                pair = torch.stack((-pair[:, 1], pair[:, 0]), dim=1)
+            expected[o2.Irrep(m, 0)].append(pair)
+    expected = torch.cat(
+        [torch.cat(expected[ir], dim=-1).flatten(1) for ir, _ in frame.irreps_out],
+        dim=-1,
+    )
+    torch.testing.assert_close(frame(features, wigner), expected, atol=2e-9, rtol=2e-9)
+
+
 @pytest.mark.parametrize("mmax", [0, 1])
+@pytest.mark.parametrize("basis_change", [True, False])
 @pytest.mark.parametrize(
     ("wigner_mmax", "wigner_lmax"), [(1, 2), (1, 4), (2, 4), (4, 4)]
 )
-def test_local_frame_trailing_axes_and_empty_batch(mmax, wigner_mmax, wigner_lmax):
-    irreps = o3.Irreps("2x0e+2x1o+2x2e")
-    frame = o2.LocalFrame(irreps, mmax=mmax).to(DEVICE, DTYPE)
+def test_local_frame_trailing_axes_and_empty_batch(
+    mmax, basis_change, wigner_mmax, wigner_lmax
+):
+    irreps = o3.Irreps("2x0e+2x1o+1x1e+2x2e+3x2o")
+    frame = o2.LocalFrame(irreps, mmax=mmax, basis_change=basis_change).to(
+        DEVICE, DTYPE
+    )
     vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
     wigner, wigner_inv = o2.WignerD(wigner_mmax, wigner_lmax).to(DEVICE, DTYPE)(vectors)
     reference, reference_inv = o2.WignerD(mmax, 2).to(DEVICE, DTYPE)(vectors)
@@ -145,8 +184,10 @@ def test_local_frame_empty_irreps():
         assert frame.to_global(local, di[:batch_size]).shape == features.shape
 
 
-def test_local_frame_truncation_compiles_with_shared_wigner(o2_dtype):
-    frame = o2.LocalFrame("2x0e+1x1e+2x2o", mmax=1)
+@pytest.mark.parametrize("basis_change", [True, False])
+def test_local_frame_truncation_compiles_with_shared_wigner(o2_dtype, basis_change):
+    torch.compiler.reset()
+    frame = o2.LocalFrame("2x0e+1x1e+2x2o", mmax=1, basis_change=basis_change)
 
     def roundtrip(features, wigner, wigner_inv):
         return frame.to_global(frame.to_local(features, wigner), wigner_inv)
@@ -797,9 +838,10 @@ def test_o2_asymmetric_contraction_preserves_time_parity():
     not hasattr(o3.Irrep("0e"), "t"),
     reason="The installed e3nn does not expose time-reversal irreps.",
 )
-def test_local_frame_preserves_time_parity():
+@pytest.mark.parametrize("basis_change", [True, False])
+def test_local_frame_preserves_time_parity(basis_change):
     irreps = o3.Irreps("2x1eo+2x2ee")
-    frame = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
+    frame = o2.LocalFrame(irreps, basis_change=basis_change).to(DEVICE, DTYPE)
     edge_vectors = torch.randn(6, 3, dtype=DTYPE, device=DEVICE)
     wigner, _ = o2.WignerD(mmax=2, lmax=2).to(DEVICE, DTYPE)(edge_vectors)
     features = torch.randn(6, irreps.dim, dtype=DTYPE, device=DEVICE)
@@ -838,6 +880,8 @@ def test_o3_tensor_product_matches_edge_cgtp(o2_dtype, mode, normalization, batc
         normalization=normalization,
         **kwargs,
     )
+    assert not module.local_frame_in.basis_change
+    assert not module.local_frame_out.basis_change
     x = torch.randn(batch_size, irreps_in.dim, requires_grad=True)
     r = torch.randn(batch_size, 3, requires_grad=True)
     w = torch.randn(batch_size, module.weight_numel, requires_grad=True)

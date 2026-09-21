@@ -14,7 +14,7 @@ from .local_frame import LocalFrame
 
 
 def _entry_components(frame: LocalFrame, index: int):
-    """Locate signed magnetic components in regrouped local storage."""
+    """Locate magnetic components in regrouped spherical harmonic storage."""
     entry = frame._entries[index]
     slices = frame.local_irreps.slices()
     components = {}
@@ -23,14 +23,9 @@ def _entry_components(frame: LocalFrame, index: int):
     ):
         _, mul = frame.local_irreps[local_index]
         start = slices[local_index].start + channel_slice.start
-        if m == 0:
-            components[0] = (start, 1.0)
-        elif entry.odd:
-            components[m] = (start + mul, 1.0)
-            components[-m] = (start, -1.0)
-        else:
-            components[m] = (start, 1.0)
-            components[-m] = (start + mul, 1.0)
+        components[m] = start
+        if m > 0:
+            components[-m] = start + mul
     return components
 
 
@@ -71,6 +66,8 @@ class O3TensorProduct(torch.nn.Module):
     Only nonzero couplings with ``m_in = +/- m_out`` are stored. The forward
     pass uses indexed products and sparse summation, without evaluating or
     rotating spherical harmonics or contracting a dense CG tensor.
+    The local frames use ``basis_change=False`` to retain the spherical
+    harmonic basis of the CG coefficients, including unnatural-parity entries.
     Rotation degrees follow the feature and output irreps. Shared Wigner
     matrices may cover additional degrees, but must retain all orders needed
     by those representations.
@@ -138,10 +135,12 @@ class O3TensorProduct(torch.nn.Module):
             self.register_buffer("weight", metadata.weight)
         self.register_buffer("output_mask", metadata.output_mask)
 
-        self.local_frame_in = LocalFrame(self.irreps_in1)
-        output_frame = LocalFrame(self.irreps_out, reverse=True)
+        self.local_frame_in = LocalFrame(self.irreps_in1, basis_change=False)
+        output_frame = LocalFrame(self.irreps_out, reverse=True, basis_change=False)
         simplified_irreps_out = self.irreps_out.simplify()
-        self.local_frame_out = LocalFrame(simplified_irreps_out, reverse=True)
+        self.local_frame_out = LocalFrame(
+            simplified_irreps_out, reverse=True, basis_change=False
+        )
         self.lmax = max(self.local_frame_in.lmax, self.local_frame_out.lmax)
         # Adjacent equal irreps share a single rotation over their channels.
         # The public output still preserves the declared, unsimplified layout.
@@ -211,16 +210,14 @@ class O3TensorProduct(torch.nn.Module):
                     coefficient = float(cg[ir1.l + m_in, ir_out.l + m_out])
                     if coefficient == 0.0:
                         continue
-                    input_start, input_sign = input_components[ins.i_in1][m_in]
-                    output_start, output_sign = output_components[ins.i_out][m_out]
+                    input_start = input_components[ins.i_in1][m_in]
+                    output_start = output_components[ins.i_out][m_out]
                     contraction["input"].extend(range(input_start, input_start + mul1))
                     contraction["output"].extend(
                         range(output_start, output_start + mul_out)
                     )
                     contraction["weight"].extend(weight_indices)
-                    contraction["scale"].append(
-                        coefficient * pole * ins.path_weight * input_sign * output_sign
-                    )
+                    contraction["scale"].append(coefficient * pole * ins.path_weight)
                     contraction["harmonic"].append(ins.i_in2)
 
         self._contractions = tuple(contractions)
@@ -255,6 +252,8 @@ class O3TensorProduct(torch.nn.Module):
         ----------
         features : torch.Tensor
             Local features with shape ``(..., local_frame_in.irreps_out.dim)``.
+            Use the unadjusted spherical harmonic basis produced by
+            ``local_frame_in``, not a frame with ``basis_change=True``.
         weight : torch.Tensor, optional
             External weights with shape ``(..., weight_numel)``. Leading
             dimensions broadcast with the features.
