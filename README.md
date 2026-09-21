@@ -52,7 +52,7 @@ while backward compatibility for the O(2) implementation is not currently guaran
 
 ## SOTA Foundation Model
 
-[TACE FOUNDATION](https://github.com/xvzemin/tace-foundations)
+[TACE FOUNDATION](https://tace.readthedocs.io/en/latest/guide/foundation.html)
 
 Default Ranking on Matbench as of July 8, 2026
 

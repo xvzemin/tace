@@ -112,7 +112,7 @@ Example
 -------
 
 First, download a pretrained model from the
-`TACE Foundation Models repository <https://github.com/xvzemin/tace-foundations>`_
+:doc:`foundation model guide <foundation>`
 (you may also use a model pretrained by yourself).
 
 You can then follow the example below, which consists of three main steps:
