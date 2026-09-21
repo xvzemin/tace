@@ -503,11 +503,12 @@ class LightningWrapperModel(L.LightningModule):
         checkpoint = torch.load(
             ckpt_path, map_location=map_location, weights_only=False
         )
-        model_dtype = dtype or _dominant_floating_dtype(
+        checkpoint_dtype = _dominant_floating_dtype(
             value
             for name, value in checkpoint["state_dict"].items()
             if name.startswith("model.")
         )
+        model_dtype = dtype or checkpoint_dtype
         cfg = checkpoint["hyper_parameters"]["cfg"]
         target_property = get_target_property(cfg)
         embedding_property = get_embedding_property(cfg)
@@ -525,19 +526,18 @@ class LightningWrapperModel(L.LightningModule):
             for k, v in checkpoint["state_dict"].items()
             if k.startswith("model.")
         }
-        model.load_state_dict(state_dict, strict=strict)
-
-        # # === SWA ===
-        # if 'swa' in cfg['callbacks']:
-        #     logging.debug("Since swa is enabled, skip trying load ema.")
-        #     return model.to(map_location)
-
         # === EMA ===
         if bool(use_ema) and "ema_state_dict" in checkpoint:
             ema_params = checkpoint["ema_state_dict"]["shadow_params"]
             for idx, (name, _) in enumerate(model.named_parameters()):
                 state_dict[name] = ema_params[idx]
-            model.load_state_dict(state_dict, strict=strict)
+
+        _load_model_state_dict(
+            model,
+            state_dict,
+            strict=strict,
+            keep_constructed_buffers=model_dtype != checkpoint_dtype,
+        )
 
         return model.to(map_location)
 
@@ -553,25 +553,41 @@ def _dominant_floating_dtype(values) -> torch.dtype:
     return Counter(dtypes).most_common(1)[0][0]
 
 
-def _resolve_model_dtype(
-    dtype: Union[str, int, torch.dtype, None],
-) -> Optional[torch.dtype]:
-    try:
-        return DTYPE[dtype]
-    except (KeyError, TypeError) as exc:
-        raise ValueError(f"Unsupported model dtype: {dtype!r}") from exc
+def _load_model_state_dict(
+    model: torch.nn.Module,
+    state_dict: Dict[str, torch.Tensor],
+    strict: bool,
+    keep_constructed_buffers: bool,
+) -> None:
+    if not keep_constructed_buffers:
+        model.load_state_dict(state_dict, strict=strict)
+        return
+
+    state_dict = copy.copy(state_dict)
+    parameter_names = {
+        name for name, _ in model.named_parameters(remove_duplicate=False)
+    }
+    for name, value in model.state_dict().items():
+        if name not in parameter_names:
+            state_dict[name] = value
+    model.load_state_dict(state_dict, strict=strict)
 
 
-def _load_tace(
+def load_tace(
     model: Union[str, Path, torch.nn.Module],
     device: Union[str, torch.device, None] = None,
     strict: bool = True,
     use_ema: bool = True,
+    target_property: Optional[list[str]] = None,
     dtype: Union[str, int, torch.dtype, None] = None,
     **kwargs: Any,
 ) -> TensorModel:
+    """Load an eager model or an AOTInductor package."""
     device = DEVICE[device]
-    requested_dtype = _resolve_model_dtype(dtype)
+    try:
+        requested_dtype = DTYPE[dtype]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"Unsupported model dtype: {dtype!r}") from exc
     is_aoti = False
     if isinstance(model, (str, Path)):
         model_path = str(model)
@@ -589,29 +605,16 @@ def _load_tace(
             model = load_aotinductor(model_path, device)
             is_aoti = True
         elif model_path.endswith(".pt") or model_path.endswith(".pth"):
-            obj = torch.load(
+            model = torch.load(
                 model_path,
                 map_location=device,
                 weights_only=False,
                 **kwargs,
             )
-            if isinstance(obj, dict) and "state_dict" in obj:
-                state_dict = obj["state_dict"]
-                model_dtype = requested_dtype or _dominant_floating_dtype(
-                    state_dict.values()
-                )
-                with torch_default_dtype(model_dtype):
-                    model = create_model(
-                        model_config=obj["cfg"],
-                        statistics=obj["statistics"],
-                        target_property=obj["target_property"],
-                        embedding_property=obj["embedding_property"],
-                        prune_removed_keys=True,
-                    )
-                model.load_state_dict(state_dict, strict=strict)
-            elif isinstance(obj, torch.nn.Module):
-                model = obj
-            else:
+            if not (
+                isinstance(model, torch.nn.Module)
+                or (isinstance(model, dict) and "state_dict" in model)
+            ):
                 raise ValueError(
                     "Unsupported .pt/.pth TACE model format. Expected a TACE "
                     "state_dict package or a serialized torch.nn.Module."
@@ -623,7 +626,11 @@ def _load_tace(
     else:
         raise TypeError("Model must be a path or torch.nn.Module")
 
-    model_dtype = model.get_model_dtype()
+    model_dtype = (
+        _dominant_floating_dtype(model["state_dict"].values())
+        if isinstance(model, dict)
+        else model.get_model_dtype()
+    )
     target_dtype = requested_dtype or model_dtype
     if is_aoti and target_dtype != model_dtype:
         raise ValueError(
@@ -631,30 +638,48 @@ def _load_tace(
             f"requested {target_dtype}. Re-export the package with the target dtype."
         )
 
+    training = None
+    if isinstance(model, torch.nn.Module) and target_dtype != model_dtype:
+        try:
+            model_config = model.readout_fn.model_config
+            statistics = model.readout_fn.statistics
+        except AttributeError as exc:
+            raise ValueError(
+                "Changing dtype requires a TACE model with construction metadata."
+            ) from exc
+        training = model.training
+        model = {
+            "state_dict": model.state_dict(),
+            "cfg": model_config,
+            "statistics": statistics,
+            "target_property": model.get_target_property(),
+            "embedding_property": model.get_embedding_property(),
+        }
+
+    if isinstance(model, dict):
+        state_dict = model["state_dict"]
+        with torch_default_dtype(target_dtype):
+            model = create_model(
+                model_config=model["cfg"],
+                statistics=model["statistics"],
+                target_property=model["target_property"],
+                embedding_property=model["embedding_property"],
+                prune_removed_keys=True,
+            )
+        _load_model_state_dict(
+            model,
+            state_dict,
+            strict=strict,
+            keep_constructed_buffers=target_dtype != model_dtype,
+        )
+        if training is not None:
+            model.train(training)
+
     torch.set_default_dtype(target_dtype)
     if is_aoti:
-        return model.to(device=device)
-    return model.to(device=device, dtype=target_dtype)
-
-
-def load_tace(
-    model: Union[str, Path, torch.nn.Module],
-    device: Union[str, torch.device, None] = None,
-    strict: bool = True,
-    use_ema: bool = True,
-    target_property: Optional[list[str]] = None,
-    dtype: Union[str, int, torch.dtype, None] = None,
-    **kwargs: Any,
-) -> TensorModel:
-
-    model = _load_tace(
-        model=model,
-        device=device,
-        dtype=dtype,
-        strict=strict,
-        use_ema=use_ema,
-        **kwargs,
-    )
+        model = model.to(device=device)
+    else:
+        model = model.to(device=device, dtype=target_dtype)
 
     if target_property:
         model.reset_target_property(target_property)
