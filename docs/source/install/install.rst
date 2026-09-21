@@ -35,6 +35,16 @@ libraries and simulation interfaces are optional and can be installed
 independently as described below. When working from a source checkout, replace
 ``tace[extra]`` with ``.[extra]`` in the commands.
 
+PyTorch Geometric
+-----------------
+
+The core ``torch_geometric`` package is required, but importing TACE or
+EquivariantX does not require the optional PyG binary extensions
+(``torch-scatter``, ``torch-sparse``, ``torch-cluster``, ``torch-spline-conv``,
+or ``pyg-lib``). Standard sum and mean reductions use native PyTorch operations.
+TACE's ``scatter_min``, ``scatter_max``, and ``scatter_mul`` require registered
+``torch-scatter`` operators only when called.
+
 OpenEquivariance (OEQ)
 ----------------------
 
@@ -93,9 +103,10 @@ usage does not require installing a separate EquiTorch package:
 
    export TACE_USE_EQT=1
 
-The sparse higher-order product path for models with ``correlation > 2`` may
-also require ``torch-scatter``. Install a wheel matching the exact PyTorch and
-CUDA versions in the environment. For example, for PyTorch 2.11 and CUDA 13.0:
+The sparse higher-order product path uses ``torch-scatter`` when available
+and otherwise falls back to native PyTorch reductions. To install the optional
+extension, select a wheel matching the PyTorch and CUDA versions in the
+environment. For example, for PyTorch 2.11 and CUDA 13.0:
 
 .. code-block:: bash
 
@@ -208,7 +219,18 @@ EquivariantX
 ------------
 
 EquivariantX is currently bundled with TACE and does not require a separate
-installation. It may be distributed as a standalone package in the future.
+installation for TACE users. Independent installation currently supports
+source builds only and does not require installing TACE. A standalone package
+release is planned once the library is fully mature. To install from source:
+
+.. code-block:: bash
+
+   git clone https://github.com/xvzemin/tace.git
+   pip install ./tace/eqx
+
+The library imports as ``eqx`` and depends on PyTorch, PyTorch
+Geometric, e3nn, and ``opt_einsum_fx``, but not on TACE or the optional PyG
+binary extensions.
 
 
 Acceleration Selection

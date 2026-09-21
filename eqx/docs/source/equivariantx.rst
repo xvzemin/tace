@@ -7,6 +7,18 @@ EquivariantX (``eqx``) provides real :math:`O(2)\times\mathbb{Z}_2^T`
 representations, equivariant operators, and transformations between global
 :math:`O(3)` and local :math:`O(2)` features.
 
+Installation
+------------
+
+EquivariantX currently supports installation from source only and does not
+require TACE. A standalone package release is planned once the library is
+fully mature.
+
+.. code-block:: bash
+
+   git clone https://github.com/xvzemin/tace.git
+   pip install ./tace/eqx
+
 Quick start
 -----------
 

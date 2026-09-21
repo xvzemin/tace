@@ -5,8 +5,22 @@ operators, and transformations between global O(3) and local O(2) features.
 Irreps include time-reversal parity. Features use a flattened `ir_mul`
 layout, with the multiplicity axis last within each irrep entry.
 
-The library is bundled with TACE. See the [tutorials](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html)
+The library is bundled with TACE and can also be installed independently.
+See the [tutorials](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html)
 and [API reference](https://tace.readthedocs.io/en/latest/equivariantx/api.html).
+
+## Installation
+
+EquivariantX currently supports installation from source only and does not
+require TACE. A standalone package release is planned once the library is
+fully mature.
+
+```bash
+git clone https://github.com/xvzemin/tace.git
+pip install ./tace/eqx
+```
+
+## Example
 
 ```python
 import torch

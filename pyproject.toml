@@ -115,6 +115,7 @@ include = [
     "eqx",
     "eqx.*",
 ]
+exclude = ["eqx.build", "eqx.build.*", "eqx.dist", "eqx.dist.*"]
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]

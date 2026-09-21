@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "EquivariantX"
+version = "0.1.0"
+description = "Global and local O(2)-equivariant computation with PyTorch."
+readme = "README.md"
+authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
+license = "MIT"
+license-files = ["LICENSE.md"]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.4",
+    "torch_geometric>=2.4",
+    "e3nn",
+    "opt_einsum_fx>=0.1.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/xvzemin/tace"
+Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html"
+
+[tool.setuptools]
+packages = ["eqx", "eqx.o2"]
+package-dir = { eqx = "." }
+
+[tool.setuptools.package-data]
+eqx = ["README.md"]
