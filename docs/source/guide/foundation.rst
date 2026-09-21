@@ -10,25 +10,20 @@ please refer to the corresponding tutorials.
 Model Selection
 ---------------
 
-For most simulations, start with ``TACE-OMat24-7M``. Choose a TECE RRA model
-when accuracy takes priority over speed and memory use.
+The models below are ordered from efficiency to accuracy.
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 50 25
+   :widths: 55 45
 
-   * - Priority
-     - Recommended models
-     - Indicative system size
-   * - Accuracy
-     - ``TECE-OMat24-RRA-1.0``, ``TECE-OAM-RRA-1.0``
-     - About 1,000 atoms in one 80GB GPU
-   * - Accuracy, speed, and memory balance
-     - ``TACE-OMat24-7M``, ``TACE-OAM-7M``
-     - About 8,000 atoms in one 80GB GPU
-   * - General-purpose materials simulations
-     - ``TACE-OAM-L``
+   * - Model
+     - Indicative system size on a single 80 GB GPU
+   * - ``TACE-OMat24-7M``
+     - About 8,000 atoms 
+   * - ``TACE-OMat24-L``
      - About 3,000 atoms
+   * - ``TECE-OMat24-RRA-1.0``
+     - About 1,000 atoms
 
 Enable a supported backend as described in :ref:`acceleration-tutorial` 
 when comparing performance.
@@ -37,13 +32,9 @@ Model Overview
 --------------
 
 TACE uses atomic cluster expansion; TECE additionally uses edge cluster
-expansion. ``RRA`` denotes radial rotary attention. ``OMat24`` models are
+expansion. ``RRA`` denotes radial rotary complex attention. ``OMat24`` models are
 trained on OMat24, whereas ``OAM`` models are subsequently trained on sAlex
-and MPtrj. The arrow below indicates this training sequence.
-
-The materials models cover 89 elements at the PBE+U level of theory.
-``TACE-v1-LES-REICO-5-PdAgCHO`` targets heterogeneous catalysis with
-Pd, Ag, C, H, and O at the PBE level of theory.
+and MPtrj.
 
 .. list-table::
    :header-rows: 1
@@ -97,6 +88,35 @@ Pd, Ag, C, H, and O at the PBE level of theory.
      - M
      - REICO-5-PdAgCHO
      - ``==0.1.0``
+
+Dataset Overview
+----------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 50 25
+
+   * - Dataset
+     - Domain and coverage
+     - Level of theory
+   * - `OMat24 <https://arxiv.org/abs/2410.12771>`_
+     - Inorganic bulk materials; non-equilibrium structures and relaxation trajectories
+     - PBE+U
+   * - `sAlex <https://huggingface.co/datasets/facebook/OMAT24#salex-dataset>`_
+     - Inorganic crystals; subsampled Alexandria relaxation trajectories
+     - PBE+U
+   * - `MPtrj <https://github.com/CederGroupHub/chgnet#dataset>`_
+     - Inorganic crystals; Materials Project relaxation trajectories
+     - PBE+U
+   * - `MatPES PBE <https://matpes.ai/>`_
+     - Inorganic materials; equilibrium structures and MD-sampled configurations
+     - PBE, without Hubbard U
+   * - `MatPES r²SCAN <https://matpes.ai/>`_
+     - Inorganic materials; equilibrium structures and MD-sampled configurations
+     - r²SCAN, without Hubbard U
+   * - `REICO-5-PdAgCHO <https://github.com/HuGroup-shanghaiTech/REICO>`_
+     - Heterogeneous catalysis; Pd-Ag catalysts and C/H/O-containing species
+     - PBE+D3
 
 Model Download and Cache
 ------------------------
