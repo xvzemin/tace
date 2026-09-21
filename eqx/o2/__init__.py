@@ -4,6 +4,7 @@ from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
 from .linear import Linear
 from .local_frame import LocalFrame
+from .o3_tensor_product import O3TensorProduct
 from .rotation_matrix import (
     rotation_matrix_to_x_axis,
     rotation_matrix_to_y_axis,
@@ -22,6 +23,7 @@ __all__ = [
     "LocalFrame",
     "CircularHarmonics",
     "TensorProduct",
+    "O3TensorProduct",
     "WignerD",
     "circular_harmonics",
     "rotation_matrix_to_x_axis",

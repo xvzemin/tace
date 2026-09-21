@@ -687,6 +687,91 @@ def load_tace(
     return model
 
 
+def convert_cgtp(model: TensorModel, implementation: str = "o2") -> TensorModel:
+    """Copy a model with an equivalent O(3) or aligned-frame CGTP implementation.
+
+    Parameters
+    ----------
+    model : TensorModel
+        Eager TACE model, for example returned by ``load_tace``.
+    implementation : {"o2", "o3"}
+        Use aligned-frame sparse contractions or global CG tensor products.
+
+    Returns
+    -------
+    TensorModel
+        Independent model with the same learned parameters, dtype, device,
+        and training mode. The original model is unchanged.
+
+    Notes
+    -----
+    Only ``cgtp`` and ``o2_cgtp`` interactions are converted. Their paths,
+    weights, and normalization are identical; outputs and derivatives agree
+    up to floating-point roundoff. Other interaction types are unchanged.
+    Recreate any optimizer for the returned model before further training.
+    """
+    from tace.models._e3nn.inter import O2CgtpInteraction, O3CgtpInteraction
+
+    if implementation not in ("o2", "o3"):
+        raise ValueError("implementation must be 'o2' or 'o3'.")
+    if not isinstance(model, TensorModel):
+        raise TypeError(
+            "Conversion requires an eager TensorModel; use load_tace first."
+        )
+    config = copy.deepcopy(model.readout_fn.model_config)
+    interactions = model.readout_fn.representation.interactions
+    types = config["atomic_basis"]["type"]
+    types = [types] * len(interactions) if isinstance(types, str) else list(types)
+    selected = [
+        index
+        for index, interaction in enumerate(interactions)
+        if type(interaction) in (O3CgtpInteraction, O2CgtpInteraction)
+    ]
+    if not selected:
+        raise ValueError("The model has no cgtp or o2_cgtp interactions to convert.")
+    for index in selected:
+        types[index] = "o2_cgtp" if implementation == "o2" else "cgtp"
+    config["atomic_basis"]["type"] = types
+    config["target_property"] = model.get_target_property()
+    config["embedding_property"] = model.get_embedding_property()
+    with (
+        torch.random.fork_rng(devices=[]),
+        torch_default_dtype(model.get_model_dtype()),
+    ):
+        converted = create_model(
+            config,
+            model.readout_fn.statistics,
+            config["target_property"],
+            config["embedding_property"],
+            prune_removed_keys=True,
+        )
+    converted.to(device=model.readout_fn.cutoff.device, dtype=model.get_model_dtype())
+    parameters = dict(model.named_parameters())
+    converted_parameters = dict(converted.named_parameters())
+    if parameters.keys() != converted_parameters.keys() or any(
+        parameters[name].shape != parameter.shape
+        for name, parameter in converted_parameters.items()
+    ):
+        raise ValueError(
+            "CGTP conversion must preserve all parameter names and shapes."
+        )
+
+    # Reuse matching state and retain freshly constructed implementation-specific buffers.
+    source_state = model.state_dict()
+    converted_state = converted.state_dict()
+    for name in converted_state.keys() & source_state.keys():
+        converted_state[name] = source_state[name]
+    converted.load_state_dict(converted_state, strict=True)
+    for name, parameter in converted_parameters.items():
+        parameter.requires_grad_(parameters[name].requires_grad)
+    converted.train(model.training)
+    converted.reset_fidelity_idx(model.get_fidelity_idx())
+    converted._set_lammps_mliap(model.lmp)
+    converted.retain_graph = model.retain_graph
+    converted.create_graph = model.create_graph
+    return converted
+
+
 def export_tace(
     model: torch.nn.Module,
     name: str,

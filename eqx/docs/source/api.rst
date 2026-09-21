@@ -63,3 +63,6 @@ features and back while retaining flattened ``ir_mul`` storage.
 
 .. autoclass:: eqx.o2.LocalFrame
    :members: restrict, forward, to_local, to_global
+
+.. autoclass:: eqx.o2.O3TensorProduct
+   :members: forward, forward_local

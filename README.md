@@ -52,6 +52,7 @@ while backward compatibility for the O(2) implementation is not currently guaran
 ## Foundation Model
 
 [HUGGING FACE](https://huggingface.co/xvzemin/tace-foundations/tree/main)
+
 [FOUNDATION MODEL DOCS](https://tace.readthedocs.io/en/latest/guide/foundation.html)
 
 ## Install, Train and Tutorial
