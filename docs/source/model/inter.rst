@@ -17,6 +17,38 @@ O(3) Cgtp
    :no-members:
    :show-inheritance:
 
+O(2) CGTP
+---------
+
+``atomic_basis.type: o2_cgtp`` evaluates the same CGTP as ``cgtp`` through
+an edge-aligned frame. Spherical harmonics then have only an order-zero
+entry, so the contraction uses only the nonzero coefficients in that CG
+slice. Coupling paths, radial weights, and normalization are unchanged.
+All required orders are retained, independently of ``mmax``.
+
+Existing CGTP models can be converted without retraining. Values and
+derivatives agree up to floating-point roundoff. The conversion returns a
+new model and leaves the original unchanged:
+
+.. code-block:: python
+
+   from tace.lightning import convert_cgtp, export_tace, load_tace
+
+   model = load_tace("TACE-OAM-7M.pt", dtype="float64")
+   local_model = convert_cgtp(model, "o2")
+   global_model = convert_cgtp(local_model, "o3")
+   export_tace(local_model, "TACE-OAM-7M-o2-cgtp.pt")
+
+This is an equivalent implementation of CGTP, not the different
+``o2`` Linear--Gate--Linear architecture. It uses PyTorch sparse reductions
+and does not use the OpenEquivariance or CuEquivariance CGTP kernels.
+
+.. autoclass:: tace.models._e3nn.inter.O2CgtpInteraction
+   :no-members:
+   :show-inheritance:
+
+.. autofunction:: tace.lightning.convert_cgtp
+
 O(2) Linear
 -----------
 
