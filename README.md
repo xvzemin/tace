@@ -1,7 +1,7 @@
 [![TACE](https://img.shields.io/pypi/v/tace?style=for-the-badge&label=TACE)](https://pypi.org/project/tace/)
 [![Docs](https://img.shields.io/readthedocs/tace?style=for-the-badge&label=docs)](https://tace.readthedocs.io/en/latest/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![Matbench Discovery](https://img.shields.io/badge/Matbench%20Discovery-SOTA-brightgreen?style=for-the-badge)](https://matbench-discovery.materialsproject.org/)
+<!-- [![Matbench Discovery](https://img.shields.io/badge/Matbench%20Discovery-SOTA-brightgreen?style=for-the-badge)](https://matbench-discovery.materialsproject.org/) -->
 
 # Tensor Atomic/Edge Cluster Expansion (TACE/TECE)
 
@@ -45,18 +45,14 @@ while backward compatibility for the O(2) implementation is not currently guaran
 \underbrace{\bigoplus_{m=1}^{l}(m,0,t)}_{\text{2D},\,m>0}.
 ````
 
-
 ## Documentation
 
 [TACE DOCS](https://tace.readthedocs.io/en/latest/index.html)
 
-## SOTA Foundation Model
+## Foundation Model
 
-[TACE FOUNDATION](https://tace.readthedocs.io/en/latest/guide/foundation.html)
-
-Default Ranking on Matbench as of July 8, 2026
-
-<img src="fig/matbench_tece_rra.png" width="100%" align="center">
+[HUGGING FACE](https://huggingface.co/xvzemin/tace-foundations/tree/main)
+[FOUNDATION MODEL DOCS](https://tace.readthedocs.io/en/latest/guide/foundation.html)
 
 ## Install, Train and Tutorial
 
