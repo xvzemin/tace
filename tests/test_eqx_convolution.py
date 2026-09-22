@@ -9,6 +9,25 @@ from eqx.conv import Convolution
 from eqx.o2 import O3TensorProduct, WignerD
 
 
+def test_edge_order_cache():
+    pytest.importorskip("triton")
+    from eqx.conv.triton import edge_order
+
+    edges = torch.tensor([[2, 0, 1, 1, 0], [0, 2, 0, 1, 2]])
+    order = edge_order(edges[0], 3)
+    assert edge_order(edges[0], 3) is order
+    torch.testing.assert_close(order, torch.tensor([1, 2, 0, 1, 0, 2]))
+    edges[0, 0] = 0
+    updated = edge_order(edges[0], 3)
+    assert updated is not order
+    torch.testing.assert_close(updated, torch.tensor([0, 1, 2, 1, 0, 2]))
+    with torch.inference_mode():
+        indices = edges[1].clone()
+        torch.testing.assert_close(
+            edge_order(indices, 3), torch.tensor([0, 2, 1, 0, 1, 2])
+        )
+
+
 @pytest.mark.parametrize(
     "device,backend", [("cpu", "torch"), ("cuda", "torch"), ("cuda", "triton")]
 )
@@ -178,8 +197,91 @@ def test_streaming_mixed_paths_and_empty_edges(device, backend, dtype):
             features[:0], edges[:, :0], frame.forward_packed(vectors[:0])
         )
         assert no_nodes.shape == (0, module.irreps_out.dim)
+        grads = torch.autograd.grad(no_nodes.sum(), (features, module.weight))
+        assert all(torch.count_nonzero(grad) == 0 for grad in grads)
     finally:
         torch.set_default_dtype(previous_dtype)
+
+
+@pytest.mark.parametrize(
+    "device,dtype,channels",
+    [
+        ("cpu", torch.float64, 2),
+        ("cuda", torch.float64, 2),
+        ("cuda", torch.float32, 17),
+    ],
+)
+@pytest.mark.parametrize("mode", ["uvu", "uvw"])
+@pytest.mark.parametrize(
+    "projected,shared", [(False, False), (False, True), (True, False), (True, True)]
+)
+def test_mixed_path_higher_derivatives(
+    device, dtype, channels, mode, projected, shared
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    if device == "cuda":
+        pytest.importorskip("triton")
+    with torch.random.fork_rng():
+        torch.manual_seed(4)
+        tp = O3TensorProduct(
+            f"{channels}x0e",
+            "0e",
+            f"{channels}x0e+{channels}x0e",
+            [(0, 0, 0, "uvu", False), (0, 0, 1, mode, True)],
+            internal_weights=False,
+            shared_weights=False,
+        ).to(device=device, dtype=dtype)
+        plan = Convolution(tp, backend="triton" if device == "cuda" else "torch").to(
+            device=device, dtype=dtype
+        )
+        edges = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
+
+        def rand(*shape):
+            return torch.randn(*shape, device=device, dtype=dtype, requires_grad=True)
+
+        x = rand(3, channels)
+        r = rand(1 if shared else 4, 3 if projected else tp.weight_numel)
+        w = rand(3 if projected else 0, tp.weight_numel)
+        d, s = rand(4, 1), rand(4, 1)
+        weight = r @ w if projected else r
+        expected = x.new_zeros(3, 2 * channels).index_add(
+            0,
+            edges[1],
+            tp(x[edges[0]], d[:, :, None], d[:, :, None], weight.expand(4, -1), s),
+        )
+        actual = plan(x, r, w, d, s, edges, 3)
+        inputs = (x, r, w, d, s) if projected else (x, r, d, s)
+        torch.testing.assert_close(actual, expected)
+        if not projected:
+            # An absent projection has no dependence on the remaining factors.
+            empty = torch.autograd.grad(
+                actual.sum(), w, create_graph=True, retain_graph=True
+            )[0]
+            assert empty.numel() == 0
+            gradients = torch.autograd.grad(
+                empty.sum(), inputs, allow_unused=True, retain_graph=True
+            )
+            assert all(g is None or torch.count_nonzero(g) == 0 for g in gradients)
+        # Starting with a weight derivative catches reintroduced unweighted paths.
+        actual = torch.autograd.grad(actual.sum(), r, create_graph=True)[0]
+        expected = torch.autograd.grad(expected.sum(), r, create_graph=True)[0]
+        for _ in range(2):
+            a = torch.autograd.grad(
+                actual.sum(), inputs, create_graph=True, allow_unused=True
+            )
+            b = torch.autograd.grad(
+                expected.sum(), inputs, create_graph=True, allow_unused=True
+            )
+            for value, reference, input in zip(a, b, inputs):
+                value = torch.zeros_like(input) if value is None else value
+                reference = torch.zeros_like(input) if reference is None else reference
+                tolerance = 1e-10 if dtype == torch.float64 else 2e-5
+                torch.testing.assert_close(
+                    value, reference, atol=tolerance, rtol=tolerance
+                )
+            actual = sum(value.square().sum() for value in a if value is not None)
+            expected = sum(value.square().sum() for value in b if value is not None)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

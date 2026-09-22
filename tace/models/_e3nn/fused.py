@@ -337,7 +337,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
         )
-        self.convolution = Convolution(self.tp, backend="triton")
+        self.eqx_tp = Convolution(self.tp, backend="triton")
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
             self.irreps_in1,
@@ -399,7 +399,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
         ).pow(self.harmonic_degrees)
         if edge_cutoff is not None:
             harmonic_scale = harmonic_scale * edge_cutoff
-        message = self.convolution(
+        message = self.eqx_tp(
             self.reshape_in(node_feats),
             radial,
             projection,

@@ -13,37 +13,80 @@ from e3nn import o3
 
 class _Contraction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, plan, outputs, source, target, *operands):
+    def forward(ctx, plan, program, source, target, *operands):
         ctx.plan = plan
-        ctx.outputs = outputs
+        ctx.program = program
         ctx.set_materialize_grads(False)
         ctx.save_for_backward(source, target, *operands)
-        return plan.contract(outputs, source, target, operands)
+        results = [None] * (
+            1 + max(slot for _, _, pairs in program for _, slot in pairs)
+        )
+        for mapping, _, pairs in program:
+            for role, slot in pairs:
+                if results[slot] is None:
+                    results[slot] = torch.zeros_like(
+                        operands[mapping[role]], memory_format=torch.contiguous_format
+                    )
+        if source.numel() and plan.path_data:
+            calls = [
+                (
+                    tuple(role for role, _ in pairs),
+                    tuple(operands[i] for i in mapping),
+                    tuple(results[slot] for _, slot in pairs),
+                    weighted_only,
+                )
+                for mapping, weighted_only, pairs in program
+            ]
+            if plan.backend == "triton" and operands[0].is_cuda:
+                from .triton import contract_many
+
+                contract_many(plan, source, target, calls)
+            else:
+                for outputs, values, destinations, weighted_only in calls:
+                    for output, result in zip(outputs, destinations):
+                        if result.numel():
+                            plan.reference(
+                                output, source, target, values, result, weighted_only
+                            )
+        return tuple(results)
 
     @staticmethod
     def backward(ctx, *grad_outputs):
         source, target, *operands = ctx.saved_tensors
+        values = list(operands)
+        cotangents = {}
+        for slot, value in enumerate(grad_outputs):
+            if value is not None:
+                cotangents[slot] = len(values)
+                values.append(value)
+        terms = {}
+        destinations = {}
+        for mapping, weighted_only, pairs in ctx.program:
+            for output, slot in pairs:
+                if slot not in cotangents:
+                    continue
+                if output == 2 and not operands[mapping[2]].numel():
+                    continue
+                replacement = list(mapping)
+                replacement[output] = cotangents[slot]
+                # Weight differentiation permanently excludes unweighted paths.
+                key = (
+                    tuple(replacement),
+                    ctx.plan.has_unweighted and (weighted_only or output in (1, 2)),
+                )
+                for role, index in enumerate(mapping):
+                    if role != output and ctx.needs_input_grad[index + 4]:
+                        destination = destinations.setdefault(index, len(destinations))
+                        terms.setdefault(key, []).append((role, destination))
         gradients = [None] * len(operands)
-        for output, grad_output in zip(ctx.outputs, grad_outputs):
-            if grad_output is None:
-                continue
-            indices = tuple(
-                index
-                for index in range(len(operands))
-                if index != output and ctx.needs_input_grad[index + 4]
+        if terms:
+            program = tuple(
+                (mapping, weighted, tuple(pairs))
+                for (mapping, weighted), pairs in terms.items()
             )
-            if not indices:
-                continue
-            values = list(operands)
-            values[output] = grad_output
-            results = _Contraction.apply(ctx.plan, indices, source, target, *values)
-            for index, value in zip(indices, results):
-                if gradients[index] is None:
-                    gradients[index] = value
-                elif torch.is_grad_enabled():
-                    gradients[index] = gradients[index] + value
-                else:
-                    gradients[index].add_(value)
+            results = _Contraction.apply(ctx.plan, program, source, target, *values)
+            for index, slot in destinations.items():
+                gradients[index] = results[slot]
         return None, None, None, None, *gradients
 
 
@@ -73,7 +116,12 @@ class Convolution(torch.nn.Module):
     block-diagonal matrices. Paths sharing an input block reuse its rotation
     within each angular/channel tile. Input adjoints are accumulated locally
     before the inverse rotation. Workspaces for projected weights are reused
-    across chunks and are not saved for backward.
+    across chunks and across mixed derivative terms, and are not saved for
+    backward. Path dependencies are retained through each transpose, including
+    mixtures of weighted and unweighted instructions. Wide channelwise CUDA
+    contractions specialize small path groups and combine graph contributions
+    in source- or target-ordered edge segments. Segment boundaries still use
+    atomic additions, so floating-point summation order is not deterministic.
     """
 
     def __init__(self, tensor_product, *, backend="torch"):
@@ -98,6 +146,7 @@ class Convolution(torch.nn.Module):
         coefficients = []
         offset = 0
         self.path_data = []
+        self.sparse_paths = []
         for ins in self.instructions:
             mul, ir = self.irreps_in[ins.i_in1]
             mul_out, ir_out = self.irreps_out[ins.i_out]
@@ -147,6 +196,25 @@ class Convolution(torch.nn.Module):
                 )
             )
             self.path_data.append((ins.connection_mode, paths[-1]))
+            self.sparse_paths.append(
+                tuple((m, n, float(cg[m, n])) for m, n in cg.nonzero().tolist())
+            )
+
+        # Small compile-time groups bound code size and register lifetimes.
+        groups = {}
+        for index, (mode, path) in enumerate(self.path_data):
+            if mode == "uvu":
+                groups.setdefault((path[0], path[2], path[4]), []).append(index)
+        self.static_groups = tuple(
+            tuple(
+                (self.path_data[i][1], self.sparse_paths[i])
+                for i in indices[start : start + 4]
+            )
+            for indices in groups.values()
+            for start in range(0, len(indices), 4)
+        )
+        self.channelwise = all(mode == "uvu" for mode, _ in self.path_data)
+        self.has_unweighted = any(path[8] < 0 for _, path in self.path_data)
 
         self.register_buffer(
             "paths",
@@ -238,7 +306,7 @@ class Convolution(torch.nn.Module):
         output = features.new_empty(1).expand(num_nodes, self.irreps_out.dim)
         return _Contraction.apply(
             self,
-            (6,),
+            ((tuple(range(7)), False, ((6, 0),)),),
             edge_index[0],
             edge_index[1],
             features,
@@ -250,28 +318,7 @@ class Convolution(torch.nn.Module):
             output,
         )[0]
 
-    def contract(self, outputs, source, target, operands):
-        results = tuple(
-            torch.zeros(
-                operands[output].shape,
-                dtype=operands[0].dtype,
-                device=operands[0].device,
-            )
-            for output in outputs
-        )
-        if not source.numel() or not self.path_data:
-            return results
-        if self.backend == "triton" and operands[0].is_cuda:
-            from .triton import contract
-
-            contract(self, outputs, source, target, operands, results)
-        else:
-            for output, result in zip(outputs, results):
-                if result.numel():
-                    self.reference(output, source, target, operands, result)
-        return results
-
-    def reference(self, output, source, target, operands, result):
+    def reference(self, output, source, target, operands, result, weighted_only=False):
         """Evaluate the same contractions using ordinary tensor operations."""
         x, radial, projection, din, dout, amplitudes, y = operands
         projected = projection.numel() != 0
@@ -280,7 +327,9 @@ class Convolution(torch.nn.Module):
             start, end, mul, mul_out, dim, dim_out, dstart, dend, weight, harmonic = (
                 path
             )
-            if (output in (1, 2) and weight < 0) or (output == 2 and not projected):
+            if ((weighted_only or output in (1, 2)) and weight < 0) or (
+                output == 2 and not projected
+            ):
                 continue
             cg = x.new_zeros(dim, dim_out).scatter(
                 0,
