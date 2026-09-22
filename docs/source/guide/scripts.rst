@@ -47,8 +47,8 @@ Script Overview
      - Split an ASE-readable dataset into train/validation/test files
    * - ``tace-finetune``
      - Generate a fine-tuning and LoRA configuration
-   * - ``tace-convert``
-     - Convert model parameters, currently including LoRA merging
+   * - ``tace-convert-lora``
+     - Merge trained LoRA parameters into the base model
    * - ``tace-convert-cgtp``
      - Automatically switch equivalent ``cgtp`` and ``o2_cgtp`` interactions
    * - ``tace-update``
@@ -168,14 +168,14 @@ This writes ``finetune_config.yaml`` in the current directory. By default the
 base parameters are frozen and LoRA adapters are enabled. Review the generated
 file before launching ``tace-train``.
 
-``tace-convert``
-~~~~~~~~~~~~~~~~
+``tace-convert-lora``
+~~~~~~~~~~~~~~~~~~~~~
 
 Merge trained LoRA parameters into the base model for inference or export:
 
 .. code-block:: bash
 
-   tace-convert -m lora-model.pt -t merge_lora
+   tace-convert-lora -m lora-model.pt -t merge_lora
 
 The output is ``lora-model.pt-merged_lora.pt``. The merged model no longer
 requires separate LoRA adapter parameters.

@@ -125,7 +125,7 @@ You can then follow the example below, which consists of three main steps:
    ``tace-train``. TACE will automatically load and apply the settings from
    ``finetune_config.yaml``.
 
-3. After training is completed, use ``tace-convert`` to convert the generated
+3. After training is completed, use ``tace-convert-lora`` to convert the generated
    LoRA checkpoint (``*.ckpt`` file) into a standard model by merging the LoRA
    weights into the base model. The resulting model can then be deployed for
    production use.
@@ -140,4 +140,4 @@ Example commands are shown below:
    tace-train -cn tace
 
    # Merge LoRA weights into the base model
-   tace-convert -m checkpoints_epoch/last.ckpt --type merge_lora
+   tace-convert-lora -m checkpoints_epoch/last.ckpt --type merge_lora

@@ -54,7 +54,7 @@ def main():
         "The finetune_config.yaml file has been created. tace-train will automatically read this file. "
         "You can modify the parameters in it to control the degree of freedom for fine-tuning. "
         "By default, all parameters are frozen and LoRA is used for fine-tuning. "
-        "After training is completed, it is recommended to use the tace-convert command "
+        "After training is completed, it is recommended to use the tace-convert-lora command "
         "to merge the LoRA parameters with the base model's parameters."
     )
 
