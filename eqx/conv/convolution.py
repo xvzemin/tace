@@ -118,13 +118,13 @@ class Convolution(torch.nn.Module):
     before the inverse rotation. Workspaces for projected weights are reused
     across chunks and across mixed derivative terms, and are not saved for
     backward. Path dependencies are retained through each transpose, including
-    mixtures of weighted and unweighted instructions. Small angular blocks
-    and derivative programs use register-resident channelwise contractions
-    with fused mixed adjoints. Common rotations and local contractions are
-    reused, and gradients are combined before inverse rotations. Larger
-    programs use tiled CUDA contractions to bound compilation and register
-    usage. Graph reductions use atomic additions, so summation order is not
-    deterministic.
+    mixtures of weighted and unweighted instructions. Channelwise contractions
+    use the same register-resident kernels at every angular degree. Mixed
+    adjoints share local rotations and accumulate into their destinations
+    before inverse rotations. Compilation partitions derivative programs
+    according to register usage, rather than an angular-degree threshold.
+    Dense channel mixing uses tiled contractions. Graph reductions use atomic
+    additions, so summation order is not deterministic.
     """
 
     def __init__(self, tensor_product, *, backend="torch"):
@@ -169,7 +169,9 @@ class Convolution(torch.nn.Module):
             cg = o3.wigner_3j(ir.l, ir_sh.l, ir_out.l, dtype=torch.float64)[
                 :, ir_sh.l, :
             ]
-            cg = cg * (pole * ins.path_weight)
+            # Static coefficients and tensor buffers use the same construction
+            # precision, including when the module is later promoted to float64.
+            cg = (cg * (pole * ins.path_weight)).to(torch.get_default_dtype())
             # Each row and column of the real m2=0 slice has at most one
             # nonzero. Both orientations are retained for transposed calls.
             if (cg.count_nonzero(0) > 1).any() or (cg.count_nonzero(1) > 1).any():
@@ -203,18 +205,15 @@ class Convolution(torch.nn.Module):
                 tuple((m, n, float(cg[m, n])) for m, n in cg.nonzero().tolist())
             )
 
-        # Small compile-time groups bound code size and register lifetimes.
+        # Keep every path sharing an input together. The CUDA scheduler chooses
+        # execution phases from the live operands of each derivative program.
         groups = {}
         for index, (mode, path) in enumerate(self.path_data):
             if mode == "uvu":
                 groups.setdefault((path[0], path[2], path[4]), []).append(index)
-        self.static_groups = tuple(
-            tuple(
-                (self.path_data[i][1], self.sparse_paths[i])
-                for i in indices[start : start + 4]
-            )
+        self.path_groups = tuple(
+            tuple((self.path_data[i][1], self.sparse_paths[i]) for i in indices)
             for indices in groups.values()
-            for start in range(0, len(indices), 4)
         )
         self.channelwise = all(mode == "uvu" for mode, _ in self.path_data)
         self.has_unweighted = any(path[8] < 0 for _, path in self.path_data)

@@ -5,7 +5,8 @@
 
 """Register-resident channelwise contractions and mixed adjoints."""
 
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 
 import torch
@@ -13,9 +14,22 @@ import triton
 import triton.language as tl
 
 CHANNEL_TILE = 32
-EDGE_TILE = 4
+REGISTER_TARGET = 128
 WORKSPACE_BYTES = 512 << 20
 _KERNELS = WeakKeyDictionary()
+
+
+@dataclass(frozen=True)
+class Phase:
+    """Compiled contraction phase and its bindings to a derivative program."""
+
+    operands: tuple
+    results: tuple
+    paths: tuple
+    operations: tuple
+    edge_tile: int
+    channel_tile: int
+    kernel: object
 
 
 @triton.jit
@@ -129,6 +143,7 @@ def path_contraction(
     MSG: tl.constexpr,
     ADJ: tl.constexpr,
     Q: tl.constexpr,
+    ACC: tl.constexpr,
     GY: tl.constexpr,
     GDO: tl.constexpr,
     GR: tl.constexpr,
@@ -229,7 +244,7 @@ def path_contraction(
                 valid,
                 0,
             )
-            value = local_grad[i]
+            value = zero_in
             for c in tl.static_range((len(path) - 10) // 3):
                 coefficient = tl.full((), path[12 + 3 * c], zero.dtype)
                 updated = ()
@@ -241,10 +256,21 @@ def path_contraction(
                         else value[k],
                     )
                 value = updated
-            updated = ()
-            for k in tl.static_range(len(ADJ)):
-                updated += (value if k == i else local_grad[k],)
-            local_grad = updated
+            # Only destination accumulators persist between paths; individual
+            # mixed adjoints are consumed immediately.
+            for j in tl.static_range(len(ACC)):
+                for term in tl.static_range(len(ACC[j])):
+                    if ACC[j][term] == i:
+                        updated = ()
+                        for k in tl.static_range(len(ACC)):
+                            if k == j:
+                                combined = ()
+                                for a in tl.static_range(dim):
+                                    combined += (local_grad[k][a] + value[a],)
+                                updated += (combined,)
+                            else:
+                                updated += (local_grad[k],)
+                        local_grad = updated
     q = ()
     for i in tl.static_range(len(Q)):
         value = zero
@@ -315,6 +341,7 @@ def kernel(
     MSG: tl.constexpr,
     ADJ: tl.constexpr,
     Q: tl.constexpr,
+    ACC: tl.constexpr,
     GX: tl.constexpr,
     GDI: tl.constexpr,
     GY: tl.constexpr,
@@ -347,7 +374,7 @@ def kernel(
         x = load_vector(P[XP[i][0]], src, channel, valid, XDIM, start, dim, mul)
         local_x += (rotate_vector(P[XP[i][1]], ei, x, valid, DDIM, dstart, dim),)
     local_grad = ()
-    for i in tl.static_range(len(ADJ)):
+    for i in tl.static_range(len(ACC)):
         local_grad += (zero_in,)
 
     for path_index in tl.static_range(len(PATHS)):
@@ -380,6 +407,7 @@ def kernel(
             MSG,
             ADJ,
             Q,
+            ACC,
             GY,
             GDO,
             GR,
@@ -388,21 +416,11 @@ def kernel(
             BC,
         )
     for i in tl.static_range(len(GX)):
-        local = zero_in
-        for j in tl.static_range(len(GX[i]) - 2):
-            updated = ()
-            for k in tl.static_range(len(zero_in)):
-                updated += (local[k] + local_grad[GX[i][2 + j]][k],)
-            local = updated
+        local = local_grad[GX[i][2]]
         value = rotate_vector(P[GX[i][0]], ei, local, valid, DDIM, dstart, dim, True)
         add_vector(G[GX[i][1]], src, channel, valid, value, XDIM, start, mul)
     for i in tl.static_range(len(GDI)):
-        local = zero_in
-        for j in tl.static_range(len(GDI[i]) - 2):
-            updated = ()
-            for k in tl.static_range(len(zero_in)):
-                updated += (local[k] + local_grad[GDI[i][2 + j]][k],)
-            local = updated
+        local = local_grad[GDI[i][2]]
         x = load_vector(P[GDI[i][0]], src, channel, valid, XDIM, start, dim, mul)
         add_outer(G[GDI[i][1]], ei, local, x, mask, DDIM, dstart)
 
@@ -449,6 +467,15 @@ def schedule(calls):
                 gr[output_ids[1]].append((qi, s))
             if 5 in outputs:
                 gs[output_ids[5]].append((qi, w, weighted))
+    accumulators = {}
+    input_gradients = []
+    for group in (gx, gdi):
+        entries = []
+        for key, value in group.items():
+            terms = tuple(sorted(value))
+            accumulator = accumulators.setdefault(terms, len(accumulators))
+            entries.append((*key, accumulator))
+        input_gradients.append(tuple(entries))
     return (
         tuple(pointers),
         tuple(results),
@@ -457,9 +484,11 @@ def schedule(calls):
         tuple(messages),
         tuple(adjoints),
         tuple(q),
+        tuple(accumulators),
+        *input_gradients,
         *(
             tuple((*key, *value) for key, value in group.items())
-            for group in (gx, gdi, gy, gdo)
+            for group in (gy, gdo)
         ),
         *(
             tuple(
@@ -471,12 +500,157 @@ def schedule(calls):
     )
 
 
+def register_estimate(paths, operations, itemsize):
+    """Estimate live 32-bit words per channel, including rotation temporaries."""
+    xp, yp, messages, _, q, accumulators, *_ = operations
+    dim = paths[0][0][4]
+    dim_out = max(path[5] for path, _ in paths)
+    live = dim * (len(xp) + len(accumulators))
+    live += dim_out * (len(yp) + len(xp) + len(messages))
+    live += 2 * max(dim, dim_out) + len(q) + 8
+    return 24 + live * (itemsize // 4)
+
+
+def split_program(calls):
+    """Partition output instructions without changing their destinations."""
+    terms = [
+        ((role,), values, (destination,), weighted)
+        for outputs, values, destinations, weighted in calls
+        for role, destination in zip(outputs, destinations)
+    ]
+    middle = len(terms) // 2
+    return terms[:middle], terms[middle:]
+
+
+def compile_schedule(paths, calls, pointers, results, source, target, shared):
+    """Compile resource-bounded phases without executing candidate kernels.
+
+    All angular degrees use the same instruction generator. Register estimates
+    bound large derivative programs before compilation; compiler resource
+    reports refine the subdivision and edge/channel tile sizes. Cached phases
+    contain operand indices, never the tensors of a particular graph.
+    """
+    x, radial, _, din, _, amplitudes, y = calls[0][1]
+    pointer_indices = {id(value): i for i, value in enumerate(pointers)}
+    result_indices = {id(value): i for i, value in enumerate(results)}
+    specification = tuple(
+        tl.constexpr(path + tuple(c for entry in cg for c in entry))
+        for path, cg in paths
+    )
+    channels = min(CHANNEL_TILE, triton.next_power_of_2(paths[0][0][2]))
+    edges = min(32, 128 // channels)
+    warps = max(1, edges * channels // 32)
+    configurations = tuple(
+        dict.fromkeys(
+            (
+                (edges, channels, warps),
+                (max(1, edges // 2), channels, warps),
+                (max(1, edges // 2), channels, max(1, warps // 2)),
+                (edges, max(1, channels // 2), warps),
+            )
+        )
+    )
+    pending = deque([calls])
+    phases = []
+    with torch.cuda.device(x.device):
+        properties = triton.runtime.driver.active.utils.get_device_properties(
+            x.device.index
+        )
+        register_limit = min(
+            REGISTER_TARGET, properties["max_num_regs"] // (2 * 32 * warps)
+        )
+        while pending:
+            program = pending.popleft()
+            inputs, destinations, *operations = schedule(program)
+            can_split = sum(len(outputs) for outputs, _, _, _ in program) > 1
+            if (
+                register_estimate(paths, operations, x.element_size())
+                > 2 * register_limit
+                and can_split
+            ):
+                pending.extendleft(reversed(split_program(program)))
+                continue
+            operations = tuple(
+                tuple(tl.constexpr(value) for value in group) for group in operations
+            )
+            arguments = (
+                inputs,
+                destinations,
+                source,
+                target,
+                source.numel(),
+                x.size(1),
+                y.size(1),
+                din.size(1),
+                radial.size(1),
+                amplitudes.size(1),
+                *shared,
+                specification,
+                *operations,
+            )
+            best = None
+            resource_error = None
+            for edge_tile, channel_tile, num_warps in configurations:
+                try:
+                    compiled = kernel.warmup(
+                        *arguments,
+                        edge_tile,
+                        channel_tile,
+                        grid=(1, 1, 1),
+                        num_warps=num_warps,
+                        num_stages=1,
+                    )
+                    if compiled.metadata.shared > properties["max_shared_mem"]:
+                        raise triton.OutOfResources(
+                            compiled.metadata.shared,
+                            properties["max_shared_mem"],
+                            "shared memory",
+                        )
+                    # Load resource metadata without launching the contraction.
+                    compiled._init_handles()
+                    max_threads = getattr(compiled, "n_max_threads", 1024)
+                    if num_warps * 32 > max_threads:
+                        raise triton.OutOfResources(
+                            num_warps * 32, max_threads, "threads"
+                        )
+                except triton.OutOfResources as error:
+                    resource_error = error
+                    continue
+                score = (
+                    compiled.n_spills,
+                    max(0, compiled.n_regs - register_limit),
+                    max(
+                        0,
+                        compiled.metadata.shared - properties["max_shared_mem"] // 2,
+                    ),
+                )
+                if best is None or score < best[0]:
+                    best = score, compiled, edge_tile, channel_tile
+                if score == (0, 0, 0):
+                    break
+            if can_split and (best is None or best[0] != (0, 0, 0)):
+                pending.extendleft(reversed(split_program(program)))
+                continue
+            if best is None:
+                raise resource_error
+            _, compiled, edge_tile, channel_tile = best
+            phases.append(
+                Phase(
+                    tuple(pointer_indices[id(value)] for value in inputs),
+                    tuple(result_indices[id(value)] for value in destinations),
+                    specification,
+                    operations,
+                    edge_tile,
+                    channel_tile,
+                    compiled,
+                )
+            )
+    return tuple(phases)
+
+
 def contract(plan, source, target, calls, shared=None):
     pointers, results, *operations = schedule(calls)
     signature = tuple(operations)
-    operations = tuple(
-        tuple(tl.constexpr(value) for value in group) for group in operations
-    )
     x, r, _, di, do, s, y = calls[0][1]
     if shared is None:
         shared = tuple(value.size(0) == 1 for value in (r, di, do, s))
@@ -495,44 +669,41 @@ def contract(plan, source, target, calls, shared=None):
         source.numel() > 2**31 - 1,
     )
     cache = _KERNELS.setdefault(plan, OrderedDict())
-    for path_index, paths in enumerate(plan.static_groups):
-        specification = tuple(
-            tl.constexpr(path + tuple(c for entry in cg for c in entry))
-            for path, cg in paths
-        )
-        channels = min(CHANNEL_TILE, triton.next_power_of_2(paths[0][0][2]))
-        grid = (
-            triton.cdiv(source.numel(), EDGE_TILE),
-            triton.cdiv(paths[0][0][2], channels),
-            1,
-        )
-        arguments = (
-            pointers,
-            results,
-            source,
-            target,
-            source.numel(),
-            x.size(1),
-            y.size(1),
-            di.size(1),
-            r.size(1),
-            s.size(1),
-            *shared,
-            specification,
-            *operations,
-            EDGE_TILE,
-            channels,
-        )
-        key = (signature, layouts, path_index, EDGE_TILE, channels)
-        compiled = cache.get(key)
-        if compiled is None:
-            compiled = kernel[grid](*arguments, num_warps=4, num_stages=1)
-            cache[key] = compiled
+    for path_index, paths in enumerate(plan.path_groups):
+        key = (signature, layouts, path_index)
+        phases = cache.get(key)
+        if phases is None:
+            phases = compile_schedule(
+                paths, calls, pointers, results, source, target, shared
+            )
+            cache[key] = phases
             if len(cache) > 256:
                 cache.popitem(last=False)
         else:
             cache.move_to_end(key)
-            compiled[grid](*arguments)
+        for phase in phases:
+            grid = (
+                triton.cdiv(source.numel(), phase.edge_tile),
+                triton.cdiv(paths[0][0][2], phase.channel_tile),
+                1,
+            )
+            phase.kernel[grid](
+                tuple(pointers[i] for i in phase.operands),
+                tuple(results[i] for i in phase.results),
+                source,
+                target,
+                source.numel(),
+                x.size(1),
+                y.size(1),
+                di.size(1),
+                r.size(1),
+                s.size(1),
+                *shared,
+                phase.paths,
+                *phase.operations,
+                phase.edge_tile,
+                phase.channel_tile,
+            )
 
 
 def contract_projected(plan, source, target, calls, chunk_size=16384):
@@ -553,14 +724,16 @@ def contract_projected(plan, source, target, calls, chunk_size=16384):
         if any(i in outputs for i in (0, 3, 4, 5, 6)):
             factors[key[:2]] = values[1:3]
     radial = calls[0][1][1]
-    count = len(factors) + sum(
+    count = max(1, len(factors)) + sum(
         1 in terms[0][2] or 2 in terms[0][2] for terms in groups.values()
     )
     chunk = max(
-        32,
-        WORKSPACE_BYTES // (max(count, 1) * plan.weight_numel * radial.element_size()),
+        1,
+        WORKSPACE_BYTES // (count * plan.weight_numel * radial.element_size()),
     )
-    chunk = min(chunk_size, chunk // 32 * 32, source.numel())
+    if chunk >= 32:
+        chunk = chunk // 32 * 32
+    chunk = min(chunk_size, chunk, source.numel())
     workspaces = {key: radial.new_empty(chunk, plan.weight_numel) for key in factors}
     gradients = {
         key: radial.new_empty(chunk, plan.weight_numel)

@@ -500,13 +500,6 @@ def contract_many(plan, source, target, calls):
     source, target = source.contiguous(), target.contiguous()
     projected = []
     fused = []
-    use_fused = (
-        plan.channelwise
-        and calls[0][1][0].dtype == torch.float32
-        and min(path[2] for _, path in plan.path_data) >= 16
-        and plan.degree_width <= 8
-        and len(calls) <= 8
-    )
     contiguous = {}
     for outputs, operands, results, weighted_only in calls:
         if operands[0].dtype not in (torch.float32, torch.float64):
@@ -521,7 +514,7 @@ def contract_many(plan, source, target, calls):
                 value = contiguous[id(value)]
             values.append(value)
         values = tuple(values)
-        if use_fused:
+        if plan.channelwise:
             fused.append((outputs, values, results, weighted_only))
             continue
         if values[2].numel() >= PROJECTION_MIN_NUMEL and values[1].size(1) >= 8:
