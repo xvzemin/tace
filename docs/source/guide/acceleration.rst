@@ -5,11 +5,11 @@ Acceleration
 
 TACE provides several composable acceleration layers:
 
-* OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide alternative
-  implementations of the same edge-level equivariant operations and are
-  mutually exclusive;
+* EquivariantX(EQX), OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide 
+  alternative implementations of the same edge-level equivariant operations and 
+  are mutually exclusive;
 * EquiTorch (EQT) accelerates product-basis tensor
-  products and can be combined with either OEQ or CUEQ;
+  products and can be combined with EQX, OEQ or CUEQ;
 * PyTorch compilation accelerates a larger part of the model and can either
   run inside the current Python process or produce an AOTInductor package for
   later deployment. AOTI is independent of the kernel-backend selection.
@@ -38,24 +38,23 @@ The following kernel backends are available:
    * - cuEquivariance
      - Edge in atomic basis
      - ``TACE_USE_CUE=1``
+   * - EquivariantX
+     - Edge in atomic basis
+     - ``TACE_USE_EQX=1``
    * - EquiTorch
      - Node in product basis
      - ``TACE_USE_EQT=1``
-   * - EquivariantX
-     - Streamed ``o2_cgtp`` convolutions
-     - ``TACE_USE_EQX=1``
+
+EquivariantX achieves more than 3x lower peak GPU memory usage than
+OpenEquivariance and CuEquivariance at larger batch sizes. 
+However, EquivariantX is still under active development, and bugs or other 
+unexpected behaviors may still exist.
 
 For example:
 
 .. code-block:: bash
 
    export TACE_USE_OEQ=1
-
-Do not enable OEQ and CUEQ at the same time. EQT is independent and may be
-enabled together with either one when the model contains a supported product
-basis.
-OpenEquivariance is the recommended edge-level backend for supported NVIDIA
-GPUs.
 
 The acceleration environment can also be configured through Python
 interface before constructing or loading the model:
