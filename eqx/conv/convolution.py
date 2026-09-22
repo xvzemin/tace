@@ -118,10 +118,13 @@ class Convolution(torch.nn.Module):
     before the inverse rotation. Workspaces for projected weights are reused
     across chunks and across mixed derivative terms, and are not saved for
     backward. Path dependencies are retained through each transpose, including
-    mixtures of weighted and unweighted instructions. Wide channelwise CUDA
-    contractions specialize small path groups and combine graph contributions
-    in source- or target-ordered edge segments. Segment boundaries still use
-    atomic additions, so floating-point summation order is not deterministic.
+    mixtures of weighted and unweighted instructions. Small angular blocks
+    and derivative programs use register-resident channelwise contractions
+    with fused mixed adjoints. Common rotations and local contractions are
+    reused, and gradients are combined before inverse rotations. Larger
+    programs use tiled CUDA contractions to bound compilation and register
+    usage. Graph reductions use atomic additions, so summation order is not
+    deterministic.
     """
 
     def __init__(self, tensor_product, *, backend="torch"):

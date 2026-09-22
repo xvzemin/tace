@@ -407,7 +407,9 @@ class Representation(torch.nn.Module):
         edge_wigner_inv = None
         if self.use_so2 or self.use_o2:
             if getattr(self, "use_packed_wigner", False):
-                edge_wigner = self.o2_angular_basis.forward_packed(graph.edge_vector)
+                from eqx.conv import wigner_D
+
+                edge_wigner = wigner_D(self.o2_angular_basis, graph.edge_vector)
             else:
                 edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
         edge_attrs = (

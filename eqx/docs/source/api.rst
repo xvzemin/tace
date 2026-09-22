@@ -77,3 +77,5 @@ in ``eqx.o2``. The default backend uses PyTorch on CPU and CUDA. Selecting
 
 .. autoclass:: eqx.conv.Convolution
    :members: forward
+
+.. autofunction:: eqx.conv.wigner_D

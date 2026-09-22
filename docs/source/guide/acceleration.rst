@@ -124,15 +124,17 @@ or PyG. ``TACE_USE_EQX=1`` selects the separate ``eqx.conv.Convolution``
 Triton backend on CUDA and its PyTorch implementation on CPU. Fused CUDA
 execution supports float32 and float64. The fused
 contraction includes source gather, both feature rotations, the sparse
-order-zero CG coupling, and target reduction. It does not materialize edge messages 
-or their adjoints. Small radial projections run inside the
-kernel; large projections and their gradients use matrix products over bounded
-edge chunks. The scalar path-weight workspaces are reused, not saved for
+order-zero CG coupling, and target reduction. It does not materialize edge messages
+or their adjoints. Radial projections and their gradients use matrix products
+over bounded edge chunks; the general kernel also supports small internal
+projections. The scalar path-weight workspaces are reused, not saved for
 backward. The same contraction evaluates transposed operations recursively,
 including the second derivatives required by force-loss training.
-Paths are grouped by block dimensions and processed in edge tiles at both
-low and high angular degree. Channel contractions use matrix products instead
-of broadcast outer-product intermediates where supported. The Triton
+Wide channelwise contractions retain angular features in registers and fuse
+mixed derivative terms. Shared local rotations are evaluated once, and input
+adjoints are combined before the inverse rotation. Other layouts, float64,
+high angular degrees, and large mixed-derivative programs use the general
+tiled CUDA contraction to bound compilation size and register usage. The Triton
 contraction uses float32 or float64 arithmetic; radial matrix products follow
 PyTorch's configured matrix-multiplication precision. Fused multiply-adds and
 atomic reductions can change floating-point rounding and summation order.
@@ -140,9 +142,13 @@ Kernels are compiled on first use. The edge count is a runtime argument, so
 varying the number of neighbors does not trigger compilation for every batch.
 
 Wigner matrices remain differentiable geometric inputs, packed by degree
-without block-diagonal zero padding or a separate inverse copy. The radial
-MLP's preceding layers and Wigner construction are outside the fused
-contraction. CPU execution uses the tensor-contraction reference.
+without block-diagonal zero padding or a separate inverse copy. Their recursive
+CG construction and transposes use a separate sparse CUDA kernel. Alignment
+and its required derivatives are compiled as pure tensor functions, with
+recursive differentiation retained beyond force training. The radial MLP's
+preceding layers and ``linear_down`` remain separate. CPU execution uses the
+tensor-contraction reference. Initial compilation is excluded from warmed
+throughput measurements.
 
 This backend targets eager training and inference. AOTInductor deployment
 with EQX is not currently validated; use the documented OEQ export path

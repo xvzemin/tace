@@ -9,23 +9,44 @@ from eqx.conv import Convolution
 from eqx.o2 import O3TensorProduct, WignerD
 
 
-def test_edge_order_cache():
+@pytest.mark.parametrize("degree", [0, 1, 3, 6])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fused_wigner_derivatives(degree, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     pytest.importorskip("triton")
-    from eqx.conv.triton import edge_order
+    from eqx.conv import wigner_D
 
-    edges = torch.tensor([[2, 0, 1, 1, 0], [0, 2, 0, 1, 2]])
-    order = edge_order(edges[0], 3)
-    assert edge_order(edges[0], 3) is order
-    torch.testing.assert_close(order, torch.tensor([1, 2, 0, 1, 0, 2]))
-    edges[0, 0] = 0
-    updated = edge_order(edges[0], 3)
-    assert updated is not order
-    torch.testing.assert_close(updated, torch.tensor([0, 1, 2, 1, 0, 2]))
-    with torch.inference_mode():
-        indices = edges[1].clone()
-        torch.testing.assert_close(
-            edge_order(indices, 3), torch.tensor([0, 2, 1, 0, 1, 2])
-        )
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        torch.manual_seed(27)
+        frame = WignerD(degree, degree).cuda()
+        vectors = torch.randn(5, 3, device="cuda", requires_grad=True)
+        actual = wigner_D(frame, vectors)
+        expected = frame.forward_packed(vectors)
+        tolerance = 2e-5 if dtype == torch.float32 else 2e-12
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        if degree:
+            actual, expected = actual.sin(), expected.sin()
+            for _ in range(3):
+                seed = torch.randn_like(actual) / actual.numel() ** 0.5
+                actual = torch.autograd.grad(
+                    (actual * seed).sum(), vectors, create_graph=True, retain_graph=True
+                )[0]
+                expected = torch.autograd.grad(
+                    (expected * seed).sum(),
+                    vectors,
+                    create_graph=True,
+                    retain_graph=True,
+                )[0]
+                torch.testing.assert_close(
+                    actual, expected, atol=10 * tolerance, rtol=10 * tolerance
+                )
+        empty = vectors[:0]
+        torch.testing.assert_close(wigner_D(frame, empty), frame.forward_packed(empty))
+    finally:
+        torch.set_default_dtype(previous)
 
 
 @pytest.mark.parametrize(
@@ -487,7 +508,7 @@ def test_streaming_high_degree(degree):
         torch.set_default_dtype(previous_dtype)
 
 
-@pytest.mark.parametrize("degree,edges_count", [(1, 35), (5, 1025), (8, 35)])
+@pytest.mark.parametrize("degree,edges_count", [(1, 35), (1, 1025), (5, 1025), (8, 35)])
 def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
