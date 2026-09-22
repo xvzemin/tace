@@ -37,9 +37,9 @@ def enable_acceleration(
 ) -> None:
     """Enable accelerations, preserving existing settings unless forced.
 
-    ``enable_eqx`` selects the EQX operator path. Until the general EQX O(3),
-    O(2), and Cartesian operators are available, supported calls
-    are routed to the temporary kernels in :mod:`tace.models.triton_ops`.
+    ``enable_eqx`` selects streamed aligned-frame CGTP convolutions for
+    ``o2_cgtp`` interactions. CUDA execution requires Triton.
+    Other operators retain their selected backend.
     """
     enabled_accelerations = {
         "oeq": enable_oeq,

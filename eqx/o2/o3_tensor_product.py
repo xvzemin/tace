@@ -8,8 +8,8 @@ from typing import Optional, Sequence
 
 import torch
 from e3nn import o3
-from torch_geometric.utils import scatter
 
+from ..conv import Convolution
 from .local_frame import LocalFrame
 
 
@@ -234,6 +234,8 @@ class O3TensorProduct(torch.nn.Module):
                     persistent=False,
                 )
 
+        self.convolution = Convolution(self)
+
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}({self.irreps_in1} x Y({self.irreps_in2}) "
@@ -310,13 +312,9 @@ class O3TensorProduct(torch.nn.Module):
                     -1, getattr(self, f"harmonic_{index}")
                 )
             values = (values * scale.unsqueeze(-1)).flatten(-2)
-            contribution = scatter(
-                values,
-                getattr(self, f"output_{index}"),
-                dim=-1,
-                dim_size=self.local_output_dim,
-                reduce="sum",
-            )
+            contribution = values.new_zeros(
+                (*values.shape[:-1], self.local_output_dim)
+            ).index_add_(-1, getattr(self, f"output_{index}"), values)
             output = contribution if output is None else output + contribution
         if output is None:
             zero = features[..., :0].sum() + weight[..., :0].sum()
@@ -362,3 +360,119 @@ class O3TensorProduct(torch.nn.Module):
         if self._simplify_output:
             features = features.index_select(-1, self.output_index)
         return features
+
+    def forward_scatter(
+        self,
+        features: torch.Tensor,
+        edge_index: torch.Tensor,
+        wigner: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        harmonic_scale: Optional[torch.Tensor] = None,
+        *,
+        radial_features: Optional[torch.Tensor] = None,
+        radial_weight: Optional[torch.Tensor] = None,
+        num_nodes: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Couple gathered features and accumulate directly at target nodes.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Node features of shape ``(nodes, irreps_in1.dim)`` in flattened
+            ``ir_mul`` order.
+        edge_index : torch.Tensor
+            Source and target node indices, with shape ``(2, edges)``.
+        wigner : torch.Tensor
+            Packed degree-wise rotation matrices from
+            :meth:`WignerD.forward_packed`. All required orders are retained.
+        weight : torch.Tensor, optional
+            Path weights with shape ``(edges, weight_numel)``,
+            ``(1, weight_numel)`` or ``(weight_numel,)``. Mutually exclusive
+            with the radial projection arguments.
+        harmonic_scale : torch.Tensor, optional
+            Amplitude for each harmonic entry, with shape
+            ``(edges, len(irreps_in2))`` or ``(1, len(irreps_in2))``.
+        radial_features : torch.Tensor, optional
+            Radial hidden features with shape ``(edges, channels)``.
+        radial_weight : torch.Tensor, optional
+            Final radial projection with shape ``(channels, weight_numel)``.
+        num_nodes : int, optional
+            Number of target nodes. Defaults to the input node count.
+
+        Returns
+        -------
+        torch.Tensor
+            Node features in the declared, unsimplified output layout.
+
+        Notes
+        -----
+        Execution uses PyTorch operations on CPU and CUDA, including higher
+        derivatives used in force training. The optional fused implementation
+        is available separately through :class:`eqx.conv.Convolution`.
+        """
+        if features.ndim != 2 or features.size(1) != self.input_dim:
+            raise ValueError("Expected two-dimensional node features in ir_mul layout.")
+        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+            raise ValueError("edge_index must have shape (2, edges).")
+        if edge_index.dtype not in (torch.int32, torch.int64):
+            raise TypeError("edge_index must contain integer indices.")
+        if edge_index.device != features.device:
+            raise ValueError("edge_index and features must be on the same device.")
+        edges = edge_index.size(1)
+        required = sum((2 * l + 1) ** 2 for l in range(self.lmax + 1))
+        if (
+            wigner.ndim != 2
+            or wigner.size(0) not in (1, edges)
+            or wigner.size(1) < required
+        ):
+            raise ValueError(
+                "Expected packed Wigner matrices covering all feature degrees."
+            )
+        if radial_features is not None or radial_weight is not None:
+            if weight is not None or radial_features is None or radial_weight is None:
+                raise ValueError(
+                    "Supply either weights or both radial projection arguments."
+                )
+            radial, projection = radial_features, radial_weight
+            if radial.ndim != 2 or projection.shape != (
+                radial.size(1),
+                self.weight_numel,
+            ):
+                raise ValueError("Incompatible radial feature and projection shapes.")
+        else:
+            if weight is None:
+                if not self.internal_weights and self.weight_numel:
+                    raise RuntimeError("External tensor-product weights are required.")
+                weight = self.weight
+            radial = weight.unsqueeze(0) if weight.ndim == 1 else weight
+            if radial.ndim != 2 or radial.size(1) != self.weight_numel:
+                raise ValueError(
+                    "Expected weights with trailing dimension weight_numel."
+                )
+            projection = features.new_empty((0, self.weight_numel))
+        if radial.size(0) not in (1, edges):
+            raise ValueError(
+                "The radial batch dimension must be one or the edge count."
+            )
+        if harmonic_scale is None:
+            harmonic_scale = features.new_ones((1, self.num_harmonics))
+        if (
+            harmonic_scale.ndim != 2
+            or harmonic_scale.size(0) not in (1, edges)
+            or harmonic_scale.size(1) != self.num_harmonics
+        ):
+            raise ValueError("Expected one amplitude per edge and harmonic entry.")
+        for value in (radial, projection, wigner, harmonic_scale):
+            if value.device != features.device or value.dtype != features.dtype:
+                raise ValueError(
+                    "All convolution operands must share dtype and device."
+                )
+        return self.convolution(
+            features,
+            radial,
+            projection,
+            wigner,
+            harmonic_scale,
+            edge_index,
+            features.size(0) if num_nodes is None else num_nodes,
+        )

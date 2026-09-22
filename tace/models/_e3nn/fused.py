@@ -4,11 +4,13 @@
 ################################################################################
 
 import logging
+import math
 from typing import Union
 
 import torch
 from e3nn import o3
 
+from eqx.conv import Convolution
 from eqx.o2 import O3TensorProduct
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
@@ -335,6 +337,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
         )
+        self.convolution = Convolution(self.tp, backend="triton")
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
             self.irreps_in1,
@@ -343,6 +346,11 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
         )
         self.reshape_out = LayoutTransform(
             self.irreps_out.simplify(),
+            layout_in="flatten_ir_mul",
+            layout_out="flatten_mul_ir",
+        )
+        self.reshape_streamed = LayoutTransform(
+            self.irreps_out,
             layout_in="flatten_ir_mul",
             layout_out="flatten_mul_ir",
         )
@@ -365,3 +373,39 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             message, edge_index[1], dim=0, dim_size=node_feats.size(0)
         )
         return self.reshape_out(message)
+
+    def forward_stream(
+        self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
+    ):
+        """Evaluate the radial projection and fused angular convolution."""
+        if wigner.ndim == 3:
+            # Other local interactions may still require the shared dense
+            # frame. Extract its full degree blocks for the streamed CGTP.
+            lmax = math.isqrt(wigner.size(-1)) - 1
+            blocks = []
+            for l in range(self.tp.lmax + 1):
+                rows = [
+                    l
+                    if m == 0
+                    else l + (2 * m - 1) * (lmax + 1) - m * m
+                    if m > 0
+                    else l + 2 * (-m) * (lmax + 1) - (-m) * (-m + 1)
+                    for m in range(-l, l + 1)
+                ]
+                blocks.append(wigner[:, rows, l * l : (l + 1) ** 2].flatten(1))
+            wigner = torch.cat(blocks, dim=1)
+        harmonic_scale = (
+            graph.edge_vector.norm(dim=-1, keepdim=True) / graph.edge_length
+        ).pow(self.harmonic_degrees)
+        if edge_cutoff is not None:
+            harmonic_scale = harmonic_scale * edge_cutoff
+        message = self.convolution(
+            self.reshape_in(node_feats),
+            radial,
+            projection,
+            wigner,
+            harmonic_scale,
+            edge_index,
+            node_feats.size(0),
+        )
+        return self.reshape_streamed(message)

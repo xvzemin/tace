@@ -121,6 +121,10 @@ class Representation(torch.nn.Module):
             or uses_o2_interaction
             or uses_o2_cgtp_interaction
         )
+        self._can_pack_wigner = uses_o2_cgtp_interaction and not (
+            uses_so2_interaction or uses_o2_interaction
+            or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+        )
         uses_magnetic_interaction = any(
             issubclass(interaction_cls, O2MagneticInteraction)
             for interaction_cls in interaction_classes
@@ -381,6 +385,13 @@ class Representation(torch.nn.Module):
                 bias=True,
             )
 
+    @property
+    def use_packed_wigner(self) -> bool:
+        return getattr(self, "_can_pack_wigner", False) and any(
+            getattr(interaction, "use_eqx", False)
+            for interaction in self.interactions
+        )
+
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
 
         # === edge initialize (radial) ===
@@ -395,9 +406,10 @@ class Representation(torch.nn.Module):
         edge_wigner = None
         edge_wigner_inv = None
         if self.use_so2 or self.use_o2:
-            edge_wigner, edge_wigner_inv = self.o2_angular_basis(
-                graph.edge_vector
-            )
+            if getattr(self, "use_packed_wigner", False):
+                edge_wigner = self.o2_angular_basis.forward_packed(graph.edge_vector)
+            else:
+                edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
         edge_attrs = (
             self.o3_angular_basis(graph.edge_vector / graph.edge_length)
             if getattr(self, "use_o3_angular_basis", True)

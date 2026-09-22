@@ -59,10 +59,21 @@ features and back while retaining flattened ``ir_mul`` storage.
 .. autofunction:: eqx.o2.rotation_matrix_to_z_axis
 
 .. autoclass:: eqx.o2.WignerD
-   :members: forward
+   :members: forward, forward_packed
 
 .. autoclass:: eqx.o2.LocalFrame
    :members: restrict, forward, to_local, to_global
 
 .. autoclass:: eqx.o2.O3TensorProduct
-   :members: forward, forward_local
+   :members: forward, forward_local, forward_scatter
+
+Indexed convolutions
+--------------------
+
+``eqx.conv`` separates convolution execution from the representation operators
+in ``eqx.o2``. The default backend uses PyTorch on CPU and CUDA. Selecting
+``backend="triton"`` enables fused CUDA contractions and requires the optional
+``triton`` installation extra. Both backends support higher derivatives.
+
+.. autoclass:: eqx.conv.Convolution
+   :members: forward

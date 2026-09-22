@@ -295,7 +295,7 @@ def test_o2_tensor_node_embedding_is_equivariant():
     ).all()
     torch.testing.assert_close(
         rotated_output,
-        output @ embedding.irreps_out.D_from_matrix(rotation).T,
+        output @ embedding.irreps_out.D_from_matrix(rotation.cpu()).to(output).T,
         atol=1.0e-6,
         rtol=1.0e-5,
     )
@@ -586,7 +586,7 @@ def test_o2_scatter_is_o3_equivariant(use_attention):
     )
 
     rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
-    matrix = module.irreps_in.D_from_matrix(rotation)
+    matrix = module.irreps_in.D_from_matrix(rotation.cpu()).to(node_features)
     rotated_features = node_features @ matrix.T
     rotated_vectors = edge_vectors @ rotation.T
     rotated_wigner, rotated_wigner_inv = wigner_module(rotated_vectors)
@@ -1043,7 +1043,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
-    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE"):
+    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -1119,6 +1119,20 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
                 parameter.grad, expected_grad, atol=2e-8, rtol=2e-7
             )
 
+    if isinstance(interaction, list):
+        from tace.lightning import convert_cgtp
+
+        converted = convert_cgtp(module)
+        assert converted.readout_fn.model_config["atomic_basis"]["type"] == [
+            "o2_cgtp",
+            "cgtp",
+        ]
+        output = converted({key: value.clone() for key, value in data.items()})
+        for key in ("energy", "forces", "stress", "virials"):
+            torch.testing.assert_close(
+                output[key], expected[key], atol=2e-9, rtol=2e-8
+            )
+
     if interaction == "o2_cgtp" and node_embedding == "linear" and Lmax == lmax == 2:
         from tace.models.compile.compile import trace_to_fx
         from tace.models.compile.wrapper import (
@@ -1152,7 +1166,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
             assert parameter.requires_grad == other.requires_grad
             assert parameter.data_ptr() != other.data_ptr()
             torch.testing.assert_close(parameter, other, atol=0, rtol=0)
-        restored = convert_cgtp(converted, "o3")
+        restored = convert_cgtp(converted)
         path = str(tmp_path / "o2_cgtp.pt")
         export_tace(converted, path)
         reloaded = load_tace(path, device="cpu").eval()

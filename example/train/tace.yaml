@@ -295,6 +295,7 @@ model:
   # export TACE_USE_OEQ=1 to use openequivariance, 0 to disable
   # export TACE_USE_CUE=1 to use cuequivariance, 0 to disable
   # export TACE_USE_EQT=1 to use equitorch, 0 to disable for correlation > 2
+  # export TACE_USE_EQX=1 to stream o2_cgtp convolutions, including force training
   # export TACE_USE_COMPILE=1 to use aoti, 0 to disable
   
   config:

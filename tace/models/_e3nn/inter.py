@@ -8,6 +8,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
+from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
 from ..lammps import Graph
@@ -292,7 +293,12 @@ class O2CgtpInteraction(O3CgtpInteraction):
 
     The paths, radial weights, normalization, and output layout are identical
     to :class:`O3CgtpInteraction`. All required local orders are retained.
+    ``TACE_USE_EQX=1`` selects the fused convolution at execution time.
     """
+
+    @property
+    def use_eqx(self) -> bool:
+        return bool(acceleration_enabled("eqx"))
 
     def _build_rejector(self) -> torch.nn.Module:
         return O2CgtpScatterTensorProduct(
@@ -317,6 +323,26 @@ class O2CgtpInteraction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
+        if self.use_eqx:
+            radial = edge_feats
+            for layer in self.edge_info.mlp[:-1]:
+                radial = layer(radial)
+            last = self.edge_info.mlp[-1]
+            projection = last.get_weight()
+            if last.bias is not None:
+                radial = torch.cat(
+                    (radial, radial.new_ones((radial.size(0), 1))), dim=-1
+                )
+                projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
+            return self.rejector.forward_stream(
+                node_feats,
+                radial,
+                projection,
+                edge_index,
+                edge_wigner,
+                edge_cutoff,
+                graph,
+            )
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff

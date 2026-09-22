@@ -13,17 +13,20 @@ license-files = ["LICENSE.md"]
 requires-python = ">=3.9"
 dependencies = [
     "torch>=2.4",
-    "torch_geometric>=2.4",
     "e3nn",
     "opt_einsum_fx>=0.1.4",
 ]
+
+[project.optional-dependencies]
+triton = ["triton>=3.0"]
+cuda = ["triton>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/xvzemin/tace"
 Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html"
 
 [tool.setuptools]
-packages = ["eqx", "eqx.o2"]
+packages = ["eqx", "eqx.o2", "eqx.conv"]
 package-dir = { eqx = "." }
 
 [tool.setuptools.package-data]

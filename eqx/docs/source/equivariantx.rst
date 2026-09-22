@@ -19,6 +19,22 @@ fully mature.
    git clone https://github.com/xvzemin/tace.git
    pip install ./tace/eqx
 
+The default operators use PyTorch on CPU and CUDA. Installation includes
+``e3nn`` for representation and coupling conventions, and ``opt_einsum_fx``
+for contraction planning. PyG and external CUDA extensions are not required.
+
+The optional fused convolution backend requires Triton:
+
+.. code-block:: bash
+
+   pip install './tace/eqx[triton]'
+
+``eqx.o2`` retains its PyTorch implementation. Accelerated execution is
+selected separately with ``eqx.conv.Convolution(..., backend="triton")``.
+Triton is imported only when that backend executes on CUDA; on CPU it uses
+the PyTorch contraction. ``backend="torch"`` is the default on every device.
+The ``cuda`` installation extra remains an alias for ``triton``.
+
 Quick start
 -----------
 

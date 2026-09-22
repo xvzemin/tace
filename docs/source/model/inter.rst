@@ -35,13 +35,15 @@ new model and leaves the original unchanged:
    from tace.lightning import convert_cgtp, export_tace, load_tace
 
    model = load_tace("TACE-OAM-7M.pt", dtype="float64")
-   local_model = convert_cgtp(model, "o2")
-   global_model = convert_cgtp(local_model, "o3")
+   local_model = convert_cgtp(model)  # cgtp -> o2_cgtp
+   global_model = convert_cgtp(local_model)  # o2_cgtp -> cgtp
    export_tace(local_model, "TACE-OAM-7M-o2-cgtp.pt")
 
 This is an equivalent implementation of CGTP, not the different
-``o2`` Linear--Gate--Linear architecture. It uses PyTorch sparse reductions
-and does not use the OpenEquivariance or CuEquivariance CGTP kernels.
+``o2`` Linear--Gate--Linear architecture. By default it uses PyTorch sparse
+reductions. ``TACE_USE_EQX=1`` selects the streamed CUDA implementation for
+``o2_cgtp``, without changing its learned parameters or model-loading behavior.
+See :ref:`eqx-streaming` for training support and requirements.
 
 .. autoclass:: tace.models._e3nn.inter.O2CgtpInteraction
    :no-members:

@@ -687,15 +687,17 @@ def load_tace(
     return model
 
 
-def convert_cgtp(model: TensorModel, implementation: str = "o2") -> TensorModel:
+def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorModel:
     """Copy a model with an equivalent O(3) or aligned-frame CGTP implementation.
 
     Parameters
     ----------
     model : TensorModel
         Eager TACE model, for example returned by ``load_tace``.
-    implementation : {"o2", "o3"}
-        Use aligned-frame sparse contractions or global CG tensor products.
+    implementation : {"auto", "o2", "o3"}, optional
+        By default, detect and switch each CGTP interaction to the other
+        implementation. Select ``"o2"`` or ``"o3"`` to convert all CGTP
+        interactions to aligned-frame or global tensor products.
 
     Returns
     -------
@@ -712,8 +714,8 @@ def convert_cgtp(model: TensorModel, implementation: str = "o2") -> TensorModel:
     """
     from tace.models._e3nn.inter import O2CgtpInteraction, O3CgtpInteraction
 
-    if implementation not in ("o2", "o3"):
-        raise ValueError("implementation must be 'o2' or 'o3'.")
+    if implementation not in ("auto", "o2", "o3"):
+        raise ValueError("implementation must be 'auto', 'o2' or 'o3'.")
     if not isinstance(model, TensorModel):
         raise TypeError(
             "Conversion requires an eager TensorModel; use load_tace first."
@@ -730,7 +732,12 @@ def convert_cgtp(model: TensorModel, implementation: str = "o2") -> TensorModel:
     if not selected:
         raise ValueError("The model has no cgtp or o2_cgtp interactions to convert.")
     for index in selected:
-        types[index] = "o2_cgtp" if implementation == "o2" else "cgtp"
+        to_o2 = (
+            type(interactions[index]) is O3CgtpInteraction
+            if implementation == "auto"
+            else implementation == "o2"
+        )
+        types[index] = "o2_cgtp" if to_o2 else "cgtp"
     config["atomic_basis"]["type"] = types
     config["target_property"] = model.get_target_property()
     config["embedding_property"] = model.get_embedding_property()

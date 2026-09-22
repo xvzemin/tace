@@ -1,3 +1,3 @@
-from . import o2
+from . import conv, o2
 
-__all__ = ["o2"]
+__all__ = ["o2", "conv"]

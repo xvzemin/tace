@@ -39,6 +39,10 @@ oeq = [
     "openequivariance>=0.5.4",
 ]
 
+eqx = [
+    "triton>=3.0",
+]
+
 torchsim = [
     "torch-sim-atomistic>=0.6.1",
 ]

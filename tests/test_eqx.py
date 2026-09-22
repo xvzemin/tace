@@ -3,6 +3,8 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -66,6 +68,74 @@ def test_o2_does_not_import_tace():
         source = source_path.read_text()
         assert "from tace" not in source
         assert "import tace" not in source
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_eqx_without_optional_backends(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    script = r"""
+import sys
+import torch
+
+# Match both import failure and find_spec returning None for absent packages.
+sys.modules.update({name: None for name in ("triton", "torch_geometric", "torch_scatter")})
+from eqx import conv, o2
+
+torch.set_default_dtype(torch.float64)
+torch.manual_seed(0)
+device = sys.argv[1]
+linear = o2.Linear("2x0e+2x0o+2x1m", "3x0e+2x0o+2x1m").to(device)
+linear(linear.irreps_in.randn(2, -1, device=device)).sum().backward()
+tp = o2.O3TensorProduct(
+    "2x1o", "1o", "2x0e+2x1e+2x2e",
+    [(0, 0, i, "uvu", True) for i in range(3)],
+    internal_weights=False, shared_weights=False,
+).to(device)
+frame = o2.WignerD(2, 2).to(device)
+x = torch.randn(3, 6, device=device, requires_grad=True)
+vectors = torch.randn(4, 3, device=device, requires_grad=True)
+weights = torch.randn(4, tp.weight_numel, device=device, requires_grad=True)
+edges = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
+d, di = frame(vectors)
+expected = x.new_zeros(3, tp.irreps_out.dim).index_add(
+    0, edges[1], tp(x[edges[0]], d, di, weights)
+)
+packed = frame.forward_packed(vectors)
+actual = tp.forward_scatter(x, edges, packed, weights)
+torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+inputs = x, vectors, weights
+for _ in range(2):
+    a = torch.autograd.grad(actual.square().sum(), inputs, create_graph=True)
+    b = torch.autograd.grad(expected.square().sum(), inputs, create_graph=True)
+    for left, right in zip(a, b):
+        torch.testing.assert_close(left, right, atol=1e-8, rtol=1e-8)
+    actual = torch.cat([value.flatten() for value in a])
+    expected = torch.cat([value.flatten() for value in b])
+assert "eqx.conv.triton" not in sys.modules
+assert "tace" not in sys.modules
+accelerated = conv.Convolution(tp, backend="triton").to(device)
+arguments = (
+    x, weights, x.new_empty(0, tp.weight_numel), packed,
+    x.new_ones(1, tp.num_harmonics), edges, 3,
+)
+if device == "cpu":
+    torch.testing.assert_close(accelerated(*arguments), tp.forward_scatter(x, edges, packed, weights))
+else:
+    try:
+        accelerated(*arguments)
+    except ImportError as error:
+        assert "[triton]" in str(error)
+    else:
+        raise AssertionError("Explicit Triton execution must report the missing dependency")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, device],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("wigner_lmax", [2, 4])

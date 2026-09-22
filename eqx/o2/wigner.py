@@ -97,6 +97,28 @@ class WignerD(torch.nn.Module):
             ``(batch, (lmax + 1)**2, local_dim)``. Truncated degrees include
             the variance-preserving inverse scale.
         """
+        matrices = self.matrix_blocks(vectors)
+        dim = (self.lmax + 1) ** 2
+        wigner = vectors.new_zeros((vectors.size(0), dim, dim))
+        for l, matrix in enumerate(matrices):
+            wigner[:, l**2 : (l + 1) ** 2, l**2 : (l + 1) ** 2] = matrix
+        wigner = wigner.index_select(1, self.local_indices)
+        wigner_inv = wigner.transpose(1, 2).contiguous() * self.inverse_scale
+        return wigner, wigner_inv
+
+    def forward_packed(self, vectors: torch.Tensor) -> torch.Tensor:
+        """Return full degree blocks concatenated as ``(batch, sum((2*l+1)**2))``.
+
+        No zero padding, order regrouping or inverse copy is stored. The
+        convolution reads transposed blocks for the inverse rotation.
+        This layout retains every order, independently of ``mmax``.
+        """
+        return torch.cat(
+            [matrix.flatten(1) for matrix in self.matrix_blocks(vectors)], dim=1
+        )
+
+    def matrix_blocks(self, vectors: torch.Tensor) -> list[torch.Tensor]:
+        """Return one differentiable rotation matrix for each degree."""
         if vectors.ndim != 2 or vectors.shape[-1] != 3:
             raise ValueError("vectors must have shape (batch, 3).")
         rotation = rotation_matrix_to_y_axis(vectors)
@@ -114,13 +136,7 @@ class WignerD(torch.nn.Module):
                 matrix = torch.einsum("emcd,cdn->emn", matrix, cg)
             matrices.append(matrix * (2 * l + 1))
 
-        dim = (self.lmax + 1) ** 2
-        wigner = rotation.new_zeros((batch, dim, dim))
-        for l, matrix in enumerate(matrices):
-            wigner[:, l**2 : (l + 1) ** 2, l**2 : (l + 1) ** 2] = matrix
-        wigner = wigner.index_select(1, self.local_indices)
-        wigner_inv = wigner.transpose(1, 2).contiguous() * self.inverse_scale
-        return wigner, wigner_inv
+        return matrices
 
     def _register_fx(self, degree: int) -> None:
         equation = "abm,eac,ebd,cdn->emn"

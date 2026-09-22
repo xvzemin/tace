@@ -14,7 +14,7 @@ TACE provides several composable acceleration layers:
   run inside the current Python process or produce an AOTInductor package for
   later deployment. AOTI is independent of the kernel-backend selection.
 
-The acceleration backend must be selected before the model is constructed.
+Unless noted otherwise, select the backend before constructing the model.
 The same settings can be used during training, validation, testing, and model
 export, subject to the backend limitations described below.
 Installation commands for each optional backend are listed separately in
@@ -41,6 +41,9 @@ The following kernel backends are available:
    * - EquiTorch
      - Node in product basis
      - ``TACE_USE_EQT=1``
+   * - EquivariantX
+     - Streamed ``o2_cgtp`` convolutions
+     - ``TACE_USE_EQX=1``
 
 For example:
 
@@ -86,6 +89,64 @@ options. For example:
    state-dict package is being loaded. Once the complete Python model has been
    serialized, its modules are already fixed. Set the required acceleration
    variables before exporting a full model or a LAMMPS model.
+
+.. _eqx-streaming:
+
+Streamed CGTP with EquivariantX
+-------------------------------
+
+Install the optional backend from the TACE source directory, then select EQX
+for ``O2CgtpInteraction``:
+
+.. code-block:: bash
+
+   pip install '.[eqx]'
+   TACE_USE_EQX=1 tace-train -cn 3bpa_o2_cgtp.yaml
+
+.. code-block:: python
+
+   from tace.utils.env import enable_acceleration
+   from tace.lightning import convert_cgtp, load_tace
+
+   model = load_tace("TACE-OAM-7M.pt", device="cuda")
+   model = convert_cgtp(model)  # cgtp -> o2_cgtp, detected per interaction
+   enable_acceleration(enable_eqx=True)
+
+The flag switches existing ``O2CgtpInteraction`` modules between PyTorch
+and fused execution at runtime. Model loading is unchanged, and ordinary
+``cgtp`` interactions retain their e3nn/OEQ/CUE backend. Use ``convert_cgtp``
+to convert an existing model explicitly, without retraining or changing its
+parameters. By default, conversion switches each CGTP interaction to the
+other implementation.
+
+The default ``eqx.o2`` operators use PyTorch on CPU and CUDA without Triton
+or PyG. ``TACE_USE_EQX=1`` selects the separate ``eqx.conv.Convolution``
+Triton backend on CUDA and its PyTorch implementation on CPU. Fused CUDA
+execution supports float32 and float64. The fused
+contraction includes source gather, both feature rotations, the sparse
+order-zero CG coupling, and target reduction. It does not materialize edge messages 
+or their adjoints. Small radial projections run inside the
+kernel; large projections and their gradients use matrix products over bounded
+edge chunks. The scalar path-weight workspaces are reused, not saved for
+backward. The same contraction evaluates transposed operations recursively,
+including the second derivatives required by force-loss training.
+Paths are grouped by block dimensions and processed in edge tiles at both
+low and high angular degree. Channel contractions use matrix products instead
+of broadcast outer-product intermediates where supported. The Triton
+contraction uses float32 or float64 arithmetic; radial matrix products follow
+PyTorch's configured matrix-multiplication precision. Fused multiply-adds and
+atomic reductions can change floating-point rounding and summation order.
+Kernels are compiled on first use. The edge count is a runtime argument, so
+varying the number of neighbors does not trigger compilation for every batch.
+
+Wigner matrices remain differentiable geometric inputs, packed by degree
+without block-diagonal zero padding or a separate inverse copy. The radial
+MLP's preceding layers and Wigner construction are outside the fused
+contraction. CPU execution uses the tensor-contraction reference.
+
+This backend targets eager training and inference. AOTInductor deployment
+with EQX is not currently validated; use the documented OEQ export path
+when an AOTI package is required.
 
 PyTorch Compilation
 -------------------

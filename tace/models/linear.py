@@ -265,12 +265,17 @@ class mlpLinear(torch.nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def get_weight(self) -> torch.Tensor:
+        """Return the scaled weight, including an active low-rank update."""
         weight = self.weight * self.alpha
         if has_lora(self):
             weight = (
                 self.weight + (self.lora_A @ self.lora_B) * _lora_scaling(self)
             ) * self.alpha
+        return weight
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        weight = self.get_weight()
         if self.bias is None:
             return torch.mm(input, weight)
         else:
