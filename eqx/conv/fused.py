@@ -668,7 +668,7 @@ def contract(plan, source, target, calls, shared=None):
         s.size(1),
         source.numel() > 2**31 - 1,
     )
-    cache = _KERNELS.setdefault(plan, OrderedDict())
+    cache = _KERNELS.setdefault(getattr(plan, "cache_key", plan), OrderedDict())
     for path_index, paths in enumerate(plan.path_groups):
         key = (signature, layouts, path_index)
         phases = cache.get(key)

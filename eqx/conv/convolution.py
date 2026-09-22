@@ -5,10 +5,155 @@
 
 """Indexed aligned-frame contractions and their transposes."""
 
+import copy
 import math
+from ast import literal_eval
+from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 from e3nn import o3
+
+
+@dataclass(eq=False)
+class _KernelPlan:
+    """Tensor-free scheduling metadata shared by compiled calls."""
+
+    path_data: tuple
+    path_groups: tuple
+    tile_groups: tuple
+    degree_width: int
+    weight_numel: int
+    has_unweighted: bool
+    channelwise: bool
+
+
+@lru_cache(maxsize=256)
+def kernel_plan(metadata):
+    return _KernelPlan(*literal_eval(metadata))
+
+
+parse_program = lru_cache(maxsize=256)(literal_eval)
+
+
+def adjoint_program(program, operands, grad_outputs, needs_grad, has_unweighted):
+    """Transpose the requested outputs while retaining every path dependency."""
+    values = list(operands)
+    cotangents = {}
+    for slot, value in enumerate(grad_outputs):
+        if value is not None:
+            cotangents[slot] = len(values)
+            values.append(value)
+    terms = {}
+    destinations = {}
+    for mapping, weighted_only, pairs in program:
+        for output, slot in pairs:
+            if slot not in cotangents:
+                continue
+            if output == 2 and not operands[mapping[2]].numel():
+                continue
+            replacement = list(mapping)
+            replacement[output] = cotangents[slot]
+            # Weight differentiation permanently excludes unweighted paths.
+            key = (
+                tuple(replacement),
+                has_unweighted and (weighted_only or output in (1, 2)),
+            )
+            for role, index in enumerate(mapping):
+                if role != output and needs_grad[index]:
+                    destination = destinations.setdefault(index, len(destinations))
+                    terms.setdefault(key, []).append((role, destination))
+    program = tuple(
+        (mapping, weighted, tuple(pairs))
+        for (mapping, weighted), pairs in terms.items()
+    )
+    return program, values, destinations
+
+
+@torch.library.custom_op("eqx::contraction", mutates_args=(), device_types="cuda")
+def contraction(
+    metadata: str,
+    program: str,
+    constants: list[torch.Tensor],
+    source: torch.Tensor,
+    target: torch.Tensor,
+    operands: list[torch.Tensor],
+) -> list[torch.Tensor]:
+    """Keep runtime scheduling and kernel compilation outside tensor tracing."""
+    template = kernel_plan(metadata)
+    plan = copy.copy(template)
+    plan.cache_key = template
+    plan.paths, plan.indices, plan.coefficients = constants[:3]
+    for index in range(len(plan.tile_groups)):
+        setattr(plan, f"tiles_{index}", constants[3 + 2 * index])
+        setattr(plan, f"tile_offsets_{index}", constants[4 + 2 * index])
+    results = contraction_fake(metadata, program, constants, source, target, operands)
+    for result in results:
+        result.zero_()
+    if source.numel() and plan.path_data:
+        from .triton import contract_many
+
+        calls = [
+            (
+                tuple(role for role, _ in pairs),
+                tuple(operands[i] for i in mapping),
+                tuple(results[slot] for _, slot in pairs),
+                weighted_only,
+            )
+            for mapping, weighted_only, pairs in parse_program(program)
+        ]
+        contract_many(plan, source, target, calls)
+    return results
+
+
+@contraction.register_fake
+def contraction_fake(metadata, program, constants, source, target, operands):
+    program = parse_program(program)
+    results = [None] * (
+        1 + max(slot for _, _, pairs in program for _, slot in pairs)
+    )
+    for mapping, _, pairs in program:
+        for role, slot in pairs:
+            if results[slot] is None:
+                results[slot] = torch.empty_like(
+                    operands[mapping[role]], memory_format=torch.contiguous_format
+                )
+    return results
+
+
+def contraction_setup_context(ctx, inputs, output):
+    metadata, program, constants, source, target, operands = inputs
+    ctx.kernel_metadata = metadata
+    ctx.program = parse_program(program)
+    ctx.num_constants = len(constants)
+    ctx.set_materialize_grads(False)
+    ctx.save_for_backward(source, target, *constants, *operands)
+
+
+def contraction_backward(ctx, grad_outputs):
+    source, target, *saved = ctx.saved_tensors
+    constants = saved[: ctx.num_constants]
+    operands = saved[ctx.num_constants :]
+    program, values, destinations = adjoint_program(
+        ctx.program,
+        operands,
+        grad_outputs,
+        ctx.needs_input_grad[5],
+        kernel_plan(ctx.kernel_metadata).has_unweighted,
+    )
+    gradients = [None] * len(operands)
+    if program:
+        results = contraction(
+            ctx.kernel_metadata, repr(program), constants, source, target, values
+        )
+        for index, slot in destinations.items():
+            gradients[index] = results[slot]
+    return None, None, [None] * len(constants), None, None, gradients
+
+
+contraction.register_autograd(
+    contraction_backward, setup_context=contraction_setup_context
+)
 
 
 class _Contraction(torch.autograd.Function):
@@ -53,37 +198,15 @@ class _Contraction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grad_outputs):
         source, target, *operands = ctx.saved_tensors
-        values = list(operands)
-        cotangents = {}
-        for slot, value in enumerate(grad_outputs):
-            if value is not None:
-                cotangents[slot] = len(values)
-                values.append(value)
-        terms = {}
-        destinations = {}
-        for mapping, weighted_only, pairs in ctx.program:
-            for output, slot in pairs:
-                if slot not in cotangents:
-                    continue
-                if output == 2 and not operands[mapping[2]].numel():
-                    continue
-                replacement = list(mapping)
-                replacement[output] = cotangents[slot]
-                # Weight differentiation permanently excludes unweighted paths.
-                key = (
-                    tuple(replacement),
-                    ctx.plan.has_unweighted and (weighted_only or output in (1, 2)),
-                )
-                for role, index in enumerate(mapping):
-                    if role != output and ctx.needs_input_grad[index + 4]:
-                        destination = destinations.setdefault(index, len(destinations))
-                        terms.setdefault(key, []).append((role, destination))
+        program, values, destinations = adjoint_program(
+            ctx.program,
+            operands,
+            grad_outputs,
+            ctx.needs_input_grad[4:],
+            ctx.plan.has_unweighted,
+        )
         gradients = [None] * len(operands)
-        if terms:
-            program = tuple(
-                (mapping, weighted, tuple(pairs))
-                for (mapping, weighted), pairs in terms.items()
-            )
+        if program:
             results = _Contraction.apply(ctx.plan, program, source, target, *values)
             for index, slot in destinations.items():
                 gradients[index] = results[slot]
@@ -269,6 +392,18 @@ class Convolution(torch.nn.Module):
                 persistent=False,
             )
 
+        self.kernel_metadata = repr(
+            (
+                tuple(self.path_data),
+                self.path_groups,
+                self.tile_groups,
+                self.degree_width,
+                self.weight_numel,
+                self.has_unweighted,
+                self.channelwise,
+            )
+        )
+
     def forward(
         self, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
     ):
@@ -306,11 +441,8 @@ class Convolution(torch.nn.Module):
         # A zero-stride placeholder supplies the output shape without allocating
         # a second node output. It is never read by the forward contraction.
         output = features.new_empty(1).expand(num_nodes, self.irreps_out.dim)
-        return _Contraction.apply(
-            self,
-            ((tuple(range(7)), False, ((6, 0),)),),
-            edge_index[0],
-            edge_index[1],
+        program = ((tuple(range(7)), False, ((6, 0),)),)
+        operands = [
             features,
             radial,
             projection,
@@ -318,6 +450,30 @@ class Convolution(torch.nn.Module):
             wigner,
             amplitudes,
             output,
+        ]
+        if self.backend == "triton" and features.is_cuda:
+            constants = [self.paths, self.indices, self.coefficients]
+            for index in range(len(self.tile_groups)):
+                constants.extend(
+                    (
+                        getattr(self, f"tiles_{index}"),
+                        getattr(self, f"tile_offsets_{index}"),
+                    )
+                )
+            return contraction(
+                self.kernel_metadata,
+                repr(program),
+                constants,
+                edge_index[0],
+                edge_index[1],
+                operands,
+            )[0]
+        return _Contraction.apply(
+            self,
+            program,
+            edge_index[0],
+            edge_index[1],
+            *operands,
         )[0]
 
     def reference(self, output, source, target, operands, result, weighted_only=False):
