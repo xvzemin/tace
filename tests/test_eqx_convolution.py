@@ -20,6 +20,7 @@ from eqx.o2 import O3TensorProduct, WignerD
         (3, torch.float64),
         (128, torch.float64),
         (129, torch.float32),
+        (33, torch.float32),
     ],
 )
 def test_streaming_derivatives(
@@ -37,10 +38,11 @@ def test_streaming_derivatives(
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
     try:
+        channels = 17 if radial_channels == 33 else 2
         tp = O3TensorProduct(
-            "2x1o",
+            f"{channels}x1o",
             "0e+1o+2e",
-            "2x0e+2x1e+2x2e",
+            "+".join(f"{channels}x{ir}" for ir in ("0e", "1e", "2e")),
             [(0, 1, i, mode, True) for i in range(3)],
             shared_weights=False,
             internal_weights=False,
@@ -57,7 +59,7 @@ def test_streaming_derivatives(
         edges = torch.tensor([[0, 1, 2, 0], [2, 0, 1, 1]], device=device)
         shared = radial_channels == 129
         size = 1 if shared else 4
-        x, r = rand(3, 6), rand(size, 3)
+        x, r = rand(3, tp.input_dim), rand(size, 3)
         amplitude = rand(size, 3)
         if radial_channels:
             radial = rand(size, radial_channels)
@@ -78,8 +80,13 @@ def test_streaming_derivatives(
         )
         tolerance = 3e-5 if dtype == torch.float32 else 1e-11
         torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        if radial_channels == 33:
+            # A nonlinear loss also differentiates the output cotangent.
+            actual, expected = actual.sin(), expected.sin()
         for _ in range(3):
             cotangent = torch.randn(actual.shape, generator=generator, device=device)
+            if radial_channels == 33:
+                cotangent = cotangent / actual.numel() ** 0.5
             actual_grads = torch.autograd.grad(
                 (actual * cotangent).sum(), inputs, create_graph=True, retain_graph=True
             )
@@ -129,6 +136,18 @@ def test_streaming_mixed_paths_and_empty_edges(device, backend, dtype):
             shared_weights=True,
         ).to(device)
         module.convolution = Convolution(module, backend=backend).to(device)
+        shared = 0
+        for index, _ in enumerate(module.convolution.tile_groups):
+            tiles = getattr(module.convolution, f"tiles_{index}").tolist()
+            offsets = getattr(module.convolution, f"tile_offsets_{index}").tolist()
+            for begin, end in zip(offsets, offsets[1:]):
+                inputs = {
+                    (module.convolution.path_data[path][1][0], u)
+                    for path, u, _ in tiles[begin:end]
+                }
+                assert len(inputs) == 1
+                shared += end - begin - 1
+        assert shared > 0
         frame = WignerD(3, 3).to(device)
         features = torch.randn(3, module.input_dim, device=device, requires_grad=True)
         vectors = torch.randn(1, 3, device=device, requires_grad=True)
@@ -384,13 +403,13 @@ def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
         tp = O3TensorProduct(
             f"17x{degree}e",
             "1o",
-            f"17x{degree}o",
-            [(0, 0, 0, "uvu", True)],
+            "+".join(f"17x{l}o" for l in (degree - 1, degree, degree + 1)),
+            [(0, 0, i, "uvu", True) for i in range(3)],
             internal_weights=False,
             shared_weights=False,
         ).cuda()
         tp.convolution = Convolution(tp, backend="triton").cuda()
-        frame = WignerD(degree, degree).cuda()
+        frame = WignerD(degree + 1, degree + 1).cuda()
         x = torch.randn(7, tp.input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edges_count, 3, device="cuda", requires_grad=True)
         radial = torch.randn(edges_count, 129, device="cuda", requires_grad=True)

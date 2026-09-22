@@ -70,8 +70,9 @@ class Convolution(torch.nn.Module):
     retaining edge messages. Large radial projections use matrix products in
     bounded edge chunks; small projections are evaluated inside the kernel.
     Rotation matrices are supplied as packed degree blocks, not zero-padded
-    block-diagonal matrices. Paths are scheduled by angular and channel block
-    sizes. Workspaces for projected weights and their adjoints are reused
+    block-diagonal matrices. Paths sharing an input block reuse its rotation
+    within each angular/channel tile. Input adjoints are accumulated locally
+    before the inverse rotation. Workspaces for projected weights are reused
     across chunks and are not saved for backward.
     """
 
@@ -175,15 +176,26 @@ class Convolution(torch.nn.Module):
             if mode == "uvu" and channels >= 16:
                 degree = max(8, degree)
             width = min(channels, 32 if mode == "uvu" else 16, max(4, 512 // degree))
-            entries = tiles.setdefault((mode, degree, width), [])
+            entries = tiles.setdefault((mode, degree, width), {})
             for u in range(0, path[2], width):
+                shared = entries.setdefault((path[0], u), [])
                 for v in [u] if mode == "uvu" else range(0, path[3], width):
-                    entries.append((index, u, v))
+                    shared.append((index, u, v))
         self.tile_groups = tuple(sorted(tiles))
         for index, key in enumerate(self.tile_groups):
+            entries = []
+            offsets = [0]
+            for shared in tiles[key].values():
+                entries.extend(shared)
+                offsets.append(len(entries))
             self.register_buffer(
                 f"tiles_{index}",
-                torch.tensor(tiles[key], dtype=torch.int32).reshape(-1, 3),
+                torch.tensor(entries, dtype=torch.int32).reshape(-1, 3),
+                persistent=False,
+            )
+            self.register_buffer(
+                f"tile_offsets_{index}",
+                torch.tensor(offsets, dtype=torch.int32),
                 persistent=False,
             )
 

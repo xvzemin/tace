@@ -78,6 +78,7 @@ def _kernel(
     Target,
     Paths,
     Tiles,
+    TileOffsets,
     Indices,
     Coefficients,
     E_DIM,
@@ -110,32 +111,24 @@ def _kernel(
     USE_DOT: tl.constexpr = UVU and B_E >= 16 and B_C >= 16
     edge = tl.program_id(0).to(tl.int64) * B_E + tl.arange(0, B_E)
     mask_e = edge < E_DIM
-    tile = tl.program_id(1)
-    path = tl.load(Tiles + tile * 3)
-    u0 = tl.load(Tiles + tile * 3 + 1)
-    v0 = tl.load(Tiles + tile * 3 + 2)
+    group = tl.program_id(1)
+    begin = tl.load(TileOffsets + group)
+    stop = tl.load(TileOffsets + group + 1)
+    path = tl.load(Tiles + begin * 3)
+    u0 = tl.load(Tiles + begin * 3 + 1)
     src = tl.load(Source + edge, mask_e, 0).to(tl.int64)
     dst = tl.load(Target + edge, mask_e, 0).to(tl.int64)
     start = tl.load(Paths + path * 10)
-    end = tl.load(Paths + path * 10 + 1)
     mul = tl.load(Paths + path * 10 + 2)
-    mul_out = tl.load(Paths + path * 10 + 3)
     dim = tl.load(Paths + path * 10 + 4)
-    dim_out = tl.load(Paths + path * 10 + 5)
     dstart = tl.load(Paths + path * 10 + 6)
-    dend = tl.load(Paths + path * 10 + 7)
-    weight = tl.load(Paths + path * 10 + 8)
-    harmonic = tl.load(Paths + path * 10 + 9)
     a = tl.arange(0, B_D)
     u = u0 + tl.arange(0, B_C)
-    v = v0 + tl.arange(0, B_C)
     er = tl.full((B_E,), 0, tl.int64) if R_SHARED else edge
     ei = tl.full((B_E,), 0, tl.int64) if DI_SHARED else edge
     eo = tl.full((B_E,), 0, tl.int64) if DO_SHARED else edge
     es = tl.full((B_E,), 0, tl.int64) if S_SHARED else edge
     dtype = X.dtype.element_ty
-    if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_DO or WRITE_Y:
-        amplitude = tl.load(S + es * S_DIM + harmonic, mask_e, 0)
     if WRITE_X or WRITE_R or WRITE_W or WRITE_DO or WRITE_S or WRITE_Y:
         din = tl.load(
             DI
@@ -144,18 +137,6 @@ def _kernel(
             + a[None, :, None] * dim
             + a[None, None, :],
             mask_e[:, None, None] & (a[None, :, None] < dim) & (a[None, None, :] < dim),
-            0,
-        )
-    if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_S or WRITE_Y:
-        dout = tl.load(
-            DO
-            + eo[:, None, None] * D_DIM
-            + dend
-            + a[None, :, None] * dim_out
-            + a[None, None, :],
-            mask_e[:, None, None]
-            & (a[None, :, None] < dim_out)
-            & (a[None, None, :] < dim_out),
             0,
         )
     if WRITE_R or WRITE_W or WRITE_DI or WRITE_DO or WRITE_S or WRITE_Y:
@@ -168,188 +149,87 @@ def _kernel(
             mask_e[:, None, None] & (a[None, :, None] < dim) & (u[None, None, :] < mul),
             0,
         )
-    if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_DO or WRITE_S:
-        y = tl.load(
-            Y
-            + dst[:, None, None] * Y_DIM
-            + end
-            + a[None, :, None] * mul_out
-            + v[None, None, :],
-            mask_e[:, None, None]
-            & (a[None, :, None] < dim_out)
-            & (v[None, None, :] < mul_out),
-            0,
-        )
-
     if WRITE_R or WRITE_W or WRITE_DO or WRITE_S or WRITE_Y:
         local_x = _rotate(din, x)
-        index = tl.load(Indices + path * 2 * CG_WIDTH + a, a < CG_WIDTH, 0)
-        coefficient = tl.load(
-            Coefficients + path * 2 * CG_WIDTH + a, a < CG_WIDTH, 0
-        ).to(dtype)
-        cx = (
-            tl.gather(
-                local_x,
-                index[None, :, None] + tl.zeros((B_E, B_D, B_C), tl.int32),
-                1,
-            )
-            * coefficient[None, :, None]
-        )
-    if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_S:
-        local_y = _rotate(dout, y)
+    if WRITE_X or WRITE_DI:
+        local_grad = tl.full((B_E, B_D, B_C), 0, dtype)
 
-    if UVU:
-        wi = weight + u
-        mask_w = u < mul
-    else:
-        wi = weight + u[:, None] * mul_out + v[None, :]
-        mask_w = (u[:, None] < mul) & (v[None, :] < mul_out)
-
-    if WRITE_X or WRITE_DI or WRITE_DO or WRITE_S or WRITE_Y:
-        if UVU:
-            w = tl.full((B_E, B_C), 1, dtype)
-        else:
-            w = tl.full((B_E, B_C, B_C), 1, dtype)
-        if weight >= 0:
-            if PROJECTED:
-                w = w * 0
-                for k0 in range(tl.cdiv(R_DIM, B_K)):
-                    k = k0 * B_K + tl.arange(0, B_K)
-                    radial = tl.load(
-                        R + er[:, None] * R_DIM + k[None, :],
-                        mask_e[:, None] & (k[None, :] < R_DIM),
-                        0,
-                    )
-                    if UVU:
-                        parameter = tl.load(
-                            W + k[:, None] * W_DIM + wi[None, :],
-                            (k[:, None] < R_DIM) & mask_w[None, :],
-                            0,
-                        )
-                        if USE_DOT:
-                            w += tl.dot(radial, parameter, input_precision="ieee")
-                        else:
-                            w += tl.sum(radial[:, :, None] * parameter[None, :, :], 1)
-                    else:
-                        parameter = tl.load(
-                            W + k[:, None, None] * W_DIM + wi[None, :, :],
-                            (k[:, None, None] < R_DIM) & mask_w[None, :, :],
-                            0,
-                        )
-                        w += tl.sum(
-                            radial[:, :, None, None] * parameter[None, :, :, :], 1
-                        )
-            else:
-                if UVU:
-                    w = tl.load(
-                        R + er[:, None] * R_DIM + wi[None, :],
-                        mask_e[:, None] & mask_w[None, :],
-                        0,
-                    )
-                else:
-                    w = tl.load(
-                        R + er[:, None, None] * R_DIM + wi[None, :, :],
-                        mask_e[:, None, None] & mask_w[None, :, :],
-                        0,
-                    )
-
-    if WRITE_DO or WRITE_Y:
-        if UVU:
-            local = cx * w[:, None, :] * amplitude[:, None, None]
-        else:
-            local = (
-                tl.sum(cx[:, :, :, None] * w[:, None, :, :], 2)
-                * amplitude[:, None, None]
-            )
-        if WRITE_Y:
-            value = _rotate(tl.permute(dout, (0, 2, 1)), local)
-            tl.atomic_add(
-                GY
-                + dst[:, None, None] * Y_DIM
-                + end
-                + a[None, :, None] * mul_out
-                + v[None, None, :],
-                value,
-                mask_e[:, None, None]
-                & (a[None, :, None] < dim_out)
-                & (v[None, None, :] < mul_out),
-                sem="relaxed",
-            )
-        if WRITE_DO:
-            value = _outer(local, y)
-            tl.atomic_add(
-                GDO
+    # Consume all paths sharing this input tile before discarding its rotation.
+    for tile in range(begin, stop):
+        path = tl.load(Tiles + tile * 3)
+        v0 = tl.load(Tiles + tile * 3 + 2)
+        end = tl.load(Paths + path * 10 + 1)
+        mul_out = tl.load(Paths + path * 10 + 3)
+        dim_out = tl.load(Paths + path * 10 + 5)
+        dend = tl.load(Paths + path * 10 + 7)
+        weight = tl.load(Paths + path * 10 + 8)
+        harmonic = tl.load(Paths + path * 10 + 9)
+        v = v0 + tl.arange(0, B_C)
+        if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_DO or WRITE_Y:
+            amplitude = tl.load(S + es * S_DIM + harmonic, mask_e, 0)
+        if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_S or WRITE_Y:
+            dout = tl.load(
+                DO
                 + eo[:, None, None] * D_DIM
                 + dend
                 + a[None, :, None] * dim_out
                 + a[None, None, :],
-                value,
                 mask_e[:, None, None]
                 & (a[None, :, None] < dim_out)
                 & (a[None, None, :] < dim_out),
-                sem="relaxed",
+                0,
             )
-    if WRITE_X or WRITE_DI:
-        index = tl.load(Indices + path * 2 * CG_WIDTH + CG_WIDTH + a, a < CG_WIDTH, 0)
-        coefficient = tl.load(
-            Coefficients + path * 2 * CG_WIDTH + CG_WIDTH + a, a < CG_WIDTH, 0
-        ).to(dtype)
-        cy = (
-            tl.gather(
-                local_y,
-                index[None, :, None] + tl.zeros((B_E, B_D, B_C), tl.int32),
-                1,
-            )
-            * coefficient[None, :, None]
-        )
-        if UVU:
-            local = cy * w[:, None, :] * amplitude[:, None, None]
-        else:
-            local = (
-                tl.sum(cy[:, :, None, :] * w[:, None, :, :], 3)
-                * amplitude[:, None, None]
-            )
-        if WRITE_X:
-            value = _rotate(tl.permute(din, (0, 2, 1)), local)
-            tl.atomic_add(
-                GX
-                + src[:, None, None] * X_DIM
-                + start
-                + a[None, :, None] * mul
-                + u[None, None, :],
-                value,
+        if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_DO or WRITE_S:
+            y = tl.load(
+                Y
+                + dst[:, None, None] * Y_DIM
+                + end
+                + a[None, :, None] * mul_out
+                + v[None, None, :],
                 mask_e[:, None, None]
-                & (a[None, :, None] < dim)
-                & (u[None, None, :] < mul),
-                sem="relaxed",
+                & (a[None, :, None] < dim_out)
+                & (v[None, None, :] < mul_out),
+                0,
             )
-        if WRITE_DI:
-            value = _outer(local, x)
-            tl.atomic_add(
-                GDI
-                + ei[:, None, None] * D_DIM
-                + dstart
-                + a[None, :, None] * dim
-                + a[None, None, :],
-                value,
-                mask_e[:, None, None]
-                & (a[None, :, None] < dim)
-                & (a[None, None, :] < dim),
-                sem="relaxed",
+
+        if WRITE_R or WRITE_W or WRITE_DO or WRITE_S or WRITE_Y:
+            index = tl.load(Indices + path * 2 * CG_WIDTH + a, a < CG_WIDTH, 0)
+            coefficient = tl.load(
+                Coefficients + path * 2 * CG_WIDTH + a, a < CG_WIDTH, 0
+            ).to(dtype)
+            cx = (
+                tl.gather(
+                    local_x,
+                    index[None, :, None] + tl.zeros((B_E, B_D, B_C), tl.int32),
+                    1,
+                )
+                * coefficient[None, :, None]
             )
-    if WRITE_R or WRITE_W or WRITE_S:
+        if WRITE_X or WRITE_R or WRITE_W or WRITE_DI or WRITE_S:
+            local_y = _rotate(dout, y)
+
         if UVU:
-            q = tl.sum(cx * local_y, 1)
+            wi = weight + u
+            mask_w = u < mul
         else:
-            q = tl.sum(cx[:, :, :, None] * local_y[:, :, None, :], 1)
-        if WRITE_S:
-            value = tl.sum(q * w, 1) if UVU else tl.sum(tl.sum(q * w, 1), 1)
-            tl.atomic_add(GS + es * S_DIM + harmonic, value, mask_e, sem="relaxed")
-        if PROJECTED and (WRITE_R or WRITE_W):
+            wi = weight + u[:, None] * mul_out + v[None, :]
+            mask_w = (u[:, None] < mul) & (v[None, :] < mul_out)
+
+        if WRITE_X or WRITE_DI or WRITE_DO or WRITE_S or WRITE_Y:
+            if UVU:
+                w = tl.full((B_E, B_C), 1, dtype)
+            else:
+                w = tl.full((B_E, B_C, B_C), 1, dtype)
             if weight >= 0:
-                for k0 in range(tl.cdiv(R_DIM, B_K)):
-                    k = k0 * B_K + tl.arange(0, B_K)
-                    if WRITE_R:
+                if PROJECTED:
+                    w = w * 0
+                    for k0 in range(tl.cdiv(R_DIM, B_K)):
+                        k = k0 * B_K + tl.arange(0, B_K)
+                        radial = tl.load(
+                            R + er[:, None] * R_DIM + k[None, :],
+                            mask_e[:, None] & (k[None, :] < R_DIM),
+                            0,
+                        )
                         if UVU:
                             parameter = tl.load(
                                 W + k[:, None] * W_DIM + wi[None, :],
@@ -357,16 +237,10 @@ def _kernel(
                                 0,
                             )
                             if USE_DOT:
-                                grad_radial = (
-                                    tl.dot(
-                                        q, tl.trans(parameter), input_precision="ieee"
-                                    )
-                                    * amplitude[:, None]
-                                )
+                                w += tl.dot(radial, parameter, input_precision="ieee")
                             else:
-                                grad_radial = (
-                                    tl.sum(parameter[None, :, :] * q[:, None, :], 2)
-                                    * amplitude[:, None]
+                                w += tl.sum(
+                                    radial[:, :, None] * parameter[None, :, :], 1
                                 )
                         else:
                             parameter = tl.load(
@@ -374,75 +248,216 @@ def _kernel(
                                 (k[:, None, None] < R_DIM) & mask_w[None, :, :],
                                 0,
                             )
-                            grad_radial = (
-                                tl.sum(
-                                    tl.sum(
-                                        parameter[None, :, :, :] * q[:, None, :, :], 3
-                                    ),
-                                    2,
-                                )
-                                * amplitude[:, None]
+                            w += tl.sum(
+                                radial[:, :, None, None] * parameter[None, :, :, :], 1
                             )
-                        tl.atomic_add(
-                            GR + er[:, None] * R_DIM + k[None, :],
-                            grad_radial,
-                            mask_e[:, None] & (k[None, :] < R_DIM),
-                            sem="relaxed",
-                        )
-                    if WRITE_W:
-                        radial = tl.load(
-                            R + er[:, None] * R_DIM + k[None, :],
-                            mask_e[:, None] & (k[None, :] < R_DIM),
+                else:
+                    if UVU:
+                        w = tl.load(
+                            R + er[:, None] * R_DIM + wi[None, :],
+                            mask_e[:, None] & mask_w[None, :],
                             0,
                         )
-                        if UVU:
-                            if USE_DOT:
-                                grad_projection = tl.dot(
-                                    tl.trans(radial),
-                                    q * amplitude[:, None],
-                                    input_precision="ieee",
+                    else:
+                        w = tl.load(
+                            R + er[:, None, None] * R_DIM + wi[None, :, :],
+                            mask_e[:, None, None] & mask_w[None, :, :],
+                            0,
+                        )
+
+        if WRITE_DO or WRITE_Y:
+            if UVU:
+                local = cx * w[:, None, :] * amplitude[:, None, None]
+            else:
+                local = (
+                    tl.sum(cx[:, :, :, None] * w[:, None, :, :], 2)
+                    * amplitude[:, None, None]
+                )
+            if WRITE_Y:
+                value = _rotate(tl.permute(dout, (0, 2, 1)), local)
+                tl.atomic_add(
+                    GY
+                    + dst[:, None, None] * Y_DIM
+                    + end
+                    + a[None, :, None] * mul_out
+                    + v[None, None, :],
+                    value,
+                    mask_e[:, None, None]
+                    & (a[None, :, None] < dim_out)
+                    & (v[None, None, :] < mul_out),
+                    sem="relaxed",
+                )
+            if WRITE_DO:
+                value = _outer(local, y)
+                tl.atomic_add(
+                    GDO
+                    + eo[:, None, None] * D_DIM
+                    + dend
+                    + a[None, :, None] * dim_out
+                    + a[None, None, :],
+                    value,
+                    mask_e[:, None, None]
+                    & (a[None, :, None] < dim_out)
+                    & (a[None, None, :] < dim_out),
+                    sem="relaxed",
+                )
+        if WRITE_X or WRITE_DI:
+            index = tl.load(
+                Indices + path * 2 * CG_WIDTH + CG_WIDTH + a, a < CG_WIDTH, 0
+            )
+            coefficient = tl.load(
+                Coefficients + path * 2 * CG_WIDTH + CG_WIDTH + a, a < CG_WIDTH, 0
+            ).to(dtype)
+            cy = (
+                tl.gather(
+                    local_y,
+                    index[None, :, None] + tl.zeros((B_E, B_D, B_C), tl.int32),
+                    1,
+                )
+                * coefficient[None, :, None]
+            )
+            if UVU:
+                local = cy * w[:, None, :] * amplitude[:, None, None]
+            else:
+                local = (
+                    tl.sum(cy[:, :, None, :] * w[:, None, :, :], 3)
+                    * amplitude[:, None, None]
+                )
+            local_grad += local
+        if WRITE_R or WRITE_W or WRITE_S:
+            if UVU:
+                q = tl.sum(cx * local_y, 1)
+            else:
+                q = tl.sum(cx[:, :, :, None] * local_y[:, :, None, :], 1)
+            if WRITE_S:
+                value = tl.sum(q * w, 1) if UVU else tl.sum(tl.sum(q * w, 1), 1)
+                tl.atomic_add(GS + es * S_DIM + harmonic, value, mask_e, sem="relaxed")
+            if PROJECTED and (WRITE_R or WRITE_W):
+                if weight >= 0:
+                    for k0 in range(tl.cdiv(R_DIM, B_K)):
+                        k = k0 * B_K + tl.arange(0, B_K)
+                        if WRITE_R:
+                            if UVU:
+                                parameter = tl.load(
+                                    W + k[:, None] * W_DIM + wi[None, :],
+                                    (k[:, None] < R_DIM) & mask_w[None, :],
+                                    0,
+                                )
+                                if USE_DOT:
+                                    grad_radial = (
+                                        tl.dot(
+                                            q,
+                                            tl.trans(parameter),
+                                            input_precision="ieee",
+                                        )
+                                        * amplitude[:, None]
+                                    )
+                                else:
+                                    grad_radial = (
+                                        tl.sum(parameter[None, :, :] * q[:, None, :], 2)
+                                        * amplitude[:, None]
+                                    )
+                            else:
+                                parameter = tl.load(
+                                    W + k[:, None, None] * W_DIM + wi[None, :, :],
+                                    (k[:, None, None] < R_DIM) & mask_w[None, :, :],
+                                    0,
+                                )
+                                grad_radial = (
+                                    tl.sum(
+                                        tl.sum(
+                                            parameter[None, :, :, :] * q[:, None, :, :],
+                                            3,
+                                        ),
+                                        2,
+                                    )
+                                    * amplitude[:, None]
+                                )
+                            tl.atomic_add(
+                                GR + er[:, None] * R_DIM + k[None, :],
+                                grad_radial,
+                                mask_e[:, None] & (k[None, :] < R_DIM),
+                                sem="relaxed",
+                            )
+                        if WRITE_W:
+                            radial = tl.load(
+                                R + er[:, None] * R_DIM + k[None, :],
+                                mask_e[:, None] & (k[None, :] < R_DIM),
+                                0,
+                            )
+                            if UVU:
+                                if USE_DOT:
+                                    grad_projection = tl.dot(
+                                        tl.trans(radial),
+                                        q * amplitude[:, None],
+                                        input_precision="ieee",
+                                    )
+                                else:
+                                    grad_projection = tl.sum(
+                                        radial[:, :, None]
+                                        * q[:, None, :]
+                                        * amplitude[:, None, None],
+                                        0,
+                                    )
+                                tl.atomic_add(
+                                    GW + k[:, None] * W_DIM + wi[None, :],
+                                    grad_projection,
+                                    (k[:, None] < R_DIM) & mask_w[None, :],
+                                    sem="relaxed",
                                 )
                             else:
                                 grad_projection = tl.sum(
-                                    radial[:, :, None]
-                                    * q[:, None, :]
-                                    * amplitude[:, None, None],
+                                    radial[:, :, None, None]
+                                    * q[:, None, :, :]
+                                    * amplitude[:, None, None, None],
                                     0,
                                 )
-                            tl.atomic_add(
-                                GW + k[:, None] * W_DIM + wi[None, :],
-                                grad_projection,
-                                (k[:, None] < R_DIM) & mask_w[None, :],
-                                sem="relaxed",
-                            )
-                        else:
-                            grad_projection = tl.sum(
-                                radial[:, :, None, None]
-                                * q[:, None, :, :]
-                                * amplitude[:, None, None, None],
-                                0,
-                            )
-                            tl.atomic_add(
-                                GW + k[:, None, None] * W_DIM + wi[None, :, :],
-                                grad_projection,
-                                (k[:, None, None] < R_DIM) & mask_w[None, :, :],
-                                sem="relaxed",
-                            )
-        elif not PROJECTED and WRITE_R:
-            if weight >= 0:
-                if UVU:
-                    pointer = GR + er[:, None] * R_DIM + wi[None, :]
-                    grad_weight = q * amplitude[:, None]
-                    mask = mask_e[:, None] & mask_w[None, :]
-                else:
-                    pointer = GR + er[:, None, None] * R_DIM + wi[None, :, :]
-                    grad_weight = q * amplitude[:, None, None]
-                    mask = mask_e[:, None, None] & mask_w[None, :, :]
-                if R_SHARED:
-                    tl.atomic_add(pointer, grad_weight, mask, sem="relaxed")
-                else:
-                    # Each edge/path/channel weight has exactly one owner.
-                    tl.store(pointer, grad_weight, mask)
+                                tl.atomic_add(
+                                    GW + k[:, None, None] * W_DIM + wi[None, :, :],
+                                    grad_projection,
+                                    (k[:, None, None] < R_DIM) & mask_w[None, :, :],
+                                    sem="relaxed",
+                                )
+            elif not PROJECTED and WRITE_R:
+                if weight >= 0:
+                    if UVU:
+                        pointer = GR + er[:, None] * R_DIM + wi[None, :]
+                        grad_weight = q * amplitude[:, None]
+                        mask = mask_e[:, None] & mask_w[None, :]
+                    else:
+                        pointer = GR + er[:, None, None] * R_DIM + wi[None, :, :]
+                        grad_weight = q * amplitude[:, None, None]
+                        mask = mask_e[:, None, None] & mask_w[None, :, :]
+                    if R_SHARED:
+                        tl.atomic_add(pointer, grad_weight, mask, sem="relaxed")
+                    else:
+                        # Each edge/path/channel weight has exactly one owner.
+                        tl.store(pointer, grad_weight, mask)
+
+    if WRITE_X:
+        value = _rotate(tl.permute(din, (0, 2, 1)), local_grad)
+        tl.atomic_add(
+            GX
+            + src[:, None, None] * X_DIM
+            + start
+            + a[None, :, None] * mul
+            + u[None, None, :],
+            value,
+            mask_e[:, None, None] & (a[None, :, None] < dim) & (u[None, None, :] < mul),
+            sem="relaxed",
+        )
+    if WRITE_DI:
+        value = _outer(local_grad, x)
+        tl.atomic_add(
+            GDI
+            + ei[:, None, None] * D_DIM
+            + dstart
+            + a[None, :, None] * dim
+            + a[None, None, :],
+            value,
+            mask_e[:, None, None] & (a[None, :, None] < dim) & (a[None, None, :] < dim),
+            sem="relaxed",
+        )
 
 
 def contract(plan, outputs, source, target, operands, results):
@@ -530,15 +545,17 @@ def contract_tiles(plan, outputs, source, target, operands, results):
         return
     for index, (mode, degree, channels) in enumerate(plan.tile_groups):
         tiles = getattr(plan, f"tiles_{index}")
+        offsets = getattr(plan, f"tile_offsets_{index}")
         edge_width = 16 if mode == "uvu" and x.dtype == torch.float32 else 4
-        edge_width = min(edge_width, max(1, 8192 // (degree * max(degree, channels))))
-        _kernel[(triton.cdiv(source.numel(), edge_width), tiles.size(0))](
+        edge_width = min(edge_width, max(1, 4096 // (degree * max(degree, channels))))
+        _kernel[(triton.cdiv(source.numel(), edge_width), offsets.numel() - 1)](
             *operands,
             *destinations,
             source,
             target,
             plan.paths,
             tiles,
+            offsets,
             plan.indices,
             plan.coefficients,
             source.numel(),
@@ -561,5 +578,6 @@ def contract_tiles(plan, outputs, source, target, operands, results):
             32,
             plan.degree_width,
             num_warps=8 if edge_width * degree >= 256 else 4,
+            num_stages=1,
             enable_fp_fusion=True,
         )
