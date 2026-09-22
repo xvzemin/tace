@@ -39,6 +39,14 @@ new model and leaves the original unchanged:
    global_model = convert_cgtp(local_model)  # o2_cgtp -> cgtp
    export_tace(local_model, "TACE-OAM-7M-o2-cgtp.pt")
 
+The same automatic conversion is available from the command line:
+
+.. code-block:: bash
+
+   tace-convert-cgtp -m TACE-OAM-7M.pt --dtype float64 --device cpu
+
+This writes ``TACE-OAM-7M-converted.pt`` beside the original model.
+
 This is an equivalent implementation of CGTP, not the different
 ``o2`` Linear--Gate--Linear architecture. By default it uses PyTorch sparse
 reductions. ``TACE_USE_EQX=1`` selects the streamed CUDA implementation for

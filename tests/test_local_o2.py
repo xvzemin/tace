@@ -3,7 +3,9 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import sys
 from copy import deepcopy
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -36,6 +38,39 @@ def _time_reverse(features: torch.Tensor, irreps) -> torch.Tensor:
     for ir_mul, ir_slice in zip(irreps, irreps.slices()):
         output[..., ir_slice] *= ir_mul.ir.t
     return output
+
+
+@pytest.mark.parametrize(
+    "arguments,dtype,device",
+    [
+        ([], None, "cpu"),
+        (["--dtype", "float32"], "float32", "cpu"),
+        (["--dtype", "float64", "--device", "cuda:0"], "float64", "cuda:0"),
+    ],
+)
+def test_convert_cgtp_script_arguments(monkeypatch, tmp_path, arguments, dtype, device):
+    from tace.scripts import convert_cgtp as script
+
+    path = tmp_path / "model.pth"
+    load, convert, export = Mock(), Mock(), Mock()
+    monkeypatch.setattr(script, "load_tace", load)
+    monkeypatch.setattr(script, "convert_cgtp", convert)
+    monkeypatch.setattr(script, "export_tace", export)
+    monkeypatch.setattr(sys, "argv", ["tace-convert-cgtp", "-m", str(path), *arguments])
+    script.main()
+    load.assert_called_once_with(str(path), device=device, dtype=dtype)
+    convert.assert_called_once_with(load.return_value)
+    export.assert_called_once_with(
+        convert.return_value, str(tmp_path / "model-converted.pt")
+    )
+
+    output = tmp_path / "model-converted.pt"
+    output.write_bytes(b"existing model")
+    with pytest.raises(SystemExit) as error:
+        script.main()
+    assert error.value.code == 2
+    assert output.read_bytes() == b"existing model"
+    assert load.call_count == export.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -1184,6 +1219,44 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
             convert_cgtp(reference, "o2_linear")
         with pytest.raises(TypeError, match="eager"):
             convert_cgtp(torch.nn.Identity())
+
+        from tace.scripts.convert_cgtp import main
+
+        path = tmp_path / "cli.pt"
+        export_tace(reference, str(path))
+        source_bytes = path.read_bytes()
+        for kind in ("o2_cgtp", "cgtp"):
+            monkeypatch.setattr(
+                sys,
+                "argv",
+                [
+                    "tace-convert-cgtp",
+                    "-m",
+                    str(path),
+                    "--dtype",
+                    "float64",
+                    "--device",
+                    "cpu",
+                ],
+            )
+            main()
+            path = path.with_name(f"{path.stem}-converted.pt")
+            converted = load_tace(path, device="cpu")
+            assert converted.readout_fn.model_config["atomic_basis"]["type"] == [
+                kind,
+                kind,
+            ]
+            assert converted.get_model_dtype() == torch.float64
+            for name, parameter in converted.named_parameters():
+                torch.testing.assert_close(
+                    parameter, reference_parameters[name], atol=0, rtol=0
+                )
+            output = converted({key: value.clone() for key, value in data.items()})
+            for key in ("energy", "forces", "stress", "virials"):
+                torch.testing.assert_close(
+                    output[key], expected[key], atol=2e-9, rtol=2e-8
+                )
+        assert (tmp_path / "cli.pt").read_bytes() == source_bytes
 
     data["edge_index"] = torch.empty(2, 0, dtype=torch.long)
     data["edge_shifts"] = torch.empty(0, 3)

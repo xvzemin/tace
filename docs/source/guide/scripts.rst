@@ -49,6 +49,8 @@ Script Overview
      - Generate a fine-tuning and LoRA configuration
    * - ``tace-convert``
      - Convert model parameters, currently including LoRA merging
+   * - ``tace-convert-cgtp``
+     - Automatically switch equivalent ``cgtp`` and ``o2_cgtp`` interactions
    * - ``tace-update``
      - Update model statistics such as atomic energies, scale, and shift
    * - ``tace-average``
@@ -177,6 +179,25 @@ Merge trained LoRA parameters into the base model for inference or export:
 
 The output is ``lora-model.pt-merged_lora.pt``. The merged model no longer
 requires separate LoRA adapter parameters.
+
+``tace-convert-cgtp``
+~~~~~~~~~~~~~~~~~~~~~
+
+Automatically switch each ``cgtp`` interaction to ``o2_cgtp``, and each
+``o2_cgtp`` interaction to ``cgtp``:
+
+.. code-block:: bash
+
+   tace-convert-cgtp -m model.pt --dtype float64 --device cpu
+
+Only ``--model`` (required), ``--dtype`` and ``--device`` are accepted. The
+stored dtype is preserved when omitted, and the default device is CPU.
+Other interaction types, including the ``o2`` Linear--Gate--Linear architecture,
+are unchanged. A model without convertible CGTP interactions is rejected.
+
+The state-dict package is saved beside the input as ``model-converted.pt``.
+The source file is unchanged, and an existing output is not overwritten.
+Run the same command on the converted model to reverse the conversion.
 
 Model Statistics and Averaging
 ------------------------------
