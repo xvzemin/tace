@@ -23,17 +23,19 @@ The default operators use PyTorch on CPU and CUDA. Installation includes
 ``e3nn`` for representation and coupling conventions, and ``opt_einsum_fx``
 for contraction planning. PyG and external CUDA extensions are not required.
 
-The optional fused convolution backend requires Triton:
+Install the optional generated CUDA convolution backend with:
 
 .. code-block:: bash
 
-   pip install './tace/eqx[triton]'
+   pip install './tace/eqx[cuda]'
 
-``eqx.o2`` retains its PyTorch implementation. Accelerated execution is
-selected separately with ``eqx.conv.Convolution(..., backend="triton")``.
-Triton is imported only when that backend executes on CUDA; on CPU it uses
-the PyTorch contraction. ``backend="torch"`` is the default on every device.
-The ``cuda`` installation extra remains an alias for ``triton``.
+``eqx.o2`` retains its PyTorch implementation. ``eqx.conv.Convolution``
+defaults to ``backend="cuda"``, using generated CUDA on GPU and PyTorch on CPU.
+A CUDA toolkit is required for GPU execution; set ``CUDA_HOME`` if needed.
+The small C++ launcher is built once, and NVRTC kernels are cached by their
+static specification. Importing EQX does not load or compile the extension.
+The CUDA backend supports ``uvu`` instructions. ``backend="torch"`` selects
+the reference contraction, which also supports ``uvw`` instructions.
 
 Quick start
 -----------

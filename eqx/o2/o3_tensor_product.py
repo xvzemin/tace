@@ -234,7 +234,7 @@ class O3TensorProduct(torch.nn.Module):
                     persistent=False,
                 )
 
-        self.convolution = Convolution(self)
+        self.convolution = Convolution(self, backend="torch")
 
     def __repr__(self) -> str:
         return (

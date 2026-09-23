@@ -1,4 +1,4 @@
-"""Indexed convolutions with PyTorch and optional Triton execution."""
+"""Indexed convolutions with PyTorch and optional fused CUDA execution."""
 
 from .convolution import Convolution
 from .wigner import wigner_D

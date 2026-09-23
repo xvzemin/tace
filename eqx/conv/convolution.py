@@ -5,7 +5,6 @@
 
 """Indexed aligned-frame contractions and their transposes."""
 
-import copy
 import math
 from ast import literal_eval
 from dataclasses import dataclass
@@ -20,12 +19,9 @@ class _KernelPlan:
     """Tensor-free scheduling metadata shared by compiled calls."""
 
     path_data: tuple
-    path_groups: tuple
-    tile_groups: tuple
-    degree_width: int
     weight_numel: int
     has_unweighted: bool
-    channelwise: bool
+    sparse_paths: tuple
 
 
 @lru_cache(maxsize=256)
@@ -74,24 +70,17 @@ def adjoint_program(program, operands, grad_outputs, needs_grad, has_unweighted)
 def contraction(
     metadata: str,
     program: str,
-    constants: list[torch.Tensor],
     source: torch.Tensor,
     target: torch.Tensor,
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Keep runtime scheduling and kernel compilation outside tensor tracing."""
-    template = kernel_plan(metadata)
-    plan = copy.copy(template)
-    plan.cache_key = template
-    plan.paths, plan.indices, plan.coefficients = constants[:3]
-    for index in range(len(plan.tile_groups)):
-        setattr(plan, f"tiles_{index}", constants[3 + 2 * index])
-        setattr(plan, f"tile_offsets_{index}", constants[4 + 2 * index])
-    results = contraction_fake(metadata, program, constants, source, target, operands)
+    plan = kernel_plan(metadata)
+    results = contraction_fake(metadata, program, source, target, operands)
     for result in results:
         result.zero_()
     if source.numel() and plan.path_data:
-        from .triton import contract_many
+        from .cuda import contract_many
 
         calls = [
             (
@@ -107,11 +96,9 @@ def contraction(
 
 
 @contraction.register_fake
-def contraction_fake(metadata, program, constants, source, target, operands):
+def contraction_fake(metadata, program, source, target, operands):
     program = parse_program(program)
-    results = [None] * (
-        1 + max(slot for _, _, pairs in program for _, slot in pairs)
-    )
+    results = [None] * (1 + max(slot for _, _, pairs in program for _, slot in pairs))
     for mapping, _, pairs in program:
         for role, slot in pairs:
             if results[slot] is None:
@@ -122,33 +109,34 @@ def contraction_fake(metadata, program, constants, source, target, operands):
 
 
 def contraction_setup_context(ctx, inputs, output):
-    metadata, program, constants, source, target, operands = inputs
+    metadata, program, source, target, operands = inputs
     ctx.kernel_metadata = metadata
     ctx.program = parse_program(program)
-    ctx.num_constants = len(constants)
     ctx.set_materialize_grads(False)
-    ctx.save_for_backward(source, target, *constants, *operands)
+    ctx.save_for_backward(source, target, *operands)
 
 
 def contraction_backward(ctx, grad_outputs):
-    source, target, *saved = ctx.saved_tensors
-    constants = saved[: ctx.num_constants]
-    operands = saved[ctx.num_constants :]
+    source, target, *operands = ctx.saved_tensors
     program, values, destinations = adjoint_program(
         ctx.program,
         operands,
         grad_outputs,
-        ctx.needs_input_grad[5],
+        ctx.needs_input_grad[4],
         kernel_plan(ctx.kernel_metadata).has_unweighted,
     )
     gradients = [None] * len(operands)
     if program:
         results = contraction(
-            ctx.kernel_metadata, repr(program), constants, source, target, values
+            ctx.kernel_metadata,
+            repr(program),
+            source,
+            target,
+            values,
         )
         for index, slot in destinations.items():
             gradients[index] = results[slot]
-    return None, None, [None] * len(constants), None, None, gradients
+    return None, None, None, None, gradients
 
 
 contraction.register_autograd(
@@ -182,17 +170,12 @@ class _Contraction(torch.autograd.Function):
                 )
                 for mapping, weighted_only, pairs in program
             ]
-            if plan.backend == "triton" and operands[0].is_cuda:
-                from .triton import contract_many
-
-                contract_many(plan, source, target, calls)
-            else:
-                for outputs, values, destinations, weighted_only in calls:
-                    for output, result in zip(outputs, destinations):
-                        if result.numel():
-                            plan.reference(
-                                output, source, target, values, result, weighted_only
-                            )
+            for outputs, values, destinations, weighted_only in calls:
+                for output, result in zip(outputs, destinations):
+                    if result.numel():
+                        plan.reference(
+                            output, source, target, values, result, weighted_only
+                        )
         return tuple(results)
 
     @staticmethod
@@ -220,10 +203,11 @@ class Convolution(torch.nn.Module):
     ----------
     tensor_product : O3TensorProduct
         Tensor product defining paths, normalization and feature layouts.
-    backend : {"torch", "triton"}, optional
-        Execution backend. Defaults to ``"torch"`` on every device.
-        ``"triton"`` uses fused CUDA contractions and falls back to PyTorch
-        on CPU. Triton is imported only when this backend executes on CUDA.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Defaults to generated ``"cuda"`` kernels on CUDA
+        and ordinary tensor operations on CPU.
+        The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
+        for channel-mixing ``"uvw"`` instructions.
 
     Notes
     -----
@@ -231,45 +215,64 @@ class Convolution(torch.nn.Module):
     features, radial projection, input rotations, output rotations, harmonic
     amplitudes, and output node features. Computing any one operand's adjoint
     uses the same contraction with that operand designated as the output.
-    This rule also applies to higher derivatives. Triton contractions fuse
+    This rule also applies to higher derivatives. Accelerated contractions fuse
     gathers, both feature rotations, sparse coupling and reductions without
-    retaining edge messages. Large radial projections use matrix products in
-    bounded edge chunks; small projections are evaluated inside the kernel.
+    retaining edge messages. Radial projections use matrix products
+    in bounded edge chunks.
     Rotation matrices are supplied as packed degree blocks, not zero-padded
     block-diagonal matrices. Paths sharing an input block reuse its rotation
-    within each angular/channel tile. Input adjoints are accumulated locally
+    within each angular/channel tile. Compatible output paths of the same
+    degree rotate jointly in bounded path/channel tiles. Their independent
+    output slots are preserved, and output-matrix adjoints are summed across
+    paths before the channel reduction. Sparse CG coefficients are combined
+    with output rotation entries and reused across channels, without storing
+    edge-wise coupling matrices. The transposed contractions use the same
+    combined entries; rotation-matrix adjoints retain the explicit coefficients.
+    Input adjoints are accumulated locally
     before the inverse rotation. Workspaces for projected weights are reused
     across chunks and across mixed derivative terms, and are not saved for
     backward. Path dependencies are retained through each transpose, including
     mixtures of weighted and unweighted instructions. Channelwise contractions
     use the same register-resident kernels at every angular degree. Mixed
     adjoints share local rotations and accumulate into their destinations
-    before inverse rotations. Compilation partitions derivative programs
-    according to register usage, rather than an angular-degree threshold.
-    Dense channel mixing uses tiled contractions. Graph reductions use atomic
-    additions, so summation order is not deterministic.
+    before inverse rotations. Compilation partitions derivative programs by
+    shared dependencies, reduction axes and register usage, rather than an
+    angular-degree threshold. Bounded per-warp shared memory holds rotation
+    matrices and combines their output adjoints before global reduction.
+    Source- or receiver-owned tasks accumulate rows
+    in registers before writing node contributions; split rows and shared gradients
+    use atomic additions. Plans are reused for unchanged topology, with
+    capture-safe topology construction for CUDA Graph replay. CUDA kernels
+    are generated and compiled with NVRTC on first use; their binaries are
+    cached independently of graph sizes and learned parameters. Warm up the
+    required derivatives before CUDA Graph capture. Atomic reductions mean
+    that summation order is not generally deterministic.
     """
 
-    def __init__(self, tensor_product, *, backend="torch"):
+    def __init__(self, tensor_product, *, backend="cuda"):
         super().__init__()
-        if backend not in ("torch", "triton"):
-            raise ValueError("backend must be torch or triton.")
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        if backend == "cuda" and any(
+            ins.connection_mode != "uvu" for ins in tensor_product.instructions
+        ):
+            raise NotImplementedError(
+                "The CUDA convolution supports only 'uvu' instructions. "
+                "Use backend='torch' for other connection modes."
+            )
         self.backend = backend
         self.irreps_in = tensor_product.irreps_in1
         self.irreps_out = tensor_product.irreps_out
+        self.output_dim = self.irreps_out.dim
         self.instructions = tuple(tensor_product.instructions)
         self.weight_numel = tensor_product.weight_numel
         self.num_harmonics = tensor_product.num_harmonics
-        self.degree_width = 1 << (2 * tensor_product.lmax).bit_length()
         self.degree_offsets = tuple(
             sum((2 * k + 1) ** 2 for k in range(l))
             for l in range(tensor_product.lmax + 1)
         )
         input_slices = self.irreps_in.slices()
         output_slices = self.irreps_out.slices()
-        paths = []
-        indices = []
-        coefficients = []
         offset = 0
         self.path_data = []
         self.sparse_paths = []
@@ -295,112 +298,34 @@ class Convolution(torch.nn.Module):
             # Static coefficients and tensor buffers use the same construction
             # precision, including when the module is later promoted to float64.
             cg = (cg * (pole * ins.path_weight)).to(torch.get_default_dtype())
-            # Each row and column of the real m2=0 slice has at most one
-            # nonzero. Both orientations are retained for transposed calls.
+            # Each row and column of the real m2=0 slice has at most one nonzero.
             if (cg.count_nonzero(0) > 1).any() or (cg.count_nonzero(1) > 1).any():
                 raise ValueError("Expected a signed-order-diagonal CG slice.")
-            map_forward = torch.zeros(self.degree_width, dtype=torch.int32)
-            map_reverse = torch.zeros_like(map_forward)
-            coefficient_forward = torch.zeros(self.degree_width, dtype=torch.float64)
-            coefficient_reverse = torch.zeros_like(coefficient_forward)
-            for m, n in cg.nonzero().tolist():
-                map_forward[n] = m
-                map_reverse[m] = n
-                coefficient_forward[n] = coefficient_reverse[m] = cg[m, n]
-            indices.append(torch.stack((map_forward, map_reverse)))
-            coefficients.append(torch.stack((coefficient_forward, coefficient_reverse)))
-            paths.append(
-                (
-                    input_slices[ins.i_in1].start,
-                    output_slices[ins.i_out].start,
-                    mul,
-                    mul_out,
-                    ir.dim,
-                    ir_out.dim,
-                    self.degree_offsets[ir.l],
-                    self.degree_offsets[ir_out.l],
-                    weight_offset,
-                    ins.i_in2,
-                )
+            self.register_buffer(f"cg_{len(self.path_data)}", cg, persistent=False)
+            path = (
+                input_slices[ins.i_in1].start,
+                output_slices[ins.i_out].start,
+                mul,
+                mul_out,
+                ir.dim,
+                ir_out.dim,
+                self.degree_offsets[ir.l],
+                self.degree_offsets[ir_out.l],
+                weight_offset,
+                ins.i_in2,
             )
-            self.path_data.append((ins.connection_mode, paths[-1]))
+            self.path_data.append((ins.connection_mode, path))
             self.sparse_paths.append(
                 tuple((m, n, float(cg[m, n])) for m, n in cg.nonzero().tolist())
             )
 
-        # Keep every path sharing an input together. The CUDA scheduler chooses
-        # execution phases from the live operands of each derivative program.
-        groups = {}
-        for index, (mode, path) in enumerate(self.path_data):
-            if mode == "uvu":
-                groups.setdefault((path[0], path[2], path[4]), []).append(index)
-        self.path_groups = tuple(
-            tuple((self.path_data[i][1], self.sparse_paths[i]) for i in indices)
-            for indices in groups.values()
-        )
-        self.channelwise = all(mode == "uvu" for mode, _ in self.path_data)
         self.has_unweighted = any(path[8] < 0 for _, path in self.path_data)
-
-        self.register_buffer(
-            "paths",
-            torch.tensor(paths, dtype=torch.int32).reshape(-1, 10),
-            persistent=False,
-        )
-        self.register_buffer(
-            "indices",
-            torch.stack(indices)
-            if indices
-            else torch.empty(0, 2, self.degree_width, dtype=torch.int32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "coefficients",
-            (
-                torch.stack(coefficients)
-                if coefficients
-                else torch.empty(0, 2, self.degree_width)
-            ).to(torch.get_default_dtype()),
-            persistent=False,
-        )
-        tiles = {}
-        for index, (mode, path) in enumerate(self.path_data):
-            degree = 1 << (max(path[4], path[5]) - 1).bit_length()
-            channels = 1 << (max(path[2], path[3]) - 1).bit_length()
-            if mode == "uvu" and channels >= 16:
-                degree = max(8, degree)
-            width = min(channels, 32 if mode == "uvu" else 16, max(4, 512 // degree))
-            entries = tiles.setdefault((mode, degree, width), {})
-            for u in range(0, path[2], width):
-                shared = entries.setdefault((path[0], u), [])
-                for v in [u] if mode == "uvu" else range(0, path[3], width):
-                    shared.append((index, u, v))
-        self.tile_groups = tuple(sorted(tiles))
-        for index, key in enumerate(self.tile_groups):
-            entries = []
-            offsets = [0]
-            for shared in tiles[key].values():
-                entries.extend(shared)
-                offsets.append(len(entries))
-            self.register_buffer(
-                f"tiles_{index}",
-                torch.tensor(entries, dtype=torch.int32).reshape(-1, 3),
-                persistent=False,
-            )
-            self.register_buffer(
-                f"tile_offsets_{index}",
-                torch.tensor(offsets, dtype=torch.int32),
-                persistent=False,
-            )
-
         self.kernel_metadata = repr(
             (
                 tuple(self.path_data),
-                self.path_groups,
-                self.tile_groups,
-                self.degree_width,
                 self.weight_numel,
                 self.has_unweighted,
-                self.channelwise,
+                tuple(self.sparse_paths),
             )
         )
 
@@ -440,7 +365,7 @@ class Convolution(torch.nn.Module):
         """
         # A zero-stride placeholder supplies the output shape without allocating
         # a second node output. It is never read by the forward contraction.
-        output = features.new_empty(1).expand(num_nodes, self.irreps_out.dim)
+        output = features.new_empty(1).expand(num_nodes, self.output_dim)
         program = ((tuple(range(7)), False, ((6, 0),)),)
         operands = [
             features,
@@ -451,19 +376,10 @@ class Convolution(torch.nn.Module):
             amplitudes,
             output,
         ]
-        if self.backend == "triton" and features.is_cuda:
-            constants = [self.paths, self.indices, self.coefficients]
-            for index in range(len(self.tile_groups)):
-                constants.extend(
-                    (
-                        getattr(self, f"tiles_{index}"),
-                        getattr(self, f"tile_offsets_{index}"),
-                    )
-                )
+        if self.backend == "cuda" and features.is_cuda:
             return contraction(
                 self.kernel_metadata,
                 repr(program),
-                constants,
                 edge_index[0],
                 edge_index[1],
                 operands,
@@ -489,11 +405,7 @@ class Convolution(torch.nn.Module):
                 output == 2 and not projected
             ):
                 continue
-            cg = x.new_zeros(dim, dim_out).scatter(
-                0,
-                self.indices[index, 0, :dim_out].long().unsqueeze(0),
-                self.coefficients[index, 0, :dim_out].to(x).unsqueeze(0),
-            )
+            cg = getattr(self, f"cg_{index}").to(x)
             tensors = [
                 None
                 if output == 0

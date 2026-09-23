@@ -5,63 +5,78 @@
 
 """Sparse recursive Wigner contractions for streaming convolutions."""
 
+from ast import literal_eval
+from functools import lru_cache
 from weakref import ref
 
 import torch
-from torch._subclasses.fake_tensor import is_fake
-
-from eqx.o2.rotation_matrix import rotation_matrix_to_y_axis
 
 _PLANS = {}
-_ALIGNMENTS = {}
+
+parse_alignment = lru_cache(maxsize=128)(literal_eval)
 
 
-def _alignment(vectors):
-    return (rotation_matrix_to_y_axis(vectors).flatten(1),)
+@torch.library.custom_op("eqx::alignment_cuda", mutates_args=(), device_types="cuda")
+def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Execute the quaternion alignment or a recursively generated transpose."""
+    from .codegen import alignment_source
+    from .cuda import kernels
 
-
-class _Alignment(torch.autograd.Function):
-    """Compile each required transpose, including higher-order transposes."""
-
-    @staticmethod
-    def forward(ctx, key, *values):
-        if key not in _ALIGNMENTS:
-            if key is None:
-                function = _alignment
-            else:
-                parent, size, active = key
-                original = _ALIGNMENTS[parent][0]
-
-                def function(*inputs):
-                    _, pullback = torch.func.vjp(original, *inputs[:size])
-                    gradients = pullback(tuple(inputs[size:]))
-                    return tuple(gradients[i] for i in active)
-
-            _ALIGNMENTS[key] = function, {}
-        ctx.key = key
-        ctx.save_for_backward(*values)
-        function, compiled = _ALIGNMENTS[key]
-        signature = tuple(
-            (value.device, value.dtype, value.size(0) == 1) for value in values
+    results = alignment_fake(key, values)
+    if values[0].size(0):
+        dtype = "float" if values[0].dtype == torch.float32 else "double"
+        code = alignment_source(parse_alignment(key), dtype)
+        kernel = kernels([code], values[0].device)[code]
+        contiguous = [value.contiguous() for value in values]
+        args = [value.data_ptr() for value in (*contiguous, *results)] + [
+            values[0].size(0)
+        ]
+        kernel.launch(
+            args,
+            (values[0].size(0) + 127) // 128,
+            1,
+            128,
+            torch.cuda.current_stream(values[0].device).cuda_stream,
         )
-        if signature not in compiled:
-            from torch.fx.experimental.proxy_tensor import make_fx
+    return results
 
-            # Each transpose has its own tensor graph and compilation cache.
-            # Tracing symbolic batch sizes avoids specialization on edge count.
-            graph = make_fx(function, tracing_mode="symbolic")(*values)
-            compiled[signature] = torch.compile(graph, fullgraph=True, dynamic=True)
-        return compiled[signature](*values)
 
-    @staticmethod
-    def backward(ctx, *cotangents):
-        values = ctx.saved_tensors
-        active = tuple(i for i, need in enumerate(ctx.needs_input_grad[1:]) if need)
-        results = _Alignment.apply((ctx.key, len(values), active), *values, *cotangents)
-        gradients = [None] * len(values)
-        for i, value in zip(active, results):
-            gradients[i] = value
-        return None, *gradients
+@alignment_cuda.register_fake
+def alignment_fake(key, values):
+    from .codegen import alignment_program
+
+    dtype = "float" if values[0].dtype == torch.float32 else "double"
+    _, outputs, _ = alignment_program(parse_alignment(key), dtype)
+    return [values[0].new_empty((values[0].size(0), len(group))) for group in outputs]
+
+
+def alignment_setup_context(ctx, inputs, output):
+    key, values = inputs
+    ctx.key = parse_alignment(key)
+    ctx.output_widths = tuple(value.size(1) for value in output)
+    ctx.save_for_backward(*values)
+
+
+def alignment_backward(ctx, gradients):
+    values = ctx.saved_tensors
+    active = tuple(i for i, need in enumerate(ctx.needs_input_grad[1]) if need)
+    results = [None] * len(values)
+    if active:
+        cotangents = [
+            grad
+            if grad is not None
+            else values[0].new_zeros((values[0].size(0), width))
+            for grad, width in zip(gradients, ctx.output_widths)
+        ]
+        transposed = alignment_cuda(repr((ctx.key, active)), [*values, *cotangents])
+        for i, value in zip(active, transposed):
+            results[i] = value
+    return None, results
+
+
+alignment_cuda.register_autograd(
+    alignment_backward, setup_context=alignment_setup_context
+)
 
 
 def rotation_plan(cg):
@@ -80,8 +95,7 @@ def rotation_plan(cg):
         for c, d, n in entries:
             indices = (3 * a + c, previous * b + d, current * m + n)
             value = (
-                float(coefficients_cpu[a, b, m] * coefficients_cpu[c, d, n])
-                * current
+                float(coefficients_cpu[a, b, m] * coefficients_cpu[c, d, n]) * current
             )
             for output in range(3):
                 inputs = tuple(index for i, index in enumerate(indices) if i != output)
@@ -102,29 +116,13 @@ def rotation_plan(cg):
 
 
 @torch.library.custom_op("eqx::rotation", mutates_args=(), device_types="cuda")
-def rotation(
-    cg: torch.Tensor, output: int, values: list[torch.Tensor]
-) -> torch.Tensor:
+def rotation(cg: torch.Tensor, output: int, values: list[torch.Tensor]) -> torch.Tensor:
     """Evaluate a degree contraction or any of its multilinear transposes."""
     result = torch.empty_like(values[output], memory_format=torch.contiguous_format)
     if result.numel():
-        from .triton import rotation_kernel
+        from .cuda import rotate
 
-        inputs = [value for i, value in enumerate(values) if i != output]
-        indices, coefficients = rotation_plan(cg)[output]
-        rotation_kernel[((result.size(0) + 3) // 4, result.size(1))](
-            *inputs,
-            result,
-            indices,
-            coefficients,
-            result.size(0),
-            *inputs[0].stride(),
-            *inputs[1].stride(),
-            result.size(1),
-            coefficients.size(1),
-            4,
-            num_warps=4,
-        )
+        rotate(cg, output, values, result, rotation_plan)
     return result
 
 
@@ -157,7 +155,7 @@ def rotation_backward(ctx, gradient):
 rotation.register_autograd(rotation_backward, setup_context=rotation_setup_context)
 
 
-def wigner_D(frame, vectors):
+def wigner_D(frame, vectors, *, backend="cuda"):
     """Return packed Wigner matrices with recursively fused CUDA derivatives.
 
     Parameters
@@ -166,6 +164,10 @@ def wigner_D(frame, vectors):
         Degree cutoff and Clebsch--Gordan buffers defining the rotations.
     vectors : torch.Tensor
         Frame directions with shape ``(edges, 3)``.
+    backend : {"cuda", "torch"}, optional
+        Execution backend. Generated CUDA is the default on GPU. The
+        quaternion alignment and recursive degree contractions retain
+        differentiable transposes at every order.
 
     Returns
     -------
@@ -173,14 +175,15 @@ def wigner_D(frame, vectors):
         Degree blocks flattened and concatenated along the last dimension.
         CPU and unsupported dtypes use the frame's PyTorch implementation.
     """
-    if not vectors.is_cuda or vectors.dtype not in (torch.float32, torch.float64):
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be torch or cuda.")
+    if (
+        backend == "torch"
+        or not vectors.is_cuda
+        or vectors.dtype not in (torch.float32, torch.float64)
+    ):
         return frame.forward_packed(vectors)
-    # Let an enclosing compiler fuse the alignment and its derivatives instead
-    # of starting a nested trace. Eager execution retains its compiled cache.
-    if torch.compiler.is_compiling() or is_fake(vectors) or not vectors.size(0):
-        aligned = rotation_matrix_to_y_axis(vectors).flatten(1)
-    else:
-        aligned = _Alignment.apply(None, vectors)[0]
+    aligned = alignment_cuda("None", [vectors])[0]
     matrices = [aligned.new_ones((vectors.size(0), 1))]
     if frame.lmax:
         matrices.append(aligned)
@@ -190,7 +193,9 @@ def wigner_D(frame, vectors):
         )
         matrices.append(
             rotation(
-                getattr(frame, f"cg_{degree}"), 2, [aligned, matrices[-1], placeholder]
+                getattr(frame, f"cg_{degree}"),
+                2,
+                [aligned, matrices[-1], placeholder],
             )
         )
     return torch.cat(matrices, dim=1)

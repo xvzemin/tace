@@ -26,13 +26,8 @@ are PyTorch, `e3nn`, and `opt_einsum_fx`.
 For fused CUDA convolutions, install the optional backend:
 
 ```bash
-pip install './tace/eqx[triton]'
+pip install './tace/eqx[cuda]'
 ```
-
-`eqx.o2` keeps its PyTorch implementation. `eqx.conv.Convolution` provides
-an explicit `backend="triton"` option; its default is `backend="torch"`.
-Triton is imported only when the selected backend executes on CUDA. The
-`cuda` installation extra remains an alias for `triton`.
 
 ## Example
 

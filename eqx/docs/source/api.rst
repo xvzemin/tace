@@ -71,9 +71,11 @@ Indexed convolutions
 --------------------
 
 ``eqx.conv`` separates convolution execution from the representation operators
-in ``eqx.o2``. The default backend uses PyTorch on CPU and CUDA. Selecting
-``backend="triton"`` enables fused CUDA contractions and requires the optional
-``triton`` installation extra. Both backends support higher derivatives.
+in ``eqx.o2``. The default ``backend="cuda"`` generates fused CUDA kernels
+on GPU and uses PyTorch on CPU. GPU execution requires the ``cuda`` extra
+and a CUDA toolkit. CUDA supports ``uvu`` instructions. ``backend="torch"``
+selects the reference implementation, including ``uvw`` instructions.
+Both backends support recursive higher derivatives.
 
 .. autoclass:: eqx.conv.Convolution
    :members: forward

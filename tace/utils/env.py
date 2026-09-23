@@ -38,7 +38,7 @@ def enable_acceleration(
     """Enable accelerations, preserving existing settings unless forced.
 
     ``enable_eqx`` selects streamed aligned-frame CGTP convolutions for
-    ``o2_cgtp`` interactions. CUDA execution requires Triton.
+    ``o2_cgtp`` interactions. CUDA execution requires a CUDA toolkit.
     Other operators retain their selected backend.
     """
     enabled_accelerations = {

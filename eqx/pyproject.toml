@@ -18,8 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-triton = ["triton>=3.0"]
-cuda = ["triton>=3.0"]
+cuda = ["ninja", "filelock"]
 
 [project.urls]
 Homepage = "https://github.com/xvzemin/tace"
@@ -30,4 +29,4 @@ packages = ["eqx", "eqx.o2", "eqx.conv"]
 package-dir = { eqx = "." }
 
 [tool.setuptools.package-data]
-eqx = ["README.md"]
+eqx = ["README.md", "conv/csrc/*.cpp", "conv/csrc/*.cuh", "conv/csrc/*.in"]

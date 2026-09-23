@@ -112,9 +112,9 @@ for _ in range(2):
         torch.testing.assert_close(left, right, atol=1e-8, rtol=1e-8)
     actual = torch.cat([value.flatten() for value in a])
     expected = torch.cat([value.flatten() for value in b])
-assert "eqx.conv.triton" not in sys.modules
+assert "eqx.conv.cuda" not in sys.modules
 assert "tace" not in sys.modules
-accelerated = conv.Convolution(tp, backend="triton").to(device)
+accelerated = conv.Convolution(tp, backend="cuda").to(device)
 arguments = (
     x, weights, x.new_empty(0, tp.weight_numel), packed,
     x.new_ones(1, tp.num_harmonics), edges, 3,
@@ -122,12 +122,14 @@ arguments = (
 if device == "cpu":
     torch.testing.assert_close(accelerated(*arguments), tp.forward_scatter(x, edges, packed, weights))
 else:
+    import torch.utils.cpp_extension
+    torch.utils.cpp_extension.CUDA_HOME = None
     try:
         accelerated(*arguments)
     except ImportError as error:
-        assert "[triton]" in str(error)
+        assert "CUDA_HOME" in str(error)
     else:
-        raise AssertionError("Explicit Triton execution must report the missing dependency")
+        raise AssertionError("CUDA execution must report the missing toolkit")
 """
     result = subprocess.run(
         [sys.executable, "-c", script, device],

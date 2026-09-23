@@ -118,36 +118,40 @@ to convert an existing model explicitly, without retraining or changing its
 parameters. By default, conversion switches each CGTP interaction to the
 other implementation.
 
-The default ``eqx.o2`` operators use PyTorch on CPU and CUDA without Triton
-or PyG. ``TACE_USE_EQX=1`` selects the separate ``eqx.conv.Convolution``
-Triton backend on CUDA and its PyTorch implementation on CPU. Fused CUDA
-execution supports float32 and float64. The fused
-contraction includes source gather, both feature rotations, the sparse
-order-zero CG coupling, and target reduction. It does not materialize edge messages
-or their adjoints. Radial projections and their gradients use matrix products
-over bounded edge chunks; the general kernel also supports small internal
-projections. The scalar path-weight workspaces are reused, not saved for
-backward. The same contraction evaluates transposed operations recursively,
-including the second derivatives required by force-loss training.
-Wide channelwise contractions retain angular features in registers and fuse
-mixed derivative terms. Shared local rotations are evaluated once, and input
-adjoints are combined before the inverse rotation. Other layouts, float64,
-high angular degrees, and large mixed-derivative programs use the general
-tiled CUDA contraction to bound compilation size and register usage. The Triton
-contraction uses float32 or float64 arithmetic; radial matrix products follow
-PyTorch's configured matrix-multiplication precision. Fused multiply-adds and
-atomic reductions can change floating-point rounding and summation order.
-Kernels are compiled on first use. The edge count is a runtime argument, so
-varying the number of neighbors does not trigger compilation for every batch.
+The default ``eqx.o2`` operators use PyTorch without external kernels.
+``TACE_USE_EQX=1`` selects generated CUDA convolutions on GPU and PyTorch on
+CPU. Install the ``eqx`` extra and provide a CUDA toolkit; set ``CUDA_HOME``
+if it is not discovered automatically.
 
-Wigner matrices remain differentiable geometric inputs, packed by degree
-without block-diagonal zero padding or a separate inverse copy. Their recursive
-CG construction and transposes use a separate sparse CUDA kernel. Alignment
-and its required derivatives are compiled as pure tensor functions, with
-recursive differentiation retained beyond force training. The radial MLP's
-preceding layers and ``linear_down`` remain separate. CPU execution uses the
-tensor-contraction reference. Initial compilation is excluded from warmed
-throughput measurements.
+The contraction fuses source gather, both feature rotations, sparse order-zero
+CG coupling and target reduction, without retaining edge messages or their
+adjoints. Radial projections and their transposes use bounded GEMM workspaces.
+The same contraction evaluates recursive adjoints, including the mixed second
+derivatives required by force-loss training. Channelwise ``uvu`` paths,
+shared weights, and float32/float64 are supported. Other connection modes
+are not implemented by the CUDA backend.
+
+Paths sharing input features reuse their local rotation. Derivative programs
+are partitioned by shared dependencies and register requirements, without a
+fixed angular-degree threshold. Compiled register counts and local-memory
+usage refine the partition, and static schedules are cached. Wigner matrices
+and their output adjoints share a bounded per-warp storage budget, reducing
+register pressure and repeated global gradient reductions.
+Node-owned reductions accumulate before
+writing results; split rows and shared gradients use atomic additions.
+Floating-point summation order can therefore differ from the reference.
+
+Wigner matrices remain differentiable geometric inputs packed by degree.
+Quaternion alignment and recursive CG contractions use generated CUDA,
+including their higher derivatives. Their formulas and normalization are
+unchanged. The radial MLP's preceding layers and node-level ``linear_down``
+remain separate.
+
+A small C++ launcher is built once. Independent NVRTC kernels are compiled
+concurrently and cached by code, compiler version and GPU architecture.
+Edge counts are runtime arguments. Warm up forward and required derivatives
+before CUDA Graph capture. Compilation is excluded from warmed throughput
+measurements.
 
 This backend targets eager training and inference. AOTInductor deployment
 with EQX is not currently validated; use the documented OEQ export path

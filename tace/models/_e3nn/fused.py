@@ -337,7 +337,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
         )
-        self.eqx_tp = Convolution(self.tp, backend="triton")
+        self.eqx_tp = Convolution(self.tp, backend="cuda")
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
             self.irreps_in1,
