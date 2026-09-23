@@ -24,18 +24,20 @@ def convolution_source(
     xp, yp, messages, adjoints, qs, accumulators, gx, gdi, gy, gdo, gr, gs = operations
     xdim, ydim, ddim, rdim, sdim = dimensions
     mul = paths[0][1][2]
+    block_channels = mul > 32
+    barrier = "__syncthreads();" if block_channels else "__syncwarp();"
     input_groups, output_groups = rotation_groups([(path, cg) for _, path, cg in paths])
     input_paths = [paths[group[0]][1] for group in input_groups]
     input_index = {j: i for i, group in enumerate(input_groups) for j in group}
     support = [{b: (a, c) for a, b, c in cg} for _, _, cg in paths]
-    # Wigner entries are identical across the channel lanes. Stage matrices
-    # once per warp instead of retaining a full matrix in every lane's registers.
+    # Wide channel tiles share one matrix across the block's warps. Narrow
+    # tiles keep independent edges in each warp without block synchronization.
     matrices = {}
     for path in input_paths:
         for pd in (*[pd for _, pd in xp], *[pd for pd, *_ in gx]):
             matrices[pd, "ei", path[6], path[4]] = None
     # C has one nonzero per supported order. Fold it into the output Wigner
-    # rows once per warp, then reuse those rows across channels and transposes.
+    # rows once per tile, then reuse those rows across channels and transposes.
     coupled_offsets, coupled_entries = {}, {}
     coupled_size = 0
     for j, (_, path, _) in enumerate(paths):
@@ -48,12 +50,16 @@ def convolution_source(
                 coupled_offsets[pd, j, b] = coupled_entries[key]
     gradients = {}
     gradient_size = 0
-    for _, path, _ in paths:
-        for _, g, *_ in gdo:
-            key = g, path[7], path[5]
-            if key not in gradients:
-                gradients[key] = gradient_size
-                gradient_size += path[5] ** 2
+    for entries, shared_edge, blocks in (
+        (gdo, shared[2], [(path[7], path[5]) for _, path, _ in paths]),
+        (gdi, shared[1], [(path[6], path[4]) for path in input_paths]),
+    ):
+        for offset, size in blocks:
+            for _, g, *_ in entries:
+                key = g, "0" if shared_edge else "edge", offset, size
+                if key not in gradients:
+                    gradients[key] = gradient_size
+                    gradient_size += size**2
     itemsize = 4 if dtype == "float" else 8
     if gradient_size * 4 * itemsize > 16384:
         gradients, gradient_size = {}, 0
@@ -81,23 +87,43 @@ def convolution_source(
         HEADER.replace("SCALAR", dtype),
         'extern "C" __global__ void run(' + ",".join(args) + ") {",
         "const int lane = threadIdx.x & 31;",
-        "const int64_t item = int64_t(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;",
-        "const int channel = blockIdx.y * 32 + lane;",
+        (
+            "const int64_t item = blockIdx.x;"
+            if block_channels
+            else "const int64_t item = int64_t(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;"
+        ),
+        (
+            "const int channel = blockIdx.y * blockDim.x + threadIdx.x;"
+            if block_channels
+            else "const int channel = blockIdx.y * 32 + lane;"
+        ),
         f"const bool active = channel < {mul};",
     ]
     emit = lines.append
-    if staging and matrix_size:
-        emit(f"__shared__ T storage[4 * {matrix_size}];")
-        emit(f"volatile T* matrix = storage + (threadIdx.x / 32) * {matrix_size};")
-    if coupled_staging and coupled_size:
-        emit(f"__shared__ T coupled_storage[4 * {coupled_size}];")
+    shared_size = (
+        (matrix_size if staging else 0)
+        + (coupled_size if coupled_staging else 0)
+        + gradient_size
+    )
+    if shared_size:
+        emit("extern __shared__ T storage[];")
         emit(
-            f"volatile T* coupled_matrix = coupled_storage + (threadIdx.x / 32) * {coupled_size};"
+            "T* warp_storage = storage;"
+            if block_channels
+            else f"T* warp_storage = storage + (threadIdx.x / 32) * {shared_size};"
         )
+    offset = 0
+    if staging and matrix_size:
+        emit("volatile T* matrix = warp_storage;")
+        offset += matrix_size
+    if coupled_staging and coupled_size:
+        emit(f"volatile T* coupled_matrix = warp_storage + {offset};")
+        offset += coupled_size
     if gradient_size:
-        emit(f"__shared__ T gradient_storage[4 * {gradient_size}];")
         emit(
-            f"T* matrix_gradient = gradient_storage + (threadIdx.x / 32) * {gradient_size};"
+            f"T* matrix_gradient = warp_storage + {offset}"
+            + (f" + (threadIdx.x / 32) * {gradient_size}" if block_channels else "")
+            + ";"
         )
 
     def load(p, offset):
@@ -194,20 +220,22 @@ def convolution_source(
         emit(
             f"for (int k = lane; k < {gradient_size}; k += 32) matrix_gradient[k] = 0;"
         )
+    thread_start = "threadIdx.x" if block_channels else "lane"
+    thread_stride = "blockDim.x" if block_channels else "32"
     if staging and matrix_size:
         for (pd, e, offset, size), location in matrices.items():
             emit(
-                f"for (int k = lane; k < {size * size}; k += 32) "
+                f"for (int k = {thread_start}; k < {size * size}; k += {thread_stride}) "
                 f"matrix[{location} + k] = p{pd}[{e} * {ddim} + {offset} + k];"
             )
     if coupled_staging and coupled_size:
         for (pd, offset, size, c), location in coupled_entries.items():
             emit(
-                f"for (int k = lane; k < {size}; k += 32) "
+                f"for (int k = {thread_start}; k < {size}; k += {thread_stride}) "
                 f"coupled_matrix[{location} + k] = T({c:.17g}) * p{pd}[eo * {ddim} + {offset} + k];"
             )
     if (staging and matrix_size) or (coupled_staging and coupled_size) or gradient_size:
-        emit("__syncwarp();")
+        emit(barrier)
     for k, path in enumerate(input_paths):
         start, dim, dstart = path[0], path[4], path[6]
         rows = {a for j in input_groups[k] for a, _, _ in paths[j][2]}
@@ -328,7 +356,11 @@ def convolution_source(
                         value = " + ".join(f"cmsg{j}_{t}_{a}" for t in terms)
                         emit(f"value = fma(({value}), oy{j}_{i}_{b}, value);")
                     if gradient_size:
-                        location = gradients[g, ostart, odim] + a * odim + b
+                        location = (
+                            gradients[g, "0" if shared[2] else "edge", ostart, odim]
+                            + a * odim
+                            + b
+                        )
                         emit(
                             f"value = warp_sum(value); if (lane == 0) matrix_gradient[{location}] += value;"
                         )
@@ -379,13 +411,6 @@ def convolution_source(
                 store(g, f"es * {sdim} + {harmonic}", value, True)
             emit("}")
         emit("}")
-    if gradient_size:
-        emit("__syncwarp();")
-        for (g, offset, size), location in gradients.items():
-            emit(
-                f"for (int k = lane; k < {size * size}; k += 32) "
-                f"atomicAdd(g{g} + eo * {ddim} + {offset} + k, matrix_gradient[{location} + k]);"
-            )
     for k, path in enumerate(input_paths):
         start, dim, dstart = path[0], path[4], path[6]
         for i, (pd, g, accumulator) in enumerate(gx):
@@ -416,15 +441,37 @@ def convolution_source(
             vector(f"ox{k}_{i}_", px, "src", dim, start, (xdim, mul), "channel")
             for a in range(dim):
                 for b in range(dim):
-                    store(
-                        g,
-                        f"ei * {ddim} + {dstart + a * dim + b}",
-                        f"dx{k}_{accumulator}_{a} * ox{k}_{i}_{b}",
-                        True,
-                    )
+                    value = f"dx{k}_{accumulator}_{a} * ox{k}_{i}_{b}"
+                    if gradient_size:
+                        location = (
+                            gradients[g, "0" if shared[1] else "edge", dstart, dim]
+                            + a * dim
+                            + b
+                        )
+                        emit(
+                            f"{{ T value = warp_sum({value}); "
+                            f"if (lane == 0) matrix_gradient[{location}] += value; }}"
+                        )
+                    else:
+                        store(g, f"ei * {ddim} + {dstart + a * dim + b}", value, True)
+    if gradient_size:
+        emit(barrier)
+        for (g, edge, offset, size), location in gradients.items():
+            emit(
+                f"for (int k = {thread_start}; k < {size * size}; k += {thread_stride}) {{"
+            )
+            if block_channels:
+                base = shared_size - gradient_size
+                emit(
+                    f"T value = 0; for (int w = 0; w < blockDim.x / 32; ++w) "
+                    f"value += storage[{base} + w * {gradient_size} + {location} + k];"
+                )
+            else:
+                emit(f"T value = matrix_gradient[{location} + k];")
+            emit(f"atomicAdd(g{g} + {edge} * {ddim} + {offset} + k, value); }}")
     if owner >= 0:
         if (staging and matrix_size) or coupled_size or gradient_size:
-            emit("__syncwarp();")
+            emit(barrier)
         emit("}")
 
         def owned_store(g, offset, value):
@@ -451,7 +498,9 @@ def convolution_source(
                             f"total_y{j}_{i}_{a}",
                         )
     emit("}")
-    return "\n".join(lines), mul
+    common = (shared_size - gradient_size) * itemsize if block_channels else 0
+    per_warp = gradient_size * itemsize if block_channels else shared_size * itemsize
+    return "\n".join(lines), mul, (common, per_warp)
 
 
 @lru_cache(maxsize=128)

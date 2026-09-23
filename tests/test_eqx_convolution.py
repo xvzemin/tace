@@ -22,7 +22,8 @@ def test_convolution_backends_and_modes():
         wigner_D(WignerD(0, 0), torch.randn(2, 3), backend="triton")
 
 
-def test_same_degree_output_rotations():
+@pytest.mark.parametrize("channels", [3, 64, 129])
+def test_same_degree_output_rotations(channels):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     previous = torch.get_default_dtype()
@@ -30,9 +31,9 @@ def test_same_degree_output_rotations():
     try:
         torch.manual_seed(37)
         tp = O3TensorProduct(
-            "3x0e+3x1o+3x2e",
+            f"{channels}x0e+{channels}x1o+{channels}x2e",
             "0e+1o+2e",
-            "+".join(["3x1o"] * 4 + ["3x2e"] * 2),
+            "+".join([f"{channels}x1o"] * 4 + [f"{channels}x2e"] * 2),
             [
                 (a, b, i, "uvu", True)
                 for i, (a, b) in enumerate(

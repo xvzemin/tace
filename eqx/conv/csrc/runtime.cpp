@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace py = pybind11;
@@ -79,6 +80,19 @@ struct Kernel {
         }
     }
 
+    int active_blocks(unsigned int threads, unsigned int shared_bytes) {
+        CUcontext current;
+        check(cuCtxGetCurrent(&current));
+        const bool change = current != context;
+        if (change) check(cuCtxPushCurrent(context));
+        int blocks = 0;
+        const auto status = cuOccupancyMaxActiveBlocksPerMultiprocessor(
+            &blocks, function, threads, shared_bytes);
+        if (change) cuCtxPopCurrent(&current);
+        check(status);
+        return blocks;
+    }
+
     void launch(std::vector<uint64_t> arguments, unsigned int gx, unsigned int gy,
                 unsigned int threads, uint64_t stream) {
         if (!gx || !gy) return;
@@ -95,8 +109,38 @@ struct Kernel {
     }
 };
 
+using Launch = std::tuple<std::shared_ptr<Kernel>, std::vector<uint64_t>,
+                          unsigned int, unsigned int, unsigned int, unsigned int>;
+
+void launch(std::vector<Launch> calls, uint64_t stream) {
+    if (calls.empty()) return;
+    py::gil_scoped_release release;
+    CUcontext current;
+    check(cuCtxGetCurrent(&current));
+    const auto context = std::get<0>(calls.front())->context;
+    const bool change = current != context;
+    if (change) check(cuCtxPushCurrent(context));
+    CUresult status = CUDA_SUCCESS;
+    std::vector<void*> pointers;
+    for (auto& [kernel, arguments, gx, gy, threads, shared_bytes] : calls) {
+        if (!gx || !gy) continue;
+        if (kernel->context != context) {
+            status = CUDA_ERROR_INVALID_CONTEXT;
+            break;
+        }
+        pointers.clear();
+        for (auto& value : arguments) pointers.push_back(&value);
+        status = cuLaunchKernel(kernel->function, gx, gy, 1, threads, 1, 1, shared_bytes,
+                                reinterpret_cast<CUstream>(stream), pointers.data(), nullptr);
+        if (status != CUDA_SUCCESS) break;
+    }
+    if (change) cuCtxPopCurrent(&current);
+    check(status);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("compile", &compile);
+    m.def("launch", &launch);
     m.def("version", []() {
         int major, minor;
         nvrtcVersion(&major, &minor);
@@ -106,5 +150,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def(py::init<py::bytes, const std::string&>())
         .def_readonly("registers", &Kernel::registers)
         .def_readonly("local_bytes", &Kernel::local_bytes)
+        .def("active_blocks", &Kernel::active_blocks)
         .def("launch", &Kernel::launch);
 }

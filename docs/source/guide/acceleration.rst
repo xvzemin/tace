@@ -134,9 +134,11 @@ are not implemented by the CUDA backend.
 Paths sharing input features reuse their local rotation. Derivative programs
 are partitioned by shared dependencies and register requirements, without a
 fixed angular-degree threshold. Compiled register counts and local-memory
-usage refine the partition, and static schedules are cached. Wigner matrices
-and their output adjoints share a bounded per-warp storage budget, reducing
-register pressure and repeated global gradient reductions.
+usage refine the partition, and static schedules are cached. Wide channel tiles
+share Wigner matrices across warps. Input and output rotations using the same
+matrix accumulate into one adjoint, with path and channel contributions combined
+in bounded shared memory before global reduction. Block sizes follow compiled
+occupancy, and cached kernel phases are launched together.
 Node-owned reductions accumulate before
 writing results; split rows and shared gradients use atomic additions.
 Floating-point summation order can therefore differ from the reference.

@@ -331,13 +331,17 @@ class TensorModel(torch.nn.Module):
                 displacement = None
             source = data["edge_index"][0]
             target = data["edge_index"][1]
-            edge_batch = data["batch"][source]
+            if num_graphs == 1:
+                # Broadcast the shared cell without an edge copy. Its backward
+                # uses a reduction instead of repeated-index atomic additions.
+                edge_lattice = data["lattice"].expand(source.size(0), -1, -1)
+            else:
+                edge_batch = data["batch"][source]
+                edge_lattice = data["lattice"][edge_batch]
             edge_vector = (
                 data["positions"][target]
                 - data["positions"][source]
-                + torch.einsum(
-                    "ni,nij->nj", data["edge_shifts"], data["lattice"][edge_batch]
-                )
+                + torch.einsum("ni,nij->nj", data["edge_shifts"], edge_lattice)
             )
             if set(self.get_target_property()) & {
                 "edge_vector",

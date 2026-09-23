@@ -168,7 +168,7 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                 and sum(path[5] for _, path, _ in paths) * len(operations[8]) > 80
             ):
                 owner = -1
-            code, width = convolution_source(
+            code, width, shared_bytes = convolution_source(
                 paths,
                 tuple(operations),
                 dimensions,
@@ -178,14 +178,16 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                 dtype,
                 owner,
             )
-            phases.append((code, width, owner, inputs, results, paths, terms))
+            phases.append(
+                (code, width, shared_bytes, owner, inputs, results, paths, terms)
+            )
     # Compile candidates together, then refine only kernels with excessive live
     # state. Splitting is independent of angular degree and never changes paths.
     accepted = []
     while phases:
         compiled = kernels([phase[0] for phase in phases], device)
         pending = []
-        for code, width, owner, inputs, results, paths, terms in phases:
+        for code, width, shared_bytes, owner, inputs, results, paths, terms in phases:
             kernel = compiled[code]
             if kernel.registers > 160 or kernel.local_bytes:
                 boundaries = [
@@ -209,7 +211,7 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                 if parts:
                     for subset, group in parts:
                         operands, destinations, *operations = schedule(group)
-                        source, width = convolution_source(
+                        source, width, shared_bytes = convolution_source(
                             subset,
                             tuple(operations),
                             dimensions,
@@ -223,6 +225,7 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                             (
                                 source,
                                 width,
+                                shared_bytes,
                                 owner,
                                 operands,
                                 destinations,
@@ -231,10 +234,29 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                             )
                         )
                     continue
+            # Use compiled occupancy to size channel and edge tiles. Wide
+            # channels share matrix storage across warps; no degree thresholds.
+            common, per_warp = shared_bytes
+            sizes = (
+                tuple(
+                    n for n in (64, 128, 256) if n <= max(64, (width + 31) // 32 * 32)
+                )
+                if width > 32
+                else (64, 128, 256)
+            )
+            threads = max(
+                (n for n in sizes if common + per_warp * (n // 32) <= 49152),
+                key=lambda n: (
+                    n * kernel.active_blocks(n, common + per_warp * (n // 32)),
+                    -abs(n - THREADS),
+                ),
+            )
             accepted.append(
                 (
-                    code,
+                    kernel,
                     width,
+                    common + per_warp * (threads // 32),
+                    threads,
                     owner,
                     tuple(locations[id(value)] for value in inputs),
                     tuple(locations[id(value)] for value in results),
@@ -269,10 +291,10 @@ def contract(plan, source, target, calls, shared=None):
         source.numel() >= 1024,
         x.device,
     )
-    compiled = kernels([phase[0] for phase in phases], x.device)
     stream = torch.cuda.current_stream(x.device).cuda_stream
     graphs = {}
-    for code, width, owner, inputs, results in phases:
+    launches = []
+    for kernel, width, shared_bytes, threads, owner, inputs, results in phases:
         if owner >= 0:
             if owner not in graphs:
                 graphs[owner] = prepare_graph(
@@ -297,13 +319,19 @@ def contract(plan, source, target, calls, shared=None):
             )
         ]
         args += [source.numel(), count]
-        compiled[code].launch(
-            args,
-            (count + THREADS // 32 - 1) // (THREADS // 32),
-            (width + 31) // 32,
-            THREADS,
-            stream,
+        tasks_per_block = 1 if width > 32 else threads // 32
+        channels_per_block = threads if width > 32 else 32
+        launches.append(
+            (
+                kernel,
+                args,
+                (count + tasks_per_block - 1) // tasks_per_block,
+                (width + channels_per_block - 1) // channels_per_block,
+                threads,
+                shared_bytes,
+            )
         )
+    runtime().launch(launches, stream)
 
 
 def contract_many(plan, source, target, calls):

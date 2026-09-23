@@ -33,6 +33,59 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
+@pytest.mark.parametrize("num_graphs", [1, 2])
+def test_periodic_graph_derivatives(num_graphs):
+    from tace.models.adapter import TensorModel
+
+    torch.manual_seed(71)
+    positions = torch.randn(3 * num_graphs, 3, dtype=DTYPE, requires_grad=True)
+    lattice = torch.randn(num_graphs, 3, 3, dtype=DTYPE, requires_grad=True)
+    edges = torch.cat(
+        [torch.tensor([[0, 1, 2, 1], [2, 0, 1, 2]]) + 3 * i for i in range(num_graphs)],
+        dim=1,
+    )
+    data = dict(
+        positions=positions,
+        lattice=lattice,
+        node_attrs=torch.ones(3 * num_graphs, 1, dtype=DTYPE),
+        edge_index=edges,
+        edge_shifts=torch.randint(-1, 2, (edges.size(1), 3)).to(DTYPE),
+        batch=torch.arange(num_graphs).repeat_interleave(3),
+        ptr=torch.arange(num_graphs + 1) * 3,
+        fidelity_idx=torch.zeros(num_graphs, dtype=torch.long),
+    )
+    model = Mock(
+        lmp=False,
+        readout_fn=torch.nn.Module(),
+        flags=Mock(compute_virials=True, compute_stress=True),
+    )
+    model.get_target_property.return_value = ["energy", "forces", "stress"]
+    graph = TensorModel.prepare_graph(model, data)
+    source, target = edges
+    reference = (
+        data["positions"][target]
+        - data["positions"][source]
+        + torch.einsum(
+            "ni,nij->nj", data["edge_shifts"], data["lattice"][data["batch"][source]]
+        )
+    )
+    torch.testing.assert_close(graph.edge_vector, reference)
+    inputs = positions, lattice, graph.displacement
+    actual, expected = graph.edge_vector.sin(), reference.sin()
+    for _ in range(3):
+        seed = torch.randn_like(actual)
+        derivatives = [
+            torch.autograd.grad(
+                (value * seed).sum(), inputs, create_graph=True, retain_graph=True
+            )
+            for value in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in grads]) for grads in derivatives
+        ]
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+
+
 def _time_reverse(features: torch.Tensor, irreps) -> torch.Tensor:
     output = features.clone()
     for ir_mul, ir_slice in zip(irreps, irreps.slices()):

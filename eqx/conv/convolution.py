@@ -237,8 +237,11 @@ class Convolution(torch.nn.Module):
     adjoints share local rotations and accumulate into their destinations
     before inverse rotations. Compilation partitions derivative programs by
     shared dependencies, reduction axes and register usage, rather than an
-    angular-degree threshold. Bounded per-warp shared memory holds rotation
-    matrices and combines their output adjoints before global reduction.
+    angular-degree threshold. Wide channel tiles share rotation matrices across
+    warps, while narrow tiles process independent edges per warp. Shared input
+    and output rotations accumulate into one adjoint. Their path and channel
+    contributions are combined in bounded shared memory before global reduction.
+    Compiled occupancy determines block sizes, and cached phases launch together.
     Source- or receiver-owned tasks accumulate rows
     in registers before writing node contributions; split rows and shared gradients
     use atomic additions. Plans are reused for unchanged topology, with
@@ -366,12 +369,13 @@ class Convolution(torch.nn.Module):
         # A zero-stride placeholder supplies the output shape without allocating
         # a second node output. It is never read by the forward contraction.
         output = features.new_empty(1).expand(num_nodes, self.output_dim)
-        program = ((tuple(range(7)), False, ((6, 0),)),)
+        # Both rotations depend on the same tensor. Keep one operand so their
+        # adjoints accumulate together, including in recursively transposed calls.
+        program = (((0, 1, 2, 3, 3, 4, 5), False, ((6, 0),)),)
         operands = [
             features,
             radial,
             projection,
-            wigner,
             wigner,
             amplitudes,
             output,
