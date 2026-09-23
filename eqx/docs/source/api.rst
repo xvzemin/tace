@@ -77,6 +77,14 @@ and a CUDA toolkit. CUDA supports ``uvu`` instructions. ``backend="torch"``
 selects the reference implementation, including ``uvw`` instructions.
 Both backends support recursive higher derivatives.
 
+Passing ``vectors=edge_vector`` to ``Convolution.forward`` enables direct
+direction derivatives. Supply their packed alignment matrices, for example
+with ``wigner_D(frame, edge_vector.detach())``. The matrices are then cached
+values, and sparse rotation-generator contractions provide the geometry
+derivatives, including higher orders. Degree-zero harmonic paths bypass the
+rotations. Omitting ``vectors`` preserves differentiation with respect to the
+matrix entries themselves.
+
 .. autoclass:: eqx.conv.Convolution
    :members: forward
 

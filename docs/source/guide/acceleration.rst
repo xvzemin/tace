@@ -135,23 +135,32 @@ Paths sharing input features reuse their local rotation. Derivative programs
 are partitioned by shared dependencies and register requirements, without a
 fixed angular-degree threshold. Compiled register counts and local-memory
 usage refine the partition, and static schedules are cached. Wide channel tiles
-share Wigner matrices across warps. Input and output rotations using the same
-matrix accumulate into one adjoint, with path and channel contributions combined
-in bounded shared memory before global reduction. Block sizes follow compiled
-occupancy, and cached kernel phases are launched together.
+share Wigner matrices across warps. Cached launch configurations use compiled
+occupancy and, outside CUDA Graph capture, measured latency on private outputs.
+Tuning uses a bounded scratch allocation and never modifies model results.
+Cached kernel phases are launched together.
 Node-owned reductions accumulate before
 writing results; split rows and shared gradients use atomic additions.
 Floating-point summation order can therefore differ from the reference.
 
-Wigner matrices remain differentiable geometric inputs packed by degree.
-Quaternion alignment and recursive CG contractions use generated CUDA,
-including their higher derivatives. Their formulas and normalization are
-unchanged. The radial MLP's preceding layers and node-level ``linear_down``
-remain separate.
+TACE supplies edge vectors together with packed Wigner matrices. Geometry
+derivatives contract sparse rotation generators directly, avoiding dense
+Wigner-matrix adjoints and backpropagation through frame construction.
+The same contraction rule applies recursively to higher derivatives, including
+the second derivatives used in force training. Harmonic amplitudes retain
+their separate radial derivatives. Degree-zero harmonic paths cancel both
+rotations exactly, while keeping each path and its weight independent.
+
+Quaternion alignment and recursive CG contractions build all cached degree
+matrices in one allocation. Their formulas and normalization are unchanged.
+The EQX API also retains differentiation of arbitrary matrix entries when edge
+vectors are omitted. The radial MLP's preceding layers and node-level
+``linear_down`` remain separate.
 
 A small C++ launcher is built once. Independent NVRTC kernels are compiled
 concurrently and cached by code, compiler version and GPU architecture.
-Edge counts are runtime arguments. Warm up forward and required derivatives
+Edge counts are runtime arguments. Launch tuning is also performed on first use.
+Warm up forward and required derivatives
 before CUDA Graph capture. Compilation is excluded from warmed throughput
 measurements.
 

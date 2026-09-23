@@ -34,6 +34,8 @@ def convolution_source(
     # tiles keep independent edges in each warp without block synchronization.
     matrices = {}
     for path in input_paths:
+        if path[6] < 0:
+            continue
         for pd in (*[pd for _, pd in xp], *[pd for pd, *_ in gx]):
             matrices[pd, "ei", path[6], path[4]] = None
     # C has one nonzero per supported order. Fold it into the output Wigner
@@ -41,6 +43,8 @@ def convolution_source(
     coupled_offsets, coupled_entries = {}, {}
     coupled_size = 0
     for j, (_, path, _) in enumerate(paths):
+        if path[7] < 0:
+            continue
         for pd in (*[pd for _, pd in yp], *[pd for pd, *_ in gy]):
             for b, (_, c) in support[j].items():
                 key = pd, path[7] + b * path[5], path[5], c
@@ -149,6 +153,8 @@ def convolution_source(
             for name, _ in selected:
                 emit(f"T {name}{a} = 0;")
             for b in range(size):
+                if offset < 0 and a != b:
+                    continue
                 terms = [
                     (name, values[b])
                     for name, values in selected
@@ -159,7 +165,13 @@ def convolution_source(
                 index = b * size + a if transpose else a * size + b
                 coefficients = {}
                 for name, value in terms:
-                    if couplings is None:
+                    if offset < 0:
+                        coefficient = (
+                            "T(1)"
+                            if couplings is None
+                            else f"T({support[couplings[name]][a][1]:.17g})"
+                        )
+                    elif couplings is None:
                         coefficient = (
                             f"matrix[{matrices[p, e, offset, size] + index}]"
                             if staging
@@ -513,7 +525,8 @@ def rotation_source(widths, terms, dtype, output):
         + f"""
 extern "C" __global__ void run(const T* a, const T* b, T* c,
     const int* indices, const T* coefficients, int64_t edges,
-    int64_t as0, int64_t as1, int64_t bs0, int64_t bs1) {{
+    int64_t as0, int64_t as1, int64_t bs0, int64_t bs1,
+    int64_t cs0, int64_t cs1) {{
     const int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= edges * {c}) return;
     const int64_t edge = index / {c}, row = index % {c};
@@ -524,7 +537,7 @@ extern "C" __global__ void run(const T* a, const T* b, T* c,
         if (cg != T(0)) value = fma(cg * a[edge * as0 + indices[2 * term] * as1],
                                   b[edge * bs0 + indices[2 * term + 1] * bs1], value);
     }}
-    c[index] = value;
+    c[edge * cs0 + row * cs1] = value;
 }}
 """
     )
@@ -636,6 +649,23 @@ class ScalarProgram:
 @lru_cache(maxsize=128)
 def alignment_program(key, dtype):
     """Represent the existing quaternion alignment, without changing its branches."""
+    if key == "direction_gradient":
+        program = ScalarProgram()
+        vectors = [program.add("input", 0, i) for i in range(3)]
+        torque = [program.add("input", 1, i) for i in range(3)]
+        norm = program.constant(0)
+        for value in vectors:
+            norm = program.add("add", norm, program.add("mul", value, value))
+        gradient = []
+        for i in range(3):
+            j, k = (i + 1) % 3, (i + 2) % 3
+            cross = program.add(
+                "add",
+                program.add("mul", torque[j], vectors[k]),
+                program.add("neg", program.add("mul", torque[k], vectors[j])),
+            )
+            gradient.append(program.add("div", cross, norm))
+        return tuple(program.nodes), (tuple(gradient),), (3, 3)
     if key is not None:
         parent, active = key
         nodes, outputs, widths = alignment_program(parent, dtype)

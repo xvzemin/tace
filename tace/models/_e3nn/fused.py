@@ -407,5 +407,6 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             harmonic_scale,
             edge_index,
             node_feats.size(0),
+            vectors=graph.edge_vector,
         )
         return self.reshape_streamed(message)

@@ -409,7 +409,11 @@ class Representation(torch.nn.Module):
             if getattr(self, "use_packed_wigner", False):
                 from eqx.conv import wigner_D
 
-                edge_wigner = wigner_D(self.o2_angular_basis, graph.edge_vector)
+                # Streamed CGTPs differentiate directions directly; their
+                # degree matrices are shared cached values, not AD operands.
+                edge_wigner = wigner_D(
+                    self.o2_angular_basis, graph.edge_vector.detach()
+                )
             else:
                 edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
         edge_attrs = (

@@ -18,7 +18,7 @@ parse_alignment = lru_cache(maxsize=128)(literal_eval)
 
 @torch.library.custom_op("eqx::alignment_cuda", mutates_args=(), device_types="cuda")
 def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
-    """Execute the quaternion alignment or a recursively generated transpose."""
+    """Execute frame geometry expressions or their recursive transposes."""
     from .codegen import alignment_source
     from .cuda import kernels
 
@@ -155,6 +155,35 @@ def rotation_backward(ctx, gradient):
 rotation.register_autograd(rotation_backward, setup_context=rotation_setup_context)
 
 
+@torch.library.custom_op("eqx::packed_wigner", mutates_args=(), device_types="cuda")
+def packed_wigner(
+    vectors: torch.Tensor, degree: int, coefficients: list[torch.Tensor]
+) -> torch.Tensor:
+    """Build cached degree matrices directly in one packed allocation."""
+    from .cuda import rotate
+
+    result = packed_wigner_fake(vectors, degree, coefficients)
+    if not vectors.size(0):
+        return result
+    result[:, :1].fill_(1)
+    if degree:
+        aligned = alignment_cuda("None", [vectors])[0]
+        result[:, 1:10].copy_(aligned)
+        previous, start = aligned, 10
+        for cg in coefficients:
+            stop = start + cg.size(2) ** 2
+            current = result[:, start:stop]
+            rotate(cg, 2, (aligned, previous, current), current, rotation_plan)
+            previous, start = current, stop
+    return result
+
+
+@packed_wigner.register_fake
+def packed_wigner_fake(vectors, degree, coefficients):
+    width = sum((2 * l + 1) ** 2 for l in range(degree + 1))
+    return vectors.new_empty(vectors.size(0), width)
+
+
 def wigner_D(frame, vectors, *, backend="cuda"):
     """Return packed Wigner matrices with recursively fused CUDA derivatives.
 
@@ -167,7 +196,8 @@ def wigner_D(frame, vectors, *, backend="cuda"):
     backend : {"cuda", "torch"}, optional
         Execution backend. Generated CUDA is the default on GPU. The
         quaternion alignment and recursive degree contractions retain
-        differentiable transposes at every order.
+        differentiable transposes at every order. When direction gradients are
+        not requested, all degree matrices are built in one packed allocation.
 
     Returns
     -------
@@ -183,6 +213,12 @@ def wigner_D(frame, vectors, *, backend="cuda"):
         or vectors.dtype not in (torch.float32, torch.float64)
     ):
         return frame.forward_packed(vectors)
+    if not vectors.requires_grad or not torch.is_grad_enabled():
+        return packed_wigner(
+            vectors.detach(),
+            frame.lmax,
+            [getattr(frame, f"cg_{l}") for l in range(2, frame.lmax + 1)],
+        )
     aligned = alignment_cuda("None", [vectors])[0]
     matrices = [aligned.new_ones((vectors.size(0), 1))]
     if frame.lmax:

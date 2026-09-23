@@ -26,6 +26,7 @@ CHUNK_SIZE = 65536
 ROW_SIZE = 64
 THREADS = 128
 _KERNELS = OrderedDict()
+_LAUNCH_CONFIGS = OrderedDict()
 _RUNTIME_LOCK = threading.Lock()
 _POOL = ThreadPoolExecutor(max_workers=min(16, len(os.sched_getaffinity(0))))
 
@@ -121,6 +122,61 @@ def kernels(sources, device):
     return result
 
 
+def launch_config(kernel, width, count, storage, threads, tensors, scalars, outputs):
+    """Choose a cached block size using private outputs and measured latency."""
+    common, per_warp = storage
+    key = kernel, width, (max(1, count) - 1).bit_length(), storage
+    if key in _LAUNCH_CONFIGS:
+        _LAUNCH_CONFIGS.move_to_end(key)
+        return _LAUNCH_CONFIGS[key]
+    candidates = [
+        n
+        for n in (32, 64, 128, 256)
+        if (width <= 32 or n <= max(32, (width + 31) // 32 * 32))
+        and common + per_warp * (n // 32) <= 49152
+        and kernel.active_blocks(n, common + per_warp * (n // 32))
+    ]
+    scratch_bytes = sum(tensors[i].numel() * tensors[i].element_size() for i in outputs)
+    if (
+        count * width >= 4096
+        and scratch_bytes <= 64 << 20
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        # Tuning must not accumulate into the actual results, including when
+        # the same destination is shared by several derivative terms.
+        scratch = {slot: torch.zeros_like(tensors[slot]) for slot in outputs}
+        arguments = [
+            scratch.get(i, value).data_ptr() for i, value in enumerate(tensors)
+        ] + list(scalars)
+        stream = torch.cuda.current_stream(tensors[0].device)
+        start, stop = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+        timings = []
+        for n in candidates:
+            edges_per_block = 1 if width > 32 else n // 32
+            channels_per_block = n if width > 32 else 32
+            candidate = (
+                kernel,
+                arguments,
+                (count + edges_per_block - 1) // edges_per_block,
+                (width + channels_per_block - 1) // channels_per_block,
+                n,
+                common + per_warp * (n // 32),
+            )
+            runtime().launch([candidate] * 2, stream.cuda_stream)
+            start.record(stream)
+            runtime().launch([candidate] * 5, stream.cuda_stream)
+            stop.record(stream)
+            stop.synchronize()
+            timings.append((start.elapsed_time(stop), n))
+        threads = min(timings)[1]
+    result = threads, common + per_warp * (threads // 32)
+    if not torch.cuda.is_current_stream_capturing():
+        _LAUNCH_CONFIGS[key] = result
+        if len(_LAUNCH_CONFIGS) > 1024:
+            _LAUNCH_CONFIGS.popitem(last=False)
+    return result
+
+
 @lru_cache(maxsize=256)
 def execution_plan(plan, specification, dimensions, shared, dtype, grouped, device):
     """Cache tensor-free schedules, using compiled resource usage to bound tiles."""
@@ -141,6 +197,12 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
     phases = []
     for indices in contraction_groups(plan.path_data):
         entries = [(*plan.path_data[i], plan.sparse_paths[i], i) for i in indices]
+        entries = [
+            (mode, (*path[:6], -1, -1, *path[8:]), cg, i)
+            if i in plan.scalar_paths
+            else (mode, path, cg, i)
+            for mode, path, cg, i in entries
+        ]
         entries.sort(key=lambda entry: (entry[1][7], entry[1][0]))
         paths = tuple((mode, path, cg) for mode, path, cg, _ in entries)
         pending = deque([(paths, calls)])
@@ -255,7 +317,7 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                 (
                     kernel,
                     width,
-                    common + per_warp * (threads // 32),
+                    (common, per_warp),
                     threads,
                     owner,
                     tuple(locations[id(value)] for value in inputs),
@@ -294,7 +356,7 @@ def contract(plan, source, target, calls, shared=None):
     stream = torch.cuda.current_stream(x.device).cuda_stream
     graphs = {}
     launches = []
-    for kernel, width, shared_bytes, threads, owner, inputs, results in phases:
+    for kernel, width, storage, threads, owner, inputs, results in phases:
         if owner >= 0:
             if owner not in graphs:
                 graphs[owner] = prepare_graph(
@@ -308,17 +370,25 @@ def contract(plan, source, target, calls, shared=None):
             count = tasks.size(0)
         else:
             order, tasks, count = source, source, source.numel()
-        args = [
-            value.data_ptr()
-            for value in (
-                *(values[i] for i in (*inputs, *results)),
-                source,
-                target,
-                order,
-                tasks,
-            )
-        ]
-        args += [source.numel(), count]
+        tensors = (
+            *(values[i] for i in (*inputs, *results)),
+            source,
+            target,
+            order,
+            tasks,
+        )
+        scalars = (source.numel(), count)
+        threads, shared_bytes = launch_config(
+            kernel,
+            width,
+            count,
+            storage,
+            threads,
+            tensors,
+            scalars,
+            range(len(inputs), len(inputs) + len(results)),
+        )
+        args = [value.data_ptr() for value in tensors] + list(scalars)
         tasks_per_block = 1 if width > 32 else threads // 32
         channels_per_block = threads if width > 32 else 32
         launches.append(
@@ -356,6 +426,132 @@ def contract_many(plan, source, target, calls):
         contract(plan, source, target, prepared)
 
 
+@lru_cache(maxsize=256)
+def direction_plan(metadata, specification, layouts, dtype, device):
+    """Compile shared tiles of mixed angular and vector adjoints."""
+    from .convolution import kernel_plan
+    from .direction_codegen import direction_source
+
+    plan = kernel_plan(metadata)
+    pending = list(contraction_groups(plan.path_data))
+    accepted = []
+    while pending:
+        sources = [
+            direction_source(metadata, group, specification, layouts, dtype)
+            for group in pending
+        ]
+        compiled = kernels([entry[0] for entry in sources], device)
+        remaining = []
+        for group, (code, width, storage) in zip(pending, sources):
+            kernel = compiled[code]
+            if (kernel.local_bytes or kernel.registers > 160) and len(group) > 1:
+                middle = len(group) // 2
+                remaining.extend((group[:middle], group[middle:]))
+                continue
+            sizes = tuple(
+                n
+                for n in (64, 128, 256)
+                if (width <= 32 or n <= max(64, (width + 31) // 32 * 32))
+                and (storage if width > 32 else storage * (n // 32)) <= 49152
+            )
+            threads = max(
+                sizes,
+                key=lambda n: (
+                    n
+                    * kernel.active_blocks(
+                        n, storage if width > 32 else storage * (n // 32)
+                    ),
+                    -abs(n - THREADS),
+                ),
+            )
+            shared_bytes = (storage, 0) if width > 32 else (0, storage)
+            accepted.append((kernel, width, threads, shared_bytes))
+        pending = remaining
+    return tuple(accepted)
+
+
+def contract_directions(metadata, source, target, calls):
+    """Stream radial projections once across all geometric derivative terms."""
+    from .convolution import kernel_plan
+
+    plan = kernel_plan(metadata)
+    contiguous, prepared = {}, []
+    for rank, outputs, operands, results, weighted in calls:
+        values = []
+        for role, value in enumerate(operands):
+            if outputs != (role,) and not value.is_contiguous():
+                if id(value) not in contiguous:
+                    contiguous[id(value)] = value.contiguous()
+                value = contiguous[id(value)]
+            values.append(value)
+        prepared.append((rank, outputs, tuple(values), results, weighted))
+
+    def execute(plan, source, target, terms, shared=None):
+        if all(rank == 0 for rank, *_ in terms):
+            return contract(plan, source, target, [term[1:] for term in terms], shared)
+        values, locations, specification = [], {}, []
+        for rank, outputs, operands, results, weighted in terms:
+            slots = []
+            for value in (*operands, *results):
+                if id(value) not in locations:
+                    locations[id(value)] = len(values)
+                    values.append(value)
+                slots.append(locations[id(value)])
+            specification.append(
+                (
+                    rank,
+                    outputs,
+                    tuple(slots[: len(operands)]),
+                    tuple(slots[len(operands) :]),
+                    weighted,
+                )
+            )
+        layouts = tuple((value.size(0) == 1, *value.stride()) for value in values)
+        phases = direction_plan(
+            metadata,
+            tuple(specification),
+            layouts,
+            "float" if values[0].dtype == torch.float32 else "double",
+            values[0].device,
+        )
+        tensors = (*values, source, target)
+        pointers = [value.data_ptr() for value in tensors] + [source.numel()]
+        destinations = {slot for _, _, _, slots, _ in specification for slot in slots}
+        launches = []
+        for kernel, width, threads, storage in phases:
+            threads, shared_bytes = launch_config(
+                kernel,
+                width,
+                source.numel(),
+                storage,
+                threads,
+                tensors,
+                (source.numel(),),
+                destinations,
+            )
+            tasks = 1 if width > 32 else threads // 32
+            channels = threads if width > 32 else 32
+            launches.append(
+                (
+                    kernel,
+                    pointers,
+                    (source.numel() + tasks - 1) // tasks,
+                    (width + channels - 1) // channels,
+                    threads,
+                    shared_bytes,
+                )
+            )
+        runtime().launch(
+            launches, torch.cuda.current_stream(values[0].device).cuda_stream
+        )
+
+    source, target = source.contiguous(), target.contiguous()
+    if prepared[0][2][2].numel():
+        project(plan, source, target, prepared, execute, CHUNK_SIZE, WORKSPACE_BYTES)
+    else:
+        execute(plan, source, target, prepared)
+
+
 def rotate(cg, output, values, result, rotation_plan):
     """Evaluate a recursive Wigner contraction using CUDA, including transposes."""
     inputs = [value for i, value in enumerate(values) if i != output]
@@ -369,7 +565,12 @@ def rotate(cg, output, values, result, rotation_plan):
     )
     kernel = kernels([code], result.device)[code]
     arguments = [value.data_ptr() for value in (*inputs, result, indices, coefficients)]
-    arguments += [result.size(0), *inputs[0].stride(), *inputs[1].stride()]
+    arguments += [
+        result.size(0),
+        *inputs[0].stride(),
+        *inputs[1].stride(),
+        *result.stride(),
+    ]
     kernel.launch(
         arguments,
         (result.numel() + 127) // 128,

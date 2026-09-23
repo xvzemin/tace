@@ -98,6 +98,284 @@ def test_derivative_partition_reuses_rotations():
         assert group[0][1][6] is group[1][1][6]
 
 
+@pytest.mark.parametrize(
+    "device,backend,mode",
+    [
+        ("cpu", "torch", "uvu"),
+        ("cpu", "torch", "uvw"),
+        ("cuda", "torch", "uvu"),
+        ("cuda", "cuda", "uvu"),
+    ],
+)
+@pytest.mark.parametrize(
+    "projected,shared", [(False, False), (True, False), (True, True)]
+)
+def test_direction_derivatives(monkeypatch, device, backend, mode, projected, shared):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import cuda
+
+    monkeypatch.setattr(cuda, "CHUNK_SIZE", 3)
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        torch.manual_seed(76)
+        tp = O3TensorProduct(
+            "2x1o+2x2e",
+            "0e+1o+2e",
+            "2x1o+2x2e+2x1e+2x2o",
+            [
+                (0, 0, 0, mode, True),
+                (1, 0, 1, mode, True),
+                (0, 1, 2, mode, True),
+                (1, 1, 3, mode, True),
+                (1, 2, 1, "uvu", False),
+            ],
+            internal_weights=False,
+            shared_weights=False,
+        ).to(device)
+        plan = Convolution(tp, backend=backend).to(device)
+        reference = Convolution(tp, backend="torch").to(device)
+        frame = WignerD(2, 2).to(device)
+        edges = torch.tensor([[0, 1, 2, 0], [2, 2, 1, 1]], device=device)
+
+        def rand(*shape):
+            return torch.randn(*shape, device=device, requires_grad=True)
+
+        rows = 1 if shared else 4
+        x, vectors = rand(3, tp.input_dim), rand(rows, 3)
+        radial = rand(rows, 3 if projected else tp.weight_numel)
+        projection = (
+            rand(3, tp.weight_numel)
+            if projected
+            else radial.new_empty(0, tp.weight_numel)
+        )
+        amplitude = rand(rows, 3)
+        inputs = (
+            (x, vectors, radial, amplitude, projection)
+            if projected
+            else (x, vectors, radial, amplitude)
+        )
+        packed = frame.forward_packed(vectors)
+        args = x, radial, projection, packed, amplitude, edges, 3
+        actual = plan(*args, vectors=vectors).sin()
+        expected = reference(*args).sin()
+        torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+        for _ in range(3):
+            cotangent = torch.randn_like(actual) / actual.numel() ** 0.5
+            derivatives = [
+                torch.autograd.grad(
+                    (value * cotangent).sum(),
+                    inputs,
+                    create_graph=True,
+                    retain_graph=True,
+                )
+                for value in (actual, expected)
+            ]
+            actual, expected = [
+                torch.cat([g.flatten() for g in grads]) for grads in derivatives
+            ]
+            torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+    finally:
+        torch.set_default_dtype(previous)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_direction_zero_order_and_empty_edges(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = (
+        O3TensorProduct("2x2e", "0e", "2x2e", [(0, 0, 0, "uvu", True)])
+        .to(device)
+        .double()
+    )
+    plan = Convolution(tp).to(device)
+    frame = WignerD(2, 2).to(device).double()
+    for size in (0, 4):
+        x = torch.randn(3, 10, device=device, dtype=torch.float64, requires_grad=True)
+        vectors = torch.randn(
+            size, 3, device=device, dtype=torch.float64, requires_grad=True
+        )
+        weights = torch.randn(
+            size, 2, device=device, dtype=torch.float64, requires_grad=True
+        )
+        edges = torch.randint(3, (2, size), device=device)
+        output = plan(
+            x,
+            weights,
+            weights.new_empty(0, 2),
+            frame.forward_packed(vectors),
+            weights.new_ones(size, 1),
+            edges,
+            3,
+            vectors=vectors,
+        )
+        gradient = torch.autograd.grad(
+            output.square().sum(), vectors, create_graph=True
+        )[0]
+        torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)
+        second = torch.autograd.grad(gradient.sum(), vectors)[0]
+        torch.testing.assert_close(second, torch.zeros_like(second), atol=0, rtol=0)
+
+
+def test_direction_compile_and_capture():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import wigner_D
+
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        tp = O3TensorProduct(
+            "2x1o", "1o", "2x0e+2x1e", [(0, 0, i, "uvu", True) for i in range(2)]
+        ).cuda()
+        plan = Convolution(tp).cuda()
+        reference = Convolution(tp, backend="torch").cuda()
+        frame = WignerD(1, 1).cuda()
+        x = torch.randn(3, 6, device="cuda", requires_grad=True)
+        vectors = torch.randn(35, 3, device="cuda", requires_grad=True)
+        radial = torch.randn(35, 3, device="cuda", requires_grad=True)
+        projection = torch.randn(3, tp.weight_numel, device="cuda", requires_grad=True)
+        edges = torch.randint(3, (2, 35), device="cuda")
+
+        def evaluate(x, vectors, radial, projection, edges):
+            packed = wigner_D(frame, vectors.detach())
+            return plan(
+                x,
+                radial,
+                projection,
+                packed,
+                radial.new_ones(radial.size(0), 1),
+                edges,
+                3,
+                vectors=vectors,
+            )
+
+        for _ in range(2):
+            torch.autograd.grad(
+                evaluate(x, vectors, radial, projection, edges).square().sum(),
+                (x, vectors, radial, projection),
+            )
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), torch.cuda.graph(graph, stream=stream):
+            actual = evaluate(x, vectors, radial, projection, edges)
+        graph.replay()
+        torch.testing.assert_close(
+            actual, evaluate(x, vectors, radial, projection, edges)
+        )
+        compiled = torch.compile(evaluate, fullgraph=True, dynamic=True)
+        for size in (35, 17):
+            actual = compiled(
+                x, vectors[:size], radial[:size], projection, edges[:, :size]
+            )
+            expected = reference(
+                x,
+                radial[:size],
+                projection,
+                frame.forward_packed(vectors[:size]),
+                radial.new_ones(size, 1),
+                edges[:, :size],
+                3,
+            )
+            torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+            actual_grads = torch.autograd.grad(
+                actual.square().sum(), (x, vectors, radial, projection)
+            )
+            expected_grads = torch.autograd.grad(
+                expected.square().sum(), (x, vectors, radial, projection)
+            )
+            for a, b in zip(actual_grads, expected_grads):
+                torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
+    finally:
+        torch.set_default_dtype(previous)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_direction_derivatives_on_axes(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn import o3
+
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        torch.manual_seed(42)
+        instructions = [(0, 0, i, "uvu", True) for i in range(3)]
+        tp = O3TensorProduct(
+            "1o",
+            "1o",
+            "0e+1e+2e",
+            instructions,
+            internal_weights=False,
+            shared_weights=False,
+        ).to(device)
+        reference = o3.TensorProduct(
+            "1o",
+            "1o",
+            "0e+1e+2e",
+            instructions,
+            internal_weights=False,
+            shared_weights=False,
+        ).to(device)
+        plan, frame = Convolution(tp).to(device), WignerD(2, 2).to(device)
+        vectors = torch.tensor(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, -1.0],
+                [1e-8, 1.0, -1e-8],
+                [-1e-8, -1.0, 1e-8],
+            ],
+            device=device,
+            requires_grad=True,
+        )
+        edges = torch.stack(
+            (torch.arange(8, device=device), torch.arange(8, device=device))
+        )
+        x = torch.randn(8, 3, device=device, requires_grad=True)
+        weights = torch.randn(8, tp.weight_numel, device=device, requires_grad=True)
+        # The unused empty projection remains a valid differentiable operand.
+        projection = torch.empty(0, tp.weight_numel, device=device, requires_grad=True)
+        actual = plan(
+            x,
+            weights,
+            projection,
+            frame.forward_packed(vectors),
+            weights.new_ones(8, 1),
+            edges,
+            8,
+            vectors=vectors,
+        )
+        expected = reference(
+            x, o3.spherical_harmonics([1], vectors, True, "component"), weights
+        )
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        for _ in range(3):
+            cotangent = torch.randn_like(actual) / actual.numel() ** 0.5
+            actual = torch.autograd.grad(
+                (actual.sin() * cotangent).sum(),
+                vectors,
+                create_graph=True,
+                retain_graph=True,
+            )[0]
+            expected = torch.autograd.grad(
+                (expected.sin() * cotangent).sum(),
+                vectors,
+                create_graph=True,
+                retain_graph=True,
+            )[0]
+            torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        (gradient,) = torch.autograd.grad(actual.sum(), projection)
+        assert gradient.shape == projection.shape
+    finally:
+        torch.set_default_dtype(previous)
+
+
 @pytest.mark.parametrize("owner", [0, 1])
 def test_convolution_graph_tiles(owner):
     from eqx.conv.graph import prepare_graph
@@ -141,6 +419,12 @@ def test_fused_wigner_derivatives(degree, dtype):
         expected = frame.forward_packed(vectors)
         tolerance = 2e-5 if dtype == torch.float32 else 2e-12
         torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        torch.testing.assert_close(
+            wigner_D(frame, vectors.detach()),
+            expected.detach(),
+            atol=tolerance,
+            rtol=tolerance,
+        )
         if degree:
             actual, expected = actual.sin(), expected.sin()
             for _ in range(4 if degree == 1 and dtype == torch.float64 else 3):
@@ -159,6 +443,9 @@ def test_fused_wigner_derivatives(degree, dtype):
                 )
         empty = vectors[:0]
         torch.testing.assert_close(wigner_D(frame, empty), frame.forward_packed(empty))
+        torch.testing.assert_close(
+            wigner_D(frame, empty.detach()), frame.forward_packed(empty).detach()
+        )
     finally:
         torch.set_default_dtype(previous)
 

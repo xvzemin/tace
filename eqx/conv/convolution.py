@@ -22,6 +22,7 @@ class _KernelPlan:
     weight_numel: int
     has_unweighted: bool
     sparse_paths: tuple
+    scalar_paths: tuple = ()
 
 
 @lru_cache(maxsize=256)
@@ -219,6 +220,15 @@ class Convolution(torch.nn.Module):
     gathers, both feature rotations, sparse coupling and reductions without
     retaining edge messages. Radial projections use matrix products
     in bounded edge chunks.
+
+    With ``vectors`` supplied, the rotation matrices are cached values.
+    Direction derivatives instead contract sparse angular tensors obtained by
+    applying rotation generators to every angular index, including indices
+    introduced by earlier derivatives. This retains recursive higher
+    derivatives without allocating rotation-matrix adjoints. Radial amplitudes
+    remain independent differentiable operands. Paths with degree-zero
+    harmonics bypass both rotations, without merging paths or their weights.
+
     Rotation matrices are supplied as packed degree blocks, not zero-padded
     block-diagonal matrices. Paths sharing an input block reuse its rotation
     within each angular/channel tile. Compatible output paths of the same
@@ -241,7 +251,10 @@ class Convolution(torch.nn.Module):
     warps, while narrow tiles process independent edges per warp. Shared input
     and output rotations accumulate into one adjoint. Their path and channel
     contributions are combined in bounded shared memory before global reduction.
-    Compiled occupancy determines block sizes, and cached phases launch together.
+    Compiled occupancy provides initial block sizes. Outside CUDA Graph capture,
+    sufficiently large calls measure candidate sizes using bounded private
+    outputs; the selected launch configurations are cached. Cached phases launch
+    together.
     Source- or receiver-owned tasks accumulate rows
     in registers before writing node contributions; split rows and shared gradients
     use atomic additions. Plans are reused for unchanged topology, with
@@ -279,6 +292,7 @@ class Convolution(torch.nn.Module):
         offset = 0
         self.path_data = []
         self.sparse_paths = []
+        scalar_paths = []
         for ins in self.instructions:
             mul, ir = self.irreps_in[ins.i_in1]
             mul_out, ir_out = self.irreps_out[ins.i_out]
@@ -288,6 +302,8 @@ class Convolution(torch.nn.Module):
                 offset += math.prod(ins.path_shape)
             if not mul or not mul_out or not ins.path_weight:
                 continue
+            if ir_sh.l == 0:
+                scalar_paths.append(len(self.path_data))
             pole = (
                 1.0
                 if tensor_product.normalization == "norm"
@@ -331,9 +347,21 @@ class Convolution(torch.nn.Module):
                 tuple(self.sparse_paths),
             )
         )
+        self.direction_metadata = repr(
+            (*literal_eval(self.kernel_metadata), tuple(scalar_paths))
+        )
 
     def forward(
-        self, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
+        self,
+        features,
+        radial,
+        projection,
+        wigner,
+        amplitudes,
+        edge_index,
+        num_nodes,
+        *,
+        vectors=None,
     ):
         """Gather, couple and sum features at target nodes.
 
@@ -359,6 +387,13 @@ class Convolution(torch.nn.Module):
             Source and target indices of shape ``(2, edges)``.
         num_nodes : int
             Number of target nodes.
+        vectors : torch.Tensor, optional
+            Nonzero frame directions, with shape ``(edges, 3)`` or ``(1, 3)``.
+            When supplied, ``wigner`` must contain their alignment matrices.
+            Direction derivatives use sparse rotation generators rather than
+            matrix adjoints. The matrices are treated as cached values, and
+            zero-degree harmonic paths bypass both rotations. Without vectors,
+            the matrices remain independent differentiable inputs.
 
         Returns
         -------
@@ -380,6 +415,19 @@ class Convolution(torch.nn.Module):
             amplitudes,
             output,
         ]
+        if vectors is not None:
+            from .geometry import direction_contraction
+
+            operands[3] = wigner.detach()
+            return direction_contraction(
+                self.direction_metadata,
+                repr(tuple((0, *term) for term in program)),
+                vectors,
+                edge_index[0],
+                edge_index[1],
+                operands,
+                self.backend == "cuda",
+            )[0]
         if self.backend == "cuda" and features.is_cuda:
             return contraction(
                 self.kernel_metadata,

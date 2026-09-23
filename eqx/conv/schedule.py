@@ -180,10 +180,10 @@ def project(
 ):
     """Fuse a mixed-adjoint program with bounded radial workspaces."""
     # Preserve the original broadcasting layout even for a one-edge tail.
-    shared = tuple(calls[0][1][i].size(0) == 1 for i in (1, 3, 4, 5))
+    shared = tuple(calls[0][-3][i].size(0) == 1 for i in (1, 3, 4, 5))
     groups = {}
     factors = {}
-    for outputs, values, results, weighted in calls:
+    for *prefix, outputs, values, results, weighted in calls:
         destinations = dict(zip(outputs, results))
         key = (
             id(values[1]),
@@ -191,12 +191,14 @@ def project(
             id(destinations.get(1)),
             id(destinations.get(2)),
         )
-        groups.setdefault(key, []).append((outputs, values, destinations, weighted))
-        if any(i in outputs for i in (0, 3, 4, 5, 6)):
+        groups.setdefault(key, []).append(
+            (*prefix, outputs, values, destinations, weighted)
+        )
+        if any(i not in (1, 2) for i in outputs):
             factors[key[:2]] = values[1:3]
-    radial = calls[0][1][1]
+    radial = calls[0][-3][1]
     count = max(1, len(factors)) + sum(
-        1 in terms[0][2] or 2 in terms[0][2] for terms in groups.values()
+        1 in terms[0][-2] or 2 in terms[0][-2] for terms in groups.values()
     )
     chunk = max(
         1,
@@ -209,7 +211,7 @@ def project(
     gradients = {
         key: radial.new_empty(chunk, plan.weight_numel)
         for key, terms in groups.items()
-        if 1 in terms[0][2] or 2 in terms[0][2]
+        if 1 in terms[0][-2] or 2 in terms[0][-2]
     }
     unused = (
         radial.new_empty(chunk, plan.weight_numel)
@@ -234,15 +236,15 @@ def project(
         direct = []
         weight_gradients = {}
         for key, terms in groups.items():
-            r, projection = terms[0][1][1:3]
+            r, projection = terms[0][-3][1:3]
             rows = 1 if r.size(0) == 1 else stop - start
             if key in gradients:
                 weight_gradients[key] = gradients[key][:rows].zero_()
             w = weights.get(key[:2], unused[:rows])
-            for outputs, values, destinations, weighted in terms:
-                x, _, _, din, dout, amplitudes, y = values
+            for *prefix, outputs, values, destinations, weighted in terms:
+                x, _, _, din, dout, amplitudes, y, *vectors = values
                 result = {
-                    i: edge_view(value) if i in (3, 4, 5) else value
+                    i: edge_view(value) if i in (3, 4, 5) or i >= 7 else value
                     for i, value in destinations.items()
                     if i not in (1, 2)
                 }
@@ -250,6 +252,7 @@ def project(
                     result[1] = weight_gradients[key]
                 direct.append(
                     (
+                        *prefix,
                         tuple(result),
                         (
                             x,
@@ -259,6 +262,7 @@ def project(
                             edge_view(dout),
                             edge_view(amplitudes),
                             y,
+                            *(edge_view(value) for value in vectors),
                         ),
                         tuple(result.values()),
                         weighted,
@@ -266,8 +270,8 @@ def project(
                 )
         contract(plan, source[start:stop], target[start:stop], direct, shared)
         for key, gradient in weight_gradients.items():
-            r, projection = groups[key][0][1][1:3]
-            destinations = groups[key][0][2]
+            r, projection = groups[key][0][-3][1:3]
+            destinations = groups[key][0][-2]
             if 1 in destinations:
                 edge_view(destinations[1]).addmm_(gradient, projection.T)
             if 2 in destinations:
