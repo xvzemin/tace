@@ -72,15 +72,16 @@ O(2) Channelwise Linear
 ------------------------
 
 ``atomic_basis.type: uu_o2`` uses an externally weighted
-``eqx.o2.UuLinear`` in the local frame. Source and target features with the
-same O(2) irrep are concatenated, and compatible representation copies mix
-within each channel. The edge MLP supplies a separate weight for each path
-and channel. These weights are used directly, without an additional
-activation or a separate radial multiplication.
+``eqx.o2.UuLinear`` in the local frame. Only source node features are
+gathered and rotated; target features are not concatenated. Compatible
+representation copies mix within each channel. The edge MLP supplies a
+separate weight for each path and channel. These weights are used directly,
+without an additional activation or a separate radial multiplication.
 
-The rejector contains no Gate or channel-mixing Linear. The node-level
-linear maps, frame transformations, cutoff, scatter, and optional
-``use_radial_rotary_attention`` retain their usual behavior.
+The rejector contains a single UuLinear, with no Gate or channel-mixing Linear.
+Radial rotary attention is not supported: set
+``use_radial_rotary_attention: false``. The node-level linear maps, frame
+transformations, cutoff, and scatter retain their usual behavior.
 ``edge_nonlinear`` is not used by this interaction. As with ``o2``, keep
 ``radial_basis.apply_cutoff: false`` so the cutoff is applied to messages.
 
@@ -89,6 +90,7 @@ linear maps, frame transformations, cutoff, scatter, and optional
    atomic_basis:
      type: uu_o2
      edge_nonlinear: null
+     use_radial_rotary_attention: false
    radial_basis:
      apply_cutoff: false
 

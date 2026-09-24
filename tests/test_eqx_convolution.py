@@ -294,6 +294,7 @@ def test_derivative_partition_reuses_rotations():
         ("cuda", "torch", "uvu", 2),
         ("cuda", "cuda", "uvu", 2),
         ("cuda", "cuda", "uvu", 65),
+        ("cuda", "cuda", "uvu", 257),
     ],
 )
 @pytest.mark.parametrize(

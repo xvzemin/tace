@@ -569,12 +569,11 @@ class UvO2Interaction(O3CgtpInteraction):
 class UuO2Interaction(UvO2Interaction):
     """Global O(3) interaction with an externally weighted O(2) UuLinear.
 
-    The local map connects source and target representation copies with
-    matching channels. The edge MLP supplies one weight for every local
-    path and channel, without an additional activation on these weights.
-    No edge gate or channel-mixing linear is applied. Node-level linear
-    maps, inverse rotation, scatter, and optional radial rotary attention
-    retain the ordinary interaction behavior.
+    Only source node features enter the local frame. A single channelwise
+    linear map uses one weight per local path and channel from the edge MLP,
+    without an additional activation on these weights. No edge gate,
+    channel-mixing linear, or radial rotary attention is applied. Node-level
+    linear maps, inverse rotation, and scatter retain their usual behavior.
     """
 
     linear_type = "uu"

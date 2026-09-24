@@ -117,6 +117,8 @@ class O2ScatterTensorProduct(torch.nn.Module):
         super().__init__()
         if linear_type not in ("uv", "uu"):
             raise ValueError("linear_type must be 'uv' or 'uu'.")
+        if linear_type == "uu" and use_radial_rotary_attention:
+            raise ValueError("uu_o2 does not support radial rotary attention.")
         self.linear_type = linear_type
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
@@ -142,7 +144,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
             layout_out="flatten_ir_mul",
         )
         self.node_irreps = self.local_frame_in.irreps_out
-        self.local_irreps_in = 2 * self.node_irreps
+        self.local_irreps_in = (
+            self.node_irreps if linear_type == "uu" else 2 * self.node_irreps
+        )
         self.local_irreps_out = self.local_frame_out.irreps_out
         if linear_type == "uu":
             self.linear = o2.UuLinear(
@@ -212,8 +216,14 @@ class O2ScatterTensorProduct(torch.nn.Module):
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         node_features = self.reshape_in(node_features)
+        if self.linear_type == "uu":
+            source_features = self.local_frame_in.to_local(
+                node_features[edge_index[0]],
+                wigner,
+            )
+            return node_features, source_features, None
         paired = self.local_frame_in.to_local(
             node_features[edge_index.T],
             wigner,
@@ -223,13 +233,15 @@ class O2ScatterTensorProduct(torch.nn.Module):
     def _convolution(
         self,
         source_features: torch.Tensor,
-        target_features: torch.Tensor,
+        target_features: Optional[torch.Tensor],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_radial_basis: Optional[torch.Tensor],
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
+        if self.linear_type == "uu":
+            return self.linear(source_features, conv_weights)
         inputs = []
         offset = 0
         for (ir, mul), ir_slice in zip(
@@ -248,20 +260,16 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 dim=-1,
             )
             width = 2 * mul
-            if self.linear_type == "uv":
-                weight = conv_weights[..., offset : offset + width].unsqueeze(-2)
-                values = values * weight
+            weight = conv_weights[..., offset : offset + width].unsqueeze(-2)
+            values = values * weight
             inputs.append(values.reshape(values.size(0), ir.dim * width))
             offset += width
         features = torch.cat(inputs, dim=-1)
-        if self.linear_type == "uu":
-            message = self.linear(features, conv_weights)
-        else:
-            if offset != conv_weights.size(-1):
-                raise ValueError("Invalid O2 convolution weight size.")
-            projected = self.linear_up(features)
-            hidden = self.nonlinearity(projected)
-            message = self.linear_down(hidden)
+        if offset != conv_weights.size(-1):
+            raise ValueError("Invalid O2 convolution weight size.")
+        projected = self.linear_up(features)
+        hidden = self.nonlinearity(projected)
+        message = self.linear_down(hidden)
         if self.attention is not None:
             if edge_radial_basis is None:
                 raise ValueError(

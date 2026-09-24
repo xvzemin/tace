@@ -8,3 +8,4 @@ model:
     mmax: 3
     atomic_basis:
       type: uu_o2
+      use_radial_rotary_attention: false

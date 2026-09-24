@@ -416,6 +416,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax, interaction)
     config["atomic_basis"]["type"] = [interaction]
     config["atomic_basis"]["nonlinear"] = ["gate"]
     config["atomic_basis"]["edge_nonlinear"] = ["gate"]
+    config["atomic_basis"]["use_radial_rotary_attention"] = interaction != "uu_o2"
     config["product_basis"]["type"] = ["cgtp"]
     config["product_basis"]["correlation"] = [2]
 
@@ -653,8 +654,9 @@ def _scatter_module(use_attention, linear_type="uv"):
     ).to(DEVICE, DTYPE)
 
 
-@pytest.mark.parametrize("use_attention", [False, True])
-@pytest.mark.parametrize("linear_type", ["uv", "uu"])
+@pytest.mark.parametrize(
+    ("use_attention", "linear_type"), [(False, "uv"), (True, "uv"), (False, "uu")]
+)
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
     torch.manual_seed(7)
@@ -712,6 +714,62 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
     )
 
 
+def test_uu_o2_rejects_radial_rotary_attention():
+    with pytest.raises(ValueError, match="uu_o2 does not support radial rotary attention"):
+        _scatter_module(True, "uu")
+
+
+def test_uu_o2_scatter_uses_only_source_features(monkeypatch):
+    torch.manual_seed(8)
+    module = _scatter_module(False, "uu")
+    assert module.linear.irreps_in == module.node_irreps
+    assert module.attention is None
+    assert sum(
+        isinstance(layer, (o2.Linear, o2.UuLinear)) for layer in module.modules()
+    ) == 1
+    edge_index = torch.tensor([[0, 0], [1, 2]], device=DEVICE)
+    node_features = module.irreps_in.randn(
+        3, -1, dtype=DTYPE, device=DEVICE, requires_grad=True
+    )
+    weights = torch.randn(2, module.weight_numel, dtype=DTYPE, device=DEVICE)
+    cutoff = torch.rand(2, 1, dtype=DTYPE, device=DEVICE)
+    wigner, wigner_inv = o2.WignerD(1, 1).to(DEVICE, DTYPE)(
+        torch.randn(2, 3, dtype=DTYPE, device=DEVICE)
+    )
+    to_local = Mock(wraps=module.local_frame_in.to_local)
+    monkeypatch.setattr(module.local_frame_in, "to_local", to_local)
+    output = module(
+        node_features,
+        weights,
+        edge_index,
+        wigner,
+        wigner_inv,
+        edge_cutoff=cutoff,
+    )
+    to_local.assert_called_once()
+    torch.testing.assert_close(
+        to_local.call_args.args[0], module.reshape_in(node_features)[edge_index[0]]
+    )
+    changed_features = node_features.detach().clone()
+    changed_features[1:] = torch.randn_like(changed_features[1:])
+    torch.testing.assert_close(
+        module(
+            changed_features,
+            weights,
+            edge_index,
+            wigner,
+            wigner_inv,
+            edge_cutoff=cutoff,
+        ),
+        output,
+        atol=0,
+        rtol=0,
+    )
+    gradients = torch.autograd.grad(output.square().sum(), node_features)[0]
+    assert gradients[0].abs().sum() > 0
+    torch.testing.assert_close(gradients[1:], torch.zeros_like(gradients[1:]))
+
+
 @pytest.mark.parametrize("linear_type", ["uv", "uu"])
 @pytest.mark.parametrize("num_nodes", [0, 3])
 def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
@@ -733,10 +791,7 @@ def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
     torch.testing.assert_close(output, torch.zeros_like(output))
 
 
-@pytest.mark.parametrize("use_attention", [False, True])
-def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
-    cgtp_dtype, use_attention
-):
+def test_uu_o2_interaction_trains_forces_and_uses_external_weights(cgtp_dtype):
     from tace.models._e3nn.inter import UuO2Interaction
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
@@ -759,7 +814,7 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
     config["atomic_basis"].update(
         type="uu_o2",
         edge_nonlinear=None,
-        use_radial_rotary_attention=use_attention,
+        use_radial_rotary_attention=False,
         num_head=1,
     )
     config["node_embedding"]["type"] = "linear"
@@ -775,6 +830,7 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
         assert not hasattr(interaction.rejector, "nonlinearity")
         assert not hasattr(interaction.rejector, "linear_up")
         assert not hasattr(interaction.rejector, "linear_down")
+        assert interaction.rejector.attention is None
         assert list(interaction.rejector.linear.parameters()) == []
         edge_features = torch.randn(3, interaction.edge_feats_channel)
         weights = interaction.edge_info(edge_features)

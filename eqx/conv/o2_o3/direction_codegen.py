@@ -18,6 +18,7 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
     entries = {}
     matrices = {}
     vectors = {}
+    reductions = {}
     matrix_size = 0
     for rank, outputs, operands, results, weighted in calls:
         for i, path in zip(indices, paths):
@@ -29,6 +30,10 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
             )
             if not entries[rank, i]:
                 continue
+            for output, result in zip(outputs, results):
+                columns = (path[9],) if output == 5 else range(3) if output >= 7 else ()
+                for column in columns:
+                    reductions.setdefault((result, column), len(reductions))
             if i not in plan.scalar_paths:
                 for p, offset, dim in (
                     (operands[3], path[6], path[4]),
@@ -92,7 +97,11 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
     def matrix(p, offset, dim, a, b):
         return f"matrix[{matrices[p, offset, dim] + a * dim + b}]"
 
-    storage_size = matrix_size + 3 * len(vectors)
+    scalar_offset = matrix_size + 3 * len(vectors)
+    # Keep one scalar accumulator per warp in shared memory. Path-wise
+    # atomics serialize channels; register accumulators increase live state.
+    reduction_warps = min(8, (mul + 31) // 32) if wide else 1
+    storage_size = scalar_offset + len(reductions) * reduction_warps
     if storage_size:
         emit("extern __shared__ T storage[];")
         emit(
@@ -120,8 +129,14 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
         emit("const long long edge = item;")
     emit("const long long src = source[edge], dst = target[edge];")
     if storage_size:
+        thread, width = ("threadIdx.x", "blockDim.x") if wide else ("lane", "32")
+        if reductions:
+            emit(f"T* scalar_sums = matrix + {scalar_offset};")
+            emit(
+                f"for (int k = {thread}; k < {len(reductions) * reduction_warps}; "
+                f"k += {width}) scalar_sums[k] = 0;"
+            )
         for (p, offset, dim), start in matrices.items():
-            thread, width = ("threadIdx.x", "blockDim.x") if wide else ("lane", "32")
             emit(
                 f"for (int k = {thread}; k < {dim * dim}; k += {width}) matrix[{start} + k] = {load(p, 'edge', f'{offset} + k')};"
             )
@@ -141,6 +156,11 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
 
     rotated = {}
     gradients = {}
+
+    def reduce_scalar(result, column, value):
+        index = reductions[result, column] * reduction_warps
+        lane_offset = " + threadIdx.x / 32" if wide else ""
+        emit(f"scalar_sums[{index}{lane_offset}] += {value};")
 
     def local(p, row, start, dim, channels, frame, offset, selected):
         key = p, row, start, dim, channels, frame, offset
@@ -291,9 +311,9 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
                         else:
                             if output == 5:
                                 emit("value = warp_sum(factor * value);")
-                                emit(
-                                    f"if (lane == 0) atomicAdd(p{result} + {address(result, 'edge', column)}, value);"
-                                )
+                                emit("if (lane == 0) {")
+                                reduce_scalar(result, harmonic, "value")
+                                emit("}")
                             else:
                                 emit(
                                     f"if (active) atomicAdd(p{result} + {address(result, 'edge', column)}, factor * value);"
@@ -327,9 +347,7 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
                 str(start + b) if channels == 0 else f"{start + b * channels} + channel"
             )
             if channels == 0:
-                if not wide and not layouts[p][0]:
-                    emit(f"if (gridDim.y == 1) {load(p, row, column)} += value; else")
-                emit(f"atomicAdd(p{p} + {address(p, row, column)}, value);")
+                reduce_scalar(p, start + b, "value")
             elif owner >= 0 and row == ("src" if owner == 0 else "dst"):
                 key = p, start, dim, channels
                 total = owned_gradients.setdefault(key, f"total{len(owned_gradients)}_")
@@ -339,6 +357,21 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
             emit("}")
         if channels == 0:
             emit("}")
+    if reductions:
+        # Combine paths and warps before updating each edge scalar. Different
+        # path tiles and broadcast operands still require an atomic update.
+        emit(barrier)
+        for (p, column), slot in reductions.items():
+            thread = "threadIdx.x" if wide else "lane"
+            emit(f"if ({thread} == {slot % 32}) {{ T value = 0;")
+            if wide:
+                emit(
+                    f"for (int w = 0; w < blockDim.x / 32; ++w) "
+                    f"value += scalar_sums[{slot * reduction_warps} + w];"
+                )
+            else:
+                emit(f"value = scalar_sums[{slot}];")
+            emit(f"atomicAdd(p{p} + {address(p, 'edge', str(column))}, value); }}")
     if owner >= 0:
         if storage_size:
             emit(barrier)
