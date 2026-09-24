@@ -95,9 +95,9 @@ def convolution_source(
         "const int64_t* source",
         "const int64_t* target",
         "const int64_t* order",
-        "const int64_t* tasks",
         "int64_t edges",
         "int64_t task_count",
+        "int64_t row_size",
     ]
     lines = [
         HEADER.replace("SCALAR", dtype),
@@ -218,10 +218,18 @@ def convolution_source(
             emit(f"if (active) atomicAdd(g{g} + {offset}, {value});")
 
     if owner >= 0:
+        index = "source" if owner == 0 else "target"
         emit("if (item >= task_count) return;")
-        emit("const int64_t node = tasks[4 * item];")
-        emit("const int64_t begin = tasks[4 * item + 1], end = tasks[4 * item + 2];")
-        emit("const bool exclusive = tasks[4 * item + 3];")
+        emit("const int64_t stop = min((item + 1) * row_size, edges);")
+        emit("int64_t end = item * row_size;")
+        emit("while (end < stop) {")
+        emit("const int64_t begin = end;")
+        emit(f"const int64_t node = {index}[order[begin]];")
+        emit(f"do {{ ++end; }} while (end < stop && {index}[order[end]] == node);")
+        emit(
+            f"const bool exclusive = (begin == 0 || {index}[order[begin - 1]] != node) "
+            f"&& (end == edges || {index}[order[end]] != node);"
+        )
         if owner == 0:
             for k, path in enumerate(input_paths):
                 for i, _ in enumerate(gx):
@@ -564,6 +572,7 @@ def convolution_source(
                             f"node * {ydim} + {path[1] + a * mul} + channel",
                             f"total_y{j}_{i}_{a}",
                         )
+        emit("}")
     emit("}")
     common = (shared_size - gradient_size) * itemsize if block_channels else 0
     per_warp = gradient_size * itemsize if block_channels else shared_size * itemsize

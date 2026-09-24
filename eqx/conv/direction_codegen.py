@@ -8,7 +8,7 @@ from .geometry import angular_coefficients
 
 
 @lru_cache(maxsize=256)
-def direction_source(metadata, indices, calls, layouts, dtype):
+def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
     """Generate a shared rotation tile for mixed direction derivatives."""
     plan = kernel_plan(metadata)
     paths = [plan.path_data[i][1] for i in indices]
@@ -47,23 +47,34 @@ def direction_source(metadata, indices, calls, layouts, dtype):
 
     pointers = len(layouts)
     destinations = {p for _, _, _, results, _ in calls for p in results}
+    result_roles = {
+        p: {
+            role
+            for _, outputs, _, results, _ in calls
+            for role, result in zip(outputs, results)
+            if result == p
+        }
+        for p in destinations
+    }
     arguments = [
         f"{'T' if i in destinations else 'const T'}* __restrict__ p{i}"
         for i in range(pointers)
     ] + [
         "const long long* source",
         "const long long* target",
+        "const long long* order",
         "long long edges",
+        "long long task_count",
+        "long long row_size",
     ]
     lines = [
         HEADER.replace("SCALAR", dtype),
         'extern "C" __global__ void run(' + ",".join(arguments) + ") {",
         "const int lane = threadIdx.x & 31;",
-        "const long long edge = blockIdx.x;"
+        "const long long item = blockIdx.x;"
         if wide
-        else "const long long edge = (long long)blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;",
-        "if (edge >= edges) return;",
-        "const long long src = source[edge], dst = target[edge];",
+        else "const long long item = (long long)blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;",
+        "if (item >= task_count) return;",
         "const int channel = blockIdx.y * blockDim.x + threadIdx.x;"
         if wide
         else "const int channel = blockIdx.y * 32 + lane;",
@@ -89,6 +100,26 @@ def direction_source(metadata, indices, calls, layouts, dtype):
             if wide
             else f"T* matrix = storage + (threadIdx.x / 32) * {storage_size};"
         )
+    owned_inputs, owned_gradients = {}, {}
+    if owner >= 0:
+        index = "source" if owner == 0 else "target"
+        emit("const long long stop = min((item + 1) * row_size, edges);")
+        emit("long long end = item * row_size;")
+        emit("while (end < stop) {")
+        emit("const long long begin = end;")
+        emit(f"const long long node = {index}[order[begin]];")
+        emit(f"do {{ ++end; }} while (end < stop && {index}[order[end]] == node);")
+        emit(
+            f"const bool exclusive = (begin == 0 || {index}[order[begin - 1]] != node) "
+            f"&& (end == edges || {index}[order[end]] != node);"
+        )
+        declarations = len(lines)
+        emit("for (long long position = begin; position < end; ++position) {")
+        emit("const long long edge = order[position];")
+    else:
+        emit("const long long edge = item;")
+    emit("const long long src = source[edge], dst = target[edge];")
+    if storage_size:
         for (p, offset, dim), start in matrices.items():
             thread, width = ("threadIdx.x", "blockDim.x") if wide else ("lane", "32")
             emit(
@@ -114,6 +145,10 @@ def direction_source(metadata, indices, calls, layouts, dtype):
     def local(p, row, start, dim, channels, frame, offset, selected):
         key = p, row, start, dim, channels, frame, offset
         name, available = rotated.setdefault(key, (f"v{len(rotated)}_", set()))
+        owned = owner >= 0 and row == ("src" if owner == 0 else "dst")
+        if owned:
+            node_key = p, start, dim, channels
+            node_name = owned_inputs.setdefault(node_key, f"node{len(owned_inputs)}_")
         for a in sorted(set(selected) - available):
             available.add(a)
             if channels == 0:
@@ -121,16 +156,23 @@ def direction_source(metadata, indices, calls, layouts, dtype):
                     f"const T {name}{a} = matrix[{matrix_size + vectors[p, frame] + a}];"
                 )
             elif offset < 0:
-                emit(
-                    f"T {name}{a} = active ? {load(p, row, f'{start + a * channels} + channel')} : T(0);"
+                value = (
+                    f"{node_name}{a}"
+                    if owned
+                    else f"active ? {load(p, row, f'{start + a * channels} + channel')} : T(0)"
                 )
+                emit(f"T {name}{a} = {value};")
             else:
                 emit(f"T {name}{a} = 0;")
                 for b in range(dim):
                     column = f"{start + b * channels} + channel"
-                    value = load(p, row, column)
+                    value = (
+                        f"{node_name}{b}"
+                        if owned
+                        else f"(active ? {load(p, row, column)} : T(0))"
+                    )
                     emit(
-                        f"{name}{a} = fma({matrix(frame, offset, dim, a, b)}, active ? {value} : T(0), {name}{a});"
+                        f"{name}{a} = fma({matrix(frame, offset, dim, a, b)}, {value}, {name}{a});"
                     )
         return name
 
@@ -288,10 +330,36 @@ def direction_source(metadata, indices, calls, layouts, dtype):
                 if not wide and not layouts[p][0]:
                     emit(f"if (gridDim.y == 1) {load(p, row, column)} += value; else")
                 emit(f"atomicAdd(p{p} + {address(p, row, column)}, value);")
+            elif owner >= 0 and row == ("src" if owner == 0 else "dst"):
+                key = p, start, dim, channels
+                total = owned_gradients.setdefault(key, f"total{len(owned_gradients)}_")
+                emit(f"{total}{b} += value;")
             else:
                 emit(f"if (active) atomicAdd(p{p} + {address(p, row, column)}, value);")
             emit("}")
         if channels == 0:
             emit("}")
+    if owner >= 0:
+        if storage_size:
+            emit(barrier)
+        emit("}")
+        initializers = []
+        for (p, start, dim, channels), name in owned_inputs.items():
+            for b in range(dim):
+                column = f"{start + b * channels} + channel"
+                initializers.append(
+                    f"const T {name}{b} = active && begin < end ? {load(p, 'node', column)} : T(0);"
+                )
+        for (p, start, dim, channels), name in owned_gradients.items():
+            private = result_roles[p] == {0 if owner == 0 else 6}
+            for b in range(dim):
+                initializers.append(f"T {name}{b} = 0;")
+                column = f"{start + b * channels} + channel"
+                emit(
+                    f"if (active && begin < end) {{ if (exclusive && {str(private).lower()}) {load(p, 'node', column)} += {name}{b}; "
+                    f"else atomicAdd(p{p} + {address(p, 'node', column)}, {name}{b}); }}"
+                )
+        lines[declarations:declarations] = initializers
+        emit("}")
     emit("}")
     return "\n".join(lines), mul, storage_size * (4 if dtype == "float" else 8)

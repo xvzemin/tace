@@ -17,13 +17,14 @@ from .schedule import (
     contraction_groups,
     project,
     register_estimate,
+    rotation_groups,
     schedule,
     split_program,
 )
 
 WORKSPACE_BYTES = 1024 << 20
 CHUNK_SIZE = 65536
-ROW_SIZE = 64
+ROW_SIZE = 4
 THREADS = 128
 _KERNELS = OrderedDict()
 _LAUNCH_CONFIGS = OrderedDict()
@@ -224,12 +225,31 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
             owner = (
                 -1 if not grouped else 1 if roles == {6} else 0 if roles == {0} else -1
             )
-            # Bound the live receiver state without introducing degree thresholds.
+            # Bound receiver accumulators by actual output entries. Tile the
+            # outputs instead of abandoning node ownership for wide products.
             if (
                 owner == 1
-                and sum(path[5] for _, path, _ in paths) * len(operations[8]) > 80
+                and sum(dim for _, dim in {(path[1], path[5]) for _, path, _ in paths})
+                * len(operations[8])
+                > 64
             ):
-                owner = -1
+                _, groups = rotation_groups([(path, cg) for _, path, cg in paths])
+                if len(groups) > 1:
+                    tile, width = [], 0
+                    for group in groups:
+                        extra = sum(
+                            dim
+                            for _, dim in {
+                                (paths[i][1][1], paths[i][1][5]) for i in group
+                            }
+                        ) * len(operations[8])
+                        if tile and width + extra > 64:
+                            pending.append((tuple(tile), terms))
+                            tile, width = [], 0
+                        tile.extend(paths[i] for i in group)
+                        width += extra
+                    pending.append((tuple(tile), terms))
+                    continue
             code, width, shared_bytes = convolution_source(
                 paths,
                 tuple(operations),
@@ -361,25 +381,18 @@ def contract(plan, source, target, calls, shared=None):
     for kernel, width, storage, threads, owner, inputs, results in phases:
         if owner >= 0:
             if owner not in graphs:
-                graphs[owner] = prepare_graph(
-                    source,
-                    target,
-                    x.size(0) if owner == 0 else y.size(0),
-                    owner,
-                    ROW_SIZE,
-                )
-            order, tasks = graphs[owner]
-            count = tasks.size(0)
+                graphs[owner] = prepare_graph(source, target, owner)
+            order = graphs[owner]
+            count = (source.numel() + ROW_SIZE - 1) // ROW_SIZE
         else:
-            order, tasks, count = source, source, source.numel()
+            order, count = source, source.numel()
         tensors = (
             *(values[i] for i in (*inputs, *results)),
             source,
             target,
             order,
-            tasks,
         )
-        scalars = (source.numel(), count)
+        scalars = (source.numel(), count, ROW_SIZE)
         threads, shared_bytes = launch_config(
             kernel,
             width,
@@ -391,7 +404,7 @@ def contract(plan, source, target, calls, shared=None):
             range(len(inputs), len(inputs) + len(results)),
         )
         args = [pointers[i] for i in (*inputs, *results)]
-        args.extend((*edge_pointers, order.data_ptr(), tasks.data_ptr(), *scalars))
+        args.extend((*edge_pointers, order.data_ptr(), *scalars))
         tasks_per_block = 1 if width > 32 else threads // 32
         channels_per_block = threads if width > 32 else 32
         launches.append(
@@ -430,7 +443,7 @@ def contract_many(plan, source, target, calls):
 
 
 @lru_cache(maxsize=256)
-def direction_plan(metadata, specification, layouts, dtype, device):
+def direction_plan(metadata, specification, layouts, dtype, grouped, device):
     """Compile shared tiles of mixed angular and vector adjoints."""
     from .convolution import kernel_plan
     from .direction_codegen import direction_source
@@ -481,26 +494,59 @@ def direction_plan(metadata, specification, layouts, dtype, device):
                         (group, tuple(part)) for part in split_program(terms)
                     )
                     continue
-            sizes = tuple(
-                n
-                for n in (64, 128, 256)
-                if (width <= 32 or n <= max(64, (width + 31) // 32 * 32))
-                and (storage if width > 32 else storage * (n // 32)) <= 49152
-            )
-            threads = max(
-                sizes,
-                key=lambda n: (
-                    n
-                    * kernel.active_blocks(
-                        n, storage if width > 32 else storage * (n // 32)
-                    ),
-                    -abs(n - THREADS),
-                ),
-            )
-            shared_bytes = (storage, 0) if width > 32 else (0, storage)
-            accepted.append((kernel, width, threads, shared_bytes))
+            accepted.append((kernel, width, storage, group, terms))
         pending = remaining
-    return tuple(accepted)
+    # Try ownership on already bounded tiles. Do not split shared rotations
+    # merely to accommodate the additional persistent node accumulators.
+    candidates = []
+    for _, _, _, group, terms in accepted:
+        roles = {role for _, outputs, *_ in terms for role in outputs}
+        owner = -1 if not grouped else 0 if 0 in roles else 1 if 6 in roles else -1
+        code = (
+            direction_source(metadata, group, terms, layouts, dtype, owner)[0]
+            if owner >= 0
+            else None
+        )
+        candidates.append((code, owner))
+    compiled = kernels([code for code, _ in candidates if code is not None], device)
+    phases = []
+    for (kernel, width, storage, _, _), (code, owner) in zip(accepted, candidates):
+        choices = [(kernel, -1)]
+        if (
+            code is not None
+            and not compiled[code].local_bytes
+            and compiled[code].registers <= 160
+        ):
+            choices.append((compiled[code], owner))
+        sizes = tuple(
+            n
+            for n in (64, 128, 256)
+            if (width <= 32 or n <= max(64, (width + 31) // 32 * 32))
+            and (storage if width > 32 else storage * (n // 32)) <= 49152
+        )
+        # Reduction savings must not come at the cost of fewer resident
+        # warps. Prefer ownership when both variants admit the same occupancy.
+        kernel, owner, threads = max(
+            ((candidate, axis, n) for candidate, axis in choices for n in sizes),
+            key=lambda choice: (
+                choice[2]
+                * choice[0].active_blocks(
+                    choice[2], storage if width > 32 else storage * (choice[2] // 32)
+                ),
+                choice[1] >= 0,
+                -abs(choice[2] - THREADS),
+            ),
+        )
+        phases.append(
+            (
+                kernel,
+                width,
+                threads,
+                (storage, 0) if width > 32 else (0, storage),
+                owner,
+            )
+        )
+    return tuple(phases)
 
 
 def contract_directions(metadata, source, target, calls):
@@ -545,21 +591,38 @@ def contract_directions(metadata, source, target, calls):
             tuple(specification),
             layouts,
             "float" if values[0].dtype == torch.float32 else "double",
+            source.numel() >= 1024,
             values[0].device,
         )
-        tensors = (*values, source, target)
-        pointers = [value.data_ptr() for value in tensors] + [source.numel()]
+        pointers = [value.data_ptr() for value in (*values, source, target)]
         destinations = {slot for _, _, _, slots, _ in specification for slot in slots}
+        graphs = {}
         launches = []
-        for kernel, width, threads, storage in phases:
+        for kernel, width, threads, storage, owner in phases:
+            if owner not in graphs:
+                if owner >= 0:
+                    order = prepare_graph(source, target, owner)
+                    count = (source.numel() + ROW_SIZE - 1) // ROW_SIZE
+                else:
+                    order, count = source, source.numel()
+                tensors = (*values, source, target, order)
+                args = [
+                    *pointers,
+                    order.data_ptr(),
+                    source.numel(),
+                    count,
+                    ROW_SIZE,
+                ]
+                graphs[owner] = tensors, args, count
+            tensors, args, count = graphs[owner]
             threads, shared_bytes = launch_config(
                 kernel,
                 width,
-                source.numel(),
+                count,
                 storage,
                 threads,
                 tensors,
-                (source.numel(),),
+                (source.numel(), count, ROW_SIZE),
                 destinations,
             )
             tasks = 1 if width > 32 else threads // 32
@@ -567,15 +630,15 @@ def contract_directions(metadata, source, target, calls):
             launches.append(
                 (
                     kernel,
-                    (),
-                    (source.numel() + tasks - 1) // tasks,
+                    args,
+                    (count + tasks - 1) // tasks,
                     (width + channels - 1) // channels,
                     threads,
                     shared_bytes,
                 )
             )
         runtime().launch(
-            launches, torch.cuda.current_stream(values[0].device).cuda_stream, pointers
+            launches, torch.cuda.current_stream(values[0].device).cuda_stream
         )
 
     source, target = source.contiguous(), target.contiguous()

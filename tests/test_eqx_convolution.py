@@ -409,7 +409,75 @@ def test_direction_zero_order_and_empty_edges(device):
         torch.testing.assert_close(second, torch.zeros_like(second), atol=0, rtol=0)
 
 
-def test_direction_compile_and_capture():
+@pytest.mark.parametrize("channels", [3, 65])
+def test_direction_node_reductions(monkeypatch, channels):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import cuda
+
+    monkeypatch.setattr(cuda, "ROW_SIZE", 8)
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        torch.manual_seed(82)
+        tp = O3TensorProduct(
+            f"{channels}x1o+{channels}x2e",
+            "0e+1o+2e",
+            f"{channels}x1o+{channels}x2e+{channels}x1e",
+            [(0, 0, 0, "uvu", True), (1, 2, 1, "uvu", True), (0, 1, 2, "uvu", True)],
+            internal_weights=False,
+            shared_weights=False,
+        ).cuda()
+        module, reference = Convolution(tp), Convolution(tp, backend="torch")
+        frame = WignerD(2, 2).cuda()
+        edges = torch.randint(37, (2, 1031), device="cuda")
+        # Include isolated nodes, complete rows, and split high-degree rows.
+        edges[:, :257] = 0
+        edges[:, 257:] = edges[:, 257:] % 29 + 1
+        edges[:, -6:] = torch.tensor(
+            [[31, 31, 32, 33, 33, 34], [33, 34, 31, 31, 32, 33]], device="cuda"
+        )
+        x = torch.randn(37, tp.input_dim, device="cuda", requires_grad=True)
+        vectors = torch.randn(1031, 3, device="cuda", requires_grad=True)
+        radial = torch.randn(1031, 3, device="cuda", requires_grad=True)
+        projection = torch.randn(3, tp.weight_numel, device="cuda", requires_grad=True)
+        amplitude = torch.randn(1031, 3, device="cuda", requires_grad=True)
+        inputs = x, vectors, radial, projection, amplitude
+        args = (
+            x,
+            radial,
+            projection,
+            frame.forward_packed(vectors),
+            amplitude,
+            edges,
+            37,
+        )
+        actual = module(*args, vectors=vectors).sin()
+        expected = reference(*args).sin()
+        torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
+        for _ in range(3):
+            seed = torch.randn_like(actual) / actual.numel() ** 0.5
+            actual, expected = [
+                torch.cat(
+                    [
+                        grad.flatten()
+                        for grad in torch.autograd.grad(
+                            (value * seed).sum(),
+                            inputs,
+                            create_graph=True,
+                            retain_graph=True,
+                        )
+                    ]
+                )
+                for value in (actual, expected)
+            ]
+            torch.testing.assert_close(actual, expected, atol=3e-8, rtol=3e-9)
+    finally:
+        torch.set_default_dtype(previous)
+
+
+@pytest.mark.parametrize("edge_count", [35, 1031])
+def test_direction_compile_and_capture(edge_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx.conv import wigner_D
@@ -424,10 +492,10 @@ def test_direction_compile_and_capture():
         reference = Convolution(tp, backend="torch").cuda()
         frame = WignerD(1, 1).cuda()
         x = torch.randn(3, 6, device="cuda", requires_grad=True)
-        vectors = torch.randn(35, 3, device="cuda", requires_grad=True)
-        radial = torch.randn(35, 3, device="cuda", requires_grad=True)
+        vectors = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
+        radial = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
         projection = torch.randn(3, tp.weight_numel, device="cuda", requires_grad=True)
-        edges = torch.randint(3, (2, 35), device="cuda")
+        edges = torch.randint(3, (2, edge_count), device="cuda")
 
         def evaluate(x, vectors, radial, projection, edges):
             packed = wigner_D(frame, vectors.detach())
@@ -450,14 +518,23 @@ def test_direction_compile_and_capture():
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         graph = torch.cuda.CUDAGraph()
-        with torch.no_grad(), torch.cuda.graph(graph, stream=stream):
+        with torch.cuda.graph(graph, stream=stream):
             actual = evaluate(x, vectors, radial, projection, edges)
+            actual_grads = torch.autograd.grad(
+                actual.square().sum(), (x, vectors, radial, projection)
+            )
+        edges[0].add_(1).remainder_(3)
+        edges[1].add_(2).remainder_(3)
         graph.replay()
-        torch.testing.assert_close(
-            actual, evaluate(x, vectors, radial, projection, edges)
+        expected = evaluate(x, vectors, radial, projection, edges)
+        torch.testing.assert_close(actual, expected)
+        expected_grads = torch.autograd.grad(
+            expected.square().sum(), (x, vectors, radial, projection)
         )
+        for a, b in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
         compiled = torch.compile(evaluate, fullgraph=True, dynamic=True)
-        for size in (35, 17):
+        for size in (edge_count, edge_count // 2):
             actual = compiled(
                 x, vectors[:size], radial[:size], projection, edges[:, :size]
             )
@@ -568,29 +645,19 @@ def test_direction_derivatives_on_axes(device):
 
 
 @pytest.mark.parametrize("owner", [0, 1])
-def test_convolution_graph_tiles(owner):
+def test_convolution_graph_order(owner):
     from eqx.conv.graph import prepare_graph
 
     edges = torch.tensor([[0, 0, 1, 0, 3, 0, 2, 0, 0], [2, 1, 2, 0, 2, 2, 1, 2, 2]])
-    order, tasks = prepare_graph(edges[0], edges[1], 5, owner, 3)
-    again = prepare_graph(edges[0], edges[1], 5, owner, 3)
-    assert again[0] is order and again[1] is tasks
-    visited = []
-    for node, start, stop, exclusive in tasks.tolist():
-        if start == stop:
-            continue
-        selected = order[start:stop]
-        assert stop - start <= 3
-        assert torch.all(edges[owner, selected] == node)
-        assert bool(exclusive) == bool((edges[owner] == node).sum() <= 3)
-        visited.extend(selected.tolist())
-    assert sorted(visited) == list(range(edges.size(1)))
+    order = prepare_graph(edges[0], edges[1], owner)
+    assert prepare_graph(edges[0], edges[1], owner) is order
+    assert prepare_graph(edges[0].detach(), edges[1].detach(), owner) is order
+    torch.testing.assert_close(order, edges[owner].argsort(stable=True))
     edges[owner, 0] = 4
-    updated, _ = prepare_graph(edges[0], edges[1], 5, owner, 3)
+    updated = prepare_graph(edges[0].detach(), edges[1].detach(), owner)
     assert updated is not order
     torch.testing.assert_close(updated, edges[owner].argsort(stable=True))
-    order, tasks = prepare_graph(edges[0, :0], edges[1, :0], 0, owner, 3)
-    assert order.shape == (0,) and tasks.shape == (0, 4)
+    assert prepare_graph(edges[0, :0], edges[1, :0], owner).shape == (0,)
 
 
 @pytest.mark.parametrize("degree", [0, 1, 3, 6])

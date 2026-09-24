@@ -262,10 +262,15 @@ class Convolution(torch.nn.Module):
     sufficiently large calls measure candidate sizes using bounded private
     outputs; the selected launch configurations are cached. Cached phases launch
     together.
-    Source- or receiver-owned tasks accumulate rows
-    in registers before writing node contributions; split rows and shared gradients
-    use atomic additions. Plans are reused for unchanged topology, with
-    capture-safe topology construction for CUDA Graph replay. CUDA kernels
+    Source- or receiver-owned tiles accumulate node contributions in registers;
+    split rows and shared gradients use atomic additions. Node boundaries are
+    identified inside sorted edge tiles without degree counts or task buffers.
+    Mixed direction derivatives reuse owned node inputs across incident edges.
+    Their ownership is selected per compiled tile, retaining edge execution when
+    persistent accumulators would reduce occupancy, require spilling, or need
+    further path splitting.
+    Plans are reused for unchanged index storage, including detached views,
+    with capture-safe sorting for CUDA Graph replay. CUDA kernels
     are generated and compiled with NVRTC on first use; their binaries are
     cached independently of graph sizes and learned parameters. Warm up the
     required derivatives before CUDA Graph capture. Atomic reductions mean
