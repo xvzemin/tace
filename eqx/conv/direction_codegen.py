@@ -17,6 +17,7 @@ def direction_source(metadata, indices, calls, layouts, dtype):
     barrier = "__syncthreads();" if wide else "__syncwarp();"
     entries = {}
     matrices = {}
+    vectors = {}
     matrix_size = 0
     for rank, outputs, operands, results, weighted in calls:
         for i, path in zip(indices, paths):
@@ -39,9 +40,17 @@ def direction_source(metadata, indices, calls, layouts, dtype):
             if rank and (operands[3], 1, 3) not in matrices:
                 matrices[operands[3], 1, 3] = matrix_size
                 matrix_size += 9
+            for axis in range(rank):
+                if any(output != 7 + axis for output in outputs):
+                    key = operands[7 + axis], operands[3]
+                    vectors.setdefault(key, 3 * len(vectors))
 
     pointers = len(layouts)
-    arguments = [f"T* p{i}" for i in range(pointers)] + [
+    destinations = {p for _, _, _, results, _ in calls for p in results}
+    arguments = [
+        f"{'T' if i in destinations else 'const T'}* __restrict__ p{i}"
+        for i in range(pointers)
+    ] + [
         "const long long* source",
         "const long long* target",
         "long long edges",
@@ -72,12 +81,13 @@ def direction_source(metadata, indices, calls, layouts, dtype):
     def matrix(p, offset, dim, a, b):
         return f"matrix[{matrices[p, offset, dim] + a * dim + b}]"
 
-    if matrix_size:
+    storage_size = matrix_size + 3 * len(vectors)
+    if storage_size:
         emit("extern __shared__ T storage[];")
         emit(
             "T* matrix = storage;"
             if wide
-            else f"T* matrix = storage + (threadIdx.x / 32) * {matrix_size};"
+            else f"T* matrix = storage + (threadIdx.x / 32) * {storage_size};"
         )
         for (p, offset, dim), start in matrices.items():
             thread, width = ("threadIdx.x", "blockDim.x") if wide else ("lane", "32")
@@ -85,6 +95,18 @@ def direction_source(metadata, indices, calls, layouts, dtype):
                 f"for (int k = {thread}; k < {dim * dim}; k += {width}) matrix[{start} + k] = {load(p, 'edge', f'{offset} + k')};"
             )
         emit(barrier)
+        # Direction cotangents are shared by all feature channels. Rotate
+        # each once per edge tile, not once per channel.
+        for (p, frame), start in vectors.items():
+            thread = "threadIdx.x" if wide else "lane"
+            emit(f"if ({thread} < 3) {{ T value = 0;")
+            for b in range(3):
+                emit(
+                    f"value = fma(matrix[{matrices[frame, 1, 3]} + 3 * {thread} + {b}], {load(p, 'edge', str(b))}, value);"
+                )
+            emit(f"matrix[{matrix_size + start} + {thread}] = value; }}")
+        if vectors:
+            emit(barrier)
 
     rotated = {}
     gradients = {}
@@ -94,18 +116,18 @@ def direction_source(metadata, indices, calls, layouts, dtype):
         name, available = rotated.setdefault(key, (f"v{len(rotated)}_", set()))
         for a in sorted(set(selected) - available):
             available.add(a)
-            if offset < 0:
+            if channels == 0:
+                emit(
+                    f"const T {name}{a} = matrix[{matrix_size + vectors[p, frame] + a}];"
+                )
+            elif offset < 0:
                 emit(
                     f"T {name}{a} = active ? {load(p, row, f'{start + a * channels} + channel')} : T(0);"
                 )
             else:
                 emit(f"T {name}{a} = 0;")
                 for b in range(dim):
-                    column = (
-                        str(start + b)
-                        if channels == 0
-                        else f"{start + b * channels} + channel"
-                    )
+                    column = f"{start + b * channels} + channel"
                     value = load(p, row, column)
                     emit(
                         f"{name}{a} = fma({matrix(frame, offset, dim, a, b)}, active ? {value} : T(0), {name}{a});"
@@ -243,6 +265,12 @@ def direction_source(metadata, indices, calls, layouts, dtype):
         name,
         selected,
     ) in gradients.items():
+        if channels == 0:
+            # Reduce the local vector before rotating it back. Only lane zero
+            # performs the inverse rotation and writes the edge cotangent.
+            for a in sorted(selected):
+                emit(f"{name}{a} = warp_sum({name}{a});")
+            emit("if (lane == 0) {")
         for b in range(dim):
             emit("{ T value = 0;")
             for a in sorted(selected):
@@ -257,12 +285,13 @@ def direction_source(metadata, indices, calls, layouts, dtype):
                 str(start + b) if channels == 0 else f"{start + b * channels} + channel"
             )
             if channels == 0:
-                emit("value = warp_sum(value);")
-                emit(
-                    f"if (lane == 0) atomicAdd(p{p} + {address(p, row, column)}, value);"
-                )
+                if not wide and not layouts[p][0]:
+                    emit(f"if (gridDim.y == 1) {load(p, row, column)} += value; else")
+                emit(f"atomicAdd(p{p} + {address(p, row, column)}, value);")
             else:
                 emit(f"if (active) atomicAdd(p{p} + {address(p, row, column)}, value);")
             emit("}")
+        if channels == 0:
+            emit("}")
     emit("}")
-    return "\n".join(lines), mul, matrix_size * (4 if dtype == "float" else 8)
+    return "\n".join(lines), mul, storage_size * (4 if dtype == "float" else 8)

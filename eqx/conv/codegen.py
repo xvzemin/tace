@@ -30,6 +30,10 @@ def convolution_source(
     input_paths = [paths[group[0]][1] for group in input_groups]
     input_index = {j: i for i, group in enumerate(input_groups) for j in group}
     support = [{b: (a, c) for a, b, c in cg} for _, _, cg in paths]
+    destinations = {}
+    for j, (_, path, _) in enumerate(paths):
+        destinations.setdefault((path[1], path[3], path[5], path[7]), []).append(j)
+    merged = {j for group in destinations.values() if len(group) > 1 for j in group}
     # Wide channel tiles share one matrix across the block's warps. Narrow
     # tiles keep independent edges in each warp without block synchronization.
     matrices = {}
@@ -38,6 +42,11 @@ def convolution_source(
             continue
         for pd in (*[pd for _, pd in xp], *[pd for pd, *_ in gx]):
             matrices[pd, "ei", path[6], path[4]] = None
+    for group in destinations.values():
+        path = paths[group[0]][1]
+        if len(group) > 1 and path[7] >= 0:
+            for pd, *_ in gy:
+                matrices[pd, "eo", path[7], path[5]] = None
     # C has one nonzero per supported order. Fold it into the output Wigner
     # rows once per tile, then reuse those rows across channels and transposes.
     coupled_offsets, coupled_entries = {}, {}
@@ -45,7 +54,10 @@ def convolution_source(
     for j, (_, path, _) in enumerate(paths):
         if path[7] < 0:
             continue
-        for pd in (*[pd for _, pd in yp], *[pd for pd, *_ in gy]):
+        for pd in (
+            *[pd for _, pd in yp],
+            *[pd for pd, *_ in gy if j not in merged],
+        ):
             for b, (_, c) in support[j].items():
                 key = pd, path[7] + b * path[5], path[5], c
                 if key not in coupled_entries:
@@ -216,7 +228,9 @@ def convolution_source(
                     for a in range(path[4]):
                         emit(f"T total_x{k}_{i}_{a} = 0;")
         else:
-            for j, (_, path, _) in enumerate(paths):
+            for group in destinations.values():
+                j = group[0]
+                path = paths[j][1]
                 for i, _ in enumerate(gy):
                     for a in range(path[5]):
                         emit(f"T total_y{j}_{i}_{a} = 0;")
@@ -312,10 +326,15 @@ def convolution_source(
                     emit(f"T cmsg{j}_{t}_{b} = T({c:.17g}) * msg{j}_{t}_{b};")
 
         for i, (pd, g, *terms) in enumerate(gy):
-            destinations = {f"out{j}_{i}_": j for j in group}
+            output_paths = {}
+            for j in group:
+                output_paths.setdefault(paths[j][1][1], []).append(j)
+            names = {
+                f"out{indices[0]}_{i}_": indices[0] for indices in output_paths.values()
+            }
 
             def consume(name, a):
-                j = destinations[name]
+                j = names[name]
                 if owner == 1:
                     emit(f"total_y{j}_{i}_{a} += {name}{a};")
                 else:
@@ -325,6 +344,9 @@ def convolution_source(
                         f"{name}{a}",
                     )
 
+            independent = [
+                indices[0] for indices in output_paths.values() if len(indices) == 1
+            ]
             rotated(
                 [
                     (
@@ -337,7 +359,7 @@ def convolution_source(
                         ],
                         range(odim),
                     )
-                    for j in group
+                    for j in independent
                 ],
                 pd,
                 "eo",
@@ -345,8 +367,39 @@ def convolution_source(
                 odim,
                 True,
                 consume,
-                destinations,
+                {f"out{j}_{i}_": j for j in independent},
             )
+            for indices in output_paths.values():
+                if len(indices) == 1:
+                    continue
+                j = indices[0]
+                values = []
+                for b in range(odim):
+                    contributions = [
+                        (index, support[index][b][1], t)
+                        for index in indices
+                        if b in support[index]
+                        for t in terms
+                    ]
+                    if not contributions:
+                        values.append(None)
+                        continue
+                    name = f"sum{j}_{i}_{b}"
+                    emit(f"T {name} = 0;")
+                    for index, coefficient, t in contributions:
+                        emit(
+                            f"{name} = fma(T({coefficient:.17g}), msg{index}_{t}_{b}, {name});"
+                        )
+                    values.append(name)
+                rotated(
+                    [(f"out{j}_{i}_", values, range(odim))],
+                    pd,
+                    "eo",
+                    ostart,
+                    odim,
+                    True,
+                    consume,
+                )
         for i, (py, g, *terms) in enumerate(gdo):
             for j in group:
                 vector(
@@ -501,7 +554,9 @@ def convolution_source(
                             f"total_x{k}_{i}_{a}",
                         )
         else:
-            for j, (_, path, _) in enumerate(paths):
+            for group in destinations.values():
+                j = group[0]
+                path = paths[j][1]
                 for i, (_, g, *_) in enumerate(gy):
                     for a in range(path[5]):
                         owned_store(

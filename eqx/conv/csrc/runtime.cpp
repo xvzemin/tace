@@ -112,7 +112,8 @@ struct Kernel {
 using Launch = std::tuple<std::shared_ptr<Kernel>, std::vector<uint64_t>,
                           unsigned int, unsigned int, unsigned int, unsigned int>;
 
-void launch(std::vector<Launch> calls, uint64_t stream) {
+void launch(std::vector<Launch> calls, uint64_t stream,
+            std::vector<uint64_t> shared_arguments) {
     if (calls.empty()) return;
     py::gil_scoped_release release;
     CUcontext current;
@@ -122,16 +123,22 @@ void launch(std::vector<Launch> calls, uint64_t stream) {
     if (change) check(cuCtxPushCurrent(context));
     CUresult status = CUDA_SUCCESS;
     std::vector<void*> pointers;
+    std::vector<void*> shared_pointers;
+    shared_pointers.reserve(shared_arguments.size());
+    for (auto& value : shared_arguments) shared_pointers.push_back(&value);
     for (auto& [kernel, arguments, gx, gy, threads, shared_bytes] : calls) {
         if (!gx || !gy) continue;
         if (kernel->context != context) {
             status = CUDA_ERROR_INVALID_CONTEXT;
             break;
         }
-        pointers.clear();
-        for (auto& value : arguments) pointers.push_back(&value);
+        if (!arguments.empty()) {
+            pointers.clear();
+            for (auto& value : arguments) pointers.push_back(&value);
+        }
         status = cuLaunchKernel(kernel->function, gx, gy, 1, threads, 1, 1, shared_bytes,
-                                reinterpret_cast<CUstream>(stream), pointers.data(), nullptr);
+                                reinterpret_cast<CUstream>(stream),
+                                arguments.empty() ? shared_pointers.data() : pointers.data(), nullptr);
         if (status != CUDA_SUCCESS) break;
     }
     if (change) cuCtxPopCurrent(&current);
@@ -140,7 +147,8 @@ void launch(std::vector<Launch> calls, uint64_t stream) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("compile", &compile);
-    m.def("launch", &launch);
+    m.def("launch", &launch, py::arg("calls"), py::arg("stream"),
+          py::arg("shared_arguments") = std::vector<uint64_t>{});
     m.def("version", []() {
         int major, minor;
         nvrtcVersion(&major, &minor);

@@ -354,6 +354,8 @@ def contract(plan, source, target, calls, shared=None):
         x.device,
     )
     stream = torch.cuda.current_stream(x.device).cuda_stream
+    pointers = tuple(value.data_ptr() for value in values)
+    edge_pointers = source.data_ptr(), target.data_ptr()
     graphs = {}
     launches = []
     for kernel, width, storage, threads, owner, inputs, results in phases:
@@ -388,7 +390,8 @@ def contract(plan, source, target, calls, shared=None):
             scalars,
             range(len(inputs), len(inputs) + len(results)),
         )
-        args = [value.data_ptr() for value in tensors] + list(scalars)
+        args = [pointers[i] for i in (*inputs, *results)]
+        args.extend((*edge_pointers, order.data_ptr(), tasks.data_ptr(), *scalars))
         tasks_per_block = 1 if width > 32 else threads // 32
         channels_per_block = threads if width > 32 else 32
         launches.append(
@@ -433,21 +436,51 @@ def direction_plan(metadata, specification, layouts, dtype, device):
     from .direction_codegen import direction_source
 
     plan = kernel_plan(metadata)
-    pending = list(contraction_groups(plan.path_data))
+    pending = [
+        (
+            tuple(
+                sorted(
+                    group,
+                    key=lambda i: (plan.path_data[i][1][7], plan.path_data[i][1][1]),
+                )
+            ),
+            specification,
+        )
+        for group in contraction_groups(plan.path_data)
+    ]
     accepted = []
     while pending:
         sources = [
-            direction_source(metadata, group, specification, layouts, dtype)
-            for group in pending
+            direction_source(metadata, group, terms, layouts, dtype)
+            for group, terms in pending
         ]
         compiled = kernels([entry[0] for entry in sources], device)
         remaining = []
-        for group, (code, width, storage) in zip(pending, sources):
+        for (group, terms), (code, width, storage) in zip(pending, sources):
             kernel = compiled[code]
-            if (kernel.local_bytes or kernel.registers > 160) and len(group) > 1:
-                middle = len(group) // 2
-                remaining.extend((group[:middle], group[middle:]))
-                continue
+            if kernel.local_bytes or kernel.registers > 160:
+                if len(group) > 1:
+                    # Keep the different adjoints together while they share
+                    # input/output rotations. Split independent output degrees
+                    # before partitioning the derivative program itself.
+                    boundaries = [
+                        i
+                        for i in range(1, len(group))
+                        if plan.path_data[group[i - 1]][1][7]
+                        != plan.path_data[group[i]][1][7]
+                    ]
+                    middle = (
+                        min(boundaries, key=lambda i: abs(2 * i - len(group)))
+                        if boundaries
+                        else len(group) // 2
+                    )
+                    remaining.extend(((group[:middle], terms), (group[middle:], terms)))
+                    continue
+                if sum(len(term[1]) for term in terms) > 1:
+                    remaining.extend(
+                        (group, tuple(part)) for part in split_program(terms)
+                    )
+                    continue
             sizes = tuple(
                 n
                 for n in (64, 128, 256)
@@ -534,7 +567,7 @@ def contract_directions(metadata, source, target, calls):
             launches.append(
                 (
                     kernel,
-                    pointers,
+                    (),
                     (source.numel() + tasks - 1) // tasks,
                     (width + channels - 1) // channels,
                     threads,
@@ -542,7 +575,7 @@ def contract_directions(metadata, source, target, calls):
                 )
             )
         runtime().launch(
-            launches, torch.cuda.current_stream(values[0].device).cuda_stream
+            launches, torch.cuda.current_stream(values[0].device).cuda_stream, pointers
         )
 
     source, target = source.contiguous(), target.contiguous()

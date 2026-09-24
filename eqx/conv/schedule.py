@@ -116,35 +116,50 @@ def rotation_groups(paths):
     inputs, outputs = {}, {}
     for i, (path, _) in enumerate(paths):
         inputs.setdefault((path[0], path[2], path[4], path[6]), []).append(i)
-        outputs.setdefault((path[3], path[5], path[7]), []).append(i)
+        outputs.setdefault((path[3], path[5], path[7]), {}).setdefault(
+            path[1], []
+        ).append(i)
     output_tiles = []
-    for group in outputs.values():
-        width = max(2, 32 // paths[group[0]][0][5])
-        output_tiles.extend(
-            tuple(group[i : i + width]) for i in range(0, len(group), width)
-        )
+    for entries in outputs.values():
+        first = next(iter(entries.values()))[0]
+        width = max(2, 32 // paths[first][0][5])
+        tile = []
+        for group in entries.values():
+            if tile and len(tile) + len(group) > width:
+                output_tiles.append(tuple(tile))
+                tile = []
+            # Instructions with the same actual destination are summed before
+            # the output rotation. Independent irrep entries remain separate.
+            tile.extend(group)
+        if tile:
+            output_tiles.append(tuple(tile))
     return tuple(map(tuple, inputs.values())), tuple(output_tiles)
 
 
 def split_program(calls):
     """Partition derivative outputs while retaining shared expensive factors."""
     terms = [
-        ((role,), values, (destination,), weighted)
-        for outputs, values, destinations, weighted in calls
+        (*prefix, (role,), values, (destination,), weighted)
+        for *prefix, outputs, values, destinations, weighted in calls
         for role, destination in zip(outputs, destinations)
     ]
     dependencies = []
-    for (role,), values, _, weighted in terms:
-        x, w, _, di, do, s, y = map(id, values)
+    for *prefix, (role,), values, _, weighted in terms:
+        x, w, _, di, do, s, y, *vectors = map(id, values)
         factors = set()
-        if role in (1, 4, 5, 6):
+        if role in (1, 4, 5, 6) or role >= 7:
             factors.add(("input rotation", x, di))
-        if role in (0, 1, 3, 5):
+        if role in (0, 1, 3, 5) or role >= 7:
             factors.add(("output rotation", y, do))
-        if role in (0, 3, 4, 5, 6):
+        if role in (0, 3, 4, 5, 6) or role >= 7:
             factors.add(("weight", w, weighted))
-        if role in (0, 1, 3, 4, 6):
+        if role in (0, 1, 3, 4, 6) or role >= 7:
             factors.add(("amplitude", s))
+        factors.update(
+            ("vector rotation", value, di)
+            for axis, value in enumerate(vectors)
+            if role != 7 + axis
+        )
         dependencies.append(factors)
     first = max(range(len(terms)), key=lambda i: len(dependencies[i]))
     second = min(
@@ -197,7 +212,7 @@ def project(
         if any(i not in (1, 2) for i in outputs):
             factors[key[:2]] = values[1:3]
     radial = calls[0][-3][1]
-    count = max(1, len(factors)) + sum(
+    count = len(factors) + sum(
         1 in terms[0][-2] or 2 in terms[0][-2] for terms in groups.values()
     )
     chunk = max(
@@ -207,18 +222,29 @@ def project(
     if chunk >= 32:
         chunk = chunk // 32 * 32
     chunk = min(chunk_size, chunk, source.numel())
-    workspaces = {key: radial.new_empty(chunk, plan.weight_numel) for key in factors}
+    workspaces = {
+        key: radial.new_empty(1 if r.size(0) == 1 else chunk, plan.weight_numel)
+        for key, (r, _) in factors.items()
+    }
     gradients = {
-        key: radial.new_empty(chunk, plan.weight_numel)
+        key: radial.new_empty(
+            1 if terms[0][-3][1].size(0) == 1 else chunk, plan.weight_numel
+        )
         for key, terms in groups.items()
         if 1 in terms[0][-2] or 2 in terms[0][-2]
     }
-    unused = (
-        radial.new_empty(chunk, plan.weight_numel)
-        if not workspaces
-        else next(iter(workspaces.values()))
-    )
+    # Weight-only adjoints never read this operand. Retain its shape without
+    # allocating a second edge-by-path workspace.
+    unused = next(iter(workspaces.values()), None)
+    if unused is None:
+        unused = radial.new_empty(1).expand(chunk, plan.weight_numel)
     empty = radial.new_empty(0, plan.weight_numel)
+    for key, (r, projection) in factors.items():
+        if r.size(0) == 1:
+            torch.mm(r, projection, out=workspaces[key])
+    for key, gradient in gradients.items():
+        if groups[key][0][-3][1].size(0) == 1:
+            gradient.zero_()
     for start in range(0, source.numel(), chunk):
         stop = min(start + chunk, source.numel())
         views = {}
@@ -230,16 +256,20 @@ def project(
 
         weights = {}
         for key, (r, projection) in factors.items():
+            is_shared = r.size(0) == 1
             r = edge_view(r)
             weights[key] = workspaces[key][: r.size(0)]
-            torch.mm(r, projection, out=weights[key])
+            if not is_shared:
+                torch.mm(r, projection, out=weights[key])
         direct = []
         weight_gradients = {}
         for key, terms in groups.items():
             r, projection = terms[0][-3][1:3]
             rows = 1 if r.size(0) == 1 else stop - start
             if key in gradients:
-                weight_gradients[key] = gradients[key][:rows].zero_()
+                weight_gradients[key] = gradients[key][:rows]
+                if r.size(0) != 1:
+                    weight_gradients[key].zero_()
             w = weights.get(key[:2], unused[:rows])
             for *prefix, outputs, values, destinations, weighted in terms:
                 x, _, _, din, dout, amplitudes, y, *vectors = values
@@ -271,8 +301,21 @@ def project(
         contract(plan, source[start:stop], target[start:stop], direct, shared)
         for key, gradient in weight_gradients.items():
             r, projection = groups[key][0][-3][1:3]
+            if r.size(0) == 1:
+                continue
             destinations = groups[key][0][-2]
             if 1 in destinations:
                 edge_view(destinations[1]).addmm_(gradient, projection.T)
             if 2 in destinations:
                 destinations[2].addmm_(edge_view(r).T, gradient)
+    # Shared weights have one projected cotangent, summed over every chunk.
+    # Apply its projection transpose only once.
+    for key, gradient in gradients.items():
+        r, projection = groups[key][0][-3][1:3]
+        if r.size(0) != 1:
+            continue
+        destinations = groups[key][0][-2]
+        if 1 in destinations:
+            destinations[1].addmm_(gradient, projection.T)
+        if 2 in destinations:
+            destinations[2].addmm_(r.T, gradient)

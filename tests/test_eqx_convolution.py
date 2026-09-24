@@ -127,8 +127,9 @@ def test_quaternion_wigner_compile_and_capture():
     torch.testing.assert_close(output, frame.forward_packed(vectors))
 
 
-@pytest.mark.parametrize("channels", [3, 64, 129])
-def test_same_degree_output_rotations(channels):
+@pytest.mark.parametrize("channels,edge_count", [(3, 5), (64, 5), (129, 5), (3, 1031)])
+@pytest.mark.parametrize("merge_paths", [False, True])
+def test_same_degree_output_rotations(channels, edge_count, merge_paths):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     previous = torch.get_default_dtype()
@@ -138,9 +139,13 @@ def test_same_degree_output_rotations(channels):
         tp = O3TensorProduct(
             f"{channels}x0e+{channels}x1o+{channels}x2e",
             "0e+1o+2e",
-            "+".join([f"{channels}x1o"] * 4 + [f"{channels}x2e"] * 2),
+            (
+                f"{channels}x1o+{channels}x2e"
+                if merge_paths
+                else "+".join([f"{channels}x1o"] * 4 + [f"{channels}x2e"] * 2)
+            ),
             [
-                (a, b, i, "uvu", True)
+                (a, b, int(i >= 4) if merge_paths else i, "uvu", True)
                 for i, (a, b) in enumerate(
                     [(0, 1), (1, 0), (1, 2), (2, 1), (1, 1), (2, 0)]
                 )
@@ -151,12 +156,12 @@ def test_same_degree_output_rotations(channels):
         plan = Convolution(tp).cuda()
         reference = Convolution(tp, backend="torch").cuda()
         frame = WignerD(2, 2).cuda()
-        edges = torch.tensor([[0, 1, 2, 0, 3], [2, 2, 1, 3, 1]], device="cuda")
+        edges = torch.randint(4, (2, edge_count), device="cuda")
         x = torch.randn(4, tp.input_dim, device="cuda", requires_grad=True)
-        vectors = torch.randn(5, 3, device="cuda", requires_grad=True)
-        radial = torch.randn(5, 4, device="cuda", requires_grad=True)
+        vectors = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
+        radial = torch.randn(edge_count, 4, device="cuda", requires_grad=True)
         projection = torch.randn(4, tp.weight_numel, device="cuda", requires_grad=True)
-        amplitude = torch.randn(5, 3, device="cuda", requires_grad=True)
+        amplitude = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
         inputs = x, vectors, radial, projection, amplitude
         arguments = (
             x,
@@ -185,6 +190,84 @@ def test_same_degree_output_rotations(channels):
         torch.set_default_dtype(previous)
 
 
+def test_shared_path_rotation_schedule():
+    from eqx.conv.schedule import rotation_groups
+
+    # Three instructions sum into one output, while the fourth writes an
+    # independent entry of the same degree. Do not split or merge those roles.
+    paths = [
+        ((0, output, 2, 2, 3, 17, 1, 680, 2 * i, i), ())
+        for i, output in enumerate((0, 34, 0, 0))
+    ]
+    _, groups = rotation_groups(paths)
+    assert groups == ((0, 2, 3), (1,))
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_projected_weight_only_workspace(monkeypatch, shared):
+    from types import SimpleNamespace
+
+    from eqx.conv.schedule import project
+
+    torch.manual_seed(46)
+    rows = 1 if shared else 7
+    radial = torch.randn(rows, 3, dtype=torch.float64)
+    projection = torch.randn(3, 11, dtype=torch.float64)
+    expected = torch.randn(7, 11, dtype=torch.float64)
+    gr, gp = torch.zeros_like(radial), torch.zeros_like(projection)
+    edges = torch.arange(7)
+    dummy = torch.ones(rows, 1, dtype=torch.float64)
+    values = (dummy, radial, projection, dummy, dummy, dummy, dummy)
+    products = []
+    mm = torch.mm
+
+    def record(a, b, **kwargs):
+        products.append(a.shape)
+        return mm(a, b, **kwargs)
+
+    monkeypatch.setattr(torch, "mm", record)
+
+    def contract(plan, source, target, calls, layout):
+        for outputs, operands, results, weighted in calls:
+            assert outputs == (1,)
+            assert operands[1].untyped_storage().nbytes() == radial.element_size()
+            result = expected[source]
+            results[0].add_(result.sum(0, keepdim=True) if shared else result)
+
+    project(
+        SimpleNamespace(weight_numel=11),
+        edges,
+        edges,
+        [((1, 2), values, (gr, gp), False)],
+        contract,
+        chunk_size=3,
+    )
+    assert not products
+    reduced = expected.sum(0, keepdim=True) if shared else expected
+    torch.testing.assert_close(gr, reduced @ projection.T)
+    torch.testing.assert_close(gp, radial.T @ reduced)
+
+    # Shared projections are evaluated once per call, not once per chunk and
+    # not cached across parameter updates.
+    def forward(plan, source, target, calls, layout):
+        weights = calls[0][1][1]
+        inputs = radial if shared else radial[source]
+        torch.testing.assert_close(weights, mm(inputs, projection))
+
+    for _ in range(2):
+        products.clear()
+        project(
+            SimpleNamespace(weight_numel=11),
+            edges,
+            edges,
+            [((6,), values, (dummy,), False)],
+            forward,
+            chunk_size=3,
+        )
+        assert len(products) == (1 if shared else 3)
+        projection.add_(0.25)
+
+
 def test_derivative_partition_reuses_rotations():
     from eqx.conv.schedule import split_program
 
@@ -204,18 +287,21 @@ def test_derivative_partition_reuses_rotations():
 
 
 @pytest.mark.parametrize(
-    "device,backend,mode",
+    "device,backend,mode,channels",
     [
-        ("cpu", "torch", "uvu"),
-        ("cpu", "torch", "uvw"),
-        ("cuda", "torch", "uvu"),
-        ("cuda", "cuda", "uvu"),
+        ("cpu", "torch", "uvu", 2),
+        ("cpu", "torch", "uvw", 2),
+        ("cuda", "torch", "uvu", 2),
+        ("cuda", "cuda", "uvu", 2),
+        ("cuda", "cuda", "uvu", 65),
     ],
 )
 @pytest.mark.parametrize(
     "projected,shared", [(False, False), (True, False), (True, True)]
 )
-def test_direction_derivatives(monkeypatch, device, backend, mode, projected, shared):
+def test_direction_derivatives(
+    monkeypatch, device, backend, mode, channels, projected, shared
+):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx.conv import cuda
@@ -226,9 +312,9 @@ def test_direction_derivatives(monkeypatch, device, backend, mode, projected, sh
     try:
         torch.manual_seed(76)
         tp = O3TensorProduct(
-            "2x1o+2x2e",
+            f"{channels}x1o+{channels}x2e",
             "0e+1o+2e",
-            "2x1o+2x2e+2x1e+2x2o",
+            "+".join(f"{channels}x{ir}" for ir in ("1o", "2e", "1e", "2o")),
             [
                 (0, 0, 0, mode, True),
                 (1, 0, 1, mode, True),

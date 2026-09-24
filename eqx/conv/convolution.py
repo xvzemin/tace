@@ -238,16 +238,23 @@ class Convolution(torch.nn.Module):
     with output rotation entries and reused across channels, without storing
     edge-wise coupling matrices. The transposed contractions use the same
     combined entries; rotation-matrix adjoints retain the explicit coefficients.
-    Input adjoints are accumulated locally
-    before the inverse rotation. Workspaces for projected weights are reused
+    Instructions writing the same output entry are summed in the aligned
+    frame before their shared inverse rotation. Independent output entries
+    remain separate, even when they have the same degree.
+    Input adjoints are accumulated locally before the inverse rotation.
+    Workspaces for projected weights are reused
     across chunks and across mixed derivative terms, and are not saved for
-    backward. Path dependencies are retained through each transpose, including
+    backward. Shared radial inputs are projected once per call; their projected
+    adjoints are reduced across chunks before the projection transpose.
+    Path dependencies are retained through each transpose, including
     mixtures of weighted and unweighted instructions. Channelwise contractions
     use the same register-resident kernels at every angular degree. Mixed
     adjoints share local rotations and accumulate into their destinations
-    before inverse rotations. Compilation partitions derivative programs by
-    shared dependencies, reduction axes and register usage, rather than an
-    angular-degree threshold. Wide channel tiles share rotation matrices across
+    before inverse rotations. Direction-vector cotangents are reduced within
+    each channel warp before their inverse rotation. Channel-independent vector
+    operands are rotated once per edge tile. Compilation partitions derivative
+    programs using shared dependencies, reduction axes and register usage, rather
+    than an angular-degree threshold. Wide channel tiles share rotation matrices across
     warps, while narrow tiles process independent edges per warp. Shared input
     and output rotations accumulate into one adjoint. Their path and channel
     contributions are combined in bounded shared memory before global reduction.
