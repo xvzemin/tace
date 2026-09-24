@@ -64,10 +64,11 @@ eqx/
 │   ├── __init__.py               # Public convolution classes
 │   ├── contraction.py            # Shared recursive transpose rule
 │   ├── graph.py                  # Shared graph ordering
+│   ├── radial.py                 # Bounded radial projections and their adjoints
 │   ├── o3/
 │   │   ├── convolution.py        # O3TensorProductConv and PyTorch reference
 │   │   ├── cuda.py               # Path scheduling and CUDA execution
-│   │   └── codegen.py            # Sparse CG and fused radial contractions
+│   │   └── codegen.py            # Sparse CG contractions and local reductions
 │   └── o2_o3/
 │       ├── convolution.py        # O2O3TensorProductConv and reference adjoints
 │       ├── geometry.py           # Recursive direction derivatives
@@ -87,7 +88,7 @@ eqx/
 
 | Class | Implementation directory | Operation | Status |
 |---|---|---|---|
-| `O3TensorProductConv` | `conv/o3/` | Sparse O(3) CGTP with fused radial projection | Implemented |
+| `O3TensorProductConv` | `conv/o3/` | Sparse O(3) CGTP with bounded radial projection | Implemented |
 | `O2O3TensorProductConv` | `conv/o2_o3/` | O(3) CGTP through aligned-frame sparse coupling | Implemented |
 | `UvO2TensorProductConv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear | Planned |
 | `UuO2TensorProductConv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Planned |
@@ -107,10 +108,13 @@ derivative rules.
 `O3TensorProductConv` accepts a tensor product defining `uvu` instructions,
 including repeated output irreps and different multiplicities. Features use
 flattened `ir_mul` order. Supply node features, edge attributes, radial features,
-the final radial projection, and edge indices to `forward`. CUDA fuses the
-projection with sparse CG contractions and graph reduction without allocating
-edge messages or projected edge weights. Transposed programs support force
-training and recursive higher derivatives. The PyTorch reference remains
+the final radial projection, and edge indices to `forward`. Radial projections
+and their adjoints use bounded matrix-product workspaces, consumed by the
+fused sparse CG contraction and graph reduction. Edge messages are not
+materialized, and projected weights are not saved for backward. Paths and
+derivative terms share angular factors and accumulate gradients before global
+writes. Transposed programs support force training and recursive higher
+derivatives. The PyTorch reference remains
 available on CPU or with `backend="torch"`. No CUDA compiler is loaded at import.
 
 ## Citation

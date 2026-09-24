@@ -128,11 +128,12 @@ if it is not discovered automatically.
 
 The O(3) kernel directly contracts the nonzero CG coefficients. Compatible
 paths share channel-parallel input products, while output paths retain their
-individual slots and weights. The final radial projection is evaluated inside
-the contraction; neither projected edge weights nor edge messages are stored.
-Projection gradients are reduced over bounded edge tiles before updating the
-shared weights. Forward and higher derivatives use the same recursive
-transpose rule. Only ``uvu`` instructions and float32/float64 are supported.
+individual slots and weights. Radial projections and their transposes use
+bounded GEMM workspaces. Edge messages are not materialized, and projected
+weights are recomputed rather than retained for backward. Angular factors are
+shared across derivative terms; input and edge gradients are accumulated within
+each path tile before global writes. Forward and higher derivatives use the
+same recursive transpose rule. Only ``uvu`` instructions and float32/float64 are supported.
 The preceding radial MLP layers and node-level ``linear_down`` stay separate.
 
 The aligned O(2)--O(3) contraction fuses source gather, both feature rotations, sparse order-zero

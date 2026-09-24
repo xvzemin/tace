@@ -98,12 +98,14 @@ class O3TensorProductConv(torch.nn.Module):
     Features use flattened ``ir_mul`` order within each irrep. Instruction
     order, weight order and output multiplicities are preserved, including
     repeated output irreps. The CUDA contraction fuses source gathering,
-    radial projection, sparse Clebsch--Gordan products and target reduction.
-    It does not allocate edge messages or projected edge weights.
+    sparse Clebsch--Gordan products and target reduction.
+    Edge messages are not materialized. Radial projections use bounded
+    temporary workspaces that are recomputed rather than saved for backward.
 
     Forward and transposed contractions share a multilinear program. Each
     backward transposes that program again, supporting force training and
-    higher derivatives. Shared projection gradients use bounded edge tiles.
+    higher derivatives. Shared angular factors and partial gradients are
+    reused across paths and derivative terms.
     Reductions use atomic additions and are not generally deterministic.
     Warm up required derivatives before CUDA Graph capture.
     """
@@ -219,7 +221,7 @@ class O3TensorProductConv(torch.nn.Module):
             radial,
             projection,
             edge_attrs,
-            features.new_empty((num_nodes, self.output_dim)),
+            features.new_empty(1).expand(num_nodes, self.output_dim),
         ]
         if self.backend == "cuda" and features.is_cuda:
             return contraction(

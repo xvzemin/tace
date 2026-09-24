@@ -1,87 +1,158 @@
-"""Bounded path scheduling on the shared NVRTC runtime."""
+"""Resource-aware sparse contractions with bounded radial matrix products."""
 
 from collections import defaultdict, deque
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import torch
 
 from ...kernels.cuda import kernels, runtime
 from ..graph import prepare_graph
+from ..radial import project
 from .codegen import convolution_source
 from .convolution import parse_metadata
 
+CHUNK_SIZE = 65536
+WORKSPACE_BYTES = 512 << 20
+ROW_SIZE = 8
+
 
 @lru_cache(maxsize=256)
-def execution_plan(metadata, program, dimensions, shared, projected, dtype, device):
-    """Partition by multiplicity and compiled register usage, not degree."""
+def execution_plan(
+    metadata, program, dimensions, shared, dtype, grouped, device, initialize
+):
+    """Group shared inputs and derivative factors using compiled resource usage."""
     paths, _, _ = parse_metadata(metadata)
-    phases = []
-    for mapping, weighted_only, pairs in program:
-        # Projection gradients reduce an edge tile before writing shared
-        # parameters. Other adjoints share angular products within an edge.
-        for projection_gradient in (False, True):
-            active = tuple(
-                (role, slot)
-                for role, slot in pairs
-                if (role == 2) == projection_gradient
-                and (role != 2 or projected[mapping[2]])
+    outputs = 1 + max(slot for _, _, pairs in program for _, slot in pairs)
+    groups = defaultdict(list)
+    for path in paths:
+        groups[path[3], path[0]].append(path)
+    pending = deque(
+        (tuple(sorted(entries, key=lambda p: (p[1], p[2]))), program)
+        for entries in groups.values()
+    )
+    accepted = []
+    while pending:
+        candidates = []
+        while pending:
+            paths, terms = pending.popleft()
+            paths = tuple(
+                path
+                for path in paths
+                if path[8] >= 0
+                or any(
+                    not weighted and any(role != 1 for role, _ in pairs)
+                    for _, weighted, pairs in terms
+                )
             )
-            if not active:
+            if not paths:
                 continue
-            groups = defaultdict(list)
-            for path in paths:
-                if path[8] < 0 and (
-                    weighted_only or all(role in (1, 2) for role, _ in active)
-                ):
+            roles = {role for _, _, pairs in terms for role, _ in pairs}
+            nodes = roles & {0, 4}
+            owner = (
+                (0 if nodes == {0} else 1 if nodes == {4} else -1) if grouped else -1
+            )
+            code = convolution_source(
+                paths, terms, dimensions, shared, dtype, owner, outputs, initialize
+            )
+            candidates.append((code, paths, terms, owner))
+        compiled = kernels([code for code, *_ in candidates], device)
+        for code, paths, terms, owner in candidates:
+            kernel = compiled[code]
+            if kernel.local_bytes or kernel.registers > 160:
+                if len(terms) > 1:
+                    half = len(terms) // 2
+                    pending.extend(((paths, terms[:half]), (paths, terms[half:])))
                     continue
-                groups[path[3]].append(path)
-            for entries in groups.values():
-                # Keep register lifetimes bounded before asking the compiler
-                # for the actual occupancy and spill count.
-                tiles, tile, cost = [], [], 0
-                for path in sorted(entries, key=lambda p: (p[0], p[1], p[2])):
-                    extra = path[5] + path[6] + path[7] + len(path[-1]) // 8
-                    if tile and cost + extra > 64:
-                        tiles.append(tuple(tile))
-                        tile, cost = [], 0
-                    tile.append(path)
-                    cost += extra
-                if tile:
-                    tiles.append(tuple(tile))
-                pending = deque(tiles)
-                while pending:
-                    tile = pending.popleft()
-                    roles = tuple(role for role, _ in active)
-                    owner = 1 if set(roles) == {4} else 0 if set(roles) == {0} else -1
-                    code, edges_per_block = convolution_source(
-                        tile,
-                        roles,
-                        tuple(dimensions[i] for i in mapping),
-                        tuple(shared[i] for i in mapping),
-                        projected[mapping[2]],
-                        dtype,
-                        owner,
+                if len(paths) > 1:
+                    boundaries = [
+                        i
+                        for i in range(1, len(paths))
+                        if paths[i - 1][1] != paths[i][1]
+                    ]
+                    half = min(
+                        boundaries or range(1, len(paths)),
+                        key=lambda i: abs(2 * i - len(paths)),
                     )
-                    kernel = kernels((code,), device)[code]
-                    if len(tile) > 1 and (kernel.local_bytes or kernel.registers > 192):
-                        half = len(tile) // 2
-                        pending.extend((tile[:half], tile[half:]))
-                        continue
-                    phases.append(
-                        (
-                            kernel,
-                            mapping,
-                            tuple(slot for _, slot in active),
-                            tile[0][3],
-                            edges_per_block,
-                            owner,
-                        )
-                    )
-    return tuple(phases)
+                    pending.extend(((paths[:half], terms), (paths[half:], terms)))
+                    continue
+            threads = max(
+                (64, 128, 256),
+                key=lambda n: (n * kernel.active_blocks(n, 0), -abs(n - 128)),
+            )
+            accepted.append((kernel, paths[0][3], owner, threads))
+    return tuple(accepted)
+
+
+def contract_direct(metadata, source, target, calls, shared=None, initialize=()):
+    """Share angular factors across derivative terms and reduce on their owners."""
+    operands, results = [], []
+    operand_ids, result_ids, program = {}, {}, []
+    shared_values = {}
+    for outputs, values, destinations, weighted in calls:
+        mapping = []
+        for i, value in enumerate(values):
+            if id(value) not in operand_ids:
+                operand_ids[id(value)] = len(operands)
+                operands.append(value)
+            pointer = operand_ids[id(value)]
+            mapping.append(pointer)
+            if shared is not None and i in (1, 3):
+                shared_values[pointer] = shared[0 if i == 1 else 1]
+        pairs = []
+        for role, value in zip(outputs, destinations):
+            if id(value) not in result_ids:
+                result_ids[id(value)] = len(results)
+                results.append(value)
+            pairs.append((role, result_ids[id(value)]))
+        program.append((tuple(mapping), weighted, tuple(pairs)))
+    phases = execution_plan(
+        metadata,
+        tuple(program),
+        tuple(value.size(1) for value in operands),
+        tuple(
+            shared_values.get(i, value.size(0) == 1) for i, value in enumerate(operands)
+        ),
+        "float" if operands[0].dtype == torch.float32 else "double",
+        source.numel() >= 1024,
+        operands[0].device,
+        tuple(result_ids[id(value)] for value in initialize),
+    )
+    orders = {
+        owner: prepare_graph(source, target, owner)
+        for owner in {phase[2] for phase in phases}
+        if owner >= 0
+    }
+    pointers = [value.data_ptr() for value in (*operands, *results)]
+    launches = []
+    for kernel, width, owner, threads in phases:
+        rows = ROW_SIZE if owner >= 0 else 1
+        count = (source.numel() + rows - 1) // rows
+        arguments = [
+            *pointers,
+            source.data_ptr(),
+            target.data_ptr(),
+            orders[owner].data_ptr() if owner >= 0 else 0,
+            source.numel(),
+            count,
+            rows,
+        ]
+        launches.append(
+            (
+                kernel,
+                arguments,
+                (count + threads // 32 - 1) // (threads // 32),
+                (width + 31) // 32,
+                threads,
+                0,
+            )
+        )
+    runtime().launch(
+        launches, torch.cuda.current_stream(operands[0].device).cuda_stream
+    )
 
 
 def contract(metadata, program, source, target, operands, results):
-    """Launch contractions without retaining per-edge angular intermediates."""
+    """Contract without saving edge messages or full projected edge weights."""
     device, dtype = operands[0].device, operands[0].dtype
     if dtype not in (torch.float32, torch.float64):
         raise TypeError("The O3 CUDA convolution requires float32 or float64.")
@@ -91,41 +162,61 @@ def contract(metadata, program, source, target, operands, results):
         raise TypeError("Edge indices must have dtype int64.")
     if source.device != device or target.device != device:
         raise ValueError("Edge indices and features must be on the same device.")
-    operands = tuple(value.contiguous() for value in operands)
-    source, target = source.contiguous(), target.contiguous()
-    phases = execution_plan(
-        metadata,
-        program,
-        tuple(value.size(1) for value in operands),
-        tuple(value.size(0) == 1 for value in operands),
-        tuple(value.numel() != 0 for value in operands),
-        "float" if dtype == torch.float32 else "double",
-        device,
-    )
-    orders = {
-        owner: prepare_graph(source, target, owner)
-        for owner in {phase[-1] for phase in phases}
-        if owner >= 0
+    required = {
+        mapping[i]
+        for mapping, _, pairs in program
+        for output, _ in pairs
+        for i in range(5)
+        if i != output
     }
-    launches = []
-    for kernel, mapping, slots, width, edges_per_block, owner in phases:
-        arguments = [operands[i].data_ptr() for i in mapping]
-        arguments += [results[i].data_ptr() for i in slots]
-        arguments += [
-            source.data_ptr(),
-            target.data_ptr(),
-            orders[owner].data_ptr() if owner >= 0 else 0,
-            source.numel(),
-        ]
-        launches.append(
-            (
-                kernel,
-                arguments,
-                (source.numel() + edges_per_block - 1) // edges_per_block,
-                (width + 31) // 32,
-                128,
-                0,
-            )
+    contiguous = {}
+    prepared = []
+    for i, value in enumerate(operands):
+        if i in required and not value.is_contiguous():
+            if id(value) not in contiguous:
+                contiguous[id(value)] = value.contiguous()
+            value = contiguous[id(value)]
+        prepared.append(value)
+    operands = tuple(prepared)
+    source, target = source.contiguous(), target.contiguous()
+    calls = [
+        (
+            tuple(role for role, _ in pairs),
+            tuple(operands[i] for i in mapping),
+            tuple(results[slot] for _, slot in pairs),
+            weighted,
         )
+        for mapping, weighted, pairs in program
+    ]
+    paths, weight_numel, _ = parse_metadata(metadata)
+    projected = [call for call in calls if call[1][2].numel()]
+    direct = [call for call in calls if not call[1][2].numel()]
     with torch.cuda.device(device):
-        runtime().launch(launches, torch.cuda.current_stream(device).cuda_stream)
+        if direct:
+            # A zero-sized projection has an identically zero derivative.
+            direct = [
+                (
+                    tuple(role for role in outputs if role != 2),
+                    values,
+                    tuple(
+                        value for role, value in zip(outputs, destinations) if role != 2
+                    ),
+                    weighted,
+                )
+                for outputs, values, destinations, weighted in direct
+                if any(role != 2 for role in outputs)
+            ]
+            if direct:
+                contract_direct(metadata, source, target, direct)
+        if projected:
+            project(
+                weight_numel,
+                source,
+                target,
+                projected,
+                partial(contract_direct, metadata),
+                complete=sum(p[3] * p[4] for p in paths if p[8] >= 0) == weight_numel,
+                output_role=4,
+                chunk_size=CHUNK_SIZE,
+                workspace_bytes=WORKSPACE_BYTES,
+            )

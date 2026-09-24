@@ -1569,6 +1569,74 @@ def test_compile_and_cuda_graph(double_precision):
         torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-10)
 
 
+@pytest.mark.parametrize("channels", [3, 65])
+@pytest.mark.parametrize(
+    "shared_attrs,shared_radial",
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_o3_chunked_shared_gradients(
+    monkeypatch, channels, shared_attrs, shared_radial, double_precision
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.o3 import cuda
+
+    # Two grouped chunks and a one-edge tail exercise private and broadcast
+    # gradients without mistaking the tail for a shared operand.
+    monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
+    tp = tensor_product(channels, merge=True, unweighted=True).cuda()
+    conv = O3TensorProductConv(tp).cuda()
+    edges = torch.randint(257, (2, 2051), device="cuda")
+    inputs = [
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (257, tp.irreps_in1.dim),
+            (1 if shared_attrs else 2051, tp.irreps_in2.dim),
+            (1 if shared_radial else 2051, 5),
+            (5, tp.weight_numel),
+        )
+    ]
+    actual = conv(*inputs, edges)
+    expected = reference(tp, *inputs, edges)
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-11)
+    for _ in range(2):
+        seed = torch.randn_like(actual) / actual.numel() ** 0.5
+        gradients = [
+            torch.autograd.grad((value.sin() * seed).sum(), inputs, create_graph=True)
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-10)
+        actual, expected = (
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        )
+
+
+def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
+    from eqx.conv.o3.codegen import angular_source
+
+    tp = tensor_product()
+    conv = O3TensorProductConv(tp)
+    for path in conv.paths:
+        values = angular_source(
+            path,
+            tuple(range(5)),
+            (
+                tp.irreps_in1.dim,
+                tp.weight_numel,
+                0,
+                tp.irreps_in2.dim,
+                tp.irreps_out.dim,
+            ),
+            (False,) * 5,
+            {0, 1, 3},
+            {},
+            [],
+        )
+        assert all(role != 4 for _, role, _ in values)
+        assert all((v, 1, 0) in values for v in range(path[4]))
+
+
 def test_tace_model_force_training(monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
