@@ -10,7 +10,7 @@ from typing import Union
 import torch
 from e3nn import o3
 
-from eqx.conv import O2O3TensorProductConv
+from eqx.conv import O2O3TensorProductConv, O3TensorProductConv
 from eqx.o2 import O3TensorProduct
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
@@ -243,8 +243,18 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        self.use_oeq = acceleration_enabled("oeq")
-        self.use_cue = acceleration_enabled("cue")
+        self.eqx_tp = O3TensorProductConv(self.tp)
+        self.reshape_in = LayoutTransform(
+            self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
+        )
+        self.reshape_attrs = LayoutTransform(
+            self.irreps_in2, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
+        )
+        self.reshape_out = LayoutTransform(
+            self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+        )
+        self.use_oeq = acceleration_enabled("oeq") and not self.use_eqx
+        self.use_cue = acceleration_enabled("cue") and not self.use_eqx
         self.use_aoti = acceleration_enabled("compile")
         if self.use_aoti and self.use_cue:
             logging.warning(
@@ -300,6 +310,10 @@ class O3ScatterTensorProduct(torch.nn.Module):
             )
             self.use_cue = False
 
+    @property
+    def use_eqx(self) -> bool:
+        return bool(acceleration_enabled("eqx"))
+
     def forward(
         self,
         x: torch.Tensor,
@@ -308,11 +322,30 @@ class O3ScatterTensorProduct(torch.nn.Module):
         edge_index: torch.Tensor,
     ) -> torch.Tensor:
 
+        if self.use_eqx:
+            return self.forward_stream(
+                x, y, w, w.new_empty((0, self.weight_numel)), edge_index, None
+            )
         if hasattr(self, "fused_tp"):
             return self.fused_tp(x, y, w, edge_index)
         return scatter_sum(
             self.tp(x[edge_index[0]], y, w), edge_index[1], dim=0, dim_size=x.size(0)
         )
+
+    def forward_stream(
+        self, node_feats, edge_attrs, radial, projection, edge_index, edge_cutoff
+    ):
+        """Fuse the final radial projection with the indexed CGTP."""
+        if edge_cutoff is not None:
+            edge_attrs = edge_attrs * edge_cutoff
+        message = self.eqx_tp(
+            self.reshape_in(node_feats),
+            self.reshape_attrs(edge_attrs),
+            radial,
+            projection,
+            edge_index,
+        )
+        return self.reshape_out(message)
 
 
 class O2CgtpScatterTensorProduct(torch.nn.Module):

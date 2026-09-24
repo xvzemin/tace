@@ -95,11 +95,12 @@ Streamed CGTP with EquivariantX
 -------------------------------
 
 Install the optional backend from the TACE source directory, then select EQX
-for ``O2CgtpInteraction``:
+for ``cgtp`` or ``o2_cgtp`` interactions:
 
 .. code-block:: bash
 
    pip install '.[eqx]'
+   TACE_USE_EQX=1 tace-train -cn 3bpa_cgtp.yaml
    TACE_USE_EQX=1 tace-train -cn 3bpa_o2_cgtp.yaml
 
 .. code-block:: python
@@ -111,9 +112,11 @@ for ``O2CgtpInteraction``:
    model = convert_cgtp(model)  # cgtp -> o2_cgtp, detected per interaction
    enable_acceleration(enable_eqx=True)
 
-The flag switches existing ``O2CgtpInteraction`` modules between PyTorch
-and fused execution at runtime. Model loading is unchanged, and ordinary
-``cgtp`` interactions retain their e3nn/OEQ/CUE backend. Use ``convert_cgtp``
+The flag switches existing CGTP interactions to fused execution at runtime.
+Model loading is unchanged. Ordinary ``cgtp`` interactions use
+``eqx.conv.O3TensorProductConv``, while ``o2_cgtp`` interactions use
+``eqx.conv.O2O3TensorProductConv``. EQX takes precedence over OEQ and CUE
+for these convolutions when enabled. Use ``convert_cgtp``
 to convert an existing model explicitly, without retraining or changing its
 parameters. By default, conversion switches each CGTP interaction to the
 other implementation.
@@ -123,7 +126,16 @@ The default ``eqx.o2`` operators use PyTorch without external kernels.
 CPU. Install the ``eqx`` extra and provide a CUDA toolkit; set ``CUDA_HOME``
 if it is not discovered automatically.
 
-The contraction fuses source gather, both feature rotations, sparse order-zero
+The O(3) kernel directly contracts the nonzero CG coefficients. Compatible
+paths share channel-parallel input products, while output paths retain their
+individual slots and weights. The final radial projection is evaluated inside
+the contraction; neither projected edge weights nor edge messages are stored.
+Projection gradients are reduced over bounded edge tiles before updating the
+shared weights. Forward and higher derivatives use the same recursive
+transpose rule. Only ``uvu`` instructions and float32/float64 are supported.
+The preceding radial MLP layers and node-level ``linear_down`` stay separate.
+
+The aligned O(2)--O(3) contraction fuses source gather, both feature rotations, sparse order-zero
 CG coupling and target reduction, without retaining edge messages or their
 adjoints. Radial projections and their transposes use bounded GEMM workspaces.
 The same contraction evaluates recursive adjoints, including the mixed second

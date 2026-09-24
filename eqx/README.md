@@ -62,7 +62,12 @@ eqx/
 │   └── o3_tensor_product.py      # Aligned O(3) TensorProduct
 ├── conv/
 │   ├── __init__.py               # Public convolution classes
+│   ├── contraction.py            # Shared recursive transpose rule
 │   ├── graph.py                  # Shared graph ordering
+│   ├── o3/
+│   │   ├── convolution.py        # O3TensorProductConv and PyTorch reference
+│   │   ├── cuda.py               # Path scheduling and CUDA execution
+│   │   └── codegen.py            # Sparse CG and fused radial contractions
 │   └── o2_o3/
 │       ├── convolution.py        # O2O3TensorProductConv and reference adjoints
 │       ├── geometry.py           # Recursive direction derivatives
@@ -82,6 +87,7 @@ eqx/
 
 | Class | Implementation directory | Operation | Status |
 |---|---|---|---|
+| `O3TensorProductConv` | `conv/o3/` | Sparse O(3) CGTP with fused radial projection | Implemented |
 | `O2O3TensorProductConv` | `conv/o2_o3/` | O(3) CGTP through aligned-frame sparse coupling | Implemented |
 | `UvO2TensorProductConv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear | Planned |
 | `UuO2TensorProductConv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Planned |
@@ -97,6 +103,15 @@ Use `from eqx.conv import O2O3TensorProductConv` and
 `from eqx.kernels import wigner_D`. CUDA compilation remains lazy. File
 organization does not change instruction ordering, weights, normalization or
 derivative rules.
+
+`O3TensorProductConv` accepts a tensor product defining `uvu` instructions,
+including repeated output irreps and different multiplicities. Features use
+flattened `ir_mul` order. Supply node features, edge attributes, radial features,
+the final radial projection, and edge indices to `forward`. CUDA fuses the
+projection with sparse CG contractions and graph reduction without allocating
+edge messages or projected edge weights. Transposed programs support force
+training and recursive higher derivatives. The PyTorch reference remains
+available on CPU or with `backend="torch"`. No CUDA compiler is loaded at import.
 
 ## Citation
 

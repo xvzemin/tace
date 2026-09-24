@@ -35,6 +35,10 @@ class O3CgtpInteraction(Interaction):
     This interaction block does not directly add nonlinearity to the edge.
     """
 
+    @property
+    def use_eqx(self) -> bool:
+        return hasattr(self.rejector, "eqx_tp") and bool(acceleration_enabled("eqx"))
+
     def _prepare_setup(self) -> None:
         pass
 
@@ -177,6 +181,20 @@ class O3CgtpInteraction(Interaction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
+        if self.use_eqx:
+            radial = edge_feats
+            for layer in self.edge_info.mlp[:-1]:
+                radial = layer(radial)
+            last = self.edge_info.mlp[-1]
+            projection = last.get_weight()
+            if last.bias is not None:
+                radial = torch.cat(
+                    (radial, radial.new_ones((radial.size(0), 1))), dim=-1
+                )
+                projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
+            return self.rejector.forward_stream(
+                node_feats, edge_attrs, radial, projection, edge_index, edge_cutoff
+            )
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
@@ -295,10 +313,6 @@ class O2CgtpInteraction(O3CgtpInteraction):
     to :class:`O3CgtpInteraction`. All required local orders are retained.
     ``TACE_USE_EQX=1`` selects the fused convolution at execution time.
     """
-
-    @property
-    def use_eqx(self) -> bool:
-        return bool(acceleration_enabled("eqx"))
 
     def _build_rejector(self) -> torch.nn.Module:
         return O2CgtpScatterTensorProduct(

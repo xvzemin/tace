@@ -56,7 +56,7 @@ class TACEAseCalc(Calculator):
     enable_compile : bool, optional
         Whether to enable the torch.compile model path.
     enable_eqx : bool, optional
-        Whether to enable the EQX operator preview.
+        Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
     **kwargs
         Additional keyword arguments passed to the ASE Calculator base class.
     """

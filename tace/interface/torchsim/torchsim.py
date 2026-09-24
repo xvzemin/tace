@@ -98,7 +98,7 @@ class TACETorchSimCalc(ModelInterface):
             enable_eqt (bool): Whether to enable Eqt acceleration. Defaults to False.
             enable_compile (bool): Whether to enable the torch.compile model path.
                 Defaults to False.
-            enable_eqx (bool): Whether to enable the EQX operator preview.
+            enable_eqx (bool): Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
                 Defaults to False.
         """
         super().__init__()
