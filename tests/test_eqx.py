@@ -456,6 +456,111 @@ def test_o2_linear_external_weights_broadcast_and_zero_pad():
     )
 
 
+@pytest.mark.parametrize("batch_size", [0, 5])
+@pytest.mark.parametrize("weight_batch", ["shared", "singleton", "edge"])
+def test_o2_uu_linear_matches_channel_diagonal_linear(
+    o2_dtype, batch_size, weight_batch
+):
+    module = o2.UuLinear(
+        "4x0ee+2x0ee+4x0oe+4x1me+2x1mo",
+        "4x0ee+2x0oe+2x1me+4x1mo+2x2me",
+        num_channel=2,
+    ).to(DEVICE, DTYPE)
+    reference = o2.Linear(
+        module.irreps_in,
+        module.irreps_out,
+        internal_weights=False,
+        shared_weights=False,
+    ).to(DEVICE, DTYPE)
+    features = module.irreps_in.randn(
+        batch_size,
+        -1,
+        device=DEVICE,
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    leading = (
+        ()
+        if weight_batch == "shared"
+        else (1 if weight_batch == "singleton" else batch_size,)
+    )
+    weight = torch.randn(
+        *leading,
+        module.weight_numel,
+        device=DEVICE,
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    matrices = []
+    offset = 0
+    for instruction in module.instructions:
+        copies_in, copies_out, channels = instruction.path_shape
+        size = copies_in * copies_out * channels
+        matrix = weight[..., offset : offset + size].reshape(
+            *leading, copies_in, copies_out, channels
+        )
+        matrix = torch.einsum(
+            "...iju,uv->...iujv",
+            matrix,
+            torch.eye(channels, device=DEVICE, dtype=DTYPE),
+        )
+        matrices.append(
+            matrix.reshape(*leading, copies_in * copies_out * channels**2)
+            * channels**0.5
+        )
+        offset += size
+    expected = reference(features, torch.cat(matrices, dim=-1))
+    actual = module(features, weight)
+    torch.testing.assert_close(actual, expected)
+    assert list(module.parameters()) == []
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(
+                output.square().sum(),
+                (features, weight),
+                create_graph=True,
+                retain_graph=True,
+            )
+            for output in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+        actual, expected = [
+            torch.cat([g.flatten() for g in grads]) for grads in gradients
+        ]
+
+    angle = torch.tensor(0.37, device=DEVICE, dtype=DTYPE)
+    for reflected, time_reversal in ((False, False), (True, False), (False, True)):
+        torch.testing.assert_close(
+            module(
+                _transform(features, module.irreps_in, angle, reflected, time_reversal),
+                weight,
+            ),
+            _transform(
+                module(features, weight),
+                module.irreps_out,
+                angle,
+                reflected,
+                time_reversal,
+            ),
+        )
+
+
+def test_o2_uu_linear_compiles_with_dynamic_batches(o2_dtype):
+    module = o2.UuLinear("4x0e+4x1m", "2x0e+6x1m+2x0o", 2)
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for batch_size in (3, 7, 0):
+        features = torch.randn(batch_size, module.irreps_in.dim, requires_grad=True)
+        weight = torch.randn(batch_size, module.weight_numel, requires_grad=True)
+        actual, expected = compiled(features, weight), module(features, weight)
+        torch.testing.assert_close(actual, expected)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), (features, weight)),
+            torch.autograd.grad(expected.square().sum(), (features, weight)),
+        ):
+            torch.testing.assert_close(a, b)
+
+
 @pytest.mark.parametrize("reflected", [False, True])
 def test_o2_gate_is_equivariant(reflected):
     module = o2.Gate(

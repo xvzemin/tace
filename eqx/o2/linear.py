@@ -370,3 +370,135 @@ class Linear(torch.nn.Module):
             f"{self.__class__.__name__}({self.irreps_in} -> "
             f"{self.irreps_out} | {self.weight_numel} weights)"
         )
+
+
+class UuLinear(torch.nn.Module):
+    """Mix equivalent O(2) representations without mixing channels.
+
+    Parameters
+    ----------
+    irreps_in : Irreps, str, or sequence
+        Input representation in flattened ``ir_mul`` layout.
+    irreps_out : Irreps, str, or sequence
+        Output representation in flattened ``ir_mul`` layout.
+    num_channel : int
+        Number of matching channels. Each multiplicity must be divisible by
+        this value and is interpreted as ``(copies, num_channel)``.
+
+    Notes
+    -----
+    Every compatible input and output entry is connected. Each pair of
+    representation copies has one external weight per channel, shared by
+    the angular components of the irrep. Weights use ``(copies_in,
+    copies_out, num_channel)`` order within each instruction. Contributions
+    are normalized by the square root of the number of input copies.
+    Reflection and time-reversal labels must both match. Unconnected output
+    entries are zero. This module has no internal weights or biases.
+    """
+
+    def __init__(
+        self,
+        irreps_in: IrrepsLike,
+        irreps_out: IrrepsLike,
+        num_channel: int,
+    ) -> None:
+        super().__init__()
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
+        self.num_channel = num_channel
+        if num_channel < 1 or any(
+            mul % num_channel for _, mul in self.irreps_in + self.irreps_out
+        ):
+            raise ValueError("num_channel must divide every positive multiplicity.")
+        self.instructions = tuple(
+            Instruction(
+                i_in,
+                i_out,
+                (mul_in // num_channel, mul_out // num_channel, num_channel),
+                (self.irreps_in.count(ir_in) // num_channel) ** -0.5,
+            )
+            for i_in, (ir_in, mul_in) in enumerate(self.irreps_in)
+            for i_out, (ir_out, mul_out) in enumerate(self.irreps_out)
+            if ir_in == ir_out and mul_in and mul_out
+        )
+        self.weight_numel = sum(
+            math.prod(instruction.path_shape) for instruction in self.instructions
+        )
+        self.weight_shape = (self.weight_numel,)
+        self._input_slices = self.irreps_in.slices()
+        self._instructions_by_output = tuple(
+            tuple(i for i, ins in enumerate(self.instructions) if ins.i_out == i_out)
+            for i_out in range(len(self.irreps_out))
+        )
+        offsets = []
+        offset = 0
+        for instruction in self.instructions:
+            size = math.prod(instruction.path_shape)
+            offsets.append((offset, size))
+            offset += size
+        self._weight_offsets = tuple(offsets)
+
+    def forward(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Apply externally weighted channelwise paths.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``.
+        weight : torch.Tensor
+            Weights with shape ``(..., weight_numel)``. Leading dimensions
+            must broadcast with the input.
+
+        Returns
+        -------
+        torch.Tensor
+            Output with shape ``(..., irreps_out.dim)`` over the broadcast
+            leading dimensions.
+        """
+        if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
+            raise ValueError(f"UuLinear features must end in {self.irreps_in.dim}.")
+        if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
+            raise ValueError(f"UuLinear weights must end in {self.weight_numel}.")
+        leading_shape = torch.broadcast_shapes(features.shape[:-1], weight.shape[:-1])
+        inputs = [
+            features[..., ir_slice].reshape(
+                *features.shape[:-1], ir.dim, mul // self.num_channel, self.num_channel
+            )
+            for (ir, mul), ir_slice in zip(self.irreps_in, self._input_slices)
+        ]
+        outputs = []
+        zero = None
+        for i_out, (ir, mul) in enumerate(self.irreps_out):
+            contributions = []
+            for index in self._instructions_by_output[i_out]:
+                instruction = self.instructions[index]
+                offset, size = self._weight_offsets[index]
+                matrix = weight.narrow(-1, offset, size).reshape(
+                    *weight.shape[:-1], *instruction.path_shape
+                )
+                contributions.append(
+                    torch.einsum(
+                        "...diu,...iou->...dou", inputs[instruction.i_in], matrix
+                    )
+                    * instruction.path_weight
+                )
+            if contributions:
+                output = sum(contributions[1:], contributions[0])
+                outputs.append(output.reshape(*leading_shape, ir.dim * mul))
+            else:
+                if zero is None:
+                    zero = features[..., :0].sum() + weight[..., :0].sum()
+                outputs.append(
+                    features.new_zeros((*leading_shape, ir.dim * mul)) + zero
+                )
+        if outputs:
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return features.new_empty((*leading_shape, 0)) + (
+            features[..., :0].sum() + weight[..., :0].sum()
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}({self.irreps_in} -> {self.irreps_out} | "
+            f"{self.num_channel} channels, {self.weight_numel} weights)"
+        )

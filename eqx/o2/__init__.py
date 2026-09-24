@@ -2,7 +2,7 @@ from .asymmetric_contraction import AsymmetricContraction
 from .circular_harmonics import CircularHarmonics, circular_harmonics
 from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
-from .linear import Linear
+from .linear import Linear, UuLinear
 from .local_frame import LocalFrame
 from .o3_tensor_product import O3TensorProduct
 from .rotation_matrix import (
@@ -17,6 +17,7 @@ __all__ = [
     "Irrep",
     "Irreps",
     "Linear",
+    "UuLinear",
     "Activation",
     "Gate",
     "AsymmetricContraction",

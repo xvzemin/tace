@@ -408,11 +408,12 @@ def test_universal_embedding_is_filtered_by_default_config():
     assert filtered == DEFAULT_MODEL_CONFIG["universal_embedding"]
 
 
+@pytest.mark.parametrize("interaction", ["o2", "uu_o2"])
 @pytest.mark.parametrize(("Lmax", "lmax"), [(2, 3), (3, 2)])
-def test_o2_representation_uses_common_angular_coverage(Lmax, lmax):
+def test_o2_representation_uses_common_angular_coverage(Lmax, lmax, interaction):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config["node_embedding"]["type"] = "linear"
-    config["atomic_basis"]["type"] = ["o2"]
+    config["atomic_basis"]["type"] = [interaction]
     config["atomic_basis"]["nonlinear"] = ["gate"]
     config["atomic_basis"]["edge_nonlinear"] = ["gate"]
     config["product_basis"]["type"] = ["cgtp"]
@@ -635,8 +636,8 @@ def test_graph_softmax_matches_groupwise_sums_and_gradients(shape, dim, use_ptr)
         torch.testing.assert_close(actual_grad, expected_grad)
 
 
-def _scatter_module(use_attention):
-    irreps = o3.Irreps("2x0e+2x1o")
+def _scatter_module(use_attention, linear_type="uv"):
+    irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e")
     return O2ScatterTensorProduct(
         irreps,
         irreps,
@@ -648,13 +649,16 @@ def _scatter_module(use_attention):
         num_head=1,
         num_radial_basis=4,
         use_radial_rotary_attention=use_attention,
+        linear_type=linear_type,
     ).to(DEVICE, DTYPE)
 
 
 @pytest.mark.parametrize("use_attention", [False, True])
-def test_o2_scatter_is_o3_equivariant(use_attention):
+@pytest.mark.parametrize("linear_type", ["uv", "uu"])
+@pytest.mark.parametrize("reflected", [False, True])
+def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
     torch.manual_seed(7)
-    module = _scatter_module(use_attention)
+    module = _scatter_module(use_attention, linear_type)
     edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=DEVICE)
     node_features = module.irreps_in.randn(3, -1, dtype=DTYPE, device=DEVICE)
     edge_vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
@@ -672,8 +676,21 @@ def test_o2_scatter_is_o3_equivariant(use_attention):
         edge_radial_basis=radial,
         edge_cutoff=cutoff,
     )
+    if linear_type == "uu":
+        torch.testing.assert_close(
+            module(
+                node_features,
+                2 * weights,
+                edge_index,
+                wigner,
+                wigner_inv,
+                edge_radial_basis=radial,
+                edge_cutoff=cutoff,
+            ),
+            2 * output,
+        )
 
-    rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
+    rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE) * (-1 if reflected else 1)
     matrix = module.irreps_in.D_from_matrix(rotation.cpu()).to(node_features)
     rotated_features = node_features @ matrix.T
     rotated_vectors = edge_vectors @ rotation.T
@@ -695,8 +712,10 @@ def test_o2_scatter_is_o3_equivariant(use_attention):
     )
 
 
-def test_o2_scatter_supports_empty_edges():
-    module = _scatter_module(False)
+@pytest.mark.parametrize("linear_type", ["uv", "uu"])
+@pytest.mark.parametrize("num_nodes", [0, 3])
+def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
+    module = _scatter_module(False, linear_type)
     assert "reshape_in" not in repr(module)
     assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
@@ -704,7 +723,7 @@ def test_o2_scatter_supports_empty_edges():
         torch.empty(0, 3, dtype=DTYPE, device=DEVICE)
     )
     output = module(
-        module.irreps_in.randn(3, -1, dtype=DTYPE, device=DEVICE),
+        module.irreps_in.randn(num_nodes, -1, dtype=DTYPE, device=DEVICE),
         torch.empty(0, module.weight_numel, dtype=DTYPE, device=DEVICE),
         edge_index,
         wigner,
@@ -712,6 +731,73 @@ def test_o2_scatter_supports_empty_edges():
         edge_cutoff=torch.empty(0, 1, dtype=DTYPE, device=DEVICE),
     )
     torch.testing.assert_close(output, torch.zeros_like(output))
+
+
+@pytest.mark.parametrize("use_attention", [False, True])
+def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
+    cgtp_dtype, use_attention
+):
+    from tace.models._e3nn.inter import UuO2Interaction
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        num_layers=2,
+        num_channel=2,
+        Lmax=1,
+        lmax=2,
+        mmax=1,
+        parity=True,
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["atomic_basis"].update(
+        type="uu_o2",
+        edge_nonlinear=None,
+        use_radial_rotary_attention=use_attention,
+        num_head=1,
+    )
+    config["node_embedding"]["type"] = "linear"
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    config["readout_emlp"]["hidden"] = [2]
+    config["radial_basis"]["hidden"] = [4]
+    config["radial_basis"]["apply_cutoff"] = False
+    config["scale_shift"]["enable"] = False
+    model = TensorModel(e3nnTACE(**config)).train()
+    for interaction in model.readout_fn.representation.interactions:
+        assert isinstance(interaction, UuO2Interaction)
+        assert isinstance(interaction.rejector.linear, o2.UuLinear)
+        assert not hasattr(interaction.rejector, "nonlinearity")
+        assert not hasattr(interaction.rejector, "linear_up")
+        assert not hasattr(interaction.rejector, "linear_down")
+        assert list(interaction.rejector.linear.parameters()) == []
+        edge_features = torch.randn(3, interaction.edge_feats_channel)
+        weights = interaction.edge_info(edge_features)
+        assert weights.shape == (3, interaction.rejector.linear.weight_numel)
+
+    data = dict(
+        positions=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]]),
+        node_attrs=torch.ones(3, 1),
+        edge_index=torch.tensor([[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]]),
+        edge_shifts=torch.zeros(6, 3),
+        lattice=torch.eye(3).unsqueeze(0) * 8,
+        batch=torch.zeros(3, dtype=torch.long),
+        ptr=torch.tensor([0, 3]),
+        fidelity_idx=torch.zeros(1, dtype=torch.long),
+    )
+    output = model(data)
+    for name in ("energy", "forces", "stress", "virials"):
+        assert torch.isfinite(output[name]).all()
+    output["forces"].square().sum().backward()
+    for interaction in model.readout_fn.representation.interactions:
+        gradients = [p.grad for p in interaction.edge_info.parameters()]
+        assert all(g is not None and torch.isfinite(g).all() for g in gradients)
+        assert sum(g.abs().sum() for g in gradients) > 0
 
 
 @pytest.mark.parametrize("Lmax", [1, 2])

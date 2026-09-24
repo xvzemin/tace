@@ -112,8 +112,12 @@ class O2ScatterTensorProduct(torch.nn.Module):
         num_head: int,
         num_radial_basis: int,
         use_radial_rotary_attention: bool,
+        linear_type: str = "uv",
     ) -> None:
         super().__init__()
+        if linear_type not in ("uv", "uu"):
+            raise ValueError("linear_type must be 'uv' or 'uu'.")
+        self.linear_type = linear_type
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
         self.num_channel = num_channel
@@ -140,43 +144,51 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_irreps_in = 2 * self.node_irreps
         self.local_irreps_out = self.local_frame_out.irreps_out
-        hidden_irreps = self.local_irreps_out.filter(
-            keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
-        )
-        scalar_entries = []
-        scalar_acts = []
-        gated_entries = []
-        for ir, mul in hidden_irreps:
-            if ir.is_invariant_scalar():
-                scalar_entries.append((ir, mul))
-                scalar_acts.append(even_scalar_act)
-            elif ir.m == 0 and odd_scalar_act is not None:
-                scalar_entries.append((ir, mul))
-                scalar_acts.append(odd_scalar_act)
-            else:
-                gated_entries.append((ir, mul))
-        irreps_gated = o2.Irreps(gated_entries)
-        irreps_gates = (
-            o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
-            if irreps_gated.num_irreps
-            else o2.Irreps()
-        )
-        self.nonlinearity = o2.Gate(
-            o2.Irreps(scalar_entries),
-            scalar_acts,
-            irreps_gates,
-            [tensor_act] if len(irreps_gates) else [],
-            irreps_gated,
-        )
-        self.linear_up = o2.Linear(
-            self.local_irreps_in,
-            self.nonlinearity.irreps_in,
-        )
-        self.linear_down = o2.Linear(
-            self.nonlinearity.irreps_out,
-            self.local_irreps_out,
-        )
-        self.weight_numel = self.local_irreps_in.num_irreps
+        if linear_type == "uu":
+            self.linear = o2.UuLinear(
+                self.local_irreps_in,
+                self.local_irreps_out,
+                num_channel,
+            )
+            self.weight_numel = self.linear.weight_numel
+        else:
+            hidden_irreps = self.local_irreps_out.filter(
+                keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
+            )
+            scalar_entries = []
+            scalar_acts = []
+            gated_entries = []
+            for ir, mul in hidden_irreps:
+                if ir.is_invariant_scalar():
+                    scalar_entries.append((ir, mul))
+                    scalar_acts.append(even_scalar_act)
+                elif ir.m == 0 and odd_scalar_act is not None:
+                    scalar_entries.append((ir, mul))
+                    scalar_acts.append(odd_scalar_act)
+                else:
+                    gated_entries.append((ir, mul))
+            irreps_gated = o2.Irreps(gated_entries)
+            irreps_gates = (
+                o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
+                if irreps_gated.num_irreps
+                else o2.Irreps()
+            )
+            self.nonlinearity = o2.Gate(
+                o2.Irreps(scalar_entries),
+                scalar_acts,
+                irreps_gates,
+                [tensor_act] if len(irreps_gates) else [],
+                irreps_gated,
+            )
+            self.linear_up = o2.Linear(
+                self.local_irreps_in,
+                self.nonlinearity.irreps_in,
+            )
+            self.linear_down = o2.Linear(
+                self.nonlinearity.irreps_out,
+                self.local_irreps_out,
+            )
+            self.weight_numel = self.local_irreps_in.num_irreps
 
         self.use_radial_rotary_attention = (
             use_radial_rotary_attention and self.node_irreps.mmax > 0
@@ -218,7 +230,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
-        weighted = []
+        inputs = []
         offset = 0
         for (ir, mul), ir_slice in zip(
             self.node_irreps,
@@ -236,14 +248,20 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 dim=-1,
             )
             width = 2 * mul
-            weight = conv_weights[..., offset : offset + width].unsqueeze(-2)
-            weighted.append((values * weight).reshape(values.size(0), ir.dim * width))
+            if self.linear_type == "uv":
+                weight = conv_weights[..., offset : offset + width].unsqueeze(-2)
+                values = values * weight
+            inputs.append(values.reshape(values.size(0), ir.dim * width))
             offset += width
-        if offset != conv_weights.size(-1):
-            raise ValueError("Invalid O2 convolution weight size.")
-        projected = self.linear_up(torch.cat(weighted, dim=-1))
-        hidden = self.nonlinearity(projected)
-        message = self.linear_down(hidden)
+        features = torch.cat(inputs, dim=-1)
+        if self.linear_type == "uu":
+            message = self.linear(features, conv_weights)
+        else:
+            if offset != conv_weights.size(-1):
+                raise ValueError("Invalid O2 convolution weight size.")
+            projected = self.linear_up(features)
+            hidden = self.nonlinearity(projected)
+            message = self.linear_down(hidden)
         if self.attention is not None:
             if edge_radial_basis is None:
                 raise ValueError(

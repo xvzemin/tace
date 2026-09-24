@@ -351,7 +351,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
         )
 
 
-class uvSO2Interaction(O3CgtpInteraction):
+class UvSO2Interaction(O3CgtpInteraction):
     """
     An interaction module based on uvSO2Linear,
     Edge Cluster Expansion and Radial Rotary Attention.
@@ -368,14 +368,14 @@ class uvSO2Interaction(O3CgtpInteraction):
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
         if self.parity:
-            raise ValueError("uvSO2Interaction does not support O(3).")
+            raise ValueError("UvSO2Interaction does not support O(3).")
         if self.irreps_in.lmax <= 0:
             raise ValueError(
-                "uvSO2Interaction requires irreps_in.lmax > 0. Use it after "
+                "UvSO2Interaction requires irreps_in.lmax > 0. Use it after "
                 "the first layer or provide a node embedding with l > 0."
             )
         if self.edge_nonlinear is None:
-            raise ValueError("uvSO2Interaction requires edge_nonlinear to be set.")
+            raise ValueError("UvSO2Interaction requires edge_nonlinear to be set.")
         self.scatter_norm = None
 
     def _build_rejector(self) -> torch.nn.Module:
@@ -449,13 +449,15 @@ class uvSO2Interaction(O3CgtpInteraction):
         )
 
 
-class O2Interaction(O3CgtpInteraction):
+class UvO2Interaction(O3CgtpInteraction):
     """Global O3 interaction evaluated through local O2 irreps.
 
     The interaction concatenates source and target node features and applies
     ``linear -> gate -> linear`` before inverse rotation and scatter. Optional
     radial rotary attention uses radial basis as scale and shift.
     """
+
+    linear_type = "uv"
 
     def _build_rejector(self) -> torch.nn.Module:
         rejector = O2ScatterTensorProduct(
@@ -483,6 +485,7 @@ class O2Interaction(O3CgtpInteraction):
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
+            linear_type=self.linear_type,
         )
         if rejector.attention is not None:
             self.scatter_norm = None
@@ -514,7 +517,7 @@ class O2Interaction(O3CgtpInteraction):
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
-        if self.edge_nonlinear is None:
+        if self.linear_type == "uv" and self.edge_nonlinear is None:
             raise ValueError("o2 requires edge_nonlinear to be set.")
         if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
             raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
@@ -563,7 +566,21 @@ class O2Interaction(O3CgtpInteraction):
         )
 
 
-class O2MagneticInteraction(O2Interaction):
+class UuO2Interaction(UvO2Interaction):
+    """Global O(3) interaction with an externally weighted O(2) UuLinear.
+
+    The local map connects source and target representation copies with
+    matching channels. The edge MLP supplies one weight for every local
+    path and channel, without an additional activation on these weights.
+    No edge gate or channel-mixing linear is applied. Node-level linear
+    maps, inverse rotation, scatter, and optional radial rotary attention
+    retain the ordinary interaction behavior.
+    """
+
+    linear_type = "uu"
+
+
+class O2MagneticInteraction(UvO2Interaction):
     """Magnetic interaction evaluated by local O(2) frame."""
 
     magnetic_info_type = "node"  # [node]
@@ -724,8 +741,9 @@ class O2MagneticInteraction(O2Interaction):
 INTERACTION: Dict[str, type[Interaction]] = {
     "cgtp": O3CgtpInteraction,
     "o2_cgtp": O2CgtpInteraction,
-    "so2": uvSO2Interaction,
-    "o2": O2Interaction,
+    "so2": UvSO2Interaction,
+    "o2": UvO2Interaction,
+    "uu_o2": UuO2Interaction,
     "o2_mag": O2MagneticInteraction,
 }
 

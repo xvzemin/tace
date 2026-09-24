@@ -62,13 +62,44 @@ See :ref:`eqx-streaming` for training support and requirements.
 O(2) Linear
 -----------
 
-.. autoclass:: tace.models._e3nn.inter.O2Interaction
+.. autoclass:: tace.models._e3nn.inter.UvO2Interaction
 
 .. autoclass:: tace.models._e3nn.inter.O2MagneticInteraction
+   :no-members:
+   :show-inheritance:
+
+O(2) Channelwise Linear
+------------------------
+
+``atomic_basis.type: uu_o2`` uses an externally weighted
+``eqx.o2.UuLinear`` in the local frame. Source and target features with the
+same O(2) irrep are concatenated, and compatible representation copies mix
+within each channel. The edge MLP supplies a separate weight for each path
+and channel. These weights are used directly, without an additional
+activation or a separate radial multiplication.
+
+The rejector contains no Gate or channel-mixing Linear. The node-level
+linear maps, frame transformations, cutoff, scatter, and optional
+``use_radial_rotary_attention`` retain their usual behavior.
+``edge_nonlinear`` is not used by this interaction. As with ``o2``, keep
+``radial_basis.apply_cutoff: false`` so the cutoff is applied to messages.
+
+.. code-block:: yaml
+
+   atomic_basis:
+     type: uu_o2
+     edge_nonlinear: null
+   radial_basis:
+     apply_cutoff: false
+
+A 3BPA configuration is available as
+``example/train/benchmark_configs/3bpa_uu_o2.yaml``.
+
+.. autoclass:: tace.models._e3nn.inter.UuO2Interaction
    :no-members:
    :show-inheritance:
 
 SO(2) Linear
 ------------
 
-.. autoclass:: tace.models._e3nn.inter.uvSO2Interaction
+.. autoclass:: tace.models._e3nn.inter.UvSO2Interaction

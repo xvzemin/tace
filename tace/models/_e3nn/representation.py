@@ -21,9 +21,9 @@ from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import (
     INTERACTION,
     O2CgtpInteraction,
-    O2Interaction,
     O2MagneticInteraction,
-    uvSO2Interaction,
+    UvO2Interaction,
+    UvSO2Interaction,
 )
 from .layer_norm import get_normalization_layer
 from .magnetic import MagneticBasis
@@ -98,11 +98,11 @@ class Representation(torch.nn.Module):
             INTERACTION[interaction] for interaction in atomic_basis["type"]
         ]
         uses_so2_interaction = any(
-            issubclass(interaction_cls, uvSO2Interaction)
+            issubclass(interaction_cls, UvSO2Interaction)
             for interaction_cls in interaction_classes
         )
         uses_o2_interaction = any(
-            issubclass(interaction_cls, O2Interaction)
+            issubclass(interaction_cls, UvO2Interaction)
             for interaction_cls in interaction_classes
         )
         uses_o2_cgtp_interaction = any(

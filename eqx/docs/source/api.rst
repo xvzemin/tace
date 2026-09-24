@@ -28,6 +28,9 @@ External weights may carry leading dimensions that broadcast with the inputs.
 .. autoclass:: eqx.o2.Linear
    :members: forward, weight_view_for_instruction, weight_views
 
+.. autoclass:: eqx.o2.UuLinear
+   :members: forward
+
 .. autoclass:: eqx.o2.Activation
    :members: forward
 
