@@ -344,6 +344,7 @@ class Product(torch.nn.Module):
         )
 
         self.irreps_tp_out_list = []
+        product_in = self.irreps_hidden
         for nu in range(2, self.correlation + 1):
             if nu == self.correlation:
                 if self.last_layer:
@@ -362,9 +363,10 @@ class Product(torch.nn.Module):
             else:
                 self.irreps_tp_out_list.append(
                     _to_possible_tp_irreps(
-                        self.irreps_hidden, self.irreps_hidden, parity, lmax
+                        product_in, self.irreps_hidden, parity, lmax
                     )
                 )
+            product_in = self.irreps_tp_out_list[-1]
 
         if self.correlation == 1:
             self.irreps_coefs_out = o3.Irreps(

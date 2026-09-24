@@ -17,7 +17,7 @@ from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
 from ..time_reversal import contains_time_odd_irreps
-from .paths import generate_paths
+from .paths import SymmetricProductPaths, generate_paths
 
 
 class uuuTensorProduct(torch.nn.Module):
@@ -33,6 +33,7 @@ class uuuTensorProduct(torch.nn.Module):
         identical_inputs: bool = False,
         warning: bool = False,
         use_fused: bool = False,
+        symmetric_paths: Union[SymmetricProductPaths, None] = None,
     ) -> None:
         super().__init__()
 
@@ -47,6 +48,10 @@ class uuuTensorProduct(torch.nn.Module):
             trainable=trainable,
             identical_inputs=identical_inputs,
         )
+        if symmetric_paths is not None:
+            instructions, actual_irreps_out = symmetric_paths.filter(
+                instructions, actual_irreps_out, irreps_in2
+            )
 
         self.tp = o3.TensorProduct(
             irreps_in1,
@@ -65,6 +70,7 @@ class uuuTensorProduct(torch.nn.Module):
 
         use_eqt = acceleration_enabled("eqt")
         self.use_eqt = use_fused if use_eqt is None else use_eqt
+        self.use_eqt = self.use_eqt and bool(instructions)
 
         # self.use_cue = acceleration_enabled("cue")
 
@@ -84,7 +90,7 @@ class uuuTensorProduct(torch.nn.Module):
                 irreps_in1=irreps_in1,
                 irreps_in2=irreps_in2,
                 irreps_out=actual_irreps_out,
-                num_channel=irreps_in2.count("1o"),
+                num_channel=irreps_in2[0].mul,
                 path=instructions,
                 trainable=trainable,
             )
@@ -99,7 +105,7 @@ class uuuTensorProduct(torch.nn.Module):
         #         l3l1=l3l1,
         #         trainable=trainable,
         #     )
-        elif warning:
+        elif warning and instructions:
             logging.warning(
                 "Correlation >= 3 is running without Equitorch. "
                 "For acceleration options, see "

@@ -14,14 +14,14 @@ from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
 from .fused import uuuTensorProduct
+from .paths import SymmetricProductPaths
 
 
 class CgtpACE(Product):
     """
     The most expressive ACE implementation based on Clebsch-Gordan tensor products.
 
-    This class computes all possible many-body tensor product paths and couples
-    all channels, forming a highly expressive product basis.
+    This class computes channel-wise many-body tensor products.
 
     Note:
         It is recommended to use no more than 64 channels for each expert, as
@@ -30,14 +30,6 @@ class CgtpACE(Product):
     """
 
     def _setup(self):
-
-        if self.parity and self.correlation > 2:
-            raise ValueError(
-                "CgtpACE with parity=True currently requires correlation < 3. "
-                "Invalid paths for correlation >= 3 have not yet been filtered "
-                "and may cause redundant computation, so higher-order full O(3) "
-                "products are temporarily disabled."
-            )
 
         self.scale = 1.0 / math.sqrt(2.0)
 
@@ -86,6 +78,11 @@ class CgtpACE(Product):
             )
 
         product_in1 = self.irreps_hidden
+        symmetric_paths = (
+            SymmetricProductPaths(product_in1)
+            if self.correlation > 2 and not self.use_bilinear_gate
+            else None
+        )
 
         for nu in range(2, self.correlation + 1):
             this_ace = uuuTensorProduct(
@@ -97,6 +94,7 @@ class CgtpACE(Product):
                 identical_inputs=nu == 2 and not self.use_bilinear_gate,
                 warning=self.correlation > 2 and self.layer == 0,
                 use_fused=self.correlation > 2 and not self.use_time_reversal,
+                symmetric_paths=symmetric_paths,
             )
             self.aces.append(this_ace)
             self.coefs.append(
