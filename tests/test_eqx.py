@@ -92,7 +92,7 @@ tp = o2.O3TensorProduct(
     [(0, 0, i, "uvu", True) for i in range(3)],
     internal_weights=False, shared_weights=False,
 ).to(device)
-frame = o2.WignerD(2, 2).to(device)
+frame = o2.WignerD(2, 2, method="recursive").to(device)
 x = torch.randn(3, 6, device=device, requires_grad=True)
 vectors = torch.randn(4, 3, device=device, requires_grad=True)
 weights = torch.randn(4, tp.weight_numel, device=device, requires_grad=True)
@@ -123,6 +123,7 @@ if device == "cpu":
     torch.testing.assert_close(accelerated(*arguments), tp.forward_scatter(x, edges, packed, weights))
 else:
     import torch.utils.cpp_extension
+    cuda_home = torch.utils.cpp_extension.CUDA_HOME
     torch.utils.cpp_extension.CUDA_HOME = None
     try:
         accelerated(*arguments)
@@ -130,6 +131,13 @@ else:
         assert "CUDA_HOME" in str(error)
     else:
         raise AssertionError("CUDA execution must report the missing toolkit")
+    finally:
+        torch.utils.cpp_extension.CUDA_HOME = cuda_home
+    # The default CUDA construction also works without Triton or PyG.
+    quaternion_frame = o2.WignerD(2, 2).to(device)
+    for actual, expected in zip(quaternion_frame(vectors), (d, di)):
+        torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+    assert "tace" not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-c", script, device],

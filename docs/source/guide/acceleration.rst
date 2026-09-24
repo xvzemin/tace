@@ -151,8 +151,11 @@ the second derivatives used in force training. Harmonic amplitudes retain
 their separate radial derivatives. Degree-zero harmonic paths cancel both
 rotations exactly, while keeping each path and its weight independent.
 
-Quaternion alignment and recursive CG contractions build all cached degree
-matrices in one allocation. Their formulas and normalization are unchanged.
+Quaternion alignment and direct quaternion polynomials build the cached
+degree matrices without degree-to-degree recursion. Analytically generated
+coefficients require no numerical fitting. The matrices retain the packed
+layout, alignment convention, and float32/float64 support. The recursive CG
+construction remains available through the EQX API with ``method="recursive"``.
 The EQX API also retains differentiation of arbitrary matrix entries when edge
 vectors are omitted. The radial MLP's preceding layers and node-level
 ``linear_down`` remain separate.

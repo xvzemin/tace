@@ -666,7 +666,7 @@ def alignment_program(key, dtype):
             )
             gradient.append(program.add("div", cross, norm))
         return tuple(program.nodes), (tuple(gradient),), (3, 3)
-    if key is not None:
+    if key not in (None, "quaternion", "wigner1"):
         parent, active = key
         nodes, outputs, widths = alignment_program(parent, dtype)
         program = ScalarProgram(nodes)
@@ -727,13 +727,20 @@ def alignment_program(key, dtype):
         ]
     )
 
+    if key == "quaternion":
+        return tuple(p.nodes), ((w, x, y, z),), (3,)
+
     def product(a, b):
         return p.add("mul", a, b)
+
+    identity = (
+        sum_values([product(q, q) for q in (w, x, y, z)]) if key == "wigner1" else one
+    )
 
     def diag(a, b):
         return p.add(
             "add",
-            one,
+            identity,
             p.add("neg", product(two, p.add("add", product(a, a), product(b, b)))),
         )
 
@@ -756,6 +763,8 @@ def alignment_program(key, dtype):
             diag(x, y),
         ),
     )
+    if key == "wigner1":
+        outputs = ((one, *outputs[0]),)
     return tuple(p.nodes), outputs, (3,)
 
 

@@ -85,6 +85,12 @@ derivatives, including higher orders. Degree-zero harmonic paths bypass the
 rotations. Omitting ``vectors`` preserves differentiation with respect to the
 matrix entries themselves.
 
+``wigner_D`` uses direct quaternion polynomials by default on CUDA. Set
+``method="recursive"`` to use sparse CG degree contractions instead, or
+``backend="torch"`` for the recursive PyTorch reference. Both CUDA methods
+support float32, float64, and higher derivatives. Coefficients and compiled
+kernels are cached independently of the number of edges.
+
 .. autoclass:: eqx.conv.Convolution
    :members: forward
 

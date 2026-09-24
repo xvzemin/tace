@@ -24,6 +24,11 @@ class WignerD(torch.nn.Module):
     use_opt_einsum_fx : bool, optional
         If ``True``, pre-optimize the recursive contractions for degrees two
         and above.
+    method : {"auto", "quaternion", "recursive"}, optional
+        ``"auto"`` uses direct quaternion polynomials for CUDA float32 and
+        float64 inputs and recursive PyTorch contractions otherwise.
+        ``"quaternion"`` requires CUDA and its toolkit. ``"recursive"``
+        selects PyTorch contractions on either device.
 
     Notes
     -----
@@ -37,6 +42,8 @@ class WignerD(torch.nn.Module):
         mmax: int,
         lmax: int,
         use_opt_einsum_fx: bool = False,
+        *,
+        method: str = "auto",
     ) -> None:
         super().__init__()
 
@@ -48,10 +55,13 @@ class WignerD(torch.nn.Module):
             raise ValueError("lmax must be non-negative.")
         if not 0 <= mmax <= lmax:
             raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
+        if method not in ("auto", "quaternion", "recursive"):
+            raise ValueError("method must be auto, quaternion or recursive.")
 
         self.mmax = mmax
         self.lmax = lmax
         self.use_opt_einsum_fx = use_opt_einsum_fx
+        self.method = method
 
         for l in range(2, self.lmax + 1):
             self.register_buffer(f"cg_{l}", o3.wigner_3j(1, l - 1, l), persistent=False)
@@ -106,21 +116,50 @@ class WignerD(torch.nn.Module):
         wigner_inv = wigner.transpose(1, 2).contiguous() * self.inverse_scale
         return wigner, wigner_inv
 
-    def forward_packed(self, vectors: torch.Tensor) -> torch.Tensor:
+    def forward_packed(self, vectors: torch.Tensor, *, method=None) -> torch.Tensor:
         """Return full degree blocks concatenated as ``(batch, sum((2*l+1)**2))``.
 
         No zero padding, order regrouping or inverse copy is stored. The
         convolution reads transposed blocks for the inverse rotation.
         This layout retains every order, independently of ``mmax``.
+        ``method`` optionally overrides the construction method for this call.
         """
+        method = getattr(self, "method", "auto") if method is None else method
+        if method not in ("auto", "quaternion", "recursive"):
+            raise ValueError("method must be auto, quaternion or recursive.")
+        if method == "quaternion" or (
+            method == "auto"
+            and vectors.is_cuda
+            and vectors.dtype in (torch.float32, torch.float64)
+        ):
+            from eqx.conv.wigner import wigner_D
+
+            return wigner_D(self, vectors, method=method)
         return torch.cat(
-            [matrix.flatten(1) for matrix in self.matrix_blocks(vectors)], dim=1
+            [
+                matrix.flatten(1)
+                for matrix in self.matrix_blocks(vectors, method="recursive")
+            ],
+            dim=1,
         )
 
-    def matrix_blocks(self, vectors: torch.Tensor) -> list[torch.Tensor]:
-        """Return one differentiable rotation matrix for each degree."""
+    def matrix_blocks(
+        self, vectors: torch.Tensor, *, method=None
+    ) -> list[torch.Tensor]:
+        """Return degree matrices, optionally overriding the construction method."""
         if vectors.ndim != 2 or vectors.shape[-1] != 3:
             raise ValueError("vectors must have shape (batch, 3).")
+        method = getattr(self, "method", "auto") if method is None else method
+        if method != "recursive" and (vectors.is_cuda or method == "quaternion"):
+            packed = self.forward_packed(vectors, method=method)
+            return [
+                block.view(vectors.size(0), 2 * l + 1, 2 * l + 1)
+                for l, block in enumerate(
+                    packed.split(
+                        [(2 * l + 1) ** 2 for l in range(self.lmax + 1)], dim=1
+                    )
+                )
+            ]
         rotation = rotation_matrix_to_y_axis(vectors)
         batch = vectors.shape[0]
         matrices = [rotation.new_ones((batch, 1, 1))]

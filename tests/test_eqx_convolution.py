@@ -12,6 +12,8 @@ from eqx.o2 import O3TensorProduct, WignerD
 def test_convolution_backends_and_modes():
     from eqx.conv import wigner_D
 
+    # Exported graphs can resolve the operator before any frame is evaluated.
+    assert torch.ops.eqx.quaternion_polynomial.default is not None
     tp = O3TensorProduct("2x0e", "0e", "3x0e", [(0, 0, 0, "uvw", True)])
     assert tp.convolution.instructions[0].connection_mode == "uvw"
     with pytest.raises(NotImplementedError, match="only 'uvu'"):
@@ -20,6 +22,109 @@ def test_convolution_backends_and_modes():
         Convolution(tp, backend="triton")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
         wigner_D(WignerD(0, 0), torch.randn(2, 3), backend="triton")
+    with pytest.raises(ValueError, match="method must be"):
+        WignerD(0, 0, method="unknown")
+    with pytest.raises(ValueError, match="CUDA float32 or float64"):
+        WignerD(1, 1, method="quaternion")(torch.randn(2, 3))
+
+
+def test_quaternion_coefficients():
+    from e3nn import o3
+
+    from eqx.conv.quaternion import polynomial_coefficients
+    from eqx.o2.rotation_matrix import _quaternion_to_matrix
+
+    q = torch.randn(
+        6, 4, dtype=torch.float64, generator=torch.Generator().manual_seed(13)
+    )
+    q = q / q.norm(dim=-1, keepdim=True)
+    q = torch.cat((q, -q))
+    pointers, exponents, coefficients = polynomial_coefficients(6)
+    terms = (q[:, None] ** exponents).prod(-1) * coefficients
+    indices = torch.repeat_interleave(
+        torch.arange(pointers.numel() - 1), pointers.diff()
+    )
+    actual = q.new_zeros(q.size(0), pointers.numel() - 1).index_add(1, indices, terms)
+    rotation = _quaternion_to_matrix(q)
+    blocks = [q.new_ones(q.size(0), 1, 1), rotation]
+    for l in range(2, 7):
+        cg = o3.wigner_3j(1, l - 1, l, dtype=torch.float64)
+        blocks.append(
+            torch.einsum("abm,eac,ebd,cdn->emn", cg, rotation, blocks[-1], cg)
+            * (2 * l + 1)
+        )
+    expected = torch.cat([block.flatten(1) for block in blocks], dim=1)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("lmax", [0, 1, 3, 5])
+def test_quaternion_wigner_frames(lmax):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import wigner_D
+
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        axes = torch.eye(3, device="cuda")
+        vectors = torch.cat((axes, -axes, axes + 1e-8, -axes + 1e-8))
+        # Non-contiguous input, including directions on the chart boundaries.
+        vectors = torch.stack((vectors, vectors), dim=-1)[..., 0].requires_grad_()
+        frame = WignerD(min(1, lmax), lmax).cuda()
+        reference = WignerD(min(1, lmax), lmax, method="recursive").cuda()
+        for actual, expected in zip(frame(vectors), reference(vectors)):
+            torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+        torch.testing.assert_close(
+            frame.forward_packed(vectors), wigner_D(frame, vectors), atol=0, rtol=0
+        )
+        for actual, expected in zip(
+            frame.matrix_blocks(vectors), reference.matrix_blocks(vectors)
+        ):
+            torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+        for actual, expected in zip(frame(vectors[:0]), reference(vectors[:0])):
+            torch.testing.assert_close(actual, expected)
+        if lmax:
+            for method in ("quaternion", "recursive"):
+                values = frame.forward_packed(vectors, method=method)
+                gradient = torch.autograd.grad(
+                    values.sin().sum(), vectors, create_graph=True
+                )[0]
+                assert torch.isfinite(gradient).all()
+                assert torch.isfinite(
+                    torch.autograd.grad(gradient.square().sum(), vectors)[0]
+                ).all()
+    finally:
+        torch.set_default_dtype(previous)
+
+
+def test_quaternion_wigner_compile_and_capture():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame = WignerD(3, 3).cuda()
+    function = torch.compile(
+        frame.forward_packed, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for count in (3, 7, 0):
+        vectors = torch.randn(count, 3, device="cuda", requires_grad=True)
+        actual, expected = function(vectors), frame.forward_packed(vectors)
+        torch.testing.assert_close(actual, expected)
+        actual_grad = torch.autograd.grad(actual.square().sum(), vectors)[0]
+        expected_grad = torch.autograd.grad(expected.square().sum(), vectors)[0]
+        torch.testing.assert_close(actual_grad, expected_grad)
+
+    vectors = torch.randn(11, 3, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            frame.forward_packed(vectors)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = frame.forward_packed(vectors)
+    vectors.normal_()
+    graph.replay()
+    torch.testing.assert_close(output, frame.forward_packed(vectors))
 
 
 @pytest.mark.parametrize("channels", [3, 64, 129])
@@ -404,7 +509,8 @@ def test_convolution_graph_tiles(owner):
 
 @pytest.mark.parametrize("degree", [0, 1, 3, 6])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_fused_wigner_derivatives(degree, dtype):
+@pytest.mark.parametrize("method", ["recursive", "quaternion"])
+def test_fused_wigner_derivatives(degree, dtype, method):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx.conv import wigner_D
@@ -415,12 +521,12 @@ def test_fused_wigner_derivatives(degree, dtype):
         torch.manual_seed(27)
         frame = WignerD(degree, degree).cuda()
         vectors = torch.randn(5, 3, device="cuda", requires_grad=True)
-        actual = wigner_D(frame, vectors)
-        expected = frame.forward_packed(vectors)
+        actual = wigner_D(frame, vectors, method=method)
+        expected = frame.forward_packed(vectors, method="recursive")
         tolerance = 2e-5 if dtype == torch.float32 else 2e-12
         torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
         torch.testing.assert_close(
-            wigner_D(frame, vectors.detach()),
+            wigner_D(frame, vectors.detach(), method=method),
             expected.detach(),
             atol=tolerance,
             rtol=tolerance,
@@ -442,9 +548,13 @@ def test_fused_wigner_derivatives(degree, dtype):
                     actual, expected, atol=10 * tolerance, rtol=10 * tolerance
                 )
         empty = vectors[:0]
-        torch.testing.assert_close(wigner_D(frame, empty), frame.forward_packed(empty))
         torch.testing.assert_close(
-            wigner_D(frame, empty.detach()), frame.forward_packed(empty).detach()
+            wigner_D(frame, empty, method=method),
+            frame.forward_packed(empty, method="recursive"),
+        )
+        torch.testing.assert_close(
+            wigner_D(frame, empty.detach(), method=method),
+            frame.forward_packed(empty, method="recursive").detach(),
         )
     finally:
         torch.set_default_dtype(previous)

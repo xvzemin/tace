@@ -3,13 +3,15 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-"""Sparse recursive Wigner contractions for streaming convolutions."""
+"""Quaternion and recursive Wigner matrices for streaming convolutions."""
 
 from ast import literal_eval
 from functools import lru_cache
 from weakref import ref
 
 import torch
+
+from .quaternion import quaternion_wigner
 
 _PLANS = {}
 
@@ -184,20 +186,22 @@ def packed_wigner_fake(vectors, degree, coefficients):
     return vectors.new_empty(vectors.size(0), width)
 
 
-def wigner_D(frame, vectors, *, backend="cuda"):
-    """Return packed Wigner matrices with recursively fused CUDA derivatives.
+def wigner_D(frame, vectors, *, backend="cuda", method=None):
+    """Return packed Wigner matrices with fused CUDA derivatives.
 
     Parameters
     ----------
     frame : eqx.o2.WignerD
-        Degree cutoff and Clebsch--Gordan buffers defining the rotations.
+        Angular cutoff and construction method.
     vectors : torch.Tensor
         Frame directions with shape ``(edges, 3)``.
     backend : {"cuda", "torch"}, optional
-        Execution backend. Generated CUDA is the default on GPU. The
-        quaternion alignment and recursive degree contractions retain
-        differentiable transposes at every order. When direction gradients are
-        not requested, all degree matrices are built in one packed allocation.
+        Execution backend. CUDA is the default on GPU. PyTorch uses recursive
+        degree contractions, including when falling back to CPU.
+    method : {"auto", "quaternion", "recursive"}, optional
+        Overrides the frame's method. On CUDA, ``"auto"`` uses direct
+        quaternion polynomials. ``"recursive"`` retains the sparse degree
+        contractions. Both CUDA methods support higher derivatives.
 
     Returns
     -------
@@ -207,12 +211,24 @@ def wigner_D(frame, vectors, *, backend="cuda"):
     """
     if backend not in ("torch", "cuda"):
         raise ValueError("backend must be torch or cuda.")
+    method = getattr(frame, "method", "auto") if method is None else method
+    if method not in ("auto", "quaternion", "recursive"):
+        raise ValueError("method must be auto, quaternion or recursive.")
+    if method == "quaternion" and backend == "torch":
+        raise ValueError("The quaternion method requires the CUDA backend.")
+    if method == "quaternion" or (
+        method == "auto"
+        and backend == "cuda"
+        and vectors.is_cuda
+        and vectors.dtype in (torch.float32, torch.float64)
+    ):
+        return quaternion_wigner(vectors, frame.lmax)
     if (
         backend == "torch"
         or not vectors.is_cuda
         or vectors.dtype not in (torch.float32, torch.float64)
     ):
-        return frame.forward_packed(vectors)
+        return frame.forward_packed(vectors, method="recursive")
     if not vectors.requires_grad or not torch.is_grad_enabled():
         return packed_wigner(
             vectors.detach(),

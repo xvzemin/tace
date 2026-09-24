@@ -266,6 +266,16 @@ rescaling preserves the intended variance. ``LocalFrame`` derives the required
 degree from its irreps and the Wigner layout from matrix shapes. Shared
 matrices may cover additional degrees or orders.
 
+``WignerD(method="auto")`` uses direct quaternion polynomials on CUDA for
+float32 and float64 inputs, and recursive PyTorch contractions otherwise.
+The CUDA method requires the ``cuda`` extra and a CUDA toolkit. Fixed
+polynomial coefficients are generated analytically, with no numerical fit.
+All degrees are evaluated without degree-to-degree recursion, and higher
+derivatives are supported. ``method="recursive"`` explicitly selects the
+PyTorch construction; ``method="quaternion"`` requires supported CUDA inputs.
+``forward_packed`` returns only the degree blocks, without zero padding or
+a separate inverse copy.
+
 By default, ``basis_change=True`` gives positive-order features a uniform
 reflection convention. Setting it to ``False`` retains the spherical harmonic
 basis without changing the regrouped layout. Channels with different reflection
