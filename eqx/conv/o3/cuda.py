@@ -8,12 +8,13 @@ import torch
 from ...kernels.cuda import kernels, runtime
 from ..graph import prepare_graph
 from ..radial import project
-from .codegen import convolution_source
+from .codegen import convolution_source, fused_source
 from .convolution import parse_metadata
 
 CHUNK_SIZE = 65536
 WORKSPACE_BYTES = 512 << 20
 ROW_SIZE = 8
+REGISTER_LIMIT = 160
 
 
 @lru_cache(maxsize=256)
@@ -23,14 +24,16 @@ def execution_plan(
     """Group shared inputs and derivative factors using compiled resource usage."""
     paths, _, _ = parse_metadata(metadata)
     outputs = 1 + max(slot for _, _, pairs in program for _, slot in pairs)
+    group_attrs = any(role == 3 for _, _, pairs in program for role, _ in pairs)
     groups = defaultdict(list)
     for path in paths:
-        groups[path[3], path[0]].append(path)
+        groups[path[3], path[1 if group_attrs else 0]].append(path)
     pending = deque(
         (tuple(sorted(entries, key=lambda p: (p[1], p[2]))), program)
         for entries in groups.values()
     )
     accepted = []
+    scheduled = []
     while pending:
         candidates = []
         while pending:
@@ -48,9 +51,7 @@ def execution_plan(
                 continue
             roles = {role for _, _, pairs in terms for role, _ in pairs}
             nodes = roles & {0, 4}
-            owner = (
-                (0 if nodes == {0} else 1 if nodes == {4} else -1) if grouped else -1
-            )
+            owner = (1 if 4 in nodes else 0 if 0 in nodes else -1) if grouped else -1
             code = convolution_source(
                 paths, terms, dimensions, shared, dtype, owner, outputs, initialize
             )
@@ -58,7 +59,7 @@ def execution_plan(
         compiled = kernels([code for code, *_ in candidates], device)
         for code, paths, terms, owner in candidates:
             kernel = compiled[code]
-            if kernel.local_bytes or kernel.registers > 160:
+            if kernel.local_bytes or kernel.registers > REGISTER_LIMIT:
                 if len(terms) > 1:
                     half = len(terms) // 2
                     pending.extend(((paths, terms[:half]), (paths, terms[half:])))
@@ -80,6 +81,38 @@ def execution_plan(
                 key=lambda n: (n * kernel.active_blocks(n, 0), -abs(n - 128)),
             )
             accepted.append((kernel, paths[0][3], owner, threads))
+            scheduled.append((paths, terms, owner))
+    separate, accepted = accepted, []
+    pending = deque([tuple(range(len(scheduled)))]) if scheduled else deque()
+    while pending:
+        candidates = []
+        while pending:
+            indices = pending.popleft()
+            if len(indices) == 1:
+                accepted.append(separate[indices[0]])
+                continue
+            phases = tuple(scheduled[i] for i in indices)
+            code = fused_source(phases, dimensions, shared, dtype, outputs, initialize)
+            candidates.append((code, indices, phases))
+        compiled = kernels([code for code, _, _ in candidates], device)
+        for code, indices, phases in candidates:
+            kernel = compiled[code]
+            if kernel.local_bytes or kernel.registers > 192:
+                half = len(indices) // 2
+                pending.extend((indices[:half], indices[half:]))
+                continue
+            threads = max(
+                (64, 128, 256),
+                key=lambda n: (n * kernel.active_blocks(n, 0), -abs(n - 128)),
+            )
+            accepted.append(
+                (
+                    kernel,
+                    max(paths[0][3] for paths, _, _ in phases),
+                    tuple(owner for _, _, owner in phases),
+                    threads,
+                )
+            )
     return tuple(accepted)
 
 
@@ -119,12 +152,32 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
     )
     orders = {
         owner: prepare_graph(source, target, owner)
-        for owner in {phase[2] for phase in phases}
+        for owner in {
+            owner
+            for phase in phases
+            for owner in (phase[2] if isinstance(phase[2], tuple) else (phase[2],))
+        }
         if owner >= 0
     }
     pointers = [value.data_ptr() for value in (*operands, *results)]
     launches = []
     for kernel, width, owner, threads in phases:
+        if isinstance(owner, tuple):
+            arguments = [
+                *pointers,
+                source.data_ptr(),
+                target.data_ptr(),
+                orders[0].data_ptr() if 0 in orders else 0,
+                orders[1].data_ptr() if 1 in orders else 0,
+                source.numel(),
+                ROW_SIZE,
+            ]
+            warps = threads // 32
+            edge_blocks = (source.numel() + warps - 1) // warps
+            node_blocks = (source.numel() + ROW_SIZE * warps - 1) // (ROW_SIZE * warps)
+            count = sum(node_blocks if index >= 0 else edge_blocks for index in owner)
+            launches.append((kernel, arguments, count, (width + 31) // 32, threads, 0))
+            continue
         rows = ROW_SIZE if owner >= 0 else 1
         count = (source.numel() + rows - 1) // rows
         arguments = [

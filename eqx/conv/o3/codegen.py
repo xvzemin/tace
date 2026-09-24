@@ -109,10 +109,20 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines):
 
 
 def convolution_source(
-    paths, program, dimensions, shared, dtype, owner, outputs, initialize=()
+    paths,
+    program,
+    dimensions,
+    shared,
+    dtype,
+    owner,
+    outputs,
+    initialize=(),
+    function=None,
+    atomic_weights=(),
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
+    concurrent = function is not None
     args = [f"const T* p{i}" for i in range(len(dimensions))]
     args += [f"T* g{i}" for i in range(outputs)]
     args += [
@@ -123,13 +133,19 @@ def convolution_source(
         "int64_t tasks",
         "int row_size",
     ]
+    if concurrent:
+        args.append("int64_t tile")
+    declaration = (
+        "__device__ __forceinline__" if concurrent else 'extern "C" __global__'
+    )
+    tile = "tile" if concurrent else "int64_t(blockIdx.x)"
     lines = [
-        HEADER.replace("SCALAR", dtype),
-        'extern "C" __global__ void run(' + ", ".join(args) + ") {",
+        "" if concurrent else HEADER.replace("SCALAR", dtype),
+        f"{declaration} void {function or 'run'}(" + ", ".join(args) + ") {",
         "const int lane = threadIdx.x % 32;",
         "const int u = int(blockIdx.y) * 32 + lane;",
         f"const bool active = u < {mul};",
-        "const int64_t task = int64_t(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;",
+        f"const int64_t task = {tile} * (blockDim.x / 32) + threadIdx.x / 32;",
         "if (task >= tasks) return;",
     ]
     node_terms, edge_terms, weight_terms = {}, {}, {}
@@ -206,7 +222,11 @@ def convolution_source(
             f"do {{ ++end; }} while (end < stop && {index}[order[end]] == node);",
             f"const bool exclusive = (begin == 0 || {index}[order[begin - 1]] != node) && (end == edges || {index}[order[end]] != node);",
         ]
-        lines += [f"T sum{i} = 0;" for i in range(len(node_terms))]
+        lines += [
+            f"T sum{i} = 0;"
+            for i, (_, role, _, _) in enumerate(node_terms)
+            if role == (0 if owner == 0 else 4)
+        ]
         lines += [
             "for (int64_t position = begin; position < end; ++position) {",
             "const int64_t edge = order[position];",
@@ -217,11 +237,12 @@ def convolution_source(
 
     for i, ((slot, role, dim, offset), terms) in enumerate(node_terms.items()):
         name = f"sum{i}"
-        if owner < 0:
+        reduced = owner >= 0 and role == (0 if owner == 0 else 4)
+        if not reduced:
             lines.append(f"T {name} = 0;")
         for a, b in terms:
             lines.append(f"{name} = fma({a}, {b}, {name});")
-        if owner < 0:
+        if not reduced:
             row = "source[edge]" if role == 0 else "target[edge]"
             lines.append(
                 f"if (active) atomicAdd(g{slot} + {row} * {dim} + {offset} + u, {name});"
@@ -239,7 +260,7 @@ def convolution_source(
         for a, b in terms:
             lines.append(f"value = fma({a}, {b}, value);")
         address = f"g{slot}[{'0' if is_shared else 'edge'} * {dim} + {offset} + u * {mul2} + {v}]"
-        if is_shared:
+        if is_shared or slot in atomic_weights:
             lines.append(f"if (active) atomicAdd(&{address}, value);")
         else:
             lines.append(
@@ -248,11 +269,96 @@ def convolution_source(
         lines.append("}")
     if owner >= 0:
         lines.append("}")
-        for i, ((slot, _, dim, offset), _) in enumerate(node_terms.items()):
+        for i, ((slot, role, dim, offset), _) in enumerate(node_terms.items()):
+            if role != (0 if owner == 0 else 4):
+                continue
             address = f"g{slot}[node * {dim} + {offset} + u]"
-            lines.append(
-                f"if (active) {{ if (exclusive) {address} += sum{i}; else atomicAdd(&{address}, sum{i}); }}"
-            )
+            if concurrent or any(
+                other_slot == slot and other_role != role
+                for other_slot, other_role, _, _ in node_terms
+            ):
+                lines.append(f"if (active) atomicAdd(&{address}, sum{i});")
+            else:
+                lines.append(
+                    f"if (active) {{ if (exclusive) {address} += sum{i}; else atomicAdd(&{address}, sum{i}); }}"
+                )
         lines.append("}")
     lines.append("}")
     return "\n".join(lines)
+
+
+def fused_source(phases, dimensions, shared, dtype, outputs, initialize):
+    """Execute independent path tiles in one grid with shared launch operands."""
+    header = HEADER.replace("SCALAR", dtype)
+    args = [f"const T* p{i}" for i in range(len(dimensions))]
+    args += [f"T* g{i}" for i in range(outputs)]
+    names = [f"p{i}" for i in range(len(dimensions))] + [
+        f"g{i}" for i in range(outputs)
+    ]
+    writers = {}
+    for i, (paths, program, _) in enumerate(phases):
+        for _, _, pairs in program:
+            for role, slot in pairs:
+                if role == 1:
+                    for path in paths:
+                        if path[8] >= 0:
+                            writers.setdefault((slot, path[8]), set()).add(i)
+    atomic_weights = {slot for (slot, _), owners in writers.items() if len(owners) > 1}
+    body = [header]
+    for i, (paths, program, owner) in enumerate(phases):
+        body.append(
+            convolution_source(
+                paths,
+                program,
+                dimensions,
+                shared,
+                dtype,
+                owner,
+                outputs,
+                initialize,
+                f"phase{i}",
+                atomic_weights,
+            )
+        )
+    args += [
+        "const int64_t* source",
+        "const int64_t* target",
+        "const int64_t* source_order",
+        "const int64_t* target_order",
+        "int64_t edges",
+        "int row_size",
+    ]
+    body += [
+        'extern "C" __global__ void run(' + ", ".join(args) + ") {",
+        "int64_t first = 0;",
+    ]
+    for grouped in (True, False):
+        indices = [
+            i for i, (_, _, owner) in enumerate(phases) if (owner >= 0) == grouped
+        ]
+        if not indices:
+            continue
+        rows = "row_size" if grouped else "1"
+        body += [
+            "{",
+            f"const int64_t tasks = (edges + {rows} - 1) / {rows};",
+            "const int64_t blocks = (tasks + blockDim.x / 32 - 1) / (blockDim.x / 32);",
+            f"if (int64_t(blockIdx.x) < first + blocks * {len(indices)}) {{",
+            f"const int64_t tile = (int64_t(blockIdx.x) - first) / {len(indices)};",
+            f"switch ((int64_t(blockIdx.x) - first) % {len(indices)}) {{",
+        ]
+        for local, i in enumerate(indices):
+            owner = phases[i][2]
+            order = (
+                "source_order"
+                if owner == 0
+                else "target_order"
+                if owner == 1
+                else "nullptr"
+            )
+            body.append(
+                f"case {local}: phase{i}({', '.join(names)}, source, target, {order}, edges, tasks, {rows}, tile); break;"
+            )
+        body += ["}", "return; }", f"first += blocks * {len(indices)}; }}"]
+    body.append("}")
+    return "\n".join(body)

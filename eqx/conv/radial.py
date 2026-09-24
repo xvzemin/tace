@@ -34,9 +34,27 @@ def project(
         if any(i not in (1, 2) for i in outputs):
             factors[key[:2]] = values[1:3]
     radial = calls[0][-3][1]
-    count = len(factors) + sum(
-        1 in terms[0][-2] or 2 in terms[0][-2] for terms in groups.values()
-    )
+    adjoints, aliases = {}, {}
+    for key, terms in groups.items():
+        if 1 not in terms[0][-2] and 2 not in terms[0][-2]:
+            continue
+        # The projected weight adjoint depends only on angular operands.
+        # Different radial/projection tangents can reuse this contraction.
+        signature = (
+            terms[0][-3][1].size(0) == 1,
+            tuple(
+                (
+                    tuple(prefix),
+                    tuple(
+                        id(value) for i, value in enumerate(values) if i not in (1, 2)
+                    ),
+                    weighted,
+                )
+                for *prefix, _, values, _, weighted in terms
+            ),
+        )
+        aliases[key] = adjoints.setdefault(signature, key)
+    count = len(factors) + len(adjoints)
     chunk = max(
         1,
         workspace_bytes // (count * weight_numel * radial.element_size()),
@@ -52,8 +70,8 @@ def project(
         key: radial.new_empty(
             1 if terms[0][-3][1].size(0) == 1 else chunk, weight_numel
         )
-        for key, terms in groups.items()
-        if 1 in terms[0][-2] or 2 in terms[0][-2]
+        for key in adjoints.values()
+        for terms in (groups[key],)
     }
     # Each active uvu path owns a disjoint range of weight columns. A single
     # non-broadcast adjoint can therefore write its workspace without reading
@@ -93,14 +111,18 @@ def project(
             if not is_shared:
                 torch.mm(r, projection, out=weights[key])
         direct = []
-        weight_gradients = {}
+        weight_gradients = {
+            key: gradients[original][
+                : 1 if groups[key][0][-3][1].size(0) == 1 else stop - start
+            ]
+            for key, original in aliases.items()
+        }
+        for key in gradients:
+            if groups[key][0][-3][1].size(0) != 1 and key not in initialize:
+                weight_gradients[key].zero_()
         for key, terms in groups.items():
             r, projection = terms[0][-3][1:3]
             rows = 1 if r.size(0) == 1 else stop - start
-            if key in gradients:
-                weight_gradients[key] = gradients[key][:rows]
-                if r.size(0) != 1 and key not in initialize:
-                    weight_gradients[key].zero_()
             w = weights.get(key[:2], unused[:rows])
             for *prefix, outputs, values, destinations, weighted in terms:
                 edge_roles = tuple(i for i in range(3, len(values)) if i != output_role)
@@ -109,8 +131,10 @@ def project(
                     for i, value in destinations.items()
                     if i not in (1, 2)
                 }
-                if key in weight_gradients:
+                if key in gradients:
                     result[1] = weight_gradients[key]
+                if not result:
+                    continue
                 direct.append(
                     (
                         *prefix,
@@ -147,7 +171,8 @@ def project(
                 destinations[2].addmm_(edge_view(r).T, gradient)
     # Shared weights have one projected cotangent, summed over every chunk.
     # Apply its projection transpose only once.
-    for key, gradient in gradients.items():
+    for key, original in aliases.items():
+        gradient = gradients[original]
         r, projection = groups[key][0][-3][1:3]
         if r.size(0) != 1:
             continue

@@ -106,6 +106,9 @@ class O3TensorProductConv(torch.nn.Module):
     backward transposes that program again, supporting force training and
     higher derivatives. Shared angular factors and partial gradients are
     reused across paths and derivative terms.
+    Compatible path tiles share a CUDA grid and are interleaved over the same
+    edge ranges. Compiled register usage limits fusion; larger programs retain
+    separate launches. Concurrent reductions preserve independent path outputs.
     Reductions use atomic additions and are not generally deterministic.
     Warm up required derivatives before CUDA Graph capture.
     """

@@ -290,6 +290,43 @@ def test_projected_weight_only_workspace(monkeypatch, shared, contributions, ina
         projection.add_(0.25)
 
 
+@pytest.mark.parametrize("shared", [False, True])
+def test_projected_adjoint_reuse(shared):
+    from eqx.conv.radial import project
+
+    torch.manual_seed(47)
+    edges = torch.arange(7)
+    angular = torch.randn(7, 2, dtype=torch.float64)
+    expected = torch.randn(7, 11, dtype=torch.float64)
+    calls = []
+    for _ in range(2):
+        radial = torch.randn(1 if shared else 7, 3, dtype=torch.float64)
+        projection = torch.randn(3, 11, dtype=torch.float64)
+        values = (angular, radial, projection, angular, angular)
+        gradients = (torch.zeros_like(radial), torch.zeros_like(projection))
+        calls.append(((1, 2), values, gradients, False))
+
+    def contract(source, target, terms, layout, initialize):
+        # Different projection transposes share one angular weight adjoint.
+        assert len(terms) == 1
+        outputs, _, results, _ = terms[0]
+        assert outputs == (1,)
+        value = expected[source]
+        if shared:
+            results[0].add_(value.sum(0, keepdim=True))
+        else:
+            assert initialize == (results[0],)
+            results[0].copy_(value)
+
+    project(
+        11, edges, edges, calls, contract, complete=True, output_role=4, chunk_size=3
+    )
+    reduced = expected.sum(0, keepdim=True) if shared else expected
+    for _, (_, radial, projection, _, _), (gr, gp), _ in calls:
+        torch.testing.assert_close(gr, reduced @ projection.T)
+        torch.testing.assert_close(gp, radial.T @ reduced)
+
+
 def test_derivative_partition_reuses_rotations():
     from eqx.conv.o2_o3.schedule import split_program
 
@@ -1635,6 +1672,42 @@ def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
         )
         assert all(role != 4 for _, role, _ in values)
         assert all((v, 1, 0) in values for v in range(path[4]))
+
+
+def test_o3_mixed_node_adjoint_destination(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.o3.convolution import contraction
+
+    tp = o3.TensorProduct(
+        "3x0e",
+        "0e",
+        "3x0e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    conv = O3TensorProductConv(tp)
+    target = torch.arange(257, device="cuda").repeat_interleave(8)
+    source = torch.randint(257, target.shape, device="cuda")
+    edges = torch.stack((source, target))
+    x = torch.randn(257, 3, device="cuda", requires_grad=True)
+    attrs = torch.randn(target.numel(), 1, device="cuda")
+    weights = torch.randn(target.numel(), 3, device="cuda")
+    projection = x.new_empty(0, 3)
+    cotangent = torch.randn_like(x)
+    expected = reference(tp, x, attrs, weights, projection, edges)
+    expected = expected + torch.autograd.grad((expected * cotangent).sum(), x)[0]
+    program = repr((((0, 1, 2, 3, 4), False, ((0, 0), (4, 0))),))
+    for _ in range(3):
+        actual = contraction(
+            conv.kernel_metadata,
+            program,
+            source,
+            target,
+            [x, weights, projection, attrs, cotangent],
+        )[0]
+        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
 
 
 def test_tace_model_force_training(monkeypatch, double_precision):
