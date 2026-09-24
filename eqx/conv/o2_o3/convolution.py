@@ -246,6 +246,9 @@ class O2O3TensorProductConv(torch.nn.Module):
     across chunks and across mixed derivative terms, and are not saved for
     backward. Shared radial inputs are projected once per call; their projected
     adjoints are reduced across chunks before the projection transpose.
+    Per-edge weight adjoints with a single contribution overwrite their
+    workspaces directly, avoiding a separate clear and read-modify-write.
+    Shared and mixed adjoints retain additive reduction.
     Path dependencies are retained through each transpose, including
     mixtures of weighted and unweighted instructions. Channelwise contractions
     use the same register-resident kernels at every angular degree. Mixed

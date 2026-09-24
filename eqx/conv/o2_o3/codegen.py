@@ -9,7 +9,7 @@ from .schedule import rotation_groups
 
 @lru_cache(maxsize=512)
 def convolution_source(
-    paths, operations, dimensions, shared, inputs, outputs, dtype, owner
+    paths, operations, dimensions, shared, inputs, outputs, dtype, owner, initialize=()
 ):
     """Emit shared input rotations and path/channel tiles of output rotations."""
     xp, yp, messages, adjoints, qs, accumulators, gx, gdi, gy, gdo, gr, gs = operations
@@ -198,13 +198,13 @@ def convolution_source(
                     consume(name, a)
                 emit("}")
 
-    def store(g, offset, value, reduced=False, private=False):
+    def store(g, offset, value, reduced=False, private=False, assign=False):
         if reduced:
             emit(
                 f"{{ T reduced_value = warp_sum({value}); if (lane == 0) atomicAdd(g{g} + {offset}, reduced_value); }}"
             )
         elif private:
-            emit(f"if (active) g{g}[{offset}] += {value};")
+            emit(f"if (active) g{g}[{offset}] {'=' if assign else '+='} {value};")
         else:
             emit(f"if (active) atomicAdd(g{g} + {offset}, {value});")
 
@@ -466,6 +466,7 @@ def convolution_source(
                         f"er * {rdim} + {weight} + channel",
                         value,
                         private=not shared[0],
+                        assign=g in initialize,
                     )
             for g, *terms in gs:
                 value = " + ".join(

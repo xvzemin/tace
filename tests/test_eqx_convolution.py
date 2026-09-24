@@ -204,7 +204,8 @@ def test_shared_path_rotation_schedule():
 
 
 @pytest.mark.parametrize("shared", [False, True])
-def test_projected_weight_only_workspace(monkeypatch, shared):
+@pytest.mark.parametrize("contributions,inactive", [(1, False), (2, False), (1, True)])
+def test_projected_weight_only_workspace(monkeypatch, shared, contributions, inactive):
     from types import SimpleNamespace
 
     from eqx.conv.o2_o3.schedule import project
@@ -214,42 +215,62 @@ def test_projected_weight_only_workspace(monkeypatch, shared):
     radial = torch.randn(rows, 3, dtype=torch.float64)
     projection = torch.randn(3, 11, dtype=torch.float64)
     expected = torch.randn(7, 11, dtype=torch.float64)
+    if inactive:
+        expected[:, -1] = 0
+    plan = SimpleNamespace(
+        weight_numel=11,
+        path_data=(("uvu", (0, 0, 10 if inactive else 11, 11, 1, 1, 0, 0, 0, 0)),),
+    )
     gr, gp = torch.zeros_like(radial), torch.zeros_like(projection)
     edges = torch.arange(7)
     dummy = torch.ones(rows, 1, dtype=torch.float64)
     values = (dummy, radial, projection, dummy, dummy, dummy, dummy)
     products = []
+    clears = []
     mm = torch.mm
+    zero = torch.Tensor.zero_
 
     def record(a, b, **kwargs):
         products.append(a.shape)
         return mm(a, b, **kwargs)
 
-    monkeypatch.setattr(torch, "mm", record)
+    def record_zero(value):
+        clears.append(value.shape)
+        return zero(value)
 
-    def contract(plan, source, target, calls, layout):
+    monkeypatch.setattr(torch, "mm", record)
+    monkeypatch.setattr(torch.Tensor, "zero_", record_zero)
+
+    def contract(plan, source, target, calls, layout, initialize):
+        assert bool(initialize) == (not shared and contributions == 1 and not inactive)
         for outputs, operands, results, weighted in calls:
             assert outputs == (1,)
             assert operands[1].untyped_storage().nbytes() == radial.element_size()
-            result = expected[source]
-            results[0].add_(result.sum(0, keepdim=True) if shared else result)
+            result = expected[source] / contributions
+            if initialize:
+                assert initialize[0] is results[0]
+                results[0].copy_(result)
+            else:
+                results[0].add_(result.sum(0, keepdim=True) if shared else result)
 
     project(
-        SimpleNamespace(weight_numel=11),
+        plan,
         edges,
         edges,
-        [((1, 2), values, (gr, gp), False)],
+        [((1, 2), values, (gr, gp), False)] * contributions,
         contract,
         chunk_size=3,
     )
     assert not products
+    assert len(clears) == (1 if shared else 3 if contributions > 1 or inactive else 0)
     reduced = expected.sum(0, keepdim=True) if shared else expected
     torch.testing.assert_close(gr, reduced @ projection.T)
     torch.testing.assert_close(gp, radial.T @ reduced)
 
     # Shared projections are evaluated once per call, not once per chunk and
     # not cached across parameter updates.
-    def forward(plan, source, target, calls, layout):
+    def forward(plan, source, target, calls, layout, initialize):
+        assert not initialize
         weights = calls[0][1][1]
         inputs = radial if shared else radial[source]
         torch.testing.assert_close(weights, mm(inputs, projection))
@@ -257,7 +278,7 @@ def test_projected_weight_only_workspace(monkeypatch, shared):
     for _ in range(2):
         products.clear()
         project(
-            SimpleNamespace(weight_numel=11),
+            plan,
             edges,
             edges,
             [((6,), values, (dummy,), False)],
@@ -373,7 +394,8 @@ def test_direction_derivatives(
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_direction_zero_order_and_empty_edges(device):
+@pytest.mark.parametrize("projected", [False, True])
+def test_direction_zero_order_and_empty_edges(device, projected):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = (
@@ -389,13 +411,24 @@ def test_direction_zero_order_and_empty_edges(device):
             size, 3, device=device, dtype=torch.float64, requires_grad=True
         )
         weights = torch.randn(
-            size, 2, device=device, dtype=torch.float64, requires_grad=True
+            size,
+            3 if projected else 2,
+            device=device,
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        projection = torch.randn(
+            3 if projected else 0,
+            2,
+            device=device,
+            dtype=torch.float64,
+            requires_grad=True,
         )
         edges = torch.randint(3, (2, size), device=device)
         output = plan(
             x,
             weights,
-            weights.new_empty(0, 2),
+            projection,
             frame.forward_packed(vectors),
             weights.new_ones(size, 1),
             edges,
@@ -406,8 +439,11 @@ def test_direction_zero_order_and_empty_edges(device):
             output.square().sum(), vectors, create_graph=True
         )[0]
         torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)
-        second = torch.autograd.grad(gradient.sum(), vectors)[0]
-        torch.testing.assert_close(second, torch.zeros_like(second), atol=0, rtol=0)
+        # A vanishing angular derivative must write zero even when the
+        # projected weight workspace has not been initialized.
+        second = torch.autograd.grad(gradient.sum(), (vectors, weights, projection))
+        for value in second:
+            torch.testing.assert_close(value, torch.zeros_like(value), atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("channels", [3, 65])

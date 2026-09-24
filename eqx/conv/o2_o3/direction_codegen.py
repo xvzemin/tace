@@ -8,7 +8,7 @@ from .geometry import angular_coefficients
 
 
 @lru_cache(maxsize=256)
-def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
+def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initialize=()):
     """Generate a shared rotation tile for mixed direction derivatives."""
     plan = kernel_plan(metadata)
     paths = [plan.path_data[i][1] for i in indices]
@@ -213,6 +213,12 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
                 continue
             cg = entries.get((rank, i), ())
             if not cg:
+                # Zero angular derivatives still own their path columns.
+                for output, result in zip(outputs, results):
+                    if output == 1 and result in initialize and weight >= 0:
+                        emit(
+                            f"if (active) {load(result, 'edge', f'{weight} + channel')} = T(0);"
+                        )
                 continue
             for output, result in zip(outputs, results):
                 # Nonempty projection adjoints are handled by the GEMM schedule.
@@ -304,9 +310,12 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1):
                         name = f"{lv[output - 7]}{destination}"
                     else:
                         column = f"{weight} + channel" if output == 1 else str(harmonic)
-                        if output == 1 and not layouts[result][0]:
+                        if output == 1 and (
+                            result in initialize or not layouts[result][0]
+                        ):
+                            update = "=" if result in initialize else "+="
                             emit(
-                                f"if (active) {load(result, 'edge', column)} += factor * value;"
+                                f"if (active) {load(result, 'edge', column)} {update} factor * value;"
                             )
                         else:
                             if output == 5:

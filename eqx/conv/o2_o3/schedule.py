@@ -233,6 +233,18 @@ def project(
         for key, terms in groups.items()
         if 1 in terms[0][-2] or 2 in terms[0][-2]
     }
+    # Each active uvu path owns a disjoint range of weight columns. A single
+    # non-broadcast adjoint can therefore write its workspace without reading
+    # or clearing it first. Retain accumulation for shared or mixed adjoints,
+    # and for instructions with inactive weight columns.
+    complete = (
+        sum(path[2] for _, path in plan.path_data if path[8] >= 0) == plan.weight_numel
+    )
+    initialize = tuple(
+        key
+        for key in gradients
+        if complete and len(groups[key]) == 1 and groups[key][0][-3][1].size(0) != 1
+    )
     # Weight-only adjoints never read this operand. Retain its shape without
     # allocating a second edge-by-path workspace.
     unused = next(iter(workspaces.values()), None)
@@ -268,7 +280,7 @@ def project(
             rows = 1 if r.size(0) == 1 else stop - start
             if key in gradients:
                 weight_gradients[key] = gradients[key][:rows]
-                if r.size(0) != 1:
+                if r.size(0) != 1 and key not in initialize:
                     weight_gradients[key].zero_()
             w = weights.get(key[:2], unused[:rows])
             for *prefix, outputs, values, destinations, weighted in terms:
@@ -298,7 +310,14 @@ def project(
                         weighted,
                     )
                 )
-        contract(plan, source[start:stop], target[start:stop], direct, shared)
+        contract(
+            plan,
+            source[start:stop],
+            target[start:stop],
+            direct,
+            shared,
+            tuple(weight_gradients[key] for key in initialize),
+        )
         for key, gradient in weight_gradients.items():
             r, projection = groups[key][0][-3][1:3]
             if r.size(0) == 1:

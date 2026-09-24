@@ -24,7 +24,9 @@ THREADS = 128
 
 
 @lru_cache(maxsize=256)
-def execution_plan(plan, specification, dimensions, shared, dtype, grouped, device):
+def execution_plan(
+    plan, specification, dimensions, shared, dtype, grouped, device, initialize=()
+):
     """Cache tensor-free schedules, using compiled resource usage to bound tiles."""
     count = 1 + max(
         i for _, operands, results, _ in specification for i in (*operands, *results)
@@ -104,6 +106,11 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                 len(results),
                 dtype,
                 owner,
+                tuple(
+                    i
+                    for i, value in enumerate(results)
+                    if locations[id(value)] in initialize
+                ),
             )
             phases.append(
                 (code, width, shared_bytes, owner, inputs, results, paths, terms)
@@ -147,6 +154,11 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
                             len(destinations),
                             dtype,
                             owner,
+                            tuple(
+                                i
+                                for i, value in enumerate(destinations)
+                                if locations[id(value)] in initialize
+                            ),
                         )
                         pending.append(
                             (
@@ -193,7 +205,7 @@ def execution_plan(plan, specification, dimensions, shared, dtype, grouped, devi
     return tuple(accepted)
 
 
-def contract(plan, source, target, calls, shared=None):
+def contract(plan, source, target, calls, shared=None, initialize=()):
     """Execute a cached mixed-adjoint program without edge message storage."""
     x, radial, _, din, dout, amplitudes, y = calls[0][1]
     if shared is None:
@@ -217,6 +229,7 @@ def contract(plan, source, target, calls, shared=None):
         "float" if x.dtype == torch.float32 else "double",
         source.numel() >= 1024,
         x.device,
+        tuple(indices[id(value)] for value in initialize),
     )
     stream = torch.cuda.current_stream(x.device).cuda_stream
     pointers = tuple(value.data_ptr() for value in values)
@@ -288,7 +301,9 @@ def contract_many(plan, source, target, calls):
 
 
 @lru_cache(maxsize=256)
-def direction_plan(metadata, specification, layouts, dtype, grouped, device):
+def direction_plan(
+    metadata, specification, layouts, dtype, grouped, device, initialize=()
+):
     """Compile shared tiles of mixed angular and vector adjoints."""
     from .convolution import kernel_plan
     from .direction_codegen import direction_source
@@ -309,7 +324,9 @@ def direction_plan(metadata, specification, layouts, dtype, grouped, device):
     accepted = []
     while pending:
         sources = [
-            direction_source(metadata, group, terms, layouts, dtype)
+            direction_source(
+                metadata, group, terms, layouts, dtype, initialize=initialize
+            )
             for group, terms in pending
         ]
         compiled = kernels([entry[0] for entry in sources], device)
@@ -348,7 +365,9 @@ def direction_plan(metadata, specification, layouts, dtype, grouped, device):
         roles = {role for _, outputs, *_ in terms for role in outputs}
         owner = -1 if not grouped else 0 if 0 in roles else 1 if 6 in roles else -1
         code = (
-            direction_source(metadata, group, terms, layouts, dtype, owner)[0]
+            direction_source(metadata, group, terms, layouts, dtype, owner, initialize)[
+                0
+            ]
             if owner >= 0
             else None
         )
@@ -410,9 +429,11 @@ def contract_directions(metadata, source, target, calls):
             values.append(value)
         prepared.append((rank, outputs, tuple(values), results, weighted))
 
-    def execute(plan, source, target, terms, shared=None):
+    def execute(plan, source, target, terms, shared=None, initialize=()):
         if all(rank == 0 for rank, *_ in terms):
-            return contract(plan, source, target, [term[1:] for term in terms], shared)
+            return contract(
+                plan, source, target, [term[1:] for term in terms], shared, initialize
+            )
         values, locations, specification = [], {}, []
         for rank, outputs, operands, results, weighted in terms:
             slots = []
@@ -438,6 +459,7 @@ def contract_directions(metadata, source, target, calls):
             "float" if values[0].dtype == torch.float32 else "double",
             source.numel() >= 1024,
             values[0].device,
+            tuple(locations[id(value)] for value in initialize),
         )
         pointers = [value.data_ptr() for value in (*values, source, target)]
         destinations = {slot for _, _, _, slots, _ in specification for slot in slots}
