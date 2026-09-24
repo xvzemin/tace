@@ -132,7 +132,7 @@ class WignerD(torch.nn.Module):
             and vectors.is_cuda
             and vectors.dtype in (torch.float32, torch.float64)
         ):
-            from eqx.conv.wigner import wigner_D
+            from eqx.kernels import wigner_D
 
             return wigner_D(self, vectors, method=method)
         return torch.cat(

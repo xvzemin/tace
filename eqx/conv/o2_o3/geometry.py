@@ -187,7 +187,7 @@ def backward(ctx, grad_outputs):
         if direction_slot is not None:
             # d n = omega x n. Radial amplitudes remain separate operands.
             if vectors.is_cuda and ctx.use_cuda:
-                from .wigner import alignment_cuda
+                from ...kernels.wigner import alignment_cuda
 
                 direction_gradient = alignment_cuda(
                     repr("direction_gradient"), [vectors, results[direction_slot]]

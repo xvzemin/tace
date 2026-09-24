@@ -1,4 +1,4 @@
-"""Backend-independent contraction schedules and bounded radial workspaces."""
+"""O(2)-aligned O(3) contraction schedules and bounded radial workspaces."""
 
 from collections import defaultdict
 

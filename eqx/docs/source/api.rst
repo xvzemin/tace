@@ -67,31 +67,37 @@ features and back while retaining flattened ``ir_mul`` storage.
 .. autoclass:: eqx.o2.O3TensorProduct
    :members: forward, forward_local, forward_scatter
 
-Indexed convolutions
---------------------
+Fused convolutions
+------------------
 
-``eqx.conv`` separates convolution execution from the representation operators
-in ``eqx.o2``. The default ``backend="cuda"`` generates fused CUDA kernels
+``eqx.conv`` contains kernels for specific convolution architectures.
+``O2O3TensorProductConv`` evaluates an O(3) tensor product in aligned O(2)
+frames, including indexed gather and reduction. Its default
+``backend="cuda"`` generates fused CUDA kernels
 on GPU and uses PyTorch on CPU. GPU execution requires the ``cuda`` extra
 and a CUDA toolkit. CUDA supports ``uvu`` instructions. ``backend="torch"``
 selects the reference implementation, including ``uvw`` instructions.
 Both backends support recursive higher derivatives.
 
-Passing ``vectors=edge_vector`` to ``Convolution.forward`` enables direct
+Passing ``vectors=edge_vector`` to ``O2O3TensorProductConv.forward`` enables direct
 direction derivatives. Supply their packed alignment matrices, for example
-with ``wigner_D(frame, edge_vector.detach())``. The matrices are then cached
+with ``eqx.kernels.wigner_D(frame, edge_vector.detach())``. The matrices are then cached
 values, and sparse rotation-generator contractions provide the geometry
 derivatives, including higher orders. Degree-zero harmonic paths bypass the
 rotations. Omitting ``vectors`` preserves differentiation with respect to the
 matrix entries themselves.
 
+.. autoclass:: eqx.conv.O2O3TensorProductConv
+   :members: forward
+
+Shared geometry kernels
+-----------------------
+
+``eqx.kernels`` provides geometry kernels shared by convolution architectures.
 ``wigner_D`` uses direct quaternion polynomials by default on CUDA. Set
 ``method="recursive"`` to use sparse CG degree contractions instead, or
 ``backend="torch"`` for the recursive PyTorch reference. Both CUDA methods
 support float32, float64, and higher derivatives. Coefficients and compiled
 kernels are cached independently of the number of edges.
 
-.. autoclass:: eqx.conv.Convolution
-   :members: forward
-
-.. autofunction:: eqx.conv.wigner_D
+.. autofunction:: eqx.kernels.wigner_D

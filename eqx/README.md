@@ -40,6 +40,64 @@ features = linear.irreps_in.randn(32, -1)
 output = linear(features)
 ```
 
+## Package organization
+
+`o2` defines representations and individual operators. `conv` contains fused
+implementations of specific convolution architectures. `kernels` contains
+shared geometry kernels and CUDA compilation support, independent of any
+convolution architecture.
+
+```text
+eqx/
+├── o2/
+│   ├── irreps.py                 # Representation metadata
+│   ├── linear.py                 # O(2) Linear
+│   ├── gate.py                   # Activation and Gate
+│   ├── tensor_product.py         # O(2) TensorProduct
+│   ├── asymmetric_contraction.py # Many-body contractions
+│   ├── circular_harmonics.py     # Circular harmonics
+│   ├── rotation_matrix.py        # Axis alignment
+│   ├── wigner.py                 # WignerD interface and PyTorch implementation
+│   ├── local_frame.py            # Restriction and feature rotations
+│   └── o3_tensor_product.py      # Aligned O(3) TensorProduct
+├── conv/
+│   ├── __init__.py               # Public convolution classes
+│   ├── graph.py                  # Shared graph ordering
+│   └── o2_o3/
+│       ├── convolution.py        # O2O3TensorProductConv and reference adjoints
+│       ├── geometry.py           # Recursive direction derivatives
+│       ├── schedule.py           # Path grouping and radial workspaces
+│       ├── cuda.py               # CUDA execution plans
+│       ├── codegen.py            # Tensor-product CUDA source generation
+│       └── direction_codegen.py  # Mixed-derivative CUDA source generation
+└── kernels/
+    ├── cuda.py                   # NVRTC compilation, caching and launches
+    ├── codegen.py                # Shared geometry source generation
+    ├── wigner.py                 # Packed Wigner construction and derivatives
+    ├── quaternion.py             # Quaternion polynomial kernels
+    └── csrc/runtime.cpp          # Model-independent CUDA runtime
+```
+
+### Convolution interfaces
+
+| Class | Implementation directory | Operation | Status |
+|---|---|---|---|
+| `O2O3TensorProductConv` | `conv/o2_o3/` | O(3) CGTP through aligned-frame sparse coupling | Implemented |
+| `UvO2TensorProductConv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear | Planned |
+| `UuO2TensorProductConv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Planned |
+
+The planned directories and classes are not created until their operators are
+implemented. Each architecture owns its reference operation, derivatives and
+CUDA schedule; shared geometry and compilation are reused without inheriting
+from another convolution implementation. A nonlinear gated convolution must
+differentiate its activations and cannot reuse the multilinear CGTP transpose
+rule unchanged.
+
+Use `from eqx.conv import O2O3TensorProductConv` and
+`from eqx.kernels import wigner_D`. CUDA compilation remains lazy. File
+organization does not change instruction ordering, weights, normalization or
+derivative rules.
+
 ## Citation
 
 If you use the local O(2) method or its global O(3)/local O(2)

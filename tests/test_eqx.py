@@ -62,9 +62,9 @@ def test_rotation_matrix_to_axis(rotation_matrix, axis):
     )
 
 
-def test_o2_does_not_import_tace():
-    directory = Path(__file__).resolve().parents[1] / "eqx" / "o2"
-    for source_path in directory.glob("*.py"):
+def test_eqx_does_not_import_tace():
+    directory = Path(__file__).resolve().parents[1] / "eqx"
+    for source_path in directory.rglob("*.py"):
         source = source_path.read_text()
         assert "from tace" not in source
         assert "import tace" not in source
@@ -112,9 +112,10 @@ for _ in range(2):
         torch.testing.assert_close(left, right, atol=1e-8, rtol=1e-8)
     actual = torch.cat([value.flatten() for value in a])
     expected = torch.cat([value.flatten() for value in b])
-assert "eqx.conv.cuda" not in sys.modules
+assert "eqx.conv.o2_o3.cuda" not in sys.modules
+assert "eqx.kernels.cuda" not in sys.modules
 assert "tace" not in sys.modules
-accelerated = conv.Convolution(tp, backend="cuda").to(device)
+accelerated = conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
 arguments = (
     x, weights, x.new_empty(0, tp.weight_numel), packed,
     x.new_ones(1, tp.num_harmonics), edges, 3,

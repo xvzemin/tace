@@ -407,7 +407,7 @@ class Representation(torch.nn.Module):
         edge_wigner_inv = None
         if self.use_so2 or self.use_o2:
             if getattr(self, "use_packed_wigner", False):
-                from eqx.conv import wigner_D
+                from eqx.kernels import wigner_D
 
                 # Streamed CGTPs differentiate directions directly; their
                 # degree matrices are shared cached values, not AD operands.

@@ -1,6 +1,5 @@
-"""Indexed convolutions with PyTorch and optional fused CUDA execution."""
+"""Fused kernels organized by convolution architecture."""
 
-from .convolution import Convolution
-from .wigner import wigner_D
+from .o2_o3 import O2O3TensorProductConv
 
-__all__ = ["Convolution", "wigner_D"]
+__all__ = ["O2O3TensorProductConv"]

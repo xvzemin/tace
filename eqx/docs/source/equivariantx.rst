@@ -29,13 +29,28 @@ Install the optional generated CUDA convolution backend with:
 
    pip install './tace/eqx[cuda]'
 
-``eqx.o2`` retains its PyTorch implementation. ``eqx.conv.Convolution``
+``eqx.o2`` retains its PyTorch implementation. ``eqx.conv.O2O3TensorProductConv``
 defaults to ``backend="cuda"``, using generated CUDA on GPU and PyTorch on CPU.
 A CUDA toolkit is required for GPU execution; set ``CUDA_HOME`` if needed.
 The small C++ launcher is built once, and NVRTC kernels are cached by their
 static specification. Importing EQX does not load or compile the extension.
 The CUDA backend supports ``uvu`` instructions. ``backend="torch"`` selects
 the reference contraction, which also supports ``uvw`` instructions.
+
+Package organization
+--------------------
+
+``eqx.o2`` defines representation metadata, Linear, Gate, TensorProduct,
+harmonics, and frame transformations. ``eqx.conv`` groups fused kernels by
+convolution architecture. Its current ``O2O3TensorProductConv`` lives in
+``conv/o2_o3`` and performs an aligned O(3) tensor-product convolution.
+``eqx.kernels`` provides shared Wigner and quaternion kernels, together with
+the lazy CUDA compiler and launcher.
+
+``UvO2TensorProductConv`` and ``UuO2TensorProductConv`` are planned interfaces
+for channel-mixing Linear--Gate--Linear and channelwise Linear convolutions,
+respectively. They will use separate ``conv/uv_o2`` and ``conv/uu_o2``
+implementations; neither is currently available.
 
 Quick start
 -----------

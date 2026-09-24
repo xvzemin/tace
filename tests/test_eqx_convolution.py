@@ -5,21 +5,21 @@ from copy import deepcopy
 import pytest
 import torch
 
-from eqx.conv import Convolution
+from eqx.conv import O2O3TensorProductConv
 from eqx.o2 import O3TensorProduct, WignerD
 
 
 def test_convolution_backends_and_modes():
-    from eqx.conv import wigner_D
+    from eqx.kernels import wigner_D
 
     # Exported graphs can resolve the operator before any frame is evaluated.
     assert torch.ops.eqx.quaternion_polynomial.default is not None
     tp = O3TensorProduct("2x0e", "0e", "3x0e", [(0, 0, 0, "uvw", True)])
     assert tp.convolution.instructions[0].connection_mode == "uvw"
     with pytest.raises(NotImplementedError, match="only 'uvu'"):
-        Convolution(tp, backend="cuda")
+        O2O3TensorProductConv(tp, backend="cuda")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
-        Convolution(tp, backend="triton")
+        O2O3TensorProductConv(tp, backend="triton")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
         wigner_D(WignerD(0, 0), torch.randn(2, 3), backend="triton")
     with pytest.raises(ValueError, match="method must be"):
@@ -31,7 +31,7 @@ def test_convolution_backends_and_modes():
 def test_quaternion_coefficients():
     from e3nn import o3
 
-    from eqx.conv.quaternion import polynomial_coefficients
+    from eqx.kernels.quaternion import polynomial_coefficients
     from eqx.o2.rotation_matrix import _quaternion_to_matrix
 
     q = torch.randn(
@@ -61,7 +61,7 @@ def test_quaternion_coefficients():
 def test_quaternion_wigner_frames(lmax):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import wigner_D
+    from eqx.kernels import wigner_D
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -153,8 +153,8 @@ def test_same_degree_output_rotations(channels, edge_count, merge_paths):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        plan = Convolution(tp).cuda()
-        reference = Convolution(tp, backend="torch").cuda()
+        plan = O2O3TensorProductConv(tp).cuda()
+        reference = O2O3TensorProductConv(tp, backend="torch").cuda()
         frame = WignerD(2, 2).cuda()
         edges = torch.randint(4, (2, edge_count), device="cuda")
         x = torch.randn(4, tp.input_dim, device="cuda", requires_grad=True)
@@ -191,7 +191,7 @@ def test_same_degree_output_rotations(channels, edge_count, merge_paths):
 
 
 def test_shared_path_rotation_schedule():
-    from eqx.conv.schedule import rotation_groups
+    from eqx.conv.o2_o3.schedule import rotation_groups
 
     # Three instructions sum into one output, while the fourth writes an
     # independent entry of the same degree. Do not split or merge those roles.
@@ -207,7 +207,7 @@ def test_shared_path_rotation_schedule():
 def test_projected_weight_only_workspace(monkeypatch, shared):
     from types import SimpleNamespace
 
-    from eqx.conv.schedule import project
+    from eqx.conv.o2_o3.schedule import project
 
     torch.manual_seed(46)
     rows = 1 if shared else 7
@@ -269,7 +269,7 @@ def test_projected_weight_only_workspace(monkeypatch, shared):
 
 
 def test_derivative_partition_reuses_rotations():
-    from eqx.conv.schedule import split_program
+    from eqx.conv.o2_o3.schedule import split_program
 
     x, w, projection, din, dout, s = (object() for _ in range(6))
     cotangents = (object(), object())
@@ -304,7 +304,7 @@ def test_direction_derivatives(
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import cuda
+    from eqx.conv.o2_o3 import cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 3)
     previous = torch.get_default_dtype()
@@ -325,8 +325,8 @@ def test_direction_derivatives(
             internal_weights=False,
             shared_weights=False,
         ).to(device)
-        plan = Convolution(tp, backend=backend).to(device)
-        reference = Convolution(tp, backend="torch").to(device)
+        plan = O2O3TensorProductConv(tp, backend=backend).to(device)
+        reference = O2O3TensorProductConv(tp, backend="torch").to(device)
         frame = WignerD(2, 2).to(device)
         edges = torch.tensor([[0, 1, 2, 0], [2, 2, 1, 1]], device=device)
 
@@ -380,7 +380,7 @@ def test_direction_zero_order_and_empty_edges(device):
         .to(device)
         .double()
     )
-    plan = Convolution(tp).to(device)
+    plan = O2O3TensorProductConv(tp).to(device)
     frame = WignerD(2, 2).to(device).double()
     for size in (0, 4):
         x = torch.randn(3, 10, device=device, dtype=torch.float64, requires_grad=True)
@@ -413,7 +413,7 @@ def test_direction_zero_order_and_empty_edges(device):
 def test_direction_node_reductions(monkeypatch, channels):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import cuda
+    from eqx.conv.o2_o3 import cuda
 
     monkeypatch.setattr(cuda, "ROW_SIZE", 8)
     previous = torch.get_default_dtype()
@@ -428,7 +428,10 @@ def test_direction_node_reductions(monkeypatch, channels):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        module, reference = Convolution(tp), Convolution(tp, backend="torch")
+        module, reference = (
+            O2O3TensorProductConv(tp),
+            O2O3TensorProductConv(tp, backend="torch"),
+        )
         frame = WignerD(2, 2).cuda()
         edges = torch.randint(37, (2, 1031), device="cuda")
         # Include isolated nodes, complete rows, and split high-degree rows.
@@ -480,7 +483,7 @@ def test_direction_node_reductions(monkeypatch, channels):
 def test_direction_compile_and_capture(edge_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import wigner_D
+    from eqx.kernels import wigner_D
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -488,8 +491,8 @@ def test_direction_compile_and_capture(edge_count):
         tp = O3TensorProduct(
             "2x1o", "1o", "2x0e+2x1e", [(0, 0, i, "uvu", True) for i in range(2)]
         ).cuda()
-        plan = Convolution(tp).cuda()
-        reference = Convolution(tp, backend="torch").cuda()
+        plan = O2O3TensorProductConv(tp).cuda()
+        reference = O2O3TensorProductConv(tp, backend="torch").cuda()
         frame = WignerD(1, 1).cuda()
         x = torch.randn(3, 6, device="cuda", requires_grad=True)
         vectors = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
@@ -587,7 +590,7 @@ def test_direction_derivatives_on_axes(device):
             internal_weights=False,
             shared_weights=False,
         ).to(device)
-        plan, frame = Convolution(tp).to(device), WignerD(2, 2).to(device)
+        plan, frame = O2O3TensorProductConv(tp).to(device), WignerD(2, 2).to(device)
         vectors = torch.tensor(
             [
                 [0.0, 1.0, 0.0],
@@ -666,7 +669,7 @@ def test_convolution_graph_order(owner):
 def test_fused_wigner_derivatives(degree, dtype, method):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import wigner_D
+    from eqx.kernels import wigner_D
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
@@ -717,12 +720,12 @@ def test_fused_wigner_derivatives(degree, dtype, method):
 def test_cuda_streams_capture_compile(monkeypatch, row_size):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import cuda
+    from eqx.conv.o2_o3 import cuda
 
     monkeypatch.setattr(cuda, "ROW_SIZE", row_size)
     tp = O3TensorProduct("2x0e", "0e", "2x0e", [(0, 0, 0, "uvu", True)]).cuda().double()
-    plan = Convolution(tp).cuda().double()
-    reference = Convolution(tp, backend="torch").cuda().double()
+    plan = O2O3TensorProductConv(tp).cuda().double()
+    reference = O2O3TensorProductConv(tp, backend="torch").cuda().double()
     x = torch.randn(4, 2, device="cuda", dtype=torch.float64)
     weights = torch.randn(1031, 2, device="cuda", dtype=torch.float64)
     projection = weights.new_empty(0, 2)
@@ -779,7 +782,7 @@ def test_streaming_derivatives(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     if backend == "cuda":
-        from eqx.conv import cuda
+        from eqx.conv.o2_o3 import cuda
 
         monkeypatch.setattr(cuda, "CHUNK_SIZE", 3)
     previous_dtype = torch.get_default_dtype()
@@ -794,7 +797,7 @@ def test_streaming_derivatives(
             shared_weights=False,
             internal_weights=False,
         ).to(device)
-        tp.convolution = Convolution(tp, backend=backend).to(device)
+        tp.convolution = O2O3TensorProductConv(tp, backend=backend).to(device)
         frame = WignerD(2, 2).to(device)
         generator = torch.Generator(device=device).manual_seed(42)
 
@@ -881,7 +884,7 @@ def test_streaming_mixed_paths_and_empty_edges(device, backend, dtype):
             internal_weights=True,
             shared_weights=True,
         ).to(device)
-        module.convolution = Convolution(module, backend=backend).to(device)
+        module.convolution = O2O3TensorProductConv(module, backend=backend).to(device)
         frame = WignerD(3, 3).to(device)
         features = torch.randn(3, module.input_dim, device=device, requires_grad=True)
         vectors = torch.randn(1, 3, device=device, requires_grad=True)
@@ -945,9 +948,9 @@ def test_mixed_path_higher_derivatives(
             internal_weights=False,
             shared_weights=False,
         ).to(device=device, dtype=dtype)
-        plan = Convolution(tp, backend="cuda" if device == "cuda" else "torch").to(
-            device=device, dtype=dtype
-        )
+        plan = O2O3TensorProductConv(
+            tp, backend="cuda" if device == "cuda" else "torch"
+        ).to(device=device, dtype=dtype)
         edges = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
 
         def rand(*shape):
@@ -1176,7 +1179,7 @@ def test_streaming_high_degree(degree):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        tp.convolution = Convolution(tp, backend="cuda").cuda()
+        tp.convolution = O2O3TensorProductConv(tp, backend="cuda").cuda()
         frame = WignerD(degree, degree).cuda()
         torch.manual_seed(71)
         x = torch.randn(3, tp.input_dim, device="cuda", requires_grad=True)
@@ -1201,7 +1204,7 @@ def test_streaming_high_degree(degree):
 def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import cuda as convolution_kernel
+    from eqx.conv.o2_o3 import cuda as convolution_kernel
 
     monkeypatch.setattr(convolution_kernel, "CHUNK_SIZE", 1024)
     previous_dtype = torch.get_default_dtype()
@@ -1218,7 +1221,7 @@ def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        tp.convolution = Convolution(tp, backend="cuda").cuda()
+        tp.convolution = O2O3TensorProductConv(tp, backend="cuda").cuda()
         frame = WignerD(degree + 1, degree + 1).cuda()
         x = torch.randn(7, tp.input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edges_count, 3, device="cuda", requires_grad=True)

@@ -197,8 +197,8 @@ class _Contraction(torch.autograd.Function):
         return None, None, None, None, *gradients
 
 
-class Convolution(torch.nn.Module):
-    """Schedule a tensor product with indexed input and output nodes.
+class O2O3TensorProductConv(torch.nn.Module):
+    """Evaluate an O(3) tensor-product convolution in aligned O(2) frames.
 
     Parameters
     ----------

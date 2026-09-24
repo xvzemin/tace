@@ -25,8 +25,8 @@ Homepage = "https://github.com/xvzemin/tace"
 Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html"
 
 [tool.setuptools]
-packages = ["eqx", "eqx.o2", "eqx.conv"]
+packages = ["eqx", "eqx.o2", "eqx.conv", "eqx.conv.o2_o3", "eqx.kernels"]
 package-dir = { eqx = "." }
 
 [tool.setuptools.package-data]
-eqx = ["README.md", "conv/csrc/*.cpp", "conv/csrc/*.cuh", "conv/csrc/*.in"]
+eqx = ["README.md", "kernels/csrc/*.cpp", "kernels/csrc/*.cuh", "kernels/csrc/*.in"]

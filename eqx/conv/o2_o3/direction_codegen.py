@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from .codegen import HEADER
+from ...kernels.codegen import HEADER
 from .convolution import kernel_plan
 from .geometry import angular_coefficients
 

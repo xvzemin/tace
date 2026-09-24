@@ -3,7 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-"""Quaternion and recursive Wigner matrices for streaming convolutions."""
+"""Packed Wigner matrices with quaternion and recursive CUDA kernels."""
 
 from ast import literal_eval
 from functools import lru_cache
@@ -117,13 +117,42 @@ def rotation_plan(cg):
     return tuple(plan)
 
 
+def rotate(cg, output, values, result, rotation_plan):
+    """Evaluate a recursive Wigner contraction using CUDA, including transposes."""
+    from .codegen import rotation_source
+    from .cuda import kernels
+
+    inputs = [value for i, value in enumerate(values) if i != output]
+    indices, coefficients = rotation_plan(cg)[output]
+    widths = (9, cg.size(1) ** 2, cg.size(2) ** 2)
+    code = rotation_source(
+        widths,
+        coefficients.size(1),
+        "float" if cg.dtype == torch.float32 else "double",
+        output,
+    )
+    kernel = kernels([code], result.device)[code]
+    arguments = [value.data_ptr() for value in (*inputs, result, indices, coefficients)]
+    arguments += [
+        result.size(0),
+        *inputs[0].stride(),
+        *inputs[1].stride(),
+        *result.stride(),
+    ]
+    kernel.launch(
+        arguments,
+        (result.numel() + 127) // 128,
+        1,
+        128,
+        torch.cuda.current_stream(result.device).cuda_stream,
+    )
+
+
 @torch.library.custom_op("eqx::rotation", mutates_args=(), device_types="cuda")
 def rotation(cg: torch.Tensor, output: int, values: list[torch.Tensor]) -> torch.Tensor:
     """Evaluate a degree contraction or any of its multilinear transposes."""
     result = torch.empty_like(values[output], memory_format=torch.contiguous_format)
     if result.numel():
-        from .cuda import rotate
-
         rotate(cg, output, values, result, rotation_plan)
     return result
 
@@ -162,8 +191,6 @@ def packed_wigner(
     vectors: torch.Tensor, degree: int, coefficients: list[torch.Tensor]
 ) -> torch.Tensor:
     """Build cached degree matrices directly in one packed allocation."""
-    from .cuda import rotate
-
     result = packed_wigner_fake(vectors, degree, coefficients)
     if not vectors.size(0):
         return result

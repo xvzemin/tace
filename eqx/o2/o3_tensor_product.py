@@ -9,7 +9,7 @@ from typing import Optional, Sequence
 import torch
 from e3nn import o3
 
-from ..conv import Convolution
+from ..conv import O2O3TensorProductConv
 from .local_frame import LocalFrame
 
 
@@ -234,7 +234,7 @@ class O3TensorProduct(torch.nn.Module):
                     persistent=False,
                 )
 
-        self.convolution = Convolution(self, backend="torch")
+        self.convolution = O2O3TensorProductConv(self, backend="torch")
 
     def __repr__(self) -> str:
         return (
@@ -408,7 +408,7 @@ class O3TensorProduct(torch.nn.Module):
         -----
         Execution uses PyTorch operations on CPU and CUDA, including higher
         derivatives used in force training. The optional fused implementation
-        is available separately through :class:`eqx.conv.Convolution`.
+        is available separately through :class:`eqx.conv.O2O3TensorProductConv`.
         """
         if features.ndim != 2 or features.size(1) != self.input_dim:
             raise ValueError("Expected two-dimensional node features in ir_mul layout.")

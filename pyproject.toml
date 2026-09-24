@@ -126,7 +126,7 @@ exclude = ["eqx.build", "eqx.build.*", "eqx.dist", "eqx.dist.*"]
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
 "tace.models.scf" = ["*.md", "longrange/*.md"]
-"eqx" = ["README.md", "conv/csrc/*.cpp", "conv/csrc/*.cuh", "conv/csrc/*.in"]
+"eqx" = ["README.md", "kernels/csrc/*.cpp", "kernels/csrc/*.cuh", "kernels/csrc/*.in"]
 
 [tool.ruff]
 target-version = "py39"

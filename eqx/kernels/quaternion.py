@@ -1,4 +1,4 @@
-"""Direct quaternion Wigner matrices and their directional derivatives."""
+"""CUDA quaternion Wigner matrices and their directional derivatives."""
 
 import math
 from collections import defaultdict

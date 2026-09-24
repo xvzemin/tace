@@ -10,7 +10,7 @@ from typing import Union
 import torch
 from e3nn import o3
 
-from eqx.conv import Convolution
+from eqx.conv import O2O3TensorProductConv
 from eqx.o2 import O3TensorProduct
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
@@ -337,7 +337,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
         )
-        self.eqx_tp = Convolution(self.tp, backend="cuda")
+        self.eqx_tp = O2O3TensorProductConv(self.tp, backend="cuda")
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
             self.irreps_in1,
