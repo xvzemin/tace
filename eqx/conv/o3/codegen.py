@@ -119,6 +119,7 @@ def convolution_source(
     initialize=(),
     function=None,
     atomic_weights=(),
+    normalization=None,
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
@@ -156,7 +157,10 @@ def convolution_source(
             start, attr, end, _, mul2, dim1, dim2, dim_out, weight, factor, _ = path
             if weight < 0 and (weighted_only or needed == {1}):
                 continue
-            values = angular_source(
+            angular = angular_source
+            if normalization is not None:
+                from .harmonics import angular_source as angular
+            values = angular(
                 path,
                 mapping,
                 dimensions,
@@ -164,10 +168,11 @@ def convolution_source(
                 needed if weight >= 0 else needed - {1},
                 cache,
                 body,
+                *(() if normalization is None else (normalization,)),
             )
             for v in range(mul2):
                 w = f"T({factor:.17g})"
-                if needed & {0, 3, 4} and weight >= 0:
+                if needed - {1, 2} and weight >= 0:
                     pointer = mapping[1]
                     row = "0" if shared[pointer] else "edge"
                     key = "radial", pointer, weight, mul2, v, factor
@@ -188,13 +193,19 @@ def convolution_source(
                                 (w, values[v, role, m])
                             )
                     elif role == 3:
-                        for m in range(dim2):
+                        for m in range(dim2 if normalization is None else 1):
                             key = (
                                 slot,
                                 dimensions[pointer],
                                 attr + m * mul2 + v,
                                 shared[pointer],
                             )
+                            edge_terms.setdefault(key, []).append(
+                                (w, values[v, role, m])
+                            )
+                    elif role >= 6:
+                        for m in range(3):
+                            key = slot, dimensions[pointer], m, shared[pointer]
                             edge_terms.setdefault(key, []).append(
                                 (w, values[v, role, m])
                             )
@@ -287,7 +298,9 @@ def convolution_source(
     return "\n".join(lines)
 
 
-def fused_source(phases, dimensions, shared, dtype, outputs, initialize):
+def fused_source(
+    phases, dimensions, shared, dtype, outputs, initialize, normalization=None
+):
     """Execute independent path tiles in one grid with shared launch operands."""
     header = HEADER.replace("SCALAR", dtype)
     args = [f"const T* p{i}" for i in range(len(dimensions))]
@@ -318,6 +331,7 @@ def fused_source(phases, dimensions, shared, dtype, outputs, initialize):
                 initialize,
                 f"phase{i}",
                 atomic_weights,
+                normalization,
             )
         )
     args += [

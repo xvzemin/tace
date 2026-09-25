@@ -249,7 +249,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = O3TensorProductConv(self.tp)
+        self.eqx_tp = O3TensorProductConv(self.tp, normalize=False)
         self.reshape_in = LayoutTransform(
             self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
         )
@@ -339,17 +339,26 @@ class O3ScatterTensorProduct(torch.nn.Module):
         )
 
     def forward_stream(
-        self, node_feats, edge_attrs, radial, projection, edge_index, edge_cutoff
+        self,
+        node_feats,
+        edge_attrs,
+        radial,
+        projection,
+        edge_index,
+        edge_cutoff,
+        edge_vector=None,
     ):
         """Fuse the final radial projection with the indexed CGTP."""
-        if edge_cutoff is not None:
+        if edge_cutoff is not None and edge_vector is None:
             edge_attrs = edge_attrs * edge_cutoff
         message = self.eqx_tp(
             self.reshape_in(node_feats),
-            self.reshape_attrs(edge_attrs),
+            self.reshape_attrs(edge_attrs) if edge_vector is None else None,
             radial,
             projection,
             edge_index,
+            vectors=edge_vector,
+            amplitudes=edge_cutoff,
         )
         return self.reshape_out(message)
 

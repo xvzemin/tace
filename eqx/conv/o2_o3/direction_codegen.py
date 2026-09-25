@@ -17,6 +17,7 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
     barrier = "__syncthreads();" if wide else "__syncwarp();"
     entries = {}
     matrices = {}
+    matrix_rows = {}
     vectors = {}
     reductions = {}
     matrix_size = 0
@@ -35,20 +36,36 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
                 for column in columns:
                     reductions.setdefault((result, column), len(reductions))
             if i not in plan.scalar_paths:
-                for p, offset, dim in (
-                    (operands[3], path[6], path[4]),
-                    (operands[4], path[7], path[5]),
+                for axis, (p, offset, dim) in enumerate(
+                    (
+                        (operands[3], path[6], path[4]),
+                        (operands[4], path[7], path[5]),
+                    )
                 ):
+                    key = p, offset, dim
+                    matrix_rows.setdefault(key, set()).update(
+                        row[axis] for row in entries[rank, i]
+                    )
                     if (p, offset, dim) not in matrices:
                         matrices[p, offset, dim] = matrix_size
                         matrix_size += dim * dim
-            if rank and (operands[3], 1, 3) not in matrices:
-                matrices[operands[3], 1, 3] = matrix_size
-                matrix_size += 9
+            if rank:
+                matrix_rows.setdefault((operands[3], 1, 3), set()).update(range(3))
+                if (operands[3], 1, 3) not in matrices:
+                    matrices[operands[3], 1, 3] = matrix_size
+                    matrix_size += 9
             for axis in range(rank):
                 if any(output != 7 + axis for output in outputs):
                     key = operands[7 + axis], operands[3]
                     vectors.setdefault(key, 3 * len(vectors))
+
+    # Sparse angular contractions require only a subset of local orders.
+    # Stage their rows instead of loading each complete degree matrix.
+    matrix_rows = {key: tuple(sorted(rows)) for key, rows in matrix_rows.items()}
+    matrix_size = 0
+    for key in matrices:
+        matrices[key] = matrix_size
+        matrix_size += len(matrix_rows[key]) * key[2]
 
     pointers = len(layouts)
     destinations = {p for _, _, _, results, _ in calls for p in results}
@@ -95,7 +112,8 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
         return f"p{p}[{address(p, row, column)}]"
 
     def matrix(p, offset, dim, a, b):
-        return f"matrix[{matrices[p, offset, dim] + a * dim + b}]"
+        row = matrix_rows[p, offset, dim].index(a)
+        return f"matrix[{matrices[p, offset, dim] + row * dim + b}]"
 
     scalar_offset = matrix_size + 3 * len(vectors)
     # Keep one scalar accumulator per warp in shared memory. Path-wise
@@ -137,9 +155,17 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
                 f"k += {width}) scalar_sums[k] = 0;"
             )
         for (p, offset, dim), start in matrices.items():
+            rows = matrix_rows[p, offset, dim]
+            columns = f"{offset} + k"
+            if len(rows) != dim:
+                emit("{")
+                emit(f"const int rows[{len(rows)}] = {{{', '.join(map(str, rows))}}};")
+                columns = f"{offset} + rows[k / {dim}] * {dim} + k % {dim}"
             emit(
-                f"for (int k = {thread}; k < {dim * dim}; k += {width}) matrix[{start} + k] = {load(p, 'edge', f'{offset} + k')};"
+                f"for (int k = {thread}; k < {len(rows) * dim}; k += {width}) matrix[{start} + k] = {load(p, 'edge', columns)};"
             )
+            if len(rows) != dim:
+                emit("}")
         emit(barrier)
         # Direction cotangents are shared by all feature channels. Rotate
         # each once per edge tile, not once per channel.
@@ -270,8 +296,6 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
                 if output != 5:
                     factors.append(load(operands[5], "edge", str(harmonic)))
                 factor = " * ".join(factors) or "T(1)"
-                emit("{")
-                emit(f"const T factor = {factor};")
                 # Apply radial factors after the sparse angular contraction.
                 values = {}
                 for a, b, *tail in cg:
@@ -299,7 +323,7 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
                         (coefficient, " * ".join(product) or "T(1)")
                     )
                 for destination, terms in values.items():
-                    emit("{ T value = 0;")
+                    emit(f"{{ const T factor = {factor}; T value = 0;")
                     for coefficient, product in terms:
                         emit(f"value = fma(T({coefficient:.17g}), ({product}), value);")
                     if output == 0:
@@ -330,7 +354,6 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
                         emit("}")
                         continue
                     emit(f"{name} = fma(factor, value, {name}); }}")
-                emit("}")
 
     for (p, row, start, dim, channels, frame, offset), (
         name,

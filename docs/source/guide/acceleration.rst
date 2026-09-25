@@ -136,6 +136,12 @@ each path tile before global writes. Forward and higher derivatives use the
 same recursive transpose rule. Only ``uvu`` instructions and float32/float64 are supported.
 The preceding radial MLP layers and node-level ``linear_down`` stay separate.
 
+For spatial CGTPs, TACE supplies the harmonic input vectors to the O(3) kernel.
+Fixed Cartesian harmonic polynomials then provide direct position derivatives,
+without a materialized spherical-harmonic gradient. The original
+``edge_vector / edge_length`` convention and cutoff factors are preserved.
+General tensor-product inputs continue to use the ordinary sparse contraction.
+
 The aligned O(2)--O(3) contraction fuses source gather, both feature rotations, sparse order-zero
 CG coupling and target reduction, without retaining edge messages or their
 adjoints. Radial projections and their transposes use bounded GEMM workspaces.
@@ -163,6 +169,10 @@ The same contraction rule applies recursively to higher derivatives, including
 the second derivatives used in force training. Harmonic amplitudes retain
 their separate radial derivatives. Degree-zero harmonic paths cancel both
 rotations exactly, while keeping each path and its weight independent.
+
+Direction-derivative kernels stage only the Wigner rows required by each
+sparse angular contraction, reducing matrix traffic and shared-memory usage.
+Rotation values and the analytic derivative rule are unchanged.
 
 Quaternion alignment and direct quaternion polynomials build the cached
 degree matrices without degree-to-degree recursion. Analytically generated

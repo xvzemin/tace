@@ -59,13 +59,41 @@ def contraction_setup_context(ctx, inputs, output):
 
 def contraction_backward(ctx, grad_outputs):
     source, target, *operands = ctx.saved_tensors
+    metadata = parse_metadata(ctx.kernel_metadata)
+    geometric = len(metadata) > 3
+    needs_grad = list(ctx.needs_input_grad[4])
+    if geometric:
+        for mapping, _, _ in ctx.program:
+            needs_grad[mapping[5]] = False
     program, values, destinations = adjoint_program(
         ctx.program,
         operands,
         grad_outputs,
-        ctx.needs_input_grad[4],
-        parse_metadata(ctx.kernel_metadata)[2],
+        needs_grad,
+        metadata[2],
     )
+    if geometric:
+        terms = {}
+        cotangents = {id(value): index for index, value in enumerate(values)}
+        for mapping, weighted, pairs in ctx.program:
+            index = mapping[5]
+            if not ctx.needs_input_grad[4][index]:
+                continue
+            for output, slot in pairs:
+                if grad_outputs[slot] is None or (
+                    output == 2 and not operands[mapping[2]].numel()
+                ):
+                    continue
+                destination = destinations.setdefault(index, len(destinations))
+                replacement = list(mapping)
+                replacement[output] = cotangents[id(grad_outputs[slot])]
+                replacement.append(index)
+                key = tuple(replacement), metadata[2] and (weighted or output in (1, 2))
+                terms.setdefault(key, []).append((len(mapping), destination))
+        program += tuple(
+            (mapping, weighted, tuple(pairs))
+            for (mapping, weighted), pairs in terms.items()
+        )
     gradients = [None] * len(operands)
     if program:
         results = contraction(
@@ -92,6 +120,11 @@ class O3TensorProductConv(torch.nn.Module):
     backend : {"cuda", "torch"}, optional
         CUDA generates sparse contractions on first use and caches the
         compiled binaries. CPU inputs use ordinary PyTorch operations.
+    normalization : {"component", "integral", "norm"}, optional
+        Spherical-harmonic normalization when vectors are supplied.
+    normalize : bool, optional
+        Normalize vector inputs before evaluating harmonics. If false,
+        evaluate regular solid harmonics at the supplied vectors.
 
     Notes
     -----
@@ -106,6 +139,10 @@ class O3TensorProductConv(torch.nn.Module):
     backward transposes that program again, supporting force training and
     higher derivatives. Shared angular factors and partial gradients are
     reused across paths and derivative terms.
+    Vector inputs use fixed Cartesian harmonic polynomials. Their derivatives
+    are contracted in registers before channel reduction, without storing
+    spherical-harmonic cotangents. Integer polynomial coefficients are
+    collected before normalization; there is no angular grid or fitted basis.
     Compatible path tiles share a CUDA grid and are interleaved over the same
     edge ranges. Compiled register usage limits fusion; larger programs retain
     separate launches. Concurrent reductions preserve independent path outputs.
@@ -113,7 +150,14 @@ class O3TensorProductConv(torch.nn.Module):
     Warm up required derivatives before CUDA Graph capture.
     """
 
-    def __init__(self, tensor_product, *, backend="cuda"):
+    def __init__(
+        self,
+        tensor_product,
+        *,
+        backend="cuda",
+        normalization="component",
+        normalize=True,
+    ):
         super().__init__()
         if backend not in ("cuda", "torch"):
             raise ValueError("backend must be torch or cuda.")
@@ -122,6 +166,10 @@ class O3TensorProductConv(torch.nn.Module):
                 "O3TensorProductConv supports only 'uvu' instructions."
             )
         self.backend = backend
+        if normalization not in ("component", "integral", "norm"):
+            raise ValueError("normalization must be integral, component or norm.")
+        self.normalization = normalization
+        self.normalize = normalize
         self.irreps_in1 = tensor_product.irreps_in1
         self.irreps_in2 = tensor_product.irreps_in2
         self.irreps_out = tensor_product.irreps_out
@@ -167,9 +215,31 @@ class O3TensorProductConv(torch.nn.Module):
         self.kernel_metadata = repr(
             (self.paths, self.weight_numel, any(path[8] < 0 for path in paths))
         )
+        amplitude_offsets, offset = {}, 0
+        for (mul, _), section in zip(self.irreps_in2, slices[1]):
+            amplitude_offsets[section.start] = offset
+            offset += mul
+        self.amplitude_dim = offset
+        self.harmonic_metadata = repr(
+            (
+                tuple((p[0], amplitude_offsets[p[1]], *p[2:]) for p in self.paths),
+                self.weight_numel,
+                any(path[8] < 0 for path in paths),
+                normalization,
+            )
+        )
 
     def forward(
-        self, features, edge_attrs, radial, projection, edge_index, num_nodes=None
+        self,
+        features,
+        edge_attrs,
+        radial,
+        projection,
+        edge_index,
+        num_nodes=None,
+        *,
+        vectors=None,
+        amplitudes=None,
     ):
         """Evaluate the indexed convolution.
 
@@ -189,17 +259,39 @@ class O3TensorProductConv(torch.nn.Module):
             Source and target indices, shape ``(2, edges)``, dtype int64.
         num_nodes : int, optional
             Number of target nodes. Defaults to the number of source nodes.
+        vectors : torch.Tensor, optional
+            Edge vectors, shape ``(edges, 3)``. When supplied, replace
+            ``edge_attrs`` with spherical harmonics, and contract
+            Cartesian derivatives directly without harmonic cotangents.
+            The ``normalize`` and ``normalization`` settings apply here only.
+        amplitudes : torch.Tensor, optional
+            Harmonic amplitudes in irrep multiplicity order. Shape is
+            ``(edges, irreps_in2.num_irreps)``; either dimension may be one.
+            Used only with ``vectors``; defaults to one.
 
         Returns
         -------
         torch.Tensor
             Target features, shape ``(num_nodes, irreps_out.dim)``.
         """
+        if vectors is not None:
+            if vectors.ndim != 2 or vectors.shape != (edge_index.size(1), 3):
+                raise ValueError("vectors must have shape (edges, 3).")
+            if self.normalize:
+                vectors = torch.nn.functional.normalize(vectors, dim=-1)
+            amplitudes = (
+                features.new_ones((1, self.amplitude_dim))
+                if amplitudes is None
+                else amplitudes.expand(amplitudes.size(0), self.amplitude_dim)
+            )
+            edge_attrs = amplitudes
         if any(value.ndim != 2 for value in (features, edge_attrs, radial, projection)):
             raise ValueError("Features, radial inputs and projection must be matrices.")
         if edge_index.ndim != 2 or edge_index.size(0) != 2:
             raise ValueError("edge_index must have shape (2, edges).")
-        if features.size(1) != self.input_dim or edge_attrs.size(1) != self.edge_dim:
+        if features.size(1) != self.input_dim or edge_attrs.size(1) != (
+            self.amplitude_dim if vectors is not None else self.edge_dim
+        ):
             raise ValueError(
                 "Feature dimensions do not match the tensor-product irreps."
             )
@@ -227,13 +319,29 @@ class O3TensorProductConv(torch.nn.Module):
             features.new_empty(1).expand(num_nodes, self.output_dim),
         ]
         if self.backend == "cuda" and features.is_cuda:
+            if vectors is not None:
+                operands.append(vectors)
             return contraction(
-                self.kernel_metadata,
-                repr((((0, 1, 2, 3, 4), False, ((4, 0),)),)),
+                self.harmonic_metadata if vectors is not None else self.kernel_metadata,
+                repr(((tuple(range(len(operands))), False, ((4, 0),)),)),
                 edge_index[0],
                 edge_index[1],
                 operands,
             )[0]
+        if vectors is not None:
+            sections, offset = [], 0
+            for mul, ir in self.irreps_in2:
+                harmonic = o3.spherical_harmonics(
+                    ir.l, vectors, normalize=False, normalization=self.normalization
+                )
+                sections.append(
+                    (
+                        harmonic.unsqueeze(-1)
+                        * amplitudes[:, None, offset : offset + mul]
+                    ).flatten(1)
+                )
+                offset += mul
+            edge_attrs = torch.cat(sections, dim=-1)
         return self.reference(
             features, edge_attrs, radial, projection, edge_index, num_nodes
         )

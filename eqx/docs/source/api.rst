@@ -74,6 +74,17 @@ Fused convolutions
 ------------------
 
 ``eqx.conv`` contains kernels for specific convolution architectures.
+``O3TensorProductConv`` evaluates sparse global CG contractions with indexed
+gather and reduction. Its optional ``vectors`` argument replaces general edge
+attributes with spherical harmonics. The CUDA kernel evaluates fixed Cartesian
+polynomials and contracts their derivatives directly into vector gradients,
+without storing harmonic cotangents. ``amplitudes`` supplies independent radial
+or cutoff factors. ``normalize=False`` selects regular solid harmonics.
+The same polynomial derivative rule supports force training and higher orders.
+
+.. autoclass:: eqx.conv.O3TensorProductConv
+   :members: forward
+
 ``O2O3TensorProductConv`` evaluates an O(3) tensor product in aligned O(2)
 frames, including indexed gather and reduction. Its default
 ``backend="cuda"`` generates fused CUDA kernels
@@ -89,6 +100,10 @@ values, and sparse rotation-generator contractions provide the geometry
 derivatives, including higher orders. Degree-zero harmonic paths bypass the
 rotations. Omitting ``vectors`` preserves differentiation with respect to the
 matrix entries themselves.
+
+Direction-derivative kernels stage only the Wigner rows required by each
+sparse angular contraction. The packed matrices, rotation values and analytic
+derivative rules are unchanged.
 
 .. autoclass:: eqx.conv.O2O3TensorProductConv
    :members: forward

@@ -22,7 +22,7 @@ def execution_plan(
     metadata, program, dimensions, shared, dtype, grouped, device, initialize
 ):
     """Group shared inputs and derivative factors using compiled resource usage."""
-    paths, _, _ = parse_metadata(metadata)
+    paths, _, _, *geometry = parse_metadata(metadata)
     outputs = 1 + max(slot for _, _, pairs in program for _, slot in pairs)
     group_attrs = any(role == 3 for _, _, pairs in program for role, _ in pairs)
     groups = defaultdict(list)
@@ -53,7 +53,15 @@ def execution_plan(
             nodes = roles & {0, 4}
             owner = (1 if 4 in nodes else 0 if 0 in nodes else -1) if grouped else -1
             code = convolution_source(
-                paths, terms, dimensions, shared, dtype, owner, outputs, initialize
+                paths,
+                terms,
+                dimensions,
+                shared,
+                dtype,
+                owner,
+                outputs,
+                initialize,
+                normalization=geometry[0] if geometry else None,
             )
             candidates.append((code, paths, terms, owner))
         compiled = kernels([code for code, *_ in candidates], device)
@@ -92,7 +100,15 @@ def execution_plan(
                 accepted.append(separate[indices[0]])
                 continue
             phases = tuple(scheduled[i] for i in indices)
-            code = fused_source(phases, dimensions, shared, dtype, outputs, initialize)
+            code = fused_source(
+                phases,
+                dimensions,
+                shared,
+                dtype,
+                outputs,
+                initialize,
+                normalization=geometry[0] if geometry else None,
+            )
             candidates.append((code, indices, phases))
         compiled = kernels([code for code, _, _ in candidates], device)
         for code, indices, phases in candidates:
@@ -219,7 +235,7 @@ def contract(metadata, program, source, target, operands, results):
         mapping[i]
         for mapping, _, pairs in program
         for output, _ in pairs
-        for i in range(5)
+        for i in range(len(mapping))
         if i != output
     }
     contiguous = {}
@@ -241,7 +257,7 @@ def contract(metadata, program, source, target, operands, results):
         )
         for mapping, weighted, pairs in program
     ]
-    paths, weight_numel, _ = parse_metadata(metadata)
+    paths, weight_numel, *_ = parse_metadata(metadata)
     projected = [call for call in calls if call[1][2].numel()]
     direct = [call for call in calls if not call[1][2].numel()]
     with torch.cuda.device(device):

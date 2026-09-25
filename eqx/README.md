@@ -117,6 +117,13 @@ writes. Transposed programs support force training and recursive higher
 derivatives. The PyTorch reference remains
 available on CPU or with `backend="torch"`. No CUDA compiler is loaded at import.
 
+For harmonic edge attributes, pass `vectors=edge_vector` and optional
+`amplitudes=cutoff`, with `edge_attrs=None`. Fixed Cartesian polynomials then
+provide direct vector gradients without materializing harmonic cotangents.
+The constructor accepts `normalization="component"`, `"integral"`, or `"norm"`.
+Set `normalize=False` for regular solid harmonics. General edge attributes and
+their ordinary tensor-product derivatives remain supported.
+
 ## Citation
 
 If you use the local O(2) method or its global O(3)/local O(2)

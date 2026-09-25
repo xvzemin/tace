@@ -10,6 +10,177 @@ from eqx.conv import O2O3TensorProductConv, O3TensorProductConv
 from eqx.o2 import O3TensorProduct, WignerD
 
 
+@pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
+def test_cartesian_harmonic_tables(normalization):
+    from eqx.conv.o3.harmonics import polynomial_coefficients
+
+    vectors = torch.randn(7, 3, dtype=torch.float64)
+    vectors = torch.nn.functional.normalize(vectors, dim=-1)
+    for degree in range(9):
+        actual = torch.stack(
+            [
+                sum(
+                    coefficient * (vectors ** vectors.new_tensor(powers)).prod(-1)
+                    for powers, coefficient in terms
+                )
+                for terms in polynomial_coefficients(degree, normalization)
+            ],
+            dim=-1,
+        )
+        expected = o3.spherical_harmonics(
+            degree, vectors, normalize=False, normalization=normalization
+        )
+        torch.testing.assert_close(actual, expected, atol=2e-13, rtol=2e-13)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
+@pytest.mark.parametrize("shared,direct", [(False, False), (True, True)])
+def test_o3_cartesian_derivatives(
+    device, normalization, shared, direct, double_precision
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = o3.TensorProduct(
+        "3x1o+3x2e",
+        "2x1o+2e",
+        "3x1o+3x2e+3x3o",
+        [
+            (0, 0, 1, "uvu", True),
+            (1, 0, 0, "uvu", True),
+            (1, 0, 2, "uvu", True),
+            (1, 1, 1, "uvu", False),
+        ],
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    conv = O3TensorProductConv(tp, normalization=normalization).to(device)
+    reference = O3TensorProductConv(
+        tp, normalization=normalization, backend="torch"
+    ).to(device)
+    edges = torch.randint(4, (2, 9), device=device)
+    x = torch.randn(4, tp.irreps_in1.dim, device=device, requires_grad=True)
+    vectors = torch.randn(9, 3, device=device, requires_grad=True)
+    amplitudes = torch.randn(1 if shared else 9, 3, device=device, requires_grad=True)
+    radial = torch.randn(
+        1 if shared else 9,
+        tp.weight_numel if direct else 4,
+        device=device,
+        requires_grad=True,
+    )
+    projection = torch.randn(
+        0 if direct else 4, tp.weight_numel, device=device, requires_grad=True
+    )
+    inputs = x, vectors, amplitudes, radial, projection
+    actual = conv(
+        x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes
+    )
+    expected = reference(
+        x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    for _ in range(3):
+        seed = torch.randn_like(actual) / max(1, actual.numel()) ** 0.5
+        a = torch.autograd.grad((actual.sin() * seed).sum(), inputs, create_graph=True)
+        b = torch.autograd.grad(
+            (expected.sin() * seed).sum(), inputs, create_graph=True
+        )
+        for value, target in zip(a, b):
+            torch.testing.assert_close(value, target, atol=3e-9, rtol=3e-9)
+        actual, expected = (
+            torch.cat([value.flatten() for value in values]) for values in (a, b)
+        )
+
+
+def test_o3_cartesian_compile_and_empty_graph(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = o3.TensorProduct(
+        "2x1o",
+        "1o",
+        "2x0e+2x2e",
+        [(0, 0, 0, "uvu", True), (0, 0, 1, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    conv = O3TensorProductConv(tp, normalize=False).cuda()
+    reference = O3TensorProductConv(tp, normalize=False, backend="torch").cuda()
+    compiled = torch.compile(conv, backend="aot_eager", fullgraph=True, dynamic=True)
+    for edges_count in (1, 7, 0):
+        edges = torch.randint(3, (2, edges_count), device="cuda")
+        x = torch.randn(3, 6, device="cuda", requires_grad=True)
+        vectors = torch.randn(edges_count, 3, device="cuda", requires_grad=True)
+        radial = torch.randn(edges_count, 2, device="cuda", requires_grad=True)
+        projection = torch.randn(2, tp.weight_numel, device="cuda", requires_grad=True)
+        amplitudes = torch.randn(edges_count, 1, device="cuda", requires_grad=True)
+        inputs = x, vectors, radial, projection, amplitudes
+        actual = compiled(
+            x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes
+        )
+        expected = reference(
+            x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes
+        )
+        torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+        a = torch.autograd.grad(actual.square().sum(), inputs)
+        b = torch.autograd.grad(expected.square().sum(), inputs)
+        for value, target in zip(a, b):
+            torch.testing.assert_close(value, target, atol=3e-11, rtol=3e-11)
+
+
+@pytest.mark.parametrize("source_degree", [0, 5])
+def test_sparse_direction_rotations(source_degree, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    harmonic_degree = 5 if source_degree == 0 else 1
+    tp = O3TensorProduct(
+        [(3, (source_degree, (-1) ** source_degree))],
+        [(1, (harmonic_degree, (-1) ** harmonic_degree))],
+        [(3, (5, (-1) ** (source_degree + harmonic_degree)))],
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    conv = O2O3TensorProductConv(tp).cuda()
+    reference = O2O3TensorProductConv(tp, backend="torch").cuda()
+    frame = WignerD(5, 5).cuda()
+    axes = torch.eye(3, device="cuda")
+    vectors = torch.cat(
+        (axes, -axes, axes + 1e-8, -axes + 1e-8, torch.randn(3, 3, device="cuda"))
+    ).requires_grad_()
+    edges = torch.randint(4, (2, vectors.size(0)), device="cuda")
+    x = torch.randn(4, tp.input_dim, device="cuda", requires_grad=True)
+    weights = torch.randn(
+        vectors.size(0), tp.weight_numel, device="cuda", requires_grad=True
+    )
+    amplitude = torch.randn(vectors.size(0), 1, device="cuda", requires_grad=True)
+    args = (
+        x,
+        weights,
+        weights.new_empty(0, tp.weight_numel),
+        frame.forward_packed(vectors),
+        amplitude,
+        edges,
+        4,
+    )
+    actual, expected = conv(*args, vectors=vectors), reference(*args)
+    torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+    for _ in range(2):
+        seed = torch.randn_like(actual) / actual.numel() ** 0.5
+        derivatives = [
+            torch.autograd.grad(
+                (value.sin() * seed).sum(),
+                (x, vectors, weights, amplitude),
+                create_graph=True,
+                retain_graph=True,
+            )
+            for value in (actual, expected)
+        ]
+        actual, expected = (
+            torch.cat([g.flatten() for g in gradients]) for gradients in derivatives
+        )
+        torch.testing.assert_close(actual, expected, atol=3e-9, rtol=3e-9)
+
+
 def test_convolution_backends_and_modes():
     from eqx.kernels import wigner_D
 
