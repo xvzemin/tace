@@ -11,8 +11,9 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
-from tace.utils.env import acceleration_enabled
+from tace.utils.env import select_acceleration
 from tace.utils.torch_scatter import scatter_sum
+
 from ..time_reversal import contains_time_odd_irreps
 from .fused import O3ScatterTensorProduct, uvuTensorProduct
 from .paths import satisfy
@@ -211,8 +212,11 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             irreps_out,
             self.extra_irreps_node_attrs,
         ):
-            for kernel in ("oeq", "cue"):
-                if acceleration_enabled(kernel):
+            for kernel in (
+                select_acceleration("oeq"),
+                select_acceleration("eqx", "oeq", "cue", kernel="conv"),
+            ):
+                if kernel in ("oeq", "cue"):
                     raise ValueError(
                         f"{kernel.upper()} does not support time-reversal "
                         "Wigner-6j scatter tensor products. Disable the "

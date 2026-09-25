@@ -7,11 +7,11 @@ import os
 from typing import Dict, Optional
 
 ACCELERATION_ENV = {
-    "oeq": "TACE_USE_OEQ",
-    "cue": "TACE_USE_CUE",
-    "eqt": "TACE_USE_EQT",
-    "compile": "TACE_USE_COMPILE",
     "eqx": "TACE_USE_EQX",
+    "oeq": "TACE_USE_OEQ",
+    "eqt": "TACE_USE_EQT",
+    "cue": "TACE_USE_CUE",
+    "compile": "TACE_USE_COMPILE",
 }
 
 # Internal switches for kernel comparisons; normal use follows TACE_USE_EQX.
@@ -76,6 +76,18 @@ def acceleration_enabled(name: str, *, kernel: Optional[str] = None) -> Optional
     if name.lower() == "eqx" and kernel is not None:
         return value == "1" and EQX_KERNELS[kernel]
     return value == "1"
+
+
+def select_acceleration(*backends: str, kernel: Optional[str] = None) -> Optional[str]:
+    """Select an enabled, supported backend in EQX, OEQ, EQT, CUEQ order."""
+    return next(
+        (
+            name
+            for name in ACCELERATION_ENV
+            if name in backends and acceleration_enabled(name, kernel=kernel)
+        ),
+        None,
+    )
 
 
 def get_tace_apply_u_shift():

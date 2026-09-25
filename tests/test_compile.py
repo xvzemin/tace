@@ -58,6 +58,33 @@ def test_tf32_environment(monkeypatch, value, training):
         )
 
 
+@pytest.mark.parametrize("mask", range(16))
+@pytest.mark.parametrize(
+    "supported",
+    [("cue", "eqt", "oeq", "eqx"), ("cue", "oeq", "eqx"), ("eqt", "eqx"), ("eqt",)],
+)
+def test_acceleration_priority(monkeypatch, mask, supported):
+    from tace.utils.env import ACCELERATION_ENV, select_acceleration
+
+    priority = ("eqx", "oeq", "eqt", "cue")
+    enabled = [name for i, name in enumerate(priority) if mask & (1 << i)]
+    for name in priority:
+        monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    expected = next((name for name in enabled if name in supported), None)
+    assert select_acceleration(*supported, kernel="conv") == expected
+
+
+def test_acceleration_priority_respects_eqx_kernel_switch(monkeypatch):
+    from tace.utils.env import EQX_KERNELS, select_acceleration
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_OEQ", "1")
+    monkeypatch.setitem(EQX_KERNELS, "conv", False)
+    assert select_acceleration("eqx", "oeq", kernel="conv") == "oeq"
+    assert select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+
+
 def test_model_input_properties_include_required_embeddings():
     assert {
         "charges",

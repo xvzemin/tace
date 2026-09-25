@@ -32,6 +32,7 @@ except ImportError as e:
 from tace.lightning import export_tace, load_tace
 from tace.models.adapter import TensorModel
 from tace.models.utils import compute_symmetric_displacement
+from tace.utils.env import select_acceleration
 
 
 def _enable_tace_acceleration(
@@ -45,19 +46,10 @@ def _enable_tace_acceleration(
 ) -> None:
     """Configure the supported TACE acceleration flags before model loading.
 
-    TACE acceleration has three main categories: OEQ/CUE accelerate edge
-    computation, EQT accelerates node computation, and EQX selects the future
-    general O(3), O(2), and Cartesian operator library. AOTInductor is
-    used for compiled deployment. OEQ and CUE are mutually exclusive, while
-    CUE currently conflicts with AOTI. For a typical model, OEQ + AOTI is
-    currently recommended.
+    Operators select enabled backends in EQX, OEQ, EQT, CUEQ order.
+    AOTInductor is used for compiled deployment; CUE currently conflicts
+    with AOTI.
     """
-
-    if sum((enable_oeq, enable_cue)) > 1:
-        raise ValueError(
-            "TACE OpenEquivariance (OEQ) and cuEquivariance (CUEQ) are "
-            "mutually exclusive."
-        )
 
     if enable_compile:
         raise ValueError(
@@ -366,11 +358,6 @@ class TACEWrapper(nn.Module, BaseModelMixin):
 
         # Checkpoint_path must be end with .ckpt, .pt, .pth or .pt2
         checkpoint_path = Path(checkpoint_path)
-        cue_enabled = enable_cue or os.environ.get("TACE_USE_CUE") == "1"
-        if cue_enabled and checkpoint_path.suffix.lower() == ".pt2":
-            raise ValueError(
-                "TACE cuEquivariance (CUEQ) currently conflicts with AOTI."
-            )
         _enable_tace_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
@@ -378,6 +365,13 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
         )
+        if (
+            select_acceleration("eqx", "oeq", "cue", kernel="conv") == "cue"
+            and checkpoint_path.suffix.lower() == ".pt2"
+        ):
+            raise ValueError(
+                "TACE cuEquivariance (CUEQ) currently conflicts with AOTI."
+            )
         # Let TACE manage the dtype to avoid runtime dtype conversions,
         # which are unsupported by AOTI and similar backends.
         model = load_tace(checkpoint_path, device=device, dtype=dtype)

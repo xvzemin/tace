@@ -12,7 +12,7 @@ from e3nn import o3
 
 from eqx import conv as eqx_conv
 from eqx import o2
-from tace.utils.env import acceleration_enabled
+from tace.utils.env import acceleration_enabled, select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
@@ -261,16 +261,16 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.reshape_out = LayoutTransform(
             self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
         )
-        self.use_oeq = acceleration_enabled("oeq") and not self.use_eqx
-        self.use_cue = acceleration_enabled("cue") and not self.use_eqx
+        backend = select_acceleration("eqx", "oeq", "cue", kernel="conv")
+        self.use_oeq = backend == "oeq"
+        self.use_cue = backend == "cue"
         self.use_aoti = acceleration_enabled("compile")
         if self.use_aoti and self.use_cue:
             logging.warning(
                 "CUE and AOTI cannot be used simultaneously in Scatter Tensor Product. "
-                "Falling back to AOTI with OEQ instead. "
-                "If execution fails, install OpenEquivariance with: pip install openequivariance"
+                "Falling back to the native tensor product. "
+                "Enable EQX or OEQ to use an accelerated convolution."
             )
-            self.use_oeq = True
             self.use_cue = False
 
         if self.use_oeq:

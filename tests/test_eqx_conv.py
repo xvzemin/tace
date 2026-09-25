@@ -1,6 +1,7 @@
 """O(3) and aligned-frame convolutions, including training and higher derivatives."""
 
 import subprocess
+import sys
 import types
 from copy import deepcopy
 from pathlib import Path
@@ -12,6 +13,48 @@ from e3nn import o3
 from eqx import conv as eqx_conv
 from eqx import o2
 from eqx.conv.models.tece_oam_rra import BilinearACE
+
+
+@pytest.mark.parametrize("mask", range(16))
+@pytest.mark.parametrize("compile_enabled", [False, True])
+def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
+    from tace.models._e3nn.fused import O3ScatterTensorProduct
+    from tace.utils.env import ACCELERATION_ENV
+
+    enabled = [
+        name for i, name in enumerate(("eqx", "oeq", "eqt", "cue")) if mask & (1 << i)
+    ]
+    for name in ("eqx", "oeq", "eqt", "cue"):
+        monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
+    monkeypatch.setenv("TACE_USE_COMPILE", "1" if compile_enabled else "0")
+    expected = next((name for name in enabled if name != "eqt"), None)
+    if expected == "cue" and compile_enabled:
+        expected = None
+    constructed = []
+
+    def oeq(**kwargs):
+        constructed.append("oeq")
+        return torch.nn.Identity()
+
+    def cue(**kwargs):
+        constructed.append("cue")
+        return torch.nn.Identity()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tace.models.oeq",
+        types.SimpleNamespace(e3nnOeqScatterTensorProduct=oeq),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tace.models.cue",
+        types.SimpleNamespace(e3nnCueScatterTensorProduct=cue),
+    )
+    module = O3ScatterTensorProduct("2x0e", "0e", "2x0e")
+    assert module.use_eqx == (expected == "eqx")
+    assert module.use_oeq == (expected == "oeq")
+    assert module.use_cue == (expected == "cue")
+    assert constructed == ([expected] if expected in ("oeq", "cue") else [])
 
 
 @pytest.fixture(scope="module")

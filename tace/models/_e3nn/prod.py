@@ -11,7 +11,7 @@ from e3nn import o3
 
 from eqx import conv as eqx_conv
 from eqx.conv.models.tece_oam_rra import BilinearACE
-from tace.utils.env import acceleration_enabled
+from tace.utils.env import select_acceleration
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
 from ..mlp import ACTIVATION
@@ -25,7 +25,7 @@ class CgtpACE(Product):
     """Channel-wise ACE with element-dependent or element-independent coefficients."""
 
     def _setup(self):
-        self.use_eqx = bool(acceleration_enabled("eqx", kernel="product"))
+        self.use_eqx = select_acceleration("eqx", "eqt", kernel="product") == "eqx"
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
             "bias": self.use_bias,
@@ -171,7 +171,8 @@ class BilinearMoEACE(Product):
 
         self.scale = 1.0 / math.sqrt(2.0)
         self.use_eqx = bool(
-            acceleration_enabled("eqx", kernel="product") and self.use_bilinear_gate
+            self.use_bilinear_gate
+            and select_acceleration("eqx", "eqt", kernel="product") == "eqx"
         )
 
         for_coefs = {

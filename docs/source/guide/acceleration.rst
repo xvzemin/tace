@@ -7,7 +7,7 @@ TACE provides several composable acceleration layers:
 
 * EquivariantX(EQX), OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide 
   alternative implementations of the same edge-level equivariant operations and 
-  are mutually exclusive;
+  are selected per operator;
 * EquiTorch (EQT) accelerates product-basis tensor
   products and can be combined with EQX, OEQ or CUEQ;
 * PyTorch compilation accelerates a larger part of the model and can either
@@ -15,6 +15,13 @@ TACE provides several composable acceleration layers:
   later deployment. AOTI is independent of the kernel-backend selection.
 
 Unless noted otherwise, select the backend before constructing the model.
+When multiple backends are enabled, each operator selects the highest-priority
+backend it supports: **EQX > OEQ > EQT > CUEQ**. Enabling a backend that does not
+implement an operator does not disable that operator's other backends. For
+example, OEQ convolutions can run alongside EQT product-basis operations.
+Unselected backends do not need to be installed. A missing dependency for the
+selected backend raises an error rather than silently selecting another backend.
+Compilation is controlled independently by ``TACE_USE_COMPILE``.
 The same settings can be used during training, validation, testing, and model
 export, subject to the backend limitations described below.
 Installation commands for each optional backend are listed separately in
