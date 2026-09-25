@@ -127,6 +127,10 @@ rule unchanged.
 Model-specific fusion lives in `conv/models/`, separately from these general
 convolutions. `tece_oam_rra` contains both gated bilinear ACE with expert and
 shared coefficient maps and the packed-feature interaction fusion utilities.
+The PyTorch model and checkpoint weight conversion are maintained in TACE's
+`tace.models._e3nn.tece_oam_rra`, using `o2.Linear`, `o2.Gate` and
+`o2.TensorProduct`. This EQX directory supplies the model-specific fused kernels
+and streaming execution, without owning the PyTorch model definition.
 The interaction evaluates attention scores and values together in bounded
 edge tiles using online softmax. Only node outputs, denominators and maxima
 are retained, rather than full-graph scores, convolution weights or wide edge

@@ -39,7 +39,7 @@ def program(module, tile_size):
                 reference(),
                 dict(zip(names, weights)),
                 (x, radial @ matrix + bias, index, None, rotation, inverse, basis),
-                {"stage": "score_value"},
+                {"stage": "score_value", "fused": True},
             )
 
         def fake(values):
@@ -59,7 +59,7 @@ def program(module, tile_size):
             value_weight_slot=5,
             valid_slot=9,
             tile_size=tile_size,
-            eps=module.graph_softmax.eps,
+            eps=module.attention_eps,
         )
         _programs[module][tile_size].resource = reference
     return _programs[module][tile_size].key

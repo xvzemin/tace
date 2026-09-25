@@ -18,10 +18,10 @@ from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import O2CgtpScatterTensorProduct, O3ScatterTensorProduct
 from .layer_norm import get_normalization_layer
-from .legacy_so2 import uvSO2Convolution
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2ScatterMagneticTensorProduct, O2ScatterTensorProduct
 from .residual import get_resnet_layer
+from .tece_oam_rra import Convolution
 
 
 class O3CgtpInteraction(Interaction):
@@ -372,7 +372,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
 
 class UvSO2Interaction(O3CgtpInteraction):
     """
-    An interaction module based on uvSO2Linear,
+    An interaction module based on native O(2) linear maps,
     Edge Cluster Expansion and Radial Rotary Complex Attention.
 
     This interaction block add nonlinearity to the message.
@@ -410,7 +410,7 @@ class UvSO2Interaction(O3CgtpInteraction):
         )
         if not isinstance(tensor_act, str):
             raise TypeError("tensor_act must be None or a string for tensor gates.")
-        return uvSO2Convolution(
+        return Convolution(
             mmax=self.mmax,
             lmax=self.lmax,
             num_channel=self.num_channel,
@@ -479,6 +479,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             edge_wigner,
             edge_wigner_inv,
             edge_radial_basis,
+            fused=acceleration_enabled("eqx", kernel="conv"),
         )
 
 

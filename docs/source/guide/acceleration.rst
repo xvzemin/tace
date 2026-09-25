@@ -135,7 +135,12 @@ Products with active coefficient LoRA adapters retain their original
 tensor-product execution. EQX takes precedence
 over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
 
-For TECE-OAM-RRA, ``TACE_USE_EQX=1`` also selects a tiled ``UvSO2Interaction``.
+TACE maintains the TECE-OAM-RRA PyTorch model in
+``tace.models._e3nn.tece_oam_rra``, using native ``eqx.o2`` linear, gate and
+tensor-product operators. EQX provides the corresponding fused kernels.
+Earlier order-wise checkpoint weights are converted during ``load_state_dict``;
+no separate SO(2) implementation is required.
+``TACE_USE_EQX=1`` also selects a tiled ``UvSO2Interaction``.
 The final radial projection, local updates and aggregation are evaluated in
 bounded edge workspaces rather than retaining full-graph convolution weights
 and edge activations. Online attention retains only node-level outputs,

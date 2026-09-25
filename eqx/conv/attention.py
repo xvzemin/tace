@@ -5,12 +5,11 @@ from functools import lru_cache
 
 import torch
 
-from ..kernels.cuda import kernels, runtime
 from ..kernels.recompute import Replay
 from .graph import prepare_graph
 
 
-def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16):
+def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=True):
     """Normalize ``(edges, heads)`` scores over incoming edges of each node.
 
     ``weight`` multiplies the shifted exponential before normalization and may
@@ -18,6 +17,7 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16):
     scores alone and detached. Epsilon is added to the shifted denominator.
     Empty neighborhoods require no special values. Derivatives include edge
     weights, including weights equal to zero, and support higher orders.
+    Set ``fused=False`` to retain the pure PyTorch path on CUDA as well.
     """
     if weight is None:
         weight = scores.new_ones((scores.shape[0], 1))
@@ -36,7 +36,7 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16):
         or target.device != scores.device
     ):
         raise ValueError("Target indices must match the edges and device of scores.")
-    if scores.is_cuda and scores.dtype in (torch.float32, torch.float64):
+    if fused and scores.is_cuda and scores.dtype in (torch.float32, torch.float64):
         return (
             normalized_exp(
                 scores.contiguous(), weight.contiguous(), target.long(), num_nodes, eps
@@ -107,6 +107,8 @@ def normalized_exp(
     num_nodes: int,
     eps: float,
 ) -> torch.Tensor:
+    from ..kernels.cuda import kernels, runtime
+
     result = torch.empty_like(scores)
     if scores.numel():
         order = prepare_graph(target, target, 1)
