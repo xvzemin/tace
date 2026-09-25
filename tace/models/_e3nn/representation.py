@@ -33,7 +33,7 @@ from .node import (
     O2TensorNodeEmbedding,
     TensorNodeEmbedding,
 )
-from .prod import PRODUCT
+from .prod import PRODUCT, BilinearMoEACE, CgtpACE
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
 
@@ -340,8 +340,14 @@ class Representation(torch.nn.Module):
                 prod_irreps_in = inter_irreps_out
 
             # === Product ===
+            product_cls = PRODUCT[product_basis["type"][layer]]
+            if product_cls is CgtpACE and (
+                product_basis["nonlinear"] is not None
+                or (product_basis["num_expert"] or 1) > 1
+            ):
+                product_cls = BilinearMoEACE
             self.products.append(
-                PRODUCT[product_basis["type"][layer]](
+                product_cls(
                     layer=layer,
                     num_layers=num_layers,
                     num_elements=self.num_elements,

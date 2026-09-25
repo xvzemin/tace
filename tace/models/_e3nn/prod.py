@@ -18,16 +18,105 @@ from .paths import SymmetricProductPaths
 
 
 class CgtpACE(Product):
-    """
-    The most expressive ACE implementation based on Clebsch-Gordan tensor products.
+    """Channel-wise ACE with element-dependent or element-independent coefficients."""
 
-    This class computes channel-wise many-body tensor products.
+    def _setup(self):
 
-    Note:
-        It is recommended to use no more than 64 channels for each expert, as
-        increasing the number of channels beyond this does not necessarily lead
-        to better performance and may introduce unnecessary computational overhead.
-    """
+        for_coefs = {
+            "irreps_out": self.irreps_coefs_out,
+            "bias": self.use_bias,
+        }
+        coefs_cls = e3nnLinear if self.agnostic else e3nnElementLinear
+        if not self.agnostic:
+            for_coefs["num_elements"] = self.num_elements
+
+        self.aces = torch.nn.ModuleList()
+        self.coefs = torch.nn.ModuleList()
+        self.coefs.append(
+            coefs_cls(
+                o3.Irreps(
+                    [(self.num_hidden_channel, ir) for _, ir in self.irreps_hidden]
+                ).simplify(),
+                **for_coefs,
+            )
+        )
+        self.irreps_base = self.irreps_hidden
+        product_in1 = self.irreps_hidden
+        symmetric_paths = (
+            SymmetricProductPaths(product_in1) if self.correlation > 2 else None
+        )
+        for nu in range(2, self.correlation + 1):
+            ace = uuuTensorProduct(
+                irreps_in1=product_in1,
+                irreps_in2=self.irreps_base,
+                irreps_out=self.irreps_tp_out_list[nu - 2],
+                l1l2=self.l1l2,
+                trainable=False,
+                identical_inputs=nu == 2,
+                warning=self.correlation > 2 and self.layer == 0,
+                use_fused=self.correlation > 2 and not self.use_time_reversal,
+                symmetric_paths=symmetric_paths,
+            )
+            self.aces.append(ace)
+            self.coefs.append(
+                coefs_cls(
+                    o3.Irreps(
+                        [(self.num_hidden_channel, ir) for _, ir in ace.irreps_out]
+                    ).simplify(),
+                    **for_coefs,
+                )
+            )
+            product_in1 = ace.irreps_out
+
+        self.linear_up = (
+            e3nnLinear(
+                self.irreps_in, self.irreps_hidden, bias=self.use_bias
+            )
+            if self.num_channel != self.num_hidden_channel
+            else torch.nn.Identity()
+        )
+        self.linear = e3nnLinear(
+            o3.Irreps(
+                [(self.num_hidden_channel, ir) for _, ir in self.irreps_coefs_out]
+            ),
+            self.irreps_out,
+            bias=self.use_bias,
+        )
+        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0.0:
+            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs: torch.Tensor,
+        sc: torch.Tensor,
+        batch: torch.Tensor,
+        node_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.agnostic:
+            for_coefs = {}
+        else:
+            if node_type is None:
+                node_type = node_attrs.argmax(dim=-1)
+            for_coefs = {"attrs": node_attrs, "node_type": node_type}
+
+        node_feats = self.linear_up(node_feats)
+        corr_feats = node_feats
+        outs = self.coefs[0](corr_feats, **for_coefs)
+        for index, ace in enumerate(self.aces):
+            corr_feats = ace(corr_feats, node_feats)
+            outs = outs + self.coefs[index + 1](corr_feats, **for_coefs)
+
+        outs = self.linear(outs)
+        if hasattr(self, "stochastic_depth"):
+            outs = self.stochastic_depth(outs, batch)
+        if sc is not None:
+            outs = outs + sc
+        return outs
+
+
+class BilinearMoEACE(Product):
+    """ACE with optional bilinear gates, coefficient experts and a shared expert."""
 
     def _setup(self):
 

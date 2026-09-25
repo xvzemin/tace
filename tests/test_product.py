@@ -1,4 +1,4 @@
-"""Exact zero-path filtering in channel-wise ACE products."""
+"""ACE paths, element coefficients and separate standard/bilinear execution."""
 
 import itertools
 
@@ -8,7 +8,7 @@ from e3nn import o3
 
 from tace.models._e3nn.fused import uuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
-from tace.models._e3nn.prod import CgtpACE
+from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 
 
@@ -207,6 +207,68 @@ def make_product(irreps, correlation, **kwargs):
     ).double()
 
 
+@pytest.mark.parametrize("correlation", [1, 2, 3])
+@pytest.mark.parametrize("agnostic", [False, True])
+@pytest.mark.parametrize("hidden,num_nodes", [(2, 0), (3, 4)])
+def test_standard_product_matches_extended_path(
+    monkeypatch, correlation, agnostic, hidden, num_nodes
+):
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=hidden,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[correlation],
+        l1l2=None,
+        bias=True,
+        nonlinear=None,
+        agnostic=agnostic,
+        parity=True,
+        stochastic_depth=0.2 if num_nodes else 0.0,
+        use_first_dropout=True,
+    )
+    actual = CgtpACE(**kwargs)
+    reference = BilinearMoEACE(**kwargs)
+    reference.load_state_dict(actual.state_dict(), strict=True)
+    assert actual.state_dict().keys() == reference.state_dict().keys()
+    assert not hasattr(actual, "_linear_up_features")
+    assert not hasattr(actual, "_merge_shared_expert")
+    x = torch.randn(num_nodes, 8, requires_grad=True)
+    attrs = torch.rand(num_nodes, 2)
+    sc = torch.randn(num_nodes, actual.irreps_out.dim, requires_grad=True)
+    batch = torch.arange(num_nodes) // 2
+    for training in (False, True):
+        outputs, gradients = [], []
+        for model in (actual, reference):
+            model.train(training)
+            torch.manual_seed(7)
+            output = model(x, attrs, sc, batch, attrs.argmax(-1))
+            outputs.append(output)
+            first = torch.autograd.grad(
+                output.square().sum(), x, create_graph=True
+            )[0]
+            gradients.append(
+                torch.autograd.grad(
+                    output.square().sum() + first.square().sum(),
+                    (x, sc, *model.parameters()),
+                    allow_unused=True,
+                )
+            )
+        torch.testing.assert_close(*outputs, atol=0, rtol=0)
+        for a, b in zip(*gradients):
+            if a is None:
+                assert b is None
+            else:
+                torch.testing.assert_close(a, b, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("correlation", [2, 3, 4, 6, 8])
 def test_product_supports_higher_correlation(monkeypatch, correlation):
     monkeypatch.setenv("TACE_USE_EQT", "0")
@@ -253,7 +315,7 @@ def test_independent_glu_inputs_keep_antisymmetric_paths(monkeypatch):
     monkeypatch.setenv("TACE_USE_EQT", "0")
     # An axial vector output can contain the cross product of two independent
     # vector fields. Do not use the self-product mask for a bilinear gate.
-    model = CgtpACE(
+    model = BilinearMoEACE(
         layer=0,
         num_layers=1,
         num_elements=1,
