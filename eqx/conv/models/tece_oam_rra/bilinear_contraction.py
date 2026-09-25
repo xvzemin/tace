@@ -25,10 +25,19 @@ def decode_metadata(metadata):
 def contract(
     metadata: str, program: str, node_type: torch.Tensor, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
+    from ....kernels.cuda_graph import execute
     from .bilinear_cuda import launch
 
     outputs = contract_fake(metadata, program, node_type, operands)
-    launch(metadata, parse(program), node_type, operands, outputs)
+    terms = parse(program)
+
+    def run(inputs, outputs):
+        launch(metadata, terms, inputs[0], inputs[1:], outputs)
+
+    read = {0}
+    for _, mapping, output, _ in terms:
+        read.update(1 + index for role, index in enumerate(mapping) if role != output)
+    execute("ace", (metadata, program), run, (node_type, *operands), outputs, read=read)
     return outputs
 
 

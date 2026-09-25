@@ -32,9 +32,7 @@ def angular_coefficients(metadata, rank):
     plan = kernel_plan(metadata)
     coefficients = []
     direct = rank in (1, 2) and bool(plan.harmonic_degrees)
-    previous = (
-        angular_coefficients(metadata, rank - 1) if rank and not direct else None
-    )
+    previous = angular_coefficients(metadata, rank - 1) if rank and not direct else None
     for index, ((_, path), entries) in enumerate(
         zip(plan.path_data, plan.sparse_paths)
     ):
@@ -99,19 +97,24 @@ def direction_contraction(
     results = direction_fake(
         metadata, program, vectors, source, target, operands, use_cuda
     )
-    for result in results:
-        result.zero_()
     plan = kernel_plan(metadata)
-    if source.numel() and plan.path_data:
+    terms = parse_program(program)
+
+    def run(inputs, outputs):
+        source, target, *values = inputs
+        for result in outputs:
+            result.zero_()
+        if not source.numel() or not plan.path_data:
+            return
         calls = [
             (
                 rank,
                 tuple(role for role, _ in pairs),
-                tuple(operands[i] for i in mapping),
-                tuple(results[slot] for _, slot in pairs),
+                tuple(values[i] for i in mapping),
+                tuple(outputs[slot] for _, slot in pairs),
                 weighted,
             )
-            for rank, mapping, weighted, pairs in parse_program(program)
+            for rank, mapping, weighted, pairs in terms
         ]
         if vectors.is_cuda and use_cuda:
             from .cuda import contract_directions
@@ -125,6 +128,23 @@ def direction_contraction(
                     reference(
                         metadata, rank, output, source, target, values, result, weighted
                     )
+
+    if vectors.is_cuda and use_cuda:
+        from ...kernels.cuda_graph import convolution
+
+        convolution(
+            "o2_o3",
+            ("direction", metadata, program),
+            run,
+            source,
+            target,
+            operands,
+            results,
+            tuple((mapping, weighted, pairs) for _, mapping, weighted, pairs in terms),
+            6,
+        )
+    else:
+        run((source, target, *operands), results)
     return results
 
 

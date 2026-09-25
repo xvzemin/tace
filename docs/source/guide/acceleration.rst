@@ -149,7 +149,30 @@ to convert an existing model explicitly, without retraining or changing its
 parameters. By default, conversion switches each CGTP interaction to the
 other implementation.
 
-The same flag accelerates the standard ACE product with ``eqx.conv.TACE``.
+Native CUDA Graph replay can additionally be enabled for both CGTP
+implementations and the standard or gated bilinear ACE contractions:
+
+.. code-block:: bash
+
+   export TACE_USE_EQX=1
+   export EQX_USE_CUDA_GRAPH=1
+
+``EQX_USE_CUDA_GRAPH`` defaults to ``0``. Replay retains the existing CUDA
+forward and recursively transposed kernels, including force-training
+derivatives; it does not replace them with autograd recomputation. Edge counts
+are bucketed, and padding connects only isolated zero nodes whose outputs are
+discarded. Edge indices, features, and weights are refreshed before replay,
+so a changed neighbor list does not reuse stale connectivity. All original
+tensor-product paths and weights are preserved.
+
+The capture cache is bounded and distinguishes dtype, device, stream and TF32
+settings. Initial capture and kernel compilation are warmup costs. Static
+buffers and graph memory pools can increase reserved GPU memory, and speed
+depends on workload. Small convolutions retain ordinary kernel execution.
+When an outer CUDA Graph is being captured, internal replay is bypassed;
+warm up the required forward and derivative kernels before outer capture.
+
+``TACE_USE_EQX=1`` also accelerates the standard ACE product with ``eqx.conv.TACE``.
 It retains all existing nonzero paths and checkpoint weights, contracts CG
 entries without expanded product tensors, and reads element coefficients
 without materializing per-node weight matrices. The highest-correlation
@@ -168,23 +191,27 @@ TACE maintains the TECE-OAM-RRA PyTorch model in
 tensor-product operators. EQX provides the corresponding fused kernels.
 Earlier order-wise checkpoint weights are converted during ``load_state_dict``;
 no separate SO(2) implementation is required.
-``TACE_USE_EQX=1`` also selects a tiled ``UvSO2Interaction``.
-The final radial projection, local updates and aggregation are evaluated in
-bounded edge workspaces rather than retaining full-graph convolution weights
-and edge activations. Online attention retains only node-level outputs,
-denominators and maxima, preserving both existing cutoff factors. Degree-wise
-rotations and rotary inner products have recursive CUDA transposes. Force
-training and higher derivatives use an analytic attention adjoint with bounded
-tile recomputation; CUDA execution plans
-amortize launch overhead after warmup. Checkpoint parameters are unchanged.
-The first evaluation of a new shape or derivative order includes warmup and
-execution-plan construction and should be excluded from timing measurements.
+``TACE_USE_EQX=1`` also selects native CUDA fusion for attention-enabled
+``UvSO2Interaction`` with SiLU, sigmoid, tanh or identity activations, including
+their scaled variants. A receiver-wise pass computes online softmax statistics.
+A second pass fuses feature gathering, rotations, the final radial projection,
+local linear maps, gates, optional edge products, rotary scores and aggregation.
+Both existing cutoff factors and all checkpoint parameters are preserved.
+Other activations retain the PyTorch implementation.
 
-.. note::
+Only node outputs, denominators and detached maxima are retained between
+passes. Local intermediates use reusable shared memory; oversized derivative
+programs use a bounded overflow workspace rather than full-edge activations.
+The analytic attention adjoint and subsequent derivatives generate native CUDA
+expressions, including derivatives needed by force training. This path does
+not use CUDA Graph replay or a live Python callback registry.
 
-   The TECE streaming plan is tied to the live Python model. It supports eager
-   execution and in-process compilation, but not standalone AOTI serialization.
-   Export TECE with ``TACE_USE_EQX=0`` until portable streaming plans are available.
+The registered operators expose tensor schemas, fake implementations and
+autograd rules to ``torch.compile``. Their architecture metadata is immutable
+and their trainable parameters are explicit tensor inputs. CUDA source
+compilation is lazy and cached; the first evaluation of a new architecture or
+derivative program includes compilation overhead. Deployment still requires
+the EQX operator registrations and CUDA backend in the target environment.
 
 The default ``eqx.o2`` operators use PyTorch without external kernels.
 ``TACE_USE_EQX=1`` also accelerates element-dependent and MoE Linear maps on

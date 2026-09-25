@@ -26,13 +26,23 @@ def contraction(
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Run sparse contractions outside the tensor tracing boundary."""
-    results = contraction_fake(metadata, program, source, target, operands)
-    for result in results:
-        result.zero_()
-    if source.numel() and parse_metadata(metadata)[0]:
-        from .cuda import contract
+    from ...kernels.cuda_graph import convolution
 
-        contract(metadata, parse_program(program), source, target, operands, results)
+    results = contraction_fake(metadata, program, source, target, operands)
+    terms = parse_program(program)
+
+    def run(inputs, outputs):
+        source, target, *values = inputs
+        for result in outputs:
+            result.zero_()
+        if source.numel() and parse_metadata(metadata)[0]:
+            from .cuda import contract
+
+            contract(metadata, terms, source, target, values, outputs)
+
+    convolution(
+        "o3", (metadata, program), run, source, target, operands, results, terms, 4
+    )
     return results
 
 

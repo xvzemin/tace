@@ -15,6 +15,196 @@ from eqx import o2
 from eqx.conv.models.tece_oam_rra import BilinearACE
 
 
+@pytest.mark.parametrize("implementation", ["o3", "o2", "o2_direction"])
+@pytest.mark.parametrize("shared", [False, True])
+def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.kernels import cuda_graph
+
+    monkeypatch.setattr(cuda_graph, "EDGE_BUCKET", 8)
+    monkeypatch.setattr(cuda_graph, "MIN_EDGES", 1)
+    cuda_graph._GRAPHS.clear()
+    tp_args = (
+        "2x0e+2x1o",
+        "0e+1o",
+        "2x0e+2x1o+2x0e",
+        [(0, 0, 0, "uvu", True), (0, 1, 1, "uvu", True), (1, 1, 2, "uvu", False)],
+    )
+    tp_cls = o3.TensorProduct if implementation == "o3" else o2.O3TensorProduct
+    tp = tp_cls(*tp_args, internal_weights=False, shared_weights=False)
+    cls = (
+        eqx_conv.O3TensorProductConv
+        if implementation == "o3"
+        else eqx_conv.O2O3TensorProductConv
+    )
+    module = cls(tp).cuda().double()
+    frame = o2.WignerD(1, 1).cuda().double()
+    try:
+        for edges in (9, 13, 9, 5, 1, 0):
+            index = torch.randint(4, (2, edges), device="cuda")
+
+            def rand(*shape):
+                return (
+                    torch.randn(*shape, device="cuda", dtype=torch.float64) * 0.2
+                ).requires_grad_()
+
+            x, vectors = rand(4, 8), rand(edges, 3)
+            rows = 1 if shared else edges
+            radial, projection, amplitudes = (
+                rand(rows, 3),
+                rand(3, tp.weight_numel),
+                rand(rows, 2),
+            )
+            inputs = x, vectors, radial, projection, amplitudes
+
+            def evaluate(enabled):
+                monkeypatch.setenv("EQX_USE_CUDA_GRAPH", str(int(enabled)))
+                if implementation == "o3":
+                    value = module(
+                        x,
+                        None,
+                        radial,
+                        projection,
+                        index,
+                        vectors=vectors,
+                        amplitudes=amplitudes,
+                    )
+                else:
+                    value = module(
+                        x,
+                        radial,
+                        projection,
+                        frame.forward_packed(vectors),
+                        amplitudes,
+                        index,
+                        4,
+                        vectors=vectors if implementation == "o2_direction" else None,
+                    )
+                result = [value]
+                if edges:
+                    for _ in range(3):
+                        grads = torch.autograd.grad(
+                            value.sin().sum(), inputs, create_graph=True
+                        )
+                        result.extend(grads)
+                        value = torch.cat([g.flatten() for g in grads]) / 10
+                return result
+
+            reference = evaluate(False)
+            actual = evaluate(True)
+            for a, b in zip(actual, reference):
+                torch.testing.assert_close(a, b, atol=5e-9, rtol=5e-9)
+            if edges:
+                assert cuda_graph._GRAPHS
+    finally:
+        cuda_graph._GRAPHS.clear()
+
+
+def test_native_cuda_graph_ace(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.kernels import cuda_graph
+
+    tp = o3.TensorProduct(
+        "2x0e",
+        "2x0e",
+        "2x0e",
+        [(0, 0, 0, "uuu", False)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    linears = [
+        o3.Linear("2x0e", "3x0e", internal_weights=False, shared_weights=False)
+        for _ in range(3)
+    ]
+    module = eqx_conv.TACE([tp, tp], linears).cuda().double()
+    cuda_graph._GRAPHS.clear()
+    try:
+        for seed in (2, 3):
+            torch.manual_seed(seed)
+            types = torch.randint(2, (7,), device="cuda")
+            inputs = [
+                torch.randn(
+                    7, 2, device="cuda", dtype=torch.float64, requires_grad=True
+                )
+            ]
+            inputs += [
+                torch.randn(
+                    2, 6, device="cuda", dtype=torch.float64, requires_grad=True
+                )
+                for _ in linears
+            ]
+            results = []
+            for enabled in (False, True):
+                monkeypatch.setenv("EQX_USE_CUDA_GRAPH", str(int(enabled)))
+                value = module(inputs[0], inputs[1:], types)
+                result = [value]
+                for _ in range(3):
+                    grads = torch.autograd.grad(
+                        value.sin().sum(), inputs, create_graph=True
+                    )
+                    result.extend(grads)
+                    value = torch.cat([g.flatten() for g in grads]) / 10
+                results.append(result)
+            for a, b in zip(*results):
+                torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+        assert cuda_graph._GRAPHS
+    finally:
+        cuda_graph._GRAPHS.clear()
+
+
+def test_native_cuda_graph_outer_capture(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.kernels import cuda_graph
+
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    monkeypatch.setattr(cuda_graph, "MIN_EDGES", 1)
+    monkeypatch.setattr(cuda_graph, "EDGE_BUCKET", 8)
+    cuda_graph._GRAPHS.clear()
+    tp = o3.TensorProduct(
+        "2x0e",
+        "0e",
+        "2x0e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    module = eqx_conv.O3TensorProductConv(tp).cuda().double()
+    x = torch.randn(4, 2, device="cuda", dtype=torch.float64, requires_grad=True)
+    attrs = torch.randn(11, 1, device="cuda", dtype=torch.float64)
+    weight = torch.randn(11, 2, device="cuda", dtype=torch.float64)
+    projection = weight.new_empty(0, 2)
+    index = torch.randint(4, (2, 11), device="cuda")
+
+    def evaluate():
+        value = module(x, attrs, weight, projection, index)
+        return value, torch.autograd.grad(value.square().sum(), x)[0]
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    # Warm the ordinary (unpadded) kernels that the outer graph will capture.
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "0")
+    with torch.cuda.stream(stream):
+        evaluate()
+        evaluate()
+    torch.cuda.current_stream().wait_stream(stream)
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual = evaluate()
+    assert not cuda_graph._GRAPHS
+    with torch.no_grad():
+        x.mul_(0.7)
+        weight.add_(0.3)
+        index.copy_(torch.randint_like(index, 4))
+    graph.replay()
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "0")
+    for a, b in zip(actual, evaluate()):
+        torch.testing.assert_close(a, b, atol=1e-12, rtol=1e-12)
+
+
 @pytest.mark.parametrize("mask", range(16))
 @pytest.mark.parametrize("compile_enabled", [False, True])
 def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
@@ -357,7 +547,6 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
             (torch.arange(edges, device=device) + 1) % nodes,
         )
     )
-    tile_size = 64 if edges == 65 else 3
     actual = stream(
         module,
         x,
@@ -369,7 +558,6 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         rotation,
         inverse,
         basis,
-        tile_size=tile_size,
     )
     expected = module(
         x, radial @ projection + bias, index, cutoff, rotation, inverse, basis
@@ -389,34 +577,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         losses = [
             sum(g.square().sum() for g in values if g is not None) for values in grads
         ]
-    if device == "cuda" and edges == 7:
-        compiled = torch.compile(
-            lambda x, radial, projection, bias, cutoff, rotation, inverse, basis: (
-                stream(
-                    module,
-                    x,
-                    radial,
-                    projection,
-                    bias,
-                    index,
-                    cutoff,
-                    rotation,
-                    inverse,
-                    basis,
-                    tile_size=3,
-                )
-            ),
-            backend="aot_eager",
-            fullgraph=True,
-        )
-        torch.testing.assert_close(
-            compiled(x, radial, projection, bias, cutoff, rotation, inverse, basis),
-            expected,
-        )
     if device == "cuda" and edges == 65:
-        from eqx.conv.models.tece_oam_rra.interaction import _programs
-
-        assert _programs[module][tile_size].graphs
         with torch.no_grad():
             module.temperature_logit.add_(0.2)
             projection.add_(0.01)
@@ -431,7 +592,6 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
             rotation,
             inverse,
             basis,
-            tile_size=tile_size,
         )
         expected = module(
             x,
@@ -443,6 +603,77 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
             basis,
         )
         torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-10)
+
+
+@pytest.mark.parametrize("ece", [False, True])
+@pytest.mark.parametrize("gate_m0", [False, True])
+@pytest.mark.parametrize("mmax", [0, 2])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from eqx.conv.models.tece_oam_rra.interaction import stream
+    from eqx.kernels import recompute
+    from tace.models._e3nn.tece_oam_rra import Convolution
+    from tace.models.layout import LayoutTransform
+    from tace.models.mlp import get_scaled_activation
+
+    def no_replay(*args, **kwargs):
+        raise AssertionError("The native interaction must not use Graph replay.")
+
+    monkeypatch.setattr(recompute, "replay", no_replay)
+    torch.manual_seed(20)
+    irreps = o3.Irreps("2x0e+2x1o+2x2e")
+    module = Convolution(
+        mmax,
+        2,
+        2,
+        1,
+        2,
+        3,
+        gate_m0,
+        ece,
+        True,
+        LayoutTransform(irreps),
+        LayoutTransform(irreps),
+        get_scaled_activation("tanh"),
+        get_scaled_activation("silu"),
+    ).to(device="cuda", dtype=dtype)
+    angular = sum((3 - m) * (1 if m == 0 else 2) for m in range(mmax + 1))
+    inputs = [
+        (torch.randn(*shape, device="cuda", dtype=dtype) * 0.1).requires_grad_()
+        for shape in (
+            (4, irreps.dim),
+            (5, 3),
+            (3, module.weight_numel),
+            (5, angular, 9),
+            (5, 9, angular),
+            (5, 3),
+        )
+    ]
+    x, radial, projection, rotation, inverse, basis = inputs
+    cutoff = torch.tensor(
+        [[0.0], [0.0], [0.7], [1.0], [0.2]],
+        device="cuda",
+        dtype=dtype,
+        requires_grad=True,
+    )
+    index = torch.tensor([[0, 1, 2, 3, 0], [1, 1, 2, 2, 2]], device="cuda")
+    with torch.no_grad():
+        module.radial_proj.weight.normal_(std=0.2)
+    actual = stream(
+        module, x, radial, projection, None, index, cutoff, rotation, inverse, basis
+    )
+    expected = module(x, radial @ projection, index, cutoff, rotation, inverse, basis)
+    atol, rtol = (2e-6, 1e-4) if dtype == torch.float32 else (2e-11, 1e-10)
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+    variables = (*inputs, cutoff, *module.parameters())
+    grads = [
+        torch.autograd.grad(value.square().sum(), variables, create_graph=True)
+        for value in (actual, expected)
+    ]
+    for a, b in zip(*grads):
+        torch.testing.assert_close(a, b, atol=10 * atol, rtol=10 * rtol)
 
 
 def test_convolution_package_layout():

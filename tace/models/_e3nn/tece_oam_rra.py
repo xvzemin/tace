@@ -292,6 +292,9 @@ class Convolution(torch.nn.Module):
                     tuple(ir.l for _, ir in reshape_out.irreps for _ in range(ir.dim)),
                 )
             )
+        from eqx.conv.models.tece_oam_rra.program import metadata
+
+        self._eqx_metadata = metadata(self)
 
     def _load_from_state_dict(
         self,

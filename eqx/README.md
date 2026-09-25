@@ -83,7 +83,9 @@ eqx/
 │   ├── uv_o2/                   # Channel-mixing convolution placeholder
 │   ├── models/
 │   │   └── tece_oam_rra/
-│   │       ├── interaction.py    # Tiled rotary-attention interaction
+│   │       ├── interaction.py    # Native rotary-attention operators
+│   │       ├── program.py        # Local expressions and analytic adjoints
+│   │       ├── codegen.py        # Cooperative CUDA fusion
 │   │       ├── product.py        # BilinearACE with expert and shared maps
 │   │       ├── bilinear_contraction.py # Recursive coefficient adjoints
 │   │       ├── bilinear_cuda.py  # Block-local products and transposes
@@ -131,13 +133,25 @@ The PyTorch model and checkpoint weight conversion are maintained in TACE's
 `tace.models._e3nn.tece_oam_rra`, using `o2.Linear`, `o2.Gate` and
 `o2.TensorProduct`. This EQX directory supplies the model-specific fused kernels
 and streaming execution, without owning the PyTorch model definition.
-The interaction evaluates attention scores and values together in bounded
-edge tiles using online softmax. Only node outputs, denominators and maxima
-are retained, rather than full-graph scores, convolution weights or wide edge
-activations. Its analytic adjoint recomputes each tile once, with recursive
-derivatives for force training. CUDA execution plans reuse fixed-shape workspaces;
-inputs and parameters are refreshed on every call. Degree-wise rotations and
-rotary inner products use CUDA kernels with recursive transposes.
+The interaction computes receiver-wise online softmax statistics, then fuses
+the complete local update and aggregation in native CUDA. Only node outputs,
+denominators and detached maxima are retained. Local intermediates use shared
+memory or a bounded overflow workspace, not full-edge activation arrays.
+Analytic reverse programs generate native kernels recursively for force
+training and higher derivatives. Tensor schemas, fake implementations and
+registered autograd rules expose the operations to `torch.compile`. Parameters
+are explicit inputs and metadata is serializable; no live model callback or
+CUDA Graph replay is used by this interaction.
+
+`EQX_USE_CUDA_GRAPH=1` enables optional native CUDA Graph replay for O3 CGTP,
+O2-aligned CGTP, and standard or gated bilinear ACE contractions. The default
+is off. The existing recursive CUDA adjoints are retained. Edge-capacity
+buckets use isolated zero nodes for padding, and inputs and weights are
+refreshed on every replay. The bounded cache includes dtype, device, stream,
+and TF32 settings. Capture adds warmup and static-buffer memory; measure both
+MD latency and reserved memory for the intended workload. Outer CUDA Graph
+capture bypasses internal replay.
+
 `conv/ace/` retains the standard `eqx.conv.TACE` implementation. Import the
 model-specific product as `eqx.conv.models.tece_oam_rra.BilinearACE`.
 

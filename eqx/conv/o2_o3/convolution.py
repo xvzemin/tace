@@ -42,23 +42,34 @@ def contraction(
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Keep runtime scheduling and kernel compilation outside tensor tracing."""
+    from ...kernels.cuda_graph import convolution
+
     plan = kernel_plan(metadata)
     results = contraction_fake(metadata, program, source, target, operands)
-    for result in results:
-        result.zero_()
-    if source.numel() and plan.path_data:
+    terms = parse_program(program)
+
+    def run(inputs, outputs):
+        source, target, *values = inputs
+        for result in outputs:
+            result.zero_()
+        if not source.numel() or not plan.path_data:
+            return
         from .cuda import contract_many
 
         calls = [
             (
                 tuple(role for role, _ in pairs),
-                tuple(operands[i] for i in mapping),
-                tuple(results[slot] for _, slot in pairs),
+                tuple(values[i] for i in mapping),
+                tuple(outputs[slot] for _, slot in pairs),
                 weighted_only,
             )
-            for mapping, weighted_only, pairs in parse_program(program)
+            for mapping, weighted_only, pairs in terms
         ]
         contract_many(plan, source, target, calls)
+
+    convolution(
+        "o2_o3", (metadata, program), run, source, target, operands, results, terms, 6
+    )
     return results
 
 
