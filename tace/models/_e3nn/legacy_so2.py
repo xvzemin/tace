@@ -8,6 +8,8 @@ from typing import Union
 
 import torch
 
+from eqx.conv.uv_so2 import local_product
+from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
 from ..linear import torchLinear
@@ -451,10 +453,29 @@ class SO2Gate(torch.nn.Module):
 
         self.scalar_act = scalar_act
         self.tensor_act = tensor_act
+        self._eqx_gate_metadata = repr(
+            (
+                num_channel,
+                (len(expand_index), self.num_components, len(expand_index)),
+                tuple(((i, j, i), 1.0) for i, j in enumerate(expand_index.tolist())),
+            )
+        )
 
     def forward(self, x: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         B = x.size(0)
         g = self.tensor_act(g).view(B, self.num_components, self.num_channel)
+        if (
+            x.is_cuda
+            and x.dtype in (torch.float32, torch.float64)
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            gated = x if self.gate_m0 else x[:, self.num_m0_components :]
+            gated = local_product(self._eqx_gate_metadata, gated, g).view_as(gated)
+            if self.gate_m0:
+                return gated
+            return torch.cat(
+                (self.scalar_act(x[:, : self.num_m0_components]), gated), dim=1
+            )
         g = torch.index_select(g, dim=1, index=self.expand_index)
         if self.gate_m0:
             return g * x
@@ -506,6 +527,46 @@ class uuuSO2TensorProduct(torch.nn.Module):
             output_scales.append(torch.full((2 * n,), scale))
         output_scales = torch.cat(output_scales)
         self.register_buffer("output_scales", output_scales, persistent=False)
+
+        rows = []
+        path = 0
+        for m3, paths in enumerate(self.instructions):
+            out = 0 if m3 == 0 else 2 * m3 - 1
+            scale = float(output_scales[out * n])
+            for m1, m2, mode in paths:
+                a = 0 if m1 == 0 else 2 * m1 - 1
+                b = 0 if m2 == 0 else 2 * m2 - 1
+                if m1 == 0 or m2 == 0:
+                    rows.append(((a, b, path, out), scale))
+                    if m3:
+                        rows.append(
+                            ((a + (m1 > 0), b + (m2 > 0), path, out + 1), scale)
+                        )
+                else:
+                    rows.append(((a, b, path, out), scale))
+                    rows.append(
+                        (
+                            (a + 1, b + 1, path, out),
+                            scale * (-1 if mode == "sum" else 1),
+                        )
+                    )
+                    if m3:
+                        sign = -1 if mode == "diff" and m1 < m2 else 1
+                        rows.append(((a + 1, b, path, out + 1), scale * sign))
+                        rows.append(
+                            (
+                                (a, b + 1, path, out + 1),
+                                scale * sign * (-1 if mode == "diff" else 1),
+                            )
+                        )
+                path += 1
+        self._eqx_metadata = repr(
+            (
+                n * num_channels,
+                (2 * mmax + 1, 2 * mmax + 1, path, 2 * mmax + 1),
+                tuple(rows),
+            )
+        )
 
     def enumerate_paths(self, m3: int) -> list[tuple[int, int, str]]:
         paths = []
@@ -574,6 +635,15 @@ class uuuSO2TensorProduct(torch.nn.Module):
         y: torch.Tensor,
         weight: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
+
+        if (
+            x.is_cuda
+            and x.dtype in (torch.float32, torch.float64)
+            and not self.internal_weights
+            and weight.shape[0] == x.shape[0]
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            return local_product(self._eqx_metadata, x, y, weight).view_as(x)
 
         xs = self.to_list(x)  #  m = 0 [B, lmax+1, C]
         ys = self.to_list(y)  #  m > 0 [B, 2, lmax+1, C]
@@ -738,6 +808,13 @@ class uvSO2Convolution(torch.nn.Module):
         self.num_components, expand_index = so2_expand_index(self.mmax, self.lmax)
         self.weight_numel = self.num_components * self.num_channel * 2
         self.register_buffer("expand_index", expand_index, persistent=False)
+        self._eqx_weight_metadata = repr(
+            (
+                2 * num_channel,
+                (len(expand_index), self.num_components, len(expand_index)),
+                tuple(((i, j, i), 1.0) for i, j in enumerate(expand_index.tolist())),
+            )
+        )
 
         start_m = 0 if gate_m0 else 1
         if self.use_asymmetric_contraction:
@@ -934,8 +1011,15 @@ class uvSO2Convolution(torch.nn.Module):
             real_alpha = self._complex_qk_attention(query, key, radial_basis)
 
         w = w.view(num_edges, self.num_components, self.num_channel * 2)
-        w = torch.index_select(w, dim=1, index=self.expand_index)
-        m_ij = w * m_ij
+        if (
+            m_ij.is_cuda
+            and m_ij.dtype in (torch.float32, torch.float64)
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            m_ij = local_product(self._eqx_weight_metadata, m_ij, w).view_as(m_ij)
+        else:
+            w = torch.index_select(w, dim=1, index=self.expand_index)
+            m_ij = w * m_ij
 
         if self.use_asymmetric_contraction:
             coefs = self.nonlinearity.scalar_act(self.linear_coefs(m_ij).squeeze(-1))

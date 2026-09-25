@@ -10,6 +10,111 @@ from eqx import conv as eqx_conv
 from eqx import o2
 
 
+@pytest.mark.parametrize("nodes", [0, 5])
+@pytest.mark.parametrize("m1m2", [None, ">=", "<="])
+def test_local_channel_product(monkeypatch, nodes, m1m2):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.legacy_so2 import uuuSO2TensorProduct
+
+    module = (
+        uuuSO2TensorProduct(3, 3, 2, m1m2=m1m2, internal_weights=False).cuda().double()
+    )
+    x, y = [
+        torch.randn(nodes, 28, 2, device="cuda", dtype=torch.float64).requires_grad_()
+        for _ in range(2)
+    ]
+    w = torch.randn(
+        nodes,
+        module.weight_numel,
+        device="cuda",
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    expected = module(x, y, w)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    actual = module(x, y, w)
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+    losses = [z.square().sum() for z in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, y, w), create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-9)
+        losses = [sum(g.square().sum() for g in gs) for gs in gradients]
+    if nodes:
+        compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+        torch.testing.assert_close(compiled(x, y, w), expected, atol=1e-11, rtol=1e-11)
+
+
+def test_local_channel_scaling():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.uv_so2 import local_product
+
+    indices = [0, 1, 2, 1, 2]
+    metadata = repr(
+        (4, (5, 3, 5), tuple(((i, j, i), 1.0) for i, j in enumerate(indices)))
+    )
+    x = torch.randn(3, 5, 8, device="cuda", dtype=torch.float64)[
+        ..., ::2
+    ].requires_grad_()
+    w = torch.randn(3, 3, 4, device="cuda", dtype=torch.float64, requires_grad=True)
+    actual = local_product(metadata, x, w).view_as(x)
+    expected = x * w[:, indices]
+    torch.testing.assert_close(actual, expected)
+    losses = [z.square().sum() for z in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, w), create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+        losses = [sum(g.square().sum() for g in gs) for gs in gradients]
+
+
+@pytest.mark.parametrize("channel_wise", [False, True])
+@pytest.mark.parametrize("gate_m0", [False, True])
+@pytest.mark.parametrize("nodes", [0, 5])
+def test_local_gate(monkeypatch, channel_wise, gate_m0, nodes):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.legacy_so2 import SO2Gate
+
+    gate = (
+        SO2Gate(2, 2, 4, torch.nn.SiLU(), torch.nn.Sigmoid(), channel_wise, gate_m0)
+        .cuda()
+        .double()
+    )
+    angular = len(gate.expand_index) + (0 if gate_m0 else 3)
+    x = torch.randn(nodes, angular + 2, 4, device="cuda", dtype=torch.float64)[
+        :, 1:-1
+    ].requires_grad_()
+    g = torch.randn(
+        nodes,
+        gate.num_components,
+        4,
+        device="cuda",
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    expected = gate(x, g)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    actual = gate(x, g)
+    torch.testing.assert_close(actual, expected)
+    losses = [z.square().sum() for z in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, g), create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+        losses = [sum(v.square().sum() for v in gs) for gs in gradients]
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("experts", [1, 2, 4])
 @pytest.mark.parametrize("nodes", [0, 3, 5])

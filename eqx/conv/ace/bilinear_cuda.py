@@ -42,10 +42,15 @@ def forward_source(dtype, metadata, terms):
             f"v*=p{mapping[4]}[n*{dim[4]}+{gate}+u]; }} a[q]=v; }}",
             "__syncthreads();",
         ]
+        # Schedule expert outputs together. A narrow expert must not leave
+        # the other warps idle while all experts execute sequentially.
+        output_width = sum(key[6] for key in maps)
+        parts.append(f"for(int task=t;task<{output_width};task+=blockDim.x) {{")
+        output_offset = 0
         for (plan, mapping, sw, so, shift, ci, co, dout, _), scale in maps.items():
             dims = plans[plan][0]
             parts += [
-                f"for(int v=t;v<{co};v+=blockDim.x) {{ scalar sum[4]={{}};",
+                f"if(task>={output_offset} && task<{output_offset + co}) {{ int v=task-{output_offset}; scalar sum[4]={{}};",
                 f"#pragma unroll 1\nfor(int u=0;u<{ci};++u) {{",
             ]
             if plan:
@@ -61,7 +66,8 @@ def forward_source(dtype, metadata, terms):
                 "}",
                 f"#pragma unroll\nfor(int row=0;row<4;++row) if(n0+row<nodes) atomicAdd(out+(n0+row)*{dims[3]}+{so}+v*{dout},scalar({scale:.17g})*sum[row]); }}",
             ]
-        parts += ["return; }"]
+            output_offset += co
+        parts += ["}", "return; }"]
         cases.append("\n".join(parts))
     count = max(i for _, mapping, _, _ in terms for i in mapping) + 1
     pointers = ", ".join(f"const scalar* p{i}" for i in range(count))
