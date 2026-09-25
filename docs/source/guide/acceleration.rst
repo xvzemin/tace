@@ -129,7 +129,7 @@ product and its coefficient contraction are fused; intermediate orders remain
 available for reuse. Recursive transposed kernels support force training and
 higher derivatives. Linear up/down, biases, dropout and residual connections
 keep their existing behavior. Gated bilinear products also use
-``eqx.conv.BilinearTACE`` to fuse their weighted tensor product with the
+``eqx.conv.models.tece_oam_rra.BilinearACE`` to fuse their weighted tensor product with the
 element-dependent or MoE coefficient map, including the optional shared expert.
 Products with active coefficient LoRA adapters retain their original
 tensor-product execution. EQX takes precedence

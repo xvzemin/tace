@@ -8,6 +8,205 @@ from e3nn import o3
 
 from eqx import conv as eqx_conv
 from eqx import o2
+from eqx.conv.models.tece_oam_rra import BilinearACE
+
+
+def test_convolution_package_layout():
+    from eqx.conv import uu_o2, uv_o2
+    from eqx.conv.ace import TACE
+    from eqx.conv.models.tece_oam_rra import LocalSplit
+    from eqx.kernels.channel_product import local_product
+
+    assert eqx_conv.TACE is TACE
+    assert BilinearACE.__module__ == "eqx.conv.models.tece_oam_rra.product"
+    assert uu_o2.__all__ == uv_o2.__all__ == []
+    assert issubclass(LocalSplit, torch.autograd.Function)
+    assert callable(local_product)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("nodes", [0, 4])
+@pytest.mark.parametrize("gate_m0", [False, True])
+def test_packed_legacy_convolution(monkeypatch, device, nodes, gate_m0):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.legacy_so2 import uvSO2Convolution, uvSO2Linear
+    from tace.models.layout import LayoutTransform
+    from tace.utils.torch_scatter import scatter_sum
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    irreps = o3.Irreps("2x0e+2x1o+2x2e")
+    module = uvSO2Convolution(
+        2,
+        2,
+        2,
+        1,
+        2,
+        4,
+        gate_m0,
+        True,
+        False,
+        LayoutTransform(irreps),
+        LayoutTransform(irreps),
+        torch.nn.SiLU(),
+        torch.nn.Sigmoid(),
+    ).to(device=device, dtype=torch.float64)
+    projections = {
+        "linear_up": uvSO2Linear(
+            2,
+            2,
+            4,
+            2,
+            num_components_out=[module.num_gates + 3, 3, 3],
+        ),
+        "linear_glu": uvSO2Linear(
+            2, 2, 4, 2, num_components_out=[3, 3, 3]
+        ),
+        "linear_coefs": uvSO2Linear(
+            0, 2, 4, 1, num_components_out=[module.ece.weight_numel]
+        ),
+    }
+    state = {
+        k: v for k, v in module.state_dict().items() if not k.startswith("linear_up.")
+    }
+    for name, projection in projections.items():
+        projection.to(device=device, dtype=torch.float64)
+        state.update({f"{name}.{k}": v for k, v in projection.state_dict().items()})
+    module.load_state_dict(state, strict=True)
+    restored = deepcopy(module)
+    restored.load_state_dict(module.state_dict(), strict=True)
+    x = torch.randn(
+        nodes, irreps.dim, device=device, dtype=torch.float64, requires_grad=True
+    )
+    edges = torch.arange(nodes, device=device).repeat(2, 1)
+    w = torch.randn(
+        nodes,
+        module.weight_numel,
+        device=device,
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    rotation = torch.eye(9, device=device, dtype=torch.float64).expand(nodes, 9, 9)
+    radial = x.new_zeros(nodes, 4)
+    actual = module(x, w, edges, None, rotation, rotation, radial)
+    torch.testing.assert_close(
+        restored(x, w, edges, None, rotation, rotation, radial), actual
+    )
+    features = module.reshape_in(x)
+    features = torch.cat((features[edges[0]], features[edges[1]]), dim=-1)
+    features = features * w.view(nodes, module.num_components, 4).index_select(
+        1, module.expand_index
+    )
+    coefs = module.nonlinearity.scalar_act(
+        projections["linear_coefs"](features).squeeze(-1)
+    )
+    other = projections["linear_glu"](features)
+    up = projections["linear_up"](features)
+    gate, h = up.split(module.split_list, dim=1)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    expected = module.linear_down(
+        h + module.nonlinearity(h, gate) + module.ece(h, other, coefs)
+    )
+    expected = module.reshape_out.inverse(
+        scatter_sum(expected, edges[1], dim=0, dim_size=nodes)
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+    losses = [v.square().sum() for v in (actual, expected)]
+    actual_weight, actual_bias = torch.autograd.grad(
+        losses[0], (module.linear_up.weight, module.linear_up.bias), retain_graph=True
+    )
+    expected_weights, expected_biases = [], []
+    for m in range(3):
+        names = ("linear_up", "linear_glu")
+        layers = [
+            projections[name].m0_rlinear
+            if m == 0
+            else projections[name].ms_clinear[m - 1].fc
+            for name in names
+        ]
+        gradients = torch.autograd.grad(
+            losses[1], [layer.weight for layer in layers], retain_graph=True
+        )
+        expected_weights.append(torch.cat(gradients, dim=0).T.flatten())
+        if m == 0:
+            expected_biases.extend(
+                torch.autograd.grad(
+                    losses[1], [layer.bias for layer in layers], retain_graph=True
+                )
+            )
+    torch.testing.assert_close(
+        actual_weight, torch.cat(expected_weights), atol=1e-10, rtol=1e-10
+    )
+    torch.testing.assert_close(
+        actual_bias, torch.cat(expected_biases), atol=1e-10, rtol=1e-10
+    )
+    for _ in range(3):
+        derivatives = [
+            torch.autograd.grad(loss, (x, w), create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*derivatives):
+            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-8)
+        losses = [sum(v.square().sum() for v in values) for values in derivatives]
+    if device == "cuda" and nodes and not gate_m0:
+        monkeypatch.setenv("TACE_USE_EQX", "1")
+        compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+        result = compiled(x, w, edges, None, rotation, rotation, radial)
+        torch.testing.assert_close(result, expected, atol=1e-11, rtol=1e-11)
+        torch.autograd.grad(result.square().sum(), (x, w, module.linear_up.weight))
+
+
+def test_legacy_rra_fixed_parameters():
+    from tace.models._e3nn.legacy_so2 import uvSO2Convolution, uvSO2Linear
+
+    kwargs = dict(
+        mmax=2,
+        lmax=2,
+        num_channel=2,
+        num_head=1,
+        edge_ace_hidden=2,
+        num_radial_basis=4,
+        gate_m0=False,
+        use_asymmetric_contraction=False,
+        use_radial_rotary_attention=True,
+        reshape_in=torch.nn.Identity(),
+        reshape_out=torch.nn.Identity(),
+        scalar_act=torch.nn.SiLU(),
+        tensor_act=torch.nn.Sigmoid(),
+    )
+    module = uvSO2Convolution(**kwargs).double()
+    for name, value in (
+        ("use_temperature", True),
+        ("use_radial_phase", True),
+        ("so2_linear_type", "w1"),
+    ):
+        with pytest.raises(TypeError):
+            uvSO2Convolution(**kwargs, **{name: value})
+    with pytest.raises(TypeError):
+        uvSO2Linear(2, 2, 2, 2, weight_type="w1")
+    with torch.no_grad():
+        module.radial_proj.weight.normal_()
+        module.radial_proj.bias.normal_()
+        module.temperature_logit.fill_(0.7)
+    query, key = torch.randn(2, 4, 9, 2, dtype=torch.float64)
+    radial = torch.randn(4, 4, dtype=torch.float64)
+    bias, phase = module.radial_proj(radial).split(1, dim=-1)
+    phase = torch.pi * phase.tanh()
+    score = (query[:, :3] * key[:, :3]).sum((1, 2)).unsqueeze(-1)
+    offset = 3
+    for m in (1, 2):
+        n = 3 - m
+        q = query[:, offset : offset + 2 * n].reshape(4, 2, n, 2)
+        k = key[:, offset : offset + 2 * n].reshape(4, 2, n, 2)
+        angle = (m * phase).unsqueeze(-1)
+        real = angle.cos() * k[:, 0] - angle.sin() * k[:, 1]
+        imag = angle.sin() * k[:, 0] + angle.cos() * k[:, 1]
+        score = score + (q[:, 0] * real + q[:, 1] * imag).sum((1, 2)).unsqueeze(-1)
+        offset += 2 * n
+    temperature = 0.25 + 3.75 * module.temperature_logit.sigmoid()
+    expected = score * module.attention_scale * temperature + bias
+    torch.testing.assert_close(
+        module._complex_qk_attention(query, key, radial), expected
+    )
 
 
 @pytest.mark.parametrize("nodes", [0, 5])
@@ -52,7 +251,7 @@ def test_local_channel_product(monkeypatch, nodes, m1m2):
 def test_local_channel_scaling():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.uv_so2 import local_product
+    from eqx.kernels.channel_product import local_product
 
     indices = [0, 1, 2, 1, 2]
     metadata = repr(
@@ -146,7 +345,7 @@ def test_bilinear_ace(device, experts, nodes, shared):
         if shared
         else None
     )
-    module = eqx_conv.BilinearTACE(tp, linear, experts, shared_linear=shared_linear).to(
+    module = BilinearACE(tp, linear, experts, shared_linear=shared_linear).to(
         device=device, dtype=torch.float64
     )
     x, y, gates = [

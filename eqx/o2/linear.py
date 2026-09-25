@@ -284,10 +284,21 @@ class Linear(torch.nn.Module):
                 matrix = weight.narrow(-1, offset, size).reshape(
                     *weight.shape[:-1], mul_in, mul_out
                 )
-                contributions.append(
-                    torch.matmul(inputs[instruction.i_in], matrix)
-                    * instruction.path_weight
-                )
+                if weight.ndim == 1:
+                    # A shared matrix is one GEMM, not a broadcast batch of
+                    # small products for each edge and real irrep dimension.
+                    value = inputs[instruction.i_in].reshape(
+                        math.prod(features.shape[:-1]) * ir_out.dim, mul_in
+                    )
+                    output = torch.matmul(value, matrix * instruction.path_weight)
+                    contributions.append(
+                        output.reshape(*features.shape[:-1], ir_out.dim, mul_out)
+                    )
+                else:
+                    contributions.append(
+                        torch.matmul(inputs[instruction.i_in], matrix)
+                        * instruction.path_weight
+                    )
             if contributions:
                 output = sum(contributions[1:], contributions[0])
             else:

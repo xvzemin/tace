@@ -10,6 +10,7 @@ import torch
 from e3nn import o3
 
 from eqx import conv as eqx_conv
+from eqx.conv.models.tece_oam_rra import BilinearACE
 from tace.utils.env import acceleration_enabled
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
@@ -263,7 +264,7 @@ class BilinearMoEACE(Product):
 
         if self.use_eqx:
             coef = self.coefs[1]
-            self.eqx_ace = eqx_conv.BilinearTACE(
+            self.eqx_ace = BilinearACE(
                 self.aces[0].tp, coef.linear, getattr(coef, "num_experts", 1),
                 shared_linear=self.shared_coefs[1].linear if hasattr(self, "shared_coefs") else None,
             )

@@ -10,7 +10,7 @@ from eqx import o3 as eqx_o3
 from .bilinear_contraction import contract, encode_metadata
 
 
-class BilinearTACE(torch.nn.Module):
+class BilinearACE(torch.nn.Module):
     """Contract a gated bilinear product directly into its coefficient output.
 
     Parameters
@@ -50,7 +50,7 @@ class BilinearTACE(torch.nn.Module):
             ins.connection_mode != "uuu" or not ins.has_weight
             for ins in tensor_product.instructions
         ):
-            raise ValueError("BilinearTACE requires weighted uuu paths.")
+            raise ValueError("BilinearACE requires weighted uuu paths.")
         if tensor_product.internal_weights or linear.internal_weights:
             raise ValueError("Provide external product and coefficient weights.")
         full_input = o3.Irreps(
@@ -69,7 +69,7 @@ class BilinearTACE(torch.nn.Module):
         self.weight_numel = linear.weight_numel * num_experts
         self.gate_dim = tensor_product.weight_numel
         self.shared = (
-            BilinearTACE(tensor_product, shared_linear, backend=backend)
+            BilinearACE(tensor_product, shared_linear, backend=backend)
             if shared_linear is not None
             else None
         )

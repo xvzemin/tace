@@ -76,10 +76,18 @@ eqx/
 │   ├── graph.py                  # Shared graph ordering
 │   ├── radial.py                 # Bounded radial projections and their adjoints
 │   ├── ace/
-│   │   ├── tace.py              # Standard ACE coefficient contraction
-│   │   ├── bilinear_tace.py     # Gated ACE with MoE and shared coefficients
-│   │   ├── bilinear_contraction.py # Recursive joint coefficient adjoints
-│   │   └── bilinear_cuda.py     # Block-local products and transposes
+│   │   ├── tace.py               # Standard ACE coefficient contraction
+│   │   ├── contraction.py        # Recursive coefficient adjoints
+│   │   └── cuda.py               # CUDA execution
+│   ├── uu_o2/                   # Channel-diagonal convolution placeholder
+│   ├── uv_o2/                   # Channel-mixing convolution placeholder
+│   ├── models/
+│   │   └── tece_oam_rra/
+│   │       ├── interaction.py    # Native interaction placeholder
+│   │       ├── product.py        # BilinearACE with expert and shared maps
+│   │       ├── bilinear_contraction.py # Recursive coefficient adjoints
+│   │       ├── bilinear_cuda.py  # Block-local products and transposes
+│   │       └── cuda.py           # Packed views and shared adjoints
 │   ├── o3/
 │   │   ├── convolution.py        # O3TensorProductConv and PyTorch reference
 │   │   ├── cuda.py               # Path scheduling and CUDA execution
@@ -93,6 +101,7 @@ eqx/
 │       └── direction_codegen.py  # Mixed-derivative CUDA source generation
 └── kernels/
     ├── cuda.py                   # NVRTC compilation, caching and launches
+    ├── channel_product.py        # Sparse channel products and recursive adjoints
     ├── codegen.py                # Shared geometry source generation
     ├── wigner.py                 # Packed Wigner construction and derivatives
     ├── quaternion.py             # Quaternion polynomial kernels
@@ -105,15 +114,22 @@ eqx/
 |---|---|---|---|
 | `O3TensorProductConv` | `conv/o3/` | Sparse O(3) CGTP with bounded radial projection | Implemented |
 | `O2O3TensorProductConv` | `conv/o2_o3/` | O(3) CGTP through aligned-frame sparse coupling | Implemented |
-| `UvO2TensorProductConv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear | Planned |
-| `UuO2TensorProductConv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Planned |
+| `UvO2Conv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear | Directory placeholder |
+| `UuO2Conv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Directory placeholder |
 
-The planned directories and classes are not created until their operators are
-implemented. Each architecture owns its reference operation, derivatives and
+The placeholder packages do not export convolution classes yet.
+Each architecture owns its reference operation, derivatives and
 CUDA schedule; shared geometry and compilation are reused without inheriting
 from another convolution implementation. A nonlinear gated convolution must
 differentiate its activations and cannot reuse the multilinear CGTP transpose
 rule unchanged.
+
+Model-specific fusion lives in `conv/models/`, separately from these general
+convolutions. `tece_oam_rra` contains both gated bilinear ACE with expert and
+shared coefficient maps and the packed-feature interaction fusion utilities.
+Its complete native interaction is reserved for future implementation.
+`conv/ace/` retains the standard `eqx.conv.TACE` implementation. Import the
+model-specific product as `eqx.conv.models.tece_oam_rra.BilinearACE`.
 
 Use `from eqx import conv as eqx_conv` to access `eqx_conv.O2O3TensorProductConv` and
 `from eqx.kernels import wigner_D`. CUDA compilation remains lazy. File

@@ -8,7 +8,10 @@ from typing import Union
 
 import torch
 
-from eqx.conv.uv_so2 import local_product
+from eqx import o2
+from eqx.conv.ace.contraction import parse
+from eqx.conv.models.tece_oam_rra import LocalSplit
+from eqx.kernels.channel_product import local_product
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
@@ -212,7 +215,6 @@ class uvSO2MLinear(torch.nn.Module):
         num_channel_out: int,
         num_components_in: int,
         num_components_out: int,
-        weight_type: str = "w1_w2",
     ):
         super().__init__()
 
@@ -221,70 +223,16 @@ class uvSO2MLinear(torch.nn.Module):
         self.num_channel_out = num_channel_out
         self.num_components_in = num_components_in
         self.num_components_out = num_components_out
-        self.weight_type = weight_type
         assert self.num_components_in > 0
         assert self.num_components_out > 0
 
-        if weight_type == "w1_w2":
-            self.fc = torchLinear(
-                self.num_components_in * self.num_channel_in,
-                self.num_components_out * self.num_channel_out * 2,
-                bias=False,
-            )
-            self.fc.weight.data.mul_(1 / math.sqrt(2))
-        elif weight_type == "w1_w1":
-            self.fc = torchLinear(
-                self.num_components_in * self.num_channel_in,
-                self.num_components_out * self.num_channel_out,
-                bias=False,
-            )
-            self.fc.weight.data.mul_(1 / math.sqrt(2))
-        else:
-            self.fc = torchLinear(
-                self.num_components_in * self.num_channel_in,
-                self.num_components_out * self.num_channel_out,
-                bias=False,
-            )
-        self._Cout = self.num_components_out * self.num_channel_out
+        self.fc = torchLinear(
+            self.num_components_in * self.num_channel_in,
+            self.num_components_out * self.num_channel_out,
+            bias=False,
+        )
 
     def forward(self, x, concat_outputs=True):
-        # [batch, 2, -1]
-        if self.weight_type == "w1_w2":
-            return self.w1_w2_forward(x, concat_outputs)
-        elif self.weight_type == "w1_w1":
-            return self.w1_w1_forward(x, concat_outputs)
-        else:
-            return self.w1_forward(x, concat_outputs)
-
-    def w1_w2_forward(
-        self, x, concat_outputs=True
-    ) -> Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
-
-        x = self.fc(x)
-        w1_x = x.narrow(2, 0, self._Cout)
-        w2_x = x.narrow(2, self._Cout, self._Cout)
-        xr = w1_x.narrow(1, 0, 1) - w2_x.narrow(1, 1, 1)  # w1_x+m - w2x-m
-        xi = w1_x.narrow(1, 1, 1) + w2_x.narrow(1, 0, 1)  # w1_x-m + w2x+m
-        x_out = (xr, xi)
-        if concat_outputs:
-            x_out = torch.cat(x_out, dim=1)
-        return x_out
-
-    def w1_w1_forward(self, x, concat_outputs=True):
-        xr = x.narrow(1, 0, 1)
-        xi = x.narrow(1, 1, 1)
-        # yr = W(xr - xi)
-        # yi = W(xi + xr)
-        yr_in = xr - xi
-        yi_in = xi + xr
-        yr = self.fc(yr_in)
-        yi = self.fc(yi_in)
-        x_out = (yr, yi)
-        if concat_outputs:
-            x_out = torch.cat(x_out, dim=1)
-        return x_out
-
-    def w1_forward(self, x, concat_outputs=True):
         x = self.fc(x)
         if concat_outputs:
             return x
@@ -305,7 +253,6 @@ class uvSO2Linear(torch.nn.Module):
         num_channel_out: int,
         num_components_in: Union[None, list[int]] = None,
         num_components_out: Union[None, list[int]] = None,
-        weight_type: str = "w1_w2",  # [w1_w2, w1_w1, w1]
     ):
         super().__init__()
 
@@ -313,7 +260,6 @@ class uvSO2Linear(torch.nn.Module):
         self.lmax = lmax
         self.num_channel_in = num_channel_in
         self.num_channel_out = num_channel_out
-        self.weight_type = weight_type
 
         if num_components_in is None:
             self.num_components_in = [lmax + 1 - m for m in range(mmax + 1)]
@@ -340,7 +286,6 @@ class uvSO2Linear(torch.nn.Module):
                     self.num_channel_out,
                     self.num_components_in[m],
                     self.num_components_out[m],
-                    weight_type=weight_type,
                 )
             )
 
@@ -398,7 +343,6 @@ class uvSO2Linear(torch.nn.Module):
             f"({'+'.join(ins)} -> "
             f"{'+'.join(outs)} | "
             f"{num_weights} weights)"
-            f"(weight_type={self.weight_type})"
             f"(bias={True})"
         )
 
@@ -775,10 +719,8 @@ class uvSO2Convolution(torch.nn.Module):
         lmax: int,
         num_channel: int,
         num_head: int,
-        use_temperature: bool,
         edge_ace_hidden: int,
         num_radial_basis: int,
-        so2_linear_type: str,
         gate_m0: bool,
         use_asymmetric_contraction: bool,
         use_radial_rotary_attention: bool,
@@ -786,7 +728,6 @@ class uvSO2Convolution(torch.nn.Module):
         reshape_out: LayoutTransform,
         scalar_act: torch.nn.Module,
         tensor_act: torch.nn.Module,
-        use_radial_phase: bool,
     ) -> None:
         super().__init__()
 
@@ -797,13 +738,10 @@ class uvSO2Convolution(torch.nn.Module):
         self.edge_ace_hidden = edge_ace_hidden
         self.num_channel_per_head = self.num_channel // self.num_head
         assert self.num_channel % self.num_head == 0
-        self.so2_linear_type = so2_linear_type
-        self.use_temperature = use_temperature
         self.use_radial_rotary_attention = use_radial_rotary_attention
         self.use_asymmetric_contraction = use_asymmetric_contraction
         self.reshape_in = reshape_in
         self.reshape_out = reshape_out
-        self.use_radial_phase = use_radial_phase
 
         self.num_components, expand_index = so2_expand_index(self.mmax, self.lmax)
         self.weight_numel = self.num_components * self.num_channel * 2
@@ -846,7 +784,6 @@ class uvSO2Convolution(torch.nn.Module):
             if self.use_asymmetric_contraction
             else self.num_channel,
             num_components_out=num_components_out,
-            weight_type=self.so2_linear_type,
         )
         self.nonlinearity = SO2Gate(
             mmax,
@@ -868,7 +805,6 @@ class uvSO2Convolution(torch.nn.Module):
                 if self.use_asymmetric_contraction
                 else self.num_channel,
                 num_components_out=[lmax + 1] + [lmax + 1 for m in range(1, mmax + 1)],
-                weight_type=self.so2_linear_type,
             )
             self.ece = ComplexProductBasis(
                 mmax,
@@ -882,7 +818,6 @@ class uvSO2Convolution(torch.nn.Module):
                 self.num_channel * 2,
                 1,
                 num_components_out=[self.ece.weight_numel],
-                weight_type=self.so2_linear_type,
             )
         self.linear_down = uvSO2Linear(
             mmax,
@@ -892,7 +827,6 @@ class uvSO2Convolution(torch.nn.Module):
             else self.num_channel,
             self.num_channel,
             num_components_in=num_components_in,
-            weight_type=self.so2_linear_type,
         )
         if self.use_radial_rotary_attention:
             self.query_proj = uvSO2Linear(
@@ -900,36 +834,167 @@ class uvSO2Convolution(torch.nn.Module):
                 lmax,
                 self.num_channel,
                 self.num_channel,
-                weight_type=self.so2_linear_type,
             )
             self.key_proj = uvSO2Linear(
                 mmax,
                 lmax,
                 self.num_channel,
                 self.num_channel,
-                weight_type=self.so2_linear_type,
             )
-            if self.use_radial_phase:
-                self.radial_proj = torchLinear(num_radial_basis, 2 * self.num_head)
-            else:
-                self.radial_proj = torchLinear(num_radial_basis, self.num_head)
+            self.radial_proj = torchLinear(num_radial_basis, 2 * self.num_head)
             torch.nn.init.zeros_(self.radial_proj.weight)
             torch.nn.init.zeros_(self.radial_proj.bias)
             self.attention_scale = 1.0 / math.sqrt(
                 self.num_channel_per_head * self.split_list[1]
             )
             self.graph_softmax = GraphSoftmax()
-            if self.use_temperature:
-                self.temperature_min = 0.25
-                self.temperature_max = 4.0
-                initial_temperature = 1.0
-                initial_temperature_logit = math.log(
-                    (initial_temperature - self.temperature_min)
-                    / (self.temperature_max - initial_temperature)
+            self.temperature_min = 0.25
+            self.temperature_max = 4.0
+            initial_temperature = 1.0
+            initial_temperature_logit = math.log(
+                (initial_temperature - self.temperature_min)
+                / (self.temperature_max - initial_temperature)
+            )
+            self.temperature_logit = torch.nn.Parameter(
+                torch.full((self.num_head,), initial_temperature_logit)
+            )
+
+        if self.use_asymmetric_contraction:
+            # Concatenate outputs within each order, not across real/imaginary parts.
+            old_state = {}
+            for name in ("linear_up", "linear_glu"):
+                old_state.update(
+                    {
+                        f"{name}.{k}": v
+                        for k, v in getattr(self, name).state_dict().items()
+                    }
                 )
-                self.temperature_logit = torch.nn.Parameter(
-                    torch.full((self.num_head,), initial_temperature_logit)
+            hidden = self.edge_ace_hidden
+            n = lmax + 1
+            # Keep coefficients separate: packing them into the feature tensor
+            # inflates every feature-adjoint buffer by the full path count.
+            widths = [(self.num_gates + 2 * n) * hidden] + [2 * n * hidden] * mmax
+            self.linear_up = o2.Linear(
+                [
+                    (o2.Irrep(m, 1 if m == 0 else 0), (lmax + 1 - m) * 2 * num_channel)
+                    for m in range(mmax + 1)
+                ],
+                [
+                    (o2.Irrep(m, 1 if m == 0 else 0), width)
+                    for m, width in enumerate(widths)
+                ],
+                biases=True,
+            )
+            del self.linear_glu
+            self._convert_linear_state_dict(old_state, "")
+            self.linear_up.load_state_dict(
+                {k.removeprefix("linear_up."): v for k, v in old_state.items()}
+            )
+
+            first, second = [], []
+            offset = 0
+            for m, width in enumerate(widths):
+                width //= hidden
+                for real in range(1 if m == 0 else 2):
+                    start = offset + real * width + (self.num_gates if m == 0 else 0)
+                    first.extend(range(start, start + n))
+                    second.extend(range(start + n, start + 2 * n))
+                offset += (1 if m == 0 else 2) * width
+            self.register_buffer(
+                "feature_indices", torch.tensor(first), persistent=False
+            )
+            self.register_buffer(
+                "product_indices", torch.tensor(second), persistent=False
+            )
+            rows = []
+            for i, index in enumerate(first):
+                rows.append(((index, -1, -1, -1, -1, i), 1.0))
+                if gate_m0 or i >= n:
+                    gate = i if gate_m0 else i - n
+                    gate = int(self.nonlinearity.expand_index[gate])
+                    rows.append(((index, -1, gate, -1, -1, i), 1.0))
+                else:
+                    rows.append(((-1, -1, -1, -1, i, i), 1.0))
+            _, dims, tp_rows = parse(self.ece.tp._eqx_metadata)
+            for (a, b, path, out), coefficient in tp_rows:
+                for degree in range(n):
+                    rows.append(
+                        (
+                            (
+                                first[a * n + degree],
+                                second[b * n + degree],
+                                -1,
+                                path * n + degree,
+                                -1,
+                                out * n + degree,
+                            ),
+                            coefficient,
+                        )
+                    )
+            self._eqx_update_metadata = repr(
+                (
+                    hidden,
+                    (offset, offset, self.num_gates, dims[2] * n, n, len(first)),
+                    tuple(rows),
                 )
+            )
+            self.projection_slices = (
+                (0, self.num_gates * hidden),
+                (self.num_gates * hidden, n * hidden),
+            )
+            rows = []
+            for role, (start, size) in enumerate(self.projection_slices, 1):
+                for i in range(size // hidden):
+                    indices = [start // hidden + i, -1, -1]
+                    indices[role] = i
+                    rows.append((tuple(indices), 1.0))
+            self._eqx_split_metadata = repr(
+                (hidden, (offset, self.num_gates, n), tuple(rows))
+            )
+
+    def _convert_linear_state_dict(self, state_dict, prefix):
+        """Pack legacy projections without changing their effective weights."""
+        if prefix + "linear_up.m0_rlinear.weight" not in state_dict:
+            return
+        weights, biases = [], []
+        for m in range(self.mmax + 1):
+            suffix = "m0_rlinear" if m == 0 else f"ms_clinear.{m - 1}.fc"
+            names = ("linear_up", "linear_glu")
+            matrices = [
+                state_dict.pop(prefix + name + "." + suffix + ".weight")
+                for name in names
+            ]
+            # Both layouts use the same inverse-square-root input normalization.
+            weights.append(torch.cat(matrices, dim=0).T.contiguous().flatten())
+            if m == 0:
+                biases.extend(
+                    state_dict.pop(prefix + name + "." + suffix + ".bias")
+                    for name in names
+                )
+        state_dict[prefix + "linear_up.weight"] = torch.cat(weights)
+        state_dict[prefix + "linear_up.bias"] = torch.cat(biases)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        if self.use_asymmetric_contraction:
+            self._convert_linear_state_dict(state_dict, prefix)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _complex_qk_attention(
         self, query: torch.Tensor, key: torch.Tensor, edge_feats: torch.Tensor
@@ -939,13 +1004,9 @@ class uvSO2Convolution(torch.nn.Module):
         H = self.num_head
         C = self.num_channel_per_head
 
-        # radial bias and pahse
-        if self.use_radial_phase:
-            radial_proj = self.radial_proj(edge_feats)
-            radial_bias = radial_proj[:, :H]
-            radial_phase = math.pi * torch.tanh(radial_proj[:, H:])
-        else:
-            radial_bias = self.radial_proj(edge_feats)
+        radial_proj = self.radial_proj(edge_feats)
+        radial_bias = radial_proj[:, :H]
+        radial_phase = math.pi * torch.tanh(radial_proj[:, H:])
 
         # m = 0
         n = self.lmax + 1
@@ -954,39 +1015,25 @@ class uvSO2Convolution(torch.nn.Module):
         score = (query_m0 * key_m0).sum(dim=(1, 3))
 
         # m > 0
-        if self.use_radial_phase:
-            offset = n
-            for m in range(1, self.mmax + 1):
-                n = self.lmax + 1 - m
-                query_m = query[:, offset : offset + 2 * n].view(B, 2, n, H, C)
-                key_m = key[:, offset : offset + 2 * n].view(B, 2, n, H, C)
-                offset += 2 * n
-                phase = (m * radial_phase).view(B, 1, H, 1)
-                cos_phase = torch.cos(phase)
-                sin_phase = torch.sin(phase)
-                key_real = cos_phase * key_m[:, 0] - sin_phase * key_m[:, 1]
-                key_imag = sin_phase * key_m[:, 0] + cos_phase * key_m[:, 1]
-                score = score + (
-                    query_m[:, 0] * key_real + query_m[:, 1] * key_imag
-                ).sum(dim=(1, 3))
-        else:
-            offset = n
-            for m in range(1, self.mmax + 1):
-                n = self.lmax + 1 - m
-                query_m = query[:, offset : offset + 2 * n].view(B, 2, n, H, C)
-                key_m = key[:, offset : offset + 2 * n].view(B, 2, n, H, C)
-                offset += 2 * n
-                score = score + (
-                    query_m[:, 0] * key_m[:, 0] + query_m[:, 1] * key_m[:, 1]
-                ).sum(dim=(1, 3))
+        offset = n
+        for m in range(1, self.mmax + 1):
+            n = self.lmax + 1 - m
+            query_m = query[:, offset : offset + 2 * n].view(B, 2, n, H, C)
+            key_m = key[:, offset : offset + 2 * n].view(B, 2, n, H, C)
+            offset += 2 * n
+            phase = (m * radial_phase).view(B, 1, H, 1)
+            cos_phase = torch.cos(phase)
+            sin_phase = torch.sin(phase)
+            key_real = cos_phase * key_m[:, 0] - sin_phase * key_m[:, 1]
+            key_imag = sin_phase * key_m[:, 0] + cos_phase * key_m[:, 1]
+            score = score + (
+                query_m[:, 0] * key_real + query_m[:, 1] * key_imag
+            ).sum(dim=(1, 3))
 
-        if self.use_temperature:
-            temperature = self.temperature_min + (
-                self.temperature_max - self.temperature_min
-            ) * torch.sigmoid(self.temperature_logit)
-            return score * self.attention_scale * temperature + radial_bias
-
-        return score * self.attention_scale + radial_bias
+        temperature = self.temperature_min + (
+            self.temperature_max - self.temperature_min
+        ) * torch.sigmoid(self.temperature_logit)
+        return score * self.attention_scale * temperature + radial_bias
 
     def forward(
         self,
@@ -1023,13 +1070,39 @@ class uvSO2Convolution(torch.nn.Module):
 
         if self.use_asymmetric_contraction:
             coefs = self.nonlinearity.scalar_act(self.linear_coefs(m_ij).squeeze(-1))
-            m_ij_2 = self.linear_glu(m_ij)
-            m_ij = self.linear_up(m_ij)
-            gate = m_ij.narrow(1, 0, self.split_list[0])
-            m_ij = m_ij.narrow(1, self.split_list[0], self.split_list[1])
-            m_ij = (
-                m_ij + self.nonlinearity(m_ij, gate) + self.ece(m_ij, m_ij_2, coefs)
-            )  # x + x**2 + x**3 TODO, forget scale
+            packed = self.linear_up(m_ij.flatten(1))
+            fused = (
+                packed.is_cuda
+                and packed.dtype in (torch.float32, torch.float64)
+                and acceleration_enabled("eqx", kernel="conv")
+            )
+            if fused:
+                gate, scalar = LocalSplit.apply(
+                    packed, self.projection_slices, self._eqx_split_metadata
+                )
+            else:
+                gate, scalar = (
+                    packed.narrow(1, start, size)
+                    for start, size in self.projection_slices
+                )
+            if fused:
+                gate = self.nonlinearity.tensor_act(gate)
+                scalar = self.nonlinearity.scalar_act(scalar)
+                m_ij = local_product(
+                    self._eqx_update_metadata, packed, packed, gate, coefs, scalar
+                )
+                m_ij = m_ij.view(num_edges, self.split_list[1], self.edge_ace_hidden)
+            else:
+                packed = packed.view(
+                    num_edges,
+                    self.linear_up.irreps_out.dim // self.edge_ace_hidden,
+                    self.edge_ace_hidden,
+                )
+                m_ij = packed.index_select(1, self.feature_indices)
+                other = packed.index_select(1, self.product_indices)
+                m_ij = (
+                    m_ij + self.nonlinearity(m_ij, gate) + self.ece(m_ij, other, coefs)
+                )
         else:
             m_ij = self.linear_up(m_ij)
             gate = m_ij.narrow(1, 0, self.split_list[0])

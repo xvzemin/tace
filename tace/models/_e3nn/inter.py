@@ -373,16 +373,10 @@ class O2CgtpInteraction(O3CgtpInteraction):
 class UvSO2Interaction(O3CgtpInteraction):
     """
     An interaction module based on uvSO2Linear,
-    Edge Cluster Expansion and Radial Rotary Attention.
-
-    It achieves highest accuracy at the expanse of computational efficiency.
+    Edge Cluster Expansion and Radial Rotary Complex Attention.
 
     This interaction block add nonlinearity to the message.
     """
-
-    use_temperature = True
-    so2_linear_type = "w1"  # w1: O(3), w1_w1, w1_w2: SO(3)
-    use_radial_phase = True # False: O(3), True:  SO(3)
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
@@ -422,9 +416,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             num_channel=self.num_channel,
             num_radial_basis=self.num_radial_basis,
             num_head=self.num_head,
-            use_temperature=self.use_temperature,
             edge_ace_hidden=self.edge_ace_hidden,
-            so2_linear_type=self.so2_linear_type,
             gate_m0=False,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
@@ -434,7 +426,6 @@ class UvSO2Interaction(O3CgtpInteraction):
             ),
             scalar_act=get_scaled_activation(scalar_act),
             tensor_act=get_scaled_activation(tensor_act),
-            use_radial_phase=self.use_radial_phase,
         )
 
     def _linear_down_irreps_in(self) -> o3.Irreps:
