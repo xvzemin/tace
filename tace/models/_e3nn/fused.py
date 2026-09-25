@@ -10,8 +10,8 @@ from typing import Union
 import torch
 from e3nn import o3
 
-from eqx.conv import O2O3TensorProductConv, O3TensorProductConv
-from eqx.o2 import O3TensorProduct
+from eqx import conv as eqx_conv
+from eqx import o2
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -251,7 +251,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = O3TensorProductConv(self.tp, normalize=False)
+        self.eqx_tp = eqx_conv.O3TensorProductConv(self.tp, normalize=False)
         self.reshape_in = LayoutTransform(
             self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
         )
@@ -379,7 +379,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             l1l2=l1l2,
             e3nn_mode="uvu",
         )
-        self.tp = O3TensorProduct(
+        self.tp = o2.O3TensorProduct(
             self.irreps_in1,
             self.irreps_in2,
             self.irreps_out,
@@ -387,7 +387,7 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
         )
-        self.eqx_tp = O2O3TensorProductConv(self.tp, backend="cuda")
+        self.eqx_tp = eqx_conv.O2O3TensorProductConv(self.tp, backend="cuda")
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
             self.irreps_in1,

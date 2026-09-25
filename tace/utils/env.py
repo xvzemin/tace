@@ -15,7 +15,7 @@ ACCELERATION_ENV = {
 }
 
 # Internal switches for kernel comparisons; normal use follows TACE_USE_EQX.
-EQX_KERNELS = {"conv": True, "product": True}
+EQX_KERNELS = {"conv": True, "product": True, "linear": True}
 
 
 def set_env(cfg: Dict):

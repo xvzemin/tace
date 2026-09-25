@@ -9,7 +9,7 @@ from typing import Dict, List, Union
 import torch
 from e3nn import o3
 
-from eqx.o2 import WignerD
+from eqx import o2
 
 from ...dataset.quantity import PROPERTY
 from ...utils.env import get_tace_use_dens
@@ -178,7 +178,7 @@ class Representation(torch.nn.Module):
         if uses_o2_cgtp_interaction and self.use_so2 and mmax != lmax:
             raise ValueError("Mixing o2_cgtp with legacy so2 requires mmax == lmax.")
         if self.use_so2 or self.use_o2:
-            self.o2_angular_basis = WignerD(
+            self.o2_angular_basis = o2.WignerD(
                 max(Lmax, lmax)
                 if uses_o2_cgtp_interaction
                 else mmax

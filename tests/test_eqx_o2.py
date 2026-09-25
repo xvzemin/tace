@@ -72,7 +72,8 @@ import torch
 
 # Match both import failure and find_spec returning None for absent packages.
 sys.modules.update({name: None for name in ("triton", "torch_geometric", "torch_scatter")})
-from eqx import conv, o2
+from eqx import conv as eqx_conv
+from eqx import o2
 
 torch.set_default_dtype(torch.float64)
 torch.manual_seed(0)
@@ -107,7 +108,7 @@ for _ in range(2):
 assert "eqx.conv.o2_o3.cuda" not in sys.modules
 assert "eqx.kernels.cuda" not in sys.modules
 assert "tace" not in sys.modules
-accelerated = conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
+accelerated = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
 arguments = (
     x, weights, x.new_empty(0, tp.weight_numel), packed,
     x.new_ones(1, tp.num_harmonics), edges, 3,

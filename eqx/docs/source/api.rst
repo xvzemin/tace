@@ -70,6 +70,21 @@ features and back while retaining flattened ``ir_mul`` storage.
 .. autoclass:: eqx.o2.O3TensorProduct
    :members: forward, forward_local, forward_scatter
 
+Element-dependent spatial linear maps
+-------------------------------------
+
+``eqx.o3`` uses flattened ``mul_ir`` features. CUDA kernels read weights
+by element index instead of gathering a weight matrix for each node.
+Expert channels remain independent within each irrep. Weights are external,
+and biases are applied by the caller. The torch backend provides a reference
+implementation; CUDA supports float32, float64 and higher derivatives.
+
+.. autoclass:: eqx.o3.ElementLinear
+   :members: forward
+
+.. autoclass:: eqx.o3.MoEElementLinear
+   :members: forward
+
 Fused convolutions
 ------------------
 

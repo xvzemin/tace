@@ -2,8 +2,11 @@
 
 EquivariantX provides real O(2) representations, equivariant PyTorch
 operators, and transformations between global O(3) and local O(2) features.
-Irreps include time-reversal parity. Features use a flattened `ir_mul`
+Irreps include time-reversal parity. O(2) features use a flattened `ir_mul`
 layout, with the multiplicity axis last within each irrep entry.
+`eqx.o3` provides element-dependent and independent-expert linear maps in
+flattened `mul_ir` layout. Their CUDA kernels read element weights directly,
+without allocating per-node weight matrices, and support higher derivatives.
 
 The library is bundled with TACE and can also be installed independently.
 See the [tutorials](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html)
@@ -46,9 +49,16 @@ output = linear(features)
 implementations of specific convolution architectures. `kernels` contains
 shared geometry kernels and CUDA compilation support, independent of any
 convolution architecture.
+`o3` contains spatial linear operators, their PyTorch implementations and
+optional CUDA contractions. Its `ElementLinear` and `MoEElementLinear` use
+external weights and preserve the supplied map's path normalization.
 
 ```text
 eqx/
+├── o3/
+│   ├── linear.py                 # ElementLinear and MoEElementLinear
+│   ├── contraction.py            # Recursive transpose rule
+│   └── cuda.py                   # Indexed CUDA contractions
 ├── o2/
 │   ├── irreps.py                 # Representation metadata
 │   ├── linear.py                 # O(2) Linear
@@ -100,7 +110,7 @@ from another convolution implementation. A nonlinear gated convolution must
 differentiate its activations and cannot reuse the multilinear CGTP transpose
 rule unchanged.
 
-Use `from eqx.conv import O2O3TensorProductConv` and
+Use `from eqx import conv as eqx_conv` to access `eqx_conv.O2O3TensorProductConv` and
 `from eqx.kernels import wigner_D`. CUDA compilation remains lazy. File
 organization does not change instruction ordering, weights, normalization or
 derivative rules.

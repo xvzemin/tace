@@ -6,8 +6,8 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.conv import TACE, O2O3TensorProductConv, O3TensorProductConv
-from eqx.o2 import O3TensorProduct, WignerD
+from eqx import conv as eqx_conv
+from eqx import o2
 
 
 def test_cuda_cache_does_not_log_lock_creation(tmp_path, monkeypatch, caplog):
@@ -51,7 +51,7 @@ def test_ace_external_coefficients(device, num_nodes):
         o3.Linear(inp, irreps, internal_weights=False, shared_weights=False)
         for inp in (irreps, tp.irreps_out.simplify())
     ]
-    module = TACE([tp], linears).to(device=device, dtype=torch.float64)
+    module = eqx_conv.TACE([tp], linears).to(device=device, dtype=torch.float64)
     x = torch.randn(num_nodes, 16, device=device, dtype=torch.float64)[
         :, ::2
     ].requires_grad_()
@@ -129,8 +129,8 @@ def test_o3_cartesian_derivatives(
         internal_weights=False,
         shared_weights=False,
     ).to(device)
-    conv = O3TensorProductConv(tp, normalization=normalization).to(device)
-    reference = O3TensorProductConv(
+    conv = eqx_conv.O3TensorProductConv(tp, normalization=normalization).to(device)
+    reference = eqx_conv.O3TensorProductConv(
         tp, normalization=normalization, backend="torch"
     ).to(device)
     edges = torch.randint(4, (2, 9), device=device)
@@ -178,8 +178,10 @@ def test_o3_cartesian_compile_and_empty_graph(double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = O3TensorProductConv(tp, normalize=False).cuda()
-    reference = O3TensorProductConv(tp, normalize=False, backend="torch").cuda()
+    conv = eqx_conv.O3TensorProductConv(tp, normalize=False).cuda()
+    reference = eqx_conv.O3TensorProductConv(
+        tp, normalize=False, backend="torch"
+    ).cuda()
     compiled = torch.compile(conv, backend="aot_eager", fullgraph=True, dynamic=True)
     for edges_count in (1, 7, 0):
         edges = torch.randint(3, (2, edges_count), device="cuda")
@@ -207,7 +209,7 @@ def test_sparse_direction_rotations(source_degree, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     harmonic_degree = 5 if source_degree == 0 else 1
-    tp = O3TensorProduct(
+    tp = o2.O3TensorProduct(
         [(3, (source_degree, (-1) ** source_degree))],
         [(1, (harmonic_degree, (-1) ** harmonic_degree))],
         [(3, (5, (-1) ** (source_degree + harmonic_degree)))],
@@ -215,9 +217,9 @@ def test_sparse_direction_rotations(source_degree, double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = O2O3TensorProductConv(tp).cuda()
-    reference = O2O3TensorProductConv(tp, backend="torch").cuda()
-    frame = WignerD(5, 5).cuda()
+    conv = eqx_conv.O2O3TensorProductConv(tp).cuda()
+    reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+    frame = o2.WignerD(5, 5).cuda()
     axes = torch.eye(3, device="cuda")
     vectors = torch.cat(
         (axes, -axes, axes + 1e-8, -axes + 1e-8, torch.randn(3, 3, device="cuda"))
@@ -261,18 +263,18 @@ def test_convolution_backends_and_modes():
 
     # Exported graphs can resolve the operator before any frame is evaluated.
     assert torch.ops.eqx.quaternion_polynomial.default is not None
-    tp = O3TensorProduct("2x0e", "0e", "3x0e", [(0, 0, 0, "uvw", True)])
+    tp = o2.O3TensorProduct("2x0e", "0e", "3x0e", [(0, 0, 0, "uvw", True)])
     assert tp.convolution.instructions[0].connection_mode == "uvw"
     with pytest.raises(NotImplementedError, match="only 'uvu'"):
-        O2O3TensorProductConv(tp, backend="cuda")
+        eqx_conv.O2O3TensorProductConv(tp, backend="cuda")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
-        O2O3TensorProductConv(tp, backend="triton")
+        eqx_conv.O2O3TensorProductConv(tp, backend="triton")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
-        wigner_D(WignerD(0, 0), torch.randn(2, 3), backend="triton")
+        wigner_D(o2.WignerD(0, 0), torch.randn(2, 3), backend="triton")
     with pytest.raises(ValueError, match="method must be"):
-        WignerD(0, 0, method="unknown")
+        o2.WignerD(0, 0, method="unknown")
     with pytest.raises(ValueError, match="CUDA float32 or float64"):
-        WignerD(1, 1, method="quaternion")(torch.randn(2, 3))
+        o2.WignerD(1, 1, method="quaternion")(torch.randn(2, 3))
 
 
 def test_quaternion_coefficients():
@@ -317,8 +319,8 @@ def test_quaternion_wigner_frames(lmax):
         vectors = torch.cat((axes, -axes, axes + 1e-8, -axes + 1e-8))
         # Non-contiguous input, including directions on the chart boundaries.
         vectors = torch.stack((vectors, vectors), dim=-1)[..., 0].requires_grad_()
-        frame = WignerD(min(1, lmax), lmax).cuda()
-        reference = WignerD(min(1, lmax), lmax, method="recursive").cuda()
+        frame = o2.WignerD(min(1, lmax), lmax).cuda()
+        reference = o2.WignerD(min(1, lmax), lmax, method="recursive").cuda()
         for actual, expected in zip(frame(vectors), reference(vectors)):
             torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
         torch.testing.assert_close(
@@ -347,7 +349,7 @@ def test_quaternion_wigner_frames(lmax):
 def test_quaternion_wigner_compile_and_capture():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    frame = WignerD(3, 3).cuda()
+    frame = o2.WignerD(3, 3).cuda()
     function = torch.compile(
         frame.forward_packed, backend="aot_eager", fullgraph=True, dynamic=True
     )
@@ -383,7 +385,7 @@ def test_same_degree_output_rotations(channels, edge_count, merge_paths):
     torch.set_default_dtype(torch.float64)
     try:
         torch.manual_seed(37)
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"{channels}x0e+{channels}x1o+{channels}x2e",
             "0e+1o+2e",
             (
@@ -400,9 +402,9 @@ def test_same_degree_output_rotations(channels, edge_count, merge_paths):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        plan = O2O3TensorProductConv(tp).cuda()
-        reference = O2O3TensorProductConv(tp, backend="torch").cuda()
-        frame = WignerD(2, 2).cuda()
+        plan = eqx_conv.O2O3TensorProductConv(tp).cuda()
+        reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+        frame = o2.WignerD(2, 2).cuda()
         edges = torch.randint(4, (2, edge_count), device="cuda")
         x = torch.randn(4, tp.input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
@@ -599,14 +601,14 @@ def test_direction_coefficients_at_pole(degree, normalization):
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             "2x3e",
             o3.Irreps([(1, (degree, (-1) ** degree))]),
             o3.Irreps([(2, (3, (-1) ** degree))]),
             [(0, 0, 0, "uvu", True)],
             normalization=normalization,
         )
-        conv = O2O3TensorProductConv(tp)
+        conv = eqx_conv.O2O3TensorProductConv(tp)
         pole = torch.tensor([0.0, 1.0, 0.0])
 
         def harmonics(vectors):
@@ -668,7 +670,7 @@ def test_direction_derivatives(
     torch.set_default_dtype(torch.float64)
     try:
         torch.manual_seed(76)
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"{channels}x1o+{channels}x2e",
             "0e+1o+2e",
             "+".join(f"{channels}x{ir}" for ir in ("1o", "2e", "1e", "2o")),
@@ -682,9 +684,9 @@ def test_direction_derivatives(
             internal_weights=False,
             shared_weights=False,
         ).to(device)
-        plan = O2O3TensorProductConv(tp, backend=backend).to(device)
-        reference = O2O3TensorProductConv(tp, backend="torch").to(device)
-        frame = WignerD(2, 2).to(device)
+        plan = eqx_conv.O2O3TensorProductConv(tp, backend=backend).to(device)
+        reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").to(device)
+        frame = o2.WignerD(2, 2).to(device)
         edges = torch.tensor([[0, 1, 2, 0], [2, 2, 1, 1]], device=device)
 
         def rand(*shape):
@@ -734,12 +736,12 @@ def test_direction_zero_order_and_empty_edges(device, projected):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = (
-        O3TensorProduct("2x2e", "0e", "2x2e", [(0, 0, 0, "uvu", True)])
+        o2.O3TensorProduct("2x2e", "0e", "2x2e", [(0, 0, 0, "uvu", True)])
         .to(device)
         .double()
     )
-    plan = O2O3TensorProductConv(tp).to(device)
-    frame = WignerD(2, 2).to(device).double()
+    plan = eqx_conv.O2O3TensorProductConv(tp).to(device)
+    frame = o2.WignerD(2, 2).to(device).double()
     for size in (0, 4):
         x = torch.randn(3, 10, device=device, dtype=torch.float64, requires_grad=True)
         vectors = torch.randn(
@@ -792,7 +794,7 @@ def test_direction_node_reductions(monkeypatch, channels):
     torch.set_default_dtype(torch.float64)
     try:
         torch.manual_seed(82)
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"{channels}x1o+{channels}x2e",
             "0e+1o+2e",
             f"{channels}x1o+{channels}x2e+{channels}x1e",
@@ -801,10 +803,10 @@ def test_direction_node_reductions(monkeypatch, channels):
             shared_weights=False,
         ).cuda()
         module, reference = (
-            O2O3TensorProductConv(tp),
-            O2O3TensorProductConv(tp, backend="torch"),
+            eqx_conv.O2O3TensorProductConv(tp),
+            eqx_conv.O2O3TensorProductConv(tp, backend="torch"),
         )
-        frame = WignerD(2, 2).cuda()
+        frame = o2.WignerD(2, 2).cuda()
         edges = torch.randint(37, (2, 1031), device="cuda")
         # Include isolated nodes, complete rows, and split high-degree rows.
         edges[:, :257] = 0
@@ -860,12 +862,12 @@ def test_direction_compile_and_capture(edge_count):
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             "2x1o", "1o", "2x0e+2x1e", [(0, 0, i, "uvu", True) for i in range(2)]
         ).cuda()
-        plan = O2O3TensorProductConv(tp).cuda()
-        reference = O2O3TensorProductConv(tp, backend="torch").cuda()
-        frame = WignerD(1, 1).cuda()
+        plan = eqx_conv.O2O3TensorProductConv(tp).cuda()
+        reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+        frame = o2.WignerD(1, 1).cuda()
         x = torch.randn(3, 6, device="cuda", requires_grad=True)
         vectors = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
         radial = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
@@ -946,7 +948,7 @@ def test_direction_derivatives_on_axes(device):
     try:
         torch.manual_seed(42)
         instructions = [(0, 0, i, "uvu", True) for i in range(3)]
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             "1o",
             "1o",
             "0e+1e+2e",
@@ -962,7 +964,10 @@ def test_direction_derivatives_on_axes(device):
             internal_weights=False,
             shared_weights=False,
         ).to(device)
-        plan, frame = O2O3TensorProductConv(tp).to(device), WignerD(2, 2).to(device)
+        plan, frame = (
+            eqx_conv.O2O3TensorProductConv(tp).to(device),
+            o2.WignerD(2, 2).to(device),
+        )
         vectors = torch.tensor(
             [
                 [0.0, 1.0, 0.0],
@@ -1047,7 +1052,7 @@ def test_fused_wigner_derivatives(degree, dtype, method):
     torch.set_default_dtype(dtype)
     try:
         torch.manual_seed(27)
-        frame = WignerD(degree, degree).cuda()
+        frame = o2.WignerD(degree, degree).cuda()
         vectors = torch.randn(5, 3, device="cuda", requires_grad=True)
         actual = wigner_D(frame, vectors, method=method)
         expected = frame.forward_packed(vectors, method="recursive")
@@ -1095,9 +1100,13 @@ def test_cuda_streams_capture_compile(monkeypatch, row_size):
     from eqx.conv.o2_o3 import cuda
 
     monkeypatch.setattr(cuda, "ROW_SIZE", row_size)
-    tp = O3TensorProduct("2x0e", "0e", "2x0e", [(0, 0, 0, "uvu", True)]).cuda().double()
-    plan = O2O3TensorProductConv(tp).cuda().double()
-    reference = O2O3TensorProductConv(tp, backend="torch").cuda().double()
+    tp = (
+        o2.O3TensorProduct("2x0e", "0e", "2x0e", [(0, 0, 0, "uvu", True)])
+        .cuda()
+        .double()
+    )
+    plan = eqx_conv.O2O3TensorProductConv(tp).cuda().double()
+    reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda().double()
     x = torch.randn(4, 2, device="cuda", dtype=torch.float64)
     weights = torch.randn(1031, 2, device="cuda", dtype=torch.float64)
     projection = weights.new_empty(0, 2)
@@ -1161,7 +1170,7 @@ def test_streaming_derivatives(
     torch.set_default_dtype(dtype)
     try:
         channels = 17 if radial_channels == 33 else 2
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"{channels}x1o",
             "0e+1o+2e",
             "+".join(f"{channels}x{ir}" for ir in ("0e", "1e", "2e")),
@@ -1169,8 +1178,8 @@ def test_streaming_derivatives(
             shared_weights=False,
             internal_weights=False,
         ).to(device)
-        tp.convolution = O2O3TensorProductConv(tp, backend=backend).to(device)
-        frame = WignerD(2, 2).to(device)
+        tp.convolution = eqx_conv.O2O3TensorProductConv(tp, backend=backend).to(device)
+        frame = o2.WignerD(2, 2).to(device)
         generator = torch.Generator(device=device).manual_seed(42)
 
         def rand(*shape):
@@ -1242,7 +1251,7 @@ def test_streaming_mixed_paths_and_empty_edges(device, backend, dtype):
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
     try:
-        module = O3TensorProduct(
+        module = o2.O3TensorProduct(
             "3x0e+35x1o+2x1e",
             "0e+1o+2e",
             f"3x0e+35x0e+{2 if backend == 'cuda' else 19}x1e+35x2e+35x2e",
@@ -1256,8 +1265,10 @@ def test_streaming_mixed_paths_and_empty_edges(device, backend, dtype):
             internal_weights=True,
             shared_weights=True,
         ).to(device)
-        module.convolution = O2O3TensorProductConv(module, backend=backend).to(device)
-        frame = WignerD(3, 3).to(device)
+        module.convolution = eqx_conv.O2O3TensorProductConv(module, backend=backend).to(
+            device
+        )
+        frame = o2.WignerD(3, 3).to(device)
         features = torch.randn(3, module.input_dim, device=device, requires_grad=True)
         vectors = torch.randn(1, 3, device=device, requires_grad=True)
         edges = torch.tensor([[0, 1, 2, 1], [1, 2, 0, 0]], device=device)
@@ -1312,7 +1323,7 @@ def test_mixed_path_higher_derivatives(
         pytest.skip("CUDA is unavailable")
     with torch.random.fork_rng():
         torch.manual_seed(4)
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"{channels}x0e",
             "0e",
             f"{channels}x0e+{channels}x0e",
@@ -1320,7 +1331,7 @@ def test_mixed_path_higher_derivatives(
             internal_weights=False,
             shared_weights=False,
         ).to(device=device, dtype=dtype)
-        plan = O2O3TensorProductConv(
+        plan = eqx_conv.O2O3TensorProductConv(
             tp, backend="cuda" if device == "cuda" else "torch"
         ).to(device=device, dtype=dtype)
         edges = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
@@ -1504,7 +1515,7 @@ def test_streaming_finite_differences():
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             "1o",
             "1o",
             "0e+1e",
@@ -1513,7 +1524,7 @@ def test_streaming_finite_differences():
             shared_weights=False,
         )
         edges = torch.tensor([[0, 1], [1, 0]])
-        frame = WignerD(1, 1)
+        frame = o2.WignerD(1, 1)
         inputs = (
             torch.randn(2, 3, requires_grad=True),
             torch.randn(2, 3, requires_grad=True),
@@ -1543,7 +1554,7 @@ def test_streaming_high_degree(degree):
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"3x{degree}e",
             "1o",
             f"3x{degree}o",
@@ -1551,8 +1562,8 @@ def test_streaming_high_degree(degree):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        tp.convolution = O2O3TensorProductConv(tp, backend="cuda").cuda()
-        frame = WignerD(degree, degree).cuda()
+        tp.convolution = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").cuda()
+        frame = o2.WignerD(degree, degree).cuda()
         torch.manual_seed(71)
         x = torch.randn(3, tp.input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(5, 3, device="cuda", requires_grad=True)
@@ -1585,7 +1596,7 @@ def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
         torch.manual_seed(23)
-        tp = O3TensorProduct(
+        tp = o2.O3TensorProduct(
             f"17x{degree}e",
             "1o",
             "+".join(f"17x{l}o" for l in (degree - 1, degree, degree + 1)),
@@ -1593,8 +1604,8 @@ def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
             internal_weights=False,
             shared_weights=False,
         ).cuda()
-        tp.convolution = O2O3TensorProductConv(tp, backend="cuda").cuda()
-        frame = WignerD(degree + 1, degree + 1).cuda()
+        tp.convolution = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").cuda()
+        frame = o2.WignerD(degree + 1, degree + 1).cuda()
         x = torch.randn(7, tp.input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edges_count, 3, device="cuda", requires_grad=True)
         radial = torch.randn(edges_count, 129, device="cuda", requires_grad=True)
@@ -1699,7 +1710,7 @@ def test_values_and_recursive_derivatives(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = tensor_product(merge=merge, unweighted=unweighted).to(device)
-    conv = O3TensorProductConv(tp).to(device)
+    conv = eqx_conv.O3TensorProductConv(tp).to(device)
     edges = torch.randint(5, (2, 19), device=device)
     x = torch.randn(5, tp.irreps_in1.dim, device=device, requires_grad=True)
     attrs = torch.randn(
@@ -1745,7 +1756,7 @@ def test_cuda_degrees_and_channels(channels, dtype, double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = O3TensorProductConv(tp).cuda()
+    conv = eqx_conv.O3TensorProductConv(tp).cuda()
     edges = torch.randint(7, (2, 33), device="cuda")
     # Noncontiguous operands are accepted without changing their derivatives.
     x = torch.randn(tp.irreps_in1.dim, 7, device="cuda").T.requires_grad_()
@@ -1764,7 +1775,7 @@ def test_cuda_degrees_and_channels(channels, dtype, double_precision):
 
 def test_empty_and_unsupported(double_precision):
     tp = tensor_product()
-    conv = O3TensorProductConv(tp)
+    conv = eqx_conv.O3TensorProductConv(tp)
     for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
         inputs = [
             torch.randn(shape, device=device, requires_grad=True)
@@ -1782,9 +1793,9 @@ def test_empty_and_unsupported(double_precision):
         for value in torch.autograd.grad(result.sum(), inputs):
             assert not value.count_nonzero()
     with pytest.raises(ValueError, match="backend"):
-        O3TensorProductConv(tp, backend="triton")
+        eqx_conv.O3TensorProductConv(tp, backend="triton")
     with pytest.raises(NotImplementedError, match="uvu"):
-        O3TensorProductConv(o3.FullyConnectedTensorProduct("0e", "0e", "0e"))
+        eqx_conv.O3TensorProductConv(o3.FullyConnectedTensorProduct("0e", "0e", "0e"))
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -1836,7 +1847,7 @@ def test_compile_and_cuda_graph(double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = tensor_product().cuda()
-    conv = O3TensorProductConv(tp).cuda()
+    conv = eqx_conv.O3TensorProductConv(tp).cuda()
     compiled = torch.compile(conv, backend="aot_eager", fullgraph=True, dynamic=True)
     for count in (17, 23, 0):
         args = [
@@ -1910,7 +1921,7 @@ def test_o3_chunked_shared_gradients(
     # gradients without mistaking the tail for a shared operand.
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
     tp = tensor_product(channels, merge=True, unweighted=True).cuda()
-    conv = O3TensorProductConv(tp).cuda()
+    conv = eqx_conv.O3TensorProductConv(tp).cuda()
     edges = torch.randint(257, (2, 2051), device="cuda")
     inputs = [
         torch.randn(shape, device="cuda", requires_grad=True)
@@ -1941,7 +1952,7 @@ def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
     from eqx.conv.o3.codegen import angular_source
 
     tp = tensor_product()
-    conv = O3TensorProductConv(tp)
+    conv = eqx_conv.O3TensorProductConv(tp)
     for path in conv.paths:
         values = angular_source(
             path,
@@ -1975,7 +1986,7 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = O3TensorProductConv(tp)
+    conv = eqx_conv.O3TensorProductConv(tp)
     target = torch.arange(257, device="cuda").repeat_interleave(8)
     source = torch.randint(257, target.shape, device="cuda")
     edges = torch.stack((source, target))

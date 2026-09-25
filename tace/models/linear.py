@@ -10,7 +10,8 @@ import torch
 import torch.nn.functional as F
 from e3nn import o3
 
-from tace.utils.env import get_tace_use_matrix_weight
+from eqx import o3 as eqx_o3
+from tace.utils.env import acceleration_enabled, get_tace_use_matrix_weight
 
 
 def _lora_scaling(module: torch.nn.Module) -> float:
@@ -417,6 +418,7 @@ class e3nnElementLinear(torch.nn.Module):
             shared_weights=False,
         )
         weight_numel = self.linear.weight_numel
+        self.eqx_linear = eqx_o3.ElementLinear(self.linear)
         self._path_shapes = [tuple(ins.path_shape) for ins in self.linear.instructions]
 
         self._0e_muls = []
@@ -481,9 +483,7 @@ class e3nnElementLinear(torch.nn.Module):
                     [w.view(self.num_elements, -1) for w in self.weight], dim=-1
                 )
             bias = (
-                self.bias.view(self.num_elements, -1)
-                if self.bias is not None
-                else None
+                self.bias.view(self.num_elements, -1) if self.bias is not None else None
             )
         else:
             weight = self.weight
@@ -493,9 +493,10 @@ class e3nnElementLinear(torch.nn.Module):
 
         if node_type is None:
             node_type = attrs.argmax(dim=-1)
-        weight = weight[node_type]
-        # weight = torch.einsum("bz,zi->bi", y, self.weight)
-        out = self.linear(x, weight)
+        if x.is_cuda and acceleration_enabled("eqx", kernel="linear"):
+            out = self.eqx_linear(x, weight, node_type)
+        else:
+            out = self.linear(x, weight[node_type])
         if bias is not None:
             bias = torch.einsum("bz,zi->bi", attrs, bias)
             bias = bias.index_select(1, self._bias_index)
@@ -550,6 +551,7 @@ class e3nnMoEElementLinear(torch.nn.Module):
             shared_weights=False,
         )
         self._input_slices = list(self.irreps_in.slices())
+        self._output_slices = list(self.irreps_out.slices())
         self._input_dims = [ir.dim for _, ir in self.irreps_in]
         self._input_expert_muls = [mul // self.num_experts for mul, _ in self.irreps_in]
         self._output_dims = [ir.dim for _, ir in self.irreps_out]
@@ -561,6 +563,7 @@ class e3nnMoEElementLinear(torch.nn.Module):
             (ins.i_in, ins.i_out, float(ins.path_weight))
             for ins in self.linear.instructions
         ]
+        self.eqx_linear = eqx_o3.MoEElementLinear(self.linear, num_experts)
 
         if self.use_matrix_weight:
             self.weight = torch.nn.ParameterList(
@@ -622,6 +625,38 @@ class e3nnMoEElementLinear(torch.nn.Module):
     ) -> torch.Tensor:
         if node_type is None:
             node_type = attrs.argmax(dim=-1)
+        if x.is_cuda and acceleration_enabled("eqx", kernel="linear"):
+            if self.use_matrix_weight:
+                weight = torch.cat(
+                    [
+                        (
+                            w + _lora_path_delta(self, i) if has_lora(self) else w
+                        ).reshape(self.num_elements, self.num_experts, -1)
+                        for i, w in enumerate(self.weight)
+                    ],
+                    dim=-1,
+                )
+            else:
+                weight = self.weight
+                if has_lora(self):
+                    weight = weight + _flat_lora_delta(self)
+            out = self.eqx_linear(x, weight, node_type)
+            if self.bias is None:
+                return out
+            outputs = [
+                out[:, sl].reshape(x.shape[0], self.num_experts, mul, dim)
+                for sl, mul, dim in zip(
+                    self._output_slices,
+                    self._output_expert_muls,
+                    self._output_dims,
+                )
+            ]
+            bias = self.bias[node_type]
+            for out_idx, start, end in self._bias_out_indices:
+                outputs[out_idx] = outputs[out_idx] + bias[:, :, start:end].unsqueeze(
+                    -1
+                )
+            return torch.cat([output.flatten(1) for output in outputs], dim=-1)
         inputs = [
             x[:, tensor_slice].reshape(x.shape[0], self.num_experts, expert_mul, ir_dim)
             for tensor_slice, ir_dim, expert_mul in zip(

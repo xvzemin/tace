@@ -129,10 +129,15 @@ product and its coefficient contraction are fused; intermediate orders remain
 available for reuse. Recursive transposed kernels support force training and
 higher derivatives. Linear up/down, biases, dropout and residual connections
 keep their existing behavior. Bilinear/MoE products and products with active
-coefficient LoRA adapters retain their original execution. EQX takes precedence
+coefficient LoRA adapters retain their original tensor-product execution. EQX takes precedence
 over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
 
 The default ``eqx.o2`` operators use PyTorch without external kernels.
+``TACE_USE_EQX=1`` also accelerates element-dependent and MoE Linear maps on
+CUDA. Their kernels read element/expert weights directly, avoiding per-node
+weight matrices. Path normalization, biases and checkpoint parameters are
+unchanged. Forward, force training and higher derivatives are supported.
+
 ``TACE_USE_EQX=1`` selects generated CUDA convolutions on GPU and PyTorch on
 CPU. Install the ``eqx`` extra and provide a CUDA toolkit; set ``CUDA_HOME``
 if it is not discovered automatically.
