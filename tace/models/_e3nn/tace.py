@@ -328,6 +328,7 @@ class e3nnTACE(torch.nn.Module):
                     data["node_attrs"],
                     data["edge_index"],
                     self.atomic_numbers,
+                    node_type=graph.node_type,
                 )[num_atoms_arange]
                 if self.scale_zbl:
                     e_node = e_node + e_zbl_node
@@ -355,6 +356,7 @@ class e3nnTACE(torch.nn.Module):
                     ),
                     node_fidelity=node_fidelity,
                     node_attrs=data["node_attrs"],
+                    node_type=graph.node_type,
                 )[num_atoms_arange, node_fidelity]
             e_graph = scatter_sum(e_node, batch, dim=-1, dim_size=num_graphs)
             e_node = e_base_node + e_node

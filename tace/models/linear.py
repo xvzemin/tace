@@ -458,7 +458,12 @@ class e3nnElementLinear(torch.nn.Module):
         self.register_buffer("_bias_index", bias_index, persistent=False)
         self.register_buffer("_bias_mask", bias_mask, persistent=False)
 
-    def forward(self, x: torch.Tensor, attrs: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attrs: torch.Tensor,
+        node_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
 
         if self.use_matrix_weight:
             if has_lora(self):
@@ -486,7 +491,8 @@ class e3nnElementLinear(torch.nn.Module):
                 weight = weight + _flat_lora_delta(self)
             bias = self.bias
 
-        node_type = attrs.argmax(dim=-1)
+        if node_type is None:
+            node_type = attrs.argmax(dim=-1)
         weight = weight[node_type]
         # weight = torch.einsum("bz,zi->bi", y, self.weight)
         out = self.linear(x, weight)
@@ -608,8 +614,14 @@ class e3nnMoEElementLinear(torch.nn.Module):
             offset += size
         return weights
 
-    def forward(self, x: torch.Tensor, attrs: torch.Tensor) -> torch.Tensor:
-        node_type = attrs.argmax(dim=-1)
+    def forward(
+        self,
+        x: torch.Tensor,
+        attrs: torch.Tensor,
+        node_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if node_type is None:
+            node_type = attrs.argmax(dim=-1)
         inputs = [
             x[:, tensor_slice].reshape(x.shape[0], self.num_experts, expert_mul, ir_dim)
             for tensor_slice, ir_dim, expert_mul in zip(
@@ -640,7 +652,7 @@ class e3nnMoEElementLinear(torch.nn.Module):
                 )
 
         return torch.cat(
-            [output.reshape(output.shape[0], -1) for output in outputs],
+            [output.flatten(1) for output in outputs],
             dim=-1,
         )
 

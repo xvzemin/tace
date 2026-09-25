@@ -394,12 +394,22 @@ class Representation(torch.nn.Module):
 
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
 
+        node_attrs = data["node_attrs"]
+        node_type = graph.node_type
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        node_attrs_local = (
+            node_attrs[: graph.lmp_natoms[0]] if graph.lmp else node_attrs
+        )
+        node_type_local = node_type[: graph.lmp_natoms[0]] if graph.lmp else node_type
+
         # === edge initialize (radial) ===
         edge_radial_basis, edge_cutoff = self.radial_basis(
             graph.edge_length,
             data["node_attrs"],
             data["edge_index"],
             self.atomic_numbers,
+            node_type=node_type,
         )
 
         # === angular basis ===
@@ -441,6 +451,7 @@ class Representation(torch.nn.Module):
                 node_fidelity=(
                     graph.node_fidelity[:1] if graph.lmp else graph.node_fidelity
                 ),
+                node_type=node_type,
             )
 
         # === node initialize ===
@@ -481,8 +492,8 @@ class Representation(torch.nn.Module):
         for idx, (edge_update, inter, prod) in enumerate(
             zip(self.edge_updates, self.interactions, self.products)
         ):
-            node_attrs_total = data["node_attrs"]
-            node_attrs_slice = data["node_attrs"]
+            node_attrs_total = node_attrs
+            node_attrs_slice = node_attrs
             this_edge_feats = edge_update(
                 node_feats,
                 node_attrs_total,
@@ -494,12 +505,13 @@ class Representation(torch.nn.Module):
                 self.node_updates[idx](
                     magnetic_radial_basis,
                     node_attrs_total,
+                    node_type=node_type,
                 )
                 if self.node_updates is not None
                 else None
             )
             if graph.lmp and idx > 0:
-                node_attrs_slice = node_attrs_slice[: graph.lmp_natoms[0]]
+                node_attrs_slice = node_attrs_local
             node_feats, sc = inter(
                 node_feats,
                 node_attrs_total,
@@ -517,14 +529,20 @@ class Representation(torch.nn.Module):
                 graph,
             )
             if graph.lmp and idx == 0:
-                node_attrs_slice = node_attrs_slice[: graph.lmp_natoms[0]]
+                node_attrs_slice = node_attrs_local
             if self.uee_embeddings is not None:
                 node_feats = self.uee_embeddings[idx](
-                    node_feats, node_attrs_slice, data
+                    node_feats, node_attrs_slice, data, node_type=node_type_local
                 )
             if forces_embedding is not None and idx == 0:
                 node_feats = node_feats + forces_embedding
-            node_feats = prod(node_feats, node_attrs_slice, sc, data["batch"])
+            node_feats = prod(
+                node_feats,
+                node_attrs_slice,
+                sc,
+                data["batch"],
+                node_type=node_type_local,
+            )
             if idx == self.num_layers - 1 and hasattr(self, "final_norm"):
                 node_feats = self.final_reshape.inverse(
                     self.final_norm(self.final_reshape(node_feats))

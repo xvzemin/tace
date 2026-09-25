@@ -216,12 +216,15 @@ class CgtpACE(Product):
         node_attrs: torch.Tensor,
         sc: torch.Tensor,
         batch: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         if self.agnostic:
             for_coefs = {}
         else:
-            for_coefs = {"attrs": node_attrs}
+            if node_type is None:
+                node_type = node_attrs.argmax(dim=-1)
+            for_coefs = {"attrs": node_attrs, "node_type": node_type}
 
         node_feats, base_feats, ace_weights = self._linear_up_features(node_feats)
 

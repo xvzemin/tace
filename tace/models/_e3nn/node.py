@@ -168,8 +168,8 @@ class TensorNodeEmbedding(NodeEmbedding):
     ) -> torch.Tensor:
 
         base_node_feats = self.node_embedding(node_attrs)
-        source_feats = self.source_embedding(node_attrs[edge_index[0]])
-        target_feats = self.target_embedding(node_attrs[edge_index[1]])
+        source_feats = self.source_embedding(node_attrs)[edge_index[0]]
+        target_feats = self.target_embedding(node_attrs)[edge_index[1]]
         conv_weights = self.edge_info(
             torch.cat([edge_feats, source_feats, target_feats], dim=-1)
         )
@@ -245,8 +245,8 @@ class O2TensorNodeEmbedding(NodeEmbedding):
     ) -> torch.Tensor:
 
         base_node_feats = self.node_embedding(node_attrs)
-        source_feats = self.source_embedding(node_attrs[edge_index[0]])
-        target_feats = self.target_embedding(node_attrs[edge_index[1]])
+        source_feats = self.source_embedding(node_attrs)[edge_index[0]]
+        target_feats = self.target_embedding(node_attrs)[edge_index[1]]
         conv_weights = self.edge_info(
             torch.cat([edge_feats, source_feats, target_feats], dim=-1)
         )
@@ -281,6 +281,7 @@ class IdentityNodeUpdate(NodeUpdate):
         self,
         magnetic_radial_basis: torch.Tensor,
         node_attrs: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return magnetic_radial_basis, magnetic_radial_basis
 
@@ -301,8 +302,9 @@ class ElementNodeUpdate(NodeUpdate):
         self,
         magnetic_radial_basis: torch.Tensor,
         node_attrs: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        node_info = self.embedding(magnetic_radial_basis, node_attrs)
+        node_info = self.embedding(magnetic_radial_basis, node_attrs, node_type)
         return node_info, node_info
 
 
@@ -330,10 +332,11 @@ class Element2NodeUpdate(NodeUpdate):
         self,
         magnetic_radial_basis: torch.Tensor,
         node_attrs: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return (
-            self.source_embedding(magnetic_radial_basis, node_attrs),
-            self.target_embedding(magnetic_radial_basis, node_attrs),
+            self.source_embedding(magnetic_radial_basis, node_attrs, node_type),
+            self.target_embedding(magnetic_radial_basis, node_attrs, node_type),
         )
 
 

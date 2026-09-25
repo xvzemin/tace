@@ -45,6 +45,7 @@ class ScalarReadOut(ReadOut):
         linear: torch.nn.Module,
         x: torch.Tensor,
         node_attrs: Union[torch.Tensor, None],
+        node_type: Union[torch.Tensor, None],
     ) -> torch.Tensor:
         return linear(x)
 
@@ -73,14 +74,15 @@ class ScalarReadOut(ReadOut):
         x: torch.Tensor,
         node_fidelity: Union[torch.Tensor, None] = None,
         node_attrs: Union[torch.Tensor, None] = None,
+        node_type: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         if not self.last_layer:
-            return self._apply_linear(self.linear1[0], x, node_attrs)
+            return self._apply_linear(self.linear1[0], x, node_attrs, node_type)
         for idx, linear in enumerate(self.linear2[:-1]):
-            x = self.acts[idx](self._apply_linear(linear, x, node_attrs))
+            x = self.acts[idx](self._apply_linear(linear, x, node_attrs, node_type))
             if self.num_fidelities > 1:
                 x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
-        return self._apply_linear(self.linear2[-1], x, node_attrs)
+        return self._apply_linear(self.linear2[-1], x, node_attrs, node_type)
 
 
 class TensorReadOut(ReadOut):
@@ -96,6 +98,7 @@ class TensorReadOut(ReadOut):
         linear: torch.nn.Module,
         x: torch.Tensor,
         node_attrs: Union[torch.Tensor, None],
+        node_type: Union[torch.Tensor, None],
     ) -> torch.Tensor:
         return linear(x)
 
@@ -140,14 +143,15 @@ class TensorReadOut(ReadOut):
         x: torch.Tensor,
         node_fidelity: Union[torch.Tensor, None] = None,
         node_attrs: Union[torch.Tensor, None] = None,
+        node_type: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
         if not self.last_layer:
-            return self._apply_linear(self.linear1[0], x, node_attrs)
+            return self._apply_linear(self.linear1[0], x, node_attrs, node_type)
         for idx, linear in enumerate(self.linear2[:-1]):
-            x = self.acts[idx](self._apply_linear(linear, x, node_attrs))
+            x = self.acts[idx](self._apply_linear(linear, x, node_attrs, node_type))
             if self.num_fidelities > 1:
                 x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
-        return self._apply_linear(self.linear2[-1], x, node_attrs)
+        return self._apply_linear(self.linear2[-1], x, node_attrs, node_type)
 
 
 class ElementScalarReadOut(ScalarReadOut):
@@ -164,10 +168,11 @@ class ElementScalarReadOut(ScalarReadOut):
         linear: torch.nn.Module,
         x: torch.Tensor,
         node_attrs: Union[torch.Tensor, None],
+        node_type: Union[torch.Tensor, None],
     ) -> torch.Tensor:
         if node_attrs is None:
             raise ValueError("element readout requires node_attrs")
-        return linear(x, node_attrs)
+        return linear(x, node_attrs, node_type)
 
 
 class ElementTensorReadOut(TensorReadOut):
@@ -184,10 +189,11 @@ class ElementTensorReadOut(TensorReadOut):
         linear: torch.nn.Module,
         x: torch.Tensor,
         node_attrs: Union[torch.Tensor, None],
+        node_type: Union[torch.Tensor, None],
     ) -> torch.Tensor:
         if node_attrs is None:
             raise ValueError("element readout requires node_attrs")
-        return linear(x, node_attrs)
+        return linear(x, node_attrs, node_type)
 
 
 def build_scalar_readout(

@@ -137,10 +137,11 @@ class MagneticBasis(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         node_fidelity: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        magnetic_scale = self.magnetic_scale[
-            node_fidelity, node_attrs.argmax(dim=-1)
-        ].unsqueeze(-1)
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        magnetic_scale = self.magnetic_scale[node_fidelity, node_type].unsqueeze(-1)
         scaled_magmoms = initial_noncollinear_magmoms / magnetic_scale
         squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
         radial_coordinate = 1.0 - 2.0 * torch.clamp(

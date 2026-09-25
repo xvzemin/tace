@@ -223,6 +223,9 @@ class O3CgtpInteraction(Interaction):
         lmp_data = graph.lmp_data
         lmp_natoms = graph.lmp_natoms
         nlocal = lmp_natoms[0] if lmp_data is not None else None
+        node_type = graph.node_type
+        if node_type is not None:
+            node_type = node_type[: node_attrs_slice.size(0)]
 
         density = None
         resBB = None
@@ -231,13 +234,13 @@ class O3CgtpInteraction(Interaction):
 
         if hasattr(self, "resnetBB"):
             if self.resnet_linear_type == "aware":
-                resBB = self.resnetBB(node_feats, node_attrs_slice)
+                resBB = self.resnetBB(node_feats, node_attrs_slice, node_type)
             else:
                 resBB = self.resnetBB(node_feats)
 
         if hasattr(self, "resnetBA"):
             if self.resnet_linear_type == "aware":
-                resBA = self.resnetBA(node_feats, node_attrs_slice)
+                resBA = self.resnetBA(node_feats, node_attrs_slice, node_type)
             else:
                 resBA = self.resnetBA(node_feats)
 
@@ -289,7 +292,7 @@ class O3CgtpInteraction(Interaction):
 
         if hasattr(self, "resnetAB"):
             if self.resnet_linear_type == "aware":
-                resAB = self.resnetAB(m_i, node_attrs_slice)
+                resAB = self.resnetAB(m_i, node_attrs_slice, node_type)
             else:
                 resAB = self.resnetAB(m_i)
 

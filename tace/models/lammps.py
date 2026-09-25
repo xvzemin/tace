@@ -154,3 +154,4 @@ class Graph(NamedTuple):
     lattice: torch.Tensor
     node_fidelity: torch.Tensor
     num_atoms_arange: torch.Tensor
+    node_type: Union[torch.Tensor, None] = None

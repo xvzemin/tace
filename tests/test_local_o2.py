@@ -33,6 +33,46 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("num_edges", [0, 8])
+def test_element_edge_update_embeds_nodes_before_gather(reverse, num_edges):
+    from tace.models._e3nn.edge import Element2EdgeUpdate, ElementEdgeUpdate
+
+    cls = Element2EdgeUpdate if reverse else ElementEdgeUpdate
+    module = cls(
+        layer=0,
+        num_layers=2,
+        num_elements=3,
+        num_radial_basis=4,
+        num_channel=4,
+        edge_embedding_channel=4,
+        bias=True,
+    ).double()
+    attrs = torch.randn(5, 3, dtype=DTYPE, requires_grad=True)
+    edges = torch.randint(5, (2, num_edges))
+    feats = torch.randn(num_edges, 4, dtype=DTYPE, requires_grad=True)
+    source = module.source_embedding(attrs[edges[0]])
+    target = module.target_embedding(attrs[edges[1]])
+    expected = torch.cat(
+        (feats, target, source) if reverse else (feats, source, target), -1
+    )
+    sizes = []
+    hook = module.source_embedding.register_forward_pre_hook(
+        lambda module, inputs: sizes.append(inputs[0].size(0))
+    )
+    actual = module(None, attrs, feats, edges, None)
+    hook.remove()
+    assert sizes == [attrs.size(0)]
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    inputs = (attrs, feats, *module.parameters())
+    gradients = [
+        torch.autograd.grad(y.square().sum(), inputs, retain_graph=True)
+        for y in (actual, expected)
+    ]
+    for actual_grad, expected_grad in zip(*gradients):
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-12, atol=1e-12)
+
+
 @pytest.mark.parametrize("num_graphs", [1, 2])
 def test_periodic_graph_derivatives(num_graphs):
     from tace.models.adapter import TensorModel
@@ -61,6 +101,7 @@ def test_periodic_graph_derivatives(num_graphs):
     )
     model.get_target_property.return_value = ["energy", "forces", "stress"]
     graph = TensorModel.prepare_graph(model, data)
+    torch.testing.assert_close(graph.node_type, data["node_attrs"].argmax(-1))
     source, target = edges
     reference = (
         data["positions"][target]

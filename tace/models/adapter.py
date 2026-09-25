@@ -369,6 +369,7 @@ class TensorModel(torch.nn.Module):
             lattice=lattice,
             node_fidelity=node_fidelity,
             num_atoms_arange=num_atoms_arange,
+            node_type=data["node_attrs"].argmax(dim=-1),
         )
 
     def get_fidelity_idx(self) -> int:

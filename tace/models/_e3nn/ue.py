@@ -125,6 +125,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
         node_feats: torch.Tensor,
         node_attrs: torch.Tensor,
         data: dict[str, torch.Tensor],
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         node_feats = self.linear(node_feats)
@@ -138,7 +139,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
                 attr = attr[batch]
             if PROPERTY[p]["rank"] == 0:
                 attr = attr.unsqueeze(-1)
-            uee_feats = e_linear(attr, node_attrs)
+            uee_feats = e_linear(attr, node_attrs, node_type)
             node_feats = node_feats + uee_feats
 
         return node_feats

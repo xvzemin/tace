@@ -9,6 +9,43 @@ from e3nn import o3
 from tace.models._e3nn.fused import uuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
 from tace.models._e3nn.prod import CgtpACE
+from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
+
+
+@pytest.mark.parametrize("moe", [False, True])
+@pytest.mark.parametrize("matrix_weight", ["0", "1"])
+@pytest.mark.parametrize("num_nodes", [0, 5])
+def test_precomputed_element_indices(moe, matrix_weight, num_nodes):
+    """Reuse element indices without changing soft-attribute bias or gradients."""
+    cls = e3nnMoEElementLinear if moe else e3nnElementLinear
+    module = cls(
+        "4x0e+4x1o",
+        "6x0e+2x1o",
+        num_elements=3,
+        bias=True,
+        use_matrix_weight=matrix_weight,
+        **({"num_experts": 2} if moe else {}),
+    )
+    with torch.no_grad():
+        module.bias.normal_()
+    x = torch.randn(num_nodes, 16, requires_grad=True)
+    attrs = torch.rand(num_nodes, 3, requires_grad=True)
+    node_type = attrs.argmax(-1)
+    expected = module(x, attrs)
+    actual = module(x, attrs, node_type)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    inputs = (x, attrs, *module.parameters())
+    derivatives = [
+        torch.autograd.grad(
+            y.square().sum(), inputs, retain_graph=True, allow_unused=True
+        )
+        for y in (actual, expected)
+    ]
+    for actual_grad, expected_grad in zip(*derivatives):
+        if expected_grad is None:
+            assert actual_grad is None
+        else:
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
 
 
 @pytest.fixture(autouse=True)

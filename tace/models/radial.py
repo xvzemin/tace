@@ -665,12 +665,13 @@ class AgnesiTransform(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source = edge_index[0]
         target = edge_index[1]
-        node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
-            1
-        )
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
         r_0: torch.Tensor = 0.5 * (self.covalent_radii[Z_u] + self.covalent_radii[Z_v])
@@ -717,12 +718,13 @@ class SoftTransform(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source = edge_index[0]
         target = edge_index[1]
-        node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
-            -1
-        )
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
         r_0 = (self.covalent_radii[Z_u] + self.covalent_radii[Z_v]) / 4
@@ -791,12 +793,13 @@ class ZBLBasis(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source = edge_index[0]
         target = edge_index[1]
-        node_atomic_numbers = atomic_numbers[torch.argmax(node_attrs, dim=1)].unsqueeze(
-            -1
-        )
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
         a = (
@@ -911,11 +914,12 @@ class RadialBasis(torch.nn.Module):
         node_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         cutoff = self.cutoff_fn(edge_length)
         if self.use_distance_transform:
             edge_length = self.distance_transform(
-                edge_length, node_attrs, edge_index, atomic_numbers
+                edge_length, node_attrs, edge_index, atomic_numbers, node_type
             )
 
         radial = self.radial_fn(edge_length, node_attrs, edge_index)
