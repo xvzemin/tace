@@ -9,7 +9,9 @@ from .program import decode
 
 
 @lru_cache(maxsize=128)
-def source(dtype, metadata, mode="edge", heads=0, cutoff=4, eps=0.0):
+def source(
+    dtype, metadata, mode="edge", heads=0, cutoff=4, eps=0.0, channels=0, splits=1
+):
     """Generate a fused edge program or receiver-wise online normalization.
 
     Large parameter arrays and their outer-product adjoints are read or written
@@ -28,6 +30,11 @@ def source(dtype, metadata, mode="edge", heads=0, cutoff=4, eps=0.0):
     for i in roots:
         visit(i)
     uses = Counter(arg for i in live for arg in nodes[i][2])
+    dependent = []
+    for op, _, args, data in nodes:
+        dependent.append(
+            data[1] != "shared" if op == "input" else any(dependent[j] for j in args)
+        )
     stored = {
         i
         for i in live
@@ -52,6 +59,9 @@ def source(dtype, metadata, mode="edge", heads=0, cutoff=4, eps=0.0):
             )
         )
         and nodes[i][1] <= 16384
+        # Scaled/transposed parameter matrices can be read directly. Copying
+        # them into each edge's workspace dominates wide derivative programs.
+        and (dependent[i] or nodes[i][1] <= 256)
     }
     order = sorted(stored)
     position = {i: k for k, i in enumerate(order)}
@@ -202,37 +212,92 @@ def source(dtype, metadata, mode="edge", heads=0, cutoff=4, eps=0.0):
         methods.append(
             f"__device__ __forceinline__ scalar v{i}(int i) const {{ {body} }}"
         )
-    stages = "\n".join(
-        f"for(int i=threadIdx.x;i<{nodes[j][1]};i+=blockDim.x) state.buffer[{offsets[j]}+i]=state.r{j}(i); __syncthreads();"
-        for j in order
-    )
+    stages = []
+    for j in order:
+        op, size, args, data = nodes[j]
+        if (
+            op == "matmul"
+            and nodes[args[1]][0] == "transpose"
+            and not dependent[args[1]]
+            and data[1] >= 64
+        ):
+            # Adjoint channel maps read transposed weights. Reduce each dot
+            # product across a warp so neighboring lanes read adjacent weights.
+            _, inner, columns = data
+            stages.append(f"""
+            for(int i=threadIdx.x/32;i<{size};i+=blockDim.x/32) {{
+              scalar sum=0;
+              for(int k=threadIdx.x%32;k<{inner};k+=32)
+                sum+=state.v{args[0]}((i/{columns})*{inner}+k)*state.v{args[1]}(k*{columns}+i%{columns});
+              for(int stride=16;stride;stride/=2) sum+=__shfl_down_sync(0xffffffffu,sum,stride);
+              if(threadIdx.x%32==0) state.buffer[{offsets[j]}+i]=sum;
+            }}
+            __syncthreads();""")
+        else:
+            stages.append(
+                f"for(int i=threadIdx.x;i<{size};i+=blockDim.x) state.buffer[{offsets[j]}+i]=state.r{j}(i); __syncthreads();"
+            )
+    stages = "\n".join(stages)
     pointers = ", ".join(f"const scalar* p{i}" for i in range(slots))
     initializer = ",".join(f"p{i}" for i in range(slots))
     fields = " ".join(f"const scalar* p{i};" for i in range(slots))
-    if mode == "stats":
-        score = roots[0]
+    if mode == "online":
+        score, value = roots
+        width = nodes[value][1]
+        output_offset = capacity
+        capacity += width
+        denominator = (
+            "denominator[h]" if splits > 1 else f"(denominator[h]+scalar({eps:.17g}))"
+        )
+        normalized = (
+            "accum[i]"
+            if splits > 1
+            else f"accum[i]/(denominator[h]+scalar({eps:.17g}))"
+        )
+        maximum = (
+            "maximum[h]"
+            if splits > 1
+            else "(maximum[h]==-scalar(1.0/0.0)?scalar(0):maximum[h])"
+        )
         body = f"""
-        __shared__ scalar maximum[{heads}], denominator[{heads}];
-        for(long long node=blockIdx.x;node<count;node+=gridDim.x) {{
+        __shared__ scalar maximum[{heads}], denominator[{heads}], correction[{heads}], weight[{heads}];
+        scalar* accum=buffer+{output_offset};
+        for(long long task=blockIdx.x;task<count;task+=gridDim.x) {{
+          long long node=task/{splits}, part=task%{splits};
           for(int h=threadIdx.x;h<{heads};h+=blockDim.x) {{ maximum[h]=-scalar(1.0/0.0); denominator[h]=0; }}
+          for(int i=threadIdx.x;i<{width};i+=blockDim.x) accum[i]=0;
           __syncthreads();
-          for(long long j=ptr[node];j<ptr[node+1];++j) {{
+          long long degree=ptr[node+1]-ptr[node];
+          long long begin=ptr[node]+degree*part/{splits}, end=ptr[node]+degree*(part+1)/{splits};
+          for(long long j=begin;j<end;++j) {{
             long long edge=order[j]; State state{{{initializer}, buffer, edge, source[edge], node}};
             {stages}
             for(int h=threadIdx.x;h<{heads};h+=blockDim.x) {{
               scalar score=state.v{score}(h), next=fmax(maximum[h],score);
-              denominator[h]=denominator[h]*exp(maximum[h]-next)+exp(score-next)*p{cutoff}[edge];
+              correction[h]=exp(maximum[h]-next);
+              scalar c=p{cutoff}[edge], exponential=exp(score-next);
+              denominator[h]=denominator[h]*correction[h]+exponential*c;
+              weight[h]=exponential*c*c;
               maximum[h]=next;
             }}
             __syncthreads();
+            for(int i=threadIdx.x;i<{width};i+=blockDim.x) {{
+              int h=(i%{channels})/{channels // heads};
+              accum[i]=correction[h]*accum[i]+weight[h]*state.v{value}(i);
+            }}
+            __syncthreads();
+          }}
+          for(int i=threadIdx.x;i<{width};i+=blockDim.x) {{
+            int h=(i%{channels})/{channels // heads};
+            out0[task*{width}+i]={normalized};
           }}
           for(int h=threadIdx.x;h<{heads};h+=blockDim.x) {{
-            out0[node*{heads}+h]=denominator[h]+scalar({eps:.17g});
-            out1[node*{heads}+h]=maximum[h]==-scalar(1.0/0.0)?scalar(0):maximum[h];
+            out1[task*{heads}+h]={denominator};
+            out2[task*{heads}+h]={maximum};
           }}
           __syncthreads();
         }}"""
-        count_outputs = 2
+        count_outputs = 3
     else:
         destinations = sorted(set(slot for _, slot, _ in outputs))
         writes = []
@@ -289,6 +354,7 @@ def launch(
     *,
     mode="edge",
     heads=0,
+    channels=0,
     eps=0.0,
 ):
     """Launch a native program with shared or bounded overflow workspace."""
@@ -304,33 +370,67 @@ def launch(
         or target_index.device != inputs[0].device
     ):
         raise ValueError("Edge indices and features must be on the same device.")
-    count = inputs[0].shape[0] if mode == "stats" else source_index.numel()
+    online = mode == "online"
+    count = inputs[0].shape[0] if online else source_index.numel()
     if not count:
         return
-    code, storage, slots = source(inputs[0].dtype, metadata, mode, heads, 4, eps)
+    processors = torch.cuda.get_device_properties(
+        inputs[0].device
+    ).multi_processor_count
+    splits = 1
+    if online:
+        splits = min(
+            8,
+            max(1, (4 * processors + count - 1) // count),
+            max(1, source_index.numel() // (16 * count)),
+        )
+    code, storage, slots = source(
+        inputs[0].dtype, metadata, mode, heads, 4, eps, channels, splits
+    )
     compiled = kernels([code], inputs[0].device)
     bytes_per_block = storage * inputs[0].element_size()
     shared = (
-        bytes_per_block
-        + (2 * heads * inputs[0].element_size() if mode == "stats" else 0)
+        bytes_per_block + (4 * heads * inputs[0].element_size() if online else 0)
         <= 49152
     )
-    blocks = count if shared else min(count, 32)
+    tasks = count * splits
+    threads = 256 if storage >= 8192 else 128
+    # Overflow storage remains bounded by the device, not the edge count.
+    # Give every SM work instead of serializing wide programs onto 32 blocks.
+    blocks = tasks if shared else min(tasks, 2 * processors)
     workspace = None if shared else inputs[0].new_empty((blocks, storage))
     order = ptr = None
-    if mode == "stats":
+    if online:
         order = prepare_graph(source_index, target_index, 1)
         counts = target_index.new_zeros(count).index_add(
             0, target_index, torch.ones_like(target_index)
         )
         ptr = torch.cat((target_index.new_zeros(1), counts.cumsum(0)))
+    partials = outputs
+    if splits > 1:
+        partials = [
+            value.new_empty((count, splits, *value.shape[1:])) for value in outputs
+        ]
     arguments = [x.data_ptr() for x in inputs[:slots]]
     arguments += [
         x.data_ptr() if x is not None else 0
         for x in (source_index, target_index, order, ptr, workspace)
     ]
-    arguments += [x.data_ptr() for x in outputs] + [count]
+    arguments += [x.data_ptr() for x in partials] + [tasks]
     runtime().launch(
-        [(compiled[code], arguments, blocks, 1, 128, bytes_per_block if shared else 0)],
+        [
+            (
+                compiled[code],
+                arguments,
+                blocks,
+                1,
+                threads,
+                bytes_per_block if shared else 0,
+            )
+        ],
         torch.cuda.current_stream(inputs[0].device).cuda_stream,
     )
+    if splits > 1:
+        from ...attention import merge_attention
+
+        merge_attention(*partials, channels, eps, outputs)

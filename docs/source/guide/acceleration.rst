@@ -193,14 +193,17 @@ Earlier order-wise checkpoint weights are converted during ``load_state_dict``;
 no separate SO(2) implementation is required.
 ``TACE_USE_EQX=1`` also selects native CUDA fusion for attention-enabled
 ``UvSO2Interaction`` with SiLU, sigmoid, tanh or identity activations, including
-their scaled variants. A receiver-wise pass computes online softmax statistics.
-A second pass fuses feature gathering, rotations, the final radial projection,
-local linear maps, gates, optional edge products, rotary scores and aggregation.
+their scaled variants. A receiver-wise pass fuses feature gathering, rotations,
+the final radial projection, local linear maps, gates, optional edge products
+and rotary scores. Online softmax accumulates the denominator and weighted
+message together, evaluating each edge once. Split neighborhoods merge partial
+statistics and messages without repeating edge computations.
 Both existing cutoff factors and all checkpoint parameters are preserved.
 Other activations retain the PyTorch implementation.
 
-Only node outputs, denominators and detached maxima are retained between
-passes. Local intermediates use reusable shared memory; oversized derivative
+The operation saves its inputs and node outputs, denominators and detached
+maxima for backward, without retaining internal edge activations.
+Local intermediates use reusable shared memory; oversized derivative
 programs use a bounded overflow workspace rather than full-edge activations.
 The analytic attention adjoint and subsequent derivatives generate native CUDA
 expressions, including derivatives needed by force training. This path does

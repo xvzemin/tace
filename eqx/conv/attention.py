@@ -9,6 +9,65 @@ from ..kernels.recompute import Replay
 from .graph import prepare_graph
 
 
+@lru_cache(maxsize=32)
+def merge_source(dtype, width, channels, heads, splits, eps):
+    scalar = "double" if dtype == torch.float64 else "float"
+    return f"""
+    using scalar={scalar};
+    extern "C" __global__ void run(const scalar* values,const scalar* denominators,
+        const scalar* maxima,scalar* out,scalar* denominator,scalar* maximum) {{
+      long long node=blockIdx.x;
+      __shared__ scalar factors[{splits * heads}], totals[{heads}];
+      for(int h=threadIdx.x;h<{heads};h+=blockDim.x) {{
+        scalar m=-scalar(1.0/0.0);
+        for(int s=0;s<{splits};++s) m=fmax(m,maxima[(node*{splits}+s)*{heads}+h]);
+        if(m==-scalar(1.0/0.0)) m=0;
+        scalar z=0;
+        for(int s=0;s<{splits};++s) {{
+          long long index=(node*{splits}+s)*{heads}+h;
+          scalar a=exp(maxima[index]-m);
+          factors[s*{heads}+h]=a;
+          z+=a*denominators[index];
+        }}
+        totals[h]=z+scalar({eps:.17g});
+        denominator[node*{heads}+h]=totals[h];
+        maximum[node*{heads}+h]=m;
+      }}
+      __syncthreads();
+      for(int i=threadIdx.x;i<{width};i+=blockDim.x) {{
+        int h=(i%{channels})/{channels // heads};
+        scalar value=0;
+        for(int s=0;s<{splits};++s)
+          value+=factors[s*{heads}+h]*values[(node*{splits}+s)*{width}+i];
+        out[node*{width}+i]=value/totals[h];
+      }}
+    }}"""
+
+
+def merge_attention(values, denominators, maxima, channels, eps, outputs):
+    """Merge unnormalized online attention tiles inside a native operation.
+
+    Values have shape ``(nodes, splits, ..., channels)``; statistics have
+    shape ``(nodes, splits, heads)``. Heads partition the channel dimension.
+    Empty tiles use zero values/denominators and negative-infinite maxima.
+    Epsilon is added only after merging, preserving weighted-softmax semantics.
+    Derivatives are supplied by the enclosing registered operation.
+    """
+    from ..kernels.cuda import kernels, runtime
+
+    nodes, splits, heads = maxima.shape
+    if not nodes:
+        return
+    width = values.numel() // (nodes * splits)
+    code = merge_source(values.dtype, width, channels, heads, splits, eps)
+    compiled = kernels([code], values.device)
+    arguments = [value.data_ptr() for value in (values, denominators, maxima, *outputs)]
+    runtime().launch(
+        [(compiled[code], arguments, nodes, 1, 128, 0)],
+        torch.cuda.current_stream(values.device).cuda_stream,
+    )
+
+
 def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=True):
     """Normalize ``(edges, heads)`` scores over incoming edges of each node.
 

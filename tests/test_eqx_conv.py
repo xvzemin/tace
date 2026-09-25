@@ -492,7 +492,7 @@ def test_streaming_graph_attention_weights(device, nodes):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("edges", [0, 7, 65])
+@pytest.mark.parametrize("edges", [0, 7, 65, 257])
 def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -547,6 +547,11 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
             (torch.arange(edges, device=device) + 1) % nodes,
         )
     )
+    if edges == 257:
+        # Exercise split neighborhoods, empty receivers and zero edge weights.
+        index[1] = (torch.arange(edges, device=device) % 5 == 0).long()
+        with torch.no_grad():
+            cutoff[::7] = 0
     actual = stream(
         module,
         x,
@@ -605,6 +610,49 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-10)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_online_attention_merge(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from eqx.conv.attention import merge_attention
+
+    torch.manual_seed(6)
+    scores = torch.randn(3, 5, 7, 2, device="cuda", dtype=dtype) * 20 + 1000
+    cutoff = torch.rand(3, 5, 7, 1, device="cuda", dtype=dtype)
+    value = torch.randn(3, 5, 7, 4, 2, 3, device="cuda", dtype=dtype)
+    scores[0] = -torch.inf
+    scores[1, 0] = -torch.inf
+    cutoff[2, 1:] = 0
+    maximum = scores.amax(2)
+    shift = torch.where(torch.isfinite(maximum), maximum, 0)
+    exponential = (scores - shift[:, :, None]).exp()
+    denominator = (exponential * cutoff).sum(2)
+    partial = (
+        exponential[:, :, :, None, :, None]
+        * cutoff[:, :, :, None, :, None].square()
+        * value
+    ).sum(2)
+    eps = 0.03
+    outputs = [
+        value.new_empty(3, 4, 6),
+        value.new_empty(3, 2),
+        value.new_empty(3, 2),
+    ]
+    merge_attention(partial.reshape(3, 5, 4, 6), denominator, maximum, 6, eps, outputs)
+    global_maximum = scores.amax((1, 2))
+    global_maximum = torch.where(torch.isfinite(global_maximum), global_maximum, 0)
+    exponential = (scores - global_maximum[:, None, None]).exp()
+    total = (exponential * cutoff).sum((1, 2)) + eps
+    expected = (
+        exponential[:, :, :, None, :, None]
+        * cutoff[:, :, :, None, :, None].square()
+        * value
+    ).sum((1, 2))
+    expected = (expected / total[:, None, :, None]).reshape(3, 4, 6)
+    for actual, reference in zip(outputs, (expected, total, global_maximum)):
+        torch.testing.assert_close(actual, reference)
+
+
 @pytest.mark.parametrize("ece", [False, True])
 @pytest.mark.parametrize("gate_m0", [False, True])
 @pytest.mark.parametrize("mmax", [0, 2])
@@ -623,11 +671,12 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
 
     monkeypatch.setattr(recompute, "replay", no_replay)
     torch.manual_seed(20)
-    irreps = o3.Irreps("2x0e+2x1o+2x2e")
+    channels = 16 if ece and mmax == 2 and dtype == torch.float64 else 2
+    irreps = o3.Irreps([(channels, (l, (-1) ** l)) for l in range(3)])
     module = Convolution(
         mmax,
         2,
-        2,
+        channels,
         1,
         2,
         3,

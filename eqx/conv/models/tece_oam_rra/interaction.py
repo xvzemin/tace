@@ -4,7 +4,7 @@ from functools import lru_cache
 
 import torch
 
-from .program import Program, build, decode, first_adjoint, next_adjoint
+from .program import build, decode, first_adjoint, next_adjoint
 
 
 def stream(
@@ -21,10 +21,10 @@ def stream(
 ):
     """Fuse the complete edge update without graph replay or Python callbacks.
 
-    A receiver-wise pass computes the attention denominator and detached
-    maximum. A second native pass recomputes scores and produces messages in
-    block-local storage. No full-edge convolution weights or local features
-    are allocated. Parameters are ordinary tensor inputs to registered ops.
+    Receiver-wise tiles compute scores and messages together, accumulating
+    the shifted denominator and weighted output online. Independent tiles
+    are merged without evaluating edges again. No full-edge convolution
+    weights or local features are allocated.
     """
     if bias is None:
         bias = projection.new_zeros(projection.shape[1])
@@ -73,24 +73,8 @@ def base_program(metadata, inputs):
 
 @lru_cache(maxsize=64)
 def forward_program(base):
-    nodes, score, value, specs, heads, channels, _ = base
-    program = Program(nodes)
-    denominator = program.input(len(specs), "target", heads)
-    maximum = program.input(len(specs) + 1, "target", heads)
-    cutoff = program.gather(program.input(4, "edge", 1), (0,) * heads)
-    exp = program.unary("exp", program.binary("add", score, program.scale(maximum, -1)))
-    alpha = program.binary(
-        "mul",
-        program.binary("mul", exp, program.binary("mul", cutoff, cutoff)),
-        program.unary("reciprocal", denominator),
-    )
-    indices = tuple(
-        c // (channels // heads)
-        for _ in range(program.size(value) // channels)
-        for c in range(channels)
-    )
-    result = program.binary("mul", value, program.gather(alpha, indices))
-    return repr((tuple(program.nodes), ((result, 0, "target"),)))
+    nodes, score, value, *_ = base
+    return repr((nodes, ((score, 0, "target"), (value, 1, "target"))))
 
 
 @torch.library.custom_op("eqx::tece_interaction", mutates_args=(), device_types="cuda")
@@ -116,24 +100,21 @@ def interaction(
         if value.numel() != rows * width:
             raise ValueError("Input shape does not match the local interaction layout.")
     result, denominator, maximum = interaction_fake(metadata, source, target, inputs)
-    result.zero_()
     if not source.numel():
+        result.zero_()
         denominator.fill_(base[-1])
         maximum.zero_()
         return [result, denominator, maximum]
-    stats = repr((base[0], ((base[1], 0, "target"),)))
     launch(
-        stats,
+        forward_program(base),
         inputs,
         source,
         target,
-        [denominator, maximum],
-        mode="stats",
+        [result, denominator, maximum],
+        mode="online",
         heads=base[4],
+        channels=base[5],
         eps=base[-1],
-    )
-    launch(
-        forward_program(base), inputs + [denominator, maximum], source, target, [result]
     )
     return [result, denominator, maximum]
 

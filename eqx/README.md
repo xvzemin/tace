@@ -133,10 +133,12 @@ The PyTorch model and checkpoint weight conversion are maintained in TACE's
 `tace.models._e3nn.tece_oam_rra`, using `o2.Linear`, `o2.Gate` and
 `o2.TensorProduct`. This EQX directory supplies the model-specific fused kernels
 and streaming execution, without owning the PyTorch model definition.
-The interaction computes receiver-wise online softmax statistics, then fuses
-the complete local update and aggregation in native CUDA. Only node outputs,
-denominators and detached maxima are retained. Local intermediates use shared
-memory or a bounded overflow workspace, not full-edge activation arrays.
+The interaction computes rotary scores and the complete local update together,
+accumulating the weighted output and softmax denominator online in native CUDA.
+Split neighborhoods merge partial sums without evaluating edges again. The
+operation saves its inputs and node outputs, denominators and detached maxima
+for backward, without retaining internal edge activations. Local intermediates
+use shared memory or a bounded overflow workspace.
 Analytic reverse programs generate native kernels recursively for force
 training and higher derivatives. Tensor schemas, fake implementations and
 registered autograd rules expose the operations to `torch.compile`. Parameters
