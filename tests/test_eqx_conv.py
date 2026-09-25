@@ -6,7 +6,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.conv import ACE, O2O3TensorProductConv, O3TensorProductConv
+from eqx.conv import TACE, O2O3TensorProductConv, O3TensorProductConv
 from eqx.o2 import O3TensorProduct, WignerD
 
 
@@ -23,7 +23,7 @@ def test_ace_external_coefficients(device, num_nodes):
     )
     linears = [o3.Linear(inp, irreps, internal_weights=False, shared_weights=False)
                for inp in (irreps, tp.irreps_out.simplify())]
-    module = ACE([tp], linears).to(device=device, dtype=torch.float64)
+    module = TACE([tp], linears).to(device=device, dtype=torch.float64)
     x = torch.randn(num_nodes, 16, device=device, dtype=torch.float64)[:, ::2].requires_grad_()
     types = (torch.arange(num_nodes*2, device=device) % 3)[::2]
     weights = [torch.randn(3, linear.weight_numel, device=device, dtype=torch.float64, requires_grad=True) for linear in linears]

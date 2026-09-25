@@ -11,6 +11,30 @@ from tace.models._e3nn.fused import uuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
+from tace.utils.env import EQX_KERNELS, acceleration_enabled
+
+
+@pytest.mark.parametrize(
+    "master,conv,product,expected",
+    [
+        (None, True, True, (None, None)),
+        ("1", True, True, (True, True)),
+        ("1", False, True, (False, True)),
+        ("1", True, False, (True, False)),
+        ("0", True, True, (False, False)),
+    ],
+)
+def test_internal_eqx_selection(monkeypatch, master, conv, product, expected):
+    if master is None:
+        monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    else:
+        monkeypatch.setenv("TACE_USE_EQX", master)
+    monkeypatch.setitem(EQX_KERNELS, "conv", conv)
+    monkeypatch.setitem(EQX_KERNELS, "product", product)
+    assert (
+        acceleration_enabled("eqx", kernel="conv"),
+        acceleration_enabled("eqx", kernel="product"),
+    ) == expected
 
 
 def test_standard_ace_eqx_precedes_eqt(monkeypatch):

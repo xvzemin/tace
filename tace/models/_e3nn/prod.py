@@ -9,7 +9,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from eqx.conv import ACE
+from eqx.conv import TACE
 from tace.utils.env import acceleration_enabled
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
@@ -24,7 +24,7 @@ class CgtpACE(Product):
     """Channel-wise ACE with element-dependent or element-independent coefficients."""
 
     def _setup(self):
-        self.use_eqx = bool(acceleration_enabled("eqx"))
+        self.use_eqx = bool(acceleration_enabled("eqx", kernel="product"))
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
             "bias": self.use_bias,
@@ -75,7 +75,7 @@ class CgtpACE(Product):
             product_in1 = ace.irreps_out
 
         if self.use_eqx and self.aces:
-            self.eqx_ace = ACE(
+            self.eqx_ace = TACE(
                 [ace.tp for ace in self.aces],
                 [coef.linear for coef in self.coefs],
             )

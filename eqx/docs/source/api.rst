@@ -111,7 +111,7 @@ derivative rules are unchanged.
 Atomic cluster expansions
 -------------------------
 
-``ACE`` evaluates unweighted channel-wise products with external element
+``TACE`` evaluates unweighted channel-wise products with external element
 coefficients. It preserves every supplied coupling path. CUDA execution
 avoids expanded CG products and per-node coefficient matrices, and fuses
 the final correlation order with its coefficient contraction. Intermediate
@@ -119,7 +119,7 @@ orders are retained for reuse. Features use flattened ``mul_ir`` storage.
 The torch backend provides a reference implementation. Forward and recursively
 transposed CUDA contractions support float32, float64 and higher derivatives.
 
-.. autoclass:: eqx.conv.ACE
+.. autoclass:: eqx.conv.TACE
    :members: forward
 
 Shared geometry kernels

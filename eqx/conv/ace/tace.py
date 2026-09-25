@@ -34,7 +34,7 @@ def make_metadata(rows, dims, weighted):
     return repr((dims, weighted, tuple(schedules)))
 
 
-class ACE(torch.nn.Module):
+class TACE(torch.nn.Module):
     """Evaluate successive channel-wise products and coefficient contractions.
 
     Parameters

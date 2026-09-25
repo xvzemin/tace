@@ -14,6 +14,9 @@ ACCELERATION_ENV = {
     "eqx": "TACE_USE_EQX",
 }
 
+# Internal switches for kernel comparisons; normal use follows TACE_USE_EQX.
+EQX_KERNELS = {"conv": True, "product": True}
+
 
 def set_env(cfg: Dict):
     env = cfg.get("misc", {}).get("env", {})
@@ -50,7 +53,7 @@ def enable_acceleration(
             os.environ[ACCELERATION_ENV[name]] = "1" if enabled else "0"
 
 
-def acceleration_enabled(name: str) -> Optional[bool]:
+def acceleration_enabled(name: str, *, kernel: Optional[str] = None) -> Optional[bool]:
     try:
         env_name = ACCELERATION_ENV[name.lower()]
     except KeyError as e:
@@ -61,6 +64,8 @@ def acceleration_enabled(name: str) -> Optional[bool]:
     value = os.environ.get(env_name)
     if value is None:
         return None
+    if name.lower() == "eqx" and kernel is not None:
+        return value == "1" and EQX_KERNELS[kernel]
     return value == "1"
 
 

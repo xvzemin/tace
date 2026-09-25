@@ -121,7 +121,7 @@ to convert an existing model explicitly, without retraining or changing its
 parameters. By default, conversion switches each CGTP interaction to the
 other implementation.
 
-The same flag accelerates the standard ACE product with ``eqx.conv.ACE``.
+The same flag accelerates the standard ACE product with ``eqx.conv.TACE``.
 It retains all existing nonzero paths and checkpoint weights, contracts CG
 entries without expanded product tensors, and reads element coefficients
 without materializing per-node weight matrices. The highest-correlation

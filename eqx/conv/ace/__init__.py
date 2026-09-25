@@ -1,5 +1,5 @@
 """Fused atomic cluster expansions."""
 
-from .ace import ACE
+from .tace import TACE
 
-__all__ = ["ACE"]
+__all__ = ["TACE"]

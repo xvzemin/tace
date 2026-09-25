@@ -37,7 +37,7 @@ class O3CgtpInteraction(Interaction):
 
     @property
     def use_eqx(self) -> bool:
-        return hasattr(self.rejector, "eqx_tp") and bool(acceleration_enabled("eqx"))
+        return hasattr(self.rejector, "eqx_tp") and bool(acceleration_enabled("eqx", kernel="conv"))
 
     def _prepare_setup(self) -> None:
         pass

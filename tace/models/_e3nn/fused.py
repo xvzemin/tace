@@ -320,7 +320,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
 
     @property
     def use_eqx(self) -> bool:
-        return bool(acceleration_enabled("eqx"))
+        return bool(acceleration_enabled("eqx", kernel="conv"))
 
     def forward(
         self,
