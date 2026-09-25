@@ -34,6 +34,7 @@ class uuuTensorProduct(torch.nn.Module):
         warning: bool = False,
         use_fused: bool = False,
         symmetric_paths: Union[SymmetricProductPaths, None] = None,
+        use_eqt: Union[bool, None] = None,
     ) -> None:
         super().__init__()
 
@@ -68,7 +69,8 @@ class uuuTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        use_eqt = acceleration_enabled("eqt")
+        if use_eqt is None:
+            use_eqt = acceleration_enabled("eqt")
         self.use_eqt = use_fused if use_eqt is None else use_eqt
         self.use_eqt = self.use_eqt and bool(instructions)
 

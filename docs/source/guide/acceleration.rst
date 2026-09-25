@@ -121,6 +121,17 @@ to convert an existing model explicitly, without retraining or changing its
 parameters. By default, conversion switches each CGTP interaction to the
 other implementation.
 
+The same flag accelerates the standard ACE product with ``eqx.conv.ACE``.
+It retains all existing nonzero paths and checkpoint weights, contracts CG
+entries without expanded product tensors, and reads element coefficients
+without materializing per-node weight matrices. The highest-correlation
+product and its coefficient contraction are fused; intermediate orders remain
+available for reuse. Recursive transposed kernels support force training and
+higher derivatives. Linear up/down, biases, dropout and residual connections
+keep their existing behavior. Bilinear/MoE products and products with active
+coefficient LoRA adapters retain their original execution. EQX takes precedence
+over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
+
 The default ``eqx.o2`` operators use PyTorch without external kernels.
 ``TACE_USE_EQX=1`` selects generated CUDA convolutions on GPU and PyTorch on
 CPU. Install the ``eqx`` extra and provide a CUDA toolkit; set ``CUDA_HOME``

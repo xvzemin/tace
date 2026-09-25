@@ -1,6 +1,7 @@
 """ACE paths, element coefficients and separate standard/bilinear execution."""
 
 import itertools
+from functools import partial
 
 import pytest
 import torch
@@ -10,6 +11,80 @@ from tace.models._e3nn.fused import uuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
+
+
+def test_standard_ace_eqx_precedes_eqt(monkeypatch):
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_EQT", "1")
+    product = make_product("2x0e+2x1o", 3, nonlinear=None)
+    assert hasattr(product, "eqx_ace")
+    assert all(not ace.use_eqt for ace in product.aces)
+
+
+@pytest.mark.parametrize("correlation", [2, 3, 4])
+@pytest.mark.parametrize("agnostic", [False, True])
+@pytest.mark.parametrize("matrix_weight", ["0", "1"])
+def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    import tace.models._e3nn.prod as prod
+
+    for name in ("e3nnLinear", "e3nnElementLinear"):
+        monkeypatch.setattr(
+            prod, name, partial(getattr(prod, name), use_matrix_weight=matrix_weight)
+        )
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[correlation],
+        l1l2=None,
+        bias=True,
+        nonlinear=None,
+        agnostic=agnostic,
+        parity=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    reference = CgtpACE(**kwargs).to(device="cuda", dtype=torch.float64)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    actual = CgtpACE(**kwargs).to(device="cuda", dtype=torch.float64)
+    actual.load_state_dict(reference.state_dict(), strict=True)
+    assert actual.state_dict().keys() == reference.state_dict().keys()
+    x = torch.randn(3, 8, device="cuda", dtype=torch.float64, requires_grad=True)
+    attrs = x.new_tensor([[0.8, 0.2], [0.1, 0.9], [0.7, 0.3]])
+    # Include nonzero biases, including the soft-attribute bias convention.
+    with torch.no_grad():
+        for a, b in zip(actual.coefs, reference.coefs):
+            if a.bias is not None:
+                a.bias.normal_()
+                b.bias.copy_(a.bias)
+    predictions, derivatives = [], []
+    for model in (actual, reference):
+        output = model(x, attrs, None, torch.zeros(3, device="cuda", dtype=torch.long))
+        first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
+        second = torch.autograd.grad(
+            first.square().sum(),
+            (x, *model.parameters()),
+            create_graph=True,
+            allow_unused=True,
+        )
+        third = torch.autograd.grad(second[0].square().sum(), x)[0]
+        predictions.append(output)
+        derivatives.append((first, *second, third))
+    torch.testing.assert_close(*predictions, atol=1e-10, rtol=1e-10)
+    for a, b in zip(*derivatives):
+        if a is None:
+            assert b is None
+        else:
+            torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-9)
 
 
 @pytest.mark.parametrize("moe", [False, True])
@@ -251,9 +326,7 @@ def test_standard_product_matches_extended_path(
             torch.manual_seed(7)
             output = model(x, attrs, sc, batch, attrs.argmax(-1))
             outputs.append(output)
-            first = torch.autograd.grad(
-                output.square().sum(), x, create_graph=True
-            )[0]
+            first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
             gradients.append(
                 torch.autograd.grad(
                     output.square().sum() + first.square().sum(),

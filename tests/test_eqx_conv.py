@@ -6,8 +6,37 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.conv import O2O3TensorProductConv, O3TensorProductConv
+from eqx.conv import ACE, O2O3TensorProductConv, O3TensorProductConv
 from eqx.o2 import O3TensorProduct, WignerD
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("num_nodes", [0, 3])
+def test_ace_external_coefficients(device, num_nodes):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    irreps = o3.Irreps("2x0e+2x1o")
+    tp = o3.TensorProduct(
+        irreps, irreps, "2x0e+2x0e+2x1o",
+        [(0, 0, 0, "uuu", False), (1, 1, 1, "uuu", False), (0, 1, 2, "uuu", False)],
+        internal_weights=False, shared_weights=False,
+    )
+    linears = [o3.Linear(inp, irreps, internal_weights=False, shared_weights=False)
+               for inp in (irreps, tp.irreps_out.simplify())]
+    module = ACE([tp], linears).to(device=device, dtype=torch.float64)
+    x = torch.randn(num_nodes, 16, device=device, dtype=torch.float64)[:, ::2].requires_grad_()
+    types = (torch.arange(num_nodes*2, device=device) % 3)[::2]
+    weights = [torch.randn(3, linear.weight_numel, device=device, dtype=torch.float64, requires_grad=True) for linear in linears]
+    actual = module(x, weights, types)
+    expected = linears[0](x, weights[0][types]) + linears[1](tp(x, x), weights[1][types])
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    gradients = [torch.autograd.grad(y.square().sum(), (x, *weights), create_graph=True) for y in (actual, expected)]
+    for a, b in zip(*gradients):
+        torch.testing.assert_close(a, b, atol=1e-11, rtol=1e-11)
+    assert not module.state_dict()
+    if device == "cuda" and num_nodes:
+        compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+        torch.testing.assert_close(compiled(x, weights, types), expected, atol=1e-12, rtol=1e-12)
 
 
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])

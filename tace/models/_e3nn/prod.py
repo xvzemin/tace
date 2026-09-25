@@ -9,7 +9,10 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear
+from eqx.conv import ACE
+from tace.utils.env import acceleration_enabled
+
+from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
 from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
@@ -21,7 +24,7 @@ class CgtpACE(Product):
     """Channel-wise ACE with element-dependent or element-independent coefficients."""
 
     def _setup(self):
-
+        self.use_eqx = bool(acceleration_enabled("eqx"))
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
             "bias": self.use_bias,
@@ -53,9 +56,12 @@ class CgtpACE(Product):
                 l1l2=self.l1l2,
                 trainable=False,
                 identical_inputs=nu == 2,
-                warning=self.correlation > 2 and self.layer == 0,
-                use_fused=self.correlation > 2 and not self.use_time_reversal,
+                warning=self.correlation > 2 and self.layer == 0 and not self.use_eqx,
+                use_fused=self.correlation > 2
+                and not self.use_time_reversal
+                and not self.use_eqx,
                 symmetric_paths=symmetric_paths,
+                use_eqt=False if self.use_eqx else None,
             )
             self.aces.append(ace)
             self.coefs.append(
@@ -67,6 +73,12 @@ class CgtpACE(Product):
                 )
             )
             product_in1 = ace.irreps_out
+
+        if self.use_eqx and self.aces:
+            self.eqx_ace = ACE(
+                [ace.tp for ace in self.aces],
+                [coef.linear for coef in self.coefs],
+            )
 
         self.linear_up = (
             e3nnLinear(
@@ -102,10 +114,46 @@ class CgtpACE(Product):
 
         node_feats = self.linear_up(node_feats)
         corr_feats = node_feats
-        outs = self.coefs[0](corr_feats, **for_coefs)
-        for index, ace in enumerate(self.aces):
-            corr_feats = ace(corr_feats, node_feats)
-            outs = outs + self.coefs[index + 1](corr_feats, **for_coefs)
+        if (
+            hasattr(self, "eqx_ace")
+            and node_feats.is_cuda
+            and not any(has_lora(coef) for coef in self.coefs)
+        ):
+            weights = []
+            for coef in self.coefs:
+                if coef.use_matrix_weight:
+                    rows = 1 if self.agnostic else self.num_elements
+                    weight = torch.cat(
+                        [w.reshape(rows, -1) for w in coef.weight], dim=-1
+                    )
+                else:
+                    weight = coef.weight.reshape(
+                        1 if self.agnostic else self.num_elements, -1
+                    )
+                weights.append(weight)
+            types = (
+                torch.zeros(
+                    node_feats.shape[0], dtype=torch.long, device=node_feats.device
+                )
+                if self.agnostic
+                else node_type
+            )
+            outs = self.eqx_ace(node_feats, weights, types)
+            for coef in self.coefs:
+                if coef.bias is not None:
+                    bias = (
+                        coef.bias
+                        if self.agnostic
+                        else node_attrs @ coef.bias.reshape(self.num_elements, -1)
+                    )
+                    outs = (
+                        outs + bias.index_select(-1, coef._bias_index) * coef._bias_mask
+                    )
+        else:
+            outs = self.coefs[0](corr_feats, **for_coefs)
+            for index, ace in enumerate(self.aces):
+                corr_feats = ace(corr_feats, node_feats)
+                outs = outs + self.coefs[index + 1](corr_feats, **for_coefs)
 
         outs = self.linear(outs)
         if hasattr(self, "stochastic_depth"):
