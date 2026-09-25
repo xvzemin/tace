@@ -137,6 +137,18 @@ transposed CUDA contractions support float32, float64 and higher derivatives.
 .. autoclass:: eqx.conv.TACE
    :members: forward
 
+``BilinearTACE`` fuses a gated ``uuu`` product with an element-dependent or
+MoE coefficient map. It preserves expert-channel grouping after adjacent
+irreps are simplified. Small node tiles reuse shared coefficients, and an
+optional shared map reuses the same block-local angular tile as the experts.
+Input gradients combine both maps before differentiating the
+product, while coefficient gradients reuse the angular tile across output
+channels. No full product or product-gradient array is stored. Biases,
+order-one terms and the final expert normalization remain separate.
+
+.. autoclass:: eqx.conv.BilinearTACE
+   :members: forward
+
 Shared geometry kernels
 -----------------------
 

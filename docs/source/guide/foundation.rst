@@ -19,9 +19,9 @@ The models below are ordered from efficiency to accuracy.
    * - Model
      - Indicative system size on a single 80 GB GPU
    * - ``TACE-OMat24-7M``
-     - About 28,000 atoms (EquivariantX O(2) kernel)
+     - About 40,000 atoms (EquivariantX O(2) kernel)
    * - ``TACE-OMat24-L``
-     - About 10,000 atoms (EquivariantX O(2) kernel)
+     - About 40,000 atoms (EquivariantX O(2) kernel)
    * - ``TECE-OMat24-RRA-1.0``
      - About 1,000 atoms
 

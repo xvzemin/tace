@@ -128,8 +128,11 @@ without materializing per-node weight matrices. The highest-correlation
 product and its coefficient contraction are fused; intermediate orders remain
 available for reuse. Recursive transposed kernels support force training and
 higher derivatives. Linear up/down, biases, dropout and residual connections
-keep their existing behavior. Bilinear/MoE products and products with active
-coefficient LoRA adapters retain their original tensor-product execution. EQX takes precedence
+keep their existing behavior. Gated bilinear products also use
+``eqx.conv.BilinearTACE`` to fuse their weighted tensor product with the
+element-dependent or MoE coefficient map, including the optional shared expert.
+Products with active coefficient LoRA adapters retain their original
+tensor-product execution. EQX takes precedence
 over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
 
 The default ``eqx.o2`` operators use PyTorch without external kernels.

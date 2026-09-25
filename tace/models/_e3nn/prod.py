@@ -169,6 +169,9 @@ class BilinearMoEACE(Product):
     def _setup(self):
 
         self.scale = 1.0 / math.sqrt(2.0)
+        self.use_eqx = bool(
+            acceleration_enabled("eqx", kernel="product") and self.use_bilinear_gate
+        )
 
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
@@ -232,6 +235,7 @@ class BilinearMoEACE(Product):
                 warning=self.correlation > 2 and self.layer == 0,
                 use_fused=self.correlation > 2 and not self.use_time_reversal,
                 symmetric_paths=symmetric_paths,
+                use_eqt=False if self.use_eqx else None,
             )
             self.aces.append(this_ace)
             self.coefs.append(
@@ -256,6 +260,13 @@ class BilinearMoEACE(Product):
                     )
                 )
             product_in1 = this_ace.irreps_out
+
+        if self.use_eqx:
+            coef = self.coefs[1]
+            self.eqx_ace = eqx_conv.BilinearTACE(
+                self.aces[0].tp, coef.linear, getattr(coef, "num_experts", 1),
+                shared_linear=self.shared_coefs[1].linear if hasattr(self, "shared_coefs") else None,
+            )
 
         if self.use_bilinear_gate:
             self._ace_gate_slices = []
@@ -309,6 +320,53 @@ class BilinearMoEACE(Product):
         shared: torch.Tensor,
     ) -> torch.Tensor:
         return (grouped + shared) * self.scale
+
+    def _bilinear_coefficients(
+        self, kernel, coef, features, base, gates, attrs, node_type
+    ):
+        elements = getattr(coef, "num_elements", 1)
+        experts = getattr(coef, "num_experts", 1)
+        weight = (
+            torch.cat([w.reshape(elements, experts, -1) for w in coef.weight], dim=-1)
+            if coef.use_matrix_weight
+            else coef.weight.reshape(elements, experts, -1)
+        )
+        types = (
+            node_type
+            if hasattr(coef, "num_elements")
+            else torch.zeros(
+                features.shape[0], device=features.device, dtype=torch.long
+            )
+        )
+        shared = self.shared_coefs[1] if hasattr(self, "shared_coefs") else None
+        shared_weight = None
+        if shared is not None:
+            shared_weight = (
+                torch.cat([w.flatten() for w in shared.weight])
+                if shared.use_matrix_weight else shared.weight
+            )
+        output = kernel(features, base, gates, weight, types, shared_weight)
+        if shared is not None and shared.bias is not None:
+            output = output + shared.bias.index_select(-1, shared._bias_index) * shared._bias_mask
+        if coef.bias is None:
+            return output
+        if hasattr(coef, "num_experts"):
+            outputs = [
+                output[:, sl].reshape(features.shape[0], experts, mul, dim)
+                for sl, mul, dim in zip(
+                    coef._output_slices, coef._output_expert_muls, coef._output_dims
+                )
+            ]
+            bias = coef.bias[types]
+            for i, start, end in coef._bias_out_indices:
+                outputs[i] = outputs[i] + bias[:, :, start:end].unsqueeze(-1)
+            return torch.cat([value.flatten(1) for value in outputs], dim=-1)
+        bias = (
+            attrs @ coef.bias.reshape(elements, -1)
+            if hasattr(coef, "num_elements")
+            else coef.bias
+        )
+        return output + bias.index_select(-1, coef._bias_index) * coef._bias_mask
 
     def _linear_up_features(
         self,
@@ -377,6 +435,25 @@ class BilinearMoEACE(Product):
         )
 
         for nu in range(2, self.correlation + 1):
+            if (
+                hasattr(self, "eqx_ace")
+                and node_feats.is_cuda
+                and not has_lora(self.coefs[nu - 1])
+                and not (
+                    shared_outs is not None and has_lora(self.shared_coefs[nu - 1])
+                )
+            ):
+                gates = ace_weights[:, self._ace_gate_slices[nu - 2]]
+                outs = outs + self._bilinear_coefficients(
+                    self.eqx_ace,
+                    self.coefs[nu - 1],
+                    node_feats,
+                    base_feats,
+                    gates,
+                    node_attrs,
+                    node_type,
+                )
+                continue
             if self.use_bilinear_gate:
                 corr_feats[nu] = self.aces[nu - 2](
                     corr_feats[nu - 1],

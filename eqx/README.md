@@ -75,6 +75,11 @@ eqx/
 │   ├── contraction.py            # Shared recursive transpose rule
 │   ├── graph.py                  # Shared graph ordering
 │   ├── radial.py                 # Bounded radial projections and their adjoints
+│   ├── ace/
+│   │   ├── tace.py              # Standard ACE coefficient contraction
+│   │   ├── bilinear_tace.py     # Gated ACE with MoE and shared coefficients
+│   │   ├── bilinear_contraction.py # Recursive joint coefficient adjoints
+│   │   └── bilinear_cuda.py     # Block-local products and transposes
 │   ├── o3/
 │   │   ├── convolution.py        # O3TensorProductConv and PyTorch reference
 │   │   ├── cuda.py               # Path scheduling and CUDA execution
