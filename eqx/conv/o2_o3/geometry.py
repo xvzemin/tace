@@ -24,13 +24,17 @@ def generators(degree):
 def angular_coefficients(metadata, rank):
     """Differentiate fixed angular tensors, including their vector indices.
 
-    A rank-zero tensor is the order-zero CG slice. Each further index is a
-    rotation derivative. Differentiating every angular index also accounts
-    for the moving local frame in higher derivatives.
+    A rank-zero tensor is the order-zero CG slice. The first two derivatives
+    couple harmonic derivatives at the pole, preserving their sparse support.
+    Higher derivatives act on every angular index, including the derivative
+    vector indices, to account for the moving local frame.
     """
     plan = kernel_plan(metadata)
     coefficients = []
-    previous = angular_coefficients(metadata, rank - 1) if rank else None
+    direct = rank in (1, 2) and bool(plan.harmonic_degrees)
+    previous = (
+        angular_coefficients(metadata, rank - 1) if rank and not direct else None
+    )
     for index, ((_, path), entries) in enumerate(
         zip(plan.path_data, plan.sparse_paths)
     ):
@@ -39,6 +43,27 @@ def angular_coefficients(metadata, rank):
             value = torch.zeros(dim, dim_out, dtype=torch.float64, device="cpu")
             for a, b, coefficient in entries:
                 value[a, b] = coefficient
+        elif direct:
+            degree = plan.harmonic_degrees[index]
+            cg = o3.wigner_3j(
+                (dim - 1) // 2,
+                degree,
+                (dim_out - 1) // 2,
+                dtype=torch.float64,
+                device="cpu",
+            )
+            base = angular_coefficients(metadata, 0)[index]
+            scale = (base * cg[:, degree, :]).sum() / cg[:, degree, :].square().sum()
+            # Differentiate the harmonic at the pole before coupling it. This
+            # preserves its sparse support without subtracting large, nearly
+            # cancelling input/output generator contractions.
+            harmonic = generators(degree)[:, :, degree].T
+            if rank == 2:
+                harmonic = torch.einsum(
+                    "jqs,si->qij", generators(degree), harmonic
+                ) + torch.einsum("jis,qs->qij", generators(1), harmonic)
+                harmonic[..., 1] = 0
+            value = torch.einsum("aqb,q...->ab...", cg, harmonic) * scale
         else:
             value = torch.zeros(
                 dim, dim_out, *([3] * rank), dtype=torch.float64, device="cpu"

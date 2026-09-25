@@ -345,6 +345,57 @@ def test_derivative_partition_reuses_rotations():
         assert group[0][1][6] is group[1][1][6]
 
 
+@pytest.mark.parametrize("degree", [0, 1, 2, 3, 5])
+@pytest.mark.parametrize("normalization", ["norm", "component", "integral"])
+def test_direction_coefficients_at_pole(degree, normalization):
+    from eqx.conv.o2_o3.geometry import angular_coefficients
+
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        tp = O3TensorProduct(
+            "2x3e",
+            o3.Irreps([(1, (degree, (-1) ** degree))]),
+            o3.Irreps([(2, (3, (-1) ** degree))]),
+            [(0, 0, 0, "uvu", True)],
+            normalization=normalization,
+        )
+        conv = O2O3TensorProductConv(tp)
+        pole = torch.tensor([0.0, 1.0, 0.0])
+
+        def harmonics(vectors):
+            return o3.spherical_harmonics(
+                degree, vectors, normalize=True, normalization=normalization
+            )
+
+        def derivative(vectors):
+            jacobian = torch.autograd.functional.jacobian(
+                harmonics, vectors, create_graph=True
+            )
+            return torch.linalg.cross(vectors.expand_as(jacobian), jacobian)
+
+        jacobian = torch.autograd.functional.jacobian(derivative, pole)
+        values = (
+            harmonics(pole),
+            derivative(pole),
+            torch.linalg.cross(pole.expand_as(jacobian), jacobian),
+        )
+        cg = o3.wigner_3j(3, degree, 3) * tp.instructions[0].path_weight
+        actual = []
+        for rank, value in enumerate(values):
+            actual.append(angular_coefficients(conv.direction_metadata, rank)[0])
+            expected = torch.einsum("aqb,q...->ab...", cg, value)
+            torch.testing.assert_close(actual[-1], expected, atol=2e-12, rtol=2e-12)
+        torch.testing.assert_close(
+            actual[2][..., 0, 0] + actual[2][..., 2, 2],
+            -degree * (degree + 1) * actual[0],
+            atol=2e-12,
+            rtol=2e-12,
+        )
+    finally:
+        torch.set_default_dtype(previous)
+
+
 @pytest.mark.parametrize(
     "device,backend,mode,channels",
     [

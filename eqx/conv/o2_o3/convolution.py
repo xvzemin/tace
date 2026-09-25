@@ -25,6 +25,7 @@ class _KernelPlan:
     has_unweighted: bool
     sparse_paths: tuple
     scalar_paths: tuple = ()
+    harmonic_degrees: tuple = ()
 
 
 @lru_cache(maxsize=256)
@@ -273,6 +274,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         self.path_data = []
         self.sparse_paths = []
         scalar_paths = []
+        harmonic_degrees = []
         for ins in self.instructions:
             mul, ir = self.irreps_in[ins.i_in1]
             mul_out, ir_out = self.irreps_out[ins.i_out]
@@ -282,6 +284,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                 offset += math.prod(ins.path_shape)
             if not mul or not mul_out or not ins.path_weight:
                 continue
+            harmonic_degrees.append(ir_sh.l)
             if ir_sh.l == 0:
                 scalar_paths.append(len(self.path_data))
             pole = (
@@ -328,7 +331,11 @@ class O2O3TensorProductConv(torch.nn.Module):
             )
         )
         self.direction_metadata = repr(
-            (*literal_eval(self.kernel_metadata), tuple(scalar_paths))
+            (
+                *literal_eval(self.kernel_metadata),
+                tuple(scalar_paths),
+                tuple(harmonic_degrees),
+            )
         )
 
     def forward(
@@ -370,7 +377,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         vectors : torch.Tensor, optional
             Nonzero frame directions, with shape ``(edges, 3)`` or ``(1, 3)``.
             When supplied, ``wigner`` must contain their alignment matrices.
-            Direction derivatives use sparse rotation generators rather than
+            Direction derivatives use sparse angular contractions rather than
             matrix adjoints. The matrices are treated as cached values, and
             zero-degree harmonic paths bypass both rotations. Without vectors,
             the matrices remain independent differentiable inputs.
