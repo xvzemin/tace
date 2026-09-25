@@ -11,6 +11,241 @@ from eqx import o2
 from eqx.conv.models.tece_oam_rra import BilinearACE
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("edges", [0, 13])
+def test_graph_attention_derivatives(device, edges):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from eqx.conv.attention import graph_softmax
+    from tace.models.softmax import GraphSoftmax
+
+    target = torch.arange(edges, device=device) % 4
+    scores = torch.randn(
+        edges, 3, dtype=torch.float64, device=device, requires_grad=True
+    )
+    weight = torch.rand(edges, 1, dtype=torch.float64, device=device)
+    weight[::3] = 0
+    weight.requires_grad_()
+    actual = graph_softmax(scores, target, 5, weight, eps=1e-3)
+    expected = GraphSoftmax(eps=1e-3)(scores, target, num_nodes=5, exp_rescale=weight)
+    torch.testing.assert_close(actual, expected)
+    losses = [x.square().sum() for x in (actual, expected)]
+    for _ in range(3):
+        grads = [
+            torch.autograd.grad(loss, (scores, weight), create_graph=True)
+            for loss in losses
+        ]
+        for a, b in zip(*grads):
+            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-8)
+        losses = [sum(g.square().sum() for g in values) for values in grads]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("nodes", [0, 5])
+def test_streaming_graph_attention_weights(device, nodes):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from eqx.conv.attention import StreamingGraphAttention
+    from tace.models.softmax import GraphSoftmax
+
+    edges, heads = (9 if nodes else 0), 2
+    target = torch.arange(edges, device=device) % 3
+    inputs = [
+        torch.zeros(nodes, 1, device=device, dtype=torch.float64),
+        torch.randn(edges, heads, device=device, dtype=torch.float64).requires_grad_(),
+        torch.randn(edges, 3, 4, device=device, dtype=torch.float64).requires_grad_(),
+        torch.rand(edges, 1, device=device, dtype=torch.float64).requires_grad_(),
+        torch.rand(edges, heads, device=device, dtype=torch.float64).requires_grad_(),
+        target,
+        torch.ones(edges, device=device, dtype=torch.bool),
+    ]
+    with torch.no_grad():
+        inputs[3][::3] = 0
+
+    def fake(v):
+        return (
+            v[0].new_empty(nodes, 3, 4),
+            v[0].new_empty(nodes, heads),
+            v[0].new_empty(nodes, heads),
+        )
+
+    attention = StreamingGraphAttention(
+        lambda v: (v[1], v[2]),
+        fake,
+        {i: 0 for i in range(1, 7)},
+        target_slot=5,
+        normalizer_slot=3,
+        value_weight_slot=4,
+        valid_slot=6,
+        tile_size=4,
+        eps=1e-3,
+    )
+    actual = attention(*inputs)[0]
+    weight = (
+        GraphSoftmax(eps=1e-3)(
+            inputs[1], target, num_nodes=nodes, exp_rescale=inputs[3]
+        )
+        * inputs[4]
+    )
+    value = (inputs[2].view(edges, 3, heads, 2) * weight[:, None, :, None]).reshape(
+        edges, 3, 4
+    )
+    expected = value.new_zeros(nodes, 3, 4).index_add(0, target, value)
+    torch.testing.assert_close(actual, expected)
+    losses = [x.square().sum() for x in (actual, expected)]
+    for _ in range(3):
+        grads = [
+            torch.autograd.grad(loss, inputs[1:5], create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*grads):
+            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-8)
+        losses = [sum(g.square().sum() for g in values) for values in grads]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("edges", [0, 7, 65])
+def test_tece_streaming_derivatives(monkeypatch, device, edges):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from eqx.conv.models.tece_oam_rra.interaction import stream
+    from tace.models._e3nn.legacy_so2 import uvSO2Convolution
+    from tace.models.layout import LayoutTransform
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    irreps = o3.Irreps("4x0e+4x1o+4x2e")
+    module = uvSO2Convolution(
+        2,
+        2,
+        4,
+        2,
+        2,
+        3,
+        False,
+        True,
+        True,
+        LayoutTransform(irreps),
+        LayoutTransform(irreps),
+        torch.nn.SiLU(),
+        torch.nn.Sigmoid(),
+    ).to(device=device, dtype=torch.float64)
+    with torch.no_grad():
+        module.radial_proj.weight.normal_(std=0.1)
+    nodes = 256 if edges == 65 else 4
+    values = [
+        torch.randn(*shape, device=device, dtype=torch.float64)
+        .mul_(0.15)
+        .requires_grad_()
+        for shape in [
+            (nodes, irreps.dim),
+            (edges, 3),
+            (3, module.weight_numel),
+            (module.weight_numel,),
+            (edges, 9, 9),
+            (edges, 9, 9),
+            (edges, 3),
+        ]
+    ]
+    x, radial, projection, bias, rotation, inverse, basis = values
+    # Frames rotate each O(3) degree independently; rows are ordered by m.
+    degrees = torch.tensor([0, 1, 2, 1, 2, 1, 2, 2, 2], device=device)
+    columns = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2], device=device)
+    mask = degrees[:, None] == columns[None, :]
+    rotation, inverse = rotation * mask, inverse * mask.T
+    cutoff = torch.rand(edges, 1, device=device, dtype=torch.float64).requires_grad_()
+    index = torch.stack(
+        (
+            torch.arange(edges, device=device) % nodes,
+            (torch.arange(edges, device=device) + 1) % nodes,
+        )
+    )
+    tile_size = 64 if edges == 65 else 3
+    actual = stream(
+        module,
+        x,
+        radial,
+        projection,
+        bias,
+        index,
+        cutoff,
+        rotation,
+        inverse,
+        basis,
+        tile_size=tile_size,
+    )
+    expected = module(
+        x, radial @ projection + bias, index, cutoff, rotation, inverse, basis
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-10)
+    inputs = (*values, cutoff, *module.parameters())
+    losses = [v.square().sum() for v in (actual, expected)]
+    for _ in range(3):
+        grads = [
+            torch.autograd.grad(loss, inputs, create_graph=True, allow_unused=True)
+            for loss in losses
+        ]
+        for i, (a, b) in enumerate(zip(*grads)):
+            a = torch.zeros_like(inputs[i]) if a is None else a
+            b = torch.zeros_like(inputs[i]) if b is None else b
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-7)
+        losses = [
+            sum(g.square().sum() for g in values if g is not None) for values in grads
+        ]
+    if device == "cuda" and edges == 7:
+        compiled = torch.compile(
+            lambda x, radial, projection, bias, cutoff, rotation, inverse, basis: (
+                stream(
+                    module,
+                    x,
+                    radial,
+                    projection,
+                    bias,
+                    index,
+                    cutoff,
+                    rotation,
+                    inverse,
+                    basis,
+                    tile_size=3,
+                )
+            ),
+            backend="aot_eager",
+            fullgraph=True,
+        )
+        torch.testing.assert_close(
+            compiled(x, radial, projection, bias, cutoff, rotation, inverse, basis),
+            expected,
+        )
+    if device == "cuda" and edges == 65:
+        from eqx.conv.models.tece_oam_rra.interaction import _programs
+
+        assert _programs[module][tile_size].graphs
+        with torch.no_grad():
+            module.temperature_logit.add_(0.2)
+            projection.add_(0.01)
+        actual = stream(
+            module,
+            x,
+            radial,
+            projection,
+            bias,
+            index.flip(0),
+            cutoff,
+            rotation,
+            inverse,
+            basis,
+            tile_size=tile_size,
+        )
+        expected = module(
+            x,
+            radial @ projection + bias,
+            index.flip(0),
+            cutoff,
+            rotation,
+            inverse,
+            basis,
+        )
+        torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-10)
+
+
 def test_convolution_package_layout():
     from eqx.conv import uu_o2, uv_o2
     from eqx.conv.ace import TACE

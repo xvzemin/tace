@@ -448,6 +448,29 @@ class UvSO2Interaction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
+        if (
+            node_feats.is_cuda
+            and self.use_radial_rotary_attention
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            from eqx.conv.models.tece_oam_rra.interaction import stream
+
+            radial = edge_feats
+            for layer in self.edge_info.mlp[:-1]:
+                radial = layer(radial)
+            last = self.edge_info.mlp[-1]
+            return stream(
+                self.rejector,
+                node_feats,
+                radial,
+                last.get_weight(),
+                last.bias,
+                edge_index,
+                edge_cutoff,
+                edge_wigner,
+                edge_wigner_inv,
+                edge_radial_basis,
+            )
         return self.rejector(
             node_feats,
             self.edge_info(edge_feats),

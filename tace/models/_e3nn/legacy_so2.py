@@ -12,6 +12,7 @@ from eqx import o2
 from eqx.conv.ace.contraction import parse
 from eqx.conv.models.tece_oam_rra import LocalSplit
 from eqx.kernels.channel_product import local_product
+from eqx.kernels.rotation import rotate
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
@@ -743,6 +744,28 @@ class uvSO2Convolution(torch.nn.Module):
         self.reshape_in = reshape_in
         self.reshape_out = reshape_out
 
+        local_degrees = tuple(
+            ell
+            for m in range(mmax + 1)
+            for _ in range(1 if m == 0 else 2)
+            for ell in range(m, lmax + 1)
+        )
+        self._eqx_rotation_in = None
+        self._eqx_rotation_out = None
+        if hasattr(reshape_in, "irreps") and hasattr(reshape_out, "irreps"):
+            self._eqx_rotation_in = repr(
+                (
+                    tuple(ir.l for _, ir in reshape_in.irreps for _ in range(ir.dim)),
+                    local_degrees,
+                )
+            )
+            self._eqx_rotation_out = repr(
+                (
+                    local_degrees,
+                    tuple(ir.l for _, ir in reshape_out.irreps for _ in range(ir.dim)),
+                )
+            )
+
         self.num_components, expand_index = so2_expand_index(self.mmax, self.lmax)
         self.weight_numel = self.num_components * self.num_channel * 2
         self.register_buffer("expand_index", expand_index, persistent=False)
@@ -997,7 +1020,11 @@ class uvSO2Convolution(torch.nn.Module):
         )
 
     def _complex_qk_attention(
-        self, query: torch.Tensor, key: torch.Tensor, edge_feats: torch.Tensor
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        edge_feats: torch.Tensor,
+        fused: bool = False,
     ) -> torch.Tensor:
 
         B = query.size(0)
@@ -1007,6 +1034,18 @@ class uvSO2Convolution(torch.nn.Module):
         radial_proj = self.radial_proj(edge_feats)
         radial_bias = radial_proj[:, :H]
         radial_phase = math.pi * torch.tanh(radial_proj[:, H:])
+
+        if fused and query.is_cuda and query.dtype in (torch.float32, torch.float64):
+            from eqx.kernels.rotary import rotary_product
+
+            orders = torch.arange(self.mmax + 1, device=query.device, dtype=query.dtype)
+            angle = radial_phase[:, None, :] * orders[None, :, None]
+            phase = torch.stack((angle.cos(), angle.sin()), dim=-1)
+            score = rotary_product(query, key, phase, self.lmax, self.mmax, H)
+            temperature = self.temperature_min + (
+                self.temperature_max - self.temperature_min
+            ) * torch.sigmoid(self.temperature_logit)
+            return score * self.attention_scale * temperature + radial_bias
 
         # m = 0
         n = self.lmax + 1
@@ -1044,18 +1083,32 @@ class uvSO2Convolution(torch.nn.Module):
         wigner: torch.Tensor,
         wigner_inv: torch.Tensor,
         radial_basis: torch.Tensor,
-    ) -> torch.Tensor:
+        stage: str = "",
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         num_nodes = x.size(0)
-        num_edges = w.size(0)
+        num_edges = edge_index.size(1)
         x = self.reshape_in(x)
         m_ij = torch.cat((x[edge_index[0]], x[edge_index[1]]), dim=-1)
-        m_ij = torch.bmm(wigner, m_ij)
+        sparse_rotation = (
+            stage == "score_value"
+            and x.is_cuda
+            and x.dtype in (torch.float32, torch.float64)
+            and self._eqx_rotation_in is not None
+            and self._eqx_rotation_out is not None
+        )
+        m_ij = (
+            rotate(m_ij, wigner, self._eqx_rotation_in)
+            if sparse_rotation
+            else torch.bmm(wigner, m_ij)
+        )
 
         if self.use_radial_rotary_attention:
             key = self.key_proj(m_ij[:, :, : self.num_channel])
             query = self.query_proj(m_ij[:, :, self.num_channel :])
-            real_alpha = self._complex_qk_attention(query, key, radial_basis)
+            real_alpha = self._complex_qk_attention(
+                query, key, radial_basis, fused=stage == "score_value"
+            )
 
         w = w.view(num_edges, self.num_components, self.num_channel * 2)
         if (
@@ -1110,6 +1163,14 @@ class uvSO2Convolution(torch.nn.Module):
             m_ij = self.nonlinearity(m_ij, gate)
 
         m_ij = self.linear_down(m_ij)
+
+        if stage == "score_value":
+            message = (
+                rotate(m_ij, wigner_inv, self._eqx_rotation_out)
+                if sparse_rotation
+                else torch.bmm(wigner_inv, m_ij)
+            )
+            return real_alpha, message
 
         if self.use_radial_rotary_attention:
             real_alpha = self.graph_softmax(

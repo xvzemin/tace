@@ -83,7 +83,7 @@ eqx/
 │   ├── uv_o2/                   # Channel-mixing convolution placeholder
 │   ├── models/
 │   │   └── tece_oam_rra/
-│   │       ├── interaction.py    # Native interaction placeholder
+│   │       ├── interaction.py    # Tiled rotary-attention interaction
 │   │       ├── product.py        # BilinearACE with expert and shared maps
 │   │       ├── bilinear_contraction.py # Recursive coefficient adjoints
 │   │       ├── bilinear_cuda.py  # Block-local products and transposes
@@ -127,9 +127,24 @@ rule unchanged.
 Model-specific fusion lives in `conv/models/`, separately from these general
 convolutions. `tece_oam_rra` contains both gated bilinear ACE with expert and
 shared coefficient maps and the packed-feature interaction fusion utilities.
-Its complete native interaction is reserved for future implementation.
+The interaction evaluates attention scores and values together in bounded
+edge tiles using online softmax. Only node outputs, denominators and maxima
+are retained, rather than full-graph scores, convolution weights or wide edge
+activations. Its analytic adjoint recomputes each tile once, with recursive
+derivatives for force training. CUDA execution plans reuse fixed-shape workspaces;
+inputs and parameters are refreshed on every call. Degree-wise rotations and
+rotary inner products use CUDA kernels with recursive transposes.
 `conv/ace/` retains the standard `eqx.conv.TACE` implementation. Import the
 model-specific product as `eqx.conv.models.tece_oam_rra.BilinearACE`.
+
+`eqx.conv.graph_softmax` provides reusable weighted normalization over incoming
+edges. It accepts `(edges, heads)` scores and optional `(edges, 1)` or
+`(edges, heads)` nonnegative weights. It uses PyTorch on CPU and segmented CUDA
+reductions on GPU, including derivatives of the edge weights.
+`eqx.conv.StreamingGraphAttention` additionally accepts a score/value callback
+for tiled evaluation and supports separate normalization and value weights.
+Streaming callback plans belong to the live Python model and are not portable
+standalone AOTI artifacts.
 
 Use `from eqx import conv as eqx_conv` to access `eqx_conv.O2O3TensorProductConv` and
 `from eqx.kernels import wigner_D`. CUDA compilation remains lazy. File

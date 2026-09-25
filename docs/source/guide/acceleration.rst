@@ -135,6 +135,24 @@ Products with active coefficient LoRA adapters retain their original
 tensor-product execution. EQX takes precedence
 over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
 
+For TECE-OAM-RRA, ``TACE_USE_EQX=1`` also selects a tiled ``UvSO2Interaction``.
+The final radial projection, local updates and aggregation are evaluated in
+bounded edge workspaces rather than retaining full-graph convolution weights
+and edge activations. Online attention retains only node-level outputs,
+denominators and maxima, preserving both existing cutoff factors. Degree-wise
+rotations and rotary inner products have recursive CUDA transposes. Force
+training and higher derivatives use an analytic attention adjoint with bounded
+tile recomputation; CUDA execution plans
+amortize launch overhead after warmup. Checkpoint parameters are unchanged.
+The first evaluation of a new shape or derivative order includes warmup and
+execution-plan construction and should be excluded from timing measurements.
+
+.. note::
+
+   The TECE streaming plan is tied to the live Python model. It supports eager
+   execution and in-process compilation, but not standalone AOTI serialization.
+   Export TECE with ``TACE_USE_EQX=0`` until portable streaming plans are available.
+
 The default ``eqx.o2`` operators use PyTorch without external kernels.
 ``TACE_USE_EQX=1`` also accelerates element-dependent and MoE Linear maps on
 CUDA. Their kernels read element/expert weights directly, avoiding per-node
