@@ -1,6 +1,7 @@
 """Shared CUDA compilation, binary caching and launch configuration."""
 
 import hashlib
+import logging
 import os
 import tempfile
 import threading
@@ -10,6 +11,16 @@ from functools import lru_cache
 from pathlib import Path
 
 import torch
+
+# Keep cache-lock bookkeeping quiet even when the application enables DEBUG.
+# Do not change the logger level: unrelated locks and warnings remain visible.
+logging.getLogger("filelock").addFilter(
+    lambda record: record.levelno >= logging.WARNING
+    or not any(
+        isinstance(arg, str) and "/eqx/cuda/" in arg.replace("\\", "/")
+        for arg in record.args
+    )
+)
 
 _KERNELS = OrderedDict()
 _LAUNCH_CONFIGS = OrderedDict()
@@ -45,6 +56,7 @@ def runtime():
                 "-lcuda",
             ],
             with_cuda=False,
+            verbose=False,
         )
 
 

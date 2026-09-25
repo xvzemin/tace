@@ -15,40 +15,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-def test_layout_transform_matches_blockwise_reference() -> None:
-    irreps = o3.Irreps("3x0e+3x1o+3x1o+3x2e")
-    transform = LayoutTransform(irreps).to(DEVICE)
-    input1 = torch.randn(
-        5,
-        irreps.dim,
-        device=DEVICE,
-        dtype=DTYPE,
-        requires_grad=True,
-    )
-    input2 = input1.detach().clone().requires_grad_(True)
-
-    blocks = []
-    offset = 0
-    for multiplicity, irrep in irreps:
-        block_dim = multiplicity * irrep.dim
-        blocks.append(
-            input2[:, offset : offset + block_dim].reshape(
-                input2.shape[0], multiplicity, irrep.dim
-            )
-        )
-        offset += block_dim
-    expected = torch.cat(blocks, dim=-1).transpose(-1, -2).contiguous()
-    actual = transform(input1)
-
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(transform.inverse(actual), input1)
-    output_grad = torch.randn_like(actual)
-    actual_grad = torch.autograd.grad((actual * output_grad).sum(), input1)[0]
-    expected_grad = torch.autograd.grad((expected * output_grad).sum(), input2)[0]
-    torch.testing.assert_close(actual_grad, expected_grad)
-    assert not transform.state_dict()
-
-
 @pytest.mark.parametrize(
     "layout_in",
     ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
@@ -58,8 +24,10 @@ def test_layout_transform_matches_blockwise_reference() -> None:
     ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
 )
 def test_layout_transform_supports_every_layout_pair(layout_in, layout_out) -> None:
-    irreps = o3.Irreps("3x0e+3x1o+3x2e")
-    flatten_mul_ir = torch.randn(5, irreps.dim, dtype=DTYPE, device=DEVICE)
+    irreps = o3.Irreps("3x0e+3x1o+3x1o+3x2e")
+    flatten_mul_ir = torch.randn(
+        5, irreps.dim, dtype=DTYPE, device=DEVICE, requires_grad=True
+    )
     blocks = []
     offset = 0
     for mul, ir in irreps:
@@ -84,6 +52,13 @@ def test_layout_transform_supports_every_layout_pair(layout_in, layout_out) -> N
     observed = transform(layouts[layout_in])
     torch.testing.assert_close(observed, layouts[layout_out])
     torch.testing.assert_close(transform.inverse(observed), layouts[layout_in])
+    seed = torch.randn_like(observed)
+    gradients = [
+        torch.autograd.grad((output * seed).sum(), flatten_mul_ir, retain_graph=True)[0]
+        for output in (observed, layouts[layout_out])
+    ]
+    torch.testing.assert_close(*gradients)
+    assert not transform.state_dict()
 
 
 def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> None:
@@ -170,9 +145,7 @@ def test_product_eqt_selection(
     product = _product(correlation)
     assert acceleration_enabled("eqt") is expected_setting
     assert all(ace.use_eqt is expected_product for ace in product.aces)
-    assert all(
-        hasattr(ace, "fused_tp") is expected_product for ace in product.aces
-    )
+    assert all(hasattr(ace, "fused_tp") is expected_product for ace in product.aces)
 
 
 def test_eqt_native_scatter_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -300,8 +300,15 @@ def test_magnetic_basis_loads_scale_fidelity_axis(num_fidelities, legacy, nested
     torch.testing.assert_close(basis.magnetic_scale, expected)
 
 
-def _spin_node_embedding(embedding_type):
-    return embedding_type(
+@pytest.mark.parametrize(
+    "name,embedding_type",
+    [
+        ("linear_spin", LinearSpinNodeEmbedding),
+        ("nonlinear_spin", NonLinearSpinNodeEmbedding),
+    ],
+)
+def test_spin_node_embedding(name, embedding_type):
+    embedding = embedding_type(
         num_elements=2,
         num_radial_basis=4,
         num_mag_radial_basis=3,
@@ -312,9 +319,6 @@ def _spin_node_embedding(embedding_type):
         bias=False,
     )
 
-
-def test_linear_spin_node_embedding():
-    embedding = _spin_node_embedding(LinearSpinNodeEmbedding)
     node_attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
     magnetic_radial_basis = torch.tensor([[0.2, -0.1, 0.4], [0.3, 0.5, -0.2]])
 
@@ -333,33 +337,11 @@ def test_linear_spin_node_embedding():
         + embedding.spin_embedding(magnetic_radial_basis)
     ) / (2.0**0.5)
 
-    assert NODE_EMBEDDING["linear_spin"] is LinearSpinNodeEmbedding
+    assert NODE_EMBEDDING[name] is embedding_type
     assert embedding.spin_embedding.irreps_in == o3.Irreps("3x0e")
+    if name == "nonlinear_spin":
+        expected = embedding.activation(expected)
     torch.testing.assert_close(output, expected)
-
-
-def test_nonlinear_spin_node_embedding():
-    embedding = _spin_node_embedding(NonLinearSpinNodeEmbedding)
-    node_attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-    magnetic_radial_basis = torch.tensor([[0.2, -0.1, 0.4], [0.3, 0.5, -0.2]])
-
-    output = embedding(
-        node_attrs,
-        torch.empty(0),
-        torch.empty(0, dtype=torch.long),
-        torch.empty(0),
-        None,
-        None,
-        None,
-        magnetic_radial_basis,
-    )
-    linear_output = (
-        embedding.element_embedding(node_attrs)
-        + embedding.spin_embedding(magnetic_radial_basis)
-    ) / (2.0**0.5)
-
-    assert NODE_EMBEDDING["nonlinear_spin"] is NonLinearSpinNodeEmbedding
-    torch.testing.assert_close(output, embedding.activation(linear_output))
 
 
 def test_o2_tensor_node_embedding_is_equivariant():
@@ -756,7 +738,9 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
 
 
 def test_uu_o2_rejects_radial_rotary_attention():
-    with pytest.raises(ValueError, match="uu_o2 does not support radial rotary attention"):
+    with pytest.raises(
+        ValueError, match="uu_o2 does not support radial rotary attention"
+    ):
         _scatter_module(True, "uu")
 
 
@@ -765,9 +749,10 @@ def test_uu_o2_scatter_uses_only_source_features(monkeypatch):
     module = _scatter_module(False, "uu")
     assert module.linear.irreps_in == module.node_irreps
     assert module.attention is None
-    assert sum(
-        isinstance(layer, (o2.Linear, o2.UuLinear)) for layer in module.modules()
-    ) == 1
+    assert (
+        sum(isinstance(layer, (o2.Linear, o2.UuLinear)) for layer in module.modules())
+        == 1
+    )
     edge_index = torch.tensor([[0, 0], [1, 2]], device=DEVICE)
     node_features = module.irreps_in.randn(
         3, -1, dtype=DTYPE, device=DEVICE, requires_grad=True
@@ -832,7 +817,7 @@ def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
     torch.testing.assert_close(output, torch.zeros_like(output))
 
 
-def test_uu_o2_interaction_trains_forces_and_uses_external_weights(cgtp_dtype):
+def test_uu_o2_interaction_trains_forces_and_uses_external_weights(double_precision):
     from tace.models._e3nn.inter import UuO2Interaction
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
@@ -1231,14 +1216,6 @@ def test_o2_magnetic_scatter_supports_empty_edges():
     torch.testing.assert_close(output, torch.zeros_like(output))
 
 
-@pytest.fixture
-def cgtp_dtype():
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(DTYPE)
-    yield
-    torch.set_default_dtype(previous)
-
-
 @pytest.mark.parametrize(
     ("irreps_in", "irreps_sh", "irreps_out"),
     [
@@ -1248,7 +1225,7 @@ def cgtp_dtype():
     ],
 )
 def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
-    cgtp_dtype, monkeypatch, irreps_in, irreps_sh, irreps_out
+    double_precision, monkeypatch, irreps_in, irreps_sh, irreps_out
 ):
     from types import SimpleNamespace
 
@@ -1303,7 +1280,7 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
     ],
 )
 def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
-    cgtp_dtype,
+    double_precision,
     monkeypatch,
     tmp_path,
     interaction,
@@ -1400,9 +1377,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
         ]
         output = converted({key: value.clone() for key, value in data.items()})
         for key in ("energy", "forces", "stress", "virials"):
-            torch.testing.assert_close(
-                output[key], expected[key], atol=2e-9, rtol=2e-8
-            )
+            torch.testing.assert_close(output[key], expected[key], atol=2e-9, rtol=2e-8)
 
     if interaction == "o2_cgtp" and node_embedding == "linear" and Lmax == lmax == 2:
         from tace.models.compile.compile import trace_to_fx

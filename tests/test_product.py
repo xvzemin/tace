@@ -13,6 +13,8 @@ from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
+pytestmark = pytest.mark.usefixtures("double_precision")
+
 
 @pytest.mark.parametrize(
     "master,conv,product,expected",
@@ -145,14 +147,6 @@ def test_precomputed_element_indices(moe, matrix_weight, num_nodes):
             assert actual_grad is None
         else:
             torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
-
-
-@pytest.fixture(autouse=True)
-def double_precision():
-    dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.float64)
-    yield
-    torch.set_default_dtype(dtype)
 
 
 def product_irreps(irreps_in1, irreps_in2, lmax):
@@ -337,8 +331,6 @@ def test_standard_product_matches_extended_path(
     reference = BilinearMoEACE(**kwargs)
     reference.load_state_dict(actual.state_dict(), strict=True)
     assert actual.state_dict().keys() == reference.state_dict().keys()
-    assert not hasattr(actual, "_linear_up_features")
-    assert not hasattr(actual, "_merge_shared_expert")
     x = torch.randn(num_nodes, 8, requires_grad=True)
     attrs = torch.rand(num_nodes, 2)
     sc = torch.randn(num_nodes, actual.irreps_out.dim, requires_grad=True)

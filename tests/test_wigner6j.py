@@ -180,8 +180,7 @@ def test_wigner6j_matches_reference_gradients_and_o3(improper):
     state = module.state_dict()
     # The old node TP stored one output per recoupling term, before sharing.
     old_intermediate_dim = sum(
-        node_tp.irreps_out[ins[0]].dim
-        for ins in module.edge_tp.instructions
+        node_tp.irreps_out[ins[0]].dim for ins in module.edge_tp.instructions
     )
     state["node_tp.tp.output_mask"] = torch.ones(old_intermediate_dim)
     module.load_state_dict(state, strict=True)

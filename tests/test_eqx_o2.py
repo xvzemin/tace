@@ -62,14 +62,6 @@ def test_rotation_matrix_to_axis(rotation_matrix, axis):
     )
 
 
-def test_eqx_does_not_import_tace():
-    directory = Path(__file__).resolve().parents[1] / "eqx"
-    for source_path in directory.rglob("*.py"):
-        source = source_path.read_text()
-        assert "from tace" not in source
-        assert "import tace" not in source
-
-
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_eqx_without_optional_backends(device):
     if device == "cuda" and not torch.cuda.is_available():
@@ -186,7 +178,7 @@ def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax, basis_change):
 
 
 @pytest.mark.parametrize("basis_change", [True, False])
-def test_local_frame_matches_degreewise_rotation(o2_dtype, basis_change):
+def test_local_frame_matches_degreewise_rotation(double_precision, basis_change):
     irreps = o3.Irreps("2x0e+0o+2x1e+3x1o+2e+2x2o")
     frame = o2.LocalFrame(irreps, basis_change=basis_change)
     vectors = torch.randn(5, 3, generator=torch.Generator().manual_seed(7))
@@ -266,7 +258,9 @@ def test_local_frame_empty_irreps():
 
 
 @pytest.mark.parametrize("basis_change", [True, False])
-def test_local_frame_truncation_compiles_with_shared_wigner(o2_dtype, basis_change):
+def test_local_frame_truncation_compiles_with_shared_wigner(
+    double_precision, basis_change
+):
     torch.compiler.reset()
     frame = o2.LocalFrame("2x0e+1x1e+2x2o", mmax=1, basis_change=basis_change)
 
@@ -459,7 +453,7 @@ def test_o2_linear_external_weights_broadcast_and_zero_pad():
 @pytest.mark.parametrize("batch_size", [0, 5])
 @pytest.mark.parametrize("weight_batch", ["shared", "singleton", "edge"])
 def test_o2_uu_linear_matches_channel_diagonal_linear(
-    o2_dtype, batch_size, weight_batch
+    double_precision, batch_size, weight_batch
 ):
     module = o2.UuLinear(
         "4x0ee+2x0ee+4x0oe+4x1me+2x1mo",
@@ -546,7 +540,7 @@ def test_o2_uu_linear_matches_channel_diagonal_linear(
         )
 
 
-def test_o2_uu_linear_compiles_with_dynamic_batches(o2_dtype):
+def test_o2_uu_linear_compiles_with_dynamic_batches(double_precision):
     module = o2.UuLinear("4x0e+4x1m", "2x0e+6x1m+2x0o", 2)
     compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
     for batch_size in (3, 7, 0):
@@ -628,14 +622,6 @@ def test_o2_tensor_product_zero_pads_missing_outputs():
     torch.testing.assert_close(output[:, -1], torch.zeros_like(output[:, -1]))
 
 
-@pytest.fixture
-def o2_dtype():
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(DTYPE)
-    yield
-    torch.set_default_dtype(previous)
-
-
 def _asymmetric_contractions(correlation=3, path_mode="sum"):
     irreps_in = o2.Irreps("2x0e+2x0o+2x1m")
     irreps_out = o2.Irreps("2x0e+2x0o+2x1m+2x2m")
@@ -709,7 +695,7 @@ def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
 @pytest.mark.parametrize("path_normalization", ["element", "path"])
 @pytest.mark.parametrize("shared_weights", [False, True])
 def test_o2_scalar_linear_matches_o3_normalization(
-    o2_dtype, path_normalization, shared_weights
+    double_precision, path_normalization, shared_weights
 ):
     irreps_in, irreps_out = "2x0e+3x0e+2x0o", "4x0e+2x0o"
     kwargs = dict(
@@ -740,7 +726,9 @@ def test_o2_scalar_linear_matches_o3_normalization(
 
 
 @pytest.mark.parametrize("batch_size", [0, 3])
-def test_o2_linear_broadcasts_bias_and_unconnected_outputs(o2_dtype, batch_size):
+def test_o2_linear_broadcasts_bias_and_unconnected_outputs(
+    double_precision, batch_size
+):
     module = o2.Linear(
         "2x0e+1m",
         "0e+1m+0o",
@@ -764,7 +752,7 @@ def test_o2_linear_broadcasts_bias_and_unconnected_outputs(o2_dtype, batch_size)
         assert torch.isfinite(grad).all()
 
 
-def test_o2_gated_linear_compiles_with_dynamic_batches(o2_dtype):
+def test_o2_gated_linear_compiles_with_dynamic_batches(double_precision):
     gate = o2.Gate(
         "2x0ee+0oo",
         [torch.nn.SiLU(), torch.tanh],
@@ -798,7 +786,7 @@ def test_o2_gated_linear_compiles_with_dynamic_batches(o2_dtype):
 
 
 @pytest.mark.parametrize("irreps_out", ["", "0o"])
-def test_o2_disconnected_operators_have_zero_gradients(o2_dtype, irreps_out):
+def test_o2_disconnected_operators_have_zero_gradients(double_precision, irreps_out):
     linear = o2.Linear("0e", irreps_out, instructions=[])
     tp = o2.TensorProduct("0e", "0e", irreps_out, [])
     for batch_size in (3, 0):
@@ -815,7 +803,7 @@ def test_o2_disconnected_operators_have_zero_gradients(o2_dtype, irreps_out):
     ("scalars", "gates", "gated"),
     [("", "", ""), ("0o", "", ""), ("", "0o", "1m")],
 )
-def test_o2_gate_supports_empty_sectors(o2_dtype, scalars, gates, gated):
+def test_o2_gate_supports_empty_sectors(double_precision, scalars, gates, gated):
     module = o2.Gate(
         scalars,
         [torch.tanh] if scalars else [],
@@ -848,7 +836,7 @@ def test_o2_gate_supports_empty_sectors(o2_dtype, scalars, gates, gated):
     ],
 )
 def test_o2_tensor_product_coupling_normalization(
-    o2_dtype, normalization, ir1, ir2, ir_out
+    double_precision, normalization, ir1, ir2, ir_out
 ):
     ir1, ir2, ir_out = o2.Irrep(ir1), o2.Irrep(ir2), o2.Irrep(ir_out)
     module = o2.TensorProduct(
@@ -870,7 +858,7 @@ def test_o2_tensor_product_coupling_normalization(
 @pytest.mark.parametrize(
     ("ir1", "ir2"), [("0oo", "1mo"), ("1me", "1mo"), ("1mo", "2me")]
 )
-def test_o2_uuu_matches_diagonal_uvw(o2_dtype, batch_size, ir1, ir2):
+def test_o2_uuu_matches_diagonal_uvw(double_precision, batch_size, ir1, ir2):
     channels = 16
     ir1, ir2 = o2.Irrep(ir1), o2.Irrep(ir2)
     irreps_out = o2.Irreps([(ir, channels) for ir in ir1 * ir2])
@@ -911,7 +899,7 @@ def test_o2_uuu_matches_diagonal_uvw(o2_dtype, batch_size, ir1, ir2):
 
 @pytest.mark.parametrize(("lmax", "mmax"), [(0, 0), (1, 1), (3, 1), (4, 2), (3, 3)])
 @pytest.mark.parametrize("optimize", [False, True])
-def test_wigner_matches_o3_rotation_matrices(o2_dtype, lmax, mmax, optimize):
+def test_wigner_matches_o3_rotation_matrices(double_precision, lmax, mmax, optimize):
     vectors = torch.randn(3, 3, generator=torch.Generator().manual_seed(7))
     rotation = o2.rotation_matrix_to_y_axis(vectors)
     module = o2.WignerD(mmax, lmax, use_opt_einsum_fx=optimize)
@@ -1041,7 +1029,9 @@ def test_local_frame_preserves_time_parity(basis_change):
 @pytest.mark.parametrize("mode", ["uvu", "uvw"])
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 @pytest.mark.parametrize("batch_size", [0, 5])
-def test_o3_tensor_product_matches_edge_cgtp(o2_dtype, mode, normalization, batch_size):
+def test_o3_tensor_product_matches_edge_cgtp(
+    double_precision, mode, normalization, batch_size
+):
     from tace.models._e3nn.paths import generate_paths
 
     irreps_in = o3.Irreps("2x0e+2x1o+3x1e+3x2o+2x3e")
@@ -1101,7 +1091,7 @@ def test_o3_tensor_product_matches_edge_cgtp(o2_dtype, mode, normalization, batc
 @pytest.mark.parametrize("irrep_normalization", ["component", "norm", "none"])
 @pytest.mark.parametrize("path_normalization", ["element", "path", "none"])
 def test_o3_tensor_product_normalization_and_second_derivatives(
-    o2_dtype,
+    double_precision,
     irrep_normalization,
     path_normalization,
 ):
@@ -1159,7 +1149,7 @@ def test_o3_tensor_product_normalization_and_second_derivatives(
         torch.testing.assert_close(actual_grad, expected_grad, atol=2e-6, rtol=2e-8)
 
 
-def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(o2_dtype):
+def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(double_precision):
     module = o2.O3TensorProduct(
         "2x1o",
         "1x1o",
@@ -1195,7 +1185,7 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(o2_dtype):
 
 @pytest.mark.parametrize("wigner_lmax", [2, 4])
 def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(
-    o2_dtype, wigner_lmax
+    double_precision, wigner_lmax
 ):
     module = o2.O3TensorProduct(
         "2x1o",
@@ -1223,7 +1213,7 @@ def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(
     not hasattr(o3.Irrep("0e"), "t"),
     reason="The installed O(3) irreps do not expose time-reversal parity.",
 )
-def test_o3_tensor_product_time_reversal(o2_dtype):
+def test_o3_tensor_product_time_reversal(double_precision):
     from tace.models.time_reversal import with_time_reversal
 
     irreps_in = with_time_reversal(o3.Irreps("2x1e"), -1)

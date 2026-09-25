@@ -21,7 +21,7 @@ def test_missing_model_statistics_only_checks_requested_inputs():
             "enable": True,
             "scale_type": "rms_forces",
             "shift_type": None,
-        }
+        },
     }
     cached_statistics = [{"rms_forces": {26: 1.0}}]
 
@@ -192,6 +192,7 @@ def test_energy_statistics_use_canonical_names(monkeypatch):
     )
     torch.testing.assert_close(scale_shift.shift, torch.tensor([[3.5, 3.5]]))
 
+
 def test_forces_statistics_use_canonical_names(monkeypatch):
     monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
 
@@ -286,6 +287,7 @@ def test_forces_statistics_use_canonical_names(monkeypatch):
         torch.tensor([5.0 / 3.0, 25.0 / 3.0]),
     )
 
+
 def test_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch):
     monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
 
@@ -355,9 +357,7 @@ def test_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch):
         2: [0.0, 0.0, 0.0],
     }
     torch.testing.assert_close(
-        torch.tensor(
-            list(stats["rms_noncollinear_magmoms_norm_by_element"].values())
-        ),
+        torch.tensor(list(stats["rms_noncollinear_magmoms_norm_by_element"].values())),
         torch.tensor([math.sqrt(5.0), 5.0]),
     )
     component_rms = torch.tensor(

@@ -403,9 +403,7 @@ def test_o2_magnetic_interactions_keep_complete_soc_irreps():
 
     for interaction in model.representation.interactions:
         output_lmax = (
-            interaction.Lmax
-            if interaction.correlation == 1
-            else interaction.lmax
+            interaction.Lmax if interaction.correlation == 1 else interaction.lmax
         )
         expected = {
             ir_out
@@ -471,9 +469,7 @@ def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
 def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
     for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)
-    config = (
-        _time_reversal_model_config() if time_reversal else _model_config()
-    )
+    config = _time_reversal_model_config() if time_reversal else _model_config()
     config["mmax"] = 1
     config["atomic_basis"]["type"] = ["o2"]
     config["atomic_basis"]["edge_nonlinear"] = ["silu"]
@@ -485,6 +481,8 @@ def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
         ir.t == 1
         for ir, _ in model.representation.interactions[0].rejector.local_irreps_out
     )
+
+
 @pytest.mark.skipif(
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",

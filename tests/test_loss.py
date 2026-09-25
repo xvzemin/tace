@@ -55,9 +55,7 @@ def _element_weight_inputs():
     pred = {"forces": torch.tensor([[1.0, 0.0, 0.0]] * 3)}
     label = {
         "forces": torch.zeros(3, 3),
-        "node_attrs": torch.tensor(
-            [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]
-        ),
+        "node_attrs": torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]),
         "batch": torch.zeros(3, dtype=torch.long),
         "entropy": torch.ones(1),
         "forces_weight": torch.ones(1),

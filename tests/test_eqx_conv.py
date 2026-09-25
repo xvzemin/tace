@@ -10,6 +10,29 @@ from eqx.conv import TACE, O2O3TensorProductConv, O3TensorProductConv
 from eqx.o2 import O3TensorProduct, WignerD
 
 
+def test_cuda_cache_does_not_log_lock_creation(tmp_path, monkeypatch, caplog):
+    import logging
+    from types import SimpleNamespace
+
+    from eqx.kernels.cuda import compile_binary
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    caplog.set_level(logging.DEBUG, logger="filelock")
+    calls = []
+    compiler = SimpleNamespace(
+        version=lambda: (1, 0),
+        compile=lambda source, options: calls.append(source) or b"test binary",
+    )
+    for _ in range(2):
+        assert compile_binary("test source", (), compiler) == b"test binary"
+    assert calls == ["test source"]
+    assert not [record for record in caplog.records if record.name == "filelock"]
+    logger = logging.getLogger("filelock")
+    logger.debug("Other lock: %s", str(tmp_path / "other.lock"))
+    logger.warning("Cache warning: %s", str(tmp_path / "eqx/cuda/test.lock"))
+    assert len([record for record in caplog.records if record.name == "filelock"]) == 2
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("num_nodes", [0, 3])
 def test_ace_external_coefficients(device, num_nodes):
@@ -17,26 +40,49 @@ def test_ace_external_coefficients(device, num_nodes):
         pytest.skip("CUDA is unavailable")
     irreps = o3.Irreps("2x0e+2x1o")
     tp = o3.TensorProduct(
-        irreps, irreps, "2x0e+2x0e+2x1o",
+        irreps,
+        irreps,
+        "2x0e+2x0e+2x1o",
         [(0, 0, 0, "uuu", False), (1, 1, 1, "uuu", False), (0, 1, 2, "uuu", False)],
-        internal_weights=False, shared_weights=False,
+        internal_weights=False,
+        shared_weights=False,
     )
-    linears = [o3.Linear(inp, irreps, internal_weights=False, shared_weights=False)
-               for inp in (irreps, tp.irreps_out.simplify())]
+    linears = [
+        o3.Linear(inp, irreps, internal_weights=False, shared_weights=False)
+        for inp in (irreps, tp.irreps_out.simplify())
+    ]
     module = TACE([tp], linears).to(device=device, dtype=torch.float64)
-    x = torch.randn(num_nodes, 16, device=device, dtype=torch.float64)[:, ::2].requires_grad_()
-    types = (torch.arange(num_nodes*2, device=device) % 3)[::2]
-    weights = [torch.randn(3, linear.weight_numel, device=device, dtype=torch.float64, requires_grad=True) for linear in linears]
+    x = torch.randn(num_nodes, 16, device=device, dtype=torch.float64)[
+        :, ::2
+    ].requires_grad_()
+    types = (torch.arange(num_nodes * 2, device=device) % 3)[::2]
+    weights = [
+        torch.randn(
+            3,
+            linear.weight_numel,
+            device=device,
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        for linear in linears
+    ]
     actual = module(x, weights, types)
-    expected = linears[0](x, weights[0][types]) + linears[1](tp(x, x), weights[1][types])
+    expected = linears[0](x, weights[0][types]) + linears[1](
+        tp(x, x), weights[1][types]
+    )
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
-    gradients = [torch.autograd.grad(y.square().sum(), (x, *weights), create_graph=True) for y in (actual, expected)]
+    gradients = [
+        torch.autograd.grad(y.square().sum(), (x, *weights), create_graph=True)
+        for y in (actual, expected)
+    ]
     for a, b in zip(*gradients):
         torch.testing.assert_close(a, b, atol=1e-11, rtol=1e-11)
     assert not module.state_dict()
     if device == "cuda" and num_nodes:
         compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
-        torch.testing.assert_close(compiled(x, weights, types), expected, atol=1e-12, rtol=1e-12)
+        torch.testing.assert_close(
+            compiled(x, weights, types), expected, atol=1e-12, rtol=1e-12
+        )
 
 
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
@@ -1597,15 +1643,6 @@ def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
     finally:
         torch.backends.cuda.matmul.allow_tf32 = previous_tf32
         torch.set_default_dtype(previous_dtype)
-
-
-@pytest.fixture
-def double_precision():
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(torch.float64)
-    torch.manual_seed(12)
-    yield
-    torch.set_default_dtype(previous)
 
 
 def layout(features, irreps, inverse=False):
