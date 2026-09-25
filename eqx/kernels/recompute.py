@@ -101,6 +101,8 @@ class Replay:
             device,
             stream.cuda_stream,
             tuple((x.shape, x.dtype, x.requires_grad) for x in inputs),
+            torch.backends.cuda.matmul.allow_tf32,
+            torch.backends.cudnn.allow_tf32,
         )
         with self.lock, torch.cuda.device(device):
             if key not in self.graphs:

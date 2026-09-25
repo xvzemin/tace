@@ -27,6 +27,37 @@ from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
 
 
+@pytest.mark.parametrize("value", [None, "0", "1"])
+@pytest.mark.parametrize("training", [False, True])
+def test_tf32_environment(monkeypatch, value, training):
+    from tace.utils.env import set_tf32
+    from tace.utils.utils import set_precision
+
+    previous = (
+        torch.backends.cuda.matmul.allow_tf32,
+        torch.backends.cudnn.allow_tf32,
+    )
+    if value is None:
+        monkeypatch.delenv("TACE_USE_TF32", raising=False)
+    else:
+        monkeypatch.setenv("TACE_USE_TF32", value)
+    expected = training if value is None else value == "1"
+    configurations = [lambda: set_tf32(training=training)]
+    if training:
+        configurations.append(lambda: set_precision({"trainer": {"precision": 32}}))
+    try:
+        for configure in configurations:
+            torch.backends.cuda.matmul.allow_tf32 = not expected
+            torch.backends.cudnn.allow_tf32 = not expected
+            configure()
+            assert torch.backends.cuda.matmul.allow_tf32 is expected
+            assert torch.backends.cudnn.allow_tf32 is expected
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = (
+            previous
+        )
+
+
 def test_model_input_properties_include_required_embeddings():
     assert {
         "charges",

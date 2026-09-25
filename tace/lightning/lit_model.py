@@ -19,7 +19,7 @@ from torchmetrics import MetricCollection
 from tace.dataset.quantity import get_embedding_property, get_target_property
 from tace.models.adapter import TensorModel
 from tace.utils._global import DEVICE, DTYPE
-from tace.utils.env import get_tace_apply_u_shift, get_tace_use_dens
+from tace.utils.env import get_tace_apply_u_shift, get_tace_use_dens, set_tf32
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.metrics import build_metrics, update_metrics
 from tace.utils.utils import torch_default_dtype
@@ -583,6 +583,7 @@ def load_tace(
     **kwargs: Any,
 ) -> TensorModel:
     """Load an eager model or an AOTInductor package."""
+    set_tf32()
     device = DEVICE[device]
     try:
         requested_dtype = DTYPE[dtype]

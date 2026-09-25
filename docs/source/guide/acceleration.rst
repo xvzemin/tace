@@ -20,6 +20,27 @@ export, subject to the backend limitations described below.
 Installation commands for each optional backend are listed separately in
 :ref:`installation`.
 
+TF32 Precision
+--------------
+
+``TACE_USE_TF32`` controls TF32 for float32 matrix multiplication and cuDNN
+operations during both training and inference. When unset, TF32 is enabled for
+training and disabled for inference. An explicit value overrides both defaults:
+
+.. code-block:: bash
+
+   export TACE_USE_TF32=1  # Enable for both training and inference
+   export TACE_USE_TF32=0  # Disable for both training and inference
+
+TF32 preserves float32 storage but uses reduced-precision multiplication in
+eligible operations. It does not affect float64 operations or the arithmetic
+inside the custom EQX CUDA kernels. Importing TACE and loading a model apply the
+inference default; training initialization and the training entry point apply
+the training default, including after loading a model for finetuning or resumed
+training. Set it before compilation or export;
+changing it does not recompile an existing AOTI package. This is a process-wide
+PyTorch setting, not a model parameter.
+
 Kernel Backends
 ---------------
 

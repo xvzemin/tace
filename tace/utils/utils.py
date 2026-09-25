@@ -15,6 +15,8 @@ from omegaconf import DictConfig, ListConfig
 from packaging import version
 from torch import Tensor
 
+from tace.utils.env import set_tf32
+
 
 def set_global_seed(cfg: Dict) -> None:
     seed = cfg["misc"].get("global_seed", 42)
@@ -47,60 +49,7 @@ def set_precision(cfg: Dict) -> None:
     elif precision in FLOAT16 or precision in BFLOAT16:
         torch.set_default_dtype(torch.float32)
 
-    # === allow_tf32 ===
-    allow_tf32 = cfg["misc"].get("allow_tf32", False)
-    if torch.cuda.is_available():
-        if allow_tf32:
-            torch.backends.cuda.matmul.allow_tf32 = allow_tf32
-            torch.backends.cudnn.allow_tf32 = allow_tf32
-
-
-# torch 2.9
-# def set_precision(cfg: Dict) -> None:
-#     # === init ===
-#     global _GLOBAL_STATE_INITIALIZED
-#     if not _GLOBAL_STATE_INITIALIZED:
-#         torch.set_default_dtype(torch.float64)
-#         if torch.cuda.is_available():
-#             if _TORCH_GE_2_9:
-#                 torch.backends.fp32_precision = "ieee"
-#             else:
-#                 torch.backends.cuda.matmul.allow_tf32 = False
-#                 torch.backends.cudnn.allow_tf32 = False
-#         _GLOBAL_STATE_INITIALIZED = True
-
-#     # === set tensor dtype ===
-#     precision = cfg["trainer"]["precision"]
-#     FLOAT64 = {"64-true", "64", 64}
-#     FLOAT32 = {"32-true", "32", 32}
-#     FLOAT16 = {"16-mixed", "16", 16}
-#     BFLOAT16 = {"bf16-mixed", "bf16"}
-#     ALLOWED_PRECISIONS = FLOAT64 | FLOAT32 | FLOAT16 | BFLOAT16
-#     try:
-#         assert precision is not None and precision in ALLOWED_PRECISIONS, (
-#             f"Invalid precision setting: {precision!r}. "
-#             f"Must be one of: {ALLOWED_PRECISIONS}"
-#         )
-#     except Exception as e:
-#         raise RuntimeError(f"The cfg.trainer.precision value must be specified.") from e
-
-#     if precision in FLOAT32:
-#         torch.set_default_dtype(torch.float32)
-#     elif precision in FLOAT16 or precision in BFLOAT16:
-#         torch.set_default_dtype(torch.float32)
-
-#     # === allow_tf32 ===
-#     allow_tf32 = cfg["misc"].get("allow_tf32", False)
-#     if torch.cuda.is_available():
-#         if _TORCH_GE_2_9:
-#             current_precision = torch.backends.fp32_precision
-#             desired_precision = "tf32" if allow_tf32 else "ieee"
-#             if current_precision != desired_precision:
-#                 torch.backends.fp32_precision = desired_precision
-#         else:
-#             if torch.backends.cuda.matmul.allow_tf32 is not allow_tf32:
-#                 torch.backends.cuda.matmul.allow_tf32 = allow_tf32
-#                 torch.backends.cudnn.allow_tf32 = allow_tf32
+    set_tf32(training=True)
 
 
 def num_params(model) -> None:

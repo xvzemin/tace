@@ -18,6 +18,15 @@ ACCELERATION_ENV = {
 EQX_KERNELS = {"conv": True, "product": True, "linear": True}
 
 
+def set_tf32(*, training: bool = False) -> None:
+    """Configure TF32, defaulting to enabled only for training."""
+    import torch
+
+    enabled = os.environ.get("TACE_USE_TF32", "1" if training else "0") == "1"
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    torch.backends.cudnn.allow_tf32 = enabled
+
+
 def set_env(cfg: Dict):
     env = cfg.get("misc", {}).get("env", {})
     for k, v in env.items():

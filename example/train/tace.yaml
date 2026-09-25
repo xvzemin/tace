@@ -18,7 +18,6 @@ misc:
   project_name: Example
   global_seed: 42
   device: cuda # cpu or cuda
-  allow_tf32: true
   ignore_warning: true
   log_level: debug # info or debug
   env: # You can specify here the environment variables that should always be used.

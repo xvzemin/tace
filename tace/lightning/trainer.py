@@ -20,6 +20,7 @@ from torch_geometric.loader import DataLoader
 
 # from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from ..utils.callbacks import PrintMetricsCallback
+from ..utils.env import set_tf32
 from ..utils.utils import log_parameters
 from .lit_model import LightningWrapperModel
 
@@ -189,6 +190,7 @@ def train(
     target_property,
     embedding_property: list[str] = [],
 ):
+    set_tf32(training=True)
 
     # resume_ckpt = cfg.get("resume_from_model", None)
     # if resume_ckpt:
