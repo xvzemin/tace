@@ -44,6 +44,8 @@ Package organization
 harmonics, and frame transformations. ``eqx.conv`` groups fused kernels by
 convolution architecture. Its current ``O2O3TensorProductConv`` lives in
 ``conv/o2_o3`` and performs an aligned O(3) tensor-product convolution.
+``eqx.ace`` provides atomic cluster expansion contractions independently of
+the convolution kernels.
 ``eqx.kernels`` provides shared Wigner and quaternion kernels, together with
 the lazy CUDA compiler and launcher.
 

@@ -16,7 +16,7 @@ def contract(
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate a multilinear contraction without expanded CG products."""
-    from ...kernels.cuda_graph import execute
+    from ..kernels.cuda_graph import execute
     from .cuda import launch
 
     outputs = contract_fake(metadata, program, node_type, operands)

@@ -9,7 +9,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from eqx import conv as eqx_conv
+from eqx.ace import TACE
 from eqx.conv.models.tece_oam_rra import BilinearACE
 from tace.utils.env import select_acceleration
 
@@ -76,7 +76,7 @@ class CgtpACE(Product):
             product_in1 = ace.irreps_out
 
         if self.use_eqx and self.aces:
-            self.eqx_ace = eqx_conv.TACE(
+            self.eqx_ace = TACE(
                 [ace.tp for ace in self.aces],
                 [coef.linear for coef in self.coefs],
             )

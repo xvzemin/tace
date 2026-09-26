@@ -46,7 +46,8 @@ output = linear(features)
 ## Package organization
 
 `o2` defines representations and individual operators. `conv` contains fused
-implementations of specific convolution architectures. `kernels` contains
+implementations of specific convolution architectures. `ace` contains atomic
+cluster expansions and their coefficient contractions. `kernels` contains
 shared geometry kernels and CUDA compilation support, independent of any
 convolution architecture.
 `o3` contains spatial linear operators, their PyTorch implementations and
@@ -70,6 +71,10 @@ eqx/
 │   ├── wigner.py                 # WignerD interface and PyTorch implementation
 │   ├── local_frame.py            # Restriction and feature rotations
 │   └── o3_tensor_product.py      # Aligned O(3) TensorProduct
+├── ace/
+│   ├── tace.py                   # Standard ACE coefficient contraction
+│   ├── contraction.py            # Recursive coefficient adjoints
+│   └── cuda.py                   # CUDA execution
 ├── conv/
 │   ├── __init__.py               # Public convolution classes
 │   ├── contraction.py            # Shared recursive transpose rule
@@ -78,10 +83,6 @@ eqx/
 │   ├── program.py                # Static expressions and recursive derivatives
 │   ├── codegen.py                # Cooperative CUDA expression kernels
 │   ├── edge.py                   # Registered differentiable edge operations
-│   ├── ace/
-│   │   ├── tace.py               # Standard ACE coefficient contraction
-│   │   ├── contraction.py        # Recursive coefficient adjoints
-│   │   └── cuda.py               # CUDA execution
 │   ├── uu_o2/                   # Fused channel-diagonal convolution
 │   ├── uv_o2/                   # Channel-mixing convolution and edge features
 │   ├── models/
@@ -158,7 +159,7 @@ and TF32 settings. Capture adds warmup and static-buffer memory; measure both
 MD latency and reserved memory for the intended workload. Outer CUDA Graph
 capture bypasses internal replay.
 
-`conv/ace/` retains the standard `eqx.conv.TACE` implementation. Import the
+`ace/` provides the standard `eqx.ace.TACE` implementation. Import the
 model-specific product as `eqx.conv.models.tece_oam_rra.BilinearACE`.
 
 `eqx.conv.graph_softmax` provides reusable weighted normalization over incoming

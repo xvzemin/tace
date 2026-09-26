@@ -26,8 +26,8 @@ Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/tutorials.ht
 
 [tool.setuptools]
 packages = [
-    "eqx", "eqx.o2", "eqx.o3", "eqx.kernels",
-    "eqx.conv", "eqx.conv.ace", "eqx.conv.o2_o3", "eqx.conv.o3",
+    "eqx", "eqx.o2", "eqx.o3", "eqx.ace", "eqx.kernels",
+    "eqx.conv", "eqx.conv.o2_o3", "eqx.conv.o3",
     "eqx.conv.uu_o2", "eqx.conv.uv_o2", "eqx.conv.models",
     "eqx.conv.models.tece_oam_rra",
 ]

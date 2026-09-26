@@ -172,7 +172,7 @@ depends on workload. Small convolutions retain ordinary kernel execution.
 When an outer CUDA Graph is being captured, internal replay is bypassed;
 warm up the required forward and derivative kernels before outer capture.
 
-``TACE_USE_EQX=1`` also accelerates the standard ACE product with ``eqx.conv.TACE``.
+``TACE_USE_EQX=1`` also accelerates the standard ACE product with ``eqx.ace.TACE``.
 It retains all existing nonzero paths and checkpoint weights, contracts CG
 entries without expanded product tensors, and reads element coefficients
 without materializing per-node weight matrices. The highest-correlation

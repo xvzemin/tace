@@ -134,7 +134,7 @@ orders are retained for reuse. Features use flattened ``mul_ir`` storage.
 The torch backend provides a reference implementation. Forward and recursively
 transposed CUDA contractions support float32, float64 and higher derivatives.
 
-.. autoclass:: eqx.conv.TACE
+.. autoclass:: eqx.ace.TACE
    :members: forward
 
 ``BilinearACE`` fuses a gated ``uuu`` product with an element-dependent or

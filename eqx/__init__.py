@@ -1,3 +1,3 @@
-from . import conv, kernels, o2, o3
+from . import ace, conv, kernels, o2, o3
 
-__all__ = ["o2", "o3", "conv", "kernels"]
+__all__ = ["o2", "o3", "ace", "conv", "kernels"]
