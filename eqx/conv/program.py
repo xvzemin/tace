@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from .._metadata import parse_metadata
+from ..utils import parse_metadata
 
 
 class Program:

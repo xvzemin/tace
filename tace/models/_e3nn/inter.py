@@ -457,7 +457,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             and self.use_radial_rotary_attention
             and acceleration_enabled("eqx", kernel="conv")
         ):
-            from eqx.conv.models.tace.tece_oam_rra.interaction import stream
+            from eqx.models.tace.tece_oam_rra.interaction import stream
 
             radial = edge_feats
             for layer in self.edge_info.mlp[:-1]:

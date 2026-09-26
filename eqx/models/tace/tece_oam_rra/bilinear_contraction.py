@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from ....._metadata import parse_metadata
+from ....utils import parse_metadata
 
 
 def encode_metadata(plans):
@@ -25,7 +25,7 @@ def decode_metadata(metadata):
 def contract(
     metadata: str, program: str, node_type: torch.Tensor, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
-    from .....kernels.cuda_graph import execute
+    from ....kernels.cuda_graph import execute
     from .bilinear_cuda import launch
 
     outputs = contract_fake(metadata, program, node_type, operands)

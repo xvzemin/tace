@@ -2,8 +2,8 @@
 
 from functools import lru_cache
 
-from ....._metadata import parse_metadata
-from ....program import Program, next_adjoint
+from ....conv.program import Program, next_adjoint
+from ....utils import parse_metadata
 
 
 def activation(module):

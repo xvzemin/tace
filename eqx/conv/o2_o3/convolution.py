@@ -12,7 +12,7 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-from ..._metadata import parse_metadata
+from ...utils import parse_metadata
 from ..contraction import adjoint_program
 
 

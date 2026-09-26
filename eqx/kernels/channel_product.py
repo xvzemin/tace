@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from .._metadata import parse_metadata
+from ..utils import parse_metadata
 from .cuda import kernels, runtime
 
 

@@ -2,7 +2,7 @@
 
 import torch
 
-from .._metadata import parse_metadata
+from ..utils import parse_metadata
 
 
 @torch.library.custom_op("eqx::element_linear", mutates_args=(), device_types="cuda")

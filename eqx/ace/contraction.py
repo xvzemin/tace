@@ -2,7 +2,7 @@
 
 import torch
 
-from .._metadata import parse_metadata
+from ..utils import parse_metadata
 
 
 @torch.library.custom_op("eqx::ace_contract", mutates_args=(), device_types="cuda")

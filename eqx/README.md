@@ -97,8 +97,9 @@ eliminated. See the convolution guide for supported backends and examples.
 | `eqx.kernels` | Shared geometry kernels, CUDA compilation, and launch support |
 | `eqx.o3` | Element-dependent linear maps using e3nn `mul_ir` layouts |
 | `eqx.ace` | Atomic cluster expansions, independent of convolutions |
-| `eqx.conv.models.tace` | TACE-specific interaction and bilinear ACE fusion |
-| `eqx.conv.models.mace` | MACE conversion for ASE inference and training |
+| `eqx.models.tace` | TACE-specific interaction and bilinear ACE fusion |
+| `eqx.models.mace` | MACE conversion for ASE inference and training |
+| `eqx.utils` | Shared utilities, including cached operator metadata parsing |
 
 Native coupling formulas and Wigner indexing are shared within `o2`.
 Convolutions share graph ordering, radial projection, expression programs,
@@ -117,7 +118,7 @@ pip install './tace/eqx[mace,cuda]'
 ```
 
 ```python
-from eqx.conv.models.mace import convert_mace_to_eqx
+from eqx.models.mace import convert_mace_to_eqx
 from mace.calculators import MACECalculator
 
 # Load original weights and choose dtype/device before conversion.
@@ -140,13 +141,13 @@ If you use the local O(2) method or its global O(3)/local O(2) conversion,
 please cite:
 
 ```bibtex
-@misc{xu2026completeo3interactionswigner6j,
-  title={Complete O(3) Interactions from Wigner-6j Recoupling to Local O(2) Frames},
+@misc{eqx,
+  title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local O(2) Frames}, 
   author={Zemin Xu and Peijun Hu and Wenbo Xie},
   year={2026},
   eprint={2608.16592},
   archivePrefix={arXiv},
   primaryClass={physics.chem-ph},
-  url={https://arxiv.org/abs/2608.16592},
+  url={https://arxiv.org/abs/2608.16592}, 
 }
 ```

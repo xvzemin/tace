@@ -171,11 +171,11 @@ If you use TACE, please cite our papers:
 }
 ```
 
-If you use Local O(2) Frame or Generalized Wigner-6j Convlution, please cite our papers: 
+If you use Local O(2) Frame, please cite our papers: 
 
 ```bibtex
-@misc{xu2026completeo3interactionswigner6j,
-   title={Complete O(3) Interactions from Wigner-6j Recoupling to Local O(2) Frames}, 
+@misc{eqx,
+   title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local O(2) Frames}, 
    author={Zemin Xu and Peijun Hu and Wenbo Xie},
    year={2026},
    eprint={2608.16592},

@@ -110,14 +110,19 @@ features. Weights are external and biases are applied by the caller.
 
 .. autofunction:: eqx.kernels.wigner_D
 
-Model-specific fusion
----------------------
+Model-specific operators
+------------------------
 
-Specialized kernels and adapters are organized by application under
-``eqx.conv.models``. TACE maintains its PyTorch model definition and checkpoint
+Specialized operators and adapters are organized by application under
+``eqx.models``. TACE maintains its PyTorch model definition and checkpoint
 conversion separately; the MACE interface converts an existing model.
 
-.. autoclass:: eqx.conv.models.tace.tece_oam_rra.BilinearACE
+.. autoclass:: eqx.models.tace.tece_oam_rra.BilinearACE
    :members: forward
 
-.. autofunction:: eqx.conv.models.mace.convert_mace_to_eqx
+.. autofunction:: eqx.models.mace.convert_mace_to_eqx
+
+Utilities
+---------
+
+.. autofunction:: eqx.utils.parse_metadata

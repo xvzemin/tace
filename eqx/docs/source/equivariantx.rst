@@ -49,8 +49,8 @@ Package organization
 ``eqx.o2`` contains the native operators and frame conversions. ``eqx.conv``
 contains the four general convolution interfaces: ``O3TensorProductConv``,
 ``O2O3TensorProductConv``, ``UuO2TensorProductConv``, and
-``UvO2TensorProductConv``. Model-specific kernels and adapters live in
-``eqx.conv.models.tace`` and ``eqx.conv.models.mace``, respectively for TACE
+``UvO2TensorProductConv``. Model-specific operators and adapters live in
+``eqx.models.tace`` and ``eqx.models.mace``, respectively for TACE
 and MACE. The MACE interface converts existing models for ASE and training.
 ``eqx.kernels`` supplies shared geometry, CUDA compilation, and execution.
 Supporting operators remain separate: ``eqx.o3`` provides element-dependent

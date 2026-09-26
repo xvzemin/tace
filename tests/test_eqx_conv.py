@@ -13,7 +13,7 @@ from e3nn import o3
 from eqx import conv as eqx_conv
 from eqx import o2
 from eqx.ace import TACE
-from eqx.conv.models.tace.tece_oam_rra import BilinearACE
+from eqx.models.tace.tece_oam_rra import BilinearACE
 
 
 @pytest.mark.parametrize("degree", range(6))
@@ -664,7 +664,7 @@ def test_streaming_graph_attention_weights(device, nodes):
 def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.models.tace.tece_oam_rra.interaction import stream
+    from eqx.models.tace.tece_oam_rra.interaction import stream
     from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.layout import LayoutTransform
 
@@ -828,8 +828,8 @@ def test_online_attention_merge(dtype):
 def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.models.tace.tece_oam_rra.interaction import stream
     from eqx.kernels import recompute
+    from eqx.models.tace.tece_oam_rra.interaction import stream
     from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.layout import LayoutTransform
     from tace.models.mlp import get_scaled_activation
@@ -893,19 +893,36 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
         torch.testing.assert_close(a, b, atol=10 * atol, rtol=10 * rtol)
 
 
+def test_shared_metadata_cache():
+    from eqx import utils
+    from eqx.conv.program import parse_metadata
+
+    assert parse_metadata is utils.parse_metadata
+    specification = (2, ((0, 1, "uvu", True, 0.5),))
+    metadata = repr(specification)
+    result = parse_metadata(metadata)
+    assert result == specification
+    assert parse_metadata(metadata) is result
+    assert parse_metadata.cache_info().maxsize == 256
+    assert parse_metadata("None") is None
+    with pytest.raises(ValueError):
+        parse_metadata("tuple()")
+
+
 def test_convolution_package_layout():
-    from eqx import ace
+    from eqx import ace, models
     from eqx.conv import uu_o2, uv_o2
-    from eqx.conv.models.mace import convert_mace_to_eqx
-    from eqx.conv.models.tace import tece_oam_rra
-    from eqx.conv.models.tace.tece_oam_rra import LocalSplit
     from eqx.kernels.channel_product import local_product
+    from eqx.models.mace import convert_mace_to_eqx
+    from eqx.models.tace import tece_oam_rra
+    from eqx.models.tace.tece_oam_rra import LocalSplit
     from tace.models._e3nn.tece_oam_rra import Convolution
 
     assert ace.TACE is TACE
+    assert models.__name__ == "eqx.models"
     assert TACE.__module__ == "eqx.ace.tace"
     assert not hasattr(eqx_conv, "TACE")
-    assert BilinearACE.__module__ == "eqx.conv.models.tace.tece_oam_rra.product"
+    assert BilinearACE.__module__ == "eqx.models.tace.tece_oam_rra.product"
     assert Convolution.__module__ == "tace.models._e3nn.tece_oam_rra"
     assert not hasattr(tece_oam_rra, "Convolution")
     assert uu_o2.UuO2TensorProductConv is eqx_conv.UuO2TensorProductConv
@@ -913,6 +930,7 @@ def test_convolution_package_layout():
     assert issubclass(LocalSplit, torch.autograd.Function)
     assert callable(local_product)
     assert callable(convert_mace_to_eqx)
+    assert convert_mace_to_eqx.__module__ == "eqx.models.mace.conversion"
 
 
 @pytest.fixture
@@ -983,7 +1001,7 @@ def mace_data(mace_model):
 def test_mace_conversion_training(mace_model, mace_data, interaction, device):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.models.mace import convert_mace_to_eqx
+    from eqx.models.mace import convert_mace_to_eqx
 
     reference = mace_model(interaction).to(device)
     converted = deepcopy(reference)
@@ -1017,7 +1035,7 @@ def test_mace_conversion_training(mace_model, mace_data, interaction, device):
 def test_mace_conversion_ase_and_checkpoint(mace_model, mace_data, tmp_path):
     from mace.calculators import MACECalculator
 
-    from eqx.conv.models.mace import convert_mace_to_eqx
+    from eqx.models.mace import convert_mace_to_eqx
 
     original = mace_model().eval()
     original.interactions[0].conv_tp_weights.requires_grad_(False)
@@ -1052,7 +1070,7 @@ def test_mace_conversion_ase_and_checkpoint(mace_model, mace_data, tmp_path):
 
 
 def test_mace_conversion_solid_harmonics(mace_model, mace_data):
-    from eqx.conv.models.mace import convert_mace_to_eqx
+    from eqx.models.mace import convert_mace_to_eqx
 
     original = mace_model()
     original.spherical_harmonics.normalize = False
@@ -1071,7 +1089,7 @@ def test_mace_conversion_cueq(mace_model, mace_data, layout):
     pytest.importorskip("cuequivariance_torch")
     from mace.cli.convert_e3nn_cueq import run
 
-    from eqx.conv.models.mace import convert_mace_to_eqx
+    from eqx.models.mace import convert_mace_to_eqx
 
     original = mace_model().cuda()
     if layout == "ir_mul":

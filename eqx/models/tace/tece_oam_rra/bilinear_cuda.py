@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from .....kernels.cuda import kernels, runtime
+from ....kernels.cuda import kernels, runtime
 from .bilinear_contraction import decode_metadata
 
 

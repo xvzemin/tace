@@ -152,10 +152,10 @@ segmented reductions, including derivatives of the weights.
 ``StreamingGraphAttention`` additionally evaluates score/value callbacks in
 tiles. Callback plans belong to the live Python process and are not portable
 standalone AOTI artifacts. Model-specific fusion in
-``eqx.conv.models.tace.tece_oam_rra`` instead uses serialized expressions and
+``eqx.models.tace.tece_oam_rra`` instead uses serialized expressions and
 explicit parameter operands, without a live model callback. It supplies
 TECE-OAM-RRA interaction kernels and ``BilinearACE``; TACE owns the reference
-model. MACE adapters are separate in ``eqx.conv.models.mace``.
+model. MACE adapters are separate in ``eqx.models.mace``.
 
 ``eqx.ace.TACE`` remains an independent atomic cluster expansion operator.
 ``eqx.o3.ElementLinear`` and ``MoEElementLinear`` read external element weights
@@ -165,7 +165,7 @@ convolution interfaces, these supporting operators use ``mul_ir`` features.
 MACE models
 -----------
 
-``eqx.conv.models.mace.convert_mace_to_eqx`` converts an existing MACE model
+``eqx.models.mace.convert_mace_to_eqx`` converts an existing MACE model
 without changing MACE source code. MACE is an optional dependency, imported
 only when conversion is requested. Install it separately or use
 ``pip install './tace/eqx[mace,cuda]'`` from the parent of the cloned repository.
@@ -186,7 +186,7 @@ ASE inference
 .. code-block:: python
 
    import torch
-   from eqx.conv.models.mace import convert_mace_to_eqx
+   from eqx.models.mace import convert_mace_to_eqx
    from mace.calculators import MACECalculator
 
    device = "cuda" if torch.cuda.is_available() else "cpu"

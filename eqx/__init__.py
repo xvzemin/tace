@@ -16,7 +16,7 @@ with (
 ):
     from . import o2
 
-__all__ = ["o2", "o3", "ace", "conv", "kernels"]
+__all__ = ["o2", "o3", "ace", "conv", "kernels", "models", "utils"]
 
 
 def __getattr__(name):

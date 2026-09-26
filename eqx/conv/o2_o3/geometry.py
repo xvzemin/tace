@@ -7,7 +7,7 @@ from string import ascii_letters
 import torch
 from e3nn import o3
 
-from ..._metadata import parse_metadata
+from ...utils import parse_metadata
 from .convolution import kernel_plan
 
 
