@@ -586,6 +586,26 @@ class UvO2Interaction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
+        if self.use_eqx:
+            radial = edge_feats
+            for layer in self.edge_info.mlp[:-1]:
+                radial = layer(radial)
+            last = self.edge_info.mlp[-1]
+            projection = last.get_weight()
+            if last.bias is not None:
+                radial = torch.cat(
+                    (radial, radial.new_ones((radial.size(0), 1))), dim=-1
+                )
+                projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
+            return self.rejector.forward_stream(
+                node_feats,
+                radial,
+                projection,
+                edge_index,
+                edge_wigner,
+                edge_cutoff,
+                graph,
+            )
         conv_weights = self.edge_info(edge_feats)
         return self._apply_rejector(
             node_feats,
@@ -608,6 +628,8 @@ class UuO2Interaction(UvO2Interaction):
     without an additional activation on these weights. No edge gate,
     channel-mixing linear, or radial rotary attention is applied. Node-level
     linear maps, inverse rotation, and scatter retain their usual behavior.
+    With EQX convolution acceleration enabled, both frame rotations and all
+    local paths are fused with gather/scatter and a bounded radial projection.
     """
 
     linear_type = "uu"

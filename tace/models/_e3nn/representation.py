@@ -22,6 +22,7 @@ from .inter import (
     INTERACTION,
     O2CgtpInteraction,
     O2MagneticInteraction,
+    UuO2Interaction,
     UvO2Interaction,
     UvSO2Interaction,
 )
@@ -121,8 +122,16 @@ class Representation(torch.nn.Module):
             or uses_o2_interaction
             or uses_o2_cgtp_interaction
         )
-        self._can_pack_wigner = uses_o2_cgtp_interaction and not (
-            uses_so2_interaction or uses_o2_interaction
+        self._can_pack_wigner = (
+            uses_o2_cgtp_interaction
+            or any(issubclass(cls, UuO2Interaction) for cls in interaction_classes)
+        ) and not (
+            uses_so2_interaction
+            or any(
+                issubclass(cls, UvO2Interaction)
+                and not issubclass(cls, UuO2Interaction)
+                for cls in interaction_classes
+            )
             or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
         )
         uses_magnetic_interaction = any(
@@ -425,7 +434,7 @@ class Representation(torch.nn.Module):
             if getattr(self, "use_packed_wigner", False):
                 from eqx.kernels import wigner_D
 
-                # Streamed CGTPs differentiate directions directly; their
+                # Streamed convolutions differentiate directions directly; their
                 # degree matrices are shared cached values, not AD operands.
                 edge_wigner = wigner_D(
                     self.o2_angular_basis, graph.edge_vector.detach()

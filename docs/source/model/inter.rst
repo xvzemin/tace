@@ -97,6 +97,13 @@ transformations, cutoff, and scatter retain their usual behavior.
 A 3BPA configuration is available as
 ``example/train/benchmark_configs/3bpa_uu_o2.yaml``.
 
+Set ``TACE_USE_EQX=1`` to use ``eqx.conv.UuO2TensorProductConv``. It fuses
+gather, both frame rotations, UuLinear, cutoff and scatter. The last radial
+MLP projection uses reusable bounded workspaces instead of a full edge-weight
+tensor. The preceding MLP layers and node-level linear maps remain unchanged.
+The same weights can be used with or without fusion. CUDA supports force
+training, recursive higher derivatives and ``torch.compile``.
+
 .. autoclass:: tace.models._e3nn.inter.UuO2Interaction
    :no-members:
    :show-inheritance:

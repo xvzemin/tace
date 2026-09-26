@@ -155,8 +155,20 @@ Model-specific fusion
 
 ``eqx.conv.models.tece_oam_rra`` provides bilinear ACE and packed-feature
 interaction fusion for TECE-OAM-RRA. The complete native interaction is not implemented in this package
-yet. General channel-diagonal and channel-mixing convolution packages,
-``eqx.conv.uu_o2`` and ``eqx.conv.uv_o2``, are placeholders and export no classes.
+yet. ``eqx.conv.uv_o2`` is reserved for general channel-mixing convolutions.
+
+Channelwise O(2) convolution
+----------------------------
+
+``UuO2TensorProductConv`` fuses source gathering, frame rotations, an externally
+weighted ``UuLinear``, cutoff multiplication and target aggregation. The final
+radial projection is evaluated in bounded workspaces; neither full edge weights
+nor edge messages are retained for backward. Both spatial parities, time labels,
+truncated orders and recursive higher derivatives are supported. It shares the
+aligned CUDA contraction engine without restricting weights to CGTP paths.
+
+.. autoclass:: eqx.conv.UuO2TensorProductConv
+   :members: forward
 
 Shared geometry kernels
 -----------------------

@@ -1,6 +1,5 @@
-"""Reserved for general channel-diagonal O(2) convolutions.
+"""Channelwise O(2) convolutions in aligned frames."""
 
-No fused convolution is implemented or exported yet.
-"""
+from .convolution import UuO2TensorProductConv
 
-__all__ = []
+__all__ = ["UuO2TensorProductConv"]

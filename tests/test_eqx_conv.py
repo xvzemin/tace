@@ -737,9 +737,216 @@ def test_convolution_package_layout():
     assert BilinearACE.__module__ == "eqx.conv.models.tece_oam_rra.product"
     assert Convolution.__module__ == "tace.models._e3nn.tece_oam_rra"
     assert not hasattr(tece_oam_rra, "Convolution")
-    assert uu_o2.__all__ == uv_o2.__all__ == []
+    assert uu_o2.UuO2TensorProductConv is eqx_conv.UuO2TensorProductConv
+    assert uv_o2.__all__ == []
     assert issubclass(LocalSplit, torch.autograd.Function)
     assert callable(local_product)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("direction", [False, True])
+@pytest.mark.parametrize(
+    "mmax,shared,projected",
+    [(0, False, False), (1, True, False), (2, False, True), (1, True, True)],
+)
+def test_uu_o2_convolution_derivatives(
+    double_precision, device, direction, mmax, shared, projected
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame_in = o2.LocalFrame("2x0e+2x1o+2x1e+2x2o", mmax=mmax).to(device)
+    frame_out = o2.LocalFrame("2x0o+2x1e+2x1o+2x2e", mmax=mmax).to(device)
+    linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, 2)
+    module = eqx_conv.UuO2TensorProductConv(frame_in, linear, frame_out).to(device)
+    frame = o2.WignerD(2, 2).to(device)
+    index = torch.tensor([[0, 1, 2, 0, 1], [1, 2, 0, 2, 0]], device=device)
+    rows = 1 if shared else index.size(1)
+
+    def rand(*shape):
+        return (torch.randn(*shape, device=device) * 0.2).requires_grad_()
+
+    x, vectors = rand(3, frame_in.input_dim), rand(rows, 3)
+    radial = rand(rows, 3 if projected else linear.weight_numel)
+    projection = (
+        rand(3, linear.weight_numel)
+        if projected
+        else torch.empty(0, linear.weight_numel, device=device)
+    )
+    cutoff = rand(rows, 1)
+    packed = frame.forward_packed(vectors)
+    inputs = (x, vectors, radial, cutoff) + ((projection,) if projected else ())
+    actual = module(
+        x,
+        radial,
+        projection,
+        packed,
+        cutoff,
+        index,
+        3,
+        vectors=vectors if direction else None,
+    )
+    wigner, inverse = frame(vectors.expand(index.size(1), -1))
+    local = frame_in.to_local(x[index[0]], wigner)
+    message = frame_out.to_global(
+        linear(local, radial @ projection if projected else radial), inverse
+    )
+    expected = x.new_zeros(3, frame_out.input_dim).index_add(
+        0, index[1], message * cutoff
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-10)
+    for _ in range(3 if direction and mmax == 1 and projected else 2):
+        gradients = [
+            torch.autograd.grad(value.sin().sum(), inputs, create_graph=True)
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-8, rtol=2e-8)
+        actual, expected = [
+            torch.cat([g.flatten() for g in grads]) / 20 for grads in gradients
+        ]
+
+
+@pytest.mark.parametrize("channels,shared", [(3, False), (33, True)])
+def test_uu_o2_chunked_reduction(monkeypatch, double_precision, channels, shared):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.o2_o3 import cuda
+
+    monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
+    frame_in = o2.LocalFrame(f"{channels}x1e+{channels}x1o").cuda()
+    frame_out = o2.LocalFrame(f"{channels}x0o+{channels}x1o").cuda()
+    linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, channels)
+    module = eqx_conv.UuO2TensorProductConv(frame_in, linear, frame_out).cuda()
+    reference = eqx_conv.UuO2TensorProductConv(
+        frame_in, linear, frame_out, backend="torch"
+    ).cuda()
+    frame = o2.WignerD(1, 1).cuda()
+    edges, nodes = 2051, 129
+    index = torch.randint(nodes, (2, edges), device="cuda")
+    rows = 1 if shared else edges
+    inputs = [
+        (0.2 * torch.randn(shape, device="cuda")).requires_grad_()
+        for shape in (
+            (nodes, frame_in.input_dim),
+            (rows, 3),
+            (rows, 4),
+            (4, linear.weight_numel),
+            (rows, 1),
+        )
+    ]
+    x, vectors, radial, projection, cutoff = inputs
+    packed = frame.forward_packed(vectors)
+    args = x, radial, projection, packed, cutoff, index, nodes
+    actual, expected = module(*args, vectors=vectors), reference(*args)
+    torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-10)
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(value.sin().mean(), inputs, create_graph=True)
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=3e-10, rtol=3e-9)
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        ]
+
+
+def test_uu_o2_compile_and_empty_graph(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame_in = o2.LocalFrame("3x0e+3x1e").cuda()
+    frame_out = o2.LocalFrame("3x0o+3x1o").cuda()
+    linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, 3)
+    module = eqx_conv.UuO2TensorProductConv(frame_in, linear, frame_out).cuda()
+    frame = o2.WignerD(1, 1).cuda()
+
+    def evaluate(x, vectors, radial, projection, cutoff, index):
+        return module(
+            x,
+            radial,
+            projection,
+            frame.forward_packed(vectors.detach()),
+            cutoff,
+            index,
+            x.size(0),
+            vectors=vectors,
+        )
+
+    compiled = torch.compile(evaluate, fullgraph=True, dynamic=True)
+    for nodes, edges in ((3, 7), (3, 1), (3, 0), (0, 0)):
+        index = torch.randint(max(nodes, 1), (2, edges), device="cuda")
+        inputs = [
+            torch.randn(shape, device="cuda", requires_grad=True)
+            for shape in (
+                (nodes, frame_in.input_dim),
+                (edges, 3),
+                (edges, 2),
+                (2, linear.weight_numel),
+                (edges, 1),
+            )
+        ]
+        actual, expected = compiled(*inputs, index), evaluate(*inputs, index)
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        gradients = [
+            torch.autograd.grad(value.square().sum(), inputs)
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=3e-9, rtol=3e-9)
+        if edges == 7:
+            from tace.models.compile.compile import trace_to_fx
+
+            def energy_forces(*values):
+                energy = evaluate(*values).square().sum()
+                forces = -torch.autograd.grad(energy, values[1], create_graph=True)[0]
+                return energy, forces
+
+            traced = trace_to_fx(energy_forces, (*inputs, index))
+            compiled_forces = torch.compile(traced, fullgraph=True)
+            actual = compiled_forces(*inputs, index)
+            expected = energy_forces(*inputs, index)
+            for a, b in zip(actual, expected):
+                torch.testing.assert_close(a, b, atol=3e-9, rtol=3e-9)
+            gradients = [
+                torch.autograd.grad(energy + forces.square().sum(), inputs)
+                for energy, forces in (actual, expected)
+            ]
+            for a, b in zip(*gradients):
+                torch.testing.assert_close(a, b, atol=3e-8, rtol=3e-8)
+
+
+def test_uu_o2_time_parity_and_duplicate_entries(double_precision):
+    if not hasattr(o3.Irrep("0e"), "t"):
+        pytest.skip("Time-reversal representations are unavailable")
+    irreps_in = "2x0ee+2x1eo+2x1oe+2x1eo"
+    irreps_out = "2x0oo+2x1oe+2x1oo+2x1eo"
+    frame_in, frame_out = o2.LocalFrame(irreps_in), o2.LocalFrame(irreps_out)
+    linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, 2)
+    module = eqx_conv.UuO2TensorProductConv(frame_in, linear, frame_out)
+    index = torch.tensor([[0, 1, 0], [1, 0, 1]])
+    features = torch.randn(2, frame_in.input_dim)
+    vectors = torch.randn(3, 3)
+    weights = torch.randn(3, linear.weight_numel)
+    cutoff = torch.rand(3, 1)
+    frame = o2.WignerD(1, 1)
+    wigner, inverse = frame(vectors)
+    expected = frame_out.to_global(
+        linear(frame_in.to_local(features[index[0]], wigner), weights), inverse
+    )
+    expected = features.new_zeros(2, frame_out.input_dim).index_add(
+        0, index[1], expected * cutoff
+    )
+    actual = module(
+        features,
+        weights,
+        weights.new_empty(0, linear.weight_numel),
+        frame.forward_packed(vectors),
+        cutoff,
+        index,
+        2,
+        vectors=vectors,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
 
 
 def test_local_channel_scaling():
@@ -2944,7 +3151,8 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
         torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
 
 
-def test_tace_model_force_training(monkeypatch, double_precision):
+@pytest.mark.parametrize("interaction", ["cgtp", "uu_o2", ["uu_o2", "o2"]])
+def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
@@ -2961,15 +3169,19 @@ def test_tace_model_force_training(monkeypatch, double_precision):
         num_channel=3,
         Lmax=2,
         lmax=2,
+        mmax=1,
         statistics=[
             dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
         ],
         target_property=["energy", "forces", "stress", "virials"],
     )
-    config["atomic_basis"]["type"] = "cgtp"
+    config["atomic_basis"]["type"] = interaction
+    config["atomic_basis"]["use_radial_rotary_attention"] = False
+    config["atomic_basis"]["num_head"] = 1
     config["node_embedding"]["type"] = "linear"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["bias"] = True
+    config["radial_basis"]["apply_cutoff"] = False
     config["readout_emlp"]["hidden"] = [3]
     config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
@@ -2997,8 +3209,18 @@ def test_tace_model_force_training(monkeypatch, double_precision):
         )
 
     for layer in model.readout_fn.representation.interactions:
-        monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
-        monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
+        if hasattr(layer.rejector, "tp"):
+            monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
+        elif hasattr(layer.rejector, "eqx_tp"):
+            monkeypatch.setattr(layer.rejector.linear, "forward", no_edge_message)
+            monkeypatch.setattr(
+                layer.rejector.local_frame_in, "to_local", no_edge_message
+            )
+            monkeypatch.setattr(
+                layer.rejector.local_frame_out, "to_global", no_edge_message
+            )
+        if hasattr(layer.rejector, "eqx_tp"):
+            monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
     results = []
     for network, enabled in ((reference_model, "0"), (model, "1")):
         monkeypatch.setenv("TACE_USE_EQX", enabled)

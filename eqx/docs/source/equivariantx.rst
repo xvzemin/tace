@@ -47,10 +47,9 @@ convolution architecture. Its current ``O2O3TensorProductConv`` lives in
 ``eqx.kernels`` provides shared Wigner and quaternion kernels, together with
 the lazy CUDA compiler and launcher.
 
-``UvO2TensorProductConv`` and ``UuO2TensorProductConv`` are planned interfaces
-for channel-mixing Linear--Gate--Linear and channelwise Linear convolutions,
-respectively. They will use separate ``conv/uv_o2`` and ``conv/uu_o2``
-implementations; neither is currently available.
+``UuO2TensorProductConv`` in ``conv/uu_o2`` provides fused channelwise Linear
+convolutions with externally generated path weights. ``conv/uv_o2`` is reserved
+for channel-mixing Linear--Gate--Linear convolutions.
 
 Quick start
 -----------

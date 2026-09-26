@@ -11,6 +11,7 @@ import torch
 from e3nn import o3
 
 from eqx import o2
+from eqx.conv import UuO2TensorProductConv
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
@@ -155,6 +156,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
                 num_channel,
             )
             self.weight_numel = self.linear.weight_numel
+            self.eqx_tp = UuO2TensorProductConv(
+                self.local_frame_in, self.linear, self.local_frame_out
+            )
         else:
             hidden_irreps = self.local_irreps_out.filter(
                 keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
@@ -210,6 +214,48 @@ class O2ScatterTensorProduct(torch.nn.Module):
 
     def __repr__(self) -> str:
         return repr_without(self, "reshape_in", "reshape_out")
+
+    def forward_stream(
+        self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
+    ):
+        """Fuse the channelwise paths without retaining edge features or weights."""
+        vectors = graph.edge_vector if graph is not None else None
+        if wigner.ndim == 3:
+            # Mixed interactions may still use order-major, truncated frames.
+            # Keep their matrix derivatives, including the zero-padded rows.
+            lmax = math.isqrt(wigner.size(-1)) - 1
+            blocks = []
+            for l in range(
+                max(self.local_frame_in.lmax, self.local_frame_out.lmax) + 1
+            ):
+                retained = min(l, self.mmax)
+                rows = [
+                    l
+                    if m == 0
+                    else l + (2 * m - 1) * (lmax + 1) - m * m
+                    if m > 0
+                    else l + 2 * (-m) * (lmax + 1) - (-m) * (-m + 1)
+                    for m in range(-retained, retained + 1)
+                ]
+                block = wigner[:, rows, l * l : (l + 1) ** 2]
+                blocks.append(
+                    torch.nn.functional.pad(
+                        block, (0, 0, l - retained, l - retained)
+                    ).flatten(1)
+                )
+            wigner = torch.cat(blocks, dim=1)
+            vectors = None
+        message = self.eqx_tp(
+            self.reshape_in(node_feats),
+            radial,
+            projection,
+            wigner,
+            edge_cutoff,
+            edge_index,
+            node_feats.size(0),
+            vectors=vectors,
+        )
+        return self.reshape_out.inverse(message)
 
     def _to_local(
         self,
