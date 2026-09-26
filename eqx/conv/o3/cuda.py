@@ -62,6 +62,8 @@ def execution_plan(
                 outputs,
                 initialize,
                 normalization=geometry[0] if geometry else None,
+                use_generators=geometry[1] if len(geometry) > 1 else False,
+                angular_derivatives=geometry[2] if len(geometry) > 2 else False,
             )
             candidates.append((code, paths, terms, owner))
         compiled = kernels([code for code, *_ in candidates], device)
@@ -108,6 +110,8 @@ def execution_plan(
                 outputs,
                 initialize,
                 normalization=geometry[0] if geometry else None,
+                use_generators=geometry[1] if len(geometry) > 1 else False,
+                angular_derivatives=geometry[2] if len(geometry) > 2 else False,
             )
             candidates.append((code, indices, phases))
         compiled = kernels([code for code, _, _ in candidates], device)

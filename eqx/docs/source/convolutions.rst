@@ -141,6 +141,27 @@ instead differentiates the matrix operands themselves. CUDA Wigner
 construction uses direct quaternion polynomials by default, with a recursive
 method available as an alternative.
 
+Fixed angular contractions
+--------------------------
+
+CUDA generates contractions for the requested degrees and preserves every
+instruction and weight. Compatible paths share scalar products and factored
+contractions. Cartesian harmonic derivatives collect equal multi-indices,
+rather than enumerating every ordering of derivative directions.
+
+With direction inputs, same-degree dipole and quadrupole paths can be evaluated
+as finite generator polynomials instead of rotating each path output. The
+generators are divided by ``sqrt(l * (l + 1))`` before multiplication; no dense
+generator powers are stored. Other paths retain the sparse aligned contraction.
+This specialization limits the harmonic degree, not the input or output degree.
+Its vector derivatives apply sparse generator products in the degree-one/two
+harmonic space, without expanding every Cartesian derivative-index tuple.
+
+Angular derivative coefficients are constructed in float64 by differentiating
+the harmonic factor before coupling it to features. The derivative vector
+indices are differentiated as well. This avoids subtracting input- and
+output-generator terms whose magnitudes grow with the feature degree.
+
 Shared and specialized kernels
 ------------------------------
 

@@ -785,6 +785,72 @@ def test_o2_tensor_product_zero_pads_missing_outputs():
     torch.testing.assert_close(output[:, -1], torch.zeros_like(output[:, -1]))
 
 
+@pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
+@pytest.mark.parametrize("order", [1, 2])
+def test_o2_shared_couplings(mode, order, double_precision):
+    from eqx.o2._clebsch_gordan import clebsch_gordan_product
+
+    torch._dynamo.reset()
+    ir1, ir2 = o2.Irrep("1mo"), o2.Irrep(order, 0, 1)
+    mul1, mul2, mul_out = 3, 1 if mode == "u1u" else 3, 3
+    outputs = list(ir1 * ir2) * 2
+    module = o2.TensorProduct(
+        mul1 * ir1,
+        mul2 * ir2,
+        [(ir, mul_out) for ir in outputs],
+        [(0, 0, i, mode, True) for i in range(len(outputs))],
+        internal_weights=False,
+        shared_weights=False,
+        path_normalization="none",
+    )
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for batch in (4, 0):
+        x = torch.randn(batch, ir1.dim * mul1, requires_grad=True)
+        y = torch.randn(1, ir2.dim * mul2, requires_grad=True)
+        weights = torch.randn(1, module.weight_numel, requires_grad=True)
+        expected = []
+        for i, ir in enumerate(outputs):
+            value = clebsch_gordan_product(
+                x.reshape(batch, ir1.dim, mul1),
+                ir1,
+                y.reshape(1, ir2.dim, mul2),
+                ir2,
+                ir,
+                elementwise=mode != "uvw",
+            )
+            weight = module.weight_view_for_instruction(i, weights)
+            value = (
+                torch.einsum("...duv,...uvw->...dw", value, weight)
+                if mode == "uvw"
+                else value * weight.unsqueeze(-2)
+            )
+            expected.append((value * module.instructions[i].path_weight).flatten(-2))
+        expected = torch.cat(expected, dim=-1)
+        actual = compiled(x, y, weights)
+        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+        if batch:
+            ga = torch.autograd.grad(actual.sin().sum(), (x, y, weights))
+            gb = torch.autograd.grad(
+                expected.sin().sum(), (x, y, weights), retain_graph=True
+            )
+            for a, b in zip(ga, gb):
+                torch.testing.assert_close(a, b, atol=2e-12, rtol=2e-12)
+            actual = module(x, y, weights)
+            for _ in range(3):
+                actual, expected = [
+                    torch.cat(
+                        [
+                            g.flatten()
+                            for g in torch.autograd.grad(
+                                value.sin().sum(), (x, y, weights), create_graph=True
+                            )
+                        ]
+                    )
+                    for value in (actual, expected)
+                ]
+                torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+
+
 def _asymmetric_contractions(correlation=3, path_mode="sum"):
     irreps_in = o2.Irreps("2x0e+2x0o+2x1m")
     irreps_out = o2.Irreps("2x0e+2x0o+2x1m+2x2m")

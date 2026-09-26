@@ -33,6 +33,128 @@ def test_rotation_generators_match_wigner(degree, double_precision):
     torch.testing.assert_close(generators(degree), expected, atol=1e-13, rtol=1e-13)
 
 
+@pytest.mark.parametrize("degree", [1, 5, 10, 16])
+@pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
+def test_generator_polynomials(degree, normalization, double_precision):
+    from eqx.conv.angular import generator_scale, generators
+
+    torch.manual_seed(91)
+    vectors = torch.randn(19, 3)
+    vectors[:3] = torch.eye(3)
+    vectors = torch.nn.functional.normalize(vectors, dim=-1)
+    matrix = torch.einsum("ba,aij->bij", vectors, generators(degree))
+    matrix /= (degree * (degree + 1)) ** 0.5
+    identity = torch.eye(2 * degree + 1)
+    for harmonic in (1, 2):
+        scale = generator_scale(degree, harmonic, normalization)
+        value = matrix if harmonic == 1 else matrix @ matrix + identity / 3
+        expected = torch.einsum(
+            "aqc,bq->bca",
+            o3.wigner_3j(degree, harmonic, degree),
+            o3.spherical_harmonics(
+                harmonic, vectors, normalize=False, normalization=normalization
+            ),
+        )
+        torch.testing.assert_close(value * scale, expected, atol=5e-14, rtol=5e-13)
+
+
+@pytest.mark.parametrize("degree", [2, 8, 16])
+def test_high_degree_angular_derivatives(degree, double_precision):
+    from eqx.conv.angular import generators
+    from eqx.conv.o2_o3.geometry import angular_coefficients
+
+    tp = o2.O3TensorProduct(f"{degree}e", "2e", f"{degree}e", [(0, 0, 0, "uvu", True)])
+    conv = eqx_conv.O2O3TensorProductConv(tp, backend="torch")
+    previous = angular_coefficients(conv.direction_metadata, 0)[0]
+    for rank in range(1, 5):
+        expected = torch.zeros(*previous.shape, 3)
+        for axis, ell in enumerate((degree, degree, *([1] * (rank - 1)))):
+            term = torch.tensordot(previous, -generators(ell), dims=([axis], [1]))
+            expected += term.movedim(-1, axis)
+        expected[..., 1] = 0
+        actual = angular_coefficients(conv.direction_metadata, rank)[0]
+        torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+        previous = actual
+
+
+@pytest.mark.parametrize("degree", [4, 12])
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_generator_cuda_paths(degree, implementation, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    previous_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        torch.manual_seed(89)
+        args = (
+            f"3x{degree}e",
+            "1o+2e",
+            f"3x{degree}o+3x{degree}e+3x{degree}e",
+            [(0, 0, 0, "uvu", True), (0, 1, 1, "uvu", True), (0, 1, 2, "uvu", False)],
+        )
+        options = dict(internal_weights=False, shared_weights=False)
+        tp = o3.TensorProduct(*args, **options)
+        reference = eqx_conv.O3TensorProductConv(tp, backend="torch").cuda()
+        module = (
+            eqx_conv.O3TensorProductConv(tp)
+            if implementation == "o3"
+            else eqx_conv.O2O3TensorProductConv(o2.O3TensorProduct(*args, **options))
+        ).cuda()
+        edges = torch.randint(3, (2, 5), device="cuda")
+        inputs = [
+            torch.randn(shape, device="cuda", requires_grad=True)
+            for shape in ((3, tp.irreps_in1.dim), (5, 3), (5, 2), (5, tp.weight_numel))
+        ]
+        x, vectors, amplitudes, weights = inputs
+        projection = x.new_empty(0, tp.weight_numel)
+        expected = reference(
+            x, None, weights, projection, edges, vectors=vectors, amplitudes=amplitudes
+        )
+        if implementation == "o3":
+            actual = module(
+                x,
+                None,
+                weights,
+                projection,
+                edges,
+                vectors=vectors,
+                amplitudes=amplitudes,
+            )
+        else:
+            frame = o2.WignerD(degree, degree, method="recursive").cuda()
+            actual = module(
+                x,
+                weights,
+                projection,
+                frame.forward_packed(vectors.detach()),
+                amplitudes,
+                edges,
+                3,
+                vectors=vectors,
+            )
+        tolerance = 3e-5 if dtype == torch.float32 else 2e-10
+        for _ in range(3):
+            torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+            cotangent = torch.randn_like(actual) / actual.numel() ** 0.5
+            actual, expected = [
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (value.sin() * cotangent).sum(), inputs, create_graph=True
+                        )
+                    ]
+                )
+                for value in (actual, expected)
+            ]
+        torch.testing.assert_close(
+            actual, expected, atol=5 * tolerance, rtol=5 * tolerance
+        )
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+
 @pytest.mark.parametrize("magnetic", [False, True])
 @pytest.mark.parametrize("attention", [False, True])
 @pytest.mark.parametrize("mmax", [0, 2])

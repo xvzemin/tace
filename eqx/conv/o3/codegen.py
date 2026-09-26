@@ -1,6 +1,7 @@
 """Generate sparse CG contractions with shared factors and local reductions."""
 
 from ...kernels.codegen import HEADER
+from ..angular import contraction_source
 
 
 def angular_source(path, mapping, dimensions, shared, roles, cache, lines):
@@ -19,14 +20,6 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines):
                 f"p{pointer}[({row}) * {dimensions[pointer]} + {column} + {channel}]"
             )
             lines.append(f"const T {name} = active ? {value} : T(0);")
-            cache[key] = name
-        return cache[key]
-
-    def product(a, b):
-        key = tuple(sorted((a, b)))
-        if key not in cache:
-            name = f"v{len(cache)}"
-            lines.append(f"const T {name} = {a} * {b};")
             cache[key] = name
         return cache[key]
 
@@ -76,14 +69,19 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines):
                         else:
                             terms.append(
                                 (
-                                    f"T({coefficient:.17g})",
-                                    product(*[t for t in (x, y, z) if t is not None]),
+                                    coefficient,
+                                    tuple(t for t in (x, y, z) if t is not None),
                                 )
                             )
-                    name = f"v{len(cache)}"
-                    lines.append(f"T {name} = 0;")
-                    for coefficient, term in terms:
-                        lines.append(f"{name} = fma({coefficient}, {term}, {name});")
+                    if role in (0, 3) and {0, 3} <= needed:
+                        name = f"v{len(cache)}"
+                        lines.append(f"T {name} = 0;")
+                        for coefficient, term in terms:
+                            lines.append(
+                                f"{name} = fma({coefficient}, {term}, {name});"
+                            )
+                    else:
+                        name = contraction_source(terms, cache, lines)
                     cache[key] = name
                 values[v, role, m] = cache[key]
         if weight_role is not None:
@@ -120,6 +118,8 @@ def convolution_source(
     function=None,
     atomic_weights=(),
     normalization=None,
+    use_generators=False,
+    angular_derivatives=False,
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
@@ -168,7 +168,11 @@ def convolution_source(
                 needed if weight >= 0 else needed - {1},
                 cache,
                 body,
-                *(() if normalization is None else (normalization,)),
+                *(
+                    ()
+                    if normalization is None
+                    else (normalization, use_generators, angular_derivatives)
+                ),
             )
             for v in range(mul2):
                 w = f"T({factor:.17g})"
@@ -299,7 +303,15 @@ def convolution_source(
 
 
 def fused_source(
-    phases, dimensions, shared, dtype, outputs, initialize, normalization=None
+    phases,
+    dimensions,
+    shared,
+    dtype,
+    outputs,
+    initialize,
+    normalization=None,
+    use_generators=False,
+    angular_derivatives=False,
 ):
     """Execute independent path tiles in one grid with shared launch operands."""
     header = HEADER.replace("SCALAR", dtype)
@@ -332,6 +344,8 @@ def fused_source(
                 f"phase{i}",
                 atomic_weights,
                 normalization,
+                use_generators,
+                angular_derivatives,
             )
         )
     args += [

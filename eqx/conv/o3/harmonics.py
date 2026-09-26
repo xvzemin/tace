@@ -3,7 +3,8 @@
 import math
 from collections import defaultdict
 from functools import lru_cache
-from itertools import product
+
+from ..angular import contraction_source, generator_action, generator_source
 
 
 @lru_cache(maxsize=64)
@@ -67,7 +68,16 @@ def polynomial_coefficients(degree, normalization):
 
 
 def angular_source(
-    path, mapping, dimensions, shared, roles, cache, lines, normalization
+    path,
+    mapping,
+    dimensions,
+    shared,
+    roles,
+    cache,
+    lines,
+    normalization,
+    use_generators=False,
+    angular_derivatives=False,
 ):
     """Contract harmonic derivatives before reducing feature channels."""
     start, attr, end, mul1, mul2, dim1, dim2, dim_out, _, _, cg = path
@@ -102,15 +112,61 @@ def angular_source(
             return cache[key]
         name = f"v{len(cache)}"
         cache[key] = name
+        if angular_derivatives:
+            vector_key = (
+                "angular_harmonics",
+                degree,
+                mapping[5:],
+                output,
+                axis,
+                normalization,
+            )
+            if vector_key not in cache:
+                values = []
+                for polynomial in polynomial_coefficients(degree, normalization):
+                    terms = []
+                    for powers, coefficient in polynomial:
+                        factors = tuple(
+                            load(5, a) for a, p in enumerate(powers) for _ in range(p)
+                        )
+                        terms.append((coefficient, factors))
+                    values.append(contraction_source(terms, cache, lines))
+                values = tuple(values)
+                # Contract derivative directions in the harmonic irrep. The
+                # rightmost generator acts first; no feature-degree powers
+                # or tensor with 3**rank entries are needed.
+                for role in reversed(range(6, len(mapping))):
+                    vector = tuple(
+                        f"T({int(a == axis)})" if role == output else load(role, a)
+                        for a in range(3)
+                    )
+                    values = generator_action(degree, vector, values, cache, lines)
+                cache[vector_key] = values
+            lines.append(f"const T {name} = {cache[vector_key][m]};")
+            return name
         terms = []
-        for axes in product(range(3), repeat=rank - (output is not None)):
-            directions = iter(axes)
-            orders, factors = [0, 0, 0], []
-            for role in range(6, len(mapping)):
-                a = axis if role == output else next(directions)
-                orders[a] += 1
-                if role != output:
-                    factors.append(load(role, a))
+        directions = {(0, 0, 0): "T(1)"}
+        for role in range(6, len(mapping)):
+            if role == output:
+                continue
+            updated = {}
+            for orders, value in directions.items():
+                for a in range(3):
+                    powers = tuple(n + (i == a) for i, n in enumerate(orders))
+                    factor = load(role, a)
+                    term = factor if value == "T(1)" else multiply(value, factor)
+                    updated.setdefault(powers, []).append(term)
+            directions = {
+                orders: values[0]
+                if len(values) == 1
+                else variable(
+                    ("symmetric_directions", tuple(values)), " + ".join(values)
+                )
+                for orders, values in updated.items()
+            }
+        for orders, direction_factor in directions.items():
+            if output is not None:
+                orders = tuple(n + (i == axis) for i, n in enumerate(orders))
             partial_key = "partial", degree, m, mapping[5], tuple(orders), normalization
             if partial_key not in cache:
                 polynomial = []
@@ -135,8 +191,8 @@ def angular_source(
                         f"{partial} = fma(T({coefficient:.17g}), {value}, {partial});"
                     )
             value = cache[partial_key]
-            for factor in factors:
-                value = multiply(value, factor)
+            if direction_factor != "T(1)":
+                value = multiply(value, direction_factor)
             terms.append(value)
         lines.append(f"T {name} = 0;")
         lines.extend(f"{name} += {value};" for value in terms)
@@ -152,6 +208,53 @@ def angular_source(
     for v in range(mul2):
         for role in sorted(needed):
             width = {0: dim1, 3: 1, 4: dim_out}.get(role, 3)
+            if (
+                use_generators
+                and rank == 0
+                and dim1 == dim_out
+                and degree in (1, 2)
+                and role in (0, 3, 4)
+            ):
+                other = 4 if role == 0 else 0
+                offset = end if role == 0 else start
+                features = tuple(
+                    load(other, offset + a * mul1, "u") for a in range(dim1)
+                )
+                vector = tuple(load(5, a) for a in range(3))
+                coupled, scale = generator_source(
+                    (dim1 - 1) // 2,
+                    degree,
+                    vector,
+                    features,
+                    cache,
+                    lines,
+                    normalization,
+                )
+                if role == 0 and degree == 1:
+                    scale = -scale
+                if role == 3:
+                    terms = tuple(
+                        (value, load(4, end + a * mul1, "u"))
+                        for a, value in enumerate(coupled)
+                    )
+                    key = "generator_adjoint", terms, scale
+                    if key not in cache:
+                        name = f"v{len(cache)}"
+                        cache[key] = name
+                        lines.append(f"T {name} = 0;")
+                        lines.extend(
+                            f"{name} = fma({a}, {b}, {name});" for a, b in terms
+                        )
+                        lines.append(f"{name} *= T({scale:.17g});")
+                    values[v, role, 0] = cache[key]
+                    continue
+                amplitude = load(3, attr + v)
+                for column, value in enumerate(coupled):
+                    values[v, role, column] = variable(
+                        ("scaled_generator", value, amplitude, scale),
+                        f"T({scale:.17g}) * {value} * {amplitude}",
+                    )
+                continue
             for column in range(width):
                 key = (
                     "angular",
@@ -197,7 +300,7 @@ def angular_source(
                                     for coefficient, value in products
                                 )
                             y = harmonic(b, role if role >= 6 else None, column)
-                            terms.append((1.0, multiply(cache[inner_key], y)))
+                            terms.append((1.0, (cache[inner_key], y)))
                     else:
                         for a, b, c, coefficient in cg:
                             if (role == 0 and a != column) or (
@@ -210,17 +313,15 @@ def angular_source(
                                 if role == 0
                                 else load(0, start + a * mul1, "u")
                             )
-                            terms.append((coefficient, multiply(y, other)))
+                            terms.append((coefficient, (y, other)))
+                    value = contraction_source(terms, cache, lines)
                     name = f"v{len(cache)}"
                     cache[key] = name
-                    lines.append(f"T {name} = 0;")
-                    for coefficient, term in terms:
-                        lines.append(
-                            f"{name} = fma(T({coefficient:.17g}), {term}, {name});"
-                        )
                     if role != 3:
                         amplitude = load(3, attr + v)
-                        lines.append(f"{name} *= {amplitude};")
+                        lines.append(f"const T {name} = {value} * {amplitude};")
+                    else:
+                        lines.append(f"const T {name} = {value};")
                 values[v, role, column] = cache[key]
         if weight_role is not None:
             role = weight_role

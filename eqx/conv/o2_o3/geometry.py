@@ -1,6 +1,5 @@
 """Direction derivatives of aligned contractions in the rotation Lie algebra."""
 
-import math
 from functools import lru_cache
 from string import ascii_letters
 
@@ -8,34 +7,37 @@ import torch
 from e3nn import o3
 
 from ...utils import parse_metadata
+from ..angular import generators
 from .convolution import kernel_plan
 
 
-@lru_cache(maxsize=32)
-def generators(degree):
-    """Return real rotation generators in the harmonic basis, on the CPU."""
-    if not degree:
-        return torch.zeros(3, 1, 1, dtype=torch.float64, device="cpu")
-    result = -math.sqrt(degree * (degree + 1) * (2 * degree + 1)) * o3.wigner_3j(
-        degree, 1, degree, dtype=torch.float64, device="cpu"
-    ).permute(1, 2, 0)
-    # The CG tensor has an arbitrary overall sign, unlike a rotation generator.
-    # In the real harmonic basis, (J_y)_{-1,+1} = +1 fixes that convention.
-    return result * result[1, degree - 1, degree + 1].sign()
+@lru_cache(maxsize=256)
+def harmonic_derivatives(degree, rank):
+    """Return angular derivatives at the pole, including rotating vector indices."""
+    if rank == 1:
+        return generators(degree)[:, :, degree].T.contiguous()
+    previous = harmonic_derivatives(degree, rank - 1)
+    value = torch.tensordot(generators(degree), previous, dims=([2], [0]))
+    value = value.movedim(0, -1).contiguous()
+    for axis in range(1, rank):
+        term = torch.tensordot(previous, -generators(1), dims=([axis], [1]))
+        value += term.movedim(-1, axis)
+    value[..., 1] = 0
+    return value
 
 
 @lru_cache(maxsize=256)
 def angular_coefficients(metadata, rank):
     """Differentiate fixed angular tensors, including their vector indices.
 
-    A rank-zero tensor is the order-zero CG slice. The first two derivatives
-    couple harmonic derivatives at the pole, preserving their sparse support.
-    Higher derivatives act on every angular index, including the derivative
-    vector indices, to account for the moving local frame.
+    A rank-zero tensor is the order-zero CG slice. Derivatives act on the
+    harmonic at the pole and its vector indices before coupling to features.
+    General order-zero maps without harmonic metadata differentiate every
+    angular index instead.
     """
     plan = kernel_plan(metadata)
     coefficients = []
-    direct = rank in (1, 2) and bool(plan.harmonic_degrees)
+    direct = rank > 0 and bool(plan.harmonic_degrees)
     previous = angular_coefficients(metadata, rank - 1) if rank and not direct else None
     for index, ((_, path), entries) in enumerate(
         zip(plan.path_data, plan.sparse_paths)
@@ -59,12 +61,7 @@ def angular_coefficients(metadata, rank):
             # Differentiate the harmonic at the pole before coupling it. This
             # preserves its sparse support without subtracting large, nearly
             # cancelling input/output generator contractions.
-            harmonic = generators(degree)[:, :, degree].T
-            if rank == 2:
-                harmonic = torch.einsum(
-                    "jqs,si->qij", generators(degree), harmonic
-                ) + torch.einsum("jis,qs->qij", generators(1), harmonic)
-                harmonic[..., 1] = 0
+            harmonic = harmonic_derivatives(degree, rank)
             value = torch.einsum("aqb,q...->ab...", cg, harmonic) * scale
         else:
             value = torch.zeros(

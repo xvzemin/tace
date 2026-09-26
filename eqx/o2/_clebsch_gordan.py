@@ -55,3 +55,37 @@ def clebsch_gordan_product(
         real = real1 * real2 + imag1 * imag2
         return torch.stack((real, imaginary), dim=dim) * scale
     return imaginary.unsqueeze(dim) * scale
+
+
+def clebsch_gordan_products(input1, ir1, input2, ir2, irreps_out, *, elementwise):
+    """Evaluate multiple output irreps while sharing the four real products."""
+    if len(irreps_out) == 1 or not ir1.m or not ir2.m:
+        return tuple(
+            clebsch_gordan_product(
+                input1, ir1, input2, ir2, ir, elementwise=elementwise
+            )
+            for ir in irreps_out
+        )
+    dim = -2 if elementwise else -3
+    if not elementwise:
+        input1 = input1.unsqueeze(-1)
+        input2 = input2.unsqueeze(-2)
+    a, b = input1.unbind(dim)
+    c, d = input2.unbind(dim)
+    ac, bd, ad, bc = a * c, b * d, a * d, b * c
+    scale = math.sqrt(0.5)
+    result = []
+    for ir in irreps_out:
+        if ir.m == ir1.m + ir2.m:
+            value = torch.stack((ac - bd, ad + bc), dim=dim)
+        elif ir.is_even_scalar():
+            value = (ac + bd).unsqueeze(dim)
+        else:
+            imaginary = bc - ad if ir1.m >= ir2.m else ad - bc
+            value = (
+                torch.stack((ac + bd, imaginary), dim=dim)
+                if ir.m
+                else imaginary.unsqueeze(dim)
+            )
+        result.append(value * scale)
+    return tuple(result)

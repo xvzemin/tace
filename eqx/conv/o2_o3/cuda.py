@@ -430,6 +430,45 @@ def contract_directions(metadata, source, target, calls):
         prepared.append((rank, outputs, tuple(values), results, weighted))
 
     def execute(plan, source, target, terms, shared=None, initialize=()):
+        polynomial, remaining, remaining_metadata = polynomial_plan(metadata)
+        if polynomial is not None:
+            from ..o3.cuda import contract_direct
+
+            directions, direct = {}, []
+            roles = {0: 0, 1: 1, 2: 2, 5: 3, 6: 4}
+            for _, outputs, operands, results, weighted in terms:
+                frame = operands[3]
+                if id(frame) not in directions:
+                    directions[id(frame)] = frame[:, 4:7].contiguous()
+                x, radial, projection, _, _, amplitudes, y, *vectors = operands
+                values = (
+                    x,
+                    radial,
+                    projection,
+                    amplitudes,
+                    y,
+                    directions[id(frame)],
+                    *vectors,
+                )
+                direct.append(
+                    (
+                        tuple(roles[r] if r < 7 else r - 1 for r in outputs),
+                        values,
+                        results,
+                        weighted,
+                    )
+                )
+            contract_direct(
+                polynomial,
+                source,
+                target,
+                direct,
+                None if shared is None else (shared[0], shared[3]),
+                initialize,
+            )
+            plan = remaining
+            if not plan.path_data:
+                return
         if all(rank == 0 for rank, *_ in terms):
             return contract(
                 plan, source, target, [term[1:] for term in terms], shared, initialize
@@ -453,7 +492,7 @@ def contract_directions(metadata, source, target, calls):
             )
         layouts = tuple((value.size(0) == 1, *value.stride()) for value in values)
         phases = direction_plan(
-            metadata,
+            remaining_metadata,
             tuple(specification),
             layouts,
             "float" if values[0].dtype == torch.float32 else "double",
@@ -513,3 +552,77 @@ def contract_directions(metadata, source, target, calls):
         project(plan, source, target, prepared, execute, CHUNK_SIZE, WORKSPACE_BYTES)
     else:
         execute(plan, source, target, prepared)
+
+
+@lru_cache(maxsize=256)
+def polynomial_plan(metadata):
+    """Select same-degree dipole and quadrupole paths for generator contraction."""
+    from dataclasses import replace
+
+    from e3nn import o3
+
+    from .convolution import kernel_plan
+
+    plan = kernel_plan(metadata)
+    if not plan.harmonic_degrees:
+        return None, plan, metadata
+    paths, keep = [], []
+    for i, ((_, path), degree, entries) in enumerate(
+        zip(plan.path_data, plan.harmonic_degrees, plan.sparse_paths)
+    ):
+        start, end, mul, _, dim, dim_out, _, _, weight, harmonic = path
+        if dim != dim_out or degree not in (1, 2):
+            keep.append(i)
+            continue
+        cg = o3.wigner_3j(
+            (dim - 1) // 2, degree, (dim - 1) // 2, dtype=torch.float64, device="cpu"
+        )
+        scale = sum(c * float(cg[a, degree, b]) for a, b, c in entries)
+        scale /= float(cg[:, degree, :].square().sum()) * (2 * degree + 1) ** 0.5
+        paths.append(
+            (
+                start,
+                harmonic,
+                end,
+                mul,
+                1,
+                dim,
+                2 * degree + 1,
+                dim_out,
+                weight,
+                scale,
+                tuple((*row, float(cg[tuple(row)])) for row in cg.nonzero().tolist()),
+            )
+        )
+    if not paths:
+        return None, plan, metadata
+    remainder = replace(
+        plan,
+        path_data=tuple(plan.path_data[i] for i in keep),
+        sparse_paths=tuple(plan.sparse_paths[i] for i in keep),
+        scalar_paths=tuple(j for j, i in enumerate(keep) if i in plan.scalar_paths),
+        harmonic_degrees=tuple(plan.harmonic_degrees[i] for i in keep),
+    )
+    return (
+        repr(
+            (
+                tuple(paths),
+                plan.weight_numel,
+                plan.has_unweighted,
+                "component",
+                True,
+                True,
+            )
+        ),
+        remainder,
+        repr(
+            (
+                remainder.path_data,
+                remainder.weight_numel,
+                remainder.has_unweighted,
+                remainder.sparse_paths,
+                remainder.scalar_paths,
+                remainder.harmonic_degrees,
+            )
+        ),
+    )

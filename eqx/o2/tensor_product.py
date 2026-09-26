@@ -8,7 +8,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence
 
 import torch
 
-from ._clebsch_gordan import clebsch_gordan_product
+from ._clebsch_gordan import clebsch_gordan_products
 from .irreps import Irreps, IrrepsLike
 
 
@@ -193,6 +193,38 @@ class TensorProduct(torch.nn.Module):
             coefficient *= instruction.path_weight
             normalized.append(instruction._replace(path_weight=math.sqrt(coefficient)))
         self.instructions = tuple(normalized)
+        couplings = {}
+        for instruction in self.instructions:
+            key = (
+                instruction.i_in1,
+                instruction.i_in2,
+                instruction.connection_mode != "uvw",
+            )
+            ir = self.irreps_out[instruction.i_out].ir
+            outputs = couplings.setdefault(key, [])
+            if ir not in outputs:
+                outputs.append(ir)
+        self._couplings = tuple((*key, tuple(irs)) for key, irs in couplings.items())
+        indices = {
+            (i1, i2, elementwise, ir): (i, j)
+            for i, (i1, i2, elementwise, irs) in enumerate(self._couplings)
+            for j, ir in enumerate(irs)
+        }
+        self._coupling_indices = tuple(
+            indices[
+                instruction.i_in1,
+                instruction.i_in2,
+                instruction.connection_mode != "uvw",
+                self.irreps_out[instruction.i_out].ir,
+            ]
+            for instruction in self.instructions
+        )
+        self._instructions_by_coupling = tuple(
+            tuple(
+                j for j, (index, _) in enumerate(self._coupling_indices) if index == i
+            )
+            for i in range(len(self._couplings))
+        )
 
         if shared_weights is None:
             shared_weights = True
@@ -327,25 +359,28 @@ class TensorProduct(torch.nn.Module):
             )
         ]
         weights = weight.split(self._weight_sizes, dim=-1)
-        outputs = []
-        zero = None
-        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
-            contributions = []
-            for instruction_index in self._instructions_by_output[i_out]:
+        contributions = [None] * len(self.instructions)
+        for (i1, i2, elementwise, irreps_out), indices in zip(
+            self._couplings, self._instructions_by_coupling
+        ):
+            couplings = clebsch_gordan_products(
+                values1[i1],
+                self.irreps_in1[i1].ir,
+                values2[i2],
+                self.irreps_in2[i2].ir,
+                irreps_out,
+                elementwise=elementwise,
+            )
+            for instruction_index in indices:
                 instruction = self.instructions[instruction_index]
-                ir1, mul1 = self.irreps_in1[instruction.i_in1]
-                ir2, mul2 = self.irreps_in2[instruction.i_in2]
-                contribution = clebsch_gordan_product(
-                    values1[instruction.i_in1],
-                    ir1,
-                    values2[instruction.i_in2],
-                    ir2,
-                    ir_out,
-                    elementwise=instruction.connection_mode != "uvw",
-                )
+                _, mul1 = self.irreps_in1[instruction.i_in1]
+                _, mul2 = self.irreps_in2[instruction.i_in2]
+                _, index = self._coupling_indices[instruction_index]
+                contribution = couplings[index]
                 if instruction.has_weight:
                     path_weight = weights[instruction_index]
                     if instruction.connection_mode == "uvw":
+                        mul_out = self.irreps_out[instruction.i_out].mul
                         path_weight = path_weight.reshape(
                             *weight.shape[:-1], mul1, mul2, mul_out
                         )
@@ -354,9 +389,15 @@ class TensorProduct(torch.nn.Module):
                         )
                     else:
                         contribution = contribution * path_weight.unsqueeze(-2)
-                contributions.append(contribution * instruction.path_weight)
-            if contributions:
-                output = sum(contributions[1:], contributions[0])
+                contributions[instruction_index] = (
+                    contribution * instruction.path_weight
+                )
+        outputs = []
+        zero = None
+        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
+            values = [contributions[i] for i in self._instructions_by_output[i_out]]
+            if values:
+                output = sum(values[1:], values[0])
             else:
                 if zero is None:
                     zero = (

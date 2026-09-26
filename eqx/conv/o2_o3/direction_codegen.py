@@ -3,6 +3,7 @@
 from functools import lru_cache
 
 from ...kernels.codegen import HEADER
+from ..angular import contraction_source
 from .convolution import kernel_plan
 from .geometry import angular_coefficients
 
@@ -182,6 +183,8 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
 
     rotated = {}
     gradients = {}
+    contractions = {}
+    expressions = []
 
     def reduce_scalar(result, column, value):
         index = reductions[result, column] * reduction_warps
@@ -320,12 +323,13 @@ def direction_source(metadata, indices, calls, layouts, dtype, owner=-1, initial
                         else 0
                     )
                     values.setdefault(destination, []).append(
-                        (coefficient, " * ".join(product) or "T(1)")
+                        (coefficient, tuple(product))
                     )
                 for destination, terms in values.items():
-                    emit(f"{{ const T factor = {factor}; T value = 0;")
-                    for coefficient, product in terms:
-                        emit(f"value = fma(T({coefficient:.17g}), ({product}), value);")
+                    value = contraction_source(terms, contractions, expressions)
+                    lines.extend(expressions)
+                    expressions.clear()
+                    emit(f"{{ const T factor = {factor}; T value = {value};")
                     if output == 0:
                         name = f"{lx}{destination}"
                     elif output == 6:
