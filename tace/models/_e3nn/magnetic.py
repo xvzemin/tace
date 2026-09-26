@@ -13,7 +13,7 @@ from ..angular import SolidHarmonics
 from ..blocks import format_list
 from ..radial import MagneticChebyshevBasis
 from ..time_reversal import make_irrep, spherical_harmonics_irreps
-from .fused import uuuTensorProduct
+from .fused import UuuTensorProduct
 
 
 class MagneticBasis(torch.nn.Module):
@@ -88,7 +88,7 @@ class MagneticBasis(torch.nn.Module):
             magnetic_edge_irreps = o3.Irreps(
                 [(1, make_irrep(0, 1, 1))]
             )
-        self.magnetic_edge_tensor_product = uuuTensorProduct(
+        self.magnetic_edge_tensor_product = UuuTensorProduct(
             self.magnetic_node_irreps_out,
             self.magnetic_node_irreps_out,
             magnetic_edge_irreps,

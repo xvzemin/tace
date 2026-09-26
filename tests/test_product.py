@@ -7,7 +7,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from tace.models._e3nn.fused import uuuTensorProduct
+from tace.models._e3nn.fused import UuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
@@ -248,7 +248,7 @@ def test_filtered_products_preserve_values_and_derivatives(monkeypatch, use_eqt)
             internal_weights=False,
             shared_weights=False,
         )
-        filtered = uuuTensorProduct(
+        filtered = UuuTensorProduct(
             irreps_in,
             base,
             requested,

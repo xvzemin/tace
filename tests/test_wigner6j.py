@@ -3,7 +3,7 @@ import torch
 from e3nn import o3
 
 from tace.models._e3nn.base import _to_possible_tp_irreps
-from tace.models._e3nn.fused import uvuTensorProduct
+from tace.models._e3nn.fused import UvuTensorProduct
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
     wigner_6j,
@@ -36,7 +36,7 @@ def test_uvu_tensor_product_oeq_matches_e3nn(shared_weights, monkeypatch):
     ]
 
     monkeypatch.setenv("TACE_USE_OEQ", "0")
-    reference = uvuTensorProduct(
+    reference = UvuTensorProduct(
         irreps_in1,
         irreps_in2,
         irreps_out,
@@ -44,7 +44,7 @@ def test_uvu_tensor_product_oeq_matches_e3nn(shared_weights, monkeypatch):
         shared_weights=shared_weights,
     ).to(DEVICE)
     monkeypatch.setenv("TACE_USE_OEQ", "1")
-    actual = uvuTensorProduct(
+    actual = UvuTensorProduct(
         irreps_in1,
         irreps_in2,
         irreps_out,

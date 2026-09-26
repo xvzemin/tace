@@ -14,6 +14,7 @@ from e3nn import o3
 from eqx import o2
 from tace.models._e3nn.base import NodeUpdate
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
+from tace.models._e3nn.fused import UuO2ScatterTensorProduct
 from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models._e3nn.magnetic import MagneticBasis
 from tace.models._e3nn.node import (
@@ -25,7 +26,7 @@ from tace.models._e3nn.node import (
 )
 from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
-    O2ScatterTensorProduct,
+    UvO2ScatterTensorProduct,
 )
 from tace.models._e3nn.representation import Representation
 
@@ -662,7 +663,11 @@ def test_graph_softmax_matches_groupwise_sums_and_gradients(shape, dim, use_ptr)
 
 def _scatter_module(use_attention, linear_type="uv"):
     irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e")
-    return O2ScatterTensorProduct(
+    if linear_type == "uu":
+        return UuO2ScatterTensorProduct(
+            irreps, irreps, num_channel=2, mmax=1
+        ).to(DEVICE, DTYPE)
+    return UvO2ScatterTensorProduct(
         irreps,
         irreps,
         num_channel=2,
@@ -673,7 +678,6 @@ def _scatter_module(use_attention, linear_type="uv"):
         num_head=1,
         num_radial_basis=4,
         use_radial_rotary_attention=use_attention,
-        linear_type=linear_type,
     ).to(DEVICE, DTYPE)
 
 
@@ -689,6 +693,7 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
     edge_vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
     weights = torch.randn(4, module.weight_numel, dtype=DTYPE, device=DEVICE)
     radial = torch.randn(4, 4, dtype=DTYPE, device=DEVICE)
+    kwargs = {"edge_radial_basis": radial} if linear_type == "uv" else {}
     cutoff = torch.rand(4, 1, dtype=DTYPE, device=DEVICE)
     wigner_module = o2.WignerD(1, 1).to(DEVICE, DTYPE)
     wigner, wigner_inv = wigner_module(edge_vectors)
@@ -698,8 +703,8 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
         edge_index,
         wigner,
         wigner_inv,
-        edge_radial_basis=radial,
         edge_cutoff=cutoff,
+        **kwargs,
     )
     if linear_type == "uu":
         torch.testing.assert_close(
@@ -709,8 +714,8 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
                 edge_index,
                 wigner,
                 wigner_inv,
-                edge_radial_basis=radial,
                 edge_cutoff=cutoff,
+                **kwargs,
             ),
             2 * output,
         )
@@ -726,8 +731,8 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
         edge_index,
         rotated_wigner,
         rotated_wigner_inv,
-        edge_radial_basis=radial,
         edge_cutoff=cutoff,
+        **kwargs,
     )
     torch.testing.assert_close(
         rotated_output,
@@ -737,18 +742,12 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
     )
 
 
-def test_uu_o2_rejects_radial_rotary_attention():
-    with pytest.raises(
-        ValueError, match="uu_o2 does not support radial rotary attention"
-    ):
-        _scatter_module(True, "uu")
-
-
 def test_uu_o2_scatter_uses_only_source_features(monkeypatch):
     torch.manual_seed(8)
     module = _scatter_module(False, "uu")
-    assert module.linear.irreps_in == module.node_irreps
-    assert module.attention is None
+    assert module.linear.irreps_in == module.local_frame_in.irreps_out
+    assert not hasattr(module, "attention")
+    assert not hasattr(module, "linear_type")
     assert (
         sum(isinstance(layer, (o2.Linear, o2.UuLinear)) for layer in module.modules())
         == 1
@@ -817,8 +816,11 @@ def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
     torch.testing.assert_close(output, torch.zeros_like(output))
 
 
-def test_uu_o2_interaction_trains_forces_and_uses_external_weights(double_precision):
-    from tace.models._e3nn.inter import UuO2Interaction
+@pytest.mark.parametrize("use_attention", [False, True])
+def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
+    double_precision, use_attention
+):
+    from tace.models._e3nn.inter import UuO2Interaction, UvO2Interaction
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
@@ -840,7 +842,7 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(double_precis
     config["atomic_basis"].update(
         type="uu_o2",
         edge_nonlinear=None,
-        use_radial_rotary_attention=False,
+        use_radial_rotary_attention=use_attention,
         num_head=1,
     )
     config["node_embedding"]["type"] = "linear"
@@ -849,14 +851,24 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(double_precis
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
     config["scale_shift"]["enable"] = False
+    if use_attention:
+        with pytest.raises(
+            ValueError, match="uu_o2 does not support radial rotary attention"
+        ):
+            e3nnTACE(**config)
+        return
     model = TensorModel(e3nnTACE(**config)).train()
+    assert model.readout_fn.representation.use_o2
+    assert model.readout_fn.representation._can_pack_wigner
     for interaction in model.readout_fn.representation.interactions:
         assert isinstance(interaction, UuO2Interaction)
+        assert not isinstance(interaction, UvO2Interaction)
+        assert isinstance(interaction.rejector, UuO2ScatterTensorProduct)
         assert isinstance(interaction.rejector.linear, o2.UuLinear)
         assert not hasattr(interaction.rejector, "nonlinearity")
         assert not hasattr(interaction.rejector, "linear_up")
         assert not hasattr(interaction.rejector, "linear_down")
-        assert interaction.rejector.attention is None
+        assert not hasattr(interaction.rejector, "attention")
         assert list(interaction.rejector.linear.parameters()) == []
         edge_features = torch.randn(3, interaction.edge_feats_channel)
         weights = interaction.edge_info(edge_features)
@@ -1230,13 +1242,13 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
     from types import SimpleNamespace
 
     from tace.models._e3nn.fused import (
-        O2CgtpScatterTensorProduct,
+        O2ScatterTensorProduct,
         O3ScatterTensorProduct,
     )
 
     for name in ("TACE_USE_OEQ", "TACE_USE_CUE"):
         monkeypatch.setenv(name, "0")
-    module = O2CgtpScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
+    module = O2ScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
     reference = O3ScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
     lmax = max(o3.Irreps(irreps).lmax for irreps in (irreps_in, irreps_out))
     assert module.tp.lmax == lmax

@@ -17,10 +17,11 @@ from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
 from ..time_reversal import contains_time_odd_irreps
+from ..utils import repr_without
 from .paths import SymmetricProductPaths, generate_paths
 
 
-class uuuTensorProduct(torch.nn.Module):
+class UuuTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -122,7 +123,7 @@ class uuuTensorProduct(torch.nn.Module):
         return self.tp(x, y, ws)
 
 
-class uvuTensorProduct(torch.nn.Module):
+class UvuTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -138,7 +139,7 @@ class uvuTensorProduct(torch.nn.Module):
         irreps_in2 = o3.Irreps(irreps_in2)
         irreps_out = o3.Irreps(irreps_out)
         if any(ins[3] != "uvu" for ins in instructions):
-            raise ValueError("uvuTensorProduct only accepts uvu instructions")
+            raise ValueError("UvuTensorProduct only accepts uvu instructions")
 
         self.tp = o3.TensorProduct(
             irreps_in1,
@@ -365,7 +366,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
         return self.reshape_out(message)
 
 
-class O2CgtpScatterTensorProduct(torch.nn.Module):
+class O2ScatterTensorProduct(torch.nn.Module):
     """Evaluate the same CGTP paths in an aligned frame and sum at target nodes."""
 
     def __init__(self, irreps_in1, irreps_in2, irreps_out, *, l1l2=None):
@@ -460,3 +461,108 @@ class O2CgtpScatterTensorProduct(torch.nn.Module):
             vectors=graph.edge_vector,
         )
         return self.reshape_streamed(message)
+
+
+class UuO2ScatterTensorProduct(torch.nn.Module):
+    """Rotate source features, apply an externally weighted UuLinear, and scatter.
+
+    Parameters
+    ----------
+    irreps_in, irreps_out : o3.Irreps
+        Global input and output representations in flattened ``mul_ir`` layout.
+    num_channel : int
+        Multiplicity shared by every input and output entry.
+    mmax : int
+        Maximum retained local order.
+    """
+
+    def __init__(self, irreps_in, irreps_out, *, num_channel, mmax):
+        super().__init__()
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.irreps_out = o3.Irreps(irreps_out)
+        self.num_channel = num_channel
+        self.mmax = min(self.irreps_in.lmax, mmax)
+        if any(mul != num_channel for mul, _ in self.irreps_in + self.irreps_out):
+            raise ValueError("irreps_in/out multiplicity must equal num_channel.")
+        self.local_frame_in = o2.LocalFrame(self.irreps_in, mmax=self.mmax)
+        self.local_frame_out = o2.LocalFrame(
+            self.irreps_out, mmax=self.mmax, reverse=True
+        )
+        self.reshape_in = LayoutTransform(
+            self.irreps_in,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
+        self.reshape_out = LayoutTransform(
+            self.irreps_out,
+            layout_in="flatten_mul_ir",
+            layout_out="flatten_ir_mul",
+        )
+        self.local_irreps_in = self.local_frame_in.irreps_out
+        self.local_irreps_out = self.local_frame_out.irreps_out
+        self.linear = o2.UuLinear(
+            self.local_irreps_in, self.local_irreps_out, num_channel
+        )
+        self.weight_numel = self.linear.weight_numel
+        self.eqx_tp = eqx_conv.UuO2TensorProductConv(
+            self.local_frame_in, self.linear, self.local_frame_out
+        )
+
+    def __repr__(self) -> str:
+        return repr_without(self, "reshape_in", "reshape_out")
+
+    def forward(
+        self, node_feats, conv_weights, edge_index, wigner, wigner_inv, edge_cutoff
+    ):
+        if edge_cutoff is None:
+            raise ValueError("O2 convolution requires edge_cutoff.")
+        node_feats = self.reshape_in(node_feats)
+        message = self.local_frame_in.to_local(node_feats[edge_index[0]], wigner)
+        message = self.linear(message, conv_weights)
+        message = self.local_frame_out.to_global(message, wigner_inv) * edge_cutoff
+        message = scatter_sum(
+            message, edge_index[1], dim=0, dim_size=node_feats.size(0)
+        )
+        return self.reshape_out.inverse(message)
+
+    def forward_stream(
+        self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
+    ):
+        """Fuse rotations, local paths, radial projection, and gather/scatter."""
+        vectors = graph.edge_vector if graph is not None else None
+        if wigner.ndim == 3:
+            # Mixed interactions may still use order-major, truncated frames.
+            # Keep their matrix derivatives, including the zero-padded rows.
+            lmax = math.isqrt(wigner.size(-1)) - 1
+            blocks = []
+            for l in range(
+                max(self.local_frame_in.lmax, self.local_frame_out.lmax) + 1
+            ):
+                retained = min(l, self.mmax)
+                rows = [
+                    l
+                    if m == 0
+                    else l + (2 * m - 1) * (lmax + 1) - m * m
+                    if m > 0
+                    else l + 2 * (-m) * (lmax + 1) - (-m) * (-m + 1)
+                    for m in range(-retained, retained + 1)
+                ]
+                block = wigner[:, rows, l * l : (l + 1) ** 2]
+                blocks.append(
+                    torch.nn.functional.pad(
+                        block, (0, 0, l - retained, l - retained)
+                    ).flatten(1)
+                )
+            wigner = torch.cat(blocks, dim=1)
+            vectors = None
+        message = self.eqx_tp(
+            self.reshape_in(node_feats),
+            radial,
+            projection,
+            wigner,
+            edge_cutoff,
+            edge_index,
+            node_feats.size(0),
+            vectors=vectors,
+        )
+        return self.reshape_out.inverse(message)

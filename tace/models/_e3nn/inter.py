@@ -16,10 +16,14 @@ from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
-from .fused import O2CgtpScatterTensorProduct, O3ScatterTensorProduct
+from .fused import (
+    O2ScatterTensorProduct,
+    O3ScatterTensorProduct,
+    UuO2ScatterTensorProduct,
+)
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
-from .o2 import O2ScatterMagneticTensorProduct, O2ScatterTensorProduct
+from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
 from .residual import get_resnet_layer
 from .tece_oam_rra import Convolution
 
@@ -320,7 +324,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
     """
 
     def _build_rejector(self) -> torch.nn.Module:
-        return O2CgtpScatterTensorProduct(
+        return O2ScatterTensorProduct(
             self.irreps_in,
             self.irreps_sh,
             self.irreps_out,
@@ -491,10 +495,8 @@ class UvO2Interaction(O3CgtpInteraction):
     radial rotary attention uses radial basis as scale and shift.
     """
 
-    linear_type = "uv"
-
     def _build_rejector(self) -> torch.nn.Module:
-        rejector = O2ScatterTensorProduct(
+        rejector = UvO2ScatterTensorProduct(
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
@@ -519,7 +521,6 @@ class UvO2Interaction(O3CgtpInteraction):
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
             use_radial_rotary_attention=self.use_radial_rotary_attention,
-            linear_type=self.linear_type,
         )
         if rejector.attention is not None:
             self.scatter_norm = None
@@ -551,7 +552,7 @@ class UvO2Interaction(O3CgtpInteraction):
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
-        if self.linear_type == "uv" and self.edge_nonlinear is None:
+        if self.edge_nonlinear is None:
             raise ValueError("o2 requires edge_nonlinear to be set.")
         if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
             raise ValueError("o2 requires 0 <= mmax <= max(Lmax, lmax).")
@@ -586,7 +587,62 @@ class UvO2Interaction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
-        if self.use_eqx and self.linear_type == "uu":
+        conv_weights = self.edge_info(edge_feats)
+        return self._apply_rejector(
+            node_feats,
+            magnetic_node_info,
+            magnetic_edge_attrs,
+            conv_weights,
+            edge_index,
+            edge_wigner,
+            edge_wigner_inv,
+            edge_radial_basis,
+            edge_cutoff,
+        )
+
+
+class UuO2Interaction(O3CgtpInteraction):
+    """Global O(3) interaction with an externally weighted O(2) UuLinear.
+
+    Only source node features enter the local frame. A single channelwise
+    linear map uses one weight per local path and channel from the edge MLP,
+    without an additional activation on these weights. No edge gate,
+    channel-mixing linear, or radial rotary attention is applied. Node-level
+    linear maps, inverse rotation, and scatter retain their usual behavior.
+    With EQX convolution acceleration enabled, both frame rotations and all
+    local paths are fused with gather/scatter and a bounded radial projection.
+    """
+
+    def _prepare_setup(self) -> None:
+        if self.use_radial_rotary_attention:
+            raise ValueError("uu_o2 does not support radial rotary attention.")
+        if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
+            raise ValueError("uu_o2 requires 0 <= mmax <= max(Lmax, lmax).")
+
+    def _build_rejector(self) -> torch.nn.Module:
+        return UuO2ScatterTensorProduct(
+            self.irreps_in,
+            self.irreps_out,
+            num_channel=self.num_channel,
+            mmax=self.mmax,
+        )
+
+    def _compute_messages(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs_total: torch.Tensor,
+        edge_radial_basis: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_attrs: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_cutoff: Union[torch.Tensor, None],
+        edge_wigner: Union[torch.Tensor, None] = None,
+        edge_wigner_inv: Union[torch.Tensor, None] = None,
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
+        magnetic_edge_attrs: Union[torch.Tensor, None] = None,
+        graph: Union[Graph, None] = None,
+    ) -> torch.Tensor:
+        if self.use_eqx:
             radial = edge_feats
             for layer in self.edge_info.mlp[:-1]:
                 radial = layer(radial)
@@ -607,32 +663,14 @@ class UvO2Interaction(O3CgtpInteraction):
                 graph,
             )
         conv_weights = self.edge_info(edge_feats)
-        return self._apply_rejector(
+        return self.rejector(
             node_feats,
-            magnetic_node_info,
-            magnetic_edge_attrs,
             conv_weights,
             edge_index,
             edge_wigner,
             edge_wigner_inv,
-            edge_radial_basis,
             edge_cutoff,
         )
-
-
-class UuO2Interaction(UvO2Interaction):
-    """Global O(3) interaction with an externally weighted O(2) UuLinear.
-
-    Only source node features enter the local frame. A single channelwise
-    linear map uses one weight per local path and channel from the edge MLP,
-    without an additional activation on these weights. No edge gate,
-    channel-mixing linear, or radial rotary attention is applied. Node-level
-    linear maps, inverse rotation, and scatter retain their usual behavior.
-    With EQX convolution acceleration enabled, both frame rotations and all
-    local paths are fused with gather/scatter and a bounded radial projection.
-    """
-
-    linear_type = "uu"
 
 
 class O2MagneticInteraction(UvO2Interaction):

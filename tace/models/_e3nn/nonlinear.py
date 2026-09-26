@@ -216,8 +216,8 @@ def get_nonlinear_layer(
 #         multiplicities = {mul for mul, _ in irreps}
 #         assert len(multiplicities) == 1
 
-#         from .fused import uuuTensorProduct
-#         self.tp = uuuTensorProduct(
+#         from .fused import UuuTensorProduct
+#         self.tp = UuuTensorProduct(
 #             non_scalar_irreps,
 #             irreps,
 #             irreps,

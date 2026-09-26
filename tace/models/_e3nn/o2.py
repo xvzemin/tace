@@ -11,7 +11,7 @@ import torch
 from e3nn import o3
 
 from eqx import o2
-from eqx.conv import UuO2TensorProductConv, UvO2TensorProductConv
+from eqx.conv import UvO2TensorProductConv
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -155,7 +155,7 @@ def uv_kernel(module):
         return None
 
 
-class O2ScatterTensorProduct(torch.nn.Module):
+class UvO2ScatterTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -169,14 +169,8 @@ class O2ScatterTensorProduct(torch.nn.Module):
         num_head: int,
         num_radial_basis: int,
         use_radial_rotary_attention: bool,
-        linear_type: str = "uv",
     ) -> None:
         super().__init__()
-        if linear_type not in ("uv", "uu"):
-            raise ValueError("linear_type must be 'uv' or 'uu'.")
-        if linear_type == "uu" and use_radial_rotary_attention:
-            raise ValueError("uu_o2 does not support radial rotary attention.")
-        self.linear_type = linear_type
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
         self.num_channel = num_channel
@@ -201,58 +195,45 @@ class O2ScatterTensorProduct(torch.nn.Module):
             layout_out="flatten_ir_mul",
         )
         self.node_irreps = self.local_frame_in.irreps_out
-        self.local_irreps_in = (
-            self.node_irreps if linear_type == "uu" else 2 * self.node_irreps
-        )
+        self.local_irreps_in = 2 * self.node_irreps
         self.local_irreps_out = self.local_frame_out.irreps_out
-        if linear_type == "uu":
-            self.linear = o2.UuLinear(
-                self.local_irreps_in,
-                self.local_irreps_out,
-                num_channel,
-            )
-            self.weight_numel = self.linear.weight_numel
-            self.eqx_tp = UuO2TensorProductConv(
-                self.local_frame_in, self.linear, self.local_frame_out
-            )
-        else:
-            hidden_irreps = self.local_irreps_out.filter(
-                keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
-            )
-            scalar_entries = []
-            scalar_acts = []
-            gated_entries = []
-            for ir, mul in hidden_irreps:
-                if ir.is_invariant_scalar():
-                    scalar_entries.append((ir, mul))
-                    scalar_acts.append(even_scalar_act)
-                elif ir.m == 0 and odd_scalar_act is not None:
-                    scalar_entries.append((ir, mul))
-                    scalar_acts.append(odd_scalar_act)
-                else:
-                    gated_entries.append((ir, mul))
-            irreps_gated = o2.Irreps(gated_entries)
-            irreps_gates = (
-                o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
-                if irreps_gated.num_irreps
-                else o2.Irreps()
-            )
-            self.nonlinearity = o2.Gate(
-                o2.Irreps(scalar_entries),
-                scalar_acts,
-                irreps_gates,
-                [tensor_act] if len(irreps_gates) else [],
-                irreps_gated,
-            )
-            self.linear_up = o2.Linear(
-                self.local_irreps_in,
-                self.nonlinearity.irreps_in,
-            )
-            self.linear_down = o2.Linear(
-                self.nonlinearity.irreps_out,
-                self.local_irreps_out,
-            )
-            self.weight_numel = self.local_irreps_in.num_irreps
+        hidden_irreps = self.local_irreps_out.filter(
+            keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
+        )
+        scalar_entries = []
+        scalar_acts = []
+        gated_entries = []
+        for ir, mul in hidden_irreps:
+            if ir.is_invariant_scalar():
+                scalar_entries.append((ir, mul))
+                scalar_acts.append(even_scalar_act)
+            elif ir.m == 0 and odd_scalar_act is not None:
+                scalar_entries.append((ir, mul))
+                scalar_acts.append(odd_scalar_act)
+            else:
+                gated_entries.append((ir, mul))
+        irreps_gated = o2.Irreps(gated_entries)
+        irreps_gates = (
+            o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
+            if irreps_gated.num_irreps
+            else o2.Irreps()
+        )
+        self.nonlinearity = o2.Gate(
+            o2.Irreps(scalar_entries),
+            scalar_acts,
+            irreps_gates,
+            [tensor_act] if len(irreps_gates) else [],
+            irreps_gated,
+        )
+        self.linear_up = o2.Linear(
+            self.local_irreps_in,
+            self.nonlinearity.irreps_in,
+        )
+        self.linear_down = o2.Linear(
+            self.nonlinearity.irreps_out,
+            self.local_irreps_out,
+        )
+        self.weight_numel = self.local_irreps_in.num_irreps
 
         self.use_radial_rotary_attention = (
             use_radial_rotary_attention and self.node_irreps.mmax > 0
@@ -267,67 +248,18 @@ class O2ScatterTensorProduct(torch.nn.Module):
             if self.use_radial_rotary_attention
             else None
         )
-        if self.linear_type == "uv":
-            self.eqx_tp = uv_kernel(self)
+        self.eqx_tp = uv_kernel(self)
 
     def __repr__(self) -> str:
         return repr_without(self, "reshape_in", "reshape_out")
-
-    def forward_stream(
-        self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
-    ):
-        """Fuse the channelwise paths without retaining edge features or weights."""
-        vectors = graph.edge_vector if graph is not None else None
-        if wigner.ndim == 3:
-            # Mixed interactions may still use order-major, truncated frames.
-            # Keep their matrix derivatives, including the zero-padded rows.
-            lmax = math.isqrt(wigner.size(-1)) - 1
-            blocks = []
-            for l in range(
-                max(self.local_frame_in.lmax, self.local_frame_out.lmax) + 1
-            ):
-                retained = min(l, self.mmax)
-                rows = [
-                    l
-                    if m == 0
-                    else l + (2 * m - 1) * (lmax + 1) - m * m
-                    if m > 0
-                    else l + 2 * (-m) * (lmax + 1) - (-m) * (-m + 1)
-                    for m in range(-retained, retained + 1)
-                ]
-                block = wigner[:, rows, l * l : (l + 1) ** 2]
-                blocks.append(
-                    torch.nn.functional.pad(
-                        block, (0, 0, l - retained, l - retained)
-                    ).flatten(1)
-                )
-            wigner = torch.cat(blocks, dim=1)
-            vectors = None
-        message = self.eqx_tp(
-            self.reshape_in(node_feats),
-            radial,
-            projection,
-            wigner,
-            edge_cutoff,
-            edge_index,
-            node_feats.size(0),
-            vectors=vectors,
-        )
-        return self.reshape_out.inverse(message)
 
     def _to_local(
         self,
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
         wigner: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         node_features = self.reshape_in(node_features)
-        if self.linear_type == "uu":
-            source_features = self.local_frame_in.to_local(
-                node_features[edge_index[0]],
-                wigner,
-            )
-            return node_features, source_features, None
         paired = self.local_frame_in.to_local(
             node_features[edge_index.T],
             wigner,
@@ -337,15 +269,13 @@ class O2ScatterTensorProduct(torch.nn.Module):
     def _convolution(
         self,
         source_features: torch.Tensor,
-        target_features: Optional[torch.Tensor],
+        target_features: torch.Tensor,
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
         edge_radial_basis: Optional[torch.Tensor],
         edge_cutoff: torch.Tensor,
         num_nodes: int,
     ) -> torch.Tensor:
-        if self.linear_type == "uu":
-            return self.linear(source_features, conv_weights)
         inputs = []
         offset = 0
         for (ir, mul), ir_slice in zip(
@@ -417,8 +347,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
         if (
-            self.linear_type == "uv"
-            and getattr(self, "eqx_tp", None) is not None
+            getattr(self, "eqx_tp", None) is not None
             and node_feats.is_cuda
             and node_feats.dtype in (torch.float32, torch.float64)
             and acceleration_enabled("eqx", kernel="conv")

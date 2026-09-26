@@ -13,8 +13,8 @@ from tace.dataset.quantity import PROPERTY, TIME_ODD_PROPERTIES
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.fused import (
     O3ScatterTensorProduct,
-    uuuTensorProduct,
-    uvuTensorProduct,
+    UuuTensorProduct,
+    UvuTensorProduct,
 )
 from tace.models._e3nn.layer_norm import get_normalization_layer
 from tace.models._e3nn.node import (
@@ -554,7 +554,7 @@ def test_time_odd_irreps_reject_eqt(monkeypatch):
     target_irreps = o3.Irreps("2x0ee + 2x0eo + 2x1ee + 2x1eo + 2x2ee + 2x2eo")
     monkeypatch.setenv("TACE_USE_EQT", "1")
     with pytest.raises(ValueError, match="EQT does not support time-reversal"):
-        uuuTensorProduct(
+        UuuTensorProduct(
             irreps_in,
             irreps_in,
             target_irreps,
@@ -604,7 +604,7 @@ def test_time_odd_irreps_reject_oeq_tensor_product(monkeypatch):
     )
     monkeypatch.setenv("TACE_USE_OEQ", "1")
     with pytest.raises(ValueError, match="OEQ does not support time-reversal"):
-        uvuTensorProduct(
+        UvuTensorProduct(
             node_irreps,
             edge_irreps,
             actual_irreps,

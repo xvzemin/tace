@@ -14,7 +14,7 @@ from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import MLP, get_scaled_activation
 from .base import NodeEmbedding, NodeUpdate
 from .fused import O3ScatterTensorProduct
-from .o2 import O2ScatterTensorProduct
+from .o2 import UvO2ScatterTensorProduct
 
 
 class LinearNodeEmbedding(NodeEmbedding):
@@ -209,7 +209,7 @@ class O2TensorNodeEmbedding(NodeEmbedding):
         self.irreps_out = o3.Irreps(
             [(self.num_channel, (l, (-1) ** l)) for l in range(self.Lmax + 1)]
         )
-        self.rejector = O2ScatterTensorProduct(
+        self.rejector = UvO2ScatterTensorProduct(
             self.node_embedding.irreps_out,
             self.irreps_out,
             num_channel=self.num_channel,

@@ -24,7 +24,7 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax):
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.o2 import (
         O2ScatterMagneticTensorProduct,
-        O2ScatterTensorProduct,
+        UvO2ScatterTensorProduct,
     )
 
     torch.manual_seed(401)
@@ -35,7 +35,7 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax):
         if time
         else "2x0e+2x0o+2x1o+2x1e+2x2e+2x2o"
     )
-    cls = O2ScatterMagneticTensorProduct if magnetic else O2ScatterTensorProduct
+    cls = O2ScatterMagneticTensorProduct if magnetic else UvO2ScatterTensorProduct
     args = (irreps, irreps, irreps) if magnetic else (irreps, irreps)
     module = (
         cls(
@@ -3309,6 +3309,7 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+    from tace.models._e3nn.fused import O3ScatterTensorProduct, UuO2ScatterTensorProduct
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
@@ -3364,7 +3365,7 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     for layer in model.readout_fn.representation.interactions:
         if hasattr(layer.rejector, "tp"):
             monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
-        elif hasattr(layer.rejector, "eqx_tp"):
+        elif isinstance(layer.rejector, UuO2ScatterTensorProduct):
             monkeypatch.setattr(layer.rejector.linear, "forward", no_edge_message)
             monkeypatch.setattr(
                 layer.rejector.local_frame_in, "to_local", no_edge_message
@@ -3372,7 +3373,7 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
             monkeypatch.setattr(
                 layer.rejector.local_frame_out, "to_global", no_edge_message
             )
-        if hasattr(layer.rejector, "eqx_tp"):
+        if isinstance(layer.rejector, (O3ScatterTensorProduct, UuO2ScatterTensorProduct)):
             monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
     results = []
     for network, enabled in ((reference_model, "0"), (model, "1")):

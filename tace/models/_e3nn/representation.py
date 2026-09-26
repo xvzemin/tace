@@ -103,7 +103,7 @@ class Representation(torch.nn.Module):
             for interaction_cls in interaction_classes
         )
         uses_o2_interaction = any(
-            issubclass(interaction_cls, UvO2Interaction)
+            issubclass(interaction_cls, (UvO2Interaction, UuO2Interaction))
             for interaction_cls in interaction_classes
         )
         uses_o2_cgtp_interaction = any(
@@ -129,7 +129,6 @@ class Representation(torch.nn.Module):
             uses_so2_interaction
             or any(
                 issubclass(cls, UvO2Interaction)
-                and not issubclass(cls, UuO2Interaction)
                 for cls in interaction_classes
             )
             or issubclass(node_embedding_cls, O2TensorNodeEmbedding)

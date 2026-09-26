@@ -17,7 +17,7 @@ from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lo
 from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
-from .fused import uuuTensorProduct
+from .fused import UuuTensorProduct
 from .paths import SymmetricProductPaths
 
 
@@ -50,7 +50,7 @@ class CgtpACE(Product):
             SymmetricProductPaths(product_in1) if self.correlation > 2 else None
         )
         for nu in range(2, self.correlation + 1):
-            ace = uuuTensorProduct(
+            ace = UuuTensorProduct(
                 irreps_in1=product_in1,
                 irreps_in2=self.irreps_base,
                 irreps_out=self.irreps_tp_out_list[nu - 2],
@@ -227,7 +227,7 @@ class BilinearMoEACE(Product):
         )
 
         for nu in range(2, self.correlation + 1):
-            this_ace = uuuTensorProduct(
+            this_ace = UuuTensorProduct(
                 irreps_in1=product_in1,
                 irreps_in2=self.irreps_base,
                 irreps_out=self.irreps_tp_out_list[nu - 2],

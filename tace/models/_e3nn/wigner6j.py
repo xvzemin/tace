@@ -15,7 +15,7 @@ from tace.utils.env import select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
 from ..time_reversal import contains_time_odd_irreps
-from .fused import O3ScatterTensorProduct, uvuTensorProduct
+from .fused import O3ScatterTensorProduct, UvuTensorProduct
 from .paths import satisfy
 
 
@@ -355,7 +355,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             for i, j, k, *rest in recoupled_node_edge_instructions
         ]
 
-        self.node_tp = uvuTensorProduct(
+        self.node_tp = UvuTensorProduct(
             self.irreps_node_feats,
             self.extra_irreps_node_attrs,
             irreps_mid,
