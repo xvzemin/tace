@@ -341,7 +341,7 @@ model:
       cutoff_fn: c2poly # [c2poly, c3poly, mollifier, cosine]
       polynomial_cutoff: 5 # (int)
       gaussian_width: 2.0
-      order: 0 # (int), specify order for jn, for j0, it is negligible, for jn, <7 stable
+      order: 0 # Nonnegative order for jn; ignored by j0.
       trainable: false # (bool)
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)

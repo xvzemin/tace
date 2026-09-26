@@ -10,34 +10,92 @@ import ase.data
 import numpy as np
 import torch
 from scipy.optimize import brentq
-from scipy.special import jv
+from scipy.special import spherical_jn
 
 from tace.utils.torch_scatter import scatter_sum
 
 
 def compute_jn_zeros(n: int, k: int) -> np.ndarray:
-    def spherical_bessel_jn(r, order):
-        return np.sqrt(np.pi / (2 * r)) * jv(
-            order + 0.5, r
-        )  # from first bessel to first spherical bessel
+    """Return the first ``k`` positive zeros of the spherical Bessel function."""
+    if not isinstance(n, int) or n < 0:
+        raise ValueError("n must be a nonnegative integer.")
+    if not isinstance(k, int) or k <= 0:
+        raise ValueError("k must be a positive integer.")
+    if n == 0:
+        return np.arange(1, k + 1, dtype=np.float64) * math.pi
 
+    # The first zero exceeds n, and consecutive positive zeros are more than pi apart.
     zeros = []
-    guess_points = np.arange(1, k + 20) * np.pi
-
-    found = 0
-    i = 0
-    while found < k and i < len(guess_points) - 1:
-        a, b = guess_points[i], guess_points[i + 1]
-        try:
-            root = brentq(
-                spherical_bessel_jn, a, b, args=(n)
-            )  # search roots for spherical_bessel_jn in [a, b]
-            zeros.append(root)
-            found += 1
-        except ValueError:
-            pass
-        i += 1
+    left = float(n)
+    value = spherical_jn(n, left)
+    while len(zeros) < k:
+        right = left + math.pi
+        next_value = spherical_jn(n, right)
+        if value * next_value < 0 or next_value == 0:
+            zeros.append(
+                brentq(lambda x: spherical_jn(n, x), left, right, xtol=1e-14)
+            )
+        left, value = right, next_value
     return np.array(zeros, dtype=np.float64)
+
+
+def spherical_bessel_jn(n: int, x: torch.Tensor) -> torch.Tensor:
+    """Evaluate a spherical Bessel function, including derivatives at zero.
+
+    Parameters
+    ----------
+    n : int
+        Nonnegative order.
+    x : torch.Tensor
+        Real arguments in double precision.
+    """
+    limit = math.sqrt(8 * n + 12) if n else 1.0
+    small = x.abs() <= limit
+    argument = torch.where(small, x, 0.0)
+    squared = argument.square()
+    coefficients = [1.0]
+    for k in range(1, 25 if n else 13):
+        coefficients.append(-coefficients[-1] / (2 * k * (2 * n + 2 * k + 1)))
+    series = torch.full_like(x, coefficients[-1])
+    for coefficient in reversed(coefficients[:-1]):
+        series = series * squared + coefficient
+    if n:
+        # Scaling before taking the power avoids overflow in x**n and (2*n+1)!!.
+        scale = math.exp(math.log(math.prod(range(1, 2 * n + 2, 2))) / n)
+        series = (argument / scale).pow(n) * series
+
+    # Ascending recurrence is stable above the order. Inactive branches must
+    # also remain finite, otherwise torch.where can propagate NaN derivatives.
+    argument = torch.where(x.abs() > max(n, limit), x, max(n, limit))
+    previous = argument.sin() / argument
+    if n == 0:
+        return torch.where(small, series, previous)
+    current = (previous - argument.cos()) / argument
+    for k in range(1, n):
+        previous, current = current, (2 * k + 1) / argument * current - previous
+
+    if n > limit:
+        middle = (~small) & (x.abs() <= n)
+        argument = torch.where(middle, x, limit)
+        previous = torch.zeros_like(argument)
+        value = torch.ones_like(argument)
+        target = torch.zeros_like(argument)
+        # Start above the turning region, whose width grows as n**(1/3).
+        for k in range(n + 32 + math.ceil(8 * n ** (1 / 3)), 0, -1):
+            previous, value = value, (2 * k + 1) / argument * value - previous
+            if k - 1 == n:
+                target = value
+            if k % 16 == 0 or k == 1:
+                scale = torch.maximum(value.abs(), previous.abs()).clamp_min(1.0)
+                value, previous, target = value / scale, previous / scale, target / scale
+        j0 = argument.sin() / argument
+        j1 = (j0 - argument.cos()) / argument
+        # j0 and j1 have no common nonzero root; use both to normalize Miller's recurrence.
+        descending = target * (j0 * value + j1 * previous) / (
+            value.square() + previous.square()
+        )
+        current = torch.where(middle, descending, current)
+    return torch.where(small, series, current)
 
 
 class j0SphericalBesselBasis(torch.nn.Module):
@@ -84,35 +142,20 @@ class j0SphericalBesselBasis(torch.nn.Module):
         )
 
 
-class jnTaylorSphericalBessel(torch.nn.Module):
-    def __init__(self, n: int, K: int = 6):
-        super().__init__()
-        self.n = n
-        self.K = K
-        prefactor = []
-        for k in range(self.K):
-            prefactor.append(
-                ((-1) ** k)
-                / (math.factorial(k) * math.gamma(k + n + 1.5))
-                * 0.5
-                * math.sqrt(math.pi)
-            )
-        self.register_buffer("prefactor", torch.tensor(prefactor), persistent=False)
-        self.register_buffer(
-            "powers", 2 * torch.arange(self.K) + self.n, persistent=False
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        orig_shape = x.shape
-        x = x.view(-1)
-        x = 0.5 * x
-        x_pow = x.unsqueeze(-1) ** self.powers
-        prefactor = self.prefactor.to(x.dtype)
-        return torch.sum(prefactor * x_pow, dim=-1).reshape(orig_shape)
-
-
 class jnSphericalBesselBasis(torch.nn.Module):
-    "arbitrary order n >= 0"
+    """Spherical Bessel radial basis, normalized with the measure ``r**2 dr``.
+
+    Parameters
+    ----------
+    cutoff : float
+        Positive radial cutoff.
+    order : int or list of int
+        Nonnegative orders, in output order.
+    num_basis : int or list of int
+        Number of positive zeros for each order.
+    trainable : bool
+        Whether to optimize the zeros. Normalization retains its initial value.
+    """
 
     def __init__(
         self,
@@ -122,183 +165,64 @@ class jnSphericalBesselBasis(torch.nn.Module):
         trainable: bool = False,
     ) -> None:
         super().__init__()
+        if not math.isfinite(cutoff) or cutoff <= 0:
+            raise ValueError("cutoff must be positive and finite.")
+        order = [order] if isinstance(order, int) else order
+        num_basis = [num_basis] if isinstance(num_basis, int) else num_basis
+        if not isinstance(order, list) or not order or not all(
+            isinstance(n, int) and n >= 0 for n in order
+        ):
+            raise ValueError("order must be a nonnegative integer or a nonempty list of them.")
+        if not isinstance(num_basis, list) or not num_basis or not all(
+            isinstance(k, int) and k > 0 for k in num_basis
+        ):
+            raise ValueError("num_basis must be a positive integer or a nonempty list of them.")
+        if len(order) != len(num_basis):
+            raise ValueError("order and num_basis must have the same length.")
 
-        num_zero = num_basis
-        if isinstance(order, int):
-            if order < 0:
-                raise ValueError("order must be a nonnegative integer")
-            order = [order]
-        else:
-            if not isinstance(order, list):
-                raise TypeError("order must be a list of nonnegative integer")
-            if not all(isinstance(x, int) and x >= 0 for x in order):
-                raise ValueError("All elements of order must be nonnegative integer")
-
-        if isinstance(num_zero, int):
-            if num_zero <= 0:
-                raise ValueError("num_zero must be a positive integer")
-            num_zero = [num_zero]
-        else:
-            if not isinstance(num_zero, list):
-                raise TypeError("num_zero must be a list of positive integers")
-            if not all(isinstance(x, int) and x > 0 for x in num_zero):
-                raise ValueError("All elements of num_zero must be positive integers")
-
-        if len(order) != len(num_zero):
-            raise ValueError(
-                f"order and num_zero must have the same length, "
-                f"but got {len(order)} and {len(num_zero)}"
-            )
-
-        zeros = []
-        for o, n in zip(order, num_zero):
-            zeros.append(compute_jn_zeros(o, n))
-
-        normalizer = self._compute_normalizer(cutoff, order, zeros)
-
+        zeros = [compute_jn_zeros(n, k) for n, k in zip(order, num_basis)]
+        normalizer = np.concatenate(
+            [
+                math.sqrt(2.0 / cutoff**3) / np.abs(spherical_jn(n + 1, z))
+                for n, z in zip(order, zeros)
+            ]
+        )
         self.register_buffer(
             "normalizer",
-            torch.tensor(
-                [y for x in normalizer for y in x], dtype=torch.get_default_dtype()
-            ).unsqueeze(0),
-        )  # (1, sum(order*zeros))
+            torch.tensor(normalizer, dtype=torch.get_default_dtype()).unsqueeze(0),
+        )
+        zeros = torch.tensor(
+            np.concatenate(zeros), dtype=torch.get_default_dtype()
+        ).unsqueeze(0)
         if trainable:
-            self.zeros = torch.nn.Parameter(
-                torch.tensor(
-                    [y for x in zeros for y in x], dtype=torch.get_default_dtype()
-                ).unsqueeze(0)
-            )
+            self.zeros = torch.nn.Parameter(zeros)
         else:
-            self.register_buffer(
-                "zeros",
-                torch.tensor(
-                    [y for x in zeros for y in x], dtype=torch.get_default_dtype()
-                ).unsqueeze(0),
-            )
+            self.register_buffer("zeros", zeros)
         self.register_buffer(
             "cutoff", torch.tensor(cutoff, dtype=torch.get_default_dtype())
         )
-        self.order = order
-        self.num_zero = num_zero
-        self.jn_taylor = torch.nn.ModuleList(
-            jnTaylorSphericalBessel(
-                n=o,
-                K=30,
-            )
-            for o in order
-        )
-
-    def torch_jn(self, i, order, x):
-        if order == 0:
-            return torch.sin(x) / x
-        elif order == 1:
-            return torch.sin(x) / x**2 - torch.cos(x) / x
-        elif order == 2:
-            return (3 / x**3 - 1 / x) * torch.sin(x) - (3 * torch.cos(x) / x**2)
-        elif order == 3:
-            return (15 / x**4 - 6 / x**2) * torch.sin(x) - (
-                15 / x**3 - 1 / x
-            ) * torch.cos(x)
-        elif order == 4:
-            return (105 / x**5 - 45 / x**3 + 1 / x) * torch.sin(x) - (
-                105 / x**4 - 10 / x**2
-            ) * torch.cos(x)
-        elif order == 5:
-            return (945 / x**6 - 420 / x**4 + 15 / x**2) * torch.sin(x) - (
-                945 / x**5 - 105 / x**3 + 1 / x
-            ) * torch.cos(x)
-        elif order == 6:
-            return (10395 / x**7 - 4725 / x**5 + 210 / x**3 - 1 / x) * torch.sin(x) - (
-                10395 / x**6 - 1260 / x**4 + 21 / x**2
-            ) * torch.cos(x)
-        elif order == 7:
-            return (135135 / x**8 - 62370 / x**6 + 3150 / x**4 - 28 / x**2) * torch.sin(
-                x
-            ) - (135135 / x**7 - 17325 / x**5 + 378 / x**3 - 1 / x) * torch.cos(x)
-        elif order == 8:
-            return (
-                2027025 / x**9 - 945945 / x**7 + 51975 / x**5 - 630 / x**3 + 1 / x
-            ) * torch.sin(x) - (
-                2027025 / x**8 - 270270 / x**6 + 6930 / x**4 - 36 / x**2
-            ) * torch.cos(x)
-        elif order == 9:
-            return (
-                34459425 / x**10
-                - 16216200 / x**8
-                + 945945 / x**6
-                - 13860 / x**4
-                + 45 / x**2
-            ) * torch.sin(x) - (
-                34459425 / x**9 - 4729725 / x**7 + 135135 / x**5 - 990 / x**3 + 1 / x
-            ) * torch.cos(x)
-        else:
-            N = (
-                order + 100
-            )  # Starting point for backward recursion (Miller's algorithm)
-            device, dtype = x.device, x.dtype
-            j = torch.zeros(N + 1, *x.shape, dtype=dtype, device=device)
-
-            # j[N] = 1e-40
-            # j[N - 1] = 0.0
-            # for n in range(N - 1, 0, -1):
-            #     j[n - 1] = (2 * n + 1) / x * j[n] - j[n + 1]
-
-            j = [None] * (N + 1)
-            j[N] = torch.full_like(x, 1e-40)
-            j[N - 1] = torch.zeros_like(x)
-            for n in range(N - 1, 0, -1):
-                j[n - 1] = (2 * n + 1) / x * j[n] - j[n + 1]
-
-            j = torch.stack(j, dim=0)
-            # Normalize using accurately computed j0
-            j0_ground_truth = torch.sin(x) / x
-            scale_factor = j0_ground_truth / j[0]  # (...,)
-            j_normalized = j * scale_factor.unsqueeze(0)
-
-            return j_normalized[order]
-        # else:
-        #     return self.jn_taylor[i](x)
+        self.order = list(order)
+        self.num_zero = list(num_basis)
 
     def forward(
         self, r: torch.Tensor, node_attrs: torch.Tensor, edge_index: torch.Tensor
-    ) -> torch.Tensor:  # [..., 1]
-        orig_dtype = r.dtype
-        r = r.to(torch.float64)
-        cutoff = self.cutoff.to(torch.float64)
-        zeros = self.zeros.to(torch.float64)
-        normalizer = self.normalizer.to(torch.float64)
+    ) -> torch.Tensor:
+        argument = self.zeros.to(torch.float64) * (
+            r.to(torch.float64) / self.cutoff.to(torch.float64)
+        )
+        basis = torch.cat(
+            [
+                spherical_bessel_jn(n, x)
+                for n, x in zip(self.order, argument.split(self.num_zero, dim=-1))
+            ],
+            dim=-1,
+        )
+        return (basis * self.normalizer.to(torch.float64)).to(r.dtype)
 
-        r = zeros * (r / cutoff)  #  (zeros/cutoff) · r  = k · r
-
-        basis = []
-        idx = 0
-        for i, (o, n) in enumerate(zip(self.order, self.num_zero)):
-            r_order = r[..., idx : idx + n]
-            jn = self.torch_jn(i, o, r_order)
-            basis.append(jn)
-            idx += n
-        basis = torch.cat(basis, dim=-1)
-
-        out = basis * normalizer
-
-        return out.to(orig_dtype)
-
-    def _compute_normalizer(self, cutoff, order, zeros):
-        normalizer = []
-        for o, zero in zip(order, zeros):
-            o_normalizer = []
-            for i in range(len(zero)):
-                z = zero[i]
-                j_next = np.sqrt(np.pi / (2 * z)) * jv(o + 1 + 0.5, z)
-                norm = np.sqrt(2 / (cutoff**3 * j_next**2))
-                o_normalizer.append(norm)
-            normalizer.append(o_normalizer)
-        return normalizer
-
-    def __repr__(self):
+    def extra_repr(self):
         return (
-            f"{self.__class__.__name__}(cutoff={self.cutoff}, order={self.order},  num_zero={self.num_zero}, "
-            f"trainable={self.zeros.requires_grad})"
+            f"cutoff={self.cutoff.item()}, order={self.order}, num_basis={self.num_zero}, "
+            f"trainable={self.zeros.requires_grad}"
         )
 
 
