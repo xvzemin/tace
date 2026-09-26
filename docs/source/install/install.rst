@@ -38,12 +38,13 @@ independently as described below. When working from a source checkout, replace
 PyTorch Geometric
 -----------------
 
-The core ``torch_geometric`` package is required, but importing TACE or
-EquivariantX does not require the optional PyG binary extensions
+TACE requires the core ``torch_geometric`` package, but not its optional
+binary extensions at import time
 (``torch-scatter``, ``torch-sparse``, ``torch-cluster``, ``torch-spline-conv``,
 or ``pyg-lib``). Standard sum and mean reductions use native PyTorch operations.
 TACE's ``scatter_min``, ``scatter_max``, and ``scatter_mul`` require registered
-``torch-scatter`` operators only when called.
+``torch-scatter`` operators only when called. EquivariantX does not depend on
+PyG or its extensions.
 
 OpenEquivariance (OEQ)
 ----------------------
@@ -208,12 +209,11 @@ TACE detects this capability at runtime; no model option is required. Pure
 O(3) models then attach time-reversal parity to magnetic moments, magnetic
 fields, and their tensor-product paths automatically.
 
-Time-reversal models use the installed time-reversal e3nn implementation for
-all equivariant operations, including irreps, spherical harmonics, linear
-maps, gates, and tensor products. TACE rejects explicit
-EQT, CUEQ, OEQ, or EquivariantX kernel selection for these models and does not
-automatically enable EQT for higher-order products, because these kernels do
-not represent time-reversal parity.
+Time-reversal models use the time-reversal e3nn implementation for global
+representation metadata and coupling rules. Native EQX O(2) operators and
+compatible fused kernels preserve these labels. EQT, CUEQ, and OEQ operators
+that do not support time-odd irreps reject them when selected; support is
+checked per operator rather than by removing time-odd coupling paths.
 
 EquivariantX
 ------------
@@ -228,17 +228,22 @@ release is planned once the library is fully mature. To install from source:
    git clone https://github.com/xvzemin/tace.git
    pip install ./tace/eqx
 
-The library imports as ``eqx`` and depends on PyTorch, PyTorch
-Geometric, e3nn, and ``opt_einsum_fx``, but not on TACE or the optional PyG
-binary extensions.
+The library imports as ``eqx`` and depends on PyTorch >= 2.4, e3nn >= 0.4.4, and
+``opt_einsum_fx``, but not on TACE or PyG. Its scope covers native O(2)
+operators, e3nn-compatible O(3)/O(2) frame conversion, and fused CUDA
+convolutions. Install ``'./tace/eqx[cuda]'`` and provide a CUDA toolkit to
+use the fused backend. See :ref:`equivariantx-tutorials` and
+:ref:`equivariantx-convolutions` for conventions, examples, and backend support.
+When using e3nn 0.4.x with recent PyTorch, import ``eqx`` before ``e3nn.o3``
+so its packaged constants are loaded in the scoped compatibility context.
 
 
 Acceleration Selection
 ----------------------
 
-OEQ and CUEQ are alternative implementations of the same edge-level
-operations; enable only one of them. EQT is an independent product-basis
-acceleration and may be combined with either OEQ or CUEQ. 
+Enabled backends are selected per supported operator in the order
+EQX, OEQ, EQT, CUEQ. Multiple backends may be enabled together, for example
+OEQ convolutions with EQT product-basis operations.
 AOTI is a separate compilation and deployment layer. See the
 :ref:`acceleration-tutorial` for backend selection, Python interfaces,
 compilation, and AOTI export.

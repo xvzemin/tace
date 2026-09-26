@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from ....ace.contraction import parse
+from ....._metadata import parse_metadata
 
 
 def encode_metadata(plans):
@@ -16,8 +16,8 @@ def encode_metadata(plans):
 @lru_cache(maxsize=128)
 def decode_metadata(metadata):
     return tuple(
-        parse(value)
-        for value in parse(zlib.decompress(bytes.fromhex(metadata)).decode())
+        parse_metadata(value)
+        for value in parse_metadata(zlib.decompress(bytes.fromhex(metadata)).decode())
     )
 
 
@@ -25,11 +25,11 @@ def decode_metadata(metadata):
 def contract(
     metadata: str, program: str, node_type: torch.Tensor, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
-    from ....kernels.cuda_graph import execute
+    from .....kernels.cuda_graph import execute
     from .bilinear_cuda import launch
 
     outputs = contract_fake(metadata, program, node_type, operands)
-    terms = parse(program)
+    terms = parse_metadata(program)
 
     def run(inputs, outputs):
         launch(metadata, terms, inputs[0], inputs[1:], outputs)
@@ -43,7 +43,7 @@ def contract(
 
 @contract.register_fake
 def contract_fake(metadata, program, node_type, operands):
-    terms = parse(program)
+    terms = parse_metadata(program)
     outputs = [None] * (max(slot for _, _, _, slot in terms) + 1)
     for plan, mapping, role, slot in terms:
         if outputs[slot] is None:
@@ -57,7 +57,7 @@ def contract_fake(metadata, program, node_type, operands):
 def setup_context(ctx, inputs, output):
     metadata, program, node_type, operands = inputs
     ctx.plans = metadata
-    ctx.program = parse(program)
+    ctx.program = parse_metadata(program)
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(node_type, *operands)
 

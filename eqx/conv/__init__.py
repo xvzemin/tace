@@ -1,4 +1,4 @@
-"""Fused kernels organized by convolution architecture."""
+"""Fused O(3) and local O(2) graph convolutions with recursive derivatives."""
 
 from .attention import StreamingGraphAttention, graph_softmax
 from .o2_o3 import O2O3TensorProductConv

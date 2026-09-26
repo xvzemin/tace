@@ -5,4 +5,5 @@ EquivariantX Documentation
    :maxdepth: 3
 
    equivariantx
+   convolutions
    api

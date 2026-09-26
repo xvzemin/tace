@@ -1,1 +1,1 @@
-"""Fused operations for model-specific computational graphs."""
+"""Model-specific fusion and adapters, organized by the consuming library."""

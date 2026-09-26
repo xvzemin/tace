@@ -2,13 +2,11 @@
 
 from collections import defaultdict
 from functools import lru_cache
-from ast import literal_eval
 
 import torch
 
+from .._metadata import parse_metadata
 from .cuda import kernels, runtime
-
-parse = lru_cache(maxsize=256)(literal_eval)
 
 
 def local_product(metadata, *features):
@@ -29,7 +27,7 @@ def local_product(metadata, *features):
 
 @lru_cache(maxsize=128)
 def product_source(dtype, metadata, role, required):
-    width, dims, rows = parse(metadata)
+    width, dims, rows = parse_metadata(metadata)
     groups = defaultdict(list)
     for indices, coefficient in rows:
         if indices[role] >= 0 and all(
@@ -82,9 +80,9 @@ def channel_product(
     nodes = operands[0].shape[0]
     if not nodes:
         return outputs
-    width = parse(metadata)[0]
+    width = parse_metadata(metadata)[0]
     jobs = []
-    for mapping, role, slot, required in parse(program):
+    for mapping, role, slot, required in parse_metadata(program):
         source, groups = product_source(operands[0].dtype, metadata, role, required)
         if groups:
             args = [operands[k].data_ptr() for k in mapping]
@@ -101,8 +99,8 @@ def channel_product(
 
 @channel_product.register_fake
 def channel_product_fake(metadata, program, operands):
-    width, dims, _ = parse(metadata)
-    terms = parse(program)
+    width, dims, _ = parse_metadata(metadata)
+    terms = parse_metadata(program)
     outputs = [None] * (max(slot for _, _, slot, _ in terms) + 1)
     for _, role, slot, _ in terms:
         if outputs[slot] is None:
@@ -114,7 +112,7 @@ def channel_product_fake(metadata, program, operands):
 
 def setup_context(ctx, inputs, output):
     ctx.kernel_metadata, program, operands = inputs
-    ctx.program = parse(program)
+    ctx.program = parse_metadata(program)
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(*operands)
 

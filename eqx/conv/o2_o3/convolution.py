@@ -6,14 +6,14 @@
 """Indexed aligned-frame contractions and their transposes."""
 
 import math
-from ast import literal_eval
 from dataclasses import dataclass
 from functools import lru_cache
 
 import torch
 from e3nn import o3
 
-from ..contraction import adjoint_program, parse_program
+from ..._metadata import parse_metadata
+from ..contraction import adjoint_program
 
 
 @dataclass(eq=False)
@@ -30,7 +30,7 @@ class _KernelPlan:
 
 @lru_cache(maxsize=256)
 def kernel_plan(metadata):
-    return _KernelPlan(*literal_eval(metadata))
+    return _KernelPlan(*parse_metadata(metadata))
 
 
 @torch.library.custom_op("eqx::contraction", mutates_args=(), device_types="cuda")
@@ -46,7 +46,7 @@ def contraction(
 
     plan = kernel_plan(metadata)
     results = contraction_fake(metadata, program, source, target, operands)
-    terms = parse_program(program)
+    terms = parse_metadata(program)
 
     def run(inputs, outputs):
         source, target, *values = inputs
@@ -75,7 +75,7 @@ def contraction(
 
 @contraction.register_fake
 def contraction_fake(metadata, program, source, target, operands):
-    program = parse_program(program)
+    program = parse_metadata(program)
     results = [None] * (1 + max(slot for _, _, pairs in program for _, slot in pairs))
     for mapping, _, pairs in program:
         for role, slot in pairs:
@@ -89,7 +89,7 @@ def contraction_fake(metadata, program, source, target, operands):
 def contraction_setup_context(ctx, inputs, output):
     metadata, program, source, target, operands = inputs
     ctx.kernel_metadata = metadata
-    ctx.program = parse_program(program)
+    ctx.program = parse_metadata(program)
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(source, target, *operands)
 
@@ -189,72 +189,20 @@ class O2O3TensorProductConv(torch.nn.Module):
 
     Notes
     -----
-    The scalar contraction has seven operands: input node features, radial
-    features, radial projection, input rotations, output rotations, harmonic
-    amplitudes, and output node features. Computing any one operand's adjoint
-    uses the same contraction with that operand designated as the output.
-    This rule also applies to higher derivatives. Accelerated contractions fuse
-    gathers, both feature rotations, sparse coupling and reductions without
-    retaining edge messages. Radial projections use matrix products
-    in bounded edge chunks.
+    Features use flattened ``ir_mul`` layout. Instruction order, independent
+    path outputs, weights and normalization follow the supplied tensor product.
+    CUDA fuses gather, rotations, sparse coupling and target reduction without
+    materializing global edge messages. Compatible paths reuse rotations;
+    radial projections use bounded workspaces and are recomputed for backward.
 
-    With ``vectors`` supplied, the rotation matrices are cached values.
-    Direction derivatives instead contract sparse angular tensors obtained by
-    applying rotation generators to every angular index, including indices
-    introduced by earlier derivatives. This retains recursive higher
-    derivatives without allocating rotation-matrix adjoints. Radial amplitudes
-    remain independent differentiable operands. Paths with degree-zero
-    harmonics bypass both rotations, without merging paths or their weights.
+    Transposed contraction programs support force training and higher
+    derivatives. Supplying ``vectors`` uses rotation-generator derivatives
+    with cached Wigner matrices; otherwise matrix entries are differentiated.
+    Harmonic amplitudes remain independent differentiable operands.
 
-    Rotation matrices are supplied as packed degree blocks, not zero-padded
-    block-diagonal matrices. Paths sharing an input block reuse its rotation
-    within each angular/channel tile. Compatible output paths of the same
-    degree rotate jointly in bounded path/channel tiles. Their independent
-    output slots are preserved, and output-matrix adjoints are summed across
-    paths before the channel reduction. Sparse CG coefficients are combined
-    with output rotation entries and reused across channels, without storing
-    edge-wise coupling matrices. The transposed contractions use the same
-    combined entries; rotation-matrix adjoints retain the explicit coefficients.
-    Instructions writing the same output entry are summed in the aligned
-    frame before their shared inverse rotation. Independent output entries
-    remain separate, even when they have the same degree.
-    Input adjoints are accumulated locally before the inverse rotation.
-    Workspaces for projected weights are reused
-    across chunks and across mixed derivative terms, and are not saved for
-    backward. Shared radial inputs are projected once per call; their projected
-    adjoints are reduced across chunks before the projection transpose.
-    Per-edge weight adjoints with a single contribution overwrite their
-    workspaces directly, avoiding a separate clear and read-modify-write.
-    Shared and mixed adjoints retain additive reduction.
-    Path dependencies are retained through each transpose, including
-    mixtures of weighted and unweighted instructions. Channelwise contractions
-    use the same register-resident kernels at every angular degree. Mixed
-    adjoints share local rotations and accumulate into their destinations
-    before inverse rotations. Direction-vector cotangents are reduced within
-    each channel warp before their inverse rotation. Channel-independent vector
-    operands are rotated once per edge tile. Compilation partitions derivative
-    programs using shared dependencies, reduction axes and register usage, rather
-    than an angular-degree threshold. Wide channel tiles share rotation matrices across
-    warps, while narrow tiles process independent edges per warp. Shared input
-    and output rotations accumulate into one adjoint. Their path and channel
-    contributions are combined in bounded shared memory before global reduction.
-    Compiled occupancy provides initial block sizes. Outside CUDA Graph capture,
-    sufficiently large calls measure candidate sizes using bounded private
-    outputs; the selected launch configurations are cached. Cached phases launch
-    together.
-    Source- or receiver-owned tiles accumulate node contributions in registers;
-    split rows and shared gradients use atomic additions. Node boundaries are
-    identified inside sorted edge tiles without degree counts or task buffers.
-    Mixed direction derivatives reuse owned node inputs across incident edges.
-    Their ownership is selected per compiled tile, retaining edge execution when
-    persistent accumulators would reduce occupancy, require spilling, or need
-    further path splitting.
-    Plans are reused for unchanged index storage, including detached views,
-    with capture-safe sorting for CUDA Graph replay. CUDA kernels
-    are generated and compiled with NVRTC on first use; their binaries are
-    cached independently of graph sizes and learned parameters. Warm up the
-    required derivatives before CUDA Graph capture. Atomic reductions mean
-    that summation order is not generally deterministic.
+    CUDA programs compile lazily and are cached by static metadata. Atomic
+    reductions are not generally bitwise deterministic. Warm up the required
+    derivatives before CUDA Graph capture.
     """
 
     def __init__(self, tensor_product, *, backend="cuda"):
@@ -343,7 +291,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         )
         self.direction_metadata = repr(
             (
-                *literal_eval(self.kernel_metadata),
+                *parse_metadata(self.kernel_metadata),
                 tuple(scalar_paths),
                 tuple(harmonic_degrees),
             )

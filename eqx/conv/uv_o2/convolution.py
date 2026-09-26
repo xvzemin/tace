@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import torch
 
+from ...o2._layout import wigner_indices, wigner_orders
 from ..attention import graph_softmax
 from ..edge import evaluate
 from ..program import Program
@@ -34,15 +35,12 @@ def rotate(
 ):
     """Encode degree-wise rotation, regrouping and signed basis permutations."""
     mmax, basis_change, irreps, entries = description
-    lmax = math.isqrt(global_dim) - 1
-    omitted = (math.isqrt(4 * (global_dim - local_dim) + 1) - 1) // 2
-    wigner_mmax = lmax - omitted
-    if (lmax + 1) ** 2 != global_dim or omitted * (
-        omitted + 1
-    ) != global_dim - local_dim:
-        raise ValueError("Invalid Wigner matrix dimensions.")
-    if entries and (lmax < max(x[2] for x in entries) or wigner_mmax < mmax):
-        raise ValueError("Wigner matrices do not cover the local frame.")
+    lmax, wigner_mmax = wigner_orders(
+        global_dim,
+        local_dim,
+        lmax=max(x[2] for x in entries) if entries else 0,
+        mmax=mmax,
+    )
     slices, offset = [], 0
     for dim, mul in irreps:
         slices.append(offset)
@@ -51,14 +49,7 @@ def rotate(
     outputs = []
     for start, mul, ell, odd, indices, starts in entries:
         retained = min(ell, mmax)
-        rows = [ell]
-        for m in range(1, retained + 1):
-            rows.extend(
-                (
-                    ell + (2 * m - 1) * (lmax + 1) - m * m,
-                    ell + 2 * m * (lmax + 1) - m * (m + 1),
-                )
-            )
+        rows = wigner_indices(ell, retained, lmax)
         dim = 2 * ell + 1
         if inverse:
             values = []
@@ -228,7 +219,7 @@ def gate_program(gate):
 
 
 class UvO2TensorProductConv(torch.nn.Module):
-    """Fuse a UV local convolution, optionally including magnetic edge features.
+    """Fuse a channel-mixing O(2) convolution with optional edge representations.
 
     Parameters
     ----------
@@ -435,20 +426,29 @@ class UvO2TensorProductConv(torch.nn.Module):
 
         Parameters
         ----------
-        features, edge_features : torch.Tensor
-            Node and optional edge features in flattened ir_mul layout.
+        features : torch.Tensor
+            Node features in flattened ``ir_mul`` layout.
+        edge_features : torch.Tensor or None
+            Optional edge features in flattened ``ir_mul`` layout.
         conv_weights : torch.Tensor
-            Radial coefficients, shape (edges, weight_numel).
+            Radial coefficients with shape ``(edges, weight_numel)``.
         edge_index : torch.Tensor
-            Source and target indices, shape (2, edges).
+            Source and target indices with shape ``(2, edges)``.
         wigner, wigner_inv : torch.Tensor
             Order-major alignment matrices and their scaled inverses.
         cutoff : torch.Tensor
-            Edge envelope, shape (edges, 1).
+            Edge envelope with shape ``(edges, 1)``.
         parameters : sequence of torch.Tensor
             Flat weight and bias tensors for up, down, then optional query/key.
         radial_attention : torch.Tensor, optional
-            Projected attention scale and shift, shape (edges, 2 * num_heads).
+            Projected attention scale and shift with shape
+            ``(edges, 2 * num_heads)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Aggregated node features in flattened ``ir_mul`` layout with
+            the global output representation declared by ``frame_out``.
         """
         source, target = edge_index[0], edge_index[1]
         if edge_features is None:

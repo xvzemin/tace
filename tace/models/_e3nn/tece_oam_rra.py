@@ -6,10 +6,10 @@ import torch
 
 from eqx import o2
 from eqx.conv.attention import graph_softmax
-from eqx.conv.models.tece_oam_rra import LocalSplit
+from eqx.conv.models.tace.tece_oam_rra import LocalSplit
 from eqx.kernels.channel_product import local_product
 from eqx.kernels.rotation import rotate
-from eqx.o2.tensor_product import _cg_product
+from eqx.o2._clebsch_gordan import clebsch_gordan_product
 
 
 class Convolution(torch.nn.Module):
@@ -208,7 +208,7 @@ class Convolution(torch.nn.Module):
                 ir1, ir2, ir_out = (
                     orders[i] for i in (ins.i_in1, ins.i_in2, ins.i_out)
                 )
-                cg = _cg_product(
+                cg = clebsch_gordan_product(
                     torch.eye(ir1.dim, dtype=torch.float64),
                     ir1,
                     torch.eye(ir2.dim, dtype=torch.float64),
@@ -292,7 +292,7 @@ class Convolution(torch.nn.Module):
                     tuple(ir.l for _, ir in reshape_out.irreps for _ in range(ir.dim)),
                 )
             )
-        from eqx.conv.models.tece_oam_rra.program import metadata
+        from eqx.conv.models.tace.tece_oam_rra.program import metadata
 
         self._eqx_metadata = metadata(self)
 

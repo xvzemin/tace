@@ -1,38 +1,55 @@
 # EquivariantX
 
-EquivariantX provides real O(2) representations, equivariant PyTorch
-operators, and transformations between global O(3) and local O(2) features.
-Irreps include time-reversal parity. O(2) features use a flattened `ir_mul`
-layout, with the multiplicity axis last within each irrep entry.
-`eqx.o3` provides element-dependent and independent-expert linear maps in
-flattened `mul_ir` layout. Their CUDA kernels read element weights directly,
-without allocating per-node weight matrices, and support higher derivatives.
+EquivariantX (EQX) provides:
 
-The library is bundled with TACE and can also be installed independently.
-See the [tutorials](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html)
+- **PyTorch-native O(2) operations:** real irreps, linear maps, tensor products,
+  normalized activations, gates, harmonics, and many-body contractions.
+- **Global O(3) ↔ local O(2) conversion:** e3nn-compatible representation
+  metadata, Wigner rotations, restriction, and reflection-basis changes.
+- **CUDA-fused O(3)/O(2) convolutions:** graph gathering, angular operations,
+  radial weighting, and aggregation, with derivatives for force training.
+
+O(2) irreps can include time-reversal parity. Native O(2) operations and frame
+conversions use flattened `ir_mul` features: each irrep entry is stored as
+`(..., ir.dim, mul)` before flattening. e3nn feature tensors use a different
+layout and must be transposed within each entry before frame conversion.
+
+See the [tutorials](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html),
+[convolution guide](https://tace.readthedocs.io/en/latest/equivariantx/convolutions.html),
 and [API reference](https://tace.readthedocs.io/en/latest/equivariantx/api.html).
 
 ## Installation
 
-EquivariantX currently supports installation from source only and does not
-require TACE. A standalone package release is planned once the library is
-fully mature.
+EQX is bundled with TACE but can be installed independently, without installing
+TACE. Source installation is currently supported; a separate package release is
+planned once the library is mature.
 
 ```bash
 git clone https://github.com/xvzemin/tace.git
 pip install ./tace/eqx
 ```
 
-The default operators use PyTorch on CPU and CUDA. The base dependencies
-are PyTorch, `e3nn`, and `opt_einsum_fx`.
+The base dependencies are PyTorch >= 2.4, e3nn >= 0.4.4, and opt_einsum_fx.
+PyG, torch-scatter, Triton, and a CUDA compiler are not required for native
+PyTorch operations.
 
-For fused CUDA convolutions, install the optional backend:
+With e3nn 0.4.x and recent PyTorch, import `eqx` before `e3nn.o3`. EQX loads
+the packaged e3nn constants in a scoped safe-loading context, without changing
+`torch.load` defaults. Available angular degrees follow the installed e3nn
+coefficient tables. Global time-odd irreps require the time-reversal e3nn
+extension; ordinary spatial operations work with upstream e3nn.
+
+For CUDA fusion, install the optional build dependencies:
 
 ```bash
 pip install './tace/eqx[cuda]'
 ```
 
-## Example
+A CUDA toolkit is also required. Set `CUDA_HOME` if it is not detected.
+The C++ launcher and generated CUDA kernels compile lazily on first use and
+are cached. Installing or importing EQX does not compile them.
+
+## Native O(2) operations
 
 ```python
 import torch
@@ -41,164 +58,86 @@ from eqx import o2
 linear = o2.Linear("8x0e + 4x1m", "4x0e + 2x1m")
 features = linear.irreps_in.randn(32, -1)
 output = linear(features)
+assert output.shape == (32, linear.irreps_out.dim)
 ```
 
-## Package organization
+`o2.Linear`, `o2.UuLinear`, `o2.TensorProduct`, `o2.Activation`, and `o2.Gate`
+operate directly on PyTorch tensors. They do not require the fused backend.
+`o2.WignerD(method="recursive")` also runs entirely in PyTorch. Its default
+`method="auto"` selects the optional quaternion CUDA kernel for supported CUDA
+inputs and the PyTorch construction otherwise.
 
-`o2` defines representations and individual operators. `conv` contains fused
-implementations of specific convolution architectures. `ace` contains atomic
-cluster expansions and their coefficient contractions. `kernels` contains
-shared geometry kernels and CUDA compilation support, independent of any
-convolution architecture.
-`o3` contains spatial linear operators, their PyTorch implementations and
-optional CUDA contractions. Its `ElementLinear` and `MoEElementLinear` use
-external weights and preserve the supplied map's path normalization.
+## Convolutions
 
-```text
-eqx/
-├── o3/
-│   ├── linear.py                 # ElementLinear and MoEElementLinear
-│   ├── contraction.py            # Recursive transpose rule
-│   └── cuda.py                   # Indexed CUDA contractions
-├── o2/
-│   ├── irreps.py                 # Representation metadata
-│   ├── linear.py                 # O(2) Linear
-│   ├── gate.py                   # Activation and Gate
-│   ├── tensor_product.py         # O(2) TensorProduct
-│   ├── asymmetric_contraction.py # Many-body contractions
-│   ├── circular_harmonics.py     # Circular harmonics
-│   ├── rotation_matrix.py        # Axis alignment
-│   ├── wigner.py                 # WignerD interface and PyTorch implementation
-│   ├── local_frame.py            # Restriction and feature rotations
-│   └── o3_tensor_product.py      # Aligned O(3) TensorProduct
-├── ace/
-│   ├── tace.py                   # Standard ACE coefficient contraction
-│   ├── contraction.py            # Recursive coefficient adjoints
-│   └── cuda.py                   # CUDA execution
-├── conv/
-│   ├── __init__.py               # Public convolution classes
-│   ├── contraction.py            # Shared recursive transpose rule
-│   ├── graph.py                  # Shared graph ordering
-│   ├── radial.py                 # Bounded radial projections and their adjoints
-│   ├── program.py                # Static expressions and recursive derivatives
-│   ├── codegen.py                # Cooperative CUDA expression kernels
-│   ├── edge.py                   # Registered differentiable edge operations
-│   ├── uu_o2/                   # Fused channel-diagonal convolution
-│   ├── uv_o2/                   # Channel-mixing convolution and edge features
-│   ├── models/
-│   │   └── tece_oam_rra/
-│   │       ├── interaction.py    # Native rotary-attention operators
-│   │       ├── program.py        # Local expressions and analytic adjoints
-│   │       ├── codegen.py        # Cooperative CUDA fusion
-│   │       ├── product.py        # BilinearACE with expert and shared maps
-│   │       ├── bilinear_contraction.py # Recursive coefficient adjoints
-│   │       ├── bilinear_cuda.py  # Block-local products and transposes
-│   │       └── cuda.py           # Packed views and shared adjoints
-│   ├── o3/
-│   │   ├── convolution.py        # O3TensorProductConv and PyTorch reference
-│   │   ├── cuda.py               # Path scheduling and CUDA execution
-│   │   └── codegen.py            # Sparse CG contractions and local reductions
-│   └── o2_o3/
-│       ├── convolution.py        # O2O3TensorProductConv and reference adjoints
-│       ├── geometry.py           # Recursive direction derivatives
-│       ├── schedule.py           # Path grouping and radial workspaces
-│       ├── cuda.py               # CUDA execution plans
-│       ├── codegen.py            # Tensor-product CUDA source generation
-│       └── direction_codegen.py  # Mixed-derivative CUDA source generation
-└── kernels/
-    ├── cuda.py                   # NVRTC compilation, caching and launches
-    ├── channel_product.py        # Sparse channel products and recursive adjoints
-    ├── codegen.py                # Shared geometry source generation
-    ├── wigner.py                 # Packed Wigner construction and derivatives
-    ├── quaternion.py             # Quaternion polynomial kernels
-    └── csrc/runtime.cpp          # Model-independent CUDA runtime
+| Interface in `eqx.conv` | Operation |
+|---|---|
+| `O3TensorProductConv` | Sparse O(3) CGTP, retaining the supplied paths and normalization |
+| `O2O3TensorProductConv` | Equivalent harmonic-edge O(3) CGTP evaluated in aligned O(2) frames |
+| `UuO2TensorProductConv` | One externally weighted channelwise O(2) linear map |
+| `UvO2TensorProductConv` | O(2) Linear → Gate → Linear, optionally with edge features and attention |
+
+The first two preserve e3nn tensor-product instructions and weights after
+feature-layout conversion. The aligned form requires multiplicity-one,
+time-even, natural-parity spherical harmonics as the second input. It is not a
+replacement for a tensor product with an arbitrary second feature tensor.
+Native uu/uv convolutions instead parameterize local O(2) maps directly.
+
+CGTP and uu CUDA contractions avoid full edge messages and recompute bounded
+radial workspaces for backward. The uv convolution retains radial weights and
+local GEMM operands while fusing surrounding rotations, gates, and aggregation.
+These are distinct fusion strategies, not a claim that every edge tensor is
+eliminated. See the convolution guide for supported backends and examples.
+
+## Module organization
+
+| Module | Responsibility |
+|---|---|
+| `eqx.o2` | Native O(2) operators and O(3)/O(2) frame conversion |
+| `eqx.conv` | General fused O3, O2-O3, uu-O2, and uv-O2 graph convolutions |
+| `eqx.kernels` | Shared geometry kernels, CUDA compilation, and launch support |
+| `eqx.o3` | Element-dependent linear maps using e3nn `mul_ir` layouts |
+| `eqx.ace` | Atomic cluster expansions, independent of convolutions |
+| `eqx.conv.models.tace` | TACE-specific interaction and bilinear ACE fusion |
+| `eqx.conv.models.mace` | MACE conversion for ASE inference and training |
+
+Native coupling formulas and Wigner indexing are shared within `o2`.
+Convolutions share graph ordering, radial projection, expression programs,
+and derivative rules. CUDA source generation and execution stay separate from
+the operator interfaces. TACE owns its model definition and checkpoint
+migration. The MACE adapter replaces operators in an existing model without
+modifying MACE source code.
+
+## MACE integration
+
+Install MACE separately, or include the optional dependency during source
+installation:
+
+```bash
+pip install './tace/eqx[mace,cuda]'
 ```
 
-### Convolution interfaces
+```python
+from eqx.conv.models.mace import convert_mace_to_eqx
+from mace.calculators import MACECalculator
 
-| Class | Implementation directory | Operation | Status |
-|---|---|---|---|
-| `O3TensorProductConv` | `conv/o3/` | Sparse O(3) CGTP with bounded radial projection | Implemented |
-| `O2O3TensorProductConv` | `conv/o2_o3/` | O(3) CGTP through aligned-frame sparse coupling | Implemented |
-| `UvO2TensorProductConv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear, optional RRA and edge features | Implemented |
-| `UuO2TensorProductConv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Implemented |
+# Load original weights and choose dtype/device before conversion.
+model = convert_mace_to_eqx(model)
+calculator = MACECalculator(models=model, device="cuda", default_dtype="float32")
+```
 
-The UV convolution preserves the native Linear and Gate instruction layouts,
-including biases, normalized activations and time-odd gates. It fuses frame
-rotations, regrouping and radial scaling, gate operations, attention scores,
-and inverse rotation with aggregation. Dense channel maps remain batched GEMMs.
-Radial weights and local GEMM operands are materialized; global edge messages
-are not. `conv/program.py`, `conv/codegen.py` and `conv/edge.py` provide shared
-static expressions, CUDA generation and recursively differentiated execution.
+The default leaves the other operators unchanged. Pass `enable_cueq=True` to
+convert them through MACE's cuEquivariance interface; do not enable a second
+backend conversion in `MACECalculator`. CPU execution uses PyTorch.
 
-Model-specific fusion lives in `conv/models/`, separately from these general
-convolutions. `tece_oam_rra` contains both gated bilinear ACE with expert and
-shared coefficient maps and the packed-feature interaction fusion utilities.
-The PyTorch model and checkpoint weight conversion are maintained in TACE's
-`tace.models._e3nn.tece_oam_rra`, using `o2.Linear`, `o2.Gate` and
-`o2.TensorProduct`. This EQX directory supplies the model-specific fused kernels
-and streaming execution, without owning the PyTorch model definition.
-The interaction computes rotary scores and the complete local update together,
-accumulating the weighted output and softmax denominator online in native CUDA.
-Split neighborhoods merge partial sums without evaluating edges again. The
-operation saves its inputs and node outputs, denominators and detached maxima
-for backward, without retaining internal edge activations. Local intermediates
-use shared memory or a bounded overflow workspace.
-Analytic reverse programs generate native kernels recursively for force
-training and higher derivatives. Tensor schemas, fake implementations and
-registered autograd rules expose the operations to `torch.compile`. Parameters
-are explicit inputs and metadata is serializable; no live model callback or
-CUDA Graph replay is used by this interaction.
-
-`EQX_USE_CUDA_GRAPH=1` enables optional native CUDA Graph replay for O3 CGTP,
-O2-aligned CGTP, and standard or gated bilinear ACE contractions. The default
-is off. The existing recursive CUDA adjoints are retained. Edge-capacity
-buckets use isolated zero nodes for padding, and inputs and weights are
-refreshed on every replay. The bounded cache includes dtype, device, stream,
-and TF32 settings. Capture adds warmup and static-buffer memory; measure both
-MD latency and reserved memory for the intended workload. Outer CUDA Graph
-capture bypasses internal replay.
-
-`ace/` provides the standard `eqx.ace.TACE` implementation. Import the
-model-specific product as `eqx.conv.models.tece_oam_rra.BilinearACE`.
-
-`eqx.conv.graph_softmax` provides reusable weighted normalization over incoming
-edges. It accepts `(edges, heads)` scores and optional `(edges, 1)` or
-`(edges, heads)` nonnegative weights. It uses PyTorch on CPU and segmented CUDA
-reductions on GPU, including derivatives of the edge weights.
-`eqx.conv.StreamingGraphAttention` additionally accepts a score/value callback
-for tiled evaluation and supports separate normalization and value weights.
-Streaming callback plans belong to the live Python model and are not portable
-standalone AOTI artifacts.
-
-Use `from eqx import conv as eqx_conv` to access `eqx_conv.O2O3TensorProductConv` and
-`from eqx.kernels import wigner_D`. CUDA compilation remains lazy. File
-organization does not change instruction ordering, weights, normalization or
-derivative rules.
-
-`O3TensorProductConv` accepts a tensor product defining `uvu` instructions,
-including repeated output irreps and different multiplicities. Features use
-flattened `ir_mul` order. Supply node features, edge attributes, radial features,
-the final radial projection, and edge indices to `forward`. Radial projections
-and their adjoints use bounded matrix-product workspaces, consumed by the
-fused sparse CG contraction and graph reduction. Edge messages are not
-materialized, and projected weights are not saved for backward. Paths and
-derivative terms share angular factors and accumulate gradients before global
-writes. Transposed programs support force training and recursive higher
-derivatives. The PyTorch reference remains
-available on CPU or with `backend="torch"`. No CUDA compiler is loaded at import.
-
-For harmonic edge attributes, pass `vectors=edge_vector` and optional
-`amplitudes=cutoff`, with `edge_attrs=None`. Fixed Cartesian polynomials then
-provide direct vector gradients without materializing harmonic cotangents.
-The constructor accepts `normalization="component"`, `"integral"`, or `"norm"`.
-Set `normalize=False` for regular solid harmonics. General edge attributes and
-their ordinary tensor-product derivatives remain supported.
+For training, convert before creating the optimizer and call the returned model
+with `training=True`. Energy, force and stress losses retain their gradients.
+Use a separate model for ASE, whose calculator disables parameter gradients.
+See the convolution guide for training and checkpoint examples.
 
 ## Citation
 
-If you use the local O(2) method or its global O(3)/local O(2)
-conversion, please cite:
+If you use the local O(2) method or its global O(3)/local O(2) conversion,
+please cite:
 
 ```bibtex
 @misc{xu2026completeo3interactionswigner6j,

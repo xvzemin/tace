@@ -64,7 +64,7 @@ class MagneticBasis(torch.nn.Module):
             Lmax,
             p=1 if parity else -1,
             time_reversal=-1 if time_reversal else 1,
-        ).regroup()
+        ).sort().irreps.simplify()
         self.angular_basis = SolidHarmonics(
             self.magnetic_node_irreps_out,
             normalization=angular_normalization,
@@ -83,7 +83,7 @@ class MagneticBasis(torch.nn.Module):
                             magnetic_edge_irrep_list.append(ir_out)
             magnetic_edge_irreps = o3.Irreps(
                 [(1, ir) for ir in magnetic_edge_irrep_list]
-            ).regroup()
+            ).sort().irreps.simplify()
         else:
             magnetic_edge_irreps = o3.Irreps(
                 [(1, make_irrep(0, 1, 1))]
@@ -95,7 +95,7 @@ class MagneticBasis(torch.nn.Module):
             trainable=False,
         )
         self.magnetic_edge_irreps_out = (
-            self.magnetic_edge_tensor_product.irreps_out.regroup()
+            self.magnetic_edge_tensor_product.irreps_out.sort().irreps.simplify()
         )
 
     @staticmethod

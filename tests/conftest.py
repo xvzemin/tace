@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+import eqx  # Load packaged constants before importing legacy e3nn modules.
 from tace.utils.env import ACCELERATION_ENV
 
 

@@ -1,11 +1,8 @@
 """Indexed bilinear contractions and their transposes."""
 
-from ast import literal_eval
-from functools import lru_cache
-
 import torch
 
-parse = lru_cache(maxsize=256)(literal_eval)
+from .._metadata import parse_metadata
 
 
 @torch.library.custom_op("eqx::element_linear", mutates_args=(), device_types="cuda")
@@ -21,13 +18,15 @@ def contract(
     from .cuda import launch
 
     result = fake(metadata, role, node_type, features, weight, output)
-    launch(parse(metadata), role, node_type, (features, weight, output), result)
+    launch(
+        parse_metadata(metadata), role, node_type, (features, weight, output), result
+    )
     return result
 
 
 @contract.register_fake
 def fake(metadata, role, node_type, features, weight, output):
-    din, dout, _, _, _ = parse(metadata)
+    din, dout, _, _, _ = parse_metadata(metadata)
     shape = (
         weight.shape if role == 1 else (node_type.shape[0], din if role == 0 else dout)
     )

@@ -6,15 +6,12 @@
 """O(3) convolutions with external radial projections."""
 
 import math
-from ast import literal_eval
-from functools import lru_cache
 
 import torch
 from e3nn import o3
 
-from ..contraction import adjoint_program, parse_program
-
-parse_metadata = lru_cache(maxsize=256)(literal_eval)
+from ..._metadata import parse_metadata
+from ..contraction import adjoint_program
 
 
 @torch.library.custom_op("eqx::o3_contraction", mutates_args=(), device_types="cuda")
@@ -29,7 +26,7 @@ def contraction(
     from ...kernels.cuda_graph import convolution
 
     results = contraction_fake(metadata, program, source, target, operands)
-    terms = parse_program(program)
+    terms = parse_metadata(program)
 
     def run(inputs, outputs):
         source, target, *values = inputs
@@ -48,7 +45,7 @@ def contraction(
 
 @contraction.register_fake
 def contraction_fake(metadata, program, source, target, operands):
-    program = parse_program(program)
+    program = parse_metadata(program)
     results = [None] * (1 + max(slot for _, _, pairs in program for _, slot in pairs))
     for mapping, _, pairs in program:
         for role, slot in pairs:
@@ -62,7 +59,7 @@ def contraction_fake(metadata, program, source, target, operands):
 def contraction_setup_context(ctx, inputs, output):
     metadata, program, source, target, operands = inputs
     ctx.kernel_metadata = metadata
-    ctx.program = parse_program(program)
+    ctx.program = parse_metadata(program)
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(source, target, *operands)
 

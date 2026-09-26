@@ -7,7 +7,8 @@ from string import ascii_letters
 import torch
 from e3nn import o3
 
-from .convolution import kernel_plan, parse_program
+from ..._metadata import parse_metadata
+from .convolution import kernel_plan
 
 
 @lru_cache(maxsize=32)
@@ -15,9 +16,12 @@ def generators(degree):
     """Return real rotation generators in the harmonic basis, on the CPU."""
     if not degree:
         return torch.zeros(3, 1, 1, dtype=torch.float64, device="cpu")
-    return -math.sqrt(degree * (degree + 1) * (2 * degree + 1)) * o3.wigner_3j(
+    result = -math.sqrt(degree * (degree + 1) * (2 * degree + 1)) * o3.wigner_3j(
         degree, 1, degree, dtype=torch.float64, device="cpu"
     ).permute(1, 2, 0)
+    # The CG tensor has an arbitrary overall sign, unlike a rotation generator.
+    # In the real harmonic basis, (J_y)_{-1,+1} = +1 fixes that convention.
+    return result * result[1, degree - 1, degree + 1].sign()
 
 
 @lru_cache(maxsize=256)
@@ -98,7 +102,7 @@ def direction_contraction(
         metadata, program, vectors, source, target, operands, use_cuda
     )
     plan = kernel_plan(metadata)
-    terms = parse_program(program)
+    terms = parse_metadata(program)
 
     def run(inputs, outputs):
         source, target, *values = inputs
@@ -150,7 +154,7 @@ def direction_contraction(
 
 @direction_contraction.register_fake
 def direction_fake(metadata, program, vectors, source, target, operands, use_cuda):
-    program = parse_program(program)
+    program = parse_metadata(program)
     results = [None] * (
         1 + max(slot for _, _, _, pairs in program for _, slot in pairs)
     )
@@ -167,7 +171,7 @@ def setup_context(ctx, inputs, output):
     metadata, program, vectors, source, target, operands, use_cuda = inputs
     ctx.kernel_metadata = metadata
     ctx.use_cuda = use_cuda
-    ctx.program = parse_program(program)
+    ctx.program = parse_metadata(program)
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(vectors, source, target, *operands)
 

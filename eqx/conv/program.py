@@ -1,9 +1,8 @@
 """Static edge expressions and recursively generated analytic adjoints."""
 
-from ast import literal_eval
 from functools import lru_cache
 
-decode = lru_cache(maxsize=128)(literal_eval)
+from .._metadata import parse_metadata
 
 
 class Program:
@@ -208,7 +207,7 @@ class Program:
 @lru_cache(maxsize=128)
 def next_adjoint(metadata, active, seeds, num_inputs):
     """Transpose an existing derivative expression at any derivative order."""
-    nodes, outputs = decode(metadata)
+    nodes, outputs = parse_metadata(metadata)
     program = Program(nodes)
     roots, gradients = [], []
     for root, slot, kind in outputs:

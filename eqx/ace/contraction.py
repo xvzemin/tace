@@ -1,11 +1,8 @@
 """Sparse channel-wise products and their transposed contractions."""
 
-from ast import literal_eval
-from functools import lru_cache
-
 import torch
 
-parse = lru_cache(maxsize=256)(literal_eval)
+from .._metadata import parse_metadata
 
 
 @torch.library.custom_op("eqx::ace_contract", mutates_args=(), device_types="cuda")
@@ -20,10 +17,10 @@ def contract(
     from .cuda import launch
 
     outputs = contract_fake(metadata, program, node_type, operands)
-    terms = parse(program)
+    terms = parse_metadata(program)
 
     def run(inputs, outputs):
-        launch(parse(metadata), terms, inputs[0], inputs[1:], outputs)
+        launch(parse_metadata(metadata), terms, inputs[0], inputs[1:], outputs)
 
     read = {0}
     for mapping, output, _ in terms:
@@ -34,8 +31,8 @@ def contract(
 
 @contract.register_fake
 def contract_fake(metadata, program, node_type, operands):
-    dims, weighted, _ = parse(metadata)
-    terms = parse(program)
+    dims, weighted, _ = parse_metadata(metadata)
+    terms = parse_metadata(program)
     outputs = [None] * (max(slot for _, _, slot in terms) + 1)
     for mapping, role, slot in terms:
         if outputs[slot] is None:
@@ -51,7 +48,7 @@ def contract_fake(metadata, program, node_type, operands):
 def setup_context(ctx, inputs, output):
     metadata, program, node_type, operands = inputs
     ctx.kernel_metadata = metadata
-    ctx.program = parse(program)
+    ctx.program = parse_metadata(program)
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(node_type, *operands)
 

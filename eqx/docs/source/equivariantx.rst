@@ -3,9 +3,10 @@
 Tutorials
 =========
 
-EquivariantX (``eqx``) provides real :math:`O(2)\times\mathbb{Z}_2^T`
-representations, equivariant operators, and transformations between global
-:math:`O(3)` and local :math:`O(2)` features.
+EquivariantX (``eqx``) provides PyTorch-native :math:`O(2)` operations,
+e3nn-compatible global :math:`O(3)` to local :math:`O(2)` frame conversions,
+and CUDA-fused :math:`O(3)`/:math:`O(2)` graph convolutions. O(2)
+representations can also carry time-reversal parity.
 
 Installation
 ------------
@@ -19,9 +20,16 @@ fully mature.
    git clone https://github.com/xvzemin/tace.git
    pip install ./tace/eqx
 
-The default operators use PyTorch on CPU and CUDA. Installation includes
-``e3nn`` for representation and coupling conventions, and ``opt_einsum_fx``
+The native operators use PyTorch >= 2.4 on CPU and CUDA. Installation includes
+``e3nn>=0.4.4`` for representation and coupling conventions, and ``opt_einsum_fx``
 for contraction planning. PyG and external CUDA extensions are not required.
+
+With e3nn 0.4.x and recent PyTorch, import ``eqx`` before ``e3nn.o3``. The
+older release loads packaged CG constants containing Python ``slice`` objects;
+EQX allows these only within the import context, leaving ``torch.load`` and
+its defaults unchanged. The available angular degrees depend on the installed
+e3nn coefficient tables. Global time-odd irreps require the time-reversal
+extension; ordinary spatial operations work with upstream e3nn.
 
 Install the optional generated CUDA convolution backend with:
 
@@ -29,30 +37,24 @@ Install the optional generated CUDA convolution backend with:
 
    pip install './tace/eqx[cuda]'
 
-``eqx.o2`` retains its PyTorch implementation. ``eqx.conv.O2O3TensorProductConv``
-defaults to ``backend="cuda"``, using generated CUDA on GPU and PyTorch on CPU.
 A CUDA toolkit is required for GPU execution; set ``CUDA_HOME`` if needed.
-The small C++ launcher is built once, and NVRTC kernels are cached by their
-static specification. Importing EQX does not load or compile the extension.
-The CUDA backend supports ``uvu`` instructions. ``backend="torch"`` selects
-the reference contraction, which also supports ``uvw`` instructions.
+This requirement applies to fused kernels, not native PyTorch execution on
+GPU. The C++ launcher and NVRTC kernels compile lazily and are cached.
+Installing or importing EQX does not compile an extension. See
+:ref:`equivariantx-convolutions` for the backends supported by each convolution.
 
 Package organization
 --------------------
 
-``eqx.o2`` defines representation metadata, Linear, Gate, TensorProduct,
-harmonics, and frame transformations. ``eqx.conv`` groups fused kernels by
-convolution architecture. Its current ``O2O3TensorProductConv`` lives in
-``conv/o2_o3`` and performs an aligned O(3) tensor-product convolution.
-``eqx.ace`` provides atomic cluster expansion contractions independently of
-the convolution kernels.
-``eqx.kernels`` provides shared Wigner and quaternion kernels, together with
-the lazy CUDA compiler and launcher.
-
-``UuO2TensorProductConv`` in ``conv/uu_o2`` provides fused channelwise Linear
-convolutions with externally generated path weights. ``UvO2TensorProductConv``
-in ``conv/uv_o2`` fuses channel-mixing Linear--Gate--Linear convolutions with
-optional edge representations and radial attention.
+``eqx.o2`` contains the native operators and frame conversions. ``eqx.conv``
+contains the four general convolution interfaces: ``O3TensorProductConv``,
+``O2O3TensorProductConv``, ``UuO2TensorProductConv``, and
+``UvO2TensorProductConv``. Model-specific kernels and adapters live in
+``eqx.conv.models.tace`` and ``eqx.conv.models.mace``, respectively for TACE
+and MACE. The MACE interface converts existing models for ASE and training.
+``eqx.kernels`` supplies shared geometry, CUDA compilation, and execution.
+Supporting operators remain separate: ``eqx.o3`` provides element-dependent
+linear maps and ``eqx.ace`` provides atomic cluster expansions.
 
 Quick start
 -----------
@@ -92,8 +94,14 @@ inputs, one for each correlation order. Inputs, internal parameters, and
 external weights use real floating-point dtypes unless an API states
 otherwise.
 
-O(2) and time reversal
+Native O(2) operations
 ----------------------
+
+Operator arguments use ``irreps_in``, ``irreps_out``, ``instructions``,
+``internal_weights``, and ``shared_weights``. Tensor products distinguish
+``irreps_in1`` and ``irreps_in2``. ``weight_numel`` gives the size of the flat
+weight axis; ``weight_views()`` exposes individual instruction weights.
+Feature tensors retain EQX's ``ir_mul`` layout throughout.
 
 Representations
 ~~~~~~~~~~~~~~~
@@ -228,6 +236,23 @@ A gated update can be constructed as follows:
    node_feats = torch.randn(32, irreps.dim)
    node_feats = linear_down(nonlinearity(linear_up(node_feats)))
 
+A tensor product is configured independently of a convolution. The following
+``uuu`` instructions retain all three couplings of two order-one inputs:
+
+.. code-block:: python
+
+   product = o2.TensorProduct(
+       "4x1m", "4x1m", "4x0e+4x0o+4x2m",
+       [(0, 0, i, "uuu", True) for i in range(3)],
+       internal_weights=False,
+       shared_weights=False,
+   )
+   features1 = product.irreps_in1.randn(16, -1)
+   features2 = product.irreps_in2.randn(16, -1)
+   weights = torch.randn(16, product.weight_numel)
+   coupled = product(features1, features2, weights)
+   assert coupled.shape == (16, product.irreps_out.dim)
+
 Circular harmonics
 ~~~~~~~~~~~~~~~~~~
 
@@ -259,27 +284,43 @@ For a time-odd two-dimensional vector:
        "0ee + 1mo + 2me + 3mo"
    )
 
+Asymmetric contraction
+~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`eqx.o2.AsymmetricContraction` contracts independent input features up
+to a requested correlation order. All weights are supplied externally.
+``algorithm="recursive"`` evaluates successive channel-wise tensor products.
+``algorithm="dense"`` contracts precomputed generalized Clebsch--Gordan
+tensors, using more coefficient storage. Both enumerate the same paths and
+accept inputs at any batch size. ``path_mode="sum"`` sums paths to each output
+irrep and scales by the inverse square root of the path count.
+``path_mode="expand"`` retains paths in the output multiplicity, allowing a
+following :class:`eqx.o2.Linear` to mix them.
+
 Global O(3) to local O(2)
-~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------
 
 A directed three-dimensional vector defines a local axis. Restricting an
-:math:`O(3)\times\mathbb{Z}_2^T` irrep ``(l, p, t)`` to the
+:math:`O(3)\times\mathbb{Z}_2^T` irrep ``(\ell, p, t)`` to the
 :math:`O(2)\times\mathbb{Z}_2^T` isotropy subgroup gives
 
 .. math::
 
-   (l,p,t)\downarrow
-   =\left(0,p(-1)^l,t\right)
-   \oplus\bigoplus_{m=1}^{\min(l,m_{\max})}(m,0,t).
+   (\ell,p,t)\downarrow
+   =\left(0,p(-1)^\ell,t\right)
+   \oplus\bigoplus_{m=1}^{\ell}(m,0,t).
 
 Time parity is retained by every local entry. For example, an axial,
-time-odd vector restricts as ``1eo -> 0oo + 1mo``.
+time-odd vector restricts as ``1eo -> 0oo + 1mo``. Ordinary e3nn irreps are
+treated as time-even. Global time-odd irreps require an e3nn version that
+supports time-reversal labels.
 
 :class:`eqx.o2.WignerD` constructs the global-to-local and local-to-global
 matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies
 those matrices. Its global input and local output both use flattened
 ``ir_mul`` layout. ``mmax`` may truncate local positive orders while inverse
-rescaling preserves the intended variance. ``LocalFrame`` derives the required
+rescaling preserves the intended variance. Truncation is a projection, not
+an invertible change of representation. ``LocalFrame`` derives the required
 degree from its irreps and the Wigner layout from matrix shapes. Shared
 matrices may cover additional degrees or orders.
 
@@ -302,41 +343,45 @@ original CG coefficients directly.
 
 .. code-block:: python
 
+   from e3nn import o3
+
    num_channels = 64
    lmax = 3
-   mmax = 2
-   global_irreps = " + ".join(
+   mmax = lmax
+   global_irreps = o3.Irreps(" + ".join(
        f"{num_channels}x{l}{p}"
        for l in range(lmax + 1)
        for p in ("e", "o")
-   )
+   ))
    edge_index = torch.randint(0, 16, (2, 48))
    edge_vectors = torch.randn(48, 3)
 
-   wigner = o2.WignerD(lmax=lmax, mmax=mmax)
+   wigner = o2.WignerD(lmax=lmax, mmax=mmax, method="recursive")
    D, D_inv = wigner(edge_vectors)
    frame = o2.LocalFrame(
        global_irreps,
        mmax=mmax,
    )
-   node_feats = torch.randn(16, frame.global_irreps.dim)
+   # Transpose within each O(3) entry, once at node level.
+   e3nn_features = global_irreps.randn(16, -1)
+   node_feats = torch.cat([
+       e3nn_features[:, s].reshape(16, mul, ir.dim).transpose(-1, -2).flatten(1)
+       for (mul, ir), s in zip(global_irreps, global_irreps.slices())
+   ], dim=-1)
 
    local_features = frame.to_local(node_feats[edge_index[0]], D)
    global_messages = frame.to_global(local_features, D_inv)
+   torch.testing.assert_close(
+       global_messages, node_feats[edge_index[0]], atol=1e-5, rtol=1e-5
+   )
 
 ``node_feats`` must already use flattened ``ir_mul`` order inside every O(3)
 entry. ``local_features`` follows ``frame.irreps_out`` in the same flattened
-order.
+order. For returning tensors to an e3nn layer, transpose each output entry
+from ``(..., ir.dim, mul)`` to ``(..., mul, ir.dim)`` before flattening. Irrep
+metadata compatibility does not imply identical feature storage.
 
-Asymmetric contraction
-~~~~~~~~~~~~~~~~~~~~~~
-
-:class:`eqx.o2.AsymmetricContraction` contracts independent input features up
-to a requested correlation order. All weights are supplied externally.
-``algorithm="recursive"`` evaluates successive channel-wise tensor products.
-``algorithm="dense"`` contracts precomputed generalized Clebsch--Gordan
-tensors, using more coefficient storage. Both enumerate the same paths and
-accept inputs at any batch size. ``path_mode="sum"`` sums paths to each output
-irrep and scales by the inverse square root of the path count.
-``path_mode="expand"`` retains paths in the output multiplicity, allowing a
-following :class:`eqx.o2.Linear` to mix them.
+The aligned CGTP operator :class:`eqx.o2.O3TensorProduct` preserves the declared
+coupling instructions for harmonic edge inputs. See
+:ref:`equivariantx-convolutions` for a runnable comparison of its direct and
+aligned convolution forms and the corresponding CUDA interfaces.

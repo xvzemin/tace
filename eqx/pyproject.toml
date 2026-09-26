@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "EquivariantX"
 version = "0.1.0"
-description = "Global and local O(2)-equivariant computation with PyTorch."
+description = "PyTorch O(2) operators, O(3) frame conversions, and fused CUDA convolutions."
 readme = "README.md"
 authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
 license = "MIT"
@@ -13,12 +13,13 @@ license-files = ["LICENSE.md"]
 requires-python = ">=3.9"
 dependencies = [
     "torch>=2.4",
-    "e3nn",
+    "e3nn>=0.4.4",
     "opt_einsum_fx>=0.1.4",
 ]
 
 [project.optional-dependencies]
 cuda = ["ninja", "filelock"]
+mace = ["mace-torch>=0.3.17"]
 
 [project.urls]
 Homepage = "https://github.com/xvzemin/tace"
@@ -29,7 +30,8 @@ packages = [
     "eqx", "eqx.o2", "eqx.o3", "eqx.ace", "eqx.kernels",
     "eqx.conv", "eqx.conv.o2_o3", "eqx.conv.o3",
     "eqx.conv.uu_o2", "eqx.conv.uv_o2", "eqx.conv.models",
-    "eqx.conv.models.tece_oam_rra",
+    "eqx.conv.models.tace", "eqx.conv.models.tace.tece_oam_rra",
+    "eqx.conv.models.mace",
 ]
 package-dir = { eqx = "." }
 

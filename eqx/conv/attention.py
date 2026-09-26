@@ -69,14 +69,36 @@ def merge_attention(values, denominators, maxima, channels, eps, outputs):
 
 
 def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=True):
-    """Normalize ``(edges, heads)`` scores over incoming edges of each node.
+    """Normalize attention scores over incoming edges of each node.
 
-    ``weight`` multiplies the shifted exponential before normalization and may
-    have shape ``(edges, 1)`` or ``(edges, heads)``. Maxima are computed from
-    scores alone and detached. Epsilon is added to the shifted denominator.
-    Empty neighborhoods require no special values. Derivatives include edge
-    weights, including weights equal to zero, and support higher orders.
-    Set ``fused=False`` to retain the pure PyTorch path on CUDA as well.
+    Parameters
+    ----------
+    scores : torch.Tensor
+        Attention logits with shape ``(edges, heads)``.
+    target : torch.Tensor
+        Destination node indices with shape ``(edges,)``.
+    num_nodes : int
+        Number of destination nodes, including isolated nodes.
+    weight : torch.Tensor, optional
+        Nonnegative edge weights with shape ``(edges, 1)`` or
+        ``(edges, heads)``. Defaults to one.
+    eps : float, optional
+        Constant added to the shifted denominator. Defaults to ``1e-16``.
+    fused : bool, optional
+        Use the CUDA kernel for supported inputs. Set ``False`` to use
+        PyTorch on either device. Defaults to ``True``.
+
+    Returns
+    -------
+    torch.Tensor
+        Weighted softmax values with shape ``(edges, heads)``.
+
+    Notes
+    -----
+    Maxima are computed from scores alone and detached. Edge weights multiply
+    the shifted exponential before normalization. Empty neighborhoods require
+    no special values. Derivatives include edge weights, including weights
+    equal to zero, and support higher orders.
     """
     if weight is None:
         weight = scores.new_ones((scores.shape[0], 1))

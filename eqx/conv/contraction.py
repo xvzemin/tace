@@ -1,10 +1,5 @@
 """Transpose multilinear convolution programs without truncating derivatives."""
 
-from ast import literal_eval
-from functools import lru_cache
-
-parse_program = lru_cache(maxsize=256)(literal_eval)
-
 
 def adjoint_program(program, operands, grad_outputs, needs_grad, has_unweighted):
     """Transpose requested outputs, retaining the dependencies of each path."""

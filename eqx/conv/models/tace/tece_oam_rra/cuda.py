@@ -2,7 +2,7 @@
 
 import torch
 
-from ....kernels.channel_product import channel_product
+from .....kernels.channel_product import channel_product
 
 
 class LocalSplit(torch.autograd.Function):

@@ -1,13 +1,11 @@
 """Degree-wise frame rotations and their recursive transposes."""
 
-from ast import literal_eval
 from functools import lru_cache
 
 import torch
 
+from .._metadata import parse_metadata
 from .cuda import kernels, runtime
-
-parse = lru_cache(maxsize=128)(literal_eval)
 
 
 def rotate(features, matrix, metadata):
@@ -18,7 +16,7 @@ def rotate(features, matrix, metadata):
 
 @lru_cache(maxsize=128)
 def source(dtype, channels, metadata, role):
-    degrees_in, degrees_out = parse(metadata)
+    degrees_in, degrees_out = parse_metadata(metadata)
     ni, no = len(degrees_in), len(degrees_out)
     scalar = "double" if dtype == torch.float64 else "float"
     groups = []

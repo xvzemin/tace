@@ -9,6 +9,7 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
+from ._layout import wigner_indices, wigner_orders
 from .irreps import Irrep, Irreps
 
 
@@ -39,6 +40,15 @@ class LocalFrame(torch.nn.Module):
         Apply the fixed basis change to positive orders of unnatural-parity
         entries. Defaults to ``True``. If ``False``, retain the spherical
         harmonic basis while still regrouping features by local order.
+
+    Attributes
+    ----------
+    irreps_in : o3.Irreps
+        Global representation.
+    irreps_out : Irreps
+        Regrouped local representation, including the input multiplicities.
+    input_dim, output_dim : int
+        Sizes of the global and local feature axes.
 
     Notes
     -----
@@ -139,15 +149,9 @@ class LocalFrame(torch.nn.Module):
                 start = local_offsets[index]
                 entry_local_slices.append(slice(start, start + mul))
                 local_offsets[index] += mul
-            rows = [ir.l]
+            rows = wigner_indices(ir.l, retained_mmax, self.lmax)
             row_strides = [0]
             for order in range(1, retained_mmax + 1):
-                rows.extend(
-                    (
-                        ir.l + (2 * order - 1) * (self.lmax + 1) - order**2,
-                        ir.l + 2 * order * (self.lmax + 1) - order * (order + 1),
-                    )
-                )
                 row_strides.extend((2 * order - 1, 2 * order))
             wigner_rows.append(torch.tensor(rows, dtype=torch.long))
             wigner_row_strides.append(torch.tensor(row_strides, dtype=torch.long))
@@ -203,13 +207,6 @@ class LocalFrame(torch.nn.Module):
             options += ", basis_change=False"
         return f"{self.__class__.__name__}({irreps_in} -> {irreps_out})({options})"
 
-    @staticmethod
-    def _apply_rotation(
-        rotation: torch.Tensor,
-        features: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.einsum("bij,b...jk->b...ik", rotation, features)
-
     def to_local(
         self,
         features: torch.Tensor,
@@ -240,7 +237,9 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner.ndim != 3 or features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        lmax, _ = self._wigner_orders(wigner.size(-1), wigner.size(-2))
+        lmax, _ = wigner_orders(
+            wigner.size(-1), wigner.size(-2), lmax=self.lmax, mmax=self.mmax
+        )
         outputs = [[] for _ in self.irreps_out]
         for group_index, indices in enumerate(self._rotation_groups):
             values = torch.cat(
@@ -261,7 +260,7 @@ class LocalFrame(torch.nn.Module):
                 )
             columns = getattr(self, f"wigner_columns_{group_index}")
             rotation = wigner.index_select(1, rows).index_select(2, columns)
-            values = self._apply_rotation(rotation, values)
+            values = torch.einsum("bij,b...jk->b...ik", rotation, values)
             offset = 0
             for entry_index in indices:
                 entry = self._entries[entry_index]
@@ -303,20 +302,6 @@ class LocalFrame(torch.nn.Module):
         """Alias for :meth:`to_local`."""
         return self.to_local(features, wigner)
 
-    def _wigner_orders(self, global_dim: int, local_dim: int) -> tuple[int, int]:
-        lmax = int(math.sqrt(global_dim)) - 1
-        if (lmax + 1) ** 2 != global_dim or lmax < self.lmax:
-            raise ValueError("Wigner global dimension must cover every O(3) degree.")
-        missing = global_dim - local_dim
-        if missing < 0:
-            raise ValueError("Wigner has an incompatible local dimension.")
-        # Removing the highest local orders removes n * (n + 1) rows.
-        omitted = (int(math.sqrt(4 * missing + 1)) - 1) // 2
-        mmax = lmax - omitted
-        if omitted * (omitted + 1) != missing or not self.mmax <= mmax <= lmax:
-            raise ValueError("Wigner local dimension must cover all required orders.")
-        return lmax, mmax
-
     def to_global(
         self,
         features: torch.Tensor,
@@ -347,8 +332,8 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner_inv.ndim != 3 or features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        lmax, wigner_mmax = self._wigner_orders(
-            wigner_inv.size(-2), wigner_inv.size(-1)
+        lmax, wigner_mmax = wigner_orders(
+            wigner_inv.size(-2), wigner_inv.size(-1), lmax=self.lmax, mmax=self.mmax
         )
         local_values = [
             features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
@@ -386,7 +371,7 @@ class LocalFrame(torch.nn.Module):
                 )
             columns = getattr(self, f"wigner_columns_{group_index}")
             rotation = wigner_inv.index_select(1, columns).index_select(2, rows)
-            values = self._apply_rotation(rotation, values)
+            values = torch.einsum("bij,b...jk->b...ik", rotation, values)
             offset = 0
             for entry_index in indices:
                 entry = self._entries[entry_index]

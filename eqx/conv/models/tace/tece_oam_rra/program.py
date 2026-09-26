@@ -2,7 +2,8 @@
 
 from functools import lru_cache
 
-from ...program import Program, decode, next_adjoint
+from ....._metadata import parse_metadata
+from ....program import Program, next_adjoint
 
 
 def activation(module):
@@ -83,10 +84,10 @@ def metadata(module):
             tuple(linears),
             names.index("temperature_logit"),
             tuple(p.numel() for p in module.parameters()),
-            decode(module._eqx_update_metadata)
+            parse_metadata(module._eqx_update_metadata)
             if module.use_asymmetric_contraction
             else (),
-            decode(module._eqx_weight_metadata),
+            parse_metadata(module._eqx_weight_metadata),
         )
     )
 
@@ -113,7 +114,7 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out):
         parameter_sizes,
         update,
         radial_product,
-    ) = decode(metadata)
+    ) = parse_metadata(metadata)
     program = Program()
     n = ell + 1
     angular = sum((n - m) * (1 if m == 0 else 2) for m in range(mmax + 1))

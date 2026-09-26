@@ -46,6 +46,23 @@ class Linear(torch.nn.Module):
         Normalization applied when several paths contribute to one output.
         ``"element"`` normalizes by the total input multiplicity, while
         ``"path"`` assigns equal variance to each path.
+
+    Attributes
+    ----------
+    irreps_in, irreps_out : Irreps
+        Input and output representations.
+    instructions : tuple of Instruction
+        Weighted paths followed by bias paths, which have ``i_in=-1``.
+    weight_numel, bias_numel : int
+        Numbers of weight and bias elements, respectively.
+
+    Examples
+    --------
+    >>> linear = Linear("4x0e+2x1m", "3x0e+2x1m")
+    >>> linear.weight_numel
+    16
+    >>> linear(linear.irreps_in.randn(5, -1)).shape
+    torch.Size([5, 7])
     """
 
     def __init__(

@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from .program import decode
+from .._metadata import parse_metadata
 
 
 @lru_cache(maxsize=128)
@@ -17,7 +17,7 @@ def source(
     Large parameter arrays and their outer-product adjoints are read or written
     directly. Only local feature vectors occupy the reusable block workspace.
     """
-    nodes, outputs = decode(metadata)
+    nodes, outputs = parse_metadata(metadata)
     roots = tuple(x[0] for x in outputs)
     live = set()
 

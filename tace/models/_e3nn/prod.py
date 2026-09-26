@@ -10,7 +10,7 @@ import torch
 from e3nn import o3
 
 from eqx.ace import TACE
-from eqx.conv.models.tece_oam_rra import BilinearACE
+from eqx.conv.models.tace.tece_oam_rra import BilinearACE
 from tace.utils.env import select_acceleration
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora

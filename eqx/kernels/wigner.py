@@ -5,17 +5,15 @@
 
 """Packed Wigner matrices with quaternion and recursive CUDA kernels."""
 
-from ast import literal_eval
 from functools import lru_cache
 from weakref import ref
 
 import torch
 
+from .._metadata import parse_metadata
 from .quaternion import quaternion_wigner
 
 _PLANS = {}
-
-parse_alignment = lru_cache(maxsize=128)(literal_eval)
 
 
 @torch.library.custom_op("eqx::alignment_cuda", mutates_args=(), device_types="cuda")
@@ -27,7 +25,7 @@ def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
     results = alignment_fake(key, values)
     if values[0].size(0):
         dtype = "float" if values[0].dtype == torch.float32 else "double"
-        code = alignment_source(parse_alignment(key), dtype)
+        code = alignment_source(parse_metadata(key), dtype)
         kernel = kernels([code], values[0].device)[code]
         contiguous = [value.contiguous() for value in values]
         args = [value.data_ptr() for value in (*contiguous, *results)] + [
@@ -48,13 +46,13 @@ def alignment_fake(key, values):
     from .codegen import alignment_program
 
     dtype = "float" if values[0].dtype == torch.float32 else "double"
-    _, outputs, _ = alignment_program(parse_alignment(key), dtype)
+    _, outputs, _ = alignment_program(parse_metadata(key), dtype)
     return [values[0].new_empty((values[0].size(0), len(group))) for group in outputs]
 
 
 def alignment_setup_context(ctx, inputs, output):
     key, values = inputs
-    ctx.key = parse_alignment(key)
+    ctx.key = parse_metadata(key)
     ctx.output_widths = tuple(value.size(1) for value in output)
     ctx.save_for_backward(*values)
 

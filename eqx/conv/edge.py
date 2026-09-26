@@ -4,7 +4,8 @@ from functools import lru_cache
 
 import torch
 
-from .program import decode, next_adjoint
+from .._metadata import parse_metadata
+from .program import next_adjoint
 
 
 @torch.library.custom_op("eqx::edge_program", mutates_args=(), device_types="cuda")
@@ -29,7 +30,7 @@ def evaluate(
             raise ValueError("Input shape does not match the fused expression layout.")
     inputs = [x.contiguous() for x in inputs]
     outputs = evaluate_fake(metadata, inputs, source, target, num_nodes)
-    descriptions = decode(metadata)[1]
+    descriptions = parse_metadata(metadata)[1]
     slots = sorted({slot for _, slot, _ in descriptions})
     for slot, output in zip(slots, outputs):
         writes = [kind for _, s, kind in descriptions if s == slot]
@@ -44,14 +45,14 @@ def evaluate(
 def input_specifications(metadata):
     return tuple(
         (data[0], data[1], size)
-        for op, size, _, data in decode(metadata)[0]
+        for op, size, _, data in parse_metadata(metadata)[0]
         if op == "input"
     )
 
 
 @evaluate.register_fake
 def evaluate_fake(metadata, inputs, source, target, num_nodes):
-    nodes, outputs = decode(metadata)
+    nodes, outputs = parse_metadata(metadata)
     specifications = {slot: (nodes[root][1], kind) for root, slot, kind in outputs}
     return [
         inputs[0].new_empty(
@@ -76,11 +77,11 @@ def setup_context(ctx, inputs, output):
 
 def backward(ctx, gradients):
     source, target, *inputs = ctx.saved_tensors
-    slots = sorted({slot for _, slot, _ in decode(ctx.kernel_metadata)[1]})
+    slots = sorted({slot for _, slot, _ in parse_metadata(ctx.kernel_metadata)[1]})
     active = tuple(i for i, need in enumerate(ctx.needs_input_grad[1]) if need)
     seeds = tuple(slot for slot, grad in zip(slots, gradients) if grad is not None)
     metadata = next_adjoint(ctx.kernel_metadata, active, seeds, len(inputs))
-    adjoints = decode(metadata)[1]
+    adjoints = parse_metadata(metadata)[1]
     results = [None] * len(inputs)
     if adjoints:
         values = inputs + [grad for grad in gradients if grad is not None]

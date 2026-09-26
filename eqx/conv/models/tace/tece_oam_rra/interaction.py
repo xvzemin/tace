@@ -4,7 +4,8 @@ from functools import lru_cache
 
 import torch
 
-from .program import build, decode, first_adjoint, next_adjoint
+from ....._metadata import parse_metadata
+from .program import build, first_adjoint, next_adjoint
 
 
 def stream(
@@ -84,7 +85,7 @@ def interaction(
     target: torch.Tensor,
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    from ...codegen import launch
+    from ....codegen import launch
 
     inputs = [x.contiguous() for x in inputs]
     source, target = source.contiguous(), target.contiguous()
@@ -121,7 +122,7 @@ def interaction(
 
 @interaction.register_fake
 def interaction_fake(metadata, source, target, inputs):
-    channels, heads = decode(metadata)[2:4]
+    channels, heads = parse_metadata(metadata)[2:4]
     nodes = inputs[0].shape[0]
     return [
         inputs[0].new_empty((nodes, inputs[6].shape[1], channels)),
@@ -152,7 +153,7 @@ def backward(ctx, gradients):
     if active:
         metadata = first_adjoint(base_program(ctx.kernel_metadata, values), active)
         inputs = [*values, result, denominator, maximum, grad_result, grad_denominator]
-        slots = tuple(sorted({slot for _, slot, _ in decode(metadata)[1]}))
+        slots = tuple(sorted({slot for _, slot, _ in parse_metadata(metadata)[1]}))
         for slot, value in zip(slots, contraction(metadata, source, target, inputs)):
             output[slot] = value
     return None, None, None, output
@@ -169,7 +170,7 @@ def contraction(
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate recursively differentiated local expressions as native kernels."""
-    from ...codegen import launch
+    from ....codegen import launch
 
     inputs = [x.contiguous() for x in inputs]
     result = contraction_fake(metadata, source, target, inputs)
@@ -182,7 +183,7 @@ def contraction(
 
 @contraction.register_fake
 def contraction_fake(metadata, source, target, inputs):
-    slots = sorted({slot for _, slot, _ in decode(metadata)[1]})
+    slots = sorted({slot for _, slot, _ in parse_metadata(metadata)[1]})
     return [
         torch.empty_like(inputs[slot], memory_format=torch.contiguous_format)
         for slot in slots
@@ -197,13 +198,13 @@ def contraction_setup_context(ctx, inputs, output):
 
 def contraction_backward(ctx, gradients):
     source, target, *inputs = ctx.saved_tensors
-    slots = sorted({slot for _, slot, _ in decode(ctx.kernel_metadata)[1]})
+    slots = sorted({slot for _, slot, _ in parse_metadata(ctx.kernel_metadata)[1]})
     seeds = tuple(slot for slot, grad in zip(slots, gradients) if grad is not None)
     active = tuple(i for i, need in enumerate(ctx.needs_input_grad[3]) if need)
     result = [None] * len(inputs)
     if active and seeds:
         metadata = next_adjoint(ctx.kernel_metadata, active, seeds, len(inputs))
-        slots_out = sorted({slot for _, slot, _ in decode(metadata)[1]})
+        slots_out = sorted({slot for _, slot, _ in parse_metadata(metadata)[1]})
         values = contraction(
             metadata,
             source,

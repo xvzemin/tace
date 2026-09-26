@@ -102,7 +102,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
                 time_reversal,
                 parity,
             )
-        irreps_out = irreps_out.regroup()
+        irreps_out = irreps_out.sort().irreps.simplify()
         self.irreps_out = o3.Irreps([(num_channel, ir) for _, ir in irreps_out])
 
         self.linear = e3nnLinear(self.irreps_in, self.irreps_out)

@@ -3,8 +3,11 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import doctest
+import re
 import subprocess
 import sys
+import textwrap
 from copy import deepcopy
 from pathlib import Path
 
@@ -17,6 +20,75 @@ from tace.models.layout import LayoutTransform
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
+
+
+@pytest.mark.parametrize("allow_slice", [False, True])
+def test_native_o2_import_is_independent(allow_slice):
+    script = f"""
+import sys
+import torch
+if {allow_slice}:
+    torch.serialization.add_safe_globals([slice])
+safe_globals = set(torch.serialization.get_safe_globals())
+load = torch.load
+import eqx
+from eqx import o2
+
+assert safe_globals.issubset(torch.serialization.get_safe_globals())
+assert (slice in torch.serialization.get_safe_globals()) == (slice in safe_globals)
+assert torch.load is load
+linear = o2.Linear('2x0e+2x1m', '2x0e+2x1m')
+linear(linear.irreps_in.randn(3, -1)).sum().backward()
+frame = o2.LocalFrame('2x0e+2x1o')
+rotation = o2.WignerD(mmax=1, lmax=1, method='recursive')
+d, di = rotation(torch.randn(3, 3))
+x = torch.randn(3, frame.input_dim)
+frame.to_global(frame.to_local(x, d), di)
+assert all('eqx.' + name not in sys.modules for name in ('conv', 'kernels', 'ace', 'o3'))
+assert 'tace' not in sys.modules
+assert set(eqx.__all__).issubset(dir(eqx))
+assert eqx.conv.O3TensorProductConv is not None
+assert 'eqx.kernels.cuda' not in sys.modules
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("page", ["equivariantx", "convolutions"])
+def test_documentation_examples(page):
+    path = Path(__file__).resolve().parents[1] / "eqx/docs/source" / f"{page}.rst"
+    blocks = re.findall(
+        r"^\.\. code-block:: python\n\n((?:(?:   [^\n]*|)\n)+)",
+        path.read_text(),
+        re.MULTILINE,
+    )
+    assert blocks
+    namespace = {"__name__": "__main__"}
+    dtype = torch.get_default_dtype()
+    try:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(0)
+            for block in blocks:
+                exec(compile(textwrap.dedent(block), str(path), "exec"), namespace)
+    finally:
+        torch.set_default_dtype(dtype)
+
+
+@pytest.mark.parametrize("operator", [o2.Linear, o2.TensorProduct])
+def test_operator_docstrings(operator):
+    examples = doctest.DocTestParser().get_doctest(
+        operator.__doc__,
+        {operator.__name__: operator, "torch": torch},
+        operator.__name__,
+        None,
+        None,
+    )
+    doctest.DebugRunner().run(examples)
 
 
 def _transform(features, irreps, angle, reflected=False, time_reversal=False):

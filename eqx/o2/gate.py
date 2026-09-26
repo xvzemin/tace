@@ -8,8 +8,8 @@ from typing import Callable, NamedTuple, Optional, Sequence
 import torch
 from e3nn.math import normalize2mom
 
+from ._clebsch_gordan import quarter_turn
 from .irreps import Irrep, Irreps, IrrepsLike
-from .tensor_product import _quarter_turn
 
 
 class Activation(torch.nn.Module):
@@ -285,7 +285,7 @@ class Gate(torch.nn.Module):
                 self.irreps_gated[path.i_gated].mul,
             )[..., path.gated_start : path.gated_start + path.mul]
             if path.ir_gate.is_odd_scalar() and path.ir_gated.m > 0:
-                values = _quarter_turn(values)
+                values = quarter_turn(values)
             output = values * gate.unsqueeze(-2)
             outputs.append(
                 output.reshape(*features.shape[:-1], path.ir_out.dim * path.mul)

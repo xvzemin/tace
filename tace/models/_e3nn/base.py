@@ -28,7 +28,7 @@ def _to_possible_tp_irreps(
         for ir3 in ir1 * ir2
         if ir3.l <= lmax and (parity or ir3.p == (-1) ** ir3.l)
     )
-    return o3.Irreps(irrep_set).regroup()
+    return o3.Irreps(irrep_set).sort().irreps.simplify()
 
 
 class NodeEmbedding(torch.nn.Module):
@@ -252,15 +252,17 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
             self.irrreps_tp_out = _to_possible_tp_irreps(
                 self.irreps_in, self.irreps_sh, parity, lmax=lmax
             )
-        self.irreps_out = (self.irrreps_tp_out * num_channel).regroup()
+        self.irreps_out = (self.irrreps_tp_out * num_channel).sort().irreps.simplify()
 
         if self.layer == num_layers - 1:
-            self.irreps_sc = (o3.Irreps(target_irreps) * num_channel).regroup()
+            self.irreps_sc = (
+                (o3.Irreps(target_irreps) * num_channel).sort().irreps.simplify()
+            )
         else:
             self.irreps_sc = _to_possible_tp_irreps(
                 self.irreps_in, self.irreps_sh, parity, lmax=Lmax
             )
-            self.irreps_sc = (self.irreps_sc * num_channel).regroup()
+            self.irreps_sc = (self.irreps_sc * num_channel).sort().irreps.simplify()
 
         self._setup()
 
@@ -349,7 +351,9 @@ class Product(torch.nn.Module):
             if nu == self.correlation:
                 if self.last_layer:
                     self.irreps_tp_out_list.append(
-                        (self.target_irreps * self.num_hidden_channel).regroup()
+                        (self.target_irreps * self.num_hidden_channel)
+                        .sort()
+                        .irreps.simplify()
                     )
                 else:
                     self.irreps_tp_out_list.append(
@@ -358,7 +362,7 @@ class Product(torch.nn.Module):
                                 self.irreps_hidden, self.irreps_hidden, parity, Lmax
                             )
                             * self.num_hidden_channel
-                        ).regroup()
+                        ).sort().irreps.simplify()
                     )
             else:
                 self.irreps_tp_out_list.append(
@@ -380,12 +384,12 @@ class Product(torch.nn.Module):
             self.irreps_coefs_out = (
                 _to_possible_tp_irreps(self.irreps_in, self.irreps_in, parity, Lmax)
                 * self.num_hidden_channel
-            ).regroup()
+            ).sort().irreps.simplify()
 
         if self.last_layer:
             self.irreps_coefs_out = (
                 self.target_irreps * self.num_hidden_channel
-            ).regroup()
+            ).sort().irreps.simplify()
         else:
             self.irreps_coefs_out = self.irreps_coefs_out
 
@@ -425,7 +429,7 @@ class ReadOut(torch.nn.Module):
         irreps_out = o3.Irreps(irreps_out)
         if not parity:
             irreps_out = with_natural_parity(irreps_out)
-        self.irreps_out = (irreps_out * num_fidelities).regroup()
+        self.irreps_out = (irreps_out * num_fidelities).sort().irreps.simplify()
         self.scalar_act = (
             "tanh"
             if any(ir.l == 0 and not ir.is_scalar() for _, ir in self.irreps_out)

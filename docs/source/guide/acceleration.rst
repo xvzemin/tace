@@ -5,7 +5,7 @@ Acceleration
 
 TACE provides several composable acceleration layers:
 
-* EquivariantX(EQX), OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide 
+* EquivariantX (EQX), OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide
   alternative implementations of the same edge-level equivariant operations and 
   are selected per operator;
 * EquiTorch (EQT) accelerates product-basis tensor
@@ -67,7 +67,7 @@ The following kernel backends are available:
      - Edge in atomic basis
      - ``TACE_USE_CUE=1``
    * - EquivariantX
-     - Edge in atomic basis
+     - Convolutions, product basis, and element-dependent linear maps
      - ``TACE_USE_EQX=1``
    * - EquiTorch
      - Node in product basis
@@ -121,6 +121,10 @@ options. For example:
 
 Streamed CGTP with EquivariantX
 -------------------------------
+
+For standalone operator interfaces, feature layouts, and fusion boundaries,
+see :ref:`equivariantx-convolutions`. This section describes integration with
+TACE and checkpoint conversion.
 
 Install the optional backend from the TACE source directory, then select EQX
 for ``cgtp`` or ``o2_cgtp`` interactions:
@@ -180,8 +184,9 @@ product and its coefficient contraction are fused; intermediate orders remain
 available for reuse. Recursive transposed kernels support force training and
 higher derivatives. Linear up/down, biases, dropout and residual connections
 keep their existing behavior. Gated bilinear products also use
-``eqx.conv.models.tece_oam_rra.BilinearACE`` to fuse their weighted tensor product with the
-element-dependent or MoE coefficient map, including the optional shared expert.
+``eqx.conv.models.tace.tece_oam_rra.BilinearACE`` to fuse their weighted tensor
+product with the element-dependent or MoE coefficient map, including the
+optional shared expert.
 Products with active coefficient LoRA adapters retain their original
 tensor-product execution. EQX takes precedence
 over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.

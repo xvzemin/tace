@@ -1,3 +1,5 @@
+"""Real O(2) representations, PyTorch operators and O(3) frame conversions."""
+
 from .asymmetric_contraction import AsymmetricContraction
 from .circular_harmonics import CircularHarmonics, circular_harmonics
 from .gate import Activation, Gate

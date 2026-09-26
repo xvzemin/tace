@@ -15,10 +15,12 @@ import torch
 # Keep cache-lock bookkeeping quiet even when the application enables DEBUG.
 # Do not change the logger level: unrelated locks and warnings remain visible.
 logging.getLogger("filelock").addFilter(
-    lambda record: record.levelno >= logging.WARNING
-    or not any(
-        isinstance(arg, str) and "/eqx/cuda/" in arg.replace("\\", "/")
-        for arg in record.args
+    lambda record: (
+        record.levelno >= logging.WARNING
+        or not any(
+            isinstance(arg, str) and "/eqx/cuda/" in arg.replace("\\", "/")
+            for arg in record.args
+        )
     )
 )
 

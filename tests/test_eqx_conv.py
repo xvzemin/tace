@@ -13,7 +13,24 @@ from e3nn import o3
 from eqx import conv as eqx_conv
 from eqx import o2
 from eqx.ace import TACE
-from eqx.conv.models.tece_oam_rra import BilinearACE
+from eqx.conv.models.tace.tece_oam_rra import BilinearACE
+
+
+@pytest.mark.parametrize("degree", range(6))
+def test_rotation_generators_match_wigner(degree, double_precision):
+    from eqx.conv.o2_o3.geometry import generators
+
+    angle = torch.zeros((), dtype=torch.float64)
+    half_pi = angle.new_tensor(torch.pi / 2)
+    matrices = (
+        lambda a: o3.wigner_D(degree, angle, a, angle),
+        lambda a: o3.wigner_D(degree, a, angle, angle),
+        lambda a: o3.wigner_D(degree, -half_pi, a, half_pi),
+    )
+    expected = torch.stack(
+        [torch.autograd.functional.jacobian(matrix, angle) for matrix in matrices]
+    )
+    torch.testing.assert_close(generators(degree), expected, atol=1e-13, rtol=1e-13)
 
 
 @pytest.mark.parametrize("magnetic", [False, True])
@@ -647,7 +664,7 @@ def test_streaming_graph_attention_weights(device, nodes):
 def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.models.tece_oam_rra.interaction import stream
+    from eqx.conv.models.tace.tece_oam_rra.interaction import stream
     from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.layout import LayoutTransform
 
@@ -811,7 +828,7 @@ def test_online_attention_merge(dtype):
 def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.models.tece_oam_rra.interaction import stream
+    from eqx.conv.models.tace.tece_oam_rra.interaction import stream
     from eqx.kernels import recompute
     from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.layout import LayoutTransform
@@ -879,21 +896,198 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
 def test_convolution_package_layout():
     from eqx import ace
     from eqx.conv import uu_o2, uv_o2
-    from eqx.conv.models import tece_oam_rra
-    from eqx.conv.models.tece_oam_rra import LocalSplit
+    from eqx.conv.models.mace import convert_mace_to_eqx
+    from eqx.conv.models.tace import tece_oam_rra
+    from eqx.conv.models.tace.tece_oam_rra import LocalSplit
     from eqx.kernels.channel_product import local_product
     from tace.models._e3nn.tece_oam_rra import Convolution
 
     assert ace.TACE is TACE
     assert TACE.__module__ == "eqx.ace.tace"
     assert not hasattr(eqx_conv, "TACE")
-    assert BilinearACE.__module__ == "eqx.conv.models.tece_oam_rra.product"
+    assert BilinearACE.__module__ == "eqx.conv.models.tace.tece_oam_rra.product"
     assert Convolution.__module__ == "tace.models._e3nn.tece_oam_rra"
     assert not hasattr(tece_oam_rra, "Convolution")
     assert uu_o2.UuO2TensorProductConv is eqx_conv.UuO2TensorProductConv
     assert uv_o2.UvO2TensorProductConv is eqx_conv.UvO2TensorProductConv
     assert issubclass(LocalSplit, torch.autograd.Function)
     assert callable(local_product)
+    assert callable(convert_mace_to_eqx)
+
+
+@pytest.fixture
+def mace_model(double_precision):
+    pytest.importorskip("mace")
+    import numpy as np
+    from mace import modules
+
+    def make(interaction="RealAgnosticResidualInteractionBlock"):
+        return modules.ScaleShiftMACE(
+            r_max=3.0,
+            num_bessel=3,
+            num_polynomial_cutoff=5,
+            max_ell=2,
+            interaction_cls=getattr(modules, interaction),
+            interaction_cls_first=modules.RealAgnosticInteractionBlock,
+            num_interactions=2,
+            num_elements=2,
+            hidden_irreps=o3.Irreps("2x0e+2x1o+2x2e"),
+            MLP_irreps=o3.Irreps("2x0e"),
+            atomic_energies=np.array([0.2, -0.3]),
+            avg_num_neighbors=2.0,
+            atomic_numbers=[1, 8],
+            correlation=2,
+            gate=torch.nn.functional.silu,
+            radial_MLP=[4],
+            atomic_inter_scale=1.2,
+            atomic_inter_shift=-0.4,
+        )
+
+    return make
+
+
+@pytest.fixture
+def mace_data(mace_model):
+    from ase import Atoms
+    from mace import data
+    from mace.tools import AtomicNumberTable, torch_geometric
+
+    atoms = Atoms(
+        "OH2",
+        positions=[[0.2, 0.4, 0.1], [1.1, 0.2, 0.3], [-0.1, 1.3, 0.5]],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    graph = data.AtomicData.from_config(
+        data.config_from_atoms(atoms),
+        z_table=AtomicNumberTable([1, 8]),
+        cutoff=3.0,
+    )
+    other = deepcopy(graph)
+    other.positions = other.positions * 1.1
+    return atoms, torch_geometric.Batch.from_data_list([graph, other])
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        "RealAgnosticInteractionBlock",
+        "RealAgnosticResidualInteractionBlock",
+        "RealAgnosticDensityInteractionBlock",
+        "RealAgnosticDensityResidualInteractionBlock",
+        "RealAgnosticAttResidualInteractionBlock",
+        "RealAgnosticResidualNonLinearInteractionBlock",
+    ],
+)
+def test_mace_conversion_training(mace_model, mace_data, interaction, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.models.mace import convert_mace_to_eqx
+
+    reference = mace_model(interaction).to(device)
+    converted = deepcopy(reference)
+    parameters = tuple(converted.parameters())
+    assert convert_mace_to_eqx(converted, inplace=True) is converted
+    assert set(converted.parameters()) == set(parameters)
+    assert type(converted) is type(reference)
+    assert all(not hasattr(layer, "conv_fusion") for layer in reference.interactions)
+    batch = mace_data[1].to(device)
+    expected = reference(batch.clone().to_dict(), training=True, compute_stress=True)
+    actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
+    for key in ("energy", "forces", "stress", "virials"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
+    # Force and stress losses differentiate through the convolution twice.
+    for output in (actual, expected):
+        loss = sum(output[key].square().sum() for key in ("energy", "forces", "stress"))
+        loss.backward()
+    for actual_param, expected_param in zip(parameters, reference.parameters()):
+        if expected_param.grad is None:
+            assert actual_param.grad is None
+        else:
+            torch.testing.assert_close(
+                actual_param.grad, expected_param.grad, atol=2e-9, rtol=2e-8
+            )
+    projection = converted.interactions[1].conv_tp.projection.weight
+    before = projection.detach().clone()
+    torch.optim.SGD(converted.parameters(), lr=0.01).step()
+    assert not torch.equal(projection, before)
+
+
+def test_mace_conversion_ase_and_checkpoint(mace_model, mace_data, tmp_path):
+    from mace.calculators import MACECalculator
+
+    from eqx.conv.models.mace import convert_mace_to_eqx
+
+    original = mace_model().eval()
+    original.interactions[0].conv_tp_weights.requires_grad_(False)
+    # Conversion follows the model precision without changing the caller's default.
+    torch.set_default_dtype(torch.float32)
+    converted = convert_mace_to_eqx(original)
+    assert torch.get_default_dtype() == torch.float32
+    assert not converted.training
+    assert next(converted.parameters()).dtype == torch.float64
+    assert not converted.interactions[0].conv_tp.projection.weight.requires_grad
+    assert converted is not original
+    assert not hasattr(original.interactions[0], "conv_fusion")
+    assert convert_mace_to_eqx(converted, inplace=True) is converted
+    assert convert_mace_to_eqx(converted) is not converted
+    checkpoint = tmp_path / "mace-eqx.model"
+    torch.save(converted, checkpoint)
+    restored = torch.load(checkpoint, weights_only=False)
+    reloaded = convert_mace_to_eqx(original)
+    reloaded.load_state_dict(converted.state_dict(), strict=True)
+    results = []
+    for model in (original, restored, reloaded):
+        atoms = mace_data[0].copy()
+        atoms.calc = MACECalculator(models=model, device="cpu", default_dtype="float64")
+        results.append(
+            (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+        )
+    for actual in results[1:]:
+        for value, expected in zip(actual, results[0]):
+            torch.testing.assert_close(
+                torch.as_tensor(value), torch.as_tensor(expected), atol=2e-10, rtol=2e-9
+            )
+
+
+def test_mace_conversion_solid_harmonics(mace_model, mace_data):
+    from eqx.conv.models.mace import convert_mace_to_eqx
+
+    original = mace_model()
+    original.spherical_harmonics.normalize = False
+    converted = convert_mace_to_eqx(original)
+    batch = mace_data[1]
+    expected = original(batch.clone().to_dict(), training=True)
+    actual = converted(batch.clone().to_dict(), training=True)
+    for key in ("energy", "forces"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
+
+
+@pytest.mark.parametrize("layout", ["mul_ir", "ir_mul"])
+def test_mace_conversion_cueq(mace_model, mace_data, layout):
+    if not torch.cuda.is_available():
+        pytest.skip("cuEquivariance requires CUDA")
+    pytest.importorskip("cuequivariance_torch")
+    from mace.cli.convert_e3nn_cueq import run
+
+    from eqx.conv.models.mace import convert_mace_to_eqx
+
+    original = mace_model().cuda()
+    if layout == "ir_mul":
+        converted = convert_mace_to_eqx(original, enable_cueq=True)
+    else:
+        converted = convert_mace_to_eqx(run(original, device="cuda", layout=layout))
+    assert converted.interactions[0].cueq_config.layout_str == layout
+    batch = mace_data[1].cuda()
+    expected = original(batch.clone().to_dict(), training=True, compute_stress=True)
+    actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
+    loss = sum(actual[key].square().sum() for key in ("energy", "forces", "stress"))
+    loss.backward()
+    gradient = converted.interactions[1].conv_tp.projection.weight.grad
+    assert gradient is not None and torch.isfinite(gradient).all()
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -2714,7 +2908,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
             raise AssertionError("The streamed convolution must not call an edge TP")
 
         for layer in representation.interactions:
-            if getattr(layer, "use_eqx", False):
+            if getattr(layer, "use_eqx", False) and hasattr(layer.rejector, "tp"):
                 monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
                 monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
 
@@ -3373,7 +3567,9 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
             monkeypatch.setattr(
                 layer.rejector.local_frame_out, "to_global", no_edge_message
             )
-        if isinstance(layer.rejector, (O3ScatterTensorProduct, UuO2ScatterTensorProduct)):
+        if isinstance(
+            layer.rejector, (O3ScatterTensorProduct, UuO2ScatterTensorProduct)
+        ):
             monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
     results = []
     for network, enabled in ((reference_model, "0"), (model, "1")):

@@ -7,8 +7,8 @@ from typing import NamedTuple, Sequence
 
 import torch
 
+from ._clebsch_gordan import clebsch_gordan_product
 from .irreps import Irrep, Irreps, IrrepsLike
-from .tensor_product import _cg_product
 
 
 class _Path(NamedTuple):
@@ -198,7 +198,7 @@ class AsymmetricContraction(torch.nn.Module):
             ir1 = path.intermediates[order_index - 1]
             ir2 = self._input_irreps[path.leaves[order_index]]
             pair = (
-                _cg_product(
+                clebsch_gordan_product(
                     torch.eye(ir1.dim, dtype=torch.float64),
                     ir1,
                     torch.eye(ir2.dim, dtype=torch.float64),
@@ -277,7 +277,7 @@ class AsymmetricContraction(torch.nn.Module):
                 value = inputs[0][..., self._base_input_slices[path.leaves[0]], :]
                 for i in range(1, len(path.leaves)):
                     i_in = path.leaves[i]
-                    value = _cg_product(
+                    value = clebsch_gordan_product(
                         value,
                         path.intermediates[i - 1],
                         inputs[i][..., self._base_input_slices[i_in], :],

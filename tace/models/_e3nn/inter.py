@@ -457,7 +457,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             and self.use_radial_rotary_attention
             and acceleration_enabled("eqx", kernel="conv")
         ):
-            from eqx.conv.models.tece_oam_rra.interaction import stream
+            from eqx.conv.models.tace.tece_oam_rra.interaction import stream
 
             radial = edge_feats
             for layer in self.edge_info.mlp[:-1]:
@@ -685,7 +685,7 @@ class O2MagneticInteraction(UvO2Interaction):
             raise ValueError("magnetic edge irreps must satisfy 0 <= lmax <= Lmax.")
         self.magnetic_edge_irreps_out = o3.Irreps(
             [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
-        ).regroup()
+        ).sort().irreps.simplify()
 
         # A magnetic SOC edge carries both the spatial bond harmonics and the
         # magnetic source-target tensor product.  We do not truncate their
@@ -706,7 +706,7 @@ class O2MagneticInteraction(UvO2Interaction):
         )
         self.irreps_out = (
             self.irrreps_tp_out * self.num_channel
-        ).regroup()
+        ).sort().irreps.simplify()
 
         # Match the skip connection to the product-basis output constructed
         # from the corrected interaction irreps.
@@ -715,7 +715,7 @@ class O2MagneticInteraction(UvO2Interaction):
         elif self.correlation == 1:
             irreps_sc = o3.Irreps(
                 [(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax]
-            ).regroup()
+            ).sort().irreps.simplify()
         else:
             irreps_sc = _to_possible_tp_irreps(
                 self.irreps_out,
@@ -723,7 +723,7 @@ class O2MagneticInteraction(UvO2Interaction):
                 parity=self.parity,
                 lmax=self.Lmax,
             )
-        self.irreps_sc = (irreps_sc * self.num_channel).regroup()
+        self.irreps_sc = (irreps_sc * self.num_channel).sort().irreps.simplify()
         super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:

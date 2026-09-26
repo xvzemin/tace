@@ -106,7 +106,7 @@ class e3nnTACE(torch.nn.Module):
         if cfg["product_basis"]["return_components"] is not None:
             target_irreps.extend(cfg["product_basis"]["return_components"])
         target_irreps = list(set(target_irreps))
-        self.target_irreps = o3.Irreps(target_irreps).regroup()
+        self.target_irreps = o3.Irreps(target_irreps).sort().irreps.simplify()
         if not cfg["parity"]:
             self.target_irreps = with_natural_parity(self.target_irreps)
 
