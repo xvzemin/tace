@@ -1,6 +1,5 @@
-"""Reserved for general channel-mixing O(2) convolutions.
+"""Channel-mixing O(2) convolutions with optional edge representations."""
 
-No fused convolution is implemented or exported yet.
-"""
+from .convolution import UvO2TensorProductConv
 
-__all__ = []
+__all__ = ["UvO2TensorProductConv"]

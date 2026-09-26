@@ -215,7 +215,25 @@ def source(
     stages = []
     for j in order:
         op, size, args, data = nodes[j]
-        if (
+        if op == "scatter" and size <= 32 and len(data) >= 64:
+            groups = defaultdict(list)
+            for k, i in enumerate(data):
+                groups[i].append(k)
+            indices, ptr = [], [0]
+            for i in range(size):
+                indices.extend(groups[i])
+                ptr.append(len(indices))
+            index_table, ptr_table = table(indices), table(ptr)
+            stages.append(f"""
+            for(int i=threadIdx.x/32;i<{size};i+=blockDim.x/32) {{
+              scalar sum=0;
+              for(int k={ptr_table}[i]+threadIdx.x%32;k<{ptr_table}[i+1];k+=32)
+                sum+=state.v{args[0]}({index_table}[k]);
+              for(int stride=16;stride;stride/=2) sum+=__shfl_down_sync(0xffffffffu,sum,stride);
+              if(threadIdx.x%32==0) state.buffer[{offsets[j]}+i]=sum;
+            }}
+            __syncthreads();""")
+        elif (
             op == "matmul"
             and nodes[args[1]][0] == "transpose"
             and not dependent[args[1]]
@@ -312,8 +330,9 @@ def source(
             index = f"{offset}*{size}+i"
             value = f"state.v{root}(i)"
             target = f"out{destinations.index(slot)}"
+            assign = "=" if sum(s == slot for _, s, _ in outputs) == 1 else "+="
             store = (
-                f"{target}[{index}]+=value;"
+                f"{target}[{index}]{assign}value;"
                 if kind == "edge"
                 else f"if(value!=scalar(0)) atomicAdd({target}+{index},value);"
             )
@@ -358,8 +377,8 @@ def launch(
     eps=0.0,
 ):
     """Launch a native program with shared or bounded overflow workspace."""
-    from ....kernels.cuda import kernels, runtime
-    from ...graph import prepare_graph
+    from ..kernels.cuda import kernels, runtime
+    from .graph import prepare_graph
 
     if any(x.device != inputs[0].device or x.dtype != inputs[0].dtype for x in inputs):
         raise ValueError("Local interaction inputs must share one device and dtype.")
@@ -431,6 +450,6 @@ def launch(
         torch.cuda.current_stream(inputs[0].device).cuda_stream,
     )
     if splits > 1:
-        from ...attention import merge_attention
+        from .attention import merge_attention
 
         merge_attention(*partials, channels, eps, outputs)

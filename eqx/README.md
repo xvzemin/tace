@@ -75,12 +75,15 @@ eqx/
 │   ├── contraction.py            # Shared recursive transpose rule
 │   ├── graph.py                  # Shared graph ordering
 │   ├── radial.py                 # Bounded radial projections and their adjoints
+│   ├── program.py                # Static expressions and recursive derivatives
+│   ├── codegen.py                # Cooperative CUDA expression kernels
+│   ├── edge.py                   # Registered differentiable edge operations
 │   ├── ace/
 │   │   ├── tace.py               # Standard ACE coefficient contraction
 │   │   ├── contraction.py        # Recursive coefficient adjoints
 │   │   └── cuda.py               # CUDA execution
-│   ├── uu_o2/                   # Channel-diagonal convolution placeholder
-│   ├── uv_o2/                   # Channel-mixing convolution placeholder
+│   ├── uu_o2/                   # Fused channel-diagonal convolution
+│   ├── uv_o2/                   # Channel-mixing convolution and edge features
 │   ├── models/
 │   │   └── tece_oam_rra/
 │   │       ├── interaction.py    # Native rotary-attention operators
@@ -116,15 +119,16 @@ eqx/
 |---|---|---|---|
 | `O3TensorProductConv` | `conv/o3/` | Sparse O(3) CGTP with bounded radial projection | Implemented |
 | `O2O3TensorProductConv` | `conv/o2_o3/` | O(3) CGTP through aligned-frame sparse coupling | Implemented |
-| `UvO2Conv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear | Directory placeholder |
-| `UuO2Conv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Directory placeholder |
+| `UvO2TensorProductConv` | `conv/uv_o2/` | Channel-mixing O(2) Linear → Gate → Linear, optional RRA and edge features | Implemented |
+| `UuO2TensorProductConv` | `conv/uu_o2/` | Channelwise O(2) Linear convolution | Implemented |
 
-The placeholder packages do not export convolution classes yet.
-Each architecture owns its reference operation, derivatives and
-CUDA schedule; shared geometry and compilation are reused without inheriting
-from another convolution implementation. A nonlinear gated convolution must
-differentiate its activations and cannot reuse the multilinear CGTP transpose
-rule unchanged.
+The UV convolution preserves the native Linear and Gate instruction layouts,
+including biases, normalized activations and time-odd gates. It fuses frame
+rotations, regrouping and radial scaling, gate operations, attention scores,
+and inverse rotation with aggregation. Dense channel maps remain batched GEMMs.
+Radial weights and local GEMM operands are materialized; global edge messages
+are not. `conv/program.py`, `conv/codegen.py` and `conv/edge.py` provide shared
+static expressions, CUDA generation and recursively differentiated execution.
 
 Model-specific fusion lives in `conv/models/`, separately from these general
 convolutions. `tece_oam_rra` contains both gated bilinear ACE with expert and

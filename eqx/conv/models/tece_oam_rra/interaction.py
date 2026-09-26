@@ -84,7 +84,7 @@ def interaction(
     target: torch.Tensor,
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    from .codegen import launch
+    from ...codegen import launch
 
     inputs = [x.contiguous() for x in inputs]
     source, target = source.contiguous(), target.contiguous()
@@ -169,7 +169,7 @@ def contraction(
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate recursively differentiated local expressions as native kernels."""
-    from .codegen import launch
+    from ...codegen import launch
 
     inputs = [x.contiguous() for x in inputs]
     result = contraction_fake(metadata, source, target, inputs)

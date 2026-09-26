@@ -154,8 +154,21 @@ Model-specific fusion
 ---------------------
 
 ``eqx.conv.models.tece_oam_rra`` provides bilinear ACE and packed-feature
-interaction fusion for TECE-OAM-RRA. The complete native interaction is not implemented in this package
-yet. ``eqx.conv.uv_o2`` is reserved for general channel-mixing convolutions.
+interaction fusion for TECE-OAM-RRA.
+
+Channel-mixing O(2) convolution
+------------------------------
+
+``UvO2TensorProductConv`` supports ordinary and magnetic edge representations,
+including reflection- and time-odd scalar gates. CUDA fuses frame rotations,
+basis changes, radial multiplication, normalized gates, attention scores and
+inverse rotation with scatter. Channel mixing uses batched GEMM. Radial weights
+and local GEMM operands remain explicit; no global edge message is allocated.
+Parameters retain the native Linear layout. Registered operators provide
+recursive derivatives and support ``torch.compile``.
+
+.. autoclass:: eqx.conv.UvO2TensorProductConv
+   :members: forward
 
 Channelwise O(2) convolution
 ----------------------------

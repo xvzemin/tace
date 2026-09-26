@@ -15,6 +15,156 @@ from eqx import o2
 from eqx.conv.models.tece_oam_rra import BilinearACE
 
 
+@pytest.mark.parametrize("magnetic", [False, True])
+@pytest.mark.parametrize("attention", [False, True])
+@pytest.mark.parametrize("mmax", [0, 2])
+def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.o2 import (
+        O2ScatterMagneticTensorProduct,
+        O2ScatterTensorProduct,
+    )
+
+    torch.manual_seed(401)
+    torch.set_default_dtype(torch.float64)
+    time = hasattr(o3.Irrep("0e"), "t")
+    irreps = (
+        "2x0ee+2x0oo+2x1oe+2x1eo+2x2ee+2x2oo"
+        if time
+        else "2x0e+2x0o+2x1o+2x1e+2x2e+2x2o"
+    )
+    cls = O2ScatterMagneticTensorProduct if magnetic else O2ScatterTensorProduct
+    args = (irreps, irreps, irreps) if magnetic else (irreps, irreps)
+    module = (
+        cls(
+            *args,
+            num_channel=2,
+            mmax=mmax,
+            even_scalar_act=torch.nn.SiLU(),
+            odd_scalar_act=torch.nn.Tanh(),
+            tensor_act=torch.nn.Sigmoid(),
+            num_head=2,
+            num_radial_basis=3,
+            use_radial_rotary_attention=attention,
+        )
+        .cuda()
+        .double()
+    )
+    frame = o2.WignerD(2, 2).cuda().double()
+    for edges in (9, 0):
+
+        def rand(*shape):
+            return (
+                torch.randn(*shape, device="cuda", dtype=torch.float64) * 0.2
+            ).requires_grad_()
+
+        x, mag = rand(4, o3.Irreps(irreps).dim), rand(edges, o3.Irreps(irreps).dim)
+        vectors = rand(edges, 3)
+        weights, radial, cutoff = (
+            rand(edges, module.weight_numel),
+            rand(edges, 3),
+            rand(edges, 1).sigmoid(),
+        )
+        index = torch.randint(4, (2, edges), device="cuda")
+        inputs = (x, vectors, weights, radial, cutoff) + ((mag,) if magnetic else ())
+        inputs += tuple(module.parameters())
+
+        def run(enabled):
+            monkeypatch.setenv("TACE_USE_EQX", str(int(enabled)))
+            w, wi = frame(vectors)
+            args = (
+                (x, mag, weights, index, w, wi)
+                if magnetic
+                else (x, weights, index, w, wi)
+            )
+            value = module(*args, edge_radial_basis=radial, edge_cutoff=cutoff)
+            result = [value]
+            if edges:
+                for _ in range(3 if magnetic and attention and mmax == 2 else 2):
+                    grads = torch.autograd.grad(
+                        value.sin().sum(), inputs, create_graph=True, allow_unused=True
+                    )
+                    result.extend(g for g in grads if g is not None)
+                    value = (
+                        torch.cat([g.flatten() for g in grads if g is not None]) / 10
+                    )
+            return result
+
+        expected, actual = run(False), run(True)
+        assert len(actual) == len(expected)
+        for i, (a, b) in enumerate(zip(actual, expected)):
+            torch.testing.assert_close(
+                a, b, atol=2e-8, rtol=2e-8, msg=lambda message: f"Result {i}: {message}"
+            )
+
+
+def test_uv_o2_compile_and_force_training(monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.o2 import O2ScatterMagneticTensorProduct
+    from tace.models.compile.compile import trace_to_fx
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    irreps = "2x0ee+2x1eo+2x1oe" if hasattr(o3.Irrep("0e"), "t") else "2x0e+2x1e+2x1o"
+    module = O2ScatterMagneticTensorProduct(
+        irreps,
+        irreps,
+        irreps,
+        num_channel=2,
+        mmax=1,
+        even_scalar_act=torch.nn.SiLU(),
+        odd_scalar_act=torch.nn.Tanh(),
+        tensor_act=torch.nn.Sigmoid(),
+        num_head=2,
+        num_radial_basis=3,
+        use_radial_rotary_attention=True,
+    ).cuda()
+    frame = o2.WignerD(1, 1).cuda()
+
+    def evaluate(x, mag, weights, vectors, radial, cutoff, index):
+        w, wi = frame(vectors)
+        return module(x, mag, weights, index, w, wi, radial, cutoff)
+
+    compiled = torch.compile(
+        evaluate, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for nodes, edges in ((3, 5), (3, 0), (0, 0)):
+        index = torch.randint(max(nodes, 1), (2, edges), device="cuda")
+        inputs = [
+            torch.randn(shape, device="cuda", requires_grad=True) * 0.1
+            for shape in (
+                (nodes, module.irreps_in.dim),
+                (edges, module.magnetic_edge_irreps.dim),
+                (edges, module.weight_numel),
+                (edges, 3),
+                (edges, 3),
+                (edges, 1),
+            )
+        ]
+        inputs[-1] = inputs[-1].sigmoid()
+        actual, expected = compiled(*inputs, index), evaluate(*inputs, index)
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+        if edges:
+
+            def energy_forces(*args):
+                energy = evaluate(*args).square().sum()
+                forces = -torch.autograd.grad(energy, args[3], create_graph=True)[0]
+                return energy, forces
+
+            traced = trace_to_fx(energy_forces, (*inputs, index))
+            compiled_forces = torch.compile(traced, backend="aot_eager", fullgraph=True)
+            a, b = compiled_forces(*inputs, index), energy_forces(*inputs, index)
+            for x, y in zip(a, b):
+                torch.testing.assert_close(x, y, atol=1e-9, rtol=1e-9)
+            parameters = tuple(module.parameters())
+            ga, gb = [
+                torch.autograd.grad(e + f.square().sum(), parameters) for e, f in (a, b)
+            ]
+            for x, y in zip(ga, gb):
+                torch.testing.assert_close(x, y, atol=1e-8, rtol=1e-8)
+
+
 @pytest.mark.parametrize("implementation", ["o3", "o2", "o2_direction"])
 @pytest.mark.parametrize("shared", [False, True])
 def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):

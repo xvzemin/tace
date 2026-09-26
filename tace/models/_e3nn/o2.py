@@ -11,7 +11,8 @@ import torch
 from e3nn import o3
 
 from eqx import o2
-from eqx.conv import UuO2TensorProductConv
+from eqx.conv import UuO2TensorProductConv, UvO2TensorProductConv
+from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
@@ -98,8 +99,63 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         return torch.cat(outputs, dim=-1)
 
 
-class O2ScatterTensorProduct(torch.nn.Module):
+def uv_convolution(
+    module,
+    node_feats,
+    magnetic_edge_attrs,
+    conv_weights,
+    edge_index,
+    wigner,
+    wigner_inv,
+    edge_radial_basis,
+    edge_cutoff,
+):
+    """Call the shared UV kernel without changing checkpoint parameter ownership."""
+    linears = [module.linear_up, module.linear_down]
+    radial_attention = None
+    if module.attention is not None:
+        if edge_radial_basis is None:
+            raise ValueError("O2 radial rotary attention requires edge_radial_basis.")
+        linears.extend((module.attention.q_proj, module.attention.k_proj))
+        radial_attention = module.attention.radial_proj(edge_radial_basis)
+    message = module.eqx_tp(
+        module.reshape_in(node_feats),
+        module.reshape_magnetic(magnetic_edge_attrs)
+        if magnetic_edge_attrs is not None
+        else None,
+        conv_weights,
+        edge_index,
+        wigner,
+        wigner_inv,
+        edge_cutoff,
+        tuple(value for linear in linears for value in (linear.weight, linear.bias)),
+        radial_attention,
+    )
+    return module.reshape_out.inverse(message)
 
+
+def uv_kernel(module):
+    """Describe the native paths; unsupported activations keep their Torch path."""
+    attention = module.attention
+    try:
+        return UvO2TensorProductConv(
+            module.local_frame_in,
+            module.linear_up,
+            module.nonlinearity,
+            module.linear_down,
+            module.local_frame_out,
+            frame_edge=getattr(module, "magnetic_frame", None),
+            query=attention.q_proj if attention is not None else None,
+            key=attention.k_proj if attention is not None else None,
+            num_heads=module.num_head if attention is not None else 1,
+            attention_scale=attention.scale if attention is not None else 1.0,
+            eps=attention.graph_softmax.eps if attention is not None else 1e-16,
+        )
+    except NotImplementedError:
+        return None
+
+
+class O2ScatterTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -211,6 +267,8 @@ class O2ScatterTensorProduct(torch.nn.Module):
             if self.use_radial_rotary_attention
             else None
         )
+        if self.linear_type == "uv":
+            self.eqx_tp = uv_kernel(self)
 
     def __repr__(self) -> str:
         return repr_without(self, "reshape_in", "reshape_out")
@@ -358,6 +416,24 @@ class O2ScatterTensorProduct(torch.nn.Module):
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
+        if (
+            self.linear_type == "uv"
+            and getattr(self, "eqx_tp", None) is not None
+            and node_feats.is_cuda
+            and node_feats.dtype in (torch.float32, torch.float64)
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            return uv_convolution(
+                self,
+                node_feats,
+                None,
+                conv_weights,
+                edge_index,
+                wigner,
+                wigner_inv,
+                edge_radial_basis,
+                edge_cutoff,
+            )
         node_features, source_features, target_features = self._to_local(
             node_feats, edge_index, wigner
         )
@@ -440,14 +516,10 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_magnetic_irreps = self.magnetic_frame.irreps_out
         self.local_irreps_in = (
-            self.node_irreps
-            + self.node_irreps
-            + self.local_magnetic_irreps
+            self.node_irreps + self.node_irreps + self.local_magnetic_irreps
         ).regroup()
         self.local_irreps_out = self.local_frame_out.irreps_out
-        self.use_time_reversal = any(
-            ir.t == -1 for ir, _ in self.local_irreps_in
-        )
+        self.use_time_reversal = any(ir.t == -1 for ir, _ in self.local_irreps_in)
         hidden_irreps = self.local_irreps_out.filter(
             keep=lambda ir_mul: self.local_irreps_in.count(ir_mul.ir) > 0
         )
@@ -471,9 +543,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             time_odd_scalars = [
                 ir for ir, _ in self.local_irreps_in if ir.m == 0 and ir.t == -1
             ]
-            time_odd_irreps = [
-                ir for ir, _ in self.local_irreps_in if ir.t == -1
-            ]
+            time_odd_irreps = [ir for ir, _ in self.local_irreps_in if ir.t == -1]
             for ir_out, mul in self.local_irreps_out:
                 path = next(
                     (
@@ -529,6 +599,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             if self.use_radial_rotary_attention
             else None
         )
+        self.eqx_tp = uv_kernel(self)
 
     def __repr__(self) -> str:
         return repr_without(self, "reshape_in", "reshape_out")
@@ -639,6 +710,23 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
             raise ValueError("O2 convolution requires edge_cutoff.")
         if wigner is None or wigner_inv is None:
             raise ValueError("O2 convolution requires Wigner matrices.")
+        if (
+            getattr(self, "eqx_tp", None) is not None
+            and node_feats.is_cuda
+            and node_feats.dtype in (torch.float32, torch.float64)
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            return uv_convolution(
+                self,
+                node_feats,
+                magnetic_edge_attrs,
+                conv_weights,
+                edge_index,
+                wigner,
+                wigner_inv,
+                edge_radial_basis,
+                edge_cutoff,
+            )
         (
             node_features,
             source_features,

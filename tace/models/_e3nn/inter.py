@@ -586,7 +586,7 @@ class UvO2Interaction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
-        if self.use_eqx:
+        if self.use_eqx and self.linear_type == "uu":
             radial = edge_feats
             for layer in self.edge_info.mlp[:-1]:
                 radial = layer(radial)

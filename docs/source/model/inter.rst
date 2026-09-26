@@ -62,6 +62,16 @@ See :ref:`eqx-streaming` for training support and requirements.
 O(2) Linear
 -----------
 
+``TACE_USE_EQX=1`` enables CUDA fusion for ``o2`` and ``o2_mag`` on float32
+and float64 inputs. Both use ``eqx.conv.UvO2TensorProductConv``: gather,
+frame rotation, basis changes and radial multiplication are fused, as are
+gates, attention scores and inverse rotation with scatter. Channel maps remain
+batched GEMMs. Radial weights and local GEMM operands are still materialized;
+global edge messages are not. Magnetic edge preparation, node operations and
+checkpoint parameters are unchanged. CPU and unsupported activations retain
+the native PyTorch implementation. Derivatives include force training and
+recursive higher orders.
+
 .. autoclass:: tace.models._e3nn.inter.UvO2Interaction
 
 .. autoclass:: tace.models._e3nn.inter.O2MagneticInteraction

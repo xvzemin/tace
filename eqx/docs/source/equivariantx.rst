@@ -48,8 +48,9 @@ convolution architecture. Its current ``O2O3TensorProductConv`` lives in
 the lazy CUDA compiler and launcher.
 
 ``UuO2TensorProductConv`` in ``conv/uu_o2`` provides fused channelwise Linear
-convolutions with externally generated path weights. ``conv/uv_o2`` is reserved
-for channel-mixing Linear--Gate--Linear convolutions.
+convolutions with externally generated path weights. ``UvO2TensorProductConv``
+in ``conv/uv_o2`` fuses channel-mixing Linear--Gate--Linear convolutions with
+optional edge representations and radial attention.
 
 Quick start
 -----------
