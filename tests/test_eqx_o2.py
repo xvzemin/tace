@@ -971,11 +971,10 @@ def test_o2_uuu_matches_diagonal_uvw(double_precision, batch_size, ir1, ir2):
 
 
 @pytest.mark.parametrize(("lmax", "mmax"), [(0, 0), (1, 1), (3, 1), (4, 2), (3, 3)])
-@pytest.mark.parametrize("optimize", [False, True])
-def test_wigner_matches_o3_rotation_matrices(double_precision, lmax, mmax, optimize):
+def test_wigner_matches_o3_rotation_matrices(double_precision, lmax, mmax):
     vectors = torch.randn(3, 3, generator=torch.Generator().manual_seed(7))
     rotation = o2.rotation_matrix_to_y_axis(vectors)
-    module = o2.WignerD(mmax, lmax, use_opt_einsum_fx=optimize)
+    module = o2.WignerD(mmax, lmax)
     actual, inverse = module(vectors)
     full = torch.stack(
         [
@@ -995,6 +994,16 @@ def test_wigner_matches_o3_rotation_matrices(double_precision, lmax, mmax, optim
     empty, empty_inverse = module(vectors[:0])
     assert empty.shape == (0, *actual.shape[1:])
     assert empty_inverse.shape == (0, *inverse.shape[1:])
+
+
+@pytest.mark.parametrize("lmax", [2, 4])
+def test_wigner_recursive_derivatives(double_precision, lmax):
+    module = o2.WignerD(lmax, lmax, method="recursive")
+    vectors = torch.randn(2, 3, requires_grad=True)
+    assert torch.autograd.gradcheck(module.forward_packed, (vectors,), fast_mode=True)
+    assert torch.autograd.gradgradcheck(
+        module.forward_packed, (vectors,), fast_mode=True
+    )
 
 
 def test_time_odd_circular_harmonics_alternate_time_parity():

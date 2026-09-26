@@ -228,8 +228,8 @@ release is planned once the library is fully mature. To install from source:
    git clone https://github.com/xvzemin/tace.git
    pip install ./tace/eqx
 
-The library imports as ``eqx`` and depends on PyTorch >= 2.4, e3nn >= 0.4.4, and
-``opt_einsum_fx``, but not on TACE or PyG. Its scope covers native O(2)
+The library imports as ``eqx`` and depends on PyTorch >= 2.4 and e3nn >= 0.4.4,
+but not on TACE or PyG. Its scope covers native O(2)
 operators, e3nn-compatible O(3)/O(2) frame conversion, and fused CUDA
 convolutions. Install ``'./tace/eqx[cuda]'`` and provide a CUDA toolkit to
 use the fused backend. See :ref:`equivariantx-tutorials` and

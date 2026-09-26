@@ -29,7 +29,7 @@ git clone https://github.com/xvzemin/tace.git
 pip install ./tace/eqx
 ```
 
-The base dependencies are PyTorch >= 2.4, e3nn >= 0.4.4, and opt_einsum_fx.
+The base dependencies are PyTorch >= 2.4 and e3nn >= 0.4.4.
 PyG, torch-scatter, Triton, and a CUDA compiler are not required for native
 PyTorch operations.
 

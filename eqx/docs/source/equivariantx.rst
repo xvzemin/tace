@@ -21,8 +21,8 @@ fully mature.
    pip install ./tace/eqx
 
 The native operators use PyTorch >= 2.4 on CPU and CUDA. Installation includes
-``e3nn>=0.4.4`` for representation and coupling conventions, and ``opt_einsum_fx``
-for contraction planning. PyG and external CUDA extensions are not required.
+``e3nn>=0.4.4`` for representation and coupling conventions.
+PyG and external CUDA extensions are not required.
 
 With e3nn 0.4.x and recent PyTorch, import ``eqx`` before ``e3nn.o3``. The
 older release loads packaged CG constants containing Python ``slice`` objects;

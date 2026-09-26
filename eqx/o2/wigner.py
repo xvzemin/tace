@@ -5,7 +5,6 @@
 
 import math
 
-import opt_einsum_fx
 import torch
 from e3nn import o3
 
@@ -21,9 +20,6 @@ class WignerD(torch.nn.Module):
         Largest local O(2) order retained in the local matrix axis.
     lmax : int
         Largest global O(3) degree represented by the matrices.
-    use_opt_einsum_fx : bool, optional
-        If ``True``, pre-optimize the recursive contractions for degrees two
-        and above.
     method : {"auto", "quaternion", "recursive"}, optional
         ``"auto"`` uses direct quaternion polynomials for CUDA float32 and
         float64 inputs and recursive PyTorch contractions otherwise.
@@ -41,7 +37,6 @@ class WignerD(torch.nn.Module):
         self,
         mmax: int,
         lmax: int,
-        use_opt_einsum_fx: bool = False,
         *,
         method: str = "auto",
     ) -> None:
@@ -60,13 +55,10 @@ class WignerD(torch.nn.Module):
 
         self.mmax = mmax
         self.lmax = lmax
-        self.use_opt_einsum_fx = use_opt_einsum_fx
         self.method = method
 
         for l in range(2, self.lmax + 1):
             self.register_buffer(f"cg_{l}", o3.wigner_3j(1, l - 1, l), persistent=False)
-            if self.use_opt_einsum_fx:
-                self._register_fx(l)
 
         local_indices = []
         inverse_scale = []
@@ -167,30 +159,12 @@ class WignerD(torch.nn.Module):
             matrices.append(rotation)
         for l in range(2, self.lmax + 1):
             cg = getattr(self, f"cg_{l}")
-            if self.use_opt_einsum_fx:
-                matrix = getattr(self, f"fx_{l}")(rotation, matrices[-1], cg)
-            else:
-                matrix = torch.einsum("abm,eac->ebmc", cg, rotation)
-                matrix = torch.einsum("ebmc,ebd->emcd", matrix, matrices[-1])
-                matrix = torch.einsum("emcd,cdn->emn", matrix, cg)
+            matrix = torch.einsum("abm,eac->ebmc", cg, rotation)
+            matrix = torch.einsum("ebmc,ebd->emcd", matrix, matrices[-1])
+            matrix = torch.einsum("emcd,cdn->emn", matrix, cg)
             matrices.append(matrix * (2 * l + 1))
 
         return matrices
-
-    def _register_fx(self, degree: int) -> None:
-        equation = "abm,eac,ebd,cdn->emn"
-        contraction = torch.fx.symbolic_trace(
-            lambda d1, d_prev, cg: torch.einsum(equation, cg, d1, d_prev, cg)
-        )
-        contraction = opt_einsum_fx.optimize_einsums_full(
-            model=contraction,
-            example_inputs=(
-                torch.randn(4, 3, 3),
-                torch.randn(4, 2 * degree - 1, 2 * degree - 1),
-                torch.randn(3, 2 * degree - 1, 2 * degree + 1),
-            ),
-        )
-        self.add_module(f"fx_{degree}", contraction)
 
     def extra_repr(self) -> str:
         return f"mmax={self.mmax}, lmax={self.lmax}"
