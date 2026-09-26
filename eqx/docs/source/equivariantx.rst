@@ -326,13 +326,13 @@ matrices may cover additional degrees or orders.
 
 ``WignerD(method="auto")`` uses direct quaternion polynomials on CUDA for
 float32 and float64 inputs, and recursive PyTorch contractions otherwise.
-The CUDA method requires the ``cuda`` extra and a CUDA toolkit. Fixed
-polynomial coefficients are generated analytically, with no numerical fit.
-All degrees are evaluated without degree-to-degree recursion, and higher
-derivatives are supported. ``method="recursive"`` explicitly selects the
-PyTorch construction; ``method="quaternion"`` requires supported CUDA inputs.
-``forward_packed`` returns only the degree blocks, without zero padding or
-a separate inverse copy.
+The CUDA method requires the ``cuda`` extra and a CUDA toolkit. Both methods
+support higher derivatives. ``method="recursive"``
+selects the PyTorch construction; ``method="quaternion"`` selects CUDA.
+``forward_packed`` returns full degree matrices without zero padding or a
+separate inverse copy, independently of ``mmax``. Both ``LocalFrame.to_local``
+and ``LocalFrame.to_global`` accept this tensor; the latter transposes the
+matrices and applies the truncation scale when needed.
 
 By default, ``basis_change=True`` gives positive-order features a uniform
 reflection convention. Setting it to ``False`` retains the spherical harmonic
@@ -374,6 +374,12 @@ original CG coefficients directly.
    torch.testing.assert_close(
        global_messages, node_feats[edge_index[0]], atol=1e-5, rtol=1e-5
    )
+
+   # Packed storage uses the same matrices in both directions.
+   packed = wigner.forward_packed(edge_vectors)
+   local_packed = frame.to_local(node_feats[edge_index[0]], packed)
+   torch.testing.assert_close(local_packed, local_features)
+   torch.testing.assert_close(frame.to_global(local_packed, packed), global_messages)
 
 ``node_feats`` must already use flattened ``ir_mul`` order inside every O(3)
 entry. ``local_features`` follows ``frame.irreps_out`` in the same flattened

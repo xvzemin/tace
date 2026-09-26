@@ -46,12 +46,12 @@ def clebsch_gordan_product(
         imaginary = real1 * imag2 + imag1 * real2
         return torch.stack((real, imaginary), dim=dim) * scale
 
-    real = real1 * real2 + imag1 * imag2
+    if ir_out.is_even_scalar():
+        return (real1 * real2 + imag1 * imag2).unsqueeze(dim) * scale
     imaginary = imag1 * real2 - real1 * imag2
     if ir2.m > ir1.m:
         imaginary = -imaginary
     if ir_out.m > 0:
+        real = real1 * real2 + imag1 * imag2
         return torch.stack((real, imaginary), dim=dim) * scale
-    if ir_out.is_even_scalar():
-        return real.unsqueeze(dim) * scale
     return imaginary.unsqueeze(dim) * scale

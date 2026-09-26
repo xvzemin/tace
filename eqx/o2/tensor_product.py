@@ -35,9 +35,10 @@ class TensorProduct(torch.nn.Module):
         Requested output representation.
     instructions : sequence of tuple
         Coupling paths written as ``(i_in1, i_in2, i_out, mode, train)`` or
-        ``(i_in1, i_in2, i_out, mode, train, path_weight)``. ``mode`` is one
-        of ``"u1u"``, ``"uuu"``, or ``"uvw"``; ``train`` selects whether the
-        path has a weight.
+        ``(i_in1, i_in2, i_out, mode, train, path_weight)``. ``"u1u"`` couples
+        one second-input channel to matching first-input/output channels;
+        ``"uuu"`` couples matching channels; ``"uvw"`` mixes all channels.
+        ``train`` selects whether the path has a weight.
     in1_var : sequence of float, optional
         Expected variance for each first-input entry. Used only to calculate
         path normalization. Defaults to one.
@@ -57,30 +58,6 @@ class TensorProduct(torch.nn.Module):
         is inferred from ``shared_weights`` and the weighted instructions.
     shared_weights : bool, optional
         Whether one weight vector is shared over all leading dimensions.
-
-    Attributes
-    ----------
-    irreps_in1, irreps_in2, irreps_out : Irreps
-        Input and output representations.
-    instructions : tuple of Instruction
-        Coupling paths with resolved shapes and normalization coefficients.
-    weight_numel : int
-        Number of elements in the flattened weight tensor.
-
-    Notes
-    -----
-    Inputs and outputs use ``(..., irreps.dim)`` tensors in flattened
-    ``ir_mul`` order. ``u1u`` couples a single second-input channel to matched
-    first/output channels, ``uuu`` couples matching channels, and ``uvw`` uses
-    a dense ``mul1 x mul2 x mul_out`` weight tensor.
-
-    Examples
-    --------
-    >>> tp = TensorProduct("2x1m", "2x1m", "2x0e", [(0, 0, 0, "uuu", True)])
-    >>> tp.weight_numel
-    2
-    >>> tp(tp.irreps_in1.randn(3, -1), tp.irreps_in2.randn(3, -1)).shape
-    torch.Size([3, 2])
     """
 
     def __init__(
@@ -238,8 +215,8 @@ class TensorProduct(torch.nn.Module):
         else:
             self.register_buffer("weight", torch.empty(0))
 
-        self._input1_slices = self.irreps_in1.slices()
-        self._input2_slices = self.irreps_in2.slices()
+        self._input1_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in1)
+        self._input2_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in2)
         offsets = []
         offset = 0
         for instruction in self.instructions:
@@ -250,6 +227,7 @@ class TensorProduct(torch.nn.Module):
             else:
                 offsets.append(None)
         self._weight_offsets = tuple(offsets)
+        self._weight_sizes = tuple(0 if item is None else item[1] for item in offsets)
         self._instructions_by_output = tuple(
             tuple(i for i, ins in enumerate(self.instructions) if ins.i_out == i_out)
             for i_out in range(len(self.irreps_out))
@@ -297,9 +275,10 @@ class TensorProduct(torch.nn.Module):
         Parameters
         ----------
         input1 : torch.Tensor
-            First input with shape ``(..., irreps_in1.dim)``.
+            First input with shape ``(..., irreps_in1.dim)`` in flattened
+            ``ir_mul`` order.
         input2 : torch.Tensor
-            Second input with shape ``(..., irreps_in2.dim)``.
+            Second input with shape ``(..., irreps_in2.dim)`` in the same layout.
         weight : torch.Tensor, optional
             External flattened weights with trailing shape ``weight_shape``.
             Leading dimensions broadcast with both inputs. Omit when internal
@@ -336,13 +315,18 @@ class TensorProduct(torch.nn.Module):
             ) from error
 
         values1 = [
-            input1[..., ir_slice].reshape(*input1.shape[:-1], ir.dim, mul)
-            for (ir, mul), ir_slice in zip(self.irreps_in1, self._input1_slices)
+            values.reshape(*input1.shape[:-1], ir.dim, mul)
+            for (ir, mul), values in zip(
+                self.irreps_in1, input1.split(self._input1_sizes, dim=-1)
+            )
         ]
         values2 = [
-            input2[..., ir_slice].reshape(*input2.shape[:-1], ir.dim, mul)
-            for (ir, mul), ir_slice in zip(self.irreps_in2, self._input2_slices)
+            values.reshape(*input2.shape[:-1], ir.dim, mul)
+            for (ir, mul), values in zip(
+                self.irreps_in2, input2.split(self._input2_sizes, dim=-1)
+            )
         ]
+        weights = weight.split(self._weight_sizes, dim=-1)
         outputs = []
         zero = None
         for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
@@ -360,8 +344,7 @@ class TensorProduct(torch.nn.Module):
                     elementwise=instruction.connection_mode != "uvw",
                 )
                 if instruction.has_weight:
-                    offset, size = self._weight_offsets[instruction_index]
-                    path_weight = weight.narrow(-1, offset, size)
+                    path_weight = weights[instruction_index]
                     if instruction.connection_mode == "uvw":
                         path_weight = path_weight.reshape(
                             *weight.shape[:-1], mul1, mul2, mul_out

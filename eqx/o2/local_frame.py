@@ -9,7 +9,7 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
-from ._layout import wigner_indices, wigner_orders
+from ._layout import _Permute, wigner_indices, wigner_orders
 from .irreps import Irrep, Irreps
 
 
@@ -29,37 +29,17 @@ class LocalFrame(torch.nn.Module):
     ----------
     irreps : o3.Irreps or str
         Global input representation, including time parity when present.
-        Every entry is stored in flattened ``ir_mul`` order.
     mmax : int, optional
         Largest local O(2) order to retain. Defaults to the largest degree in
         ``irreps``; larger values have no effect.
     reverse : bool, optional
-        Reverse the global/local order in the module representation. This only
-        changes how the module is displayed.
+        Display the local-to-global mapping in ``repr``. Defaults to ``False``;
+        does not change the computation.
     basis_change : bool, optional
         Apply the fixed basis change to positive orders of unnatural-parity
         entries. Defaults to ``True``. If ``False``, retain the spherical
-        harmonic basis while still regrouping features by local order.
-
-    Attributes
-    ----------
-    irreps_in : o3.Irreps
-        Global representation.
-    irreps_out : Irreps
-        Regrouped local representation, including the input multiplicities.
-    input_dim, output_dim : int
-        Sizes of the global and local feature axes.
-
-    Notes
-    -----
-    The first tensor dimension is the rotation batch. Additional leading
-    dimensions, such as a source/target axis, are preserved. The local output
-    representation is available as :attr:`irreps_out`.
-    Wigner layout is inferred from the matrix dimensions. Matrices shared
-    across representations may contain additional degrees or local orders.
-    With ``basis_change=False``, positive-order channels can have different
-    reflection matrices despite sharing an irrep label. Subsequent operators
-    must account for these bases rather than mix those channels directly.
+        harmonic basis; subsequent operators must account for the different
+        reflection matrices of natural- and unnatural-parity inputs.
     """
 
     @staticmethod
@@ -130,9 +110,6 @@ class LocalFrame(torch.nn.Module):
         local_indices = {ir: index for index, (ir, _) in enumerate(self.irreps_out)}
         local_offsets = [0] * len(self.irreps_out)
         entries = []
-        wigner_rows = []
-        wigner_row_strides = []
-        wigner_columns = []
         for global_slice, global_entry in zip(global_slices, self.irreps_in):
             ir, mul = global_entry.ir, global_entry.mul
             retained_mmax = min(ir.l, self.mmax)
@@ -149,13 +126,6 @@ class LocalFrame(torch.nn.Module):
                 start = local_offsets[index]
                 entry_local_slices.append(slice(start, start + mul))
                 local_offsets[index] += mul
-            rows = wigner_indices(ir.l, retained_mmax, self.lmax)
-            row_strides = [0]
-            for order in range(1, retained_mmax + 1):
-                row_strides.extend((2 * order - 1, 2 * order))
-            wigner_rows.append(torch.tensor(rows, dtype=torch.long))
-            wigner_row_strides.append(torch.tensor(row_strides, dtype=torch.long))
-            wigner_columns.append(torch.arange(ir.l**2, (ir.l + 1) ** 2))
             entries.append(
                 _FrameEntry(
                     global_slice,
@@ -167,34 +137,150 @@ class LocalFrame(torch.nn.Module):
                 )
             )
         self._entries = tuple(entries)
-        rotation_groups = []
-        for index, entry in enumerate(entries):
-            for indices in rotation_groups:
-                if entries[indices[0]].mul == entry.mul and all(
-                    entries[grouped_index].degree != entry.degree
-                    for grouped_index in indices
+        self._degrees = tuple(sorted({entry.degree for entry in entries}))
+        self._multiplicities = tuple(
+            sum(entry.mul for entry in entries if entry.degree == degree)
+            for degree in self._degrees
+        )
+        self._global_sizes = tuple(
+            (2 * degree + 1) * mul
+            for degree, mul in zip(self._degrees, self._multiplicities)
+        )
+        self._local_sizes = tuple(
+            (2 * min(degree, self.mmax) + 1) * mul
+            for degree, mul in zip(self._degrees, self._multiplicities)
+        )
+        self._matrix_sizes = tuple(
+            (2 * degree + 1) * (2 * min(degree, self.mmax) + 1)
+            for degree in self._degrees
+        )
+        global_index = []
+        local_index = [0] * self.output_dim
+        local_sign = [1.0] * self.output_dim
+        dense_rows, dense_columns, row_strides, packed_index = [], [], [], []
+        local_slices = self.irreps_out.slices()
+        offset = 0
+        for degree, mul in zip(self._degrees, self._multiplicities):
+            selected = [entry for entry in entries if entry.degree == degree]
+            dim = 2 * degree + 1
+            orders = [0] + [
+                s * m for m in range(1, min(degree, self.mmax) + 1) for s in (1, -1)
+            ]
+            for m in range(dim):
+                for entry in selected:
+                    global_index.extend(
+                        range(
+                            entry.global_slice.start + m * entry.mul,
+                            entry.global_slice.start + (m + 1) * entry.mul,
+                        )
+                    )
+            channel = 0
+            for entry in selected:
+                for m, (index, local_slice) in enumerate(
+                    zip(entry.local_indices, entry.local_slices)
                 ):
-                    indices.append(index)
-                    break
+                    for component in range(1 if m == 0 else 2):
+                        swapped = self.basis_change and entry.odd and m > 0
+                        row = (
+                            0
+                            if m == 0
+                            else 2 * m - 1 + (1 - component if swapped else component)
+                        )
+                        start = (
+                            local_slices[index].start
+                            + component * self.irreps_out[index].mul
+                            + local_slice.start
+                        )
+                        for u in range(entry.mul):
+                            local_index[start + u] = offset + row * mul + channel + u
+                            local_sign[start + u] = (
+                                -1.0 if swapped and component == 0 else 1.0
+                            )
+                channel += entry.mul
+            rows = wigner_indices(degree, min(degree, self.mmax), self.lmax)
+            for row, (m, dense_row) in enumerate(zip(orders, rows)):
+                for column in range(dim):
+                    dense_rows.append(dense_row)
+                    dense_columns.append(degree**2 + column)
+                    row_strides.append(row)
+                    packed_index.append(
+                        degree * (4 * degree**2 - 1) // 3 + (degree + m) * dim + column
+                    )
+            offset += len(orders) * mul
+        self._global_identity = global_index == list(range(self.input_dim))
+        self._local_identity = local_index == list(range(self.output_dim))
+        self._has_signs = -1.0 in local_sign
+        global_dim = (self.lmax + 1) ** 2
+        local_dim = global_dim - (self.lmax - self.mmax) * (self.lmax - self.mmax + 1)
+        for name, indices in (
+            ("_global_index", global_index),
+            (
+                "_global_inverse",
+                sorted(range(self.input_dim), key=global_index.__getitem__),
+            ),
+            ("_local_index", local_index),
+            (
+                "_local_inverse",
+                sorted(range(self.output_dim), key=local_index.__getitem__),
+            ),
+            ("_dense_rows", dense_rows),
+            ("_dense_columns", dense_columns),
+            ("_row_strides", row_strides),
+            ("_packed_index", packed_index),
+            (
+                "_dense_index",
+                [row * global_dim + col for row, col in zip(dense_rows, dense_columns)],
+            ),
+            (
+                "_dense_inverse_index",
+                [col * local_dim + row for row, col in zip(dense_rows, dense_columns)],
+            ),
+        ):
+            self.register_buffer(
+                name, torch.tensor(indices, dtype=torch.long), persistent=False
+            )
+        self.register_buffer("_local_sign", torch.tensor(local_sign), persistent=False)
+
+    def _rotation_matrices(self, wigner: torch.Tensor, inverse: bool = False):
+        """Extract degree matrices from dense or packed Wigner storage."""
+        if wigner.ndim == 2:
+            degree = self.lmax + 1
+            if wigner.size(-1) < degree * (4 * degree**2 - 1) // 3:
+                raise ValueError(
+                    "Wigner packed dimension must cover every O(3) degree."
+                )
+            matrices = wigner.index_select(1, self._packed_index)
+            wigner_mmax = self.lmax
+        else:
+            global_dim, local_dim = (
+                wigner.shape[-2:] if inverse else wigner.shape[-2:][::-1]
+            )
+            lmax, wigner_mmax = wigner_orders(
+                global_dim, local_dim, lmax=self.lmax, mmax=self.mmax
+            )
+            if lmax == self.lmax and wigner_mmax == self.mmax:
+                indices = self._dense_inverse_index if inverse else self._dense_index
             else:
-                rotation_groups.append([index])
-        self._rotation_groups = tuple(tuple(indices) for indices in rotation_groups)
-        for group_index, indices in enumerate(self._rotation_groups):
-            self.register_buffer(
-                f"wigner_rows_{group_index}",
-                torch.cat([wigner_rows[index] for index in indices]),
-                persistent=False,
-            )
-            self.register_buffer(
-                f"wigner_row_strides_{group_index}",
-                torch.cat([wigner_row_strides[index] for index in indices]),
-                persistent=False,
-            )
-            self.register_buffer(
-                f"wigner_columns_{group_index}",
-                torch.cat([wigner_columns[index] for index in indices]),
-                persistent=False,
-            )
+                rows = self._dense_rows + (lmax - self.lmax) * self._row_strides
+                indices = (
+                    self._dense_columns * local_dim + rows
+                    if inverse
+                    else rows * global_dim + self._dense_columns
+                )
+            matrices = wigner.flatten(1).index_select(1, indices)
+        outputs = []
+        for degree, matrix in zip(
+            self._degrees, matrices.split(self._matrix_sizes, dim=1)
+        ):
+            retained = 2 * min(degree, self.mmax) + 1
+            matrix = matrix.view(wigner.size(0), retained, 2 * degree + 1)
+            if inverse:
+                matrix = matrix.transpose(1, 2)
+                source = 2 * min(degree, wigner_mmax) + 1
+                if source != retained:
+                    matrix = matrix * math.sqrt(source / retained)
+            outputs.append(matrix)
+        return outputs
 
     def __repr__(self) -> str:
         irreps_in, irreps_out = (
@@ -223,7 +309,8 @@ class LocalFrame(torch.nn.Module):
             Global-to-local matrices with shape
             ``(batch, local_wigner_dim, (L + 1)**2)``. The global degree ``L``
             and retained local orders are inferred from these dimensions and
-            must cover the representation used by this module.
+            must cover the representation used by this module. Alternatively,
+            full degree matrices packed as ``(batch, sum((2*l+1)**2))``.
 
         Returns
         -------
@@ -235,64 +322,33 @@ class LocalFrame(torch.nn.Module):
                 "LocalFrame input trailing dimension must be "
                 f"{self.input_dim}, got {tuple(features.shape)}."
             )
-        if wigner.ndim != 3 or features.size(0) != wigner.size(0):
+        if wigner.ndim not in (2, 3) or features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        lmax, _ = wigner_orders(
-            wigner.size(-1), wigner.size(-2), lmax=self.lmax, mmax=self.mmax
-        )
-        outputs = [[] for _ in self.irreps_out]
-        for group_index, indices in enumerate(self._rotation_groups):
-            values = torch.cat(
-                [
-                    features[..., self._entries[index].global_slice].reshape(
-                        *features.shape[:-1],
-                        2 * self._entries[index].degree + 1,
-                        self._entries[index].mul,
-                    )
-                    for index in indices
-                ],
-                dim=-2,
+        matrices = self._rotation_matrices(wigner)
+        if not self._global_identity:
+            features = _Permute.apply(
+                features, self._global_index, self._global_inverse
             )
-            rows = getattr(self, f"wigner_rows_{group_index}")
-            if lmax != self.lmax and self.mmax:
-                rows = rows + (lmax - self.lmax) * getattr(
-                    self, f"wigner_row_strides_{group_index}"
-                )
-            columns = getattr(self, f"wigner_columns_{group_index}")
-            rotation = wigner.index_select(1, rows).index_select(2, columns)
-            values = torch.einsum("bij,b...jk->b...ik", rotation, values)
-            offset = 0
-            for entry_index in indices:
-                entry = self._entries[entry_index]
-                outputs[entry.local_indices[0]].append(
-                    (
-                        entry.local_slices[0].start,
-                        values[..., offset : offset + 1, :],
-                    )
-                )
-                offset += 1
-                for local_position, local_index in enumerate(
-                    entry.local_indices[1:], start=1
-                ):
-                    pair = values[..., offset : offset + 2, :]
-                    if self.basis_change and entry.odd:
-                        pair = torch.cat((-pair[..., 1:2, :], pair[..., :1, :]), dim=-2)
-                    outputs[local_index].append(
-                        (entry.local_slices[local_position].start, pair)
-                    )
-                    offset += 2
-        if outputs:
-            flattened = []
-            for (ir, mul), parts in zip(self.irreps_out, outputs):
-                parts = [part for _, part in sorted(parts, key=lambda item: item[0])]
-                values = (
-                    parts[0].contiguous()
-                    if len(parts) == 1
-                    else torch.cat(parts, dim=-1)
-                )
-                flattened.append(values.view(*features.shape[:-1], ir.dim * mul))
-            return torch.cat(flattened, dim=-1)
-        return features.new_empty((*features.shape[:-1], 0))
+        outputs = []
+        for degree, mul, matrix, values in zip(
+            self._degrees,
+            self._multiplicities,
+            matrices,
+            features.split(self._global_sizes, dim=-1),
+        ):
+            values = values.view(*features.shape[:-1], 2 * degree + 1, mul)
+            values = (
+                torch.bmm(matrix, values)
+                if features.ndim == 2
+                else torch.einsum("bij,b...jk->b...ik", matrix, values)
+            )
+            outputs.append(values.flatten(-2))
+        if not outputs:
+            return features[..., :0]
+        features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        if not self._local_identity:
+            features = _Permute.apply(features, self._local_index, self._local_inverse)
+        return features * self._local_sign if self._has_signs else features
 
     def forward(
         self,
@@ -318,6 +374,8 @@ class LocalFrame(torch.nn.Module):
             ``(batch, (L + 1)**2, local_wigner_dim)``. The layout is inferred
             from these dimensions. Additional degrees are ignored; additional
             local orders are accepted with the corresponding inverse rescaling.
+            Alternatively, pass the same packed degree matrices as to
+            :meth:`to_local`; their transpose and inverse scale are applied here.
 
         Returns
         -------
@@ -330,57 +388,33 @@ class LocalFrame(torch.nn.Module):
                 "LocalFrame input trailing dimension must be "
                 f"{self.output_dim}, got {tuple(features.shape)}."
             )
-        if wigner_inv.ndim != 3 or features.size(0) != wigner_inv.size(0):
+        if wigner_inv.ndim not in (2, 3) or features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        lmax, wigner_mmax = wigner_orders(
-            wigner_inv.size(-2), wigner_inv.size(-1), lmax=self.lmax, mmax=self.mmax
-        )
-        local_values = [
-            features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
-            for (ir, mul), ir_slice in zip(
-                self.irreps_out,
-                self.irreps_out.slices(),
+        matrices = self._rotation_matrices(wigner_inv, inverse=True)
+        if self._has_signs:
+            features = features * self._local_sign
+        if not self._local_identity:
+            features = _Permute.apply(features, self._local_inverse, self._local_index)
+        outputs = []
+        for degree, mul, matrix, values in zip(
+            self._degrees,
+            self._multiplicities,
+            matrices,
+            features.split(self._local_sizes, dim=-1),
+        ):
+            retained = 2 * min(degree, self.mmax) + 1
+            values = values.view(*features.shape[:-1], retained, mul)
+            values = (
+                torch.bmm(matrix, values)
+                if features.ndim == 2
+                else torch.einsum("bij,b...jk->b...ik", matrix, values)
             )
-        ]
-
-        outputs = [None] * len(self._entries)
-        for group_index, indices in enumerate(self._rotation_groups):
-            group_values = []
-            for entry_index in indices:
-                entry = self._entries[entry_index]
-                entry_values = [
-                    local_values[entry.local_indices[0]][..., entry.local_slices[0]]
-                ]
-                for local_index, local_slice in zip(
-                    entry.local_indices[1:],
-                    entry.local_slices[1:],
-                ):
-                    pair = local_values[local_index][..., local_slice]
-                    if self.basis_change and entry.odd:
-                        pair = torch.cat((pair[..., 1:2, :], -pair[..., :1, :]), dim=-2)
-                    entry_values.append(pair)
-                values = torch.cat(entry_values, dim=-2)
-                retained = 2 * min(entry.degree, self.mmax) + 1
-                source = 2 * min(entry.degree, wigner_mmax) + 1
-                group_values.append(values * math.sqrt(source / retained))
-            values = torch.cat(group_values, dim=-2)
-            rows = getattr(self, f"wigner_rows_{group_index}")
-            if lmax != self.lmax and self.mmax:
-                rows = rows + (lmax - self.lmax) * getattr(
-                    self, f"wigner_row_strides_{group_index}"
-                )
-            columns = getattr(self, f"wigner_columns_{group_index}")
-            rotation = wigner_inv.index_select(1, columns).index_select(2, rows)
-            values = torch.einsum("bij,b...jk->b...ik", rotation, values)
-            offset = 0
-            for entry_index in indices:
-                entry = self._entries[entry_index]
-                width = 2 * entry.degree + 1
-                outputs[entry_index] = values[..., offset : offset + width, :].reshape(
-                    *features.shape[:-1],
-                    entry.mul * width,
-                )
-                offset += width
-        if outputs:
-            return torch.cat(outputs, dim=-1)
-        return features.new_empty((*features.shape[:-1], 0))
+            outputs.append(values.flatten(-2))
+        if not outputs:
+            return features[..., :0]
+        features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return (
+            features
+            if self._global_identity
+            else _Permute.apply(features, self._global_inverse, self._global_index)
+        )

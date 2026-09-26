@@ -12,7 +12,7 @@ from .rotation_matrix import rotation_matrix_to_y_axis
 
 
 class WignerD(torch.nn.Module):
-    """Construct global-to-local and local-to-global rotation matrices.
+    """Construct Wigner-D matrices that align vectors with the y axis.
 
     Parameters
     ----------
@@ -25,12 +25,6 @@ class WignerD(torch.nn.Module):
         float64 inputs and recursive PyTorch contractions otherwise.
         ``"quaternion"`` requires CUDA and its toolkit. ``"recursive"``
         selects PyTorch contractions on either device.
-
-    Notes
-    -----
-    Each input vector defines a local frame whose second axis is aligned with
-    the vector. The matrices use degree-major global storage and truncated
-    order-major local storage compatible with :class:`LocalFrame`.
     """
 
     def __init__(
@@ -79,6 +73,28 @@ class WignerD(torch.nn.Module):
             torch.tensor(inverse_scale).view(1, 1, -1),
             persistent=False,
         )
+        local_rows = {index: row for row, index in enumerate(local_indices)}
+        dense_indices, packed_indices = [], []
+        dim = (lmax + 1) ** 2
+        for l in range(lmax + 1):
+            offset = l * (4 * l**2 - 1) // 3
+            for row in range(2 * l + 1):
+                if abs(row - l) <= mmax:
+                    for column in range(2 * l + 1):
+                        dense_indices.append(
+                            local_rows[l**2 + row] * dim + l**2 + column
+                        )
+                        packed_indices.append(offset + row * (2 * l + 1) + column)
+        self.register_buffer(
+            "_dense_indices",
+            torch.tensor(dense_indices, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_packed_indices",
+            torch.tensor(packed_indices, dtype=torch.long),
+            persistent=False,
+        )
 
     def forward(self, vectors: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Build both rotation directions for a batch of vectors.
@@ -99,22 +115,34 @@ class WignerD(torch.nn.Module):
             ``(batch, (lmax + 1)**2, local_dim)``. Truncated degrees include
             the variance-preserving inverse scale.
         """
-        matrices = self.matrix_blocks(vectors)
+        packed = self.forward_packed(vectors)
         dim = (self.lmax + 1) ** 2
-        wigner = vectors.new_zeros((vectors.size(0), dim, dim))
-        for l, matrix in enumerate(matrices):
-            wigner[:, l**2 : (l + 1) ** 2, l**2 : (l + 1) ** 2] = matrix
-        wigner = wigner.index_select(1, self.local_indices)
-        wigner_inv = wigner.transpose(1, 2).contiguous() * self.inverse_scale
+        if self.mmax < self.lmax:
+            packed = packed.index_select(1, self._packed_indices)
+        wigner = vectors.new_zeros((vectors.size(0), self.local_indices.numel() * dim))
+        wigner = wigner.index_copy(1, self._dense_indices, packed).view(
+            vectors.size(0), self.local_indices.numel(), dim
+        )
+        wigner_inv = wigner.transpose(1, 2).contiguous()
+        if self.mmax < self.lmax:
+            wigner_inv = wigner_inv * self.inverse_scale
         return wigner, wigner_inv
 
     def forward_packed(self, vectors: torch.Tensor, *, method=None) -> torch.Tensor:
-        """Return full degree blocks concatenated as ``(batch, sum((2*l+1)**2))``.
+        """Construct packed degree matrices without local-order truncation.
 
-        No zero padding, order regrouping or inverse copy is stored. The
-        convolution reads transposed blocks for the inverse rotation.
-        This layout retains every order, independently of ``mmax``.
-        ``method`` optionally overrides the construction method for this call.
+        Parameters
+        ----------
+        vectors : torch.Tensor
+            Nonzero vectors with shape ``(batch, 3)``.
+        method : {"auto", "quaternion", "recursive"}, optional
+            Override the construction method for this call.
+
+        Returns
+        -------
+        torch.Tensor
+            Matrices in increasing degree order, flattened to
+            ``(batch, sum((2*l+1)**2 for l in range(lmax+1)))``.
         """
         method = getattr(self, "method", "auto") if method is None else method
         if method not in ("auto", "quaternion", "recursive"):

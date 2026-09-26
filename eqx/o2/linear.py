@@ -24,45 +24,25 @@ class Linear(torch.nn.Module):
     Parameters
     ----------
     irreps_in : Irreps, str, or sequence
-        Representation carried by the input feature axis.
+        Input representation.
     irreps_out : Irreps, str, or sequence
-        Representation carried by the output feature axis.
+        Output representation.
     internal_weights : bool, optional
-        If ``True``, store trainable weights and biases in the module. If
-        ``False``, they must be supplied to :meth:`forward`. The default is
-        inferred from ``shared_weights``.
+        Store trainable weights and biases in the module. Defaults to ``True``
+        unless ``shared_weights=False``. Otherwise, supply them to :meth:`forward`.
     shared_weights : bool, optional
-        Whether one weight is shared over all leading dimensions.
-        Internal weights require shared weights. External weights may add
-        broadcastable leading dimensions when this is ``False``.
+        Share weights over batch dimensions. Defaults to ``True``;
+        required when ``internal_weights=True``.
     instructions : sequence of tuple of int, optional
-        Entry-level paths ``(i_in, i_out)``. Each path must connect identical
-        irreps. By default, every compatible input and output entry is
-        connected.
+        Paths ``(i_in, i_out)`` connecting identical irreps. Defaults to all
+        compatible input-output pairs.
     biases : bool or sequence of bool, optional
-        Enable biases globally or per output entry. Biases are permitted only
-        for scalar outputs even under reflection and time reversal.
+        Enable biases for all eligible outputs or per output entry. Only
+        reflection- and time-even scalars admit biases. Defaults to ``False``.
     path_normalization : {"element", "path"}, optional
         Normalization applied when several paths contribute to one output.
         ``"element"`` normalizes by the total input multiplicity, while
         ``"path"`` assigns equal variance to each path.
-
-    Attributes
-    ----------
-    irreps_in, irreps_out : Irreps
-        Input and output representations.
-    instructions : tuple of Instruction
-        Weighted paths followed by bias paths, which have ``i_in=-1``.
-    weight_numel, bias_numel : int
-        Numbers of weight and bias elements, respectively.
-
-    Examples
-    --------
-    >>> linear = Linear("4x0e+2x1m", "3x0e+2x1m")
-    >>> linear.weight_numel
-    16
-    >>> linear(linear.irreps_in.randn(5, -1)).shape
-    torch.Size([5, 7])
     """
 
     def __init__(
@@ -189,6 +169,8 @@ class Linear(torch.nn.Module):
             weight_offsets.append((offset, size))
             offset += size
         self._weight_offsets = tuple(weight_offsets)
+        self._input_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
+        self._weight_sizes = tuple(size for _, size in weight_offsets)
         self._instructions_by_output = tuple(
             tuple(
                 i
@@ -204,6 +186,42 @@ class Linear(torch.nn.Module):
             bias_offsets[instruction.i_out] = (offset, size)
             offset += size
         self._bias_offsets = bias_offsets
+        self._bias_sizes = tuple(ins.path_shape[0] for ins in self._bias_instructions)
+        self._bias_indices = {
+            ins.i_out: i for i, ins in enumerate(self._bias_instructions)
+        }
+        # Group complete channel maps; keep sparse or repeated paths separate.
+        groups = []
+        remaining = set(range(len(self.irreps_out)))
+        for ir, _ in self.irreps_out:
+            outputs = tuple(
+                i
+                for i, (other, _) in enumerate(self.irreps_out)
+                if other == ir and i in remaining
+            )
+            if not outputs:
+                continue
+            inputs = tuple(
+                i for i, (other, _) in enumerate(self.irreps_in) if other == ir
+            )
+            paths = {
+                (ins.i_in, ins.i_out): i
+                for i, ins in enumerate(self._weight_instructions)
+                if ins.i_out in outputs
+            }
+            count = sum(len(self._instructions_by_output[i]) for i in outputs)
+            if inputs and len(paths) == count == len(inputs) * len(outputs):
+                groups.append(
+                    (
+                        inputs,
+                        outputs,
+                        tuple(tuple(paths[i, j] for j in outputs) for i in inputs),
+                    )
+                )
+            else:
+                groups.extend(((), (j,), ()) for j in outputs)
+            remaining.difference_update(outputs)
+        self._groups = tuple(groups)
 
         output_mask = []
         for i_out, ir_mul in enumerate(self.irreps_out):
@@ -244,7 +262,7 @@ class Linear(torch.nn.Module):
         Parameters
         ----------
         features : torch.Tensor
-            Input with shape ``(..., irreps_in.dim)``.
+            Input with shape ``(..., irreps_in.dim)`` in flattened ``ir_mul`` order.
         weight : torch.Tensor, optional
             External weights with shape ``weight_shape``. Leading
             dimensions must broadcast with ``features``. Omit when internal
@@ -287,35 +305,66 @@ class Linear(torch.nn.Module):
             ) from error
 
         inputs = [
-            features[..., ir_slice].reshape(*features.shape[:-1], ir.dim, mul)
-            for (ir, mul), ir_slice in zip(self.irreps_in, self._input_slices)
+            value.reshape(*features.shape[:-1], ir.dim, mul)
+            for (ir, mul), value in zip(
+                self.irreps_in, features.split(self._input_sizes, dim=-1)
+            )
         ]
-        outputs = []
+        matrices = [
+            value.reshape(*weight.shape[:-1], *ins.path_shape) * ins.path_weight
+            for ins, value in zip(
+                self._weight_instructions, weight.split(self._weight_sizes, dim=-1)
+            )
+        ]
+        biases = bias.split(self._bias_sizes, dim=-1)
+        shared = all(size == 1 for size in weight.shape[:-1])
+        outputs = [None] * len(self.irreps_out)
         zero = None
-        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
+        for input_indices, output_indices, paths in self._groups:
+            if input_indices:
+                values = (
+                    inputs[input_indices[0]]
+                    if len(input_indices) == 1
+                    else torch.cat([inputs[i] for i in input_indices], dim=-1)
+                )
+                rows = [
+                    matrices[row[0]]
+                    if len(row) == 1
+                    else torch.cat([matrices[i] for i in row], dim=-1)
+                    for row in paths
+                ]
+                matrix = rows[0] if len(rows) == 1 else torch.cat(rows, dim=-2)
+                ir = self.irreps_out[output_indices[0]].ir
+                if shared:
+                    result = torch.matmul(
+                        values.reshape(
+                            math.prod(features.shape[:-1]) * ir.dim, values.size(-1)
+                        ),
+                        matrix.reshape(matrix.shape[-2:]),
+                    ).reshape(*features.shape[:-1], ir.dim, matrix.size(-1))
+                else:
+                    result = torch.matmul(values, matrix)
+                sizes = tuple(self.irreps_out[i].mul for i in output_indices)
+                for i_out, output in zip(output_indices, result.split(sizes, dim=-1)):
+                    outputs[i_out] = output
+                continue
+            (i_out,) = output_indices
+            ir_out, mul_out = self.irreps_out[i_out]
             contributions = []
             for instruction_index in self._instructions_by_output[i_out]:
                 instruction = self._weight_instructions[instruction_index]
                 mul_in, _ = instruction.path_shape
-                offset, size = self._weight_offsets[instruction_index]
-                matrix = weight.narrow(-1, offset, size).reshape(
-                    *weight.shape[:-1], mul_in, mul_out
-                )
-                if weight.ndim == 1:
-                    # A shared matrix is one GEMM, not a broadcast batch of
-                    # small products for each edge and real irrep dimension.
+                matrix = matrices[instruction_index]
+                if shared:
                     value = inputs[instruction.i_in].reshape(
                         math.prod(features.shape[:-1]) * ir_out.dim, mul_in
                     )
-                    output = torch.matmul(value, matrix * instruction.path_weight)
+                    output = torch.matmul(value, matrix.reshape(mul_in, mul_out))
                     contributions.append(
                         output.reshape(*features.shape[:-1], ir_out.dim, mul_out)
                     )
                 else:
-                    contributions.append(
-                        torch.matmul(inputs[instruction.i_in], matrix)
-                        * instruction.path_weight
-                    )
+                    contributions.append(torch.matmul(inputs[instruction.i_in], matrix))
             if contributions:
                 output = sum(contributions[1:], contributions[0])
             else:
@@ -328,13 +377,13 @@ class Linear(torch.nn.Module):
                 output = (
                     features.new_zeros((*leading_shape, ir_out.dim, mul_out)) + zero
                 )
-            if i_out in self._bias_offsets:
-                offset, size = self._bias_offsets[i_out]
-                output = output + bias.narrow(-1, offset, size).unsqueeze(-2)
-            outputs.append(
-                output.expand(*leading_shape, ir_out.dim, mul_out).reshape(
-                    *leading_shape, mul_out * ir_out.dim
-                )
+            outputs[i_out] = output
+        for i_out, (ir, mul) in enumerate(self.irreps_out):
+            output = outputs[i_out]
+            if i_out in self._bias_indices:
+                output = output + biases[self._bias_indices[i_out]].unsqueeze(-2)
+            outputs[i_out] = output.expand(*leading_shape, ir.dim, mul).reshape(
+                *leading_shape, ir.dim * mul
             )
         if outputs:
             return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
@@ -403,6 +452,9 @@ class Linear(torch.nn.Module):
 class UuLinear(torch.nn.Module):
     """Mix equivalent O(2) representations without mixing channels.
 
+    External weights are normalized by the inverse square root of the number
+    of input irrep copies. There are no internal weights or biases.
+
     Parameters
     ----------
     irreps_in : Irreps, str, or sequence
@@ -412,16 +464,6 @@ class UuLinear(torch.nn.Module):
     num_channel : int
         Number of matching channels. Each multiplicity must be divisible by
         this value and is interpreted as ``(copies, num_channel)``.
-
-    Notes
-    -----
-    Every compatible input and output entry is connected. Each pair of
-    representation copies has one external weight per channel, shared by
-    the angular components of the irrep. Weights use ``(copies_in,
-    copies_out, num_channel)`` order within each instruction. Contributions
-    are normalized by the square root of the number of input copies.
-    Reflection and time-reversal labels must both match. Unconnected output
-    entries are zero. This module has no internal weights or biases.
     """
 
     def __init__(
@@ -465,6 +507,8 @@ class UuLinear(torch.nn.Module):
             offsets.append((offset, size))
             offset += size
         self._weight_offsets = tuple(offsets)
+        self._input_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
+        self._weight_sizes = tuple(size for _, size in offsets)
 
     def forward(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Apply externally weighted channelwise paths.
@@ -474,8 +518,9 @@ class UuLinear(torch.nn.Module):
         features : torch.Tensor
             Input with shape ``(..., irreps_in.dim)``.
         weight : torch.Tensor
-            Weights with shape ``(..., weight_numel)``. Leading dimensions
-            must broadcast with the input.
+            Weights with shape ``(..., weight_numel)``, ordered as
+            ``(copies_in, copies_out, num_channel)`` within each instruction.
+            Leading dimensions must broadcast with the input.
 
         Returns
         -------
@@ -489,19 +534,21 @@ class UuLinear(torch.nn.Module):
             raise ValueError(f"UuLinear weights must end in {self.weight_numel}.")
         leading_shape = torch.broadcast_shapes(features.shape[:-1], weight.shape[:-1])
         inputs = [
-            features[..., ir_slice].reshape(
+            values.reshape(
                 *features.shape[:-1], ir.dim, mul // self.num_channel, self.num_channel
             )
-            for (ir, mul), ir_slice in zip(self.irreps_in, self._input_slices)
+            for (ir, mul), values in zip(
+                self.irreps_in, features.split(self._input_sizes, dim=-1)
+            )
         ]
+        weights = weight.split(self._weight_sizes, dim=-1)
         outputs = []
         zero = None
         for i_out, (ir, mul) in enumerate(self.irreps_out):
             contributions = []
             for index in self._instructions_by_output[i_out]:
                 instruction = self.instructions[index]
-                offset, size = self._weight_offsets[index]
-                matrix = weight.narrow(-1, offset, size).reshape(
+                matrix = weights[index].reshape(
                     *weight.shape[:-1], *instruction.path_shape
                 )
                 contributions.append(

@@ -330,6 +330,96 @@ def test_local_frame_empty_irreps():
         assert frame.to_global(local, di[:batch_size]).shape == features.shape
 
 
+@pytest.mark.parametrize("basis_change", [False, True])
+@pytest.mark.parametrize("mmax", [0, 1, 3])
+def test_local_frame_packed_derivatives(double_precision, basis_change, mmax):
+    frame = o2.LocalFrame(
+        "2x0e+1x1o+3x1e+2x3o+1x1o", mmax=mmax, basis_change=basis_change
+    )
+    wigner = o2.WignerD(4, 4, method="recursive")
+    for batch_size in (0, 2):
+        x = torch.randn(batch_size, 2, frame.input_dim, requires_grad=True)
+        r = torch.randn(batch_size, 3, requires_grad=True)
+        dense, inverse = wigner(r)
+        packed = wigner.forward_packed(r)
+        actual = frame.to_local(x, packed)
+        expected = frame.to_local(x, dense)
+        torch.testing.assert_close(actual, expected)
+        actual = frame.to_global(actual, packed)
+        expected = frame.to_global(expected, inverse)
+        for _ in range(3):
+            torch.testing.assert_close(actual, expected, atol=1e-8, rtol=1e-8)
+            gradients = [
+                torch.autograd.grad(
+                    value.sin().sum(), (x, r), create_graph=True, retain_graph=True
+                )
+                for value in (actual, expected)
+            ]
+            actual, expected = [
+                torch.cat([g.flatten() for g in values]) / 10 for values in gradients
+            ]
+
+
+def test_gate_derivatives(double_precision):
+    gate = o2.Gate(
+        "0e+0o",
+        [torch.nn.SiLU(), torch.nn.Tanh()],
+        "2x0o+3x0e",
+        [torch.nn.Tanh(), torch.nn.Sigmoid()],
+        "1m+0o+2x2m+0e",
+    )
+    features = torch.randn(2, gate.irreps_in.dim, requires_grad=True)
+    assert torch.autograd.gradcheck(gate, (features,), fast_mode=True)
+    assert torch.autograd.gradgradcheck(gate, (features,), fast_mode=True)
+
+    tangent = torch.randn_like(features)
+    _, expected = torch.autograd.functional.jvp(gate, features, tangent)
+    _, actual = torch.func.jvp(gate, (features,), (tangent,))
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(torch.vmap(gate)(features), gate(features))
+
+
+@pytest.mark.parametrize("normalization", ["element", "path"])
+@pytest.mark.parametrize("weight_batch", [(), (1,), (3,)])
+def test_linear_grouped_instructions(double_precision, normalization, weight_batch):
+    module = o2.Linear(
+        "2x1m+3x1m+0e",
+        "3x1m+2x1m+0e",
+        internal_weights=False,
+        shared_weights=False,
+        path_normalization=normalization,
+    )
+    x = torch.randn(3, module.irreps_in.dim, requires_grad=True)
+    weight = torch.randn(*weight_batch, module.weight_numel, requires_grad=True)
+    inputs = [
+        x[..., s].reshape(3, ir.dim, mul)
+        for (ir, mul), s in zip(module.irreps_in, module.irreps_in.slices())
+    ]
+    outputs = []
+    for i_out, (ir, mul) in enumerate(module.irreps_out):
+        terms = [
+            torch.matmul(
+                inputs[ins.i_in], module.weight_view_for_instruction(i, weight)
+            )
+            * ins.path_weight
+            for i, ins in enumerate(module._weight_instructions)
+            if ins.i_out == i_out
+        ]
+        outputs.append(sum(terms).reshape(3, ir.dim * mul))
+    actual, expected = module(x, weight), torch.cat(outputs, dim=-1)
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected)
+        gradients = [
+            torch.autograd.grad(
+                value.sin().sum(), (x, weight), create_graph=True, retain_graph=True
+            )
+            for value in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        ]
+
+
 @pytest.mark.parametrize("basis_change", [True, False])
 def test_local_frame_truncation_compiles_with_shared_wigner(
     double_precision, basis_change
