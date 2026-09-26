@@ -10,8 +10,10 @@ from scipy.special import spherical_jn
 from tace.models.radial import (
     RadialBasis,
     compute_jn_zeros,
+    j0SphericalBesselBasis,
     jnSphericalBesselBasis,
     spherical_bessel_jn,
+    spherical_bessel_parameters,
 )
 
 pytestmark = pytest.mark.usefixtures("double_precision")
@@ -30,11 +32,18 @@ def reference_derivative(n, x, derivative):
 
 @pytest.mark.parametrize("n", [0, 1, 2, 3, 5, 9, 10, 16, 32, 64, 128])
 def test_spherical_bessel_values_and_derivatives(n):
-    limit = math.sqrt(8 * n + 12) if n else 1.0
+    boundaries = [
+        boundary
+        for derivative in range(4)
+        for boundary in (
+            min(max(n + derivative, 1), math.sqrt(8 * n + 12)),
+            max(n + derivative, 1),
+        )
+    ]
     positive = torch.cat(
         (
             torch.logspace(-12, math.log10(max(100, 3 * n)), 180),
-            torch.tensor([limit, max(n, 1)])[:, None]
+            torch.tensor(boundaries)[:, None]
             .mul(torch.tensor([1 - 1e-8, 1.0, 1 + 1e-8]))
             .flatten(),
             # Include zeros of j0, used to normalize the old downward recurrence.
@@ -137,8 +146,26 @@ def test_spherical_bessel_trainable_gradients():
     assert torch.autograd.gradgradcheck(evaluate, (r, basis.zeros))
 
 
-def test_spherical_bessel_compilation():
-    basis = RadialBasis(radial_basis="jn", order=[0, 3, 12], num_basis=[2, 1, 1])
+def test_spherical_bessel_precomputed_parameters():
+    spherical_bessel_parameters.cache_clear()
+    basis = jnSphericalBesselBasis(order=[1, 3, 12], num_basis=[2, 2, 2])
+    cache = spherical_bessel_parameters.cache_info()
+    assert cache.misses == 9
+    r = torch.tensor([[0.0], [0.2], [3.0]], requires_grad=True)
+    value = basis(r, None, None)
+    for _ in range(2):
+        value = torch.autograd.grad(value.sum(), r, create_graph=True)[0]
+        assert torch.isfinite(value).all()
+    assert spherical_bessel_parameters.cache_info() == cache
+    # Derivatives beyond force training remain available through the shared cache.
+    value = torch.autograd.grad(value.sum(), r, create_graph=True)[0]
+    assert torch.isfinite(value).all()
+    assert spherical_bessel_parameters.cache_info().misses == 12
+
+
+@pytest.mark.parametrize("name", ["j0", "j1", "j3", "j12"])
+def test_spherical_bessel_compilation(name):
+    basis = RadialBasis(radial_basis=name, num_basis=4)
     compiled = torch.compile(basis, backend="aot_eager", fullgraph=True, dynamic=True)
     for size in (4, 7, 0):
         r = torch.linspace(0, 5.9, size).unsqueeze(-1).requires_grad_()
@@ -149,6 +176,61 @@ def test_spherical_bessel_compilation():
         actual_grad = torch.autograd.grad(actual.sum(), r)[0]
         expected_grad = torch.autograd.grad(expected.sum(), r)[0]
         torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("name", ["j0", "bessel", "j1", "j3", "j12"])
+def test_spherical_bessel_selection(name):
+    basis = RadialBasis(radial_basis=name, num_basis=4, apply_cutoff=False)
+    if name in ("j0", "bessel"):
+        assert isinstance(basis.radial_fn, j0SphericalBesselBasis)
+        reference = j0SphericalBesselBasis(num_basis=4)
+    else:
+        assert isinstance(basis.radial_fn, jnSphericalBesselBasis)
+        reference = jnSphericalBesselBasis(order=int(name[1:]), num_basis=4)
+        assert basis.radial_fn.order == [int(name[1:])]
+    r = torch.tensor([[0.0], [0.1], [2.0], [5.9]], requires_grad=True)
+    actual, _ = basis(r, None, None, None)
+    expected = reference(r, None, None)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert actual.shape == (4, 4)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.sum(), r)[0],
+        torch.autograd.grad(expected.sum(), r)[0],
+        atol=0,
+        rtol=0,
+    )
+
+
+@pytest.mark.parametrize("n", [0, 1, 3, 12])
+def test_spherical_bessel_differentiation(n):
+    x = torch.tensor([0.0, 0.01, 1.0, 4.0, 12.0, 30.0], requires_grad=True)
+    value = spherical_bessel_jn(n, x)
+    for derivative in range(1, 7):
+        value = torch.autograd.grad(value.sum(), x, create_graph=True)[0]
+        expected = torch.from_numpy(
+            reference_derivative(n, x.detach().numpy(), derivative)
+        )
+        torch.testing.assert_close(value, expected, atol=2e-13, rtol=2e-11)
+    tangent = torch.linspace(0.1, 1.0, x.numel())
+    _, actual = torch.func.jvp(lambda x: spherical_bessel_jn(n, x), (x,), (tangent,))
+    expected = (
+        torch.from_numpy(reference_derivative(n, x.detach().numpy(), 1)) * tangent
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-13, rtol=2e-11)
+    torch.testing.assert_close(
+        torch.vmap(lambda x: spherical_bessel_jn(n, x))(x), spherical_bessel_jn(n, x)
+    )
+
+
+@pytest.mark.parametrize("name", ["jn", "j-1", "j1.5", "jx"])
+def test_spherical_bessel_invalid_name(name):
+    with pytest.raises(ValueError, match="Unknown radial_basis"):
+        RadialBasis(radial_basis=name)
+
+
+def test_radial_basis_has_no_order_parameter():
+    with pytest.raises(TypeError, match="order"):
+        RadialBasis(order=[1, 3])
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,8 @@
 ################################################################################
 
 import math
+import re
+from functools import lru_cache
 from typing import Union
 
 import ase.data
@@ -13,89 +15,6 @@ from scipy.optimize import brentq
 from scipy.special import spherical_jn
 
 from tace.utils.torch_scatter import scatter_sum
-
-
-def compute_jn_zeros(n: int, k: int) -> np.ndarray:
-    """Return the first ``k`` positive zeros of the spherical Bessel function."""
-    if not isinstance(n, int) or n < 0:
-        raise ValueError("n must be a nonnegative integer.")
-    if not isinstance(k, int) or k <= 0:
-        raise ValueError("k must be a positive integer.")
-    if n == 0:
-        return np.arange(1, k + 1, dtype=np.float64) * math.pi
-
-    # The first zero exceeds n, and consecutive positive zeros are more than pi apart.
-    zeros = []
-    left = float(n)
-    value = spherical_jn(n, left)
-    while len(zeros) < k:
-        right = left + math.pi
-        next_value = spherical_jn(n, right)
-        if value * next_value < 0 or next_value == 0:
-            zeros.append(
-                brentq(lambda x: spherical_jn(n, x), left, right, xtol=1e-14)
-            )
-        left, value = right, next_value
-    return np.array(zeros, dtype=np.float64)
-
-
-def spherical_bessel_jn(n: int, x: torch.Tensor) -> torch.Tensor:
-    """Evaluate a spherical Bessel function, including derivatives at zero.
-
-    Parameters
-    ----------
-    n : int
-        Nonnegative order.
-    x : torch.Tensor
-        Real arguments in double precision.
-    """
-    limit = math.sqrt(8 * n + 12) if n else 1.0
-    small = x.abs() <= limit
-    argument = torch.where(small, x, 0.0)
-    squared = argument.square()
-    coefficients = [1.0]
-    for k in range(1, 25 if n else 13):
-        coefficients.append(-coefficients[-1] / (2 * k * (2 * n + 2 * k + 1)))
-    series = torch.full_like(x, coefficients[-1])
-    for coefficient in reversed(coefficients[:-1]):
-        series = series * squared + coefficient
-    if n:
-        # Scaling before taking the power avoids overflow in x**n and (2*n+1)!!.
-        scale = math.exp(math.log(math.prod(range(1, 2 * n + 2, 2))) / n)
-        series = (argument / scale).pow(n) * series
-
-    # Ascending recurrence is stable above the order. Inactive branches must
-    # also remain finite, otherwise torch.where can propagate NaN derivatives.
-    argument = torch.where(x.abs() > max(n, limit), x, max(n, limit))
-    previous = argument.sin() / argument
-    if n == 0:
-        return torch.where(small, series, previous)
-    current = (previous - argument.cos()) / argument
-    for k in range(1, n):
-        previous, current = current, (2 * k + 1) / argument * current - previous
-
-    if n > limit:
-        middle = (~small) & (x.abs() <= n)
-        argument = torch.where(middle, x, limit)
-        previous = torch.zeros_like(argument)
-        value = torch.ones_like(argument)
-        target = torch.zeros_like(argument)
-        # Start above the turning region, whose width grows as n**(1/3).
-        for k in range(n + 32 + math.ceil(8 * n ** (1 / 3)), 0, -1):
-            previous, value = value, (2 * k + 1) / argument * value - previous
-            if k - 1 == n:
-                target = value
-            if k % 16 == 0 or k == 1:
-                scale = torch.maximum(value.abs(), previous.abs()).clamp_min(1.0)
-                value, previous, target = value / scale, previous / scale, target / scale
-        j0 = argument.sin() / argument
-        j1 = (j0 - argument.cos()) / argument
-        # j0 and j1 have no common nonzero root; use both to normalize Miller's recurrence.
-        descending = target * (j0 * value + j1 * previous) / (
-            value.square() + previous.square()
-        )
-        current = torch.where(middle, descending, current)
-    return torch.where(small, series, current)
 
 
 class j0SphericalBesselBasis(torch.nn.Module):
@@ -140,6 +59,189 @@ class j0SphericalBesselBasis(torch.nn.Module):
             f"{self.__class__.__name__}(cutoff={self.cutoff}, num_basis={self.num_basis}, "
             f"trainable={self.bessel_weights.requires_grad})"
         )
+
+
+def compute_jn_zeros(n: int, k: int) -> np.ndarray:
+    """Return the first ``k`` positive zeros of the spherical Bessel function."""
+    if not isinstance(n, int) or n < 0:
+        raise ValueError("n must be a nonnegative integer.")
+    if not isinstance(k, int) or k <= 0:
+        raise ValueError("k must be a positive integer.")
+    if n == 0:
+        return np.arange(1, k + 1, dtype=np.float64) * math.pi
+
+    # The first zero exceeds n, and consecutive positive zeros are more than pi apart.
+    zeros = []
+    left = float(n)
+    value = spherical_jn(n, left)
+    while len(zeros) < k:
+        right = left + math.pi
+        next_value = spherical_jn(n, right)
+        if value * next_value < 0 or next_value == 0:
+            zeros.append(
+                brentq(lambda x: spherical_jn(n, x), left, right, xtol=1e-14)
+            )
+        left, value = right, next_value
+    return np.array(zeros, dtype=np.float64)
+
+
+@lru_cache(maxsize=None)
+def spherical_bessel_parameters(n: int, derivative: int):
+    """Construct the power series and neighboring-order derivative coefficients."""
+    highest = n + derivative
+    limit = min(max(highest, 1), math.sqrt(8 * n + 12))
+    start = max(0, (derivative - n + 1) // 2)
+    power = n + 2 * start - derivative
+    numerator = math.prod(range(power + 1, n + 2 * start + 1))
+    denominator = (
+        2**start * math.factorial(start) * math.prod(range(1, 2 * n + 2 * start + 2, 2))
+    )
+    scale = (
+        math.exp((math.log(denominator) - math.log(numerator)) / power)
+        if power
+        else 1.0
+    )
+    amplitude = (-1) ** start * (1.0 if power else numerator / denominator)
+    coefficients = [1.0]
+    term = 1.0
+    k = start
+    while True:
+        degree = n + 2 * k
+        ratio = (
+            -(degree + 2)
+            * (degree + 1)
+            / (
+                2
+                * (k + 1)
+                * (n + degree + 3)
+                * (degree + 2 - derivative)
+                * (degree + 1 - derivative)
+            )
+        )
+        term *= abs(ratio) * limit**2
+        if term < 1e-18:
+            break
+        coefficients.append(coefficients[-1] * ratio)
+        k += 1
+
+    # j_0' = -j_1; j_n' = (n*j_{n-1} - (n+1)*j_{n+1}) / (2*n+1).
+    weights = {n: 1.0}
+    for _ in range(derivative):
+        terms = {}
+        for degree, weight in weights.items():
+            if degree:
+                terms.setdefault(degree - 1, []).append(
+                    weight * degree / (2 * degree + 1)
+                )
+                weight *= (degree + 1) / (2 * degree + 1)
+            terms.setdefault(degree + 1, []).append(-weight)
+        weights = {degree: math.fsum(values) for degree, values in terms.items()}
+    steps = highest + 32 + math.ceil(8 * highest ** (1 / 3)) if highest > limit else 0
+    return limit, power, scale, amplitude, tuple(coefficients), weights, steps
+
+
+@torch.compiler.allow_in_graph
+class SphericalBesselJn(torch.autograd.Function):
+    """Evaluate spherical Bessel functions with recursive analytic derivatives."""
+
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(
+        n: int, derivative: int, x: torch.Tensor, parameters: tuple
+    ) -> torch.Tensor:
+        limit, power, scale, amplitude, coefficients, weights, steps = (
+            parameters[derivative]
+            if derivative < len(parameters)
+            else spherical_bessel_parameters(n, derivative)
+        )
+        absolute = x.abs()
+        small = absolute <= limit
+        argument = torch.where(small, x, 0.0)
+        squared = argument.square()
+        series = torch.full_like(x, coefficients[-1])
+        for coefficient in reversed(coefficients[:-1]):
+            series = series * squared + coefficient
+        if power:
+            series = (argument / scale).pow(power) * series
+        series = amplitude * series
+
+        highest = n + derivative
+        # Keep inactive branches finite, including at zero.
+        argument = torch.where(absolute > max(highest, limit), x, max(highest, limit))
+        previous = argument.sin() / argument
+        result = weights.get(0, 0.0) * previous
+        if highest:
+            current = (previous - argument.cos()) / argument
+            if 1 in weights:
+                result = result + weights[1] * current
+            for k in range(1, highest):
+                previous, current = current, (2 * k + 1) / argument * current - previous
+                if k + 1 in weights:
+                    result = result + weights[k + 1] * current
+
+        if highest > limit:
+            middle = (~small) & (absolute <= highest)
+            argument = torch.where(middle, x, limit)
+            previous = torch.zeros_like(argument)
+            value = torch.ones_like(argument)
+            target = torch.zeros_like(argument)
+            # Start above the turning region, whose width grows as highest**(1/3).
+            for k in range(steps, 0, -1):
+                previous, value = value, (2 * k + 1) / argument * value - previous
+                if k - 1 in weights:
+                    target = target + weights[k - 1] * value
+                if k % 16 == 0 or k == 1:
+                    scale = torch.maximum(value.abs(), previous.abs()).clamp_min(1.0)
+                    value, previous, target = (
+                        value / scale,
+                        previous / scale,
+                        target / scale,
+                    )
+            j0 = argument.sin() / argument
+            j1 = (j0 - argument.cos()) / argument
+            # Normalize with two orders to remain stable at zeros of either one.
+            descending = (
+                target
+                * (j0 * value + j1 * previous)
+                / (value.square() + previous.square())
+            )
+            result = torch.where(middle, descending, result)
+        return torch.where(small, series, result)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        ctx.n, ctx.derivative, x, ctx.parameters = inputs
+        ctx.save_for_backward(x)
+        ctx.save_for_forward(x)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        (x,) = ctx.saved_tensors
+        derivative = SphericalBesselJn.apply(
+            ctx.n, ctx.derivative + 1, x, ctx.parameters
+        )
+        return None, None, gradient * derivative, None
+
+    @staticmethod
+    def jvp(ctx, n_tangent, derivative_tangent, tangent, parameters_tangent):
+        (x,) = ctx.saved_tensors
+        return tangent * SphericalBesselJn.apply(
+            ctx.n, ctx.derivative + 1, x, ctx.parameters
+        )
+
+
+def spherical_bessel_jn(n: int, x: torch.Tensor) -> torch.Tensor:
+    """Evaluate a spherical Bessel function with analytic derivatives.
+
+    Parameters
+    ----------
+    n : int
+        Nonnegative order.
+    x : torch.Tensor
+        Real arguments in double precision.
+    """
+    return SphericalBesselJn.apply(n, 0, x, ())
 
 
 class jnSphericalBesselBasis(torch.nn.Module):
@@ -203,6 +305,12 @@ class jnSphericalBesselBasis(torch.nn.Module):
         )
         self.order = list(order)
         self.num_zero = list(num_basis)
+        # Prepare coefficients for values, forces and force-loss gradients.
+        # Python constants retain double precision when the module changes dtype.
+        self.bessel_parameters = tuple(
+            tuple(spherical_bessel_parameters(n, derivative) for derivative in range(3))
+            for n in self.order
+        )
 
     def forward(
         self, r: torch.Tensor, node_attrs: torch.Tensor, edge_index: torch.Tensor
@@ -210,13 +318,22 @@ class jnSphericalBesselBasis(torch.nn.Module):
         argument = self.zeros.to(torch.float64) * (
             r.to(torch.float64) / self.cutoff.to(torch.float64)
         )
-        basis = torch.cat(
-            [
-                spherical_bessel_jn(n, x)
-                for n, x in zip(self.order, argument.split(self.num_zero, dim=-1))
-            ],
-            dim=-1,
-        )
+        if len(self.order) == 1:
+            basis = SphericalBesselJn.apply(
+                self.order[0], 0, argument, self.bessel_parameters[0]
+            )
+        else:
+            basis = torch.cat(
+                [
+                    SphericalBesselJn.apply(n, 0, x, parameters)
+                    for n, x, parameters in zip(
+                        self.order,
+                        argument.split(self.num_zero, dim=-1),
+                        self.bessel_parameters,
+                    )
+                ],
+                dim=-1,
+            )
         return (basis * self.normalizer.to(torch.float64)).to(r.dtype)
 
     def extra_repr(self):
@@ -752,7 +869,6 @@ class RadialBasis(torch.nn.Module):
         polynomial_cutoff: int = 5,
         radial_basis: str = "j0",
         distance_transform=None,
-        order: Union[int, list[int]] = [0],
         trainable: bool = False,
         apply_cutoff: bool = True,
         cutoff_fn: str = "mollifier",  # ['cosine', 'mollifier', 'polynomial']
@@ -762,6 +878,8 @@ class RadialBasis(torch.nn.Module):
 
         assert isinstance(trainable, bool)
         assert isinstance(apply_cutoff, bool)
+        if not isinstance(num_basis, int) or num_basis <= 0:
+            raise ValueError("num_basis must be a positive integer.")
 
         if cutoff_fn == "mollifier":
             self.cutoff_fn = MollifierCutoff(cutoff=cutoff)
@@ -778,10 +896,10 @@ class RadialBasis(torch.nn.Module):
                 num_basis=num_basis,
                 trainable=trainable,
             )
-        elif radial_basis == "jn":
+        elif re.fullmatch(r"j[1-9][0-9]*", radial_basis):
             self.radial_fn = jnSphericalBesselBasis(
                 cutoff=cutoff,
-                order=order,
+                order=int(radial_basis[1:]),
                 num_basis=num_basis,
                 trainable=trainable,
             )
@@ -808,14 +926,8 @@ class RadialBasis(torch.nn.Module):
         else:
             self.use_distance_transform = False
 
-        if not isinstance(num_basis, int):
-            num_basis = sum(num_basis)
-            self.out_dim = num_basis
-            self.num_basis = num_basis
-        else:
-            self.out_dim = num_basis
-            self.num_basis = num_basis
-        # self.num_basis = self.radial_fn.num_basis
+        self.out_dim = num_basis
+        self.num_basis = num_basis
         self.apply_cutoff = apply_cutoff
 
     def forward(

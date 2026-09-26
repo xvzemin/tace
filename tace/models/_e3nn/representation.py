@@ -87,7 +87,6 @@ class Representation(torch.nn.Module):
             polynomial_cutoff=radial_basis["polynomial_cutoff"],
             radial_basis=radial_basis["radial_basis"],
             distance_transform=radial_basis["distance_transform"],
-            order=radial_basis["order"],
             trainable=radial_basis["trainable"],
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],

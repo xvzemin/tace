@@ -44,7 +44,6 @@ DEFAULT_MODEL_CONFIG = {
         "distance_transform": None,
         "cutoff_fn": "c2poly",
         "polynomial_cutoff": 5,
-        "order": 0,
         "trainable": False,
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
