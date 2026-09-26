@@ -14,6 +14,9 @@ from eqx import o3 as eqx_o3
 from tace.utils.env import acceleration_enabled, get_tace_use_matrix_weight
 
 
+IndexedFeatures = tuple[tuple[torch.Tensor, torch.Tensor | None], ...]
+
+
 def _lora_scaling(module: torch.nn.Module) -> float:
     return float(module.lora_alpha) / float(module.lora_r)
 
@@ -275,8 +278,27 @@ class mlpLinear(torch.nn.Module):
             ) * self.alpha
         return weight
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor | IndexedFeatures) -> torch.Tensor:
+        """Project dense or partitioned inputs, gathering after projection.
+
+        Each partition contains features and optional row indices. The result
+        equals applying this linear map to their gathered concatenation.
+        Scaling uses the full input width and the bias is applied once.
+        """
         weight = self.get_weight()
+        if isinstance(input, tuple):
+            weights = weight.split([value.size(-1) for value, _ in input], dim=0)
+            output = None
+            for (value, index), part in zip(input, weights):
+                projected = (
+                    torch.addmm(self.bias, value, part)
+                    if output is None and self.bias is not None
+                    else torch.mm(value, part)
+                )
+                if index is not None:
+                    projected = projected.index_select(0, index)
+                output = projected if output is None else output + projected
+            return output
         if self.bias is None:
             return torch.mm(input, weight)
         else:

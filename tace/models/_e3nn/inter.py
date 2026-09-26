@@ -13,7 +13,7 @@ from tace.utils.torch_scatter import scatter_sum
 
 from ..lammps import Graph
 from ..layout import LayoutTransform
-from ..linear import e3nnLinear
+from ..linear import IndexedFeatures, e3nnLinear
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
@@ -173,7 +173,7 @@ class O3CgtpInteraction(Interaction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
@@ -212,7 +212,7 @@ class O3CgtpInteraction(Interaction):
         node_attrs_total: torch.Tensor,
         node_attrs_slice: torch.Tensor,
         edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
@@ -232,6 +232,14 @@ class O3CgtpInteraction(Interaction):
         node_type = graph.node_type
         if node_type is not None:
             node_type = node_type[: node_attrs_slice.size(0)]
+
+        # A single-layer radial network passes its input directly to the fused
+        # projection; there is no hidden linear map to consume the partitions.
+        if isinstance(edge_feats, tuple) and self.edge_info.num_layers == 1:
+            edge_feats = torch.cat(
+                [value if index is None else value[index] for value, index in edge_feats],
+                dim=-1,
+            )
 
         density = None
         resBB = None
@@ -336,7 +344,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
@@ -440,7 +448,7 @@ class UvSO2Interaction(O3CgtpInteraction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
@@ -575,7 +583,7 @@ class UvO2Interaction(O3CgtpInteraction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
@@ -632,7 +640,7 @@ class UuO2Interaction(O3CgtpInteraction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         edge_radial_basis: torch.Tensor,
-        edge_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],

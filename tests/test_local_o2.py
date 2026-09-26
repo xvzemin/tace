@@ -34,44 +34,70 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("lora", [False, True])
+@pytest.mark.parametrize("hidden", [[], [7]])
 @pytest.mark.parametrize("num_edges", [0, 8])
-def test_element_edge_update_embeds_nodes_before_gather(reverse, num_edges):
-    from tace.models._e3nn.edge import Element2EdgeUpdate, ElementEdgeUpdate
+def test_element2_projects_nodes_before_gather(bias, lora, hidden, num_edges):
+    from tace.models._e3nn.edge import Element2EdgeUpdate
+    from tace.models.linear import enable_lora
+    from tace.models.mlp import MLP
 
-    cls = Element2EdgeUpdate if reverse else ElementEdgeUpdate
-    module = cls(
+    module = Element2EdgeUpdate(
         layer=0,
         num_layers=2,
         num_elements=3,
         num_radial_basis=4,
         num_channel=4,
-        edge_embedding_channel=4,
-        bias=True,
+        edge_embedding_channel=6,
+        bias=bias,
     ).double()
+    mlp = MLP([14, *hidden, 3], bias=bias).double()
+    if lora:
+        enable_lora(mlp.mlp[0], r=2, freeze_base=False)
+        with torch.no_grad():
+            mlp.mlp[0].lora_B.normal_()
+    with torch.no_grad():
+        for name, parameter in (*module.named_parameters(), *mlp.named_parameters()):
+            if name.endswith("bias"):
+                parameter.normal_()
     attrs = torch.randn(5, 3, dtype=DTYPE, requires_grad=True)
     edges = torch.randint(5, (2, num_edges))
-    feats = torch.randn(num_edges, 4, dtype=DTYPE, requires_grad=True)
+    feats = torch.randn(num_edges, 6, dtype=DTYPE, requires_grad=True)
     source = module.source_embedding(attrs[edges[0]])
     target = module.target_embedding(attrs[edges[1]])
-    expected = torch.cat(
-        (feats, target, source) if reverse else (feats, source, target), -1
-    )
+    expected = mlp(torch.cat((feats, target, source), -1))
     sizes = []
     hook = module.source_embedding.register_forward_pre_hook(
         lambda module, inputs: sizes.append(inputs[0].size(0))
     )
-    actual = module(None, attrs, feats, edges, None)
+    actual = mlp(module(None, attrs, feats, edges, None))
     hook.remove()
     assert sizes == [attrs.size(0)]
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
-    inputs = (attrs, feats, *module.parameters())
-    gradients = [
-        torch.autograd.grad(y.square().sum(), inputs, retain_graph=True)
-        for y in (actual, expected)
-    ]
-    for actual_grad, expected_grad in zip(*gradients):
-        torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-12, atol=1e-12)
+    inputs = (attrs, feats, *module.parameters(), *mlp.parameters())
+    for _ in range(2):
+        seed = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad(
+                (y * seed).sum(),
+                inputs,
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            for y in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat(
+                [
+                    (torch.zeros_like(x) if g is None else g).reshape(-1)
+                    for x, g in zip(inputs, values)
+                ]
+            )
+            for values in gradients
+        ]
+        torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
 
 
 @pytest.mark.parametrize("num_graphs", [1, 2])
@@ -1327,6 +1353,17 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     config["readout_emlp"]["hidden"] = [2]
     config["scale_shift"]["enable"] = False
     reference = TensorModel(e3nnTACE(**deepcopy(config))).train()
+    for update in reference.readout_fn.representation.edge_updates:
+
+        def gather_inputs(*args, forward=update.forward, **kwargs):
+            features = forward(*args, **kwargs)
+            if isinstance(features, tuple):
+                return torch.cat(
+                    [x if index is None else x[index] for x, index in features], -1
+                )
+            return features
+
+        monkeypatch.setattr(update, "forward", gather_inputs)
     config["atomic_basis"]["type"] = interaction
     module = TensorModel(e3nnTACE(**config)).train()
     reference_parameters = dict(reference.named_parameters())
