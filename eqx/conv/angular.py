@@ -94,6 +94,22 @@ def generator_source(degree, harmonic, vector, features, cache, lines, normaliza
     return values, scale
 
 
+def generator_adjoint(degree, features, cotangent, cache, lines):
+    """Contract the vector adjoint of a sparse generator action."""
+    matrix = generators(degree)
+    return tuple(
+        contraction_source(
+            tuple(
+                (float(matrix[a, i, j]), (cotangent[i], features[j]))
+                for i, j in matrix[a].nonzero().tolist()
+            ),
+            cache,
+            lines,
+        )
+        for a in range(3)
+    )
+
+
 def contraction_source(terms, cache, lines):
     """Factor shared operands in a sparse multilinear contraction."""
     terms = tuple(

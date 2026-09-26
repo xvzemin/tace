@@ -90,8 +90,13 @@ def test_generator_cuda_paths(degree, implementation, dtype):
         args = (
             f"3x{degree}e",
             "1o+2e",
-            f"3x{degree}o+3x{degree}e+3x{degree}e",
-            [(0, 0, 0, "uvu", True), (0, 1, 1, "uvu", True), (0, 1, 2, "uvu", False)],
+            f"3x{degree}o+3x{degree}e+3x{degree}e+3x{degree + 2}e",
+            [
+                (0, 0, 0, "uvu", True),
+                (0, 1, 1, "uvu", True),
+                (0, 1, 2, "uvu", False),
+                (0, 1, 3, "uvu", True),
+            ],
         )
         options = dict(internal_weights=False, shared_weights=False)
         tp = o3.TensorProduct(*args, **options)
@@ -122,7 +127,7 @@ def test_generator_cuda_paths(degree, implementation, dtype):
                 amplitudes=amplitudes,
             )
         else:
-            frame = o2.WignerD(degree, degree, method="recursive").cuda()
+            frame = o2.WignerD(degree + 2, degree + 2, method="recursive").cuda()
             actual = module(
                 x,
                 weights,
@@ -153,6 +158,148 @@ def test_generator_cuda_paths(degree, implementation, dtype):
         )
     finally:
         torch.set_default_dtype(previous_dtype)
+
+
+@pytest.mark.parametrize(
+    "normalization,order", [("component", 4), ("integral", 2), ("norm", 2)]
+)
+def test_low_degree_couplings_fourth_derivatives(
+    normalization, order, double_precision
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.manual_seed(103)
+    outputs, instructions = [], []
+    for harmonic in range(3):
+        for degree in range(abs(2 - harmonic), 3 + harmonic):
+            instructions.append((0, harmonic, len(outputs), "uvu", degree != 0))
+            outputs.append((2, (degree, (-1) ** harmonic)))
+    tp = o2.O3TensorProduct(
+        "2x2e",
+        "0e+1o+2e",
+        outputs,
+        instructions,
+        normalization=normalization,
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    module = eqx_conv.O2O3TensorProductConv(tp)
+    reference = eqx_conv.O3TensorProductConv(
+        o3.TensorProduct(
+            "2x2e",
+            "0e+1o+2e",
+            outputs,
+            instructions,
+            internal_weights=False,
+            shared_weights=False,
+        ),
+        backend="torch",
+        normalization=normalization,
+    ).cuda()
+    frame = o2.WignerD(4, 4, method="recursive").cuda()
+    edges = torch.tensor([[0, 1, 0], [1, 0, 1]], device="cuda")
+    x = torch.randn(2, tp.input_dim, device="cuda")
+    vectors = torch.tensor(
+        [[0.0, 2.0, 0.0], [0.0, -2.0, 1e-8], [0.3, -0.7, 1.2]],
+        device="cuda",
+        requires_grad=True,
+    )
+    weights = torch.randn(3, tp.weight_numel, device="cuda", requires_grad=True)
+    amplitudes = torch.randn(1, 3, device="cuda")
+    inputs = vectors, weights
+    packed = frame.forward_packed(vectors.detach())
+    projection = x.new_empty(0, tp.weight_numel)
+    actual = module(
+        x, weights, projection, packed, amplitudes, edges, 2, vectors=vectors
+    )
+    expected = reference(
+        x, None, weights, projection, edges, vectors=vectors, amplitudes=amplitudes
+    )
+    for _ in range(order):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        cotangent = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    grad.flatten()
+                    for grad in torch.autograd.grad(
+                        (value.sin() * cotangent).sum(), inputs, create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=2e-8, rtol=2e-8)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_hybrid_direction_derivatives(monkeypatch, shared, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.o2_o3 import cuda
+
+    monkeypatch.setattr(cuda, "CHUNK_SIZE", 2)
+    torch.manual_seed(107)
+    args = (
+        "3x2e",
+        "1o+2e+3o",
+        "3x1o+3x2e+3x3o",
+        [(0, 0, 0, "uvu", True), (0, 1, 1, "uvu", False), (0, 2, 2, "uvu", True)],
+    )
+    options = dict(internal_weights=False, shared_weights=False)
+    tp = o2.O3TensorProduct(*args, **options).cuda()
+    module = eqx_conv.O2O3TensorProductConv(tp)
+    reference = eqx_conv.O3TensorProductConv(
+        o3.TensorProduct(*args, **options), backend="torch"
+    ).cuda()
+    frame = o2.WignerD(3, 3, method="recursive").cuda()
+    rows = 1 if shared else 5
+    inputs = [
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (3, tp.input_dim),
+            (rows, 3),
+            (rows, 4),
+            (4, tp.weight_numel),
+            (rows, 3),
+        )
+    ]
+    x, vectors, radial, projection, amplitudes = inputs
+    edges = torch.randint(3, (2, 5), device="cuda")
+    actual = module(
+        x,
+        radial,
+        projection,
+        frame.forward_packed(vectors.detach()),
+        amplitudes,
+        edges,
+        3,
+        vectors=vectors,
+    )
+    expected = reference(
+        x,
+        None,
+        radial,
+        projection,
+        edges,
+        vectors=vectors.expand(edges.size(1), -1),
+        amplitudes=amplitudes,
+    )
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        cotangent = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    grad.flatten()
+                    for grad in torch.autograd.grad(
+                        (value.sin() * cotangent).sum(), inputs, create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
 
 
 @pytest.mark.parametrize("magnetic", [False, True])

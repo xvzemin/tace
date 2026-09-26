@@ -337,9 +337,10 @@ class O2O3TensorProductConv(torch.nn.Module):
             Nonzero frame directions, with shape ``(edges, 3)`` or ``(1, 3)``.
             When supplied, ``wigner`` must contain their alignment matrices.
             Direction derivatives use sparse angular contractions rather than
-            matrix adjoints. The matrices are treated as cached values, and
-            zero-degree harmonic paths bypass both rotations. Without vectors,
-            the matrices remain independent differentiable inputs.
+            matrix adjoints. The matrices are treated as cached values. On CUDA,
+            harmonic degrees zero, one and two bypass feature rotations.
+            Without vectors, the matrices remain independent differentiable
+            inputs.
 
         Returns
         -------

@@ -120,6 +120,7 @@ def convolution_source(
     normalization=None,
     use_generators=False,
     angular_derivatives=False,
+    direction_offset=0,
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
@@ -171,7 +172,12 @@ def convolution_source(
                 *(
                     ()
                     if normalization is None
-                    else (normalization, use_generators, angular_derivatives)
+                    else (
+                        normalization,
+                        use_generators,
+                        angular_derivatives,
+                        direction_offset,
+                    )
                 ),
             )
             for v in range(mul2):
@@ -312,6 +318,7 @@ def fused_source(
     normalization=None,
     use_generators=False,
     angular_derivatives=False,
+    direction_offset=0,
 ):
     """Execute independent path tiles in one grid with shared launch operands."""
     header = HEADER.replace("SCALAR", dtype)
@@ -346,6 +353,7 @@ def fused_source(
                 normalization,
                 use_generators,
                 angular_derivatives,
+                direction_offset,
             )
         )
     args += [

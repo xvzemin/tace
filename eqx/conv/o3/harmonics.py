@@ -4,7 +4,12 @@ import math
 from collections import defaultdict
 from functools import lru_cache
 
-from ..angular import contraction_source, generator_action, generator_source
+from ..angular import (
+    contraction_source,
+    generator_action,
+    generator_adjoint,
+    generator_source,
+)
 
 
 @lru_cache(maxsize=64)
@@ -78,6 +83,7 @@ def angular_source(
     normalization,
     use_generators=False,
     angular_derivatives=False,
+    direction_offset=0,
 ):
     """Contract harmonic derivatives before reducing feature channels."""
     start, attr, end, mul1, mul2, dim1, dim2, dim_out, _, _, cg = path
@@ -93,6 +99,10 @@ def angular_source(
 
     def load(role, column, channel="0"):
         pointer = mapping[role]
+        if role == 5:
+            # The aligned contraction already stores the direction in row y
+            # of the degree-one Wigner matrix. Read it without an edge copy.
+            column += direction_offset
         row = {0: "source[edge]", 4: "target[edge]"}.get(role, "edge")
         if role not in (0, 4) and shared[pointer]:
             row = "0"
@@ -104,7 +114,62 @@ def angular_source(
     def multiply(a, b):
         return variable(("product", *sorted((a, b))), f"{a} * {b}")
 
+    def angular_harmonics(start=6):
+        key = "angular_harmonics", degree, mapping[5], mapping[start:], normalization
+        if key not in cache:
+            if start < len(mapping):
+                vector = tuple(load(start, a) for a in range(3))
+                values = generator_action(
+                    degree, vector, angular_harmonics(start + 1), cache, lines
+                )
+            else:
+                values = tuple(
+                    contraction_source(
+                        tuple(
+                            (
+                                coefficient,
+                                tuple(
+                                    load(5, a)
+                                    for a, p in enumerate(powers)
+                                    for _ in range(p)
+                                ),
+                            )
+                            for powers, coefficient in polynomial
+                        ),
+                        cache,
+                        lines,
+                    )
+                    for polynomial in polynomial_coefficients(degree, normalization)
+                )
+            cache[key] = values
+        return cache[key]
+
+    def harmonic_adjoint():
+        values = []
+        for b in range(dim2):
+            key = "harmonic_adjoint", start, end, mul1, mapping[0], mapping[4], cg, b
+            if key not in cache:
+                cache[key] = contraction_source(
+                    tuple(
+                        (
+                            coefficient,
+                            (
+                                load(0, start + a * mul1, "u"),
+                                load(4, end + c * mul1, "u"),
+                            ),
+                        )
+                        for a, j, c, coefficient in cg
+                        if j == b
+                    ),
+                    cache,
+                    lines,
+                )
+            values.append(cache[key])
+        return tuple(values)
+
     def harmonic(m, output=None, axis=None):
+        if angular_derivatives:
+            return angular_harmonics()[m]
         if output is None:
             axis = None
         key = "harmonic", degree, m, mapping[5:], output, axis, normalization
@@ -112,38 +177,6 @@ def angular_source(
             return cache[key]
         name = f"v{len(cache)}"
         cache[key] = name
-        if angular_derivatives:
-            vector_key = (
-                "angular_harmonics",
-                degree,
-                mapping[5:],
-                output,
-                axis,
-                normalization,
-            )
-            if vector_key not in cache:
-                values = []
-                for polynomial in polynomial_coefficients(degree, normalization):
-                    terms = []
-                    for powers, coefficient in polynomial:
-                        factors = tuple(
-                            load(5, a) for a, p in enumerate(powers) for _ in range(p)
-                        )
-                        terms.append((coefficient, factors))
-                    values.append(contraction_source(terms, cache, lines))
-                values = tuple(values)
-                # Contract derivative directions in the harmonic irrep. The
-                # rightmost generator acts first; no feature-degree powers
-                # or tensor with 3**rank entries are needed.
-                for role in reversed(range(6, len(mapping))):
-                    vector = tuple(
-                        f"T({int(a == axis)})" if role == output else load(role, a)
-                        for a in range(3)
-                    )
-                    values = generator_action(degree, vector, values, cache, lines)
-                cache[vector_key] = values
-            lines.append(f"const T {name} = {cache[vector_key][m]};")
-            return name
         terms = []
         directions = {(0, 0, 0): "T(1)"}
         for role in range(6, len(mapping)):
@@ -208,12 +241,32 @@ def angular_source(
     for v in range(mul2):
         for role in sorted(needed):
             width = {0: dim1, 3: 1, 4: dim_out}.get(role, 3)
+            if angular_derivatives and role >= 6:
+                # Transpose the prefix and reuse the suffix. This produces all
+                # three vector components without three generator chains.
+                cotangent = harmonic_adjoint()
+                for index in range(6, role):
+                    vector = tuple(load(index, a) for a in range(3))
+                    cotangent = generator_action(
+                        degree, vector, cotangent, cache, lines
+                    )
+                adjoint = generator_adjoint(
+                    degree, angular_harmonics(role + 1), cotangent, cache, lines
+                )
+                amplitude = load(3, attr + v)
+                sign = -1 if (role - 6) % 2 else 1
+                for column, value in enumerate(adjoint):
+                    values[v, role, column] = variable(
+                        ("angular_adjoint", value, amplitude, sign),
+                        f"T({sign}) * {value} * {amplitude}",
+                    )
+                continue
             if (
                 use_generators
                 and rank == 0
                 and dim1 == dim_out
                 and degree in (1, 2)
-                and role in (0, 3, 4)
+                and role in (0, 4)
             ):
                 other = 4 if role == 0 else 0
                 offset = end if role == 0 else start
@@ -232,22 +285,6 @@ def angular_source(
                 )
                 if role == 0 and degree == 1:
                     scale = -scale
-                if role == 3:
-                    terms = tuple(
-                        (value, load(4, end + a * mul1, "u"))
-                        for a, value in enumerate(coupled)
-                    )
-                    key = "generator_adjoint", terms, scale
-                    if key not in cache:
-                        name = f"v{len(cache)}"
-                        cache[key] = name
-                        lines.append(f"T {name} = 0;")
-                        lines.extend(
-                            f"{name} = fma({a}, {b}, {name});" for a, b in terms
-                        )
-                        lines.append(f"{name} *= T({scale:.17g});")
-                    values[v, role, 0] = cache[key]
-                    continue
                 amplitude = load(3, attr + v)
                 for column, value in enumerate(coupled):
                     values[v, role, column] = variable(
@@ -269,38 +306,9 @@ def angular_source(
                     if role == 3 or role >= 6:
                         # The CG adjoint is shared by all three Cartesian
                         # directions and stays in registers until contraction.
-                        for b in range(dim2):
-                            inner_key = (
-                                "harmonic_adjoint",
-                                start,
-                                end,
-                                mul1,
-                                mapping[0],
-                                mapping[4],
-                                cg,
-                                b,
-                            )
-                            if inner_key not in cache:
-                                products = [
-                                    (
-                                        coefficient,
-                                        multiply(
-                                            load(0, start + a * mul1, "u"),
-                                            load(4, end + c * mul1, "u"),
-                                        ),
-                                    )
-                                    for a, j, c, coefficient in cg
-                                    if j == b
-                                ]
-                                inner = f"v{len(cache)}"
-                                cache[inner_key] = inner
-                                lines.append(f"T {inner} = 0;")
-                                lines.extend(
-                                    f"{inner} = fma(T({coefficient:.17g}), {value}, {inner});"
-                                    for coefficient, value in products
-                                )
+                        for b, value in enumerate(harmonic_adjoint()):
                             y = harmonic(b, role if role >= 6 else None, column)
-                            terms.append((1.0, (cache[inner_key], y)))
+                            terms.append((1.0, (value, y)))
                     else:
                         for a, b, c, coefficient in cg:
                             if (role == 0 and a != column) or (

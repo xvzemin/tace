@@ -149,13 +149,19 @@ instruction and weight. Compatible paths share scalar products and factored
 contractions. Cartesian harmonic derivatives collect equal multi-indices,
 rather than enumerating every ordering of derivative directions.
 
-With direction inputs, same-degree dipole and quadrupole paths can be evaluated
-as finite generator polynomials instead of rotating each path output. The
-generators are divided by ``sqrt(l * (l + 1))`` before multiplication; no dense
-generator powers are stored. Other paths retain the sparse aligned contraction.
-This specialization limits the harmonic degree, not the input or output degree.
-Its vector derivatives apply sparse generator products in the degree-one/two
-harmonic space, without expanding every Cartesian derivative-index tuple.
+With direction inputs, harmonic degrees zero, one and two use direct sparse
+contractions, including paths between different feature degrees. Same-degree
+dipole and quadrupole maps additionally use finite generator polynomials.
+The generators are divided by ``sqrt(l * (l + 1))`` before multiplication;
+no dense generator powers are stored. Higher harmonic degrees retain the
+aligned contraction. The specialization does not limit the feature degree.
+
+Angular derivatives apply ordered sparse generators in the harmonic space.
+Vector adjoints reuse the forward suffix and transposed prefix of this product
+instead of evaluating three separate chains. Harmonic cotangents are shared
+with amplitude and weight adjoints. Neither Jacobians nor Hessians are stored
+on edges. Directions are read from the degree-one Wigner matrix without a
+separate copy.
 
 Angular derivative coefficients are constructed in float64 by differentiating
 the harmonic factor before coupling it to features. The derivative vector

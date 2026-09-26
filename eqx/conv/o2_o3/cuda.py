@@ -430,24 +430,21 @@ def contract_directions(metadata, source, target, calls):
         prepared.append((rank, outputs, tuple(values), results, weighted))
 
     def execute(plan, source, target, terms, shared=None, initialize=()):
-        polynomial, remaining, remaining_metadata = polynomial_plan(metadata)
-        if polynomial is not None:
+        direct_metadata, remaining, remaining_metadata = harmonic_plan(metadata)
+        if direct_metadata is not None:
             from ..o3.cuda import contract_direct
 
-            directions, direct = {}, []
+            direct = []
             roles = {0: 0, 1: 1, 2: 2, 5: 3, 6: 4}
             for _, outputs, operands, results, weighted in terms:
-                frame = operands[3]
-                if id(frame) not in directions:
-                    directions[id(frame)] = frame[:, 4:7].contiguous()
-                x, radial, projection, _, _, amplitudes, y, *vectors = operands
+                x, radial, projection, frame, _, amplitudes, y, *vectors = operands
                 values = (
                     x,
                     radial,
                     projection,
                     amplitudes,
                     y,
-                    directions[id(frame)],
+                    frame,
                     *vectors,
                 )
                 direct.append(
@@ -459,7 +456,7 @@ def contract_directions(metadata, source, target, calls):
                     )
                 )
             contract_direct(
-                polynomial,
+                direct_metadata,
                 source,
                 target,
                 direct,
@@ -555,8 +552,8 @@ def contract_directions(metadata, source, target, calls):
 
 
 @lru_cache(maxsize=256)
-def polynomial_plan(metadata):
-    """Select same-degree dipole and quadrupole paths for generator contraction."""
+def harmonic_plan(metadata):
+    """Select low-degree harmonic paths for direct sparse contractions."""
     from dataclasses import replace
 
     from e3nn import o3
@@ -571,11 +568,15 @@ def polynomial_plan(metadata):
         zip(plan.path_data, plan.harmonic_degrees, plan.sparse_paths)
     ):
         start, end, mul, _, dim, dim_out, _, _, weight, harmonic = path
-        if dim != dim_out or degree not in (1, 2):
+        if degree > 2:
             keep.append(i)
             continue
         cg = o3.wigner_3j(
-            (dim - 1) // 2, degree, (dim - 1) // 2, dtype=torch.float64, device="cpu"
+            (dim - 1) // 2,
+            degree,
+            (dim_out - 1) // 2,
+            dtype=torch.float64,
+            device="cpu",
         )
         scale = sum(c * float(cg[a, degree, b]) for a, b, c in entries)
         scale /= float(cg[:, degree, :].square().sum()) * (2 * degree + 1) ** 0.5
@@ -612,6 +613,7 @@ def polynomial_plan(metadata):
                 "component",
                 True,
                 True,
+                4,
             )
         ),
         remainder,
