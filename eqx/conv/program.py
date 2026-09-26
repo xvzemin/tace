@@ -5,6 +5,30 @@ from functools import lru_cache
 from ..utils import parse_metadata
 
 
+def activate(program, value, module):
+    """Encode a supported scalar activation and its normalization."""
+    if module is None:
+        return value
+    name = type(module).__name__
+    if name == "normalize2mom":
+        return program.scale(
+            activate(program, value, module.f), 1 if module._is_id else module.cst
+        )
+    if name == "ScaledActivation":
+        return program.scale(
+            activate(program, value, module.activation), module.scale_factor
+        )
+    operations = {
+        "SiLU": "silu",
+        "Sigmoid": "sigmoid",
+        "Tanh": "tanh",
+        "Identity": "identity",
+    }
+    if name not in operations:
+        raise NotImplementedError(f"Fused activation does not support {name}.")
+    return value if name == "Identity" else program.unary(operations[name], value)
+
+
 class Program:
     """A vector expression evaluated by one cooperative CUDA block per edge.
 

@@ -183,13 +183,21 @@ without materializing per-node weight matrices. The highest-correlation
 product and its coefficient contraction are fused; intermediate orders remain
 available for reuse. Recursive transposed kernels support force training and
 higher derivatives. Linear up/down, biases, dropout and residual connections
-keep their existing behavior. Gated bilinear products also use
+keep their existing behavior. Within a weighted ACE path, angular products
+are reused across output channels, and backward contractions reuse the
+coefficient-transformed adjoint. Paths and coefficient parameters remain
+independent. Gated bilinear products also use
 ``eqx.models.tace.tece_oam_rra.BilinearACE`` to fuse their weighted tensor
 product with the element-dependent or MoE coefficient map, including the
 optional shared expert.
 Products with active coefficient LoRA adapters retain their original
 tensor-product execution. EQX takes precedence
 over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
+
+When enabled during model construction, EQX also fuses supported node gates
+with ``eqx.o3.Gate``. Scalar activation normalization, feature ordering and
+checkpoint keys are unchanged. SiLU, sigmoid, tanh and identity activations
+support recursive CUDA derivatives; other activations retain torch execution.
 
 TACE maintains the TECE-OAM-RRA PyTorch model in
 ``tace.models._e3nn.tece_oam_rra``, using native ``eqx.o2`` linear, gate and

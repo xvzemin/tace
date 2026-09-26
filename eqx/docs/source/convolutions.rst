@@ -191,6 +191,10 @@ model. MACE adapters are separate in ``eqx.models.mace``.
 ``eqx.o3.ElementLinear`` and ``MoEElementLinear`` read external element weights
 directly instead of allocating one weight matrix per node. Unlike the
 convolution interfaces, these supporting operators use ``mul_ir`` features.
+``eqx.o3.Gate`` fuses normalized SiLU, sigmoid, tanh and identity activations
+with scalar multiplication. Its input ordering and normalization follow
+``e3nn.nn.Gate``, and its recursive derivatives support force training.
+Other activations and CPU inputs retain the torch implementation.
 
 MACE models
 -----------

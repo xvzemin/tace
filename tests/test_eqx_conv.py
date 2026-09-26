@@ -1837,25 +1837,32 @@ def test_cuda_cache_does_not_log_lock_creation(tmp_path, monkeypatch, caplog):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("num_nodes", [0, 3])
-def test_ace_external_coefficients(device, num_nodes):
+@pytest.mark.parametrize("num_nodes", [0, 3, 9])
+@pytest.mark.parametrize("channels_in,channels_out,degree", [(2, 2, 1), (33, 17, 5)])
+def test_ace_external_coefficients(device, num_nodes, channels_in, channels_out, degree):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    irreps = o3.Irreps("2x0e+2x1o")
+    irreps = o3.Irreps([(channels_in, (0, 1)), (channels_in, (degree, (-1) ** degree))])
     tp = o3.TensorProduct(
         irreps,
         irreps,
-        "2x0e+2x0e+2x1o",
-        [(0, 0, 0, "uuu", False), (1, 1, 1, "uuu", False), (0, 1, 2, "uuu", False)],
+        irreps[:1] + irreps[:1] + irreps[1:] + irreps[1:],
+        [
+            (0, 0, 0, "uuu", False),
+            (1, 1, 1, "uuu", False),
+            (0, 1, 2, "uuu", False),
+            (1, 0, 3, "uuu", False),
+        ],
         internal_weights=False,
         shared_weights=False,
     )
+    irreps_out = o3.Irreps([(channels_out, ir) for _, ir in irreps])
     linears = [
-        o3.Linear(inp, irreps, internal_weights=False, shared_weights=False)
+        o3.Linear(inp, irreps_out, internal_weights=False, shared_weights=False)
         for inp in (irreps, tp.irreps_out.simplify())
     ]
     module = TACE([tp], linears).to(device=device, dtype=torch.float64)
-    x = torch.randn(num_nodes, 16, device=device, dtype=torch.float64)[
+    x = torch.randn(num_nodes, 2 * irreps.dim, device=device, dtype=torch.float64)[
         :, ::2
     ].requires_grad_()
     types = (torch.arange(num_nodes * 2, device=device) % 3)[::2]
@@ -1874,12 +1881,15 @@ def test_ace_external_coefficients(device, num_nodes):
         tp(x, x), weights[1][types]
     )
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
-    gradients = [
-        torch.autograd.grad(y.square().sum(), (x, *weights), create_graph=True)
-        for y in (actual, expected)
-    ]
-    for a, b in zip(*gradients):
-        torch.testing.assert_close(a, b, atol=1e-11, rtol=1e-11)
+    losses = [y.square().sum() for y in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, *weights), create_graph=True)
+            for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-10)
+        losses = [sum(g.square().sum() for g in values) / 100 for values in gradients]
     assert not module.state_dict()
     if device == "cuda" and num_nodes:
         compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
@@ -1968,6 +1978,80 @@ def test_o3_cartesian_derivatives(
         actual, expected = (
             torch.cat([value.flatten() for value in values]) for values in (a, b)
         )
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize("channels", [3, 64])
+def test_reverse_edge_convolution(implementation, channels, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.manual_seed(105)
+    args = (
+        f"{channels}x1o",
+        "1o+3o",
+        f"{channels}x0e+{channels}x2e+{channels}x4e",
+        [
+            (0, 0, 0, "uvu", True),
+            (0, 1, 1, "uvu", True),
+            (0, 1, 2, "uvu", True),
+        ],
+    )
+    options = dict(internal_weights=False, shared_weights=False)
+    tp = o3.TensorProduct(*args, **options).cuda()
+    reference = eqx_conv.O3TensorProductConv(tp, backend="torch").cuda()
+    module = (
+        eqx_conv.O3TensorProductConv(tp)
+        if implementation == "o3"
+        else eqx_conv.O2O3TensorProductConv(o2.O3TensorProduct(*args, **options))
+    ).cuda()
+    # Repeated endpoints with distinct images, a self-image, duplicates and
+    # one unmatched edge. Every directed edge has independent radial weights.
+    pairs = torch.tensor([[0, 0, 1, 2], [1, 1, 2, 2]], device="cuda")
+    edges = torch.cat(
+        (pairs, pairs.flip(0), pairs[:, :1], pairs.flip(0)[:, :1], pairs[:, 2:3]),
+        dim=1,
+    )
+    r = torch.randn(4, 3, device="cuda")
+    vectors = torch.cat((r, -r, r[:1], -r[:1], r[2:3] * 2)).requires_grad_()
+    x = torch.randn(3, tp.irreps_in1.dim, device="cuda", requires_grad=True)
+    amplitudes = torch.randn(11, 2, device="cuda", requires_grad=True)
+    radial = torch.randn(11, 4, device="cuda", requires_grad=True)
+    projection = torch.randn(4, tp.weight_numel, device="cuda", requires_grad=True)
+    inputs = x, vectors, amplitudes, radial, projection
+    expected = reference(
+        x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes
+    )
+    if implementation == "o3":
+        actual = module(
+            x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes
+        )
+    else:
+        frame = o2.WignerD(4, 4, method="recursive").cuda()
+        actual = module(
+            x,
+            radial,
+            projection,
+            frame.forward_packed(vectors.detach()),
+            amplitudes,
+            edges,
+            3,
+            vectors=vectors,
+        )
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        seed = torch.randn_like(actual) / max(1, actual.numel()) ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (value.sin() * seed).sum(), inputs, create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=2e-8, rtol=2e-8)
 
 
 def test_o3_cartesian_compile_and_empty_graph(double_precision):
@@ -3866,7 +3950,9 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
     reference_model = TensorModel(e3nnTACE(**config)).cuda().train()
-    model = deepcopy(reference_model)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    model = TensorModel(e3nnTACE(**config)).cuda().train()
+    model.load_state_dict(reference_model.state_dict(), strict=True)
     assert model.state_dict().keys() == reference_model.state_dict().keys()
     data = dict(
         positions=torch.tensor(

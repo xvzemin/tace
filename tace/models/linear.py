@@ -13,7 +13,6 @@ from e3nn import o3
 from eqx import o3 as eqx_o3
 from tace.utils.env import acceleration_enabled, get_tace_use_matrix_weight
 
-
 IndexedFeatures = tuple[tuple[torch.Tensor, torch.Tensor | None], ...]
 
 
@@ -328,7 +327,7 @@ class e3nnLinear(torch.nn.Module):
             irreps_in=self.irreps_in,
             irreps_out=self.irreps_out,
             internal_weights=False,
-            shared_weights=False,
+            shared_weights=internal_weights,
         )
 
         self.weight_numel = self.linear.weight_numel

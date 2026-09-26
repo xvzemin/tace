@@ -95,9 +95,12 @@ interface is CUDA-only; its reference is the composition of native operators.
 Supporting operators
 --------------------
 
-``eqx.o3`` supplies indexed element-dependent linear maps, not a second O(3)
-representation algebra. These maps and ``eqx.ace.TACE`` use flattened ``mul_ir``
-features. Weights are external and biases are applied by the caller.
+``eqx.o3`` supplies indexed element-dependent linear maps and gated activations.
+These operators and ``eqx.ace.TACE`` use flattened ``mul_ir`` features. Linear
+weights are external and biases are applied by the caller.
+
+.. autoclass:: eqx.o3.Gate
+   :members: forward
 
 .. autoclass:: eqx.o3.ElementLinear
    :members: forward

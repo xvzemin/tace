@@ -95,7 +95,7 @@ eliminated. See the convolution guide for supported backends and examples.
 | `eqx.o2` | Native O(2) operators and O(3)/O(2) frame conversion |
 | `eqx.conv` | General fused O3, O2-O3, uu-O2, and uv-O2 graph convolutions |
 | `eqx.kernels` | Shared geometry kernels, CUDA compilation, and launch support |
-| `eqx.o3` | Element-dependent linear maps using e3nn `mul_ir` layouts |
+| `eqx.o3` | Element-dependent linear maps and gated activations using `mul_ir` layouts |
 | `eqx.ace` | Atomic cluster expansions, independent of convolutions |
 | `eqx.models.tace` | TACE-specific interaction and bilinear ACE fusion |
 | `eqx.models.mace` | MACE conversion for ASE inference and training |

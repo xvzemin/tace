@@ -1,12 +1,136 @@
-"""Indexed spatial linear maps, including element and expert coefficients."""
+"""Spatial linear maps and normalized gated activations."""
 
 import pytest
 import torch
 from e3nn import o3
 
 from eqx import o3 as eqx_o3
-from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear, enable_lora
+from tace.models.linear import (
+    e3nnElementLinear,
+    e3nnLinear,
+    e3nnMoEElementLinear,
+    enable_lora,
+)
 from tace.utils.env import EQX_KERNELS
+
+
+@pytest.mark.parametrize("matrix", ["0", "1"])
+@pytest.mark.parametrize("internal", [False, True])
+@pytest.mark.parametrize("num_nodes", [0, 7])
+def test_shared_linear(matrix, internal, num_nodes, double_precision):
+    import copy
+
+    actual = e3nnLinear(
+        "2x0e+0e+3x1o+2x5o",
+        "3x0e+0e+2x1o+5o",
+        bias=True,
+        internal_weights=internal,
+        use_matrix_weight=matrix,
+    )
+    reference = copy.deepcopy(actual)
+    reference.linear = o3.Linear(
+        actual.irreps_in,
+        actual.irreps_out,
+        internal_weights=False,
+        shared_weights=False,
+    )
+    reference.load_state_dict(actual.state_dict(), strict=True)
+    x = torch.randn(num_nodes, actual.irreps_in.dim, requires_grad=True)
+    weight = (
+        None
+        if internal
+        else torch.randn(num_nodes, actual.weight_numel, requires_grad=True)
+    )
+    values = [module(x, weight) for module in (actual, reference)]
+    torch.testing.assert_close(*values, atol=1e-12, rtol=1e-12)
+    inputs = [
+        (x, *module.parameters()) if internal else (x, weight, *module.parameters())
+        for module in (actual, reference)
+    ]
+    for _ in range(3):
+        derivatives = [
+            torch.autograd.grad(y.sin().sum(), args, create_graph=True)
+            for y, args in zip(values, inputs)
+        ]
+        for a, b in zip(*derivatives):
+            torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
+        values = [torch.cat([g.flatten() for g in grads]) for grads in derivatives]
+
+
+@pytest.mark.parametrize("num_nodes", [0, 5])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("gate_scalars", [False, True])
+def test_gate_derivatives(num_nodes, device, gate_scalars, double_precision):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn.nn import Gate
+
+    args = (
+        "2x0e+0o+0e",
+        [torch.nn.SiLU(), torch.nn.Tanh(), None],
+        "2x0e+2x0o",
+        [torch.nn.Sigmoid(), torch.nn.Tanh()],
+        "2x0e+1o+3e" if gate_scalars else "2x1o+1e+3e",
+    )
+    module = eqx_o3.Gate(*args).to(device)
+    reference = Gate(*args).to(device)
+    module.load_state_dict(reference.state_dict(), strict=True)
+    x = torch.randn(module.irreps_in.dim, num_nodes, device=device).T.requires_grad_()
+    actual, expected = module(x), reference(x)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    for _ in range(3):
+        seed = torch.randn_like(actual)
+        actual, expected = [
+            torch.autograd.grad((y.sin() * seed).sum(), x, create_graph=True)[0]
+            for y in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize("scalar_only", [False, True])
+def test_gate_compile(scalar_only, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn.nn import Gate
+
+    args = (
+        ("2x0e", [torch.nn.SiLU()], "", [], "")
+        if scalar_only
+        else ("", [], "2x0e", [torch.nn.Sigmoid()], "1o+2e")
+    )
+    module = eqx_o3.Gate(*args).cuda()
+    reference = Gate(*args).cuda()
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for count in (3, 7, 0):
+        x = torch.randn(
+            2, count, module.irreps_in.dim, device="cuda", requires_grad=True
+        )
+        actual, expected = compiled(x), reference(x)
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.square().sum(), x)[0],
+            torch.autograd.grad(expected.square().sum(), x)[0],
+            atol=1e-12,
+            rtol=1e-12,
+        )
+
+
+def test_gate_fallback(double_precision):
+    from e3nn.nn import Gate
+
+    for backend, act in (("torch", torch.nn.SiLU()), ("cuda", torch.nn.ReLU())):
+        args = ("2x0e", [act], "0e", [None], "1o")
+        module = eqx_o3.Gate(*args, backend=backend)
+        assert module.metadata is None
+        x = torch.randn(4, module.irreps_in.dim, requires_grad=True)
+        actual, expected = module(x), Gate(*args)(x)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.square().sum(), x)[0],
+            torch.autograd.grad(expected.square().sum(), x)[0],
+            atol=0,
+            rtol=0,
+        )
 
 
 @pytest.mark.parametrize(

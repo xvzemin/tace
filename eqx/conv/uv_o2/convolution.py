@@ -8,7 +8,7 @@ import torch
 from ...o2._layout import wigner_indices, wigner_orders
 from ..attention import graph_softmax
 from ..edge import evaluate
-from ..program import Program
+from ..program import Program, activate
 
 
 def frame_description(frame):
@@ -161,29 +161,6 @@ def linear(features, weight, bias, description):
                 value = value + bias[start : start + size]
         result.append(value.reshape(features.shape[0], dim * mul))
     return torch.cat(result, dim=-1)
-
-
-def activate(program, value, module):
-    if module is None:
-        return value
-    name = type(module).__name__
-    if name == "normalize2mom":
-        return program.scale(
-            activate(program, value, module.f), 1 if module._is_id else module.cst
-        )
-    if name == "ScaledActivation":
-        return program.scale(
-            activate(program, value, module.activation), module.scale_factor
-        )
-    operations = {
-        "SiLU": "silu",
-        "Sigmoid": "sigmoid",
-        "Tanh": "tanh",
-        "Identity": "identity",
-    }
-    if name not in operations:
-        raise NotImplementedError(f"Fused O(2) gate does not support {name}.")
-    return value if name == "Identity" else program.unary(operations[name], value)
 
 
 def gate_program(gate):

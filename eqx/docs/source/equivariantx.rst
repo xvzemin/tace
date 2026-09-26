@@ -54,7 +54,8 @@ contains the four general convolution interfaces: ``O3TensorProductConv``,
 and MACE. The MACE interface converts existing models for ASE and training.
 ``eqx.kernels`` supplies shared geometry, CUDA compilation, and execution.
 Supporting operators remain separate: ``eqx.o3`` provides element-dependent
-linear maps and ``eqx.ace`` provides atomic cluster expansions.
+linear maps and gated activations, and ``eqx.ace`` provides atomic cluster
+expansions.
 
 Quick start
 -----------

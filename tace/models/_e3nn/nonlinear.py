@@ -9,6 +9,8 @@ import torch
 from e3nn import o3
 from e3nn.nn import Gate
 
+from tace.utils.env import acceleration_enabled
+
 from ..linear import e3nnLinear
 from ..mlp import ACTIVATION
 
@@ -21,6 +23,11 @@ def _get_gate_layer(
     tensor_act: Union[str, None] = None,
     bias: bool = True,
 ):
+    gate_cls = Gate
+    if acceleration_enabled("eqx", kernel="linear"):
+        from eqx.o3 import Gate as EqxGate
+
+        gate_cls = EqxGate
     if gate_m0:
         if scalar_act is None:
             act_0e_name = "sigmoid"
@@ -39,7 +46,7 @@ def _get_gate_layer(
 
         irreps_gated = irreps_in
         irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_in)
-        nonlinearity = Gate(
+        nonlinearity = gate_cls(
             irreps_scalars=o3.Irreps(),
             act_scalars=[],
             irreps_gates=irreps_gates,
@@ -79,7 +86,7 @@ def _get_gate_layer(
             [(mul, ir) for mul, ir in irreps_in if ir.l > 0]
         )
         irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_gated)
-        nonlinearity = Gate(
+        nonlinearity = gate_cls(
             irreps_scalars=irreps_scalars,
             act_scalars=[
                 act_0e if irrep.is_scalar() else act_0o
