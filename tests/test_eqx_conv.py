@@ -16,6 +16,50 @@ from eqx.ace import TACE
 from eqx.models.tace.tece_oam_rra import BilinearACE
 
 
+@pytest.mark.parametrize(
+    "degrees",
+    [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],
+)
+def test_cg_generator_constraints(degrees, double_precision):
+    from eqx.conv.angular import generators
+
+    ell1, ell2, ell3 = degrees
+    cg = o3.wigner_3j(ell1, ell2, ell3)
+    for g1, g2, g3 in zip(*(generators(ell) for ell in degrees)):
+        left = torch.einsum("dk,abk->abd", g3, cg)
+        right = torch.einsum("qbd,qa->abd", cg, g1)
+        right += torch.einsum("aqd,qb->abd", cg, g2)
+        torch.testing.assert_close(left, right, atol=2e-13, rtol=2e-13)
+
+
+def test_contraction_source_reuses_polynomials():
+    from eqx.kernels.codegen import contraction_source
+
+    cache, lines = {}, []
+    value = contraction_source([(2.0, ("x", "y")), (3.0, ("z", "x"))], cache, lines)
+    count = len(lines)
+    assert (
+        contraction_source(
+            [(3.0, ("x", "z")), (1.0, ("y", "x")), (1.0, ("x", "y"))],
+            cache,
+            lines,
+        )
+        == value
+    )
+    assert (
+        contraction_source([(-3.0, ("z", "x")), (-2.0, ("y", "x"))], cache, lines)
+        == f"(-{value})"
+    )
+    assert len(lines) == count
+    assert (
+        contraction_source([(1.0, ("x", "y")), (-1.0, ("y", "x"))], cache, lines)
+        == "T(0)"
+    )
+    assert contraction_source([(1.0, ("x",))], cache, lines) == "x"
+    assert contraction_source([(2.0, ())], cache, lines) == "T(2)"
+    assert contraction_source([(1e-20, ("x",))], cache, lines) != "T(0)"
+
+
 @pytest.mark.parametrize("degree", range(6))
 def test_rotation_generators_match_wigner(degree, double_precision):
     from eqx.conv.o2_o3.geometry import generators
@@ -90,12 +134,13 @@ def test_generator_cuda_paths(degree, implementation, dtype):
         args = (
             f"3x{degree}e",
             "1o+2e",
-            f"3x{degree}o+3x{degree}e+3x{degree}e+3x{degree + 2}e",
+            f"3x{degree}o+3x{degree}e+3x{degree}e+3x{degree + 1}o+3x{degree + 2}e",
             [
                 (0, 0, 0, "uvu", True),
                 (0, 1, 1, "uvu", True),
                 (0, 1, 2, "uvu", False),
-                (0, 1, 3, "uvu", True),
+                (0, 0, 3, "uvu", True),
+                (0, 1, 4, "uvu", True),
             ],
         )
         options = dict(internal_weights=False, shared_weights=False)

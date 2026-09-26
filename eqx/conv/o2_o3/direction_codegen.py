@@ -2,8 +2,7 @@
 
 from functools import lru_cache
 
-from ...kernels.codegen import HEADER
-from ..angular import contraction_source
+from ...kernels.codegen import HEADER, contraction_source
 from .convolution import kernel_plan
 from .geometry import angular_coefficients
 

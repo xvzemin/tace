@@ -4,8 +4,8 @@ import math
 from collections import defaultdict
 from functools import lru_cache
 
+from ...kernels.codegen import contraction_source
 from ..angular import (
-    contraction_source,
     generator_action,
     generator_adjoint,
     generator_source,

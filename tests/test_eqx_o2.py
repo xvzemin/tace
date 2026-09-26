@@ -507,6 +507,35 @@ def test_o2_irreps_sort_and_serialization():
     )
 
 
+@pytest.mark.parametrize(
+    "inputs", [("0o", "1m"), ("1m", "0o"), ("1m", "1m"), ("2m", "5m"), ("16m", "12m")]
+)
+def test_o2_coupling_generators(inputs, double_precision):
+    from eqx.o2._clebsch_gordan import clebsch_gordan_product
+
+    ir1, ir2 = map(o2.Irrep, inputs)
+    x, y = torch.randn(ir1.dim, 3), torch.randn(ir2.dim, 3)
+
+    def matrices(ir):
+        if ir.m:
+            return ir.m * torch.tensor([[0.0, -1.0], [1.0, 0.0]]), torch.diag(
+                torch.tensor([1.0, -1.0])
+            )
+        return torch.zeros(1, 1), torch.tensor([[float(ir.p)]])
+
+    g1, f1 = matrices(ir1)
+    g2, f2 = matrices(ir2)
+    for ir in ir1 * ir2:
+        g3, f3 = matrices(ir)
+
+        def couple(a, b):
+            return clebsch_gordan_product(a, ir1, b, ir2, ir, elementwise=True)
+
+        value = couple(x, y)
+        torch.testing.assert_close(g3 @ value, couple(g1 @ x, y) + couple(x, g2 @ y))
+        torch.testing.assert_close(f3 @ value, couple(f1 @ x, f2 @ y))
+
+
 def test_o2_irrep_products_and_restriction():
     assert o2.Irrep("0o") * o2.Irrep("0o") == (o2.Irrep("0e"),)
     assert o2.Irrep("1m") * o2.Irrep("2m") == (

@@ -148,6 +148,9 @@ CUDA generates contractions for the requested degrees and preserves every
 instruction and weight. Compatible paths share scalar products and factored
 contractions. Cartesian harmonic derivatives collect equal multi-indices,
 rather than enumerating every ordering of derivative directions.
+Scalar expressions are shared across reordered monomials and overall sign
+changes. Only exact coefficient cancellations are removed; independent paths
+and their weights are retained.
 
 With direction inputs, harmonic degrees zero, one and two use direct sparse
 contractions, including paths between different feature degrees. Same-degree

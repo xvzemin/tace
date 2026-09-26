@@ -1,7 +1,6 @@
 """Generate sparse CG contractions with shared factors and local reductions."""
 
-from ...kernels.codegen import HEADER
-from ..angular import contraction_source
+from ...kernels.codegen import HEADER, contraction_source
 
 
 def angular_source(path, mapping, dimensions, shared, roles, cache, lines):

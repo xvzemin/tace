@@ -1,6 +1,7 @@
-"""CUDA source generation for frame geometry and degree contractions."""
+"""CUDA source generation for sparse contractions and frame geometry."""
 
 import math
+from collections import Counter, defaultdict
 from functools import lru_cache
 
 HEADER = r"""
@@ -12,6 +13,84 @@ __device__ __forceinline__ T warp_sum(T value) {
     return value;
 }
 """
+
+
+def contraction_source(terms, cache, lines):
+    """Factor a scalar polynomial and reuse equal or opposite expressions.
+
+    Parameters
+    ----------
+    terms : iterable of (float, tuple of str)
+        Coefficients and scalar operands of each monomial.
+    cache : dict
+        Expressions already emitted in the current scope.
+    lines : list of str
+        Generated statements, using ``T`` as the scalar type.
+    """
+    coefficients = defaultdict(list)
+    for coefficient, factors in terms:
+        coefficients[tuple(sorted(factors))].append(coefficient)
+    terms = tuple(
+        (coefficient, factors)
+        for factors, values in coefficients.items()
+        if (coefficient := math.fsum(values)) != 0
+    )
+    if not terms:
+        return "T(0)"
+    # Canonicalize the cache key while preserving the first-use term order.
+    canonical = sorted(terms, key=lambda term: term[1])
+    sign = -1 if canonical[0][0] < 0 else 1
+    key = "contraction", tuple((sign * c, f) for c, f in canonical)
+    if key in cache:
+        value = cache[key]
+        return value if sign == 1 else f"(-{value})"
+    if len(terms) == 1 and not terms[0][1]:
+        return f"T({terms[0][0]:.17g})"
+    if len(terms) == 1 and terms[0][0] == 1 and len(terms[0][1]) == 1:
+        return terms[0][1][0]
+    counts = Counter(
+        factor for _, factors in terms for factor in dict.fromkeys(factors)
+    )
+    factor, count = counts.most_common(1)[0] if counts else (None, 0)
+    if count > 1:
+        selected, remaining = [], []
+        for coefficient, factors in terms:
+            if factor in factors:
+                factors = list(factors)
+                factors.remove(factor)
+                selected.append((coefficient, tuple(factors)))
+            else:
+                remaining.append((coefficient, factors))
+        inner = contraction_source(selected, cache, lines)
+        rest = contraction_source(remaining, cache, lines)
+        expression = f"fma({factor}, {inner}, {rest})"
+    else:
+        products = []
+        for coefficient, factors in terms:
+            value = "T(1)"
+            for operand in factors:
+                if value == "T(1)":
+                    value = operand
+                else:
+                    product = "contraction_product", *sorted((value, operand))
+                    if product not in cache:
+                        name = f"v{len(cache)}"
+                        lines.append(f"const T {name} = {value} * {operand};")
+                        cache[product] = name
+                    value = cache[product]
+            products.append((coefficient, value))
+        name = f"v{len(cache)}"
+        cache[key] = name if sign == 1 else f"(-{name})"
+        lines.append(f"T {name} = 0;")
+        lines.extend(
+            f"{name} = fma(T({coefficient:.17g}), {value}, {name});"
+            for coefficient, value in products
+        )
+        return name
+    name = f"v{len(cache)}"
+    cache[key] = name if sign == 1 else f"(-{name})"
+    lines.append(f"const T {name} = {expression};")
+    return name
 
 
 @lru_cache(maxsize=128)

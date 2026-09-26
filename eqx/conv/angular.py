@@ -1,11 +1,12 @@
 """Fixed generator contractions in the real spherical-harmonic basis."""
 
 import math
-from collections import Counter
 from functools import lru_cache
 
 import torch
 from e3nn import o3
+
+from ..kernels.codegen import contraction_source
 
 
 @lru_cache(maxsize=64)
@@ -108,56 +109,3 @@ def generator_adjoint(degree, features, cotangent, cache, lines):
         )
         for a in range(3)
     )
-
-
-def contraction_source(terms, cache, lines):
-    """Factor shared operands in a sparse multilinear contraction."""
-    terms = tuple(
-        (coefficient, tuple(sorted(factors))) for coefficient, factors in terms
-    )
-    key = "contraction", terms
-    if key in cache:
-        return cache[key]
-    counts = Counter(
-        factor for _, factors in terms for factor in dict.fromkeys(factors)
-    )
-    factor, count = counts.most_common(1)[0] if counts else (None, 0)
-    if count > 1:
-        selected, remaining = [], []
-        for coefficient, factors in terms:
-            if factor in factors:
-                factors = list(factors)
-                factors.remove(factor)
-                selected.append((coefficient, tuple(factors)))
-            else:
-                remaining.append((coefficient, factors))
-        inner = contraction_source(selected, cache, lines)
-        rest = contraction_source(remaining, cache, lines) if remaining else "T(0)"
-        expression = f"fma({factor}, {inner}, {rest})"
-    else:
-        products = []
-        for coefficient, factors in terms:
-            value = "T(1)"
-            for operand in factors:
-                if value == "T(1)":
-                    value = operand
-                else:
-                    product = "angular_product", *sorted((value, operand))
-                    if product not in cache:
-                        name = f"v{len(cache)}"
-                        lines.append(f"const T {name} = {value} * {operand};")
-                        cache[product] = name
-                    value = cache[product]
-            products.append((coefficient, value))
-        name = f"v{len(cache)}"
-        cache[key] = name
-        lines.append(f"T {name} = 0;")
-        lines.extend(
-            f"{name} = fma(T({coefficient:.17g}), {value}, {name});"
-            for coefficient, value in products
-        )
-        return name
-    name = f"v{len(cache)}"
-    cache[key] = name
-    lines.append(f"const T {name} = {expression};")
-    return name
