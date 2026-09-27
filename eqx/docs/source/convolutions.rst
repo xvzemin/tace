@@ -3,60 +3,62 @@
 Fused O(3)/O(2) Convolutions
 ============================
 
-EQX separates the mathematical operator from its execution backend. CGTP
-convolutions preserve the supplied instructions, path normalization, weight
-ordering, and output multiplicities. Repeated output irreps are not merged
-unless the supplied instructions already sum into the same output entry.
-Native uu/uv convolutions instead use independently parameterized local O(2)
-maps; they are not constrained to the CGTP parameterization.
+EQX provides four convolution interfaces. The two CGTP forms retain the same
+instructions, independent path weights, and normalization. Uu and Uv instead
+parameterize native O(2) operations.
 
-CGTP equivalence refers to the conventions of the installed e3nn version.
-Releases can differ in the overall signs of CG tensors. EQX reads the installed
-coefficients and fixes rotation-generator signs independently; API compatibility
-does not imply that checkpoints are interchangeable across coefficient conventions.
+|eqx-convolutions|
 
 Choosing an operator
 --------------------
 
-.. list-table:: Convolution interfaces
+.. list-table::
    :header-rows: 1
-   :widths: 30 40 30
+   :widths: 34 38 28
 
    * - Interface
-     - Operation
+     - Input / operation
      - Backend
    * - ``O3TensorProductConv``
-     - Sparse O(3) CGTP with ``uvu`` paths
-     - PyTorch or CUDA
+     - O(3) features and arbitrary edge irreps; ``uvu`` CGTP
+     - PyTorch / CUDA
    * - ``O2O3TensorProductConv``
-     - Harmonic-edge O(3) CGTP in aligned frames
-     - PyTorch (``uvu``, ``uvw``) or CUDA (``uvu``)
+     - O(3) features and spherical-harmonic edges; aligned CGTP
+     - PyTorch / CUDA
    * - ``UuO2TensorProductConv``
-     - Externally weighted channelwise O(2) linear map
-     - PyTorch or CUDA
+     - Source features and one externally weighted ``UuLinear``
+     - PyTorch / CUDA
    * - ``UvO2TensorProductConv``
-     - O(2) Linear--Gate--Linear, optional edge features and attention
+     - Linear--Gate--Linear; optional edge features and attention
      - CUDA
 
-The first three default to ``backend="cuda"`` and use their PyTorch reference
-on CPU. Explicit ``backend="torch"`` also permits the reference on GPU.
-``UvO2TensorProductConv`` is a CUDA interface; use the constituent
-``LocalFrame``, ``Linear``, and ``Gate`` modules for native PyTorch execution.
+Convolution features use flattened ``ir_mul`` storage. The first three
+interfaces default to CUDA on GPU and use PyTorch on CPU. Set
+``backend="torch"`` to select their reference implementation on either device.
+For a native Uv reference, compose ``LocalFrame``, ``Linear``, and ``Gate``.
 
-All convolution features use flattened ``ir_mul`` layout. The second input
-to ``O2O3TensorProductConv`` is restricted to natural-parity, time-even
-spherical harmonics with one channel per entry. Their order-zero values in
-the aligned frame are included in the coupling coefficients. General edge
-representations should instead use ``O3TensorProductConv`` or an appropriate
-native O(2) convolution.
+CUDA CGTPs support ``uvu`` instructions and float32/float64.
+The aligned PyTorch CGTP also supports ``uvw``. Its harmonic input must have
+natural spatial parity, even time parity, and one channel per degree.
+This equivalence does not extend to arbitrary second-input tensors.
 
-An equivalent CGTP example
---------------------------
+Equivalent CGTPs
+----------------
 
-This example evaluates the same weighted paths with direct and aligned-frame
-contractions. It uses the reference backend so it runs without a CUDA toolkit.
-Construct coefficients in the intended dtype, rather than constructing in
-float32 and only later promoting the module.
+For source node :math:`j` and destination node :math:`i`, the two CGTP forms
+evaluate the same sum:
+
+.. math::
+
+   h'_i=\sum_j \operatorname{TP}(h_j,a_{ij};W_{ij}),
+   \qquad W_{ij}=z_{ij}W.
+
+Here :math:`z_{ij}` is the radial input and :math:`W` is its final projection.
+Paths remain independent unless the supplied instructions explicitly sum them.
+
+The following example runs without a CUDA toolkit. Construct coefficients
+in the desired dtype; promoting float32 coefficients later does not recover
+float64 accuracy.
 
 .. code-block:: python
 
@@ -95,199 +97,129 @@ float32 and only later promoting the module.
    torch.testing.assert_close(output_o2, output_o3, atol=1e-10, rtol=1e-10)
    output_o2.square().sum().backward()
 
-For fused execution, place operands and modules on CUDA and use
-``backend="cuda"``. Supply a projection of shape ``(0, weight_numel)`` if
-``radial`` already contains the path weights. Harmonic amplitudes remain
-separate differentiable operands, for example for a distance cutoff.
+Use ``backend="cuda"`` with CUDA operands for fusion. If radial inputs already
+contain path weights, supply an empty projection of shape
+``(0, weight_numel)``. Harmonic amplitudes remain separate differentiable
+inputs, for example for a distance cutoff.
 
-Fusion and memory
+Equivalence uses the installed e3nn coefficient conventions. Different releases
+can use different CG signs; do not assume checkpoints share those conventions.
+
+Fusion boundaries
 -----------------
 
-The O3 and O2-O3 kernels fuse gathering, angular coupling, and target
-aggregation. Aligned contractions additionally fuse feature rotations and
-reuse rotations across compatible paths. Uu convolutions use the same aligned
-contraction engine with the coefficients of ``UuLinear``. These kernels do not
-materialize full edge messages. Final radial projections use bounded matrix
-workspaces; projected weights are recomputed instead of saved for backward.
+.. list-table::
+   :header-rows: 1
+   :widths: 23 42 35
 
-Uv convolutions preserve the native Linear and Gate instruction layouts,
-including biases, normalized activations, and time-odd gates. CUDA fuses
-rotations, basis changes, radial multiplication, gate operations, attention
-scores, and inverse rotation with aggregation. Dense channel maps use batched
-GEMM. Radial weights and local GEMM operands remain explicit; global edge
-messages are not allocated.
+   * - Operation
+     - Fused work
+     - Intermediate storage
+   * - O3 / O2--O3 CGTP
+     - Gather, angular contraction, radial weighting, scatter;
+       aligned CGTP also fuses feature rotations
+     - No full edge messages; bounded radial-projection workspaces
+   * - Uu O(2)
+     - Gather, rotations, channelwise weighting, scatter
+     - No full edge messages; bounded radial-projection workspaces
+   * - Uv O(2)
+     - Rotations, radial multiplication, gate, optional attention, scatter
+     - Radial weights and local GEMM operands remain explicit
+   * - TECE-OAM-RRA
+     - Tiled matrix products and CUDA expressions; two-pass attention
+     - Attention scores span edges; local features are recomputed per tile
 
-Derivatives and geometry
-------------------------
+Final radial projections are recomputed during backward where needed.
+Preceding radial-MLP layers and node-level ``linear_down`` remain outside
+the CGTP kernels. Shared subexpressions do not merge learned path weights.
 
-Transposed contraction programs implement input and parameter gradients and
-can be differentiated recursively. This supports force training and higher
-derivatives. Operators provide fake implementations and registered autograd
-rules for ``torch.compile``. Floating-point reductions may use atomic additions
-and are not generally bitwise deterministic.
+Derivatives and compilation
+---------------------------
 
-``O3TensorProductConv`` can take ``vectors`` instead of explicit harmonic edge
-attributes. Fixed Cartesian polynomials then provide direct vector gradients
-without storing harmonic cotangents. ``normalization`` selects ``component``,
-``integral``, or ``norm`` harmonics; ``normalize=False`` selects regular solid
-harmonics.
+.. code-block:: text
 
-``O2O3TensorProductConv`` accepts ``vectors`` together with matching packed
-alignment matrices. In this mode, matrices are treated as cached values and
-direction derivatives use rotation generators. Construct them with
-``eqx.kernels.wigner_D(frame, vectors.detach())``; their degrees must match the
-frame and their directions must match ``vectors``. Omitting ``vectors``
-instead differentiates the matrix operands themselves. CUDA Wigner
-construction uses direct quaternion polynomials by default, with a recursive
-method available as an alternative.
+   energy forward
+        |
+        +--> geometry derivatives --> forces / stress
+        |                               |
+        |                               +--> force-loss parameter gradients
+        |
+        +--> parameter gradients --> energy-loss training
 
-Fixed angular contractions
---------------------------
+Transposed contraction programs support recursive derivatives, including the
+mixed second derivatives required by force training. Registered operators
+provide fake implementations and autograd rules for ``torch.compile``.
+Atomic reductions can change floating-point summation order.
 
-CUDA generates contractions for the requested degrees and preserves every
-instruction and weight. Compatible paths share scalar products and factored
-contractions. Cartesian harmonic derivatives collect equal multi-indices,
-rather than enumerating every ordering of derivative directions.
-Scalar expressions are shared across reordered monomials and overall sign
-changes. Only exact coefficient cancellations are removed; independent paths
-and their weights are retained.
+Two geometry interfaces avoid differentiating stored angular intermediates:
 
-With direction inputs, harmonic degrees zero, one and two use direct sparse
-contractions, including paths between different feature degrees. Same-degree
-dipole and quadrupole maps additionally use finite generator polynomials.
-The generators are divided by ``sqrt(l * (l + 1))`` before multiplication;
-no dense generator powers are stored. Higher harmonic degrees retain the
-aligned contraction. The specialization does not limit the feature degree.
+* ``O3TensorProductConv.forward(..., vectors=...)`` differentiates fixed harmonic
+  polynomials. ``normalization`` selects ``component``, ``integral``, or
+  ``norm``; ``normalize=False`` selects regular solid harmonics.
+* ``O2O3TensorProductConv.forward(..., vectors=...)`` uses analytic angular derivatives
+  with matching cached Wigner matrices. Construct them with
+  ``eqx.kernels.wigner_D(frame, vectors.detach())``. If vectors are omitted,
+  gradients are taken with respect to the matrix operands instead.
 
-Angular derivatives apply ordered sparse generators in the harmonic space.
-Vector adjoints reuse the forward suffix and transposed prefix of this product
-instead of evaluating three separate chains. Harmonic cotangents are shared
-with amplitude and weight adjoints. Neither Jacobians nor Hessians are stored
-on edges. Directions are read from the degree-one Wigner matrix without a
-separate copy.
+CUDA kernels compile lazily and are cached. Warm up the forward and derivatives
+used by the workload before measuring speed. ``EQX_USE_CUDA_GRAPH=1`` enables
+optional replay for CGTP and ACE; it is off by default and can increase memory.
+Custom-operator registrations and the CUDA runtime remain required after
+model export.
 
-Angular derivative coefficients are constructed in float64 by differentiating
-the harmonic factor before coupling it to features. The derivative vector
-indices are differentiated as well. This avoids subtracting input- and
-output-generator terms whose magnitudes grow with the feature degree.
+Supporting operators
+--------------------
 
-Shared and specialized kernels
-------------------------------
+.. list-table::
+   :header-rows: 1
+   :widths: 42 58
 
-``eqx.conv.graph_softmax`` normalizes scores over incoming edges. Scores have
-shape ``(edges, heads)``; optional nonnegative weights have shape
-``(edges, 1)`` or ``(edges, heads)``. PyTorch handles CPU inputs and CUDA uses
-segmented reductions, including derivatives of the weights.
+   * - Module
+     - Role
+   * - ``eqx.ace.TACE``
+     - Atomic cluster expansion, separate from convolution
+   * - ``eqx.o3``
+     - Element-dependent Linear, MoE Linear, and Gate in ``mul_ir`` layout
+   * - ``eqx.conv.graph_softmax``
+     - Destination-wise normalization of ``(edges, heads)`` scores
+   * - ``eqx.models.tace.tece_oam_rra``
+     - TECE-OAM-RRA interaction and bilinear ACE fusion
+   * - ``eqx.models.mace``
+     - Conversion of existing MACE models
 
-``StreamingGraphAttention`` additionally evaluates score/value callbacks in
-tiles. Callback plans belong to the live Python process and are not portable
-standalone AOTI artifacts. Model-specific fusion in
-``eqx.models.tace.tece_oam_rra`` instead uses serialized expressions and
-explicit parameter operands, without a live model callback. It supplies
-TECE-OAM-RRA interaction kernels and ``BilinearACE``; TACE owns the reference
-model. MACE adapters are separate in ``eqx.models.mace``.
-
-TECE-OAM-RRA evaluates dense contractions with tiled matrix products and fuses
-intervening expressions into CUDA kernels. Only attention scores span all
-edges; local features and radial weights are recomputed within each tile.
-Recursive adjoints use the same execution plan and reduce shared parameter
-gradients without materializing per-edge outer products.
-
-``eqx.ace.TACE`` remains an independent atomic cluster expansion operator.
-``eqx.o3.ElementLinear`` and ``MoEElementLinear`` read external element weights
-directly instead of allocating one weight matrix per node. Unlike the
-convolution interfaces, these supporting operators use ``mul_ir`` features.
-``eqx.o3.Gate`` fuses normalized SiLU, sigmoid, tanh and identity activations
-with scalar multiplication. Its input ordering and normalization follow
-``e3nn.nn.Gate``, and its recursive derivatives support force training.
-Other activations and CPU inputs retain the torch implementation.
+TACE owns its model definition and checkpoint migration. TECE-OAM-RRA fusion
+stores attention scores, recomputes bounded edge tiles, and reduces shared
+parameter gradients without per-edge weight matrices.
+``StreamingGraphAttention`` is also available for tiled callbacks; those live
+Python callbacks are not standalone AOTI artifacts.
 
 MACE models
 -----------
 
-``eqx.models.mace.convert_mace_to_eqx`` converts an existing MACE model
-without changing MACE source code. MACE is an optional dependency, imported
-only when conversion is requested. Install it separately or use
-``pip install './tace/eqx[mace,cuda]'`` from the parent of the cloned repository.
-The adapter targets MACE >= 0.3.17 and supports the six spatial RealAgnostic
-interaction variants listed in the API reference. Magnetic interactions and
-all-even, SO(3)-only edge harmonics are not supported.
+Install ``'./tace/eqx[mace,cuda]'`` from the parent of the cloned repository.
+The adapter supports spatial RealAgnostic MACE interactions, not magnetic
+models or all-even SO(3)-only harmonic inputs.
 
-Conversion retains the original interaction methods, node linear maps,
-product bases and readouts. The last radial projection is moved into
-``O2O3TensorProductConv``; its bias, when present, is represented by a constant
-radial channel. The unchanged interaction applies the cutoff before the
-fused projection. All tensor-product paths and learned parameters are retained.
-Feature layouts are converted between the active MACE backend and EQX.
-
-ASE inference
-~~~~~~~~~~~~~
+Given an existing model:
 
 .. code-block:: python
 
-   import torch
    from eqx.models.mace import convert_mace_to_eqx
    from mace.calculators import MACECalculator
 
-   device = "cuda" if torch.cuda.is_available() else "cpu"
-   model = torch.load("mace.model", map_location=device, weights_only=False)
-   model = convert_mace_to_eqx(model.float())
-   calculator = MACECalculator(
-       models=model, device=device, default_dtype="float32"
-   )
-   atoms.calc = calculator
-   energy = atoms.get_potential_energy()
-   forces = atoms.get_forces()
-   stress = atoms.get_stress()
-
-Only load checkpoints from trusted sources. Conversion returns a copy by
-default; ``inplace=True`` reuses the input model where possible. Existing
-cuEquivariance operators are retained. ``enable_cueq=True`` first converts the
-remaining operators with MACE's own converter and requires its optional
-dependencies. Do not request a second backend conversion in the calculator.
-
-Training and checkpoints
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The returned model keeps the original MACE forward interface. Convert after
-loading foundation weights and before creating an optimizer or distributed
-wrapper. A force loss requires ``training=True`` to retain the derivative
-graph:
-
-.. code-block:: python
-
    model = convert_mace_to_eqx(model)
-   model.train()
-   model.requires_grad_(True)  # Omit for intentionally frozen parameters.
-   optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-   optimizer.zero_grad(set_to_none=True)
-   prediction = model(batch.to_dict(), training=True, compute_stress=True)
-   loss = loss_fn(pred=prediction, ref=batch)
-   loss.backward()
-   optimizer.step()
+   calculator = MACECalculator(
+       models=model, device="cuda", default_dtype="float32"
+   )
 
-Use a separate model copy for ASE: its calculator disables parameter gradients
-for inference. The converter is a Python interface, not an additional MACE
-training CLI option. Select ``backend="torch"`` to use reference contractions
-on either device; the default uses fused CUDA kernels on CUDA and PyTorch on CPU.
+Conversion replaces interaction tensor products and their final radial
+projections, retaining the other model operations and all coupling paths.
+``enable_cueq=True`` converts the remaining supported operations through MACE;
+do not request a second conversion in the calculator.
 
-Moved radial parameters have new state-dict names. Load original MACE weights
-before conversion. A converted checkpoint can be saved as a module with
-``torch.save(model, path)`` and loaded in an environment containing MACE and
-EQX. Alternatively, load its state dict into the same architecture converted
-with this interface. Reapplying the converter does not wrap operators again.
+For training, convert before constructing the optimizer and call the model
+with ``training=True`` for force losses. Use a separate model instance for ASE,
+whose calculator disables parameter gradients. Load original checkpoints before
+conversion; converted state dictionaries have different parameter names.
 
-Compilation
------------
-
-Install the optional CUDA dependencies and a CUDA toolkit as described in
-:ref:`equivariantx-tutorials`. The model-independent C++ launcher is built
-lazily. NVRTC compiles generated CUDA programs on first use and caches binaries
-by their static specification. Compilation is not performed at installation
-or ordinary import. Forward and derivative programs can require separate
-warmup calls.
-
-``EQX_USE_CUDA_GRAPH=1`` enables optional CUDA Graph replay for CGTP and ACE
-contractions. It is disabled by default. Capture needs warmup and additional
-static buffers, so measure latency and memory for the actual workload. An
-outer CUDA Graph capture bypasses this internal replay mechanism.
+See :ref:`equivariantx-api` for signatures and supported interaction classes.

@@ -205,7 +205,7 @@ class UvO2TensorProductConv(torch.nn.Module):
     linear_up, linear_down : Linear
         Channel maps before and after the gate. Parameters remain owned by
         the caller and are supplied to forward, preserving checkpoint layouts.
-    gate : Gate
+    gate : eqx.o2.Gate
         Normalized scalar activations and gates, including odd scalar gates.
     frame_edge : LocalFrame, optional
         Additional edge representation, e.g. magnetic tensor-product features.

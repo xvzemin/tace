@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 364" role="img" aria-labelledby="title desc">
+  <title id="title">Recommended TACE acceleration workflows</title>
+  <desc id="desc">Enable TACE_USE_EQX before model construction. For training also enable TACE_USE_COMPILE. For inference export with the aoti backend using tace-export-eval for ASE or TorchSim, or tace-export-lammps for LAMMPS.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#526276"/></marker></defs>
+  <rect width="880" height="364" rx="14" fill="#fff"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
+    <text x="440" y="32" text-anchor="middle" font-size="23" font-weight="600">Recommended GPU acceleration</text>
+    <rect x="235" y="55" width="410" height="62" rx="9" fill="#e4efeb" stroke="#8595a6"/>
+    <text x="440" y="84" text-anchor="middle" font-size="17" font-weight="600">TACE_USE_EQX=1</text>
+    <text x="440" y="108" text-anchor="middle" font-size="14" font-weight="400">Fused operators in the model</text>
+    <path d="M440 117V139H222V157" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M440 139H658V157" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="26" y="162" width="392" height="72" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="222" y="196" text-anchor="middle" font-size="17" font-weight="600">Training</text>
+    <text x="222" y="220" text-anchor="middle" font-size="14" font-weight="400">TACE_USE_COMPILE=1</text>
+    <rect x="462" y="162" width="392" height="72" rx="9" fill="#f9eadc" stroke="#8595a6"/>
+    <text x="658" y="196" text-anchor="middle" font-size="17" font-weight="600">Inference</text>
+    <text x="658" y="220" text-anchor="middle" font-size="14" font-weight="400">Export with --backend aoti</text>
+    <path d="M222 234L222 268" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M658 234L658 268" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="26" y="273" width="392" height="56" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="222" y="299" text-anchor="middle" font-size="17" font-weight="600">tace-train</text>
+    <text x="222" y="323" text-anchor="middle" font-size="14" font-weight="400">Compiled forward + force-loss derivatives</text>
+    <rect x="462" y="273" width="392" height="56" rx="9" fill="#f9eadc" stroke="#8595a6"/>
+    <text x="658" y="299" text-anchor="middle" font-size="17" font-weight="600">tace-export-eval / tace-export-lammps</text>
+    <text x="658" y="323" text-anchor="middle" font-size="14" font-weight="400">AOTI package → ASE / TorchSim / LAMMPS</text>
+    <text x="440" y="350" text-anchor="middle" font-size="14" font-weight="400">Select backend and precision before compilation; benchmark after warmup.</text>
+  </g>
+</svg>

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 364" role="img" aria-labelledby="title desc">
+  <title id="title">O(3) to local O(2) frame conversion</title>
+  <desc id="desc">Convert each O(3) irrep entry to ir_mul storage at nodes, gather edges, rotate to a local O(2) frame, apply operators, rotate back and scatter. Edge vectors provide shared Wigner matrices.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#526276"/></marker></defs>
+  <rect width="900" height="364" rx="14" fill="#fff"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
+    <text x="26" y="34" text-anchor="start" font-size="22" font-weight="600">Frame conversion and a local O(2) update</text>
+    <rect x="24" y="64" width="252" height="68" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="150" y="96" text-anchor="middle" font-size="17" font-weight="600">O(3) node features</text>
+    <text x="150" y="120" text-anchor="middle" font-size="14" font-weight="400">Each entry: (..., mul, ir.dim)</text>
+    <path d="M276 98L318 98" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="322" y="64" width="252" height="68" rx="9" fill="#f9eadc" stroke="#8595a6"/>
+    <text x="448" y="96" text-anchor="middle" font-size="17" font-weight="600">Transpose within each entry</text>
+    <text x="448" y="120" text-anchor="middle" font-size="14" font-weight="400">(..., ir.dim, mul) → flatten</text>
+    <path d="M574 98L616 98" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="620" y="64" width="252" height="68" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="746" y="96" text-anchor="middle" font-size="17" font-weight="600">Gather edge inputs</text>
+    <text x="746" y="120" text-anchor="middle" font-size="14" font-weight="400">Source / target node indices</text>
+    <path d="M746 132V170H140V196" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="24" y="200" width="228" height="72" rx="9" fill="#e4efeb" stroke="#8595a6"/>
+    <text x="138" y="234" text-anchor="middle" font-size="17" font-weight="600">LocalFrame.to_local</text>
+    <text x="138" y="258" text-anchor="middle" font-size="14" font-weight="400">Rotate + basis change</text>
+    <path d="M252 236L318 236" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="322" y="200" width="252" height="72" rx="9" fill="#eee7f4" stroke="#8595a6"/>
+    <text x="448" y="234" text-anchor="middle" font-size="17" font-weight="600">O(2) operators</text>
+    <text x="448" y="258" text-anchor="middle" font-size="14" font-weight="400">Linear · Gate · TensorProduct</text>
+    <path d="M574 236L616 236" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="620" y="200" width="252" height="72" rx="9" fill="#e4efeb" stroke="#8595a6"/>
+    <text x="746" y="234" text-anchor="middle" font-size="17" font-weight="600">LocalFrame.to_global</text>
+    <text x="746" y="258" text-anchor="middle" font-size="14" font-weight="400">Undo basis change + rotate</text>
+    <rect x="24" y="298" width="340" height="44" rx="9" fill="#f9eadc" stroke="#8595a6"/>
+    <text x="194" y="326" text-anchor="middle" font-size="17" font-weight="600">Edge vectors → WignerD</text>
+    <path d="M138 298V277" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M364 320H596V256H616" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M746 272L746 300" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="620" y="304" width="252" height="44" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="746" y="332" text-anchor="middle" font-size="17" font-weight="600">Scatter to O(3) nodes</text>
+  </g>
+</svg>

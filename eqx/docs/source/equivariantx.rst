@@ -3,307 +3,155 @@
 Tutorials
 =========
 
-EquivariantX (``eqx``) provides PyTorch-native :math:`O(2)` operations,
-e3nn-compatible global :math:`O(3)` to local :math:`O(2)` frame conversions,
-and CUDA-fused :math:`O(3)`/:math:`O(2)` graph convolutions. O(2)
-representations can also carry time-reversal parity.
+EquivariantX (``eqx``) provides native :math:`O(2)` operators, e3nn-compatible
+:math:`O(3)`/:math:`O(2)` frame conversion, and fused CUDA convolutions.
+Time-reversal parity is optional.
+
+|eqx-operators|
 
 Installation
 ------------
 
-EquivariantX currently supports installation from source only and does not
-require TACE. A standalone package release is planned once the library is
-fully mature.
+Install from source without installing TACE:
 
 .. code-block:: bash
 
    git clone https://github.com/xvzemin/tace.git
    pip install ./tace/eqx
 
-The native operators use PyTorch >= 2.4 on CPU and CUDA. Installation includes
-``e3nn>=0.4.4`` for representation and coupling conventions.
-PyG and external CUDA extensions are not required.
-
-With e3nn 0.4.x and recent PyTorch, import ``eqx`` before ``e3nn.o3``. The
-older release loads packaged CG constants containing Python ``slice`` objects;
-EQX allows these only within the import context, leaving ``torch.load`` and
-its defaults unchanged. The available angular degrees depend on the installed
-e3nn coefficient tables. Global time-odd irreps require the time-reversal
-extension; ordinary spatial operations work with upstream e3nn.
-
-Install the optional generated CUDA convolution backend with:
+Native operations require PyTorch >= 2.4 and e3nn >= 0.4.4. They run on CPU
+and GPU without PyG or custom CUDA extensions. For the fused backend, install
+the build dependencies and provide a CUDA toolkit:
 
 .. code-block:: bash
 
    pip install './tace/eqx[cuda]'
 
-A CUDA toolkit is required for GPU execution; set ``CUDA_HOME`` if needed.
-This requirement applies to fused kernels, not native PyTorch execution on
-GPU. The C++ launcher and NVRTC kernels compile lazily and are cached.
-Installing or importing EQX does not compile an extension. See
-:ref:`equivariantx-convolutions` for the backends supported by each convolution.
+Set ``CUDA_HOME`` if the toolkit is not detected. Fused kernels compile on first
+use and are cached; installation does not compile them. A standalone package
+release is planned.
 
-Package organization
---------------------
+With e3nn 0.4.x, import ``eqx`` before ``e3nn.o3``. Global time-odd irreps
+require the time-reversal e3nn extension.
 
-``eqx.o2`` contains the native operators and frame conversions. ``eqx.conv``
-contains the four general convolution interfaces: ``O3TensorProductConv``,
-``O2O3TensorProductConv``, ``UuO2TensorProductConv``, and
-``UvO2TensorProductConv``. Model-specific operators and adapters live in
-``eqx.models.tace`` and ``eqx.models.mace``, respectively for TACE
-and MACE. The MACE interface converts existing models for ASE and training.
-``eqx.kernels`` supplies shared geometry, CUDA compilation, and execution.
-Supporting operators remain separate: ``eqx.o3`` provides element-dependent
-linear maps and gated activations, and ``eqx.ace`` provides atomic cluster
-expansions.
+Representations and layouts
+---------------------------
 
-Quick start
------------
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Irrep
+     - Dimension
+     - Transformation
+   * - ``0ee``, ``0eo``
+     - 1
+     - Reflection-even scalar; final letter gives time parity.
+   * - ``0oe``, ``0oo``
+     - 1
+     - Reflection-odd scalar; final letter gives time parity.
+   * - ``1me``, ``1mo``, ...
+     - 2
+     - Positive-order real irrep; final letter gives time parity.
+
+``0e``, ``0o``, and ``1m`` abbreviate time-even irreps. Iteration over
+``o2.Irreps`` yields ``(ir, mul)``. ``sort()``, ``simplify()``, and ``regroup()``
+change metadata, not feature tensors.
+
+Every feature tensor has shape ``(..., irreps.dim)``. Within each entry,
+EQX stores ``(..., ir.dim, mul)`` before flattening: the ``ir_mul`` layout.
+e3nn stores ``(..., mul, ir.dim)`` before flattening. Transpose within each
+entry when crossing this boundary; a reshape alone does not convert layouts.
+
+Native operators
+----------------
+
+``Linear`` mixes channels of identical irreps. Only the invariant scalar
+``0ee`` can receive a bias.
 
 .. code-block:: python
 
    import torch
-
    from eqx import o2
 
-   irreps = o2.Irreps("8x0ee + 4x0oe + 6x1me + 3x2me")
-   linear = o2.Linear(irreps, "4x0ee + 2x1me")
-   features = irreps.randn(32, -1)
+   irreps = o2.Irreps("4x0e + 2x0o + 3x1m")
+   linear = o2.Linear(irreps, "2x0e + 2x1m", biases=True)
+   features = irreps.randn(16, -1)
    output = linear(features)
-   assert output.shape == (32, linear.irreps_out.dim)
+   assert output.shape == (16, linear.irreps_out.dim)
 
-Tensor layout
--------------
-
-The :mod:`eqx.o2` operators use one flattened feature axis:
-
-.. math::
-
-   (\ldots,\ D_{\mathrm{irreps}}).
-
-Inside every ``(ir, mul)`` entry, values are ordered as ``ir_mul``. The entry
-can therefore be viewed directly as
-
-.. math::
-
-   (\ldots,\ d_{\mathrm{irrep}},\ \mathrm{mul}).
-
-Linear, activation, gate, tensor-product, and local-frame modules use this
-flattened ``ir_mul`` representation. Circular harmonics produce the same
-layout. Asymmetric contraction accepts a sequence of independent flattened
-inputs, one for each correlation order. Inputs, internal parameters, and
-external weights use real floating-point dtypes unless an API states
-otherwise.
-
-Native O(2) operations
-----------------------
-
-Operator arguments use ``irreps_in``, ``irreps_out``, ``instructions``,
-``internal_weights``, and ``shared_weights``. Tensor products distinguish
-``irreps_in1`` and ``irreps_in2``. ``weight_numel`` gives the size of the flat
-weight axis; ``weight_views()`` exposes individual instruction weights.
-Feature tensors retain EQX's ``ir_mul`` layout throughout.
-
-Representations
-~~~~~~~~~~~~~~~
-
-The real irreps of :math:`O(2)\times\mathbb{Z}_2^T` carry a spatial
-reflection parity and an independent time-reversal parity:
-
-``0ee``, ``0eo``
-   One-dimensional scalars even under reflection. The final letter is the
-   time parity.
-
-``0oe``, ``0oo``
-   One-dimensional pseudoscalars odd under reflection.
-
-``1me``, ``1mo``, ``2me``, ``2mo``, ...
-   Two-dimensional real irreps. The components are stored as the cosine
-   and sine pair for positive order :math:`m`. ``m`` denotes the spatial
-   representation and the final letter denotes time parity.
-
-The names ``0e``, ``0o``, ``1m``, and ``2m`` omit the even time parity.
-
-``Irreps.sort()`` returns ``(irreps, p, inv)``: the sorted representation,
-the original-to-sorted entry permutation, and its inverse. Entries are sorted
-by order, reflection parity, and time parity, with even parity first.
-``simplify()`` merges adjacent identical entries; ``regroup()`` sorts and
-then simplifies. These operations change representation metadata, not tensors.
-
-For a rotation by :math:`\theta`, a positive-order block transforms as
-
-.. math::
-
-   D_m(\theta)=
-   \begin{pmatrix}
-   \cos(m\theta)&-\sin(m\theta)\\
-   \sin(m\theta)& \cos(m\theta)
-   \end{pmatrix}.
-
-Reflection distinguishes ``0ee`` and ``0oe`` and acts on the two-dimensional
-blocks through the reflection component of :math:`O(2)`. Time reversal
-multiplies an irrep by its time parity :math:`t=\pm1` without changing its
-spatial components.
-
-The tensor-product rules are
-
-.. list-table:: Real O(2) tensor products
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Inputs
-     - Outputs
-   * - ``0ee x a``
-     - ``a``
-   * - ``0oo x 0oo``
-     - ``0ee``
-   * - ``0oo x 1mo``
-     - ``1me``
-   * - ``1mo x 2me``
-     - ``1mo + 3mo``
-   * - ``2mo x 2mo``
-     - ``0ee + 0oe + 4me``
-
-For every product, time parity follows
-
-.. math::
-
-   t_{\mathrm{out}}=t_1t_2.
-
-Linear, Gate, and TensorProduct
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-:class:`eqx.o2.Linear` connects only identical irreps and uses a dense
-input-output multiplicity matrix for every instruction. Missing output irreps
-are returned as differentiable zeros; only ``0ee`` can receive a bias.
-
-:class:`eqx.o2.Gate` applies an arbitrary scalar activation to ``0ee``. An
-activation acting on a scalar that is odd under reflection or time reversal
-must itself be even or odd. Gated outputs follow the tensor-product rules
-for the activated gate and the gated irrep.
-
-:class:`eqx.o2.TensorProduct` supports three connection modes:
-
-.. list-table:: Tensor-product connection modes
-   :header-rows: 1
-   :widths: 18 32 50
-
-   * - Mode
-     - Channel constraint
-     - Weight layout per path
-   * - ``u1u``
-     - :math:`C_2=1`, :math:`C_3=C_1`
-     - One weight per output channel
-   * - ``uuu``
-     - :math:`C_1=C_2=C_3`
-     - One weight per matched channel
-   * - ``uvw``
-     - No equality constraint
-     - Dense :math:`C_1\times C_2\times C_3` weights
-
-Activations are rescaled so that :math:`\mathbb{E}[\phi(z)^2]=1` for
-:math:`z\sim\mathcal{N}(0,1)`. Linear and tensor-product path normalization
-uses the declared input variances and unit-variance weight initialization.
-``path_normalization="element"`` normalizes by the total number of contributing
-input elements; ``"path"`` assigns equal variance to each contributing path.
-
-A gated update can be constructed as follows:
+``Gate`` combines scalar activations with equivariant tensor gating. Scalars
+odd under reflection or time reversal require an even or odd activation;
+an even activation changes their output parity. Gated output irreps follow
+the tensor-product rules.
 
 .. code-block:: python
 
-   irreps = o2.Irreps("4x0ee + 2x0oe + 3x1me + 2x2me")
-   irreps_scalars = o2.Irreps("4x0ee + 2x0oe")
-   irreps_gated = o2.Irreps("3x1me + 2x2me")
-   irreps_gates = o2.Irreps("5x0ee")
-
-   nonlinearity = o2.Gate(
-       irreps_scalars,
-       [torch.nn.SiLU(), torch.nn.Tanh()],
-       irreps_gates,
-       [torch.nn.Sigmoid()],
-       irreps_gated,
+   gate = o2.Gate(
+       "4x0e + 2x0o", [torch.nn.SiLU(), torch.nn.Tanh()],
+       "3x0e", [torch.nn.Sigmoid()],
+       "3x1m",
    )
-   linear_up = o2.Linear(
-       irreps,
-       nonlinearity.irreps_in,
-       biases=True,
-   )
-   linear_down = o2.Linear(
-       nonlinearity.irreps_out,
-       irreps,
-       biases=False,
-   )
+   linear_up = o2.Linear(irreps, gate.irreps_in)
+   linear_down = o2.Linear(gate.irreps_out, irreps)
+   output = linear_down(gate(linear_up(features)))
+   assert output.shape == features.shape
 
-   node_feats = torch.randn(32, irreps.dim)
-   node_feats = linear_down(nonlinearity(linear_up(node_feats)))
-
-A tensor product is configured independently of a convolution. The following
-``uuu`` instructions retain all three couplings of two order-one inputs:
+``TensorProduct`` couples two inputs using explicit instructions. This example
+retains the three couplings ``1m x 1m -> 0e + 0o + 2m``:
 
 .. code-block:: python
 
    product = o2.TensorProduct(
-       "4x1m", "4x1m", "4x0e+4x0o+4x2m",
+       "4x1m", "4x1m", "4x0e + 4x0o + 4x2m",
        [(0, 0, i, "uuu", True) for i in range(3)],
        internal_weights=False,
        shared_weights=False,
    )
-   features1 = product.irreps_in1.randn(16, -1)
-   features2 = product.irreps_in2.randn(16, -1)
+   x = product.irreps_in1.randn(16, -1)
+   y = product.irreps_in2.randn(16, -1)
    weights = torch.randn(16, product.weight_numel)
-   coupled = product(features1, features2, weights)
-   assert coupled.shape == (16, product.irreps_out.dim)
+   output = product(x, y, weights)
+   assert output.shape == (16, product.irreps_out.dim)
 
-Circular harmonics
-~~~~~~~~~~~~~~~~~~
+.. list-table:: Channel connections
+   :header-rows: 1
+   :widths: 20 40 40
 
-:class:`eqx.o2.CircularHarmonics` constructs two-dimensional angular
-features. With ``normalize=True`` the output depends only on direction. With
-``normalize=False``, order :math:`m` is homogeneous of degree :math:`m` in the
-input vector. ``time_reversal=True`` declares a time-odd input and assigns
-time parity :math:`(-1)^m` to order :math:`m`.
+   * - Mode
+     - Constraint
+     - Weights per path
+   * - ``u1u``
+     - :math:`C_2=1,\ C_3=C_1`
+     - :math:`C_1`
+   * - ``uuu``
+     - :math:`C_1=C_2=C_3`
+     - :math:`C_1`
+   * - ``uvw``
+     - Independent channel widths
+     - :math:`C_1 C_2 C_3`
 
-.. code-block:: python
+Time parity multiplies along a tensor-product path.
+Activations are normalized to unit second moment under a standard Gaussian.
+Linear and tensor-product normalization uses the declared input variances:
+``path_normalization="element"`` counts contributing input elements, whereas
+``"path"`` balances contributing paths.
 
-   vectors_2d = torch.randn(128, 2)
-   harmonics = o2.CircularHarmonics(mmax=3, normalize=True)
-   edge_attrs = harmonics(vectors_2d)
+Additional operators are described in :ref:`equivariantx-api`:
 
-   assert harmonics.irreps_out == o2.Irreps("0ee + 1me + 2me + 3me")
-   assert edge_attrs.shape == (128, harmonics.irreps_out.dim)
+* ``CircularHarmonics`` constructs 2D angular features. ``normalize=False``
+  gives homogeneous polynomials, and ``time_reversal=True`` assigns time parity
+  :math:`(-1)^m`.
+* ``AsymmetricContraction`` contracts independent inputs across correlation
+  orders. ``path_mode="sum"`` sums paths; ``"expand"`` retains them as channels.
 
-For a time-odd two-dimensional vector:
+O(3)/O(2) frame conversion
+----------------------------
 
-.. code-block:: python
+|eqx-frames|
 
-   magnetic_harmonics = o2.CircularHarmonics(
-       mmax=3,
-       normalize=True,
-       time_reversal=True,
-   )
-   assert magnetic_harmonics.irreps_out == o2.Irreps(
-       "0ee + 1mo + 2me + 3mo"
-   )
-
-Asymmetric contraction
-~~~~~~~~~~~~~~~~~~~~~~
-
-:class:`eqx.o2.AsymmetricContraction` contracts independent input features up
-to a requested correlation order. All weights are supplied externally.
-``algorithm="recursive"`` evaluates successive channel-wise tensor products.
-``algorithm="dense"`` contracts precomputed generalized Clebsch--Gordan
-tensors, using more coefficient storage. Both enumerate the same paths and
-accept inputs at any batch size. ``path_mode="sum"`` sums paths to each output
-irrep and scales by the inverse square root of the path count.
-``path_mode="expand"`` retains paths in the output multiplicity, allowing a
-following :class:`eqx.o2.Linear` to mix them.
-
-Global O(3) to local O(2)
---------------------------
-
-A directed three-dimensional vector defines a local axis. Restricting an
-:math:`O(3)\times\mathbb{Z}_2^T` irrep ``(\ell, p, t)`` to the
-:math:`O(2)\times\mathbb{Z}_2^T` isotropy subgroup gives
+An edge direction defines the alignment axis. Restriction preserves time
+parity and separates local orders:
 
 .. math::
 
@@ -311,84 +159,61 @@ A directed three-dimensional vector defines a local axis. Restricting an
    =\left(0,p(-1)^\ell,t\right)
    \oplus\bigoplus_{m=1}^{\ell}(m,0,t).
 
-Time parity is retained by every local entry. For example, an axial,
-time-odd vector restricts as ``1eo -> 0oo + 1mo``. Ordinary e3nn irreps are
-treated as time-even. Global time-odd irreps require an e3nn version that
-supports time-reversal labels.
-
-:class:`eqx.o2.WignerD` constructs the global-to-local and local-to-global
-matrices from three-dimensional vectors. :class:`eqx.o2.LocalFrame` applies
-those matrices. Its global input and local output both use flattened
-``ir_mul`` layout. ``mmax`` may truncate local positive orders while inverse
-rescaling preserves the intended variance. Truncation is a projection, not
-an invertible change of representation. ``LocalFrame`` derives the required
-degree from its irreps and the Wigner layout from matrix shapes. Shared
-matrices may cover additional degrees or orders.
-
-``WignerD(method="auto")`` uses direct quaternion polynomials on CUDA for
-float32 and float64 inputs, and recursive PyTorch contractions otherwise.
-The CUDA method requires the ``cuda`` extra and a CUDA toolkit. Both methods
-support higher derivatives. ``method="recursive"``
-selects the PyTorch construction; ``method="quaternion"`` selects CUDA.
-``forward_packed`` returns full degree matrices without zero padding or a
-separate inverse copy, independently of ``mmax``. Both ``LocalFrame.to_local``
-and ``LocalFrame.to_global`` accept this tensor; the latter transposes the
-matrices and applies the truncation scale when needed.
-
-By default, ``basis_change=True`` gives positive-order features a uniform
-reflection convention. Setting it to ``False`` retains the spherical harmonic
-basis without changing the regrouped layout. Channels with different reflection
-matrices must then be handled explicitly rather than mixed by standard O(2)
-operators. :class:`eqx.o2.O3TensorProduct` uses this setting to contract the
-original CG coefficients directly.
+``WignerD`` builds rotation matrices; ``LocalFrame`` applies them and performs
+the reflection-basis change. Both global and local features use flattened
+``ir_mul`` storage. Convert layouts at node level before gathering.
 
 .. code-block:: python
 
    from e3nn import o3
 
-   num_channels = 64
-   lmax = 3
-   mmax = lmax
-   global_irreps = o3.Irreps(" + ".join(
-       f"{num_channels}x{l}{p}"
-       for l in range(lmax + 1)
-       for p in ("e", "o")
-   ))
-   edge_index = torch.randint(0, 16, (2, 48))
-   edge_vectors = torch.randn(48, 3)
-
-   wigner = o2.WignerD(lmax=lmax, mmax=mmax, method="recursive")
-   D, D_inv = wigner(edge_vectors)
-   frame = o2.LocalFrame(
-       global_irreps,
-       mmax=mmax,
-   )
-   # Transpose within each O(3) entry, once at node level.
-   e3nn_features = global_irreps.randn(16, -1)
-   node_feats = torch.cat([
-       e3nn_features[:, s].reshape(16, mul, ir.dim).transpose(-1, -2).flatten(1)
-       for (mul, ir), s in zip(global_irreps, global_irreps.slices())
+   torch.set_default_dtype(torch.float64)
+   irreps = o3.Irreps("4x0e + 4x1o + 4x1e + 4x2e")
+   features = irreps.randn(8, -1)
+   features = torch.cat([
+       features[:, s].reshape(8, mul, ir.dim).transpose(-1, -2).flatten(1)
+       for (mul, ir), s in zip(irreps, irreps.slices())
    ], dim=-1)
 
-   local_features = frame.to_local(node_feats[edge_index[0]], D)
-   global_messages = frame.to_global(local_features, D_inv)
-   torch.testing.assert_close(
-       global_messages, node_feats[edge_index[0]], atol=1e-5, rtol=1e-5
+   edge_index = torch.randint(0, 8, (2, 24))
+   vectors = torch.randn(24, 3)
+   frame = o2.LocalFrame(irreps)
+   wigner = o2.WignerD(mmax=2, lmax=2, method="recursive")
+   packed = wigner.forward_packed(vectors)
+
+   local = frame.to_local(features[edge_index[0]], packed)
+   restored = frame.to_global(local, packed)
+   torch.testing.assert_close(restored, features[edge_index[0]])
+
+   linear = o2.Linear(frame.irreps_out, frame.irreps_out)
+   messages = frame.to_global(linear(local), packed)
+   output = features.new_zeros(8, irreps.dim).index_add(
+       0, edge_index[1], messages
    )
 
-   # Packed storage uses the same matrices in both directions.
-   packed = wigner.forward_packed(edge_vectors)
-   local_packed = frame.to_local(node_feats[edge_index[0]], packed)
-   torch.testing.assert_close(local_packed, local_features)
-   torch.testing.assert_close(frame.to_global(local_packed, packed), global_messages)
+Packed matrices are shared by both rotation directions. Transpose each output
+entry back to ``mul_ir`` before passing it to an e3nn layer.
 
-``node_feats`` must already use flattened ``ir_mul`` order inside every O(3)
-entry. ``local_features`` follows ``frame.irreps_out`` in the same flattened
-order. For returning tensors to an e3nn layer, transpose each output entry
-from ``(..., ir.dim, mul)`` to ``(..., mul, ir.dim)`` before flattening. Irrep
-metadata compatibility does not imply identical feature storage.
+.. list-table:: Frame options
+   :header-rows: 1
+   :widths: 35 65
 
-The aligned CGTP operator :class:`eqx.o2.O3TensorProduct` preserves the declared
-coupling instructions for harmonic edge inputs. See
-:ref:`equivariantx-convolutions` for a runnable comparison of its direct and
-aligned convolution forms and the corresponding CUDA interfaces.
+   * - Option
+     - Behavior
+   * - ``WignerD(method="auto")``
+     - Quaternion CUDA construction for float32/float64 CUDA inputs; recursive
+       PyTorch construction otherwise.
+   * - ``method="recursive"``
+     - PyTorch construction, without the optional CUDA backend.
+   * - ``method="quaternion"``
+     - CUDA-only quaternion construction.
+   * - ``LocalFrame(mmax=...)``
+     - Truncate local orders. Truncation is a projection, not an invertible map.
+   * - ``basis_change=True`` (default)
+     - Put positive-order irreps in the same reflection convention.
+
+``basis_change=False`` retains the spherical-harmonic basis. It is used by
+``o2.O3TensorProduct`` for the original CG coefficients; do not mix these
+unadjusted features using ordinary O(2) operators.
+
+See :ref:`equivariantx-convolutions` for equivalent CGTPs and fused execution.

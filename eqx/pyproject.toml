@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = ["pytest"]
 cuda = ["ninja", "filelock"]
 mace = ["mace-torch>=0.3.17"]
 
@@ -36,3 +37,6 @@ package-dir = { eqx = "." }
 
 [tool.setuptools.package-data]
 eqx = ["README.md", "kernels/csrc/*.cpp", "kernels/csrc/*.cuh", "kernels/csrc/*.in"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

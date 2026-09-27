@@ -121,7 +121,7 @@ include = [
     "eqx",
     "eqx.*",
 ]
-exclude = ["eqx.build", "eqx.build.*", "eqx.dist", "eqx.dist.*"]
+exclude = ["eqx.build", "eqx.build.*", "eqx.dist", "eqx.dist.*", "eqx.tests", "eqx.tests.*"]
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
@@ -152,3 +152,6 @@ known-first-party = ["eqx", "tace"]
 
 [tool.ruff.format]
 line-ending = "lf"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

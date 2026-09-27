@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 358" role="img" aria-labelledby="title desc">
+  <title id="title">Native O(2) operators</title>
+  <desc id="desc">Linear mixes channels of matching irreps. Gate applies scalar nonlinearities and equivariant gating. TensorProduct couples two inputs along explicit weighted paths.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#526276"/></marker></defs>
+  <rect width="880" height="358" rx="14" fill="#fff"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
+    <text x="30" y="34" text-anchor="start" font-size="22" font-weight="600">PyTorch-native O(2) operators</text>
+    <rect x="24" y="60" width="166" height="70" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="107" y="93" text-anchor="middle" font-size="17" font-weight="600">Features</text>
+    <text x="107" y="117" text-anchor="middle" font-size="14" font-weight="400">(..., irreps.dim)</text>
+    <path d="M190 95L244 95" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="248" y="60" width="260" height="70" rx="9" fill="#e4efeb" stroke="#8595a6"/>
+    <text x="378" y="93" text-anchor="middle" font-size="17" font-weight="600">Linear</text>
+    <text x="378" y="117" text-anchor="middle" font-size="14" font-weight="400">Mix channels of identical irreps</text>
+    <path d="M508 95L562 95" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="566" y="60" width="286" height="70" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="709" y="93" text-anchor="middle" font-size="17" font-weight="600">Output features</text>
+    <text x="709" y="117" text-anchor="middle" font-size="14" font-weight="400">Same representation rules</text>
+    <rect x="24" y="155" width="166" height="70" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="107" y="188" text-anchor="middle" font-size="17" font-weight="600">Scalars + tensors</text>
+    <text x="107" y="212" text-anchor="middle" font-size="14" font-weight="400">Declared irreps</text>
+    <path d="M190 190L244 190" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="248" y="155" width="260" height="70" rx="9" fill="#f9eadc" stroke="#8595a6"/>
+    <text x="378" y="188" text-anchor="middle" font-size="17" font-weight="600">Gate</text>
+    <text x="378" y="212" text-anchor="middle" font-size="14" font-weight="400">Scalar activations + tensor gates</text>
+    <path d="M508 190L562 190" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="566" y="155" width="286" height="70" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="709" y="188" text-anchor="middle" font-size="17" font-weight="600">Gated features</text>
+    <text x="709" y="212" text-anchor="middle" font-size="14" font-weight="400">Gate parity × tensor parity</text>
+    <rect x="24" y="250" width="166" height="70" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="107" y="283" text-anchor="middle" font-size="17" font-weight="600">Two inputs</text>
+    <text x="107" y="307" text-anchor="middle" font-size="14" font-weight="400">h₁, h₂</text>
+    <path d="M190 285L244 285" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="248" y="250" width="260" height="70" rx="9" fill="#eee7f4" stroke="#8595a6"/>
+    <text x="378" y="283" text-anchor="middle" font-size="17" font-weight="600">TensorProduct</text>
+    <text x="378" y="307" text-anchor="middle" font-size="14" font-weight="400">CG couplings × path weights</text>
+    <path d="M508 285L562 285" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
+    <rect x="566" y="250" width="286" height="70" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
+    <text x="709" y="283" text-anchor="middle" font-size="17" font-weight="600">Coupled features</text>
+    <text x="709" y="307" text-anchor="middle" font-size="14" font-weight="400">u1u · uuu · uvw</text>
+    <text x="440" y="344" text-anchor="middle" font-size="14" font-weight="400">Real features · optional time-reversal labels · standard PyTorch autograd</text>
+  </g>
+</svg>

@@ -42,3 +42,17 @@ html_theme_options = {
     "show_nav_level": 2,
 }
 html_show_sourcelink = False
+
+rst_prolog = """
+.. |eqx-operators| image:: /_static/operators.svg
+   :alt: Native O(2) linear, gating, and tensor-product operations.
+   :width: 100%
+
+.. |eqx-frames| image:: /_static/frames.svg
+   :alt: Node layout conversion, edge gather, local O(2) update, and node scatter.
+   :width: 100%
+
+.. |eqx-convolutions| image:: /_static/convolutions.svg
+   :alt: Direct CGTP, aligned CGTP, Uu, and Uv convolution flows.
+   :width: 100%
+"""

@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-
 SOURCE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SOURCE_DIR))
 sys.path.insert(0, str(SOURCE_DIR.parents[1]))
@@ -70,3 +69,17 @@ html_show_sourcelink = False
 html_static_path = ["_static"]
 # html_logo = "_static/logo.png"
 html_favicon = "_static/favicon.svg"
+
+rst_prolog = """
+.. |eqx-operators| image:: /../../eqx/docs/source/_static/operators.svg
+   :alt: Native O(2) linear, gating, and tensor-product operations.
+   :width: 100%
+
+.. |eqx-frames| image:: /../../eqx/docs/source/_static/frames.svg
+   :alt: Node layout conversion, edge gather, local O(2) update, and node scatter.
+   :width: 100%
+
+.. |eqx-convolutions| image:: /../../eqx/docs/source/_static/convolutions.svg
+   :alt: Direct CGTP, aligned CGTP, Uu, and Uv convolution flows.
+   :width: 100%
+"""

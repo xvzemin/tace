@@ -3,512 +3,257 @@
 Acceleration
 ============
 
-TACE provides several composable acceleration layers:
+Combine fused operators with model compilation. Select acceleration settings
+before constructing, loading, or exporting the model.
 
-* EquivariantX (EQX), OpenEquivariance (OEQ) and cuEquivariance (CUEQ) provide
-  alternative implementations of the same edge-level equivariant operations and 
-  are selected per operator;
-* EquiTorch (EQT) accelerates product-basis tensor
-  products and can be combined with EQX, OEQ or CUEQ;
-* PyTorch compilation accelerates a larger part of the model and can either
-  run inside the current Python process or produce an AOTInductor package for
-  later deployment. AOTI is independent of the kernel-backend selection.
+Recommended workflow
+--------------------
 
-Unless noted otherwise, select the backend before constructing the model.
-When multiple backends are enabled, each operator selects the highest-priority
-backend it supports: **EQX > OEQ > EQT > CUEQ**. Enabling a backend that does not
-implement an operator does not disable that operator's other backends. For
-example, OEQ convolutions can run alongside EQT product-basis operations.
-Unselected backends do not need to be installed. A missing dependency for the
-selected backend raises an error rather than silently selecting another backend.
-Compilation is controlled independently by ``TACE_USE_COMPILE``.
-The same settings can be used during training, validation, testing, and model
-export, subject to the backend limitations described below.
-Installation commands for each optional backend are listed separately in
-:ref:`installation`.
+To maximize model throughput, start with **EQX + compilation for training**
+and **EQX + AOTI export for inference**.
 
-TF32 Precision
---------------
+.. figure:: ../_static/acceleration.svg
+   :alt: Enable EQX, then compile training or export inference with AOTI.
+   :width: 100%
 
-``TACE_USE_TF32`` controls TF32 for float32 matrix multiplication and cuDNN
-operations during both training and inference. When unset, TF32 is enabled for
-training and disabled for inference. An explicit value overrides both defaults:
+   Operator fusion and model compilation are complementary.
+
+Install EQX build dependencies from the TACE source directory and provide a
+CUDA toolkit:
 
 .. code-block:: bash
 
-   export TACE_USE_TF32=1  # Enable for both training and inference
-   export TACE_USE_TF32=0  # Disable for both training and inference
+   pip install '.[eqx]'
 
-TF32 preserves float32 storage but uses reduced-precision multiplication in
-eligible operations. It does not affect float64 operations or the arithmetic
-inside the custom EQX CUDA kernels. Importing TACE and loading a model apply the
-inference default; training initialization and the training entry point apply
-the training default, including after loading a model for finetuning or resumed
-training. Set it before compilation or export;
-changing it does not recompile an existing AOTI package. This is a process-wide
-PyTorch setting, not a model parameter.
+**Training:** enable both environment variables.
 
-Kernel Backends
----------------
+.. code-block:: bash
 
-The following kernel backends are available:
+   TACE_USE_EQX=1 TACE_USE_COMPILE=1 tace-train -cn tace.yaml
+
+**Inference:** keep EQX enabled and export a compiled model. The
+``tace-export-*`` entry points are ``tace-export-eval`` for ASE/TorchSim and
+``tace-export-lammps`` for LAMMPS.
+
+.. code-block:: bash
+
+   TACE_USE_EQX=1 tace-export-eval \
+     -m model.ckpt --backend aoti --device cuda
+
+   TACE_USE_EQX=1 tace-export-lammps \
+     -m model.ckpt --backend aoti --device cuda
+
+The AOTI export commands enable the compilation path automatically.
+Exporting with ``state_dict`` or ``full_model`` does **not** compile the model.
+Measure speed after warming up the actual workload, including force-loss
+derivatives during training; gains depend on model, batch size, and hardware.
+
+Kernel selection
+----------------
 
 .. list-table::
    :header-rows: 1
-   :widths: 28 42 30
+   :widths: 20 30 50
 
-   * - Backend
-     - Scope
+   * - Priority
      - Environment variable
-   * - OpenEquivariance
-     - Edge in atomic basis
-     - ``TACE_USE_OEQ=1``
-   * - cuEquivariance
-     - Edge in atomic basis
-     - ``TACE_USE_CUE=1``
-   * - EquivariantX
-     - Convolutions, product basis, and element-dependent linear maps
+     - Scope
+   * - 1. EquivariantX
      - ``TACE_USE_EQX=1``
-   * - EquiTorch
-     - Node in product basis
+     - Convolutions, ACE, element-dependent Linear, and supported gates
+   * - 2. OpenEquivariance
+     - ``TACE_USE_OEQ=1``
+     - O(3) tensor-product convolutions
+   * - 3. EquiTorch
      - ``TACE_USE_EQT=1``
+     - Product-basis tensor products
+   * - 4. cuEquivariance
+     - ``TACE_USE_CUE=1``
+     - Supported O(3) tensor-product operations
 
-EquivariantX achieves more than 3x lower peak GPU memory usage than
-OpenEquivariance and CuEquivariance at larger batch sizes. 
-However, EquivariantX is still under active development, and bugs or other 
-unexpected behaviors may still exist.
+Each operator selects the highest-priority enabled backend it supports:
+**EQX > OEQ > EQT > CUEQ**. Unselected packages need not be installed.
+A missing dependency for a selected backend raises an error.
+``TACE_USE_COMPILE`` is independent of this selection.
+See :ref:`installation` for optional packages.
 
-For example:
-
-.. code-block:: bash
-
-   export TACE_USE_OEQ=1
-
-The acceleration environment can also be configured through Python
-interface before constructing or loading the model:
+The equivalent Python setup is:
 
 .. code-block:: python
 
    from tace.utils.env import enable_acceleration
 
-   enable_acceleration(enable_oeq=True)
+   enable_acceleration(enable_eqx=True, enable_compile=True)
 
-By default, this interface only enables the requested backends and preserves
-existing environment settings. Pass ``force=True`` to explicitly write every
-backend setting and disable unselected backends.
-
-The ASE and TorchSim calculators expose the same backends as constructor
-options. For example:
-
-.. code-block:: python
-
-   from tace.interface.ase import TACEAseCalc
-
-   calc = TACEAseCalc(
-       model="model.pt",
-       device="cuda",
-       enable_oeq=True,
-   )
-
-.. note::
-
-   Environment variables can replace compatible modules while a checkpoint or
-   state-dict package is being loaded. Once the complete Python model has been
-   serialized, its modules are already fixed. Set the required acceleration
-   variables before exporting a full model or a LAMMPS model.
+This preserves existing settings. ``force=True`` also disables unselected
+backends. ASE and TorchSim calculators expose backend options, but an exported
+AOTI package already contains its chosen operator graph.
 
 .. _eqx-streaming:
 
-Streamed CGTP with EquivariantX
--------------------------------
+EQX in TACE
+-----------
 
-For standalone operator interfaces, feature layouts, and fusion boundaries,
-see :ref:`equivariantx-convolutions`. This section describes integration with
-TACE and checkpoint conversion.
+|eqx-convolutions|
 
-Install the optional backend from the TACE source directory, then select EQX
-for ``cgtp`` or ``o2_cgtp`` interactions:
+.. list-table:: Model-to-operator mapping
+   :header-rows: 1
+   :widths: 34 66
 
-.. code-block:: bash
+   * - TACE operation
+     - EQX implementation
+   * - ``cgtp``
+     - ``eqx.conv.O3TensorProductConv``
+   * - ``o2_cgtp``
+     - ``eqx.conv.O2O3TensorProductConv``
+   * - ``uu_o2``
+     - ``eqx.conv.UuO2TensorProductConv``
+   * - ``o2`` / ``o2_mag``
+     - ``eqx.conv.UvO2TensorProductConv``
+   * - TECE-OAM-RRA ``so2``
+     - ``eqx.models.tace.tece_oam_rra``
+   * - Standard / gated bilinear ACE
+     - ``eqx.ace.TACE`` / ``eqx.models.tace.tece_oam_rra.BilinearACE``
 
-   pip install '.[eqx]'
-   TACE_USE_EQX=1 tace-train -cn 3bpa_cgtp.yaml
-   TACE_USE_EQX=1 tace-train -cn 3bpa_o2_cgtp.yaml
+Supported CUDA operations use fused forward and derivative kernels. CPU and
+unsupported cases retain their reference implementations. Products with
+active coefficient LoRA adapters retain their original tensor products.
+Feature layouts, paths, normalization, and checkpoint weights are preserved;
+floating-point summation order can differ.
+
+For fusion boundaries and standalone examples, see
+:ref:`equivariantx-convolutions`. To switch between equivalent CGTP forms
+without retraining:
 
 .. code-block:: python
 
    from tace.utils.env import enable_acceleration
    from tace.lightning import convert_cgtp, load_tace
 
-   model = load_tace("TACE-OAM-7M.pt", device="cuda")
-   model = convert_cgtp(model)  # cgtp -> o2_cgtp, detected per interaction
    enable_acceleration(enable_eqx=True)
+   model = load_tace("model.pt", device="cuda")
+   model = convert_cgtp(model, implementation="o2")  # "o3" for direct CGTP
 
-The flag switches existing CGTP interactions to fused execution at runtime.
-Model loading is unchanged. Ordinary ``cgtp`` interactions use
-``eqx.conv.O3TensorProductConv``, while ``o2_cgtp`` interactions use
-``eqx.conv.O2O3TensorProductConv``. EQX takes precedence over OEQ and CUE
-for these convolutions when enabled. Use ``convert_cgtp``
-to convert an existing model explicitly, without retraining or changing its
-parameters. By default, conversion switches each CGTP interaction to the
-other implementation.
+The default ``implementation="auto"`` switches each CGTP interaction to the
+other form. Conversion returns a copy; recreate its optimizer before training.
 
-Native CUDA Graph replay can additionally be enabled for both CGTP
-implementations and the standard or gated bilinear ACE contractions:
+Precision and warmup
+--------------------
 
-.. code-block:: bash
-
-   export TACE_USE_EQX=1
-   export EQX_USE_CUDA_GRAPH=1
-
-``EQX_USE_CUDA_GRAPH`` defaults to ``0``. Replay retains the existing CUDA
-forward and recursively transposed kernels, including force-training
-derivatives; it does not replace them with autograd recomputation. Edge counts
-are bucketed, and padding connects only isolated zero nodes whose outputs are
-discarded. Edge indices, features, and weights are refreshed before replay,
-so a changed neighbor list does not reuse stale connectivity. All original
-tensor-product paths and weights are preserved.
-
-The capture cache is bounded and distinguishes dtype, device, stream and TF32
-settings. Initial capture and kernel compilation are warmup costs. Static
-buffers and graph memory pools can increase reserved GPU memory, and speed
-depends on workload. Small convolutions retain ordinary kernel execution.
-When an outer CUDA Graph is being captured, internal replay is bypassed;
-warm up the required forward and derivative kernels before outer capture.
-
-``TACE_USE_EQX=1`` also accelerates the standard ACE product with ``eqx.ace.TACE``.
-It retains all existing nonzero paths and checkpoint weights, contracts CG
-entries without expanded product tensors, and reads element coefficients
-without materializing per-node weight matrices. The highest-correlation
-product and its coefficient contraction are fused; intermediate orders remain
-available for reuse. Recursive transposed kernels support force training and
-higher derivatives. Linear up/down, biases, dropout and residual connections
-keep their existing behavior. Within a weighted ACE path, angular products
-are reused across output channels, and backward contractions reuse the
-coefficient-transformed adjoint. Paths and coefficient parameters remain
-independent. Gated bilinear products also use
-``eqx.models.tace.tece_oam_rra.BilinearACE`` to fuse their weighted tensor
-product with the element-dependent or MoE coefficient map, including the
-optional shared expert.
-Products with active coefficient LoRA adapters retain their original
-tensor-product execution. EQX takes precedence
-over EQT for the standard CUDA ACE product; CPU uses ordinary tensor products.
-
-When enabled during model construction, EQX also fuses supported node gates
-with ``eqx.o3.Gate``. Scalar activation normalization, feature ordering and
-checkpoint keys are unchanged. SiLU, sigmoid, tanh and identity activations
-support recursive CUDA derivatives; other activations retain torch execution.
-
-TACE maintains the TECE-OAM-RRA PyTorch model in
-``tace.models._e3nn.tece_oam_rra``, using native ``eqx.o2`` linear, gate and
-tensor-product operators. EQX provides the corresponding fused kernels.
-Earlier order-wise checkpoint weights are converted during ``load_state_dict``;
-no separate SO(2) implementation is required.
-``TACE_USE_EQX=1`` also selects native CUDA fusion for attention-enabled
-``UvSO2Interaction`` with SiLU, sigmoid, tanh or identity activations, including
-their scaled variants. Bounded edge tiles evaluate dense contractions with
-matrix products and fuse the intervening expressions into CUDA kernels.
-The first pass retains only the attention scores, of shape ``(edges, heads)``,
-for receiver-wise softmax. The second pass recomputes local features and
-accumulates weighted messages at nodes. Convolution weights and intermediate
-features are allocated only within each tile, not across the full graph.
-Both existing cutoff factors and all checkpoint parameters are preserved.
-Other activations retain the PyTorch implementation.
-
-The operation saves its inputs and node outputs, denominators and detached
-maxima for backward, without retaining internal edge activations.
-Backward recomputes tile-local activations. Shared parameter gradients contract
-over edges before forming the output matrix, avoiding per-edge outer products.
-The analytic attention adjoint and subsequent derivatives use the same tiled
-matrix products and CUDA expressions, including force-training derivatives.
-This path does not use CUDA Graph replay or a live Python callback registry.
-
-The registered operators expose tensor schemas, fake implementations and
-autograd rules to ``torch.compile``. Their architecture metadata is immutable
-and their trainable parameters are explicit tensor inputs. CUDA source
-compilation is lazy and cached; the first evaluation of a new architecture or
-derivative program includes compilation overhead. Deployment still requires
-the EQX operator registrations and CUDA backend in the target environment.
-
-The default ``eqx.o2`` operators use PyTorch without external kernels.
-``TACE_USE_EQX=1`` also accelerates element-dependent and MoE Linear maps on
-CUDA. Their kernels read element/expert weights directly, avoiding per-node
-weight matrices. Path normalization, biases and checkpoint parameters are
-unchanged. Forward, force training and higher derivatives are supported.
-
-``TACE_USE_EQX=1`` selects generated CUDA convolutions on GPU and PyTorch on
-CPU. Install the ``eqx`` extra and provide a CUDA toolkit; set ``CUDA_HOME``
-if it is not discovered automatically.
-
-The O(3) kernel directly contracts the nonzero CG coefficients. Compatible
-paths share channel-parallel input products, while output paths retain their
-individual slots and weights. Radial projections and their transposes use
-bounded GEMM workspaces. Edge messages are not materialized, and projected
-weights are recomputed rather than retained for backward. Angular factors are
-shared across derivative terms; input and edge gradients are accumulated within
-each path tile before global writes. Forward and higher derivatives use the
-same recursive transpose rule. Only ``uvu`` instructions and float32/float64 are supported.
-The preceding radial MLP layers and node-level ``linear_down`` stay separate.
-
-For spatial CGTPs, TACE supplies the harmonic input vectors to the O(3) kernel.
-Fixed Cartesian harmonic polynomials then provide direct position derivatives,
-without a materialized spherical-harmonic gradient. The original
-``edge_vector / edge_length`` convention and cutoff factors are preserved.
-General tensor-product inputs continue to use the ordinary sparse contraction.
-
-The aligned O(2)--O(3) contraction fuses source gather, both feature rotations, sparse order-zero
-CG coupling and target reduction, without retaining edge messages or their
-adjoints. Radial projections and their transposes use bounded GEMM workspaces.
-The same contraction evaluates recursive adjoints, including the mixed second
-derivatives required by force-loss training. Channelwise ``uvu`` paths,
-shared weights, and float32/float64 are supported. Other connection modes
-are not implemented by the CUDA backend.
-
-Paths sharing input features reuse their local rotation. Derivative programs
-are partitioned by shared dependencies and register requirements, without a
-fixed angular-degree threshold. Compiled register counts and local-memory
-usage refine the partition, and static schedules are cached. Wide channel tiles
-share Wigner matrices across warps. Cached launch configurations use compiled
-occupancy and, outside CUDA Graph capture, measured latency on private outputs.
-Tuning uses a bounded scratch allocation and never modifies model results.
-Cached kernel phases are launched together.
-Node-owned reductions accumulate before
-writing results; split rows and shared gradients use atomic additions.
-Floating-point summation order can therefore differ from the reference.
-
-TACE supplies edge vectors together with packed Wigner matrices. Geometry
-derivatives contract sparse rotation generators directly, avoiding dense
-Wigner-matrix adjoints and backpropagation through frame construction.
-The same contraction rule applies recursively to higher derivatives, including
-the second derivatives used in force training. Harmonic amplitudes retain
-their separate radial derivatives. Degree-zero harmonic paths cancel both
-rotations exactly, while keeping each path and its weight independent.
-
-Direction-derivative kernels stage only the Wigner rows required by each
-sparse angular contraction, reducing matrix traffic and shared-memory usage.
-Rotation values and the analytic derivative rule are unchanged.
-
-Quaternion alignment and direct quaternion polynomials build the cached
-degree matrices without degree-to-degree recursion. Analytically generated
-coefficients require no numerical fitting. The matrices retain the packed
-layout, alignment convention, and float32/float64 support. The recursive CG
-construction remains available through the EQX API with ``method="recursive"``.
-The EQX API also retains differentiation of arbitrary matrix entries when edge
-vectors are omitted. The radial MLP's preceding layers and node-level
-``linear_down`` remain separate.
-
-A small C++ launcher is built once. Independent NVRTC kernels are compiled
-concurrently and cached by code, compiler version and GPU architecture.
-Edge counts are runtime arguments. Launch tuning is also performed on first use.
-Warm up forward and required derivatives
-before CUDA Graph capture. Compilation is excluded from warmed throughput
-measurements.
-
-This backend targets eager training and inference. AOTInductor deployment
-with EQX is not currently validated; use the documented OEQ export path
-when an AOTI package is required.
-
-PyTorch Compilation
--------------------
-
-TACE provides two different compilation workflows.
-
-.. list-table::
+.. list-table:: TF32 for float32 operations
    :header-rows: 1
-   :widths: 28 34 38
+   :widths: 40 30 30
 
-   * - Workflow
-     - How to enable it
-     - Intended use
-   * - In-process compilation
-     - ``TACE_USE_COMPILE=1``
-     - Training, validation, and inference in the current Python process
-   * - AOTInductor (AOTI)
-     - ``tace-export-eval --backend aoti`` or
-       ``tace-export-lammps --backend aoti``
-     - Ahead-of-time deployment without compiling again at startup
+   * - ``TACE_USE_TF32``
+     - Training
+     - Inference
+   * - Unset
+     - Enabled
+     - Disabled
+   * - ``1``
+     - Enabled
+     - Enabled
+   * - ``0``
+     - Disabled
+     - Disabled
 
-In-process compilation caches compiled graphs in memory and does not create a
-deployment artifact:
+TF32 changes eligible PyTorch matrix multiplication and cuDNN arithmetic, not
+float32 storage, float64 operations, or custom CUDA contraction arithmetic.
+Choose precision before compilation or export; changing the environment does
+not recompile an AOTI package.
 
-.. code-block:: bash
-
-   export TACE_USE_COMPILE=1
-   tace-train -cn tace.yaml
-
-AOTI produces a ``.pt2`` package containing compiled native code. Loading the
-package does not call ``torch.compile`` again.
-
-AOTI is an independent compilation and deployment layer. It does not replace
-OEQ, CUEQ, or EQT. Configure the desired compatible acceleration
-backends before export; the resulting package captures the model constructed
-with those selections.
-
-.. important::
-
-   TACE AOTInductor compilation and export require ``torch>=2.13``.
-   Earlier PyTorch versions are not supported for AOTI export.
-   When OpenEquivariance is enabled for AOTI export, OEQ 0.6.4 or newer is
-   required.
-
-Compilation currently supports energy force, stress, virial, charge
-and noncollinear-magnetic-force. Models using
-unsupported output properties or LES cannot be exported through the current
-AOTI path.
-
-AOTI packages contain machine-specific native code. Compile on the deployment
-machine, or on a machine with a compatible operating system, PyTorch/CUDA ABI,
-and GPU architecture. A package compiled for CUDA cannot be loaded on CPU.
+EQX generates and caches CUDA kernels on first use, including derivative
+kernels. ``EQX_USE_CUDA_GRAPH=1`` is an optional replay path, disabled by default.
+It can increase memory and is not required for the recommended workflow.
 
 .. _tace-export-tutorial:
 
-TACE Export Tutorial
---------------------
+Export and deployment
+---------------------
 
-Use the export command that matches the target workflow:
+.. list-table::
+   :header-rows: 1
+   :widths: 30 25 45
 
-* ``tace-export-train`` creates an editable model package for continued
-  training, fine-tuning, or transfer learning;
-* ``tace-export-eval`` creates a native PyTorch inference model or an AOTI
-  graph package;
-* ``tace-export-lammps`` creates a LAMMPS ML-IAP model, optionally backed by
-  AOTI.
+   * - Command
+     - Backend
+     - Purpose
+   * - ``tace-export-train``
+     - State dictionary
+     - Continued training or fine-tuning
+   * - ``tace-export-eval``
+     - ``state_dict`` / ``full_model``
+     - Native PyTorch inference
+   * - ``tace-export-eval``
+     - ``aoti``
+     - Compiled graph for ASE and TorchSim
+   * - ``tace-export-lammps``
+     - ``mliap`` / ``aoti``
+     - Eager or compiled LAMMPS ML-IAP model
 
-The commands accept ``.ckpt``, state-dict ``.pt``/``.pth`` packages, and
-serialized full models as input. Use ``-f`` to select a fidelity and ``--dtype``
-to change model precision during export.
+Commands accept checkpoints, state-dict packages, and serialized models.
+Use ``-o`` for the output path, ``-f`` for fidelity, and ``--dtype`` for
+precision. ``tace-compile`` aliases ``tace-export-eval``.
 
-.. Export for Training
-.. ~~~~~~~~~~~~~~~~~~~
+.. important::
 
-.. Use this form when the result must remain editable by TACE:
+   AOTI export requires PyTorch >= 2.13. If using OEQ, use OEQ >= 0.6.4.
+   Supported outputs include energy, forces, stress, virials, charges, and
+   noncollinear magnetic forces. LES is not supported by this compilation path.
 
-.. .. code-block:: bash
+ASE and TorchSim
+~~~~~~~~~~~~~~~~
 
-..    tace-export-train -m model.ckpt
+The recommended export command above writes ``model.pt2``. TACE creates
+synthetic inputs with dynamic node, edge, and graph dimensions; ``--sample``
+is an optional override, not a requirement.
 
-.. The default output is ``model.ckpt-state.pt``. It stores the state dictionary
-.. and the model configuration required by ``load_tace`` and training utilities.
-.. The command loads EMA parameters when they are available.
+.. code-block:: python
 
-.. An explicit output, fidelity, and precision can also be selected:
+   from tace.interface.ase import TACEAseCalc
 
-.. .. code-block:: bash
+   calc = TACEAseCalc(model="model.pt2", device="cuda")
 
-..    tace-export-train \
-..      -m model.ckpt \
-..      -o model-fidelity-1.pt \
-..      -f 1 \
-..      --dtype float32
+``load_tace("model.pt2", device="cuda")`` also loads the compiled graph directly.
+The package does not call ``torch.compile`` again, but external operator
+registrations and their runtime dependencies remain necessary. EQX-generated
+kernels may still require first-use compilation if their cache is absent.
+For TECE-OAM-RRA packages, import
+``eqx.models.tace.tece_oam_rra.interaction`` before loading to register its
+model-specific operators.
+Validate the exported model in the deployment environment.
 
-Export for Native PyTorch Inference
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The default ``state_dict`` backend is portable and reconstructs the model from
-its saved configuration:
+For non-compiled inference:
 
 .. code-block:: bash
 
    tace-export-eval -m model.ckpt --backend state_dict --device cpu
 
-The default output is ``model.ckpt-state_dict.pt``. This is the recommended
-non-compiled format for normal evaluation and Python deployment.
+This writes ``model.ckpt-state_dict.pt``. The ``full_model`` backend instead
+writes ``model.ckpt-full_model.pt`` and is more dependent on Python package
+versions.
 
-The ``full_model`` backend serializes the complete Python module with
-``torch.save``:
+LAMMPS
+~~~~~~
 
-.. code-block:: bash
-
-   tace-export-eval -m model.ckpt --backend full_model --device cpu
-
-The default output is ``model.ckpt-full_model.pt``. It is convenient, but more
-tightly coupled to the TACE and PyTorch versions used during export.
-
-Both formats are loaded through the same API:
-
-.. code-block:: python
-
-   from tace.lightning import load_tace
-
-   model = load_tace("model.ckpt-state_dict.pt", device="cuda")
-   model.eval()
-
-Export Eager or AOTI for ASE and TorchSim
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Set external-kernel variables before export, then select the ``aoti`` backend:
-
-.. code-block:: bash
-
-   export TACE_USE_OEQ=1
-
-   tace-export-eval \
-     -m model.ckpt \
-     --backend aoti \
-     --device cuda
-
-No sample structure is required. TACE automatically builds a synthetic
-two-graph input and exports dynamic node, edge, and graph dimensions, so the
-resulting package can be used with different structures and batch sizes.
-``--sample`` remains available as an optional advanced override, but is not
-needed for normal ASE or TorchSim deployment.
-
-The default output is ``model.pt2``. ``tace-compile`` is an alias for
-``tace-export-eval`` and accepts the same options. The equivalent short command
-is:
-
-.. code-block:: bash
-
-   tace-compile -m model.ckpt --backend aoti --device cuda
-
-The graph ``.pt2`` package can be loaded with ``load_tace`` and shared by native
-PyTorch consumers, including the ASE and TorchSim integrations:
-
-.. code-block:: python
-
-   from tace.lightning import load_tace
-
-   model = load_tace("model.pt2", device="cuda")
-   outputs = model(batch)
-
-Export Eager or AOTI for LAMMPS
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The regular ML-IAP backend serializes the eager model:
-
-.. code-block:: bash
-
-   export TACE_USE_OEQ=1
-   tace-export-lammps -m model.pt --backend mliap --device cuda
-
-This creates ``model.pt-lammps_mliap.pt`` by default.
-
-To compile the LAMMPS tensor graph ahead of time:
-
-.. code-block:: bash
-
-   export TACE_USE_OEQ=1
-   tace-export-lammps \
-     -m model.pt \
-     --backend aoti \
-     --device cuda
-
-The AOTI backend creates two files:
-
-* ``model.pt-lammps_aoti.pt2`` is the compiled AOTInductor package;
-* ``model.pt-lammps_aoti.pt`` is the ``MLIAPUnified`` loader used by LAMMPS.
-
-LAMMPS ML-IAP loads a pickled Python interface, so ``pair_style`` must point to
-the ``.pt`` loader rather than directly to the ``.pt2`` package. The loader
-contains the package bytes and loads the compiled model without recompilation:
+The AOTI export writes a package and an ML-IAP loader:
 
 .. code-block:: text
 
-   pair_style mliap unified model.pt-lammps_aoti.pt 0
+   model.ckpt-lammps_aoti.pt2   compiled package
+   model.ckpt-lammps_aoti.pt    ML-IAP loader containing the package
+
+Point LAMMPS to the loader, not the raw package:
+
+.. code-block:: text
+
+   pair_style mliap unified model.ckpt-lammps_aoti.pt 0
    pair_coeff * * H C N
 
-Use ``--aoti-package`` to choose the package path and ``-o`` to choose the
-ML-IAP loader path. TACE ML-IAP currently requires the CUDA Kokkos backend,
-and multi-rank runs require CUDA-aware MPI. Native CPU inference remains
-available through the ASE and TorchSim interfaces. Detailed LAMMPS setup is
-covered in :doc:`lammps`.
+Use ``--aoti-package`` to choose the package path. ML-IAP requires CUDA Kokkos;
+multi-rank runs also require CUDA-aware MPI. See :doc:`lammps` for setup.
+
+Compile for a compatible deployment OS, PyTorch/CUDA ABI, and GPU architecture.
+A CUDA package cannot be loaded on CPU. Set backend flags before exporting a
+full model or AOTI graph; they do not replace operators in an already compiled
+artifact.

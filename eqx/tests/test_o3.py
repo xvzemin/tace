@@ -5,56 +5,6 @@ import torch
 from e3nn import o3
 
 from eqx import o3 as eqx_o3
-from tace.models.linear import (
-    e3nnElementLinear,
-    e3nnLinear,
-    e3nnMoEElementLinear,
-    enable_lora,
-)
-from tace.utils.env import EQX_KERNELS
-
-
-@pytest.mark.parametrize("matrix", ["0", "1"])
-@pytest.mark.parametrize("internal", [False, True])
-@pytest.mark.parametrize("num_nodes", [0, 7])
-def test_shared_linear(matrix, internal, num_nodes, double_precision):
-    import copy
-
-    actual = e3nnLinear(
-        "2x0e+0e+3x1o+2x5o",
-        "3x0e+0e+2x1o+5o",
-        bias=True,
-        internal_weights=internal,
-        use_matrix_weight=matrix,
-    )
-    reference = copy.deepcopy(actual)
-    reference.linear = o3.Linear(
-        actual.irreps_in,
-        actual.irreps_out,
-        internal_weights=False,
-        shared_weights=False,
-    )
-    reference.load_state_dict(actual.state_dict(), strict=True)
-    x = torch.randn(num_nodes, actual.irreps_in.dim, requires_grad=True)
-    weight = (
-        None
-        if internal
-        else torch.randn(num_nodes, actual.weight_numel, requires_grad=True)
-    )
-    values = [module(x, weight) for module in (actual, reference)]
-    torch.testing.assert_close(*values, atol=1e-12, rtol=1e-12)
-    inputs = [
-        (x, *module.parameters()) if internal else (x, weight, *module.parameters())
-        for module in (actual, reference)
-    ]
-    for _ in range(3):
-        derivatives = [
-            torch.autograd.grad(y.sin().sum(), args, create_graph=True)
-            for y, args in zip(values, inputs)
-        ]
-        for a, b in zip(*derivatives):
-            torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
-        values = [torch.cat([g.flatten() for g in grads]) for grads in derivatives]
 
 
 @pytest.mark.parametrize("num_nodes", [0, 5])
@@ -189,70 +139,6 @@ def test_indexed_linear_derivatives(device, num_experts, num_nodes, double_preci
             torch.cat([g.flatten() for g in grads]) for grads in gradients
         ]
     assert not module.state_dict()
-
-
-@pytest.mark.parametrize("experts", [1, 2])
-@pytest.mark.parametrize("matrix", ["0", "1"])
-@pytest.mark.parametrize("lora", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_tace_indexed_linear(monkeypatch, experts, matrix, lora, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    torch.set_default_dtype(dtype)
-    cls = e3nnElementLinear if experts == 1 else e3nnMoEElementLinear
-    module = cls(
-        "4x0e+2x0e+4x1o+2x1e",
-        "6x0e+4x1o+2x1o+2x2o",
-        num_elements=3,
-        bias=True,
-        use_matrix_weight=matrix,
-        **({} if experts == 1 else {"num_experts": experts}),
-    ).cuda()
-    if lora:
-        enable_lora(module, r=2, freeze_base=False)
-        with torch.no_grad():
-            for parameter in module.lora_B:
-                parameter.normal_()
-    with torch.no_grad():
-        module.bias.normal_()
-    attrs = torch.rand(5, 3, device="cuda", requires_grad=True)
-    x = torch.randn(5, module.irreps_in.dim, device="cuda", requires_grad=True)
-    # A supplied element index takes precedence over attrs.argmax for weights.
-    types = torch.tensor([2, 0, 1, 2, 1], device="cuda")
-    monkeypatch.setenv("TACE_USE_EQX", "1")
-    outputs, derivatives = [], []
-    inputs = (x, attrs, *module.parameters())
-    for enabled in (False, True):
-        monkeypatch.setitem(EQX_KERNELS, "linear", enabled)
-        output = module(x, attrs, types)
-        first = torch.autograd.grad(output.square().mean(), x, create_graph=True)[0]
-        derivatives.append(
-            torch.autograd.grad(
-                output.square().mean() + first.square().mean(),
-                inputs,
-                allow_unused=True,
-            )
-        )
-        outputs.append(output)
-    tol = 3e-4 if dtype == torch.float32 else 1e-10
-    torch.testing.assert_close(*outputs, atol=tol, rtol=tol)
-    for actual, expected in zip(*derivatives):
-        if expected is None:
-            assert actual is None
-        else:
-            torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
-    if dtype == torch.float64 and matrix == "1" and lora:
-        compiled = torch.compile(
-            module, backend="aot_eager", fullgraph=True, dynamic=True
-        )
-        output = compiled(x, attrs, types)
-        torch.testing.assert_close(output, outputs[1], atol=tol, rtol=tol)
-        torch.testing.assert_close(
-            torch.autograd.grad(output.square().mean(), x)[0],
-            torch.autograd.grad(module(x, attrs, types).square().mean(), x)[0],
-            atol=tol,
-            rtol=tol,
-        )
 
 
 @pytest.mark.parametrize("experts", [1, 2])
