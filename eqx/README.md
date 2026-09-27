@@ -1,6 +1,6 @@
 # EquivariantX
 
-EquivariantX (EQX) provides PyTorch-native O(2) operators, e3nn-compatible
+EquivariantX (EQX) provides PyTorch-native O(2) and Cartesian O(3) operators, e3nn-compatible
 O(3)/O(2) frame conversion, and fused CUDA convolutions. Time-reversal labels
 are optional.
 
@@ -36,7 +36,7 @@ features = linear.irreps_in.randn(32, -1)
 output = linear(features)
 ```
 
-Native features use flattened `ir_mul` storage: `(..., ir.dim, mul)` within
+O(2) features use flattened `ir_mul` storage: `(..., ir.dim, mul)` within
 each irrep entry. Transpose each entry when converting from e3nn's `mul_ir`
 storage. `WignerD` builds rotations; `LocalFrame` applies rotations and
 reflection-basis changes. Use `WignerD(method="recursive")` for a purely
@@ -57,6 +57,7 @@ directly. CUDA kernels support force training and higher derivatives.
 | Module | Role |
 |---|---|
 | `eqx.o2` | Native O(2) operators and O(3)/O(2) frames |
+| `eqx.co3` | Cartesian O(3) irreps, harmonics, Linear, Gate, and tensor products in `mul_ir` layout |
 | `eqx.conv` | General fused convolutions and graph attention |
 | `eqx.o3` | Element-dependent Linear and Gate in `mul_ir` layout |
 | `eqx.ace` | Atomic cluster expansions |
@@ -70,6 +71,19 @@ for parameters. Model converters use `implementation="o3"` by default;
 Install the consuming model package separately or through the `mace`,
 `nequip`, or `sevennet` extras. Prophet is installed from its source repository.
 See [model integration](docs/source/models.rst) for usage and restrictions.
+
+## Cartesian O(3)
+
+`co3` stores each degree-`l` tensor as `(..., mul, 3**l)` before flattening.
+Iteration yields `(mul, ir)`. The symmetric traceless subspace has `2*l+1`
+independent coordinates; `ChangeOfBasis` converts to and from spherical
+features through orthonormal path matrices. Tensor products retain all
+requested delta/epsilon paths and their independent weights. `project=False`
+defers output projection past sums and channel-linear maps, but not past
+nonlinearities or subsequent tensor products.
+
+See the [Cartesian tutorial](docs/source/cartesian.rst) for normalization,
+operators, and equivalent-model conversion.
 
 ## Tests
 

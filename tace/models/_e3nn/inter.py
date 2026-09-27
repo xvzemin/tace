@@ -8,6 +8,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
+from eqx import co3
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -18,6 +19,7 @@ from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
     O2ScatterTensorProduct,
+    O3CartesianScatterTensorProduct,
     O3ScatterTensorProduct,
     UuO2ScatterTensorProduct,
 )
@@ -321,6 +323,33 @@ class O3CgtpInteraction(Interaction):
             sc = None
 
         return m_i, self.truncate_ghosts(sc, nlocal)
+
+
+class O3CartesianIctpIctcInteraction(O3CgtpInteraction):
+    """Evaluate CGTP interactions with Cartesian ICTP/ICTC contractions.
+
+    Node inputs and outputs use spherical coordinates. Intermediate tensor
+    products use Cartesian storage with identical paths and radial weights.
+    Projection back to spherical coordinates follows node aggregation and
+    channel compression. The product basis is unchanged.
+    """
+
+    def _build_rejector(self) -> torch.nn.Module:
+        return O3CartesianScatterTensorProduct(
+            self.irreps_in,
+            self.irreps_sh,
+            self.irreps_out,
+            l1l2=self.l1l2,
+        )
+
+    def _setup_additional_modules(self) -> None:
+        self.linear_down.linear = co3.Linear(
+            self.linear_down.irreps_in,
+            self.linear_down.irreps_out,
+            internal_weights=False,
+            shared_weights=True,
+            output_basis="spherical",
+        )
 
 
 class O2CgtpInteraction(O3CgtpInteraction):
@@ -841,6 +870,7 @@ class O2MagneticInteraction(UvO2Interaction):
 
 INTERACTION: Dict[str, type[Interaction]] = {
     "cgtp": O3CgtpInteraction,
+    "co3": O3CartesianIctpIctcInteraction,
     "o2_cgtp": O2CgtpInteraction,
     "so2": UvSO2Interaction,
     "o2": UvO2Interaction,

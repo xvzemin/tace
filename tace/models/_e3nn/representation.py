@@ -9,7 +9,7 @@ from typing import Dict, List, Union
 import torch
 from e3nn import o3
 
-from eqx import o2
+from eqx import co3, o2
 
 from ...dataset.quantity import PROPERTY
 from ...utils.env import get_tace_use_dens
@@ -22,6 +22,7 @@ from .inter import (
     INTERACTION,
     O2CgtpInteraction,
     O2MagneticInteraction,
+    O3CartesianIctpIctcInteraction,
     UuO2Interaction,
     UvO2Interaction,
     UvSO2Interaction,
@@ -112,8 +113,14 @@ class Representation(torch.nn.Module):
         self.use_o3_angular_basis = issubclass(
             node_embedding_cls, TensorNodeEmbedding
         ) or any(
-            not issubclass(interaction_cls, O2CgtpInteraction)
+            not issubclass(
+                interaction_cls, (O2CgtpInteraction, O3CartesianIctpIctcInteraction)
+            )
             for interaction_cls in interaction_classes
+        )
+        uses_co3_interaction = any(
+            issubclass(cls, O3CartesianIctpIctcInteraction)
+            for cls in interaction_classes
         )
         self.use_so2 = uses_so2_interaction
         self.use_o2 = (
@@ -199,6 +206,14 @@ class Representation(torch.nn.Module):
             o3.Irreps.spherical_harmonics(lmax, p=-1),
             normalize=False,
             normalization="component",
+        )
+        self.co3_angular_basis = (
+            co3.CartesianHarmonics(
+                o3.Irreps.spherical_harmonics(lmax, p=-1),
+                normalize=False,
+                normalization="component",
+            )
+            if uses_co3_interaction else None
         )
 
         # === node/edge embedding ===
@@ -444,6 +459,10 @@ class Representation(torch.nn.Module):
             if getattr(self, "use_o3_angular_basis", True)
             else graph.edge_vector.new_empty((graph.edge_vector.size(0), 0))
         )
+        cartesian_edge_attrs = (
+            self.co3_angular_basis(graph.edge_vector / graph.edge_length)
+            if getattr(self, "co3_angular_basis", None) is not None else None
+        )
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
@@ -531,7 +550,9 @@ class Representation(torch.nn.Module):
                 node_attrs_slice,
                 edge_radial_basis,
                 this_edge_feats,
-                edge_attrs,
+                cartesian_edge_attrs
+                if isinstance(inter, O3CartesianIctpIctcInteraction)
+                else edge_attrs,
                 data["edge_index"],
                 edge_cutoff,
                 edge_wigner,

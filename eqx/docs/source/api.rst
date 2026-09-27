@@ -92,6 +92,48 @@ interface is CUDA-only; its reference is the composition of native operators.
 .. autoclass:: eqx.conv.StreamingGraphAttention
    :members: forward
 
+Cartesian O(3) operations
+--------------------------
+
+Features use flattened ``mul_ir`` storage with ``3**l`` Cartesian entries
+per channel. Inputs to tensor products are symmetric traceless tensors.
+These operators use native PyTorch on CPU and GPU.
+
+.. autoclass:: eqx.co3.Irrep
+   :members:
+
+.. autoclass:: eqx.co3.Irreps
+   :members:
+
+.. autoclass:: eqx.co3.ChangeOfBasis
+   :members: forward
+
+.. autoclass:: eqx.co3.Projector
+   :members: forward
+
+.. autoclass:: eqx.co3.CartesianHarmonics
+   :members: forward
+
+.. autoclass:: eqx.co3.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.co3.Activation
+   :members: forward
+
+.. autoclass:: eqx.co3.Gate
+   :members: forward
+
+.. autoclass:: eqx.co3.TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.co3.FullyConnectedTensorProduct
+
+.. autoclass:: eqx.co3.ElementwiseTensorProduct
+
+.. autofunction:: eqx.co3.path_matrix
+
+.. autofunction:: eqx.co3.path_normalization
+
 Supporting operators
 --------------------
 

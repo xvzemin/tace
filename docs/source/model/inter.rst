@@ -59,6 +59,56 @@ See :ref:`eqx-streaming` for training support and requirements.
 
 .. autofunction:: tace.lightning.convert_cgtp
 
+Cartesian O(3) ICTP/ICTC
+-----------------------
+
+``atomic_basis.type: co3`` selects
+``O3CartesianIctpIctcInteraction`` and automatically constructs the
+``co3_angular_basis`` using ``eqx.co3.CartesianHarmonics``. ``lmax`` still
+controls the edge angular degrees; no separate basis selector is needed.
+Node embeddings that require spherical harmonics retain their own spherical
+inputs. Cartesian and spherical interaction layers can be mixed.
+
+The interaction preserves the CGTP paths, radial weights, channel-linear
+weights, and normalization. Its computation is:
+
+.. code-block:: text
+
+   spherical nodes -> linear up -> Cartesian basis -> gather
+   Cartesian edge harmonics ------------------------> ICTP/ICTC x radial weights
+     -> scatter -> Cartesian linear down -> transposed path matrix
+     -> spherical nonlinearity and product basis
+
+Raw Cartesian edge tensors are not projected before aggregation. Channel
+compression precedes the output projection, which uses rectangular path
+matrices. Both delta and epsilon contractions are retained, including
+unnatural-parity paths. The product basis, readouts, and residual connections
+remain spherical.
+
+.. code-block:: python
+
+   from tace.lightning import convert_cgtp, export_tace, load_tace
+   from tace.interface.ase import TACEAseCalc
+
+   model = load_tace("TACE-OAM-7M.pt", device="cuda", dtype="float64")
+   cartesian = convert_cgtp(model, implementation="co3")
+   spherical = convert_cgtp(cartesian, implementation="o3")
+   export_tace(cartesian, "TACE-OAM-7M-co3.pt")
+   calculator = TACEAseCalc(cartesian, device="cuda", dtype="float64")
+
+Conversion preserves all learned parameter names, shapes, and values.
+Predictions and derivatives agree up to floating-point roundoff; recreate
+the optimizer when continuing training with the returned model. New models
+can use ``example/train/benchmark_configs/3bpa_co3.yaml``.
+
+This interaction uses native PyTorch, not the fused spherical CUDA kernel.
+Cartesian storage grows as ``3**l`` and can cost more memory at high degree.
+See :ref:`equivariantx-cartesian` for the layout and normalization conventions.
+
+.. autoclass:: tace.models._e3nn.inter.O3CartesianIctpIctcInteraction
+   :no-members:
+   :show-inheritance:
+
 O(2) Linear
 -----------
 

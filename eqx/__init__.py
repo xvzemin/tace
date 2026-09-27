@@ -1,4 +1,4 @@
-"""Native O(2) operators, O(3) frame conversion, and fused CUDA convolutions."""
+"""O(2) and Cartesian O(3) operators, frame conversion, and CUDA convolutions."""
 
 from contextlib import nullcontext
 from importlib import import_module
@@ -16,7 +16,7 @@ with (
 ):
     from . import o2
 
-__all__ = ["o2", "o3", "ace", "conv", "kernels", "models", "utils"]
+__all__ = ["o2", "o3", "co3", "ace", "conv", "kernels", "models", "utils"]
 
 
 def __getattr__(name):

@@ -3,7 +3,7 @@
 Tutorials
 =========
 
-EquivariantX (``eqx``) provides native :math:`O(2)` operators, e3nn-compatible
+EquivariantX (``eqx``) provides native :math:`O(2)` and Cartesian :math:`O(3)` operators, e3nn-compatible
 :math:`O(3)`/:math:`O(2)` frame conversion, and fused CUDA convolutions.
 Time-reversal parity is optional.
 
@@ -57,9 +57,11 @@ Representations and layouts
 change metadata, not feature tensors.
 
 Every feature tensor has shape ``(..., irreps.dim)``. Within each entry,
-EQX stores ``(..., ir.dim, mul)`` before flattening: the ``ir_mul`` layout.
+``eqx.o2`` stores ``(..., ir.dim, mul)`` before flattening: the ``ir_mul`` layout.
 e3nn stores ``(..., mul, ir.dim)`` before flattening. Transpose within each
 entry when crossing this boundary; a reshape alone does not convert layouts.
+The Cartesian ``eqx.co3`` operators instead use flattened ``mul_ir``
+storage; see :ref:`equivariantx-cartesian`.
 
 Native operators
 ----------------
