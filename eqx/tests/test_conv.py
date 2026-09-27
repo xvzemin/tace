@@ -13,6 +13,162 @@ from eqx.models.tace.tece_oam_rra import BilinearACE
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize(
+    "mmax,magnetic,attention,odd",
+    [(0, False, False, False), (1, True, True, False), (2, True, True, True)],
+)
+def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.attention import graph_softmax
+
+    frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e+2x2e+2x2o", mmax).cuda()
+    scalars = frame.irreps_out.filter(keep=lambda ir_mul: ir_mul.ir.m == 0)
+    tensors = frame.irreps_out.filter(keep=lambda ir_mul: ir_mul.ir.m > 0)
+    gates = (
+        o2.Irreps([(o2.Irrep("0o" if odd else "0e"), tensors.num_irreps)])
+        if tensors
+        else o2.Irreps("")
+    )
+    gate = o2.Gate(
+        scalars,
+        [
+            torch.nn.Tanh() if ir.is_odd_scalar() else torch.nn.SiLU()
+            for ir, _ in scalars
+        ],
+        gates,
+        [torch.nn.Tanh() if odd else torch.nn.Sigmoid()] if tensors else [],
+        tensors,
+    ).cuda()
+    inputs = (frame.irreps_out * (3 if magnetic else 2)).regroup()
+    up = o2.Linear(inputs, gate.irreps_in, biases=True).cuda()
+    down = o2.Linear(gate.irreps_out, frame.irreps_out, biases=True).cuda()
+    query, key = [
+        o2.Linear(frame.irreps_out, frame.irreps_out).cuda() for _ in range(2)
+    ]
+    conv = eqx_conv.UvO2TensorProductConv(
+        frame,
+        up,
+        gate,
+        down,
+        frame,
+        frame_edge=frame if magnetic else None,
+        query=query if attention else None,
+        key=key if attention else None,
+        num_heads=2,
+        attention_scale=0.2,
+        backend=backend,
+    ).cuda()
+    parameters = tuple(
+        p
+        for module in (up, down, *((query, key) if attention else ()))
+        for p in (module.weight, module.bias)
+    )
+    rotation = o2.WignerD(2, 2).cuda()
+    for edges in (8, 0):
+
+        def rand(*shape):
+            return (torch.randn(*shape, device="cuda") * 0.3).requires_grad_()
+
+        index = torch.randint(4, (2, edges), device="cuda")
+        x, extra = (
+            rand(4, frame.input_dim),
+            rand(edges, frame.input_dim) if magnetic else None,
+        )
+        vectors = (
+            torch.cat((torch.eye(3), -torch.eye(3), torch.randn(2, 3)))
+            .cuda()[:edges]
+            .requires_grad_()
+        )
+        weights, cutoff, radial = (
+            rand(edges, conv.weight_numel),
+            rand(edges, 1).sigmoid(),
+            rand(edges, 4),
+        )
+        wigner, inverse = rotation(vectors)
+        source, target = (
+            frame.to_local(x[index[0]], wigner),
+            frame.to_local(x[index[1]], wigner),
+        )
+        local = [(frame.irreps_out, target), (frame.irreps_out, source)]
+        if magnetic:
+            local.append((frame.irreps_out, frame.to_local(extra, wigner)))
+        parts, offset = [], 0
+        for ir, mul in inputs:
+            value = torch.cat(
+                [
+                    value[:, s].reshape(edges, ir.dim, width)
+                    for irreps, value in local
+                    for (ir_in, width), s in zip(irreps, irreps.slices())
+                    if ir == ir_in
+                ],
+                -1,
+            )
+            parts.append((value * weights[:, None, offset : offset + mul]).flatten(1))
+            offset += mul
+        message = down(gate(up(torch.cat(parts, -1))))
+        if attention:
+            q, k = query(target), key(source)
+            score = sum(
+                (q[:, s] * k[:, s]).reshape(edges, ir.dim, 2, mul // 2).sum((1, 3))
+                for (ir, mul), s in zip(frame.irreps_out, frame.irreps_out.slices())
+            )
+            score = score * 0.2 * (2 * radial[:, :2].sigmoid()) + radial[:, 2:]
+            scale = graph_softmax(score, index[1], 4, cutoff, fused=False) * cutoff
+            message = torch.cat(
+                [
+                    (
+                        message[:, s].reshape(edges, ir.dim, 2, mul // 2)
+                        * scale[:, None, :, None]
+                    ).flatten(1)
+                    for (ir, mul), s in zip(frame.irreps_out, frame.irreps_out.slices())
+                ],
+                -1,
+            )
+        else:
+            message = message * cutoff
+        expected = x.new_zeros(4, frame.input_dim).index_add(
+            0, index[1], frame.to_global(message, inverse)
+        )
+        arguments = (
+            x,
+            vectors,
+            weights,
+            cutoff,
+            *((extra,) if magnetic else ()),
+            *((radial,) if attention else ()),
+        ) + tuple(p for p in parameters if p.requires_grad)
+        for transverse in (False, True):
+            actual = conv(
+                x,
+                extra,
+                weights,
+                index,
+                None if transverse else wigner,
+                None if transverse else inverse,
+                cutoff,
+                parameters,
+                radial if attention else None,
+                vectors=vectors if transverse else None,
+            )
+            torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-10)
+            a, b = actual, expected
+            for _ in range(3 if edges else 0):
+                gradients = [
+                    torch.autograd.grad(
+                        value.sin().sum(),
+                        arguments,
+                        create_graph=True,
+                        retain_graph=True,
+                    )
+                    for value in (a, b)
+                ]
+                for ga, gb in zip(*gradients):
+                    torch.testing.assert_close(ga, gb, atol=3e-8, rtol=3e-8)
+                a, b = [torch.cat([g.flatten() for g in gs]) / 30 for gs in gradients]
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 def test_transverse_convolution(backend, normalization, double_precision):
     if not torch.cuda.is_available():
@@ -77,6 +233,145 @@ def test_transverse_convolution(backend, normalization, double_precision):
             for value in (actual, expected)
         ]
         torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+
+
+@pytest.mark.parametrize("degree,mmax", [(5, 2), (7, 7)])
+def test_transverse_frame(degree, mmax, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.uv_o2.transverse import TransverseFrame
+
+    time = hasattr(o3.Irrep("0e"), "t")
+    suffix = "o" if time else ""
+    frame = o2.LocalFrame(
+        f"1x{degree}e{suffix}+2x{degree}o{suffix}+3x{degree}e{suffix}", mmax
+    ).cuda()
+    vectors = (
+        torch.cat((torch.eye(3), -torch.eye(3), torch.randn(2, 3)))
+        .cuda()
+        .requires_grad_()
+    )
+    direction = vectors / vectors.norm(dim=-1, keepdim=True)
+    features = torch.randn(8, frame.input_dim, device="cuda", requires_grad=True)
+    index = torch.arange(8, device="cuda")
+    wigner, inverse = o2.WignerD(degree, degree).cuda()(vectors)
+    compact = frame.to_local(features, wigner)
+    expected = frame.to_global(compact, inverse)
+    for backend in ("torch", "cuda"):
+        torch.set_default_dtype(torch.float32)
+        module = TransverseFrame(frame, backend).cuda().double()
+        torch.set_default_dtype(torch.float64)
+        transverse = module(features, direction, index, index, 8)
+        for (dim, mul, start), (ir, _), section in zip(
+            module.layout, frame.irreps_out, frame.irreps_out.slices()
+        ):
+            norm = (
+                transverse[:, start : start + dim * mul]
+                .reshape(8, dim, mul)
+                .square()
+                .sum(1)
+            )
+            reference = compact[:, section].reshape(8, ir.dim, mul).square().sum(1)
+            torch.testing.assert_close(norm, reference, atol=3e-10, rtol=3e-10)
+        actual = module(transverse, direction, index, index, 8, inverse=True)
+        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+        gradients = [
+            torch.autograd.grad(
+                value.sin().sum(), (features, vectors), retain_graph=True
+            )
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=3e-8, rtol=3e-8)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_uv_o2_transverse_compile(backend, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame = o2.LocalFrame("2x0e+2x1e+2x1o").cuda()
+    gate = o2.Gate(
+        "2x0e+2x0o",
+        [torch.nn.SiLU(), torch.nn.Tanh()],
+        "2x0o",
+        [torch.nn.Tanh()],
+        "2x1m",
+    ).cuda()
+    up = o2.Linear((frame.irreps_out * 2).regroup(), gate.irreps_in).cuda()
+    down = o2.Linear(gate.irreps_out, frame.irreps_out).cuda()
+    module = eqx_conv.UvO2TensorProductConv(
+        frame, up, gate, down, frame, backend=backend
+    ).cuda()
+    parameters = up.weight, up.bias, down.weight, down.bias
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for nodes, edges in ((4, 8), (5, 11), (3, 0), (0, 0)):
+        x = torch.randn(nodes, frame.input_dim, device="cuda", requires_grad=True)
+        vectors = torch.randn(edges, 3, device="cuda", requires_grad=True)
+        weights = torch.randn(
+            edges, module.weight_numel, device="cuda", requires_grad=True
+        )
+        cutoff = torch.rand(edges, 1, device="cuda", requires_grad=True)
+        index = torch.randint(max(1, nodes), (2, edges), device="cuda")
+        args = x, None, weights, index, None, None, cutoff, parameters
+        actual, expected = (
+            compiled(*args, vectors=vectors),
+            module(*args, vectors=vectors),
+        )
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-10)
+        gradients = [
+            torch.autograd.grad(
+                result.square().sum(),
+                (x, vectors, weights, up.weight, down.weight),
+            )
+            for result in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
+        if edges == 8:
+            from torch.fx.experimental.proxy_tensor import make_fx
+
+            def energy_forces(x, vectors, weights, cutoff, up_weight, down_weight):
+                output = module(
+                    x,
+                    None,
+                    weights,
+                    index,
+                    None,
+                    None,
+                    cutoff,
+                    (up_weight, up.bias, down_weight, down.bias),
+                    vectors=vectors,
+                )
+                energy = output.square().sum()
+                forces = -torch.autograd.grad(energy, vectors, create_graph=True)[0]
+                return energy, forces
+
+            inputs = x, vectors, weights, cutoff, up.weight, down.weight
+            graph = make_fx(energy_forces)(*inputs)
+            # This function has no intentional detach. make_fx inserts
+            # detaches for saved activation outputs; remove them before
+            # differentiating the force graph, as in model compilation.
+            for node in list(graph.graph.nodes):
+                if (
+                    node.op == "call_function"
+                    and node.target == torch.ops.aten.detach.default
+                ):
+                    node.replace_all_uses_with(node.args[0])
+                    graph.graph.erase_node(node)
+            graph.recompile()
+            force_model = torch.compile(graph, backend="aot_eager", fullgraph=True)
+
+            actual, expected = force_model(*inputs), energy_forces(*inputs)
+            for a, b in zip(actual, expected):
+                torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
+            gradients = [
+                torch.autograd.grad(
+                    energy + forces.square().sum(), (weights, up.weight, down.weight)
+                )
+                for energy, forces in (actual, expected)
+            ]
+            for a, b in zip(*gradients):
+                torch.testing.assert_close(a, b, atol=2e-8, rtol=2e-8)
 
 
 @pytest.mark.parametrize("degree", range(7))
@@ -1147,7 +1442,7 @@ def test_uu_o2_convolution_derivatives(
         x,
         radial,
         projection,
-        packed,
+        None if direction else packed,
         cutoff,
         index,
         3,
@@ -1179,8 +1474,10 @@ def test_uu_o2_chunked_reduction(monkeypatch, double_precision, channels, shared
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx.conv.o2_o3 import cuda
+    from eqx.conv.o3 import cuda as o3_cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
+    monkeypatch.setattr(o3_cuda, "CHUNK_SIZE", 1025)
     frame_in = o2.LocalFrame(f"{channels}x1e+{channels}x1o").cuda()
     frame_out = o2.LocalFrame(f"{channels}x0o+{channels}x1o").cuda()
     linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, channels)
@@ -1251,6 +1548,70 @@ def test_uu_o2_time_parity_and_duplicate_entries(double_precision):
         vectors=vectors,
     )
     torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("degree,mmax", [(5, 2), (7, 7)])
+def test_uu_o2_high_degree(degree, mmax, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame = o2.LocalFrame(f"2x{degree}e+2x{degree}o", mmax=mmax).cuda()
+    linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 2)
+    # Construct in float32, then promote: constants must retain their precision.
+    torch.set_default_dtype(torch.float32)
+    module = eqx_conv.UuO2TensorProductConv(frame, linear, frame).cuda().double()
+    torch.set_default_dtype(torch.float64)
+    wigner = o2.WignerD(degree, degree).cuda()
+    vectors = torch.cat((torch.eye(3), -torch.eye(3), torch.randn(3, 3))).cuda()
+    vectors.requires_grad_()
+    features = torch.randn(3, frame.input_dim, device="cuda", requires_grad=True)
+    weights = torch.randn(9, linear.weight_numel, device="cuda", requires_grad=True)
+    projection = weights.new_empty((0, linear.weight_numel))
+    cutoff = weights.new_ones((9, 1))
+    index = torch.randint(3, (2, 9), device="cuda")
+    actual = module(
+        features, weights, projection, None, cutoff, index, 3, vectors=vectors
+    )
+    expected = module(
+        features, weights, projection, wigner.forward_packed(vectors), cutoff, index, 3
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    # Check Cartesian direction derivatives against the packed rotation reference.
+    for value in (actual, expected):
+        assert torch.isfinite(
+            torch.autograd.grad(value.square().sum(), vectors, retain_graph=True)[0]
+        ).all()
+    gradients = [
+        torch.autograd.grad(value.square().sum(), (features, weights, vectors))
+        for value in (actual, expected)
+    ]
+    for a, b in zip(*gradients):
+        torch.testing.assert_close(a, b, atol=2e-7, rtol=2e-8)
+
+
+def test_uu_o2_compile_and_empty_edges(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame = o2.LocalFrame("2x0e+2x1o").cuda()
+    linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 2)
+    module = eqx_conv.UuO2TensorProductConv(frame, linear, frame).cuda()
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for nodes, edges in ((3, 5), (3, 0), (0, 0)):
+        x = torch.randn(nodes, frame.input_dim, device="cuda", requires_grad=True)
+        vectors = torch.randn(edges, 3, device="cuda", requires_grad=True)
+        radial = torch.randn(edges, 3, device="cuda", requires_grad=True)
+        projection = torch.randn(
+            3, linear.weight_numel, device="cuda", requires_grad=True
+        )
+        index = torch.randint(max(1, nodes), (2, edges), device="cuda")
+        args = (x, radial, projection, None, radial.new_ones((edges, 1)), index, nodes)
+        actual, expected = [f(*args, vectors=vectors) for f in (compiled, module)]
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-10)
+        gradients = [
+            torch.autograd.grad(y.square().sum(), (x, vectors, radial, projection))
+            for y in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
 
 
 def test_local_channel_scaling():

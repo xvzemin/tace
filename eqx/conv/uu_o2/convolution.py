@@ -1,15 +1,17 @@
-"""Channelwise O(2) convolutions in aligned frames."""
+"""Channelwise O(2) convolutions with optional frame-free evaluation."""
 
 import math
 
 import torch
+from e3nn import o3
 
+from ...co2 import SphericalCoupling
 from ...o2 import Irrep
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
 class UuO2TensorProductConv(O2O3TensorProductConv):
-    """Fuse frame rotations, an externally weighted UuLinear and aggregation.
+    """Apply an externally weighted UuLinear and aggregate its global output.
 
     Parameters
     ----------
@@ -22,17 +24,9 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         Channelwise map between the frames' local representations. Its
         instruction order, weight layout and path normalization are preserved.
     backend : {"cuda", "torch"}, optional
-        Execution backend. CUDA fuses gather, rotations, all local paths and
-        scatter without storing edge messages. CPU uses tensor operations.
+        Execution backend. CUDA fuses directional couplings and aggregation
+        without storing edge messages. CPU uses tensor operations.
 
-    Notes
-    -----
-    Each local path has one or two fixed angular coefficients. The frame
-    basis changes are incorporated into these coefficients before compilation.
-    The aligned contraction engine is shared with O2O3TensorProductConv; no
-    Clebsch--Gordan expansion or restriction of the learned weights is needed.
-    Radial projections use bounded, reusable workspaces that are not retained
-    for backward. Transposed contractions support recursive higher derivatives.
     """
 
     def __init__(self, frame_in, linear, frame_out, *, backend="cuda"):
@@ -52,6 +46,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         self.weight_numel = linear.weight_numel
         self.num_harmonics = 1
         channels = linear.num_channel
+        self.num_channel = channels
         if any(mul != channels for mul, _ in self.irreps_in + self.irreps_out):
             raise ValueError("Every global multiplicity must equal num_channel.")
         lmax = max(frame_in.lmax, frame_out.lmax)
@@ -86,11 +81,15 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                     scale = ins.path_weight * math.sqrt(
                         dim_out / (2 * min(l_out, frame_out.mmax) + 1)
                     )
-                    cg = torch.zeros(dim, dim_out)
+                    cg = torch.zeros(dim, dim_out, dtype=torch.float64, device="cpu")
                     for (a, sign_in), (b, sign_out) in zip(rows_in, rows_out):
                         cg[a, b] = scale * sign_in * sign_out
                     index = len(self.path_data)
-                    self.register_buffer(f"cg_{index}", cg, persistent=False)
+                    self.register_buffer(
+                        f"cg_{index}",
+                        cg.to(torch.get_default_dtype()),
+                        persistent=False,
+                    )
                     if l_in == l_out == 0:
                         scalar_paths.append(index)
                     self.path_data.append(
@@ -126,6 +125,197 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         # single spherical harmonic. Use the general angular-generator rule.
         self.direction_metadata = repr((*metadata, tuple(scalar_paths)))
 
+        # Pole CG slices form an orthogonal basis for order-preserving maps.
+        # Transform the radial projection, not the edge features or their weights.
+        pairs = {}
+        for index, (_, path) in enumerate(self.path_data):
+            pairs.setdefault(path[:2], []).append(index)
+        groups = {}
+        for indices in pairs.values():
+            path = self.path_data[indices[0]][1]
+            l_in, l_out = (path[4] - 1) // 2, (path[5] - 1) // 2
+            matrices = torch.zeros(
+                len(indices), path[4], path[5], dtype=torch.float64, device="cpu"
+            )
+            for i, index in enumerate(indices):
+                for a, b, value in self.sparse_paths[index]:
+                    matrices[i, a, b] = value
+            degrees, coefficients = [], []
+            reconstruction = torch.zeros_like(matrices)
+            for l in range(abs(l_in - l_out), l_in + l_out + 1):
+                cg = o3.wigner_3j(l_in, l, l_out, dtype=torch.float64, device="cpu")
+                pole = cg[:, l, :]
+                values = (matrices * pole).sum((1, 2)) / pole.square().sum()
+                if values.abs().max() > 1e-14:
+                    degrees.append((l, cg))
+                    coefficients.append(values)
+                    reconstruction += values[:, None, None] * pole
+            if not torch.allclose(matrices, reconstruction, atol=2e-12, rtol=2e-12):
+                raise ValueError("The local map must commute with rotations about y.")
+            transform = torch.stack(coefficients)
+            groups.setdefault(transform.shape, []).append((indices, degrees, transform))
+
+        self.transverse_couplings = torch.nn.ModuleDict()
+        self.weight_transforms = []
+        weight_paths = []
+        transverse_paths = []
+        offset = 0
+        for index, group in enumerate(groups.values()):
+            indices = [
+                self.path_data[i][1][8] // channels
+                for paths, _, _ in group
+                for i in paths
+            ]
+            transform = torch.stack([values for _, _, values in group])
+            self.register_buffer(
+                f"weight_index_{index}",
+                torch.tensor(indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                f"weight_transform_{index}",
+                transform.to(torch.get_default_dtype()),
+                persistent=False,
+            )
+            self.weight_transforms.append((tuple(transform.shape), transform.tolist()))
+            for paths, degrees, transform in group:
+                path = self.path_data[paths[0]][1]
+                l_in, l_out = (path[4] - 1) // 2, (path[5] - 1) // 2
+                for row, (l, cg) in zip(transform, degrees):
+                    weight_paths.extend(
+                        (
+                            (self.path_data[i][1][8] // channels, offset // channels),
+                            float(value),
+                        )
+                        for i, value in zip(paths, row)
+                        if value != 0
+                    )
+                    name = f"{l_in}_{l}_{l_out}"
+                    if name not in self.transverse_couplings:
+                        self.transverse_couplings[name] = SphericalCoupling(
+                            l_in, l, l_out, "norm"
+                        )
+                    transverse_paths.append(
+                        (
+                            path[0],
+                            0,
+                            path[1],
+                            channels,
+                            1,
+                            path[4],
+                            2 * l + 1,
+                            path[5],
+                            offset,
+                            1.0,
+                            tuple(
+                                (a, b, c, float(cg[a, b, c]))
+                                for a, b, c in cg.nonzero().tolist()
+                            ),
+                        )
+                    )
+                    offset += channels
+        self.transverse_paths = tuple(transverse_paths)
+        self.transverse_layout = (("uvu", channels),) * len(transverse_paths)
+        self.transverse_weight_numel = offset
+        self.weight_metadata = repr(
+            (
+                channels,
+                (self.weight_numel // channels, offset // channels),
+                tuple(weight_paths),
+            )
+        )
+        self.transverse_metadata = repr(
+            (self.transverse_paths, offset, False, ("transverse", "norm"))
+        )
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        for index, (_, values) in enumerate(self.weight_transforms):
+            buffer = getattr(self, f"weight_transform_{index}")
+            buffer.copy_(torch.tensor(values, dtype=buffer.dtype, device=buffer.device))
+        for index, entries in enumerate(self.sparse_paths):
+            buffer = getattr(self, f"cg_{index}")
+            value = torch.zeros(buffer.shape, dtype=torch.float64, device="cpu")
+            for a, b, coefficient in entries:
+                value[a, b] = coefficient
+            buffer.copy_(value.to(buffer))
+        return self
+
+    def transform_weights(self, weights):
+        """Express local order weights in the directional coupling basis."""
+        if self.backend == "cuda" and weights.is_cuda:
+            from ...kernels.channel_product import local_product
+
+            return local_product(self.weight_metadata, weights)
+        values = weights.reshape(
+            weights.shape[0], self.weight_numel // self.num_channel, self.num_channel
+        )
+        result = []
+        for index, (shape, _) in enumerate(self.weight_transforms):
+            count, outputs, inputs = shape
+            selected = values.index_select(1, getattr(self, f"weight_index_{index}"))
+            selected = selected.reshape(
+                weights.shape[0], count, inputs, self.num_channel
+            )
+            result.append(
+                torch.einsum(
+                    "goi,bgic->bgoc",
+                    getattr(self, f"weight_transform_{index}"),
+                    selected,
+                ).reshape(weights.shape[0], count * outputs * self.num_channel)
+            )
+        return torch.cat(result, dim=-1) if result else weights[..., :0]
+
+    def forward_wigner(
+        self,
+        features,
+        radial,
+        projection,
+        wigner,
+        cutoff,
+        edge_index,
+        num_nodes,
+        *,
+        vectors=None,
+    ):
+        """Evaluate the aligned reference, optionally using generator derivatives."""
+        if vectors is None:
+            return super().forward(
+                features, radial, projection, wigner, cutoff, edge_index, num_nodes
+            )
+        from ..o2_o3.geometry import direction_contraction
+
+        operands = [
+            features,
+            radial,
+            projection,
+            wigner.detach(),
+            cutoff,
+            features.new_empty(1).expand(num_nodes, self.output_dim),
+        ]
+        return direction_contraction(
+            self.direction_metadata,
+            repr(((0, (0, 1, 2, 3, 3, 4, 5), False, ((6, 0),)),)),
+            vectors,
+            edge_index[0],
+            edge_index[1],
+            operands,
+            self.backend == "cuda",
+        )[0]
+
+    def forward_transverse(
+        self, features, radial, projection, cutoff, edge_index, num_nodes, vectors
+    ):
+        """Evaluate local order weights without constructing alignment matrices."""
+        if projection.numel():
+            projection = self.transform_weights(projection)
+        else:
+            radial = self.transform_weights(radial)
+            projection = projection.new_empty((0, self.transverse_weight_numel))
+        return super().forward_transverse(
+            features, radial, projection, cutoff, edge_index, num_nodes, vectors
+        )
+
     def forward(
         self,
         features,
@@ -150,9 +340,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         projection : torch.Tensor
             Final radial weight matrix, ``(channels, weight_numel)``. An empty
             matrix of shape ``(0, weight_numel)`` selects direct path weights.
-        wigner : torch.Tensor
+        wigner : torch.Tensor or None
             Packed full degree matrices, ``(edges, sum((2*l+1)**2))``. A
-            leading dimension of one shares matrices across edges.
+            leading dimension of one shares matrices across edges. Unused
+            when vectors are supplied; pass None to avoid constructing frames.
         cutoff : torch.Tensor
             Scalar edge factors, ``(edges, 1)`` or ``(1, 1)``.
         edge_index : torch.Tensor
@@ -161,15 +352,19 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             Number of output nodes.
         vectors : torch.Tensor, optional
             Frame directions, ``(edges, 3)`` or ``(1, 3)``. When supplied,
-            differentiate directions directly and treat Wigner matrices as
-            cached values. Otherwise differentiate the matrices themselves.
+            evaluate the same map without selecting a transverse basis.
+            Otherwise use the supplied matrices as the rotation reference.
 
         Returns
         -------
         torch.Tensor
             Aggregated features, ``(num_nodes, irreps_out.dim)``, in ir_mul order.
         """
-        return super().forward(
+        if vectors is not None:
+            return self.forward_transverse(
+                features, radial, projection, cutoff, edge_index, num_nodes, vectors
+            )
+        return self.forward_wigner(
             features,
             radial,
             projection,

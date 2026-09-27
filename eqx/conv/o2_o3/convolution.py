@@ -326,6 +326,7 @@ class O2O3TensorProductConv(torch.nn.Module):
             )
         )
         self.transverse_paths = tuple(transverse_paths)
+        self.transverse_layout = tuple((mode, path[3]) for mode, path in self.path_data)
         self.transverse_metadata = repr(
             (
                 self.transverse_paths,
@@ -424,10 +425,11 @@ class O2O3TensorProductConv(torch.nn.Module):
         self, features, radial, projection, amplitudes, edge_index, num_nodes, vectors
     ):
         """Contract transverse tensors in spherical storage without alignment."""
-        direction = vectors / vectors.norm(dim=-1, keepdim=True)
         if self.backend == "cuda" and features.is_cuda:
+            from ...kernels.wigner import alignment_cuda
             from ..o3.convolution import contraction as spherical_contraction
 
+            direction = alignment_cuda(repr("normalize"), [vectors])[0]
             operands = [
                 features,
                 radial,
@@ -443,6 +445,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                 edge_index[1],
                 operands,
             )[0]
+        direction = vectors / vectors.norm(dim=-1, keepdim=True)
         source, target = edge_index
         edges = source.numel()
         weights = radial @ projection if projection.numel() else radial
@@ -451,7 +454,7 @@ class O2O3TensorProductConv(torch.nn.Module):
             for value in (features, radial, projection, amplitudes, direction)
         )
         result = features.new_zeros((num_nodes, self.output_dim)) + zero
-        for (mode, local), path in zip(self.path_data, self.transverse_paths):
+        for (mode, mul_out), path in zip(self.transverse_layout, self.transverse_paths):
             (
                 start,
                 harmonic,
@@ -465,7 +468,6 @@ class O2O3TensorProductConv(torch.nn.Module):
                 factor,
                 _,
             ) = path
-            mul_out = local[3]
             x = (
                 features[source, start : start + dim * mul]
                 .reshape(edges, dim, mul)

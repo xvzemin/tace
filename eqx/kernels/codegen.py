@@ -226,7 +226,16 @@ class ScalarProgram:
 
 @lru_cache(maxsize=128)
 def alignment_program(key, dtype):
-    """Represent the existing quaternion alignment, without changing its branches."""
+    """Build frame geometry expressions and their transposes."""
+    if key == "normalize":
+        program = ScalarProgram()
+        vectors = [program.add("input", 0, i) for i in range(3)]
+        norm = program.constant(0)
+        for value in vectors:
+            norm = program.add("add", norm, program.add("mul", value, value))
+        norm = program.add("sqrt", norm)
+        direction = tuple(program.add("div", value, norm) for value in vectors)
+        return tuple(program.nodes), (direction,), (3,)
     if key == "direction_gradient":
         program = ScalarProgram()
         vectors = [program.add("input", 0, i) for i in range(3)]

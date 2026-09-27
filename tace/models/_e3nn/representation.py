@@ -133,16 +133,12 @@ class Representation(torch.nn.Module):
             or uses_o2_interaction
             or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
         )
-        self._can_pack_wigner = (
-            uses_o2_cgtp_interaction
-            or any(issubclass(cls, UuO2Interaction) for cls in interaction_classes)
-        ) and not (
+        self._can_pack_wigner = not (
             uses_so2_interaction
-            or any(
-                issubclass(cls, UvO2Interaction)
-                for cls in interaction_classes
-            )
             or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+        )
+        self._can_skip_wigner = self._can_pack_wigner and not any(
+            issubclass(cls, UvO2Interaction) for cls in interaction_classes
         )
         uses_magnetic_interaction = any(
             issubclass(interaction_cls, O2MagneticInteraction)
@@ -452,15 +448,20 @@ class Representation(torch.nn.Module):
         # === angular basis ===
         edge_wigner = None
         edge_wigner_inv = None
-        if getattr(self, "use_local_frame", self.use_so2 or self.use_o2):
+        skip_wigner = getattr(self, "_can_skip_wigner", False) and all(
+            interaction.use_eqx
+            for interaction in self.interactions
+            if isinstance(interaction, UuO2Interaction)
+        )
+        if (
+            getattr(self, "use_local_frame", self.use_so2 or self.use_o2)
+            and not skip_wigner
+        ):
             if getattr(self, "use_packed_wigner", False):
                 from eqx.kernels import wigner_D
 
-                # Streamed convolutions differentiate directions directly; their
-                # degree matrices are shared cached values, not AD operands.
-                edge_wigner = wigner_D(
-                    self.o2_angular_basis, graph.edge_vector.detach()
-                )
+                edge_wigner = wigner_D(self.o2_angular_basis, graph.edge_vector)
+                edge_wigner_inv = edge_wigner
             else:
                 edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
         edge_attrs = (

@@ -33,13 +33,37 @@ Choosing an operator
      - PyTorch / CUDA
    * - ``UvO2TensorProductConv``
      - Linear--Gate--Linear; optional edge features and attention
-     - CUDA
+     - PyTorch / CUDA
 
 Cartesian features use flattened ``mul_ir`` storage; the other convolutions
-use flattened ``ir_mul`` storage. Except for Uv, the interfaces default to
-CUDA on GPU and use PyTorch on CPU. Set
-``backend="torch"`` to select their reference implementation on either device.
-For a native Uv reference, compose ``LocalFrame``, ``Linear``, and ``Gate``.
+use flattened ``ir_mul`` storage. The interfaces default to CUDA on GPU and
+use PyTorch on CPU. Set ``backend="torch"`` to use tensor operations on either
+device without loading CUDA extensions.
+
+The three O(2)-based convolutions expose two equivalent evaluations, independent
+of the backend:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 35 40
+
+   * - Interface
+     - Wigner evaluation
+     - Transverse evaluation
+   * - ``O2O3TensorProductConv``
+     - Rotate, contract local CG coefficients, rotate back
+     - Directional couplings with the original CGTP path weights
+   * - ``UuO2TensorProductConv``
+     - Rotate, apply UuLinear, rotate back
+     - Transform order weights and contract directional couplings
+   * - ``UvO2TensorProductConv``
+     - Rotate, Linear--Gate--Linear, rotate back
+     - Restrict to spherical order subspaces, Linear--Gate--Linear, lift
+
+Supply Wigner matrices for the standard evaluation. Supply ``vectors`` and
+``wigner=None`` for transverse evaluation; Uv additionally takes
+``wigner_inv=None``. The latter constructs neither an alignment rotation nor
+transverse axes. Both evaluations preserve the parameters and normalization.
 
 CUDA CGTPs support ``uvu`` instructions and float32/float64.
 The aligned PyTorch CGTP also supports ``uvw``. Its harmonic input must have
@@ -123,14 +147,14 @@ Fusion boundaries
        aligned CGTP also fuses feature rotations
      - No full edge messages; bounded radial-projection workspaces
    * - Uu O(2)
-     - Gather, rotations, channelwise weighting, scatter
+     - Gather, aligned or transverse contractions, channelwise weighting, scatter
      - No full edge messages; bounded radial-projection workspaces
    * - Cartesian O(3)
      - Gather, harmonic polynomials, delta/epsilon contractions, scatter
      - No edge harmonics or messages with vector inputs; bounded radial workspaces
    * - Uv O(2)
-     - Rotations, radial multiplication, gate, optional attention, scatter
-     - Radial weights and local GEMM operands remain explicit
+     - Restriction, radial multiplication, gate, optional attention, lift/scatter
+     - Radial weights and channel-GEMM operands remain explicit
    * - TECE-OAM-RRA
      - Tiled matrix products and CUDA expressions; two-pass attention
      - Attention scores span edges; local features are recomputed per tile
@@ -156,6 +180,8 @@ Transposed contraction programs support recursive derivatives, including the
 mixed second derivatives required by force training. Registered operators
 provide fake implementations and autograd rules for ``torch.compile``.
 Atomic reductions can change floating-point summation order.
+For force training, compile the graph including force evaluation. This avoids
+requesting double backward through an AOT-compiled energy-only wrapper.
 
 Vector interfaces avoid differentiating stored angular intermediates:
 
@@ -172,6 +198,28 @@ Vector interfaces avoid differentiating stored angular intermediates:
   couplings and sparse generator actions; direction derivatives use harmonic
   polynomials at every order. If vectors are omitted, supplied Wigner matrices
   are used and differentiated instead.
+* ``UuO2TensorProductConv.forward(..., vectors=...)`` preserves every local
+  order weight while evaluating in spherical storage without alignment.
+  A fixed, degree-wise change of coefficients is applied to the radial
+  projection before processing edges. ``forward_wigner`` retains the aligned
+  reference, including optional generator-based direction derivatives.
+
+``UvO2TensorProductConv`` accepts packed degree matrices from
+``WignerD.forward_packed``. Pass ``wigner_inv=None`` to reuse these matrices
+for the inverse rotation. This avoids zero-filled dense storage and a separate
+inverse matrix; it does not remove frame alignment.
+
+For transverse Uv evaluation, order :math:`m>0` is embedded isometrically in a
+degree-:math:`m` spherical tensor of width :math:`2m+1`. The tensor stays in a
+two-dimensional subspace, with no explicit Cartesian tensor or selected axes.
+Channel maps, even scalar gates, and attention inner products preserve this
+subspace. An odd scalar gate additionally applies the rotation generator about
+the unit edge direction, divided by :math:`m`, replacing the fixed local
+quarter-turn. Order-zero activations are unchanged. CUDA kernels evaluate
+restriction/lifting, scalar expressions, and segmented attention; channel
+mixing uses PyTorch GEMMs. These larger intermediates can cost more than the
+compact Wigner implementation, so frame-free evaluation is not necessarily
+faster or smaller. The Wigner path remains available as a reference.
 
 CUDA kernels compile lazily and are cached. Warm up the forward and derivatives
 used by the workload before measuring speed. ``EQX_USE_CUDA_GRAPH=1`` enables

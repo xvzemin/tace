@@ -591,7 +591,7 @@ class UuO2ScatterTensorProduct(torch.nn.Module):
     ):
         """Fuse rotations, local paths, radial projection, and gather/scatter."""
         vectors = graph.edge_vector if graph is not None else None
-        if wigner.ndim == 3:
+        if vectors is None and wigner is not None and wigner.ndim == 3:
             # Mixed interactions may still use order-major, truncated frames.
             # Keep their matrix derivatives, including the zero-padded rows.
             lmax = math.isqrt(wigner.size(-1)) - 1

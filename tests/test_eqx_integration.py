@@ -350,7 +350,8 @@ def test_tace_indexed_linear(monkeypatch, experts, matrix, lora, dtype):
 @pytest.mark.parametrize("magnetic", [False, True])
 @pytest.mark.parametrize("attention", [False, True])
 @pytest.mark.parametrize("mmax", [0, 2])
-def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax):
+@pytest.mark.parametrize("packed", [False, True])
+def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.o2 import (
@@ -404,7 +405,11 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax):
 
         def run(enabled):
             monkeypatch.setenv("TACE_USE_EQX", str(int(enabled)))
-            w, wi = frame(vectors)
+            w, wi = (
+                (frame.forward_packed(vectors), None)
+                if enabled and packed
+                else frame(vectors)
+            )
             args = (
                 (x, mag, weights, index, w, wi)
                 if magnetic
@@ -431,7 +436,8 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax):
             )
 
 
-def test_uv_o2_compile_and_force_training(monkeypatch, double_precision):
+@pytest.mark.parametrize("packed", [False, True])
+def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.o2 import O2ScatterMagneticTensorProduct
@@ -455,7 +461,7 @@ def test_uv_o2_compile_and_force_training(monkeypatch, double_precision):
     frame = o2.WignerD(1, 1).cuda()
 
     def evaluate(x, mag, weights, vectors, radial, cutoff, index):
-        w, wi = frame(vectors)
+        w, wi = (frame.forward_packed(vectors), None) if packed else frame(vectors)
         return module(x, mag, weights, index, w, wi, radial, cutoff)
 
     compiled = torch.compile(
@@ -1331,7 +1337,7 @@ def test_tace_radial_bias_cutoff_and_force_training(
         torch.testing.assert_close(a, b, atol=2e-6, rtol=2e-9)
 
 
-@pytest.mark.parametrize("interaction", ["cgtp", "uu_o2", ["uu_o2", "o2"]])
+@pytest.mark.parametrize("interaction", ["cgtp", "uu_o2", "o2", ["uu_o2", "o2"]])
 def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -1389,6 +1395,18 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     def no_edge_message(*args):
         raise AssertionError(
             "The fused interaction must not materialize edge messages or weights"
+        )
+
+    if interaction == "uu_o2":
+        monkeypatch.setattr(
+            model.readout_fn.representation.o2_angular_basis,
+            "forward",
+            no_edge_message,
+        )
+        monkeypatch.setattr(
+            model.readout_fn.representation.o2_angular_basis,
+            "forward_packed",
+            no_edge_message,
         )
 
     for layer in model.readout_fn.representation.interactions:
