@@ -233,6 +233,48 @@ def convolution_source(
                             (f"T({factor:.17g})", values[v, 1, 0])
                         )
 
+    if "transverse_adjoints" in cache:
+        from ..o2_o3.transverse import coupling_adjoint_source
+
+        pending, groups = cache["transverse_adjoints"], {}
+        for key, terms in edge_terms.items():
+            remaining = []
+            slot, width, column, shared_output = key
+            for weight, value in terms:
+                if value not in pending:
+                    remaining.append((weight, value))
+                    continue
+                request, axis = pending[value]
+                if axis == 0:
+                    group = slot, width, shared_output, request[3]
+                    groups.setdefault(group, []).append((*request, weight))
+            edge_terms[key] = remaining
+        for (slot, width, shared_output, _), requests in groups.items():
+            gradient = coupling_adjoint_source(requests, cache, body)
+            for column, value in enumerate(gradient):
+                key = slot, width, column, shared_output
+                edge_terms[key].append(("T(1)", value))
+        groups = {}
+        for key, terms in node_terms.items():
+            remaining = []
+            slot, role, width, column = key
+            for weight, value in terms:
+                if value not in pending:
+                    remaining.append((weight, value))
+                    continue
+                request, axis = pending[value]
+                if axis == 0:
+                    group = slot, role, width, column, request[3:5]
+                    groups.setdefault(group, []).append((*request, weight))
+            node_terms[key] = remaining
+        for (slot, role, width, offset, _), requests in groups.items():
+            gradient = coupling_adjoint_source(
+                requests, cache, body, feature_adjoint=True
+            )
+            for column, value in enumerate(gradient):
+                key = slot, role, width, offset + column * mul
+                node_terms[key].append(("T(1)", value))
+
     if owner >= 0:
         index = "source" if owner == 0 else "target"
         lines += [
@@ -401,7 +443,9 @@ def fused_source(
             order = (
                 "source_order"
                 if owner == 0
-                else "target_order" if owner == 1 else "nullptr"
+                else "target_order"
+                if owner == 1
+                else "nullptr"
             )
             body.append(
                 f"case {local}: phase{i}({', '.join(names)}, source, target, {order}, edges, tasks, {rows}, tile, channel); break;"

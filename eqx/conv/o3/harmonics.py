@@ -272,20 +272,28 @@ def angular_source(
     weight_role = None
     if 1 in roles:
         widths = {0: dim1, 3: 1, 4: dim_out}
-        weight_role = min(needed & widths.keys() or widths, key=widths.__getitem__)
+        weight_role = (
+            3
+            if transverse and method == "recurrence"
+            else min(needed & widths.keys() or widths, key=widths.__getitem__)
+        )
         needed.add(weight_role)
     values = {}
     for v in range(mul2):
         for role in sorted(needed):
             width = {0: dim1, 3: 1, 4: dim_out}.get(role, 3)
-            if transverse and (rank == 0 or method == "generator"):
+            if transverse and (rank == 0 or method in ("generator", "recurrence")):
                 from ..o2_o3.transverse import (
                     coupling_derivative_source,
                     coupling_source,
                 )
 
                 contracted_role = role
-                if role not in (0, 4):
+                if method == "recurrence" and (role == 0 or role >= 6):
+                    # Input and geometry adjoints share the source recurrence across
+                    # independent paths before transposing their weighted sum.
+                    contracted_role = 4
+                elif role not in (0, 4):
                     widths = {0: dim1, 4: dim_out}
                     contracted_role = min(
                         needed & widths.keys() or widths, key=widths.__getitem__
@@ -304,6 +312,42 @@ def angular_source(
                     if contracted_role == 0
                     else 1
                 )
+                if method == "recurrence" and (role == 0 or role >= 6):
+                    directions = tuple(
+                        tuple(load(index, a) for a in range(3))
+                        for index in range(6, len(mapping))
+                        if index != role
+                    )
+                    offset = start if contracted_role == 0 else end
+                    cotangent = tuple(
+                        load(contracted_role, offset + a * mul1, "u")
+                        for a in range(out)
+                    )
+                    amplitude = load(3, attr + v)
+                    cotangent = tuple(
+                        contraction_source(
+                            ((float(sign), (x, amplitude)),), cache, lines
+                        )
+                        for x in cotangent
+                    )
+                    request = (
+                        (dim - 1) // 2,
+                        degree,
+                        (out - 1) // 2,
+                        vector,
+                        features,
+                        cotangent,
+                        normalization,
+                        directions,
+                    )
+                    pending = cache.setdefault("transverse_adjoints", {})
+                    for axis in range(dim1 if role == 0 else 3):
+                        key = "transverse_adjoint", request, role == 0, axis
+                        if key not in cache:
+                            cache[key] = f"v{len(cache)}"
+                            pending[cache[key]] = request, axis
+                        values[v, role, axis] = cache[key]
+                    continue
                 for axis in range(3 if role >= 6 else 1):
                     directions = tuple(
                         tuple(f"T({int(a == axis)})" for a in range(3))
@@ -322,9 +366,11 @@ def angular_source(
                         lines,
                     )
                     coupled = (
-                        coupling_derivative_source(*args, directions)
+                        coupling_derivative_source(
+                            *args, directions, recurrence=method == "recurrence"
+                        )
                         if directions
-                        else coupling_source(*args)
+                        else coupling_source(*args, recurrence=method == "recurrence")
                     )
                     if role not in (0, 4):
                         offset = start if contracted_role == 0 else end

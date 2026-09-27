@@ -85,6 +85,25 @@ def coupling_polynomial(l1, l2, l3, normalization="component"):
     return tuple(coefficients.tolist())
 
 
+@lru_cache(maxsize=256)
+def coupling_recurrence(l1, l3):
+    """Return adjacent-degree coefficients of normalized CG operators.
+
+    The generator is divided by ``sqrt(d * (d + 1))``, where
+    ``d = min(l1, l3)``. Reference-axis operators have unit Frobenius norm.
+    Coefficients are independent of direction and feature multiplicity.
+    """
+    degree, delta = min(l1, l3), abs(l1 - l3)
+    return tuple(
+        -math.sqrt(
+            ((l1 + l3 + 1) ** 2 - l**2)
+            * (l**2 - delta**2)
+            / (4 * (4 * l**2 - 1) * degree * (degree + 1))
+        )
+        for l in range(delta + 1, l1 + l3 + 1)
+    )
+
+
 class SphericalCoupling(torch.nn.Module):
     """Apply a transverse coupling without selecting a local frame.
 
@@ -94,6 +113,8 @@ class SphericalCoupling(torch.nn.Module):
         Input, harmonic and output degrees.
     normalization : {"component", "norm", "integral"}, optional
         Harmonic normalization.
+    method : {"chebyshev", "recurrence"}, optional
+        Evaluate a Chebyshev expansion or a CG recurrence at fixed parity.
 
     Notes
     -----
@@ -101,8 +122,11 @@ class SphericalCoupling(torch.nn.Module):
     of the rotation generator implement the transverse restriction and lift.
     """
 
-    def __init__(self, l1, l2, l3, normalization="component"):
+    def __init__(self, l1, l2, l3, normalization="component", method="chebyshev"):
         super().__init__()
+        if method not in ("chebyshev", "recurrence"):
+            raise ValueError("method must be chebyshev or recurrence.")
+        self.method = method
         self.l1, self.l2, self.l3 = l1, l2, l3
         self.normalization = normalization
         self.delta = abs(l1 - l3)
@@ -110,6 +134,7 @@ class SphericalCoupling(torch.nn.Module):
         self.odd = (l1 + l2 + l3) % 2
         self.spectral_scale = self.degree * (self.degree + 1) / max(1, self.degree**2)
         self.coefficients = coupling_polynomial(l1, l2, l3, normalization)
+        self.recurrence = coupling_recurrence(l1, l3)
         self.harmonics = o3.SphericalHarmonics(
             self.delta, normalize=False, normalization="norm"
         )
@@ -135,8 +160,11 @@ class SphericalCoupling(torch.nn.Module):
         ).to(self.generator)
         return self
 
-    def forward(self, features, vectors):
+    def forward(self, features, vectors, method=None):
         """Couple (..., 2*l1+1) features to harmonics of (..., 3) vectors."""
+        method = self.method if method is None else method
+        if method not in ("chebyshev", "recurrence"):
+            raise ValueError("method must be chebyshev or recurrence.")
         direction = vectors / vectors.norm(dim=-1, keepdim=True)
         harmonic = self.harmonics(direction)
 
@@ -154,6 +182,30 @@ class SphericalCoupling(torch.nn.Module):
             )
             return (projected * direction.unsqueeze(-1)).sum(-2)
 
+        if method == "recurrence":
+            value = math.sqrt(2 * self.delta + 1) * value
+            if self.odd:
+                value = apply_generator(value) / self.recurrence[0]
+            previous = None
+            for k in range(self.odd, self.l2 - self.delta, 2):
+                diagonal = self.recurrence[k] ** 2
+                if k:
+                    diagonal += self.recurrence[k - 1] ** 2
+                following = apply_generator(apply_generator(value)) + diagonal * value
+                if k >= 2:
+                    following = following - (
+                        self.recurrence[k - 1] * self.recurrence[k - 2] * previous
+                    )
+                previous, value = (
+                    value,
+                    following / (self.recurrence[k] * self.recurrence[k + 1]),
+                )
+            if self.normalization == "norm":
+                value = value / math.sqrt(2 * self.l2 + 1)
+            elif self.normalization == "integral":
+                value = value / math.sqrt(4 * math.pi)
+            return bridge(value) if self.l1 < self.l3 else value
+
         if self.odd:
             value = apply_generator(value)
         previous = value
@@ -170,4 +222,7 @@ class SphericalCoupling(torch.nn.Module):
         return bridge(result) if self.l1 < self.l3 else result
 
     def extra_repr(self):
-        return f"{self.l1} x Y({self.l2}) -> {self.l3}, normalization={self.normalization!r}"
+        return (
+            f"{self.l1} x Y({self.l2}) -> {self.l3}, "
+            f"normalization={self.normalization!r}, method={self.method!r}"
+        )

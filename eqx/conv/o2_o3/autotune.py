@@ -49,7 +49,7 @@ def select_method(
         module.selected_method = module.tuning_results[key]["method"]
         return module.selected_method
 
-    methods = ("baseline", "generator", "cg", "wigner")
+    methods = ("baseline", "generator", "recurrence", "cg", "wigner")
     timings = {method: [] for method in methods}
     with (
         torch.cuda.device(features.device),

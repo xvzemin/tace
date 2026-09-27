@@ -29,7 +29,16 @@ def assert_native_autograd(value):
 @pytest.mark.parametrize("edges", [0, 4])
 @pytest.mark.parametrize(
     "algorithm",
-    ["o3", "cartesian", "generator", "cg", "wigner", "uu_wigner", "uu_transverse"],
+    [
+        "o3",
+        "cartesian",
+        "generator",
+        "recurrence",
+        "cg",
+        "wigner",
+        "uu_wigner",
+        "uu_transverse",
+    ],
 )
 def test_torch_scalar_direction_gradient(algorithm, edges, double_precision):
     if not torch.cuda.is_available():
@@ -239,7 +248,9 @@ def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precis
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
-@pytest.mark.parametrize("method", ["baseline", "generator", "cg", "wigner"])
+@pytest.mark.parametrize(
+    "method", ["baseline", "generator", "recurrence", "cg", "wigner"]
+)
 def test_transverse_convolution(
     backend, normalization, method, double_precision, monkeypatch
 ):
@@ -286,7 +297,9 @@ def test_transverse_convolution(
     actual = module(x, radial, projection, None, amplitudes, edges, 4, vectors=vectors)
     if backend == "torch":
         assert_native_autograd(actual)
-        assert set(calls) == {"generator" if method == "baseline" else method}
+        assert set(calls) == {
+            "generator" if method in ("baseline", "recurrence") else method
+        }
     harmonics = torch.cat(
         [
             o3.spherical_harmonics(
@@ -423,7 +436,7 @@ def test_o2_cgtp_autotune(training, double_precision):
     assert not module.tuning_results
 
 
-@pytest.mark.parametrize("method", ["generator", "cg", "wigner"])
+@pytest.mark.parametrize("method", ["generator", "recurrence", "cg", "wigner"])
 @pytest.mark.parametrize("shared", [False, True])
 def test_o2_torch_channel_mixing(method, shared, double_precision):
     if not torch.cuda.is_available():
@@ -473,7 +486,9 @@ def test_o2_torch_channel_mixing(method, shared, double_precision):
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("degrees", [(5, 4, 5), (7, 6, 6)])
-@pytest.mark.parametrize("method", ["baseline", "generator", "cg", "wigner"])
+@pytest.mark.parametrize(
+    "method", ["baseline", "generator", "recurrence", "cg", "wigner"]
+)
 def test_o2_cgtp_high_degree(backend, degrees, method, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -508,7 +523,9 @@ def test_o2_cgtp_high_degree(backend, degrees, method, double_precision):
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-@pytest.mark.parametrize("method", ["baseline", "generator", "cg", "wigner", "auto"])
+@pytest.mark.parametrize(
+    "method", ["baseline", "generator", "recurrence", "cg", "wigner", "auto"]
+)
 def test_o2_cgtp_empty_methods(backend, method, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")

@@ -25,9 +25,21 @@ def execution_plan(
     paths, _, _, *geometry = parse_metadata(metadata)
     outputs = 1 + max(slot for _, _, pairs in program for _, slot in pairs)
     group_attrs = any(role == 3 for _, _, pairs in program for role, _ in pairs)
+    transverse = bool(
+        geometry
+        and isinstance(geometry[0], tuple)
+        and geometry[0][0] == "transverse"
+        and len(geometry[0]) > 2
+        and geometry[0][2] == "recurrence"
+    )
     groups = defaultdict(list)
     for path in paths:
-        groups[path[3], path[1 if group_attrs else 0]].append(path)
+        key = (
+            (path[3], path[0], path[7])
+            if transverse
+            else (path[3], path[1 if group_attrs else 0])
+        )
+        groups[key].append(path)
     pending = deque(
         (tuple(sorted(entries, key=lambda p: (p[1], p[2]))), program)
         for entries in groups.values()
@@ -98,7 +110,8 @@ def execution_plan(
                     boundaries = [
                         i
                         for i in range(1, len(paths))
-                        if paths[i - 1][1] != paths[i][1]
+                        if paths[i - 1][7 if transverse else 1]
+                        != paths[i][7 if transverse else 1]
                     ]
                     half = min(
                         boundaries or range(1, len(paths)),

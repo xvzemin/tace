@@ -135,9 +135,10 @@ class O2O3TensorProductConv(torch.nn.Module):
         on CUDA inputs and native operations on CPU.
         The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
         for channel-mixing ``"uvw"`` instructions.
-    method : {"auto", "baseline", "generator", "cg", "wigner"}, optional
+    method : {"auto", "baseline", "generator", "recurrence", "cg", "wigner"}, optional
         ``"baseline"`` retains static path-wise expression selection.
-        ``"generator"`` uses generator polynomials, including their derivatives.
+        ``"generator"`` uses a Chebyshev expansion of the squared generator.
+        ``"recurrence"`` uses a fixed-parity CG recurrence with shared adjoints.
         ``"cg"`` uses sparse CG contractions of harmonic polynomials.
         ``"wigner"`` constructs a frame and contracts its order-zero CG slices.
         ``"auto"`` measures complete CUDA evaluations and caches the fastest
@@ -174,8 +175,17 @@ class O2O3TensorProductConv(torch.nn.Module):
                 "Use backend='torch' for other connection modes."
             )
         self.backend = backend
-        if method not in ("auto", "baseline", "generator", "cg", "wigner"):
-            raise ValueError("method must be auto, baseline, generator, cg or wigner.")
+        if method not in (
+            "auto",
+            "baseline",
+            "generator",
+            "recurrence",
+            "cg",
+            "wigner",
+        ):
+            raise ValueError(
+                "method must be auto, baseline, generator, recurrence, cg or wigner."
+            )
         self.method = method
         self.selected_method = "baseline"
         self.tuning_results = {}
@@ -320,6 +330,14 @@ class O2O3TensorProductConv(torch.nn.Module):
                 ("transverse", self.normalization, "generator"),
             )
         )
+        self.recurrence_metadata = repr(
+            (
+                self.transverse_paths,
+                self.weight_numel,
+                self.has_unweighted,
+                ("transverse", self.normalization, "recurrence"),
+            )
+        )
         self.cg_metadata = repr(
             (
                 self.transverse_paths,
@@ -381,9 +399,18 @@ class O2O3TensorProductConv(torch.nn.Module):
             declared, unsimplified ``ir_mul`` layout.
         """
         method = getattr(self, "method", "baseline") if method is None else method
-        if method not in ("auto", "baseline", "generator", "cg", "wigner"):
-            raise ValueError("method must be auto, baseline, generator, cg or wigner.")
-        if vectors is None and method in ("generator", "cg"):
+        if method not in (
+            "auto",
+            "baseline",
+            "generator",
+            "recurrence",
+            "cg",
+            "wigner",
+        ):
+            raise ValueError(
+                "method must be auto, baseline, generator, recurrence, cg or wigner."
+            )
+        if vectors is None and method in ("generator", "recurrence", "cg"):
             raise ValueError(f"method={method!r} requires vectors.")
         if vectors is not None:
             if method == "auto":
@@ -403,7 +430,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                 wigner = self.frame.forward_packed(
                     vectors, method="auto" if self.backend == "cuda" else "recursive"
                 )
-            elif method in ("baseline", "generator", "cg"):
+            elif method in ("baseline", "generator", "recurrence", "cg"):
                 return self.forward_transverse(
                     features,
                     radial,
@@ -519,7 +546,9 @@ class O2O3TensorProductConv(torch.nn.Module):
                 )
             else:
                 value = self.transverse_couplings[name](
-                    x, direction.unsqueeze(-2)
+                    x,
+                    direction.unsqueeze(-2),
+                    method="recurrence" if method == "recurrence" else "chebyshev",
                 ).transpose(-1, -2)
             if weight >= 0:
                 width = mul if mode == "uvu" else mul * mul_out

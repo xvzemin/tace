@@ -122,7 +122,7 @@ extern "C" __global__ void run(const T* a, const T* b, T* c,
 
 
 class ScalarProgram:
-    """A small expression graph for the alignment formula and its transposes."""
+    """Scalar expressions and their transposes for geometry and contractions."""
 
     def __init__(self, nodes=()):
         self.nodes = list(nodes)

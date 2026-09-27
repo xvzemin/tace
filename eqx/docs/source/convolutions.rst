@@ -60,6 +60,8 @@ references.
      - CG contraction with supplied edge features or spherical harmonics
    * - O2 CGTP, ``generator``
      - Minimum-degree CG coupling and a Chebyshev polynomial of the rotation generator
+   * - O2 CGTP, ``recurrence``
+     - Minimum-degree CG coupling and a fixed-parity CG recurrence
    * - O2 CGTP, ``cg``
      - Full CG contraction with directional spherical harmonics
    * - O2 CGTP, ``wigner``
@@ -128,8 +130,11 @@ the module or its weights.
      - Original static choice of generator or sparse CG expressions per path
      - Harmonic polynomial derivatives
    * - ``generator``
-     - Minimum-degree coupling and generator polynomials
-     - Product-rule derivatives of the same generator expression
+     - Minimum-degree coupling and a Chebyshev polynomial
+     - Product-rule derivatives of the same expression
+   * - ``recurrence``
+     - Minimum-degree coupling and a three-term CG recurrence
+     - Shared source and direction adjoints of the recurrence
    * - ``cg``
      - Sparse CG contraction of harmonic polynomials
      - Derivatives of those polynomials
@@ -138,12 +143,24 @@ the module or its weights.
      - Derivatives through the Wigner matrices
 
 All paths, output multiplicities, radial weights and normalization are retained.
-The first three methods do not construct frames. The generator method still
-uses fixed CG coefficients for its minimum-degree coupling; it does not replace
+All methods except ``wigner`` avoid constructing frames. Generator methods still
+use fixed CG coefficients for their minimum-degree coupling; they do not replace
 the full coupling with a direct CG expression. ``baseline`` is a scheduling
 policy over these expressions, not an additional coupling formula. Its PyTorch
 reference uses the generator expression; ``cg`` independently checks the direct
 contraction. Every explicit method has its own differentiable PyTorch forward.
+
+The ``recurrence`` method uses fixed, closed-form coefficients and normalized
+rotation generators. Eliminating alternating degrees gives separate even and
+odd recurrences in the squared generator. Compatible paths reuse their prefix
+while retaining independent weights and outputs. CUDA collects weighted path
+cotangents before transposing the shared expression graph. Source gradients
+and all three direction-gradient entries are computed without separate
+coordinate-wise forward differentiation. Higher derivatives use the product
+rule and the same transposition machinery. The PyTorch reference uses native
+autograd. ``generator`` retains the previous Chebyshev evaluation and its
+derivatives. Neither method is uniformly fastest; ``auto`` measures the
+requested derivative workload before selecting an implementation.
 
 On CUDA, ``auto`` measures geometry construction, radial projection, contraction
 and reduction together. Gradient-enabled inputs include a reverse pass;
@@ -315,7 +332,8 @@ CUDA vector interfaces avoid storing angular intermediates for differentiation:
   ``TensorProduct(project=False)`` defers projection until after node aggregation
   and channel compression. See :doc:`cartesian`.
 * ``O2O3TensorProductConv.forward(..., vectors=...)`` selects a complete evaluation
-  through ``method``. ``generator`` differentiates the generator polynomial;
+  through ``method``. ``generator`` and ``recurrence`` differentiate their
+  generator polynomials;
   ``cg`` uses harmonic polynomials; ``baseline`` uses harmonic derivatives with
   its selected forward expression. These methods require no alignment matrices.
   ``wigner`` constructs and differentiates the Wigner-D matrices. If vectors are
