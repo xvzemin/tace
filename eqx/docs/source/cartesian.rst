@@ -138,6 +138,21 @@ entries are evaluated once per path. Output equivalence is checked separately
 for every incoming instruction; independent path weights are never combined.
 The full Cartesian layout is restored after node aggregation. The derivative
 of this expansion sums the corresponding cotangents before the edge kernel.
+Input entries with identical contraction coefficients are summed once on
+nodes and reused by all outgoing edges. For a fully contracted symmetric
+rank-:math:`k` tensor, the :math:`3^k` summands reduce to
+:math:`\binom{k+2}{2}` index classes. Each class includes all its permutations;
+no multiplicity factor is discarded. Partially contracted paths use the same
+coefficient check without assuming full output symmetry. This also preserves
+derivatives with respect to individual input entries, not only symmetric
+perturbations. No additional edge tensor or trainable parameter is introduced.
+With ``symmetric_inputs=True``, inputs are averaged over index permutations.
+This is the identity on symmetric tensors and allows different paths to share
+their compact input storage. TACE enables it after the spherical-to-Cartesian
+basis change. The CUDA node map combines packing and layout conversion;
+its backward applies the transpose with the same kernel and no atomic sums.
+Delta/epsilon coefficients and permutation multiplicities are integers;
+their common normalization is applied once through the path factor.
 Higher derivatives use the same transposed contraction rules.
 High-rank contractions are tiled over Cartesian indices to limit register
 usage. Tiles sharing a path use the same weight and sum their contributions;

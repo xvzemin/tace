@@ -10,7 +10,13 @@ from ..._layout import _Permute
 from ...co3.basis import path_normalization
 from ...co3.tensor_product import coupling_phase
 from ..o3.convolution import O3TensorProductConv
-from .polynomials import ANGULAR_TILE_SIZE, coupling_coefficients, output_components
+from .polynomials import (
+    ANGULAR_TILE_SIZE,
+    coupling_coefficients,
+    input_components,
+    output_components,
+    symmetric_indices,
+)
 
 
 class CartesianTensorProductConv(O3TensorProductConv):
@@ -27,6 +33,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Cartesian-harmonic normalization when vectors are supplied.
     normalize : bool, optional
         Normalize vector inputs before evaluating harmonics.
+    symmetric_inputs : bool, optional
+        Average input index permutations before coupling. Enables shared
+        symmetric storage across paths when vectors are supplied.
 
     Notes
     -----
@@ -34,8 +43,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
     symmetric traceless tensors. Every output path is retained.
     ``tensor_product.project`` selects STF or raw outputs. CUDA applies
     projection after aggregation.
-    At low degree, identical harmonic polynomials and output entries are
-    shared within each path. The full layout is restored on nodes.
+    At low degree, equivalent input entries are summed on nodes, and
+    identical harmonic polynomials and output entries are shared per path.
+    The full output layout is restored on nodes.
     Radial projections use bounded temporary workspaces, recomputed during
     backward. Vector inputs evaluate harmonics and their derivatives inside
     the CUDA contraction. The same contraction supports higher derivatives.
@@ -48,6 +58,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
         backend="cuda",
         normalization="component",
         normalize=True,
+        symmetric_inputs=False,
     ):
         torch.nn.Module.__init__(self)
         if backend not in ("cuda", "torch"):
@@ -63,6 +74,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
             normalization,
             normalize,
         )
+        self.symmetric_inputs = symmetric_inputs
         self.irreps_in1 = tensor_product.irreps_in1
         self.irreps_in2 = tensor_product.irreps_in2
         self.irreps_out = tensor_product.irreps_out
@@ -106,6 +118,29 @@ class CartesianTensorProductConv(O3TensorProductConv):
             self.register_buffer(f"{name}_index", index, persistent=False)
             self.register_buffer(f"{name}_inverse", index.argsort(), persistent=False)
             setattr(self, f"{name}_identity", indices == list(range(offset)))
+        if symmetric_inputs:
+            indices, counts, offset = [], [], 0
+            for mul, ir in self.irreps_in1:
+                entries = symmetric_indices(ir.dim)
+                unique = {group: i for i, group in enumerate(dict.fromkeys(entries))}
+                indices.extend(
+                    offset + u * len(unique) + unique[group]
+                    for u in range(mul)
+                    for group in entries
+                )
+                counts.extend(len(group) for _ in range(mul) for group in unique)
+                offset += mul * len(unique)
+            self.symmetric_dim = offset
+            self.register_buffer(
+                "symmetric_index",
+                torch.tensor(indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "symmetric_count",
+                torch.tensor(counts, dtype=torch.long),
+                persistent=False,
+            )
         paths, offset = [], 0
         for ins in self.instructions:
             mul1, ir1 = self.irreps_in1[ins.i_in1]
@@ -117,10 +152,12 @@ class CartesianTensorProductConv(O3TensorProductConv):
             if not mul1 or not mul2 or not ins.path_weight:
                 continue
             degrees = ir1.l, ir2.l, ir_out.l
+            k, odd = divmod(ir1.l + ir2.l - ir_out.l, 2)
             factor = (
                 ins.path_weight
                 * coupling_phase(*degrees)
                 / path_normalization(*degrees)
+                / math.sqrt(3**k * (2 if odd else 1))
             )
             paths.append(
                 (
@@ -146,7 +183,33 @@ class CartesianTensorProductConv(O3TensorProductConv):
             offset += mul
         self.amplitude_dim = offset
         harmonic_paths, expansion, self.harmonic_output_dim = output_components(
-            paths, self.irreps_out, normalization
+            paths, self.irreps_out, normalization, symmetric_inputs
+        )
+        harmonic_paths, sources, targets, self.harmonic_input_dim = input_components(
+            harmonic_paths, self.input_dim, symmetric_inputs
+        )
+        self.pack_inputs = sources != tuple(range(self.input_dim)) or targets != sources
+        sources = self.input_index[torch.tensor(sources, dtype=torch.long)]
+        targets = torch.tensor(targets, dtype=torch.long)
+        for name, columns, rows, width in (
+            ("harmonic_input", sources, targets, self.harmonic_input_dim),
+            ("harmonic_input_transpose", targets, sources, self.input_dim),
+        ):
+            self.register_buffer(
+                f"{name}_index", columns[rows.argsort(stable=True)], persistent=False
+            )
+            ptr = torch.cat(
+                (rows.new_zeros(1), rows.bincount(minlength=width).cumsum(0))
+            )
+            self.register_buffer(f"{name}_ptr", ptr, persistent=False)
+        self.register_buffer(
+            "harmonic_input_count",
+            (
+                self.harmonic_input_ptr.diff()
+                if symmetric_inputs
+                else targets.new_empty(0)
+            ),
+            persistent=False,
         )
         self.register_buffer(
             "harmonic_output_index",
@@ -189,6 +252,15 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Parameters follow :meth:`eqx.conv.O3TensorProductConv.forward`, with all tensor
         features in flattened ``mul_ir`` layout and Cartesian dimensions.
         """
+        if self.symmetric_inputs and (
+            vectors is None or self.backend == "torch" or not features.is_cuda
+        ):
+            values = features.new_zeros(
+                (features.size(0), self.symmetric_dim)
+            ).index_add(-1, self.symmetric_index, features)
+            features = (values / self.symmetric_count).index_select(
+                -1, self.symmetric_index
+            )
         if vectors is not None and (self.backend == "torch" or not features.is_cuda):
             vectors = (
                 torch.nn.functional.normalize(vectors, dim=-1)
@@ -211,11 +283,23 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 offset += mul
             edge_attrs = torch.cat(attrs, dim=-1) if attrs else vectors[:, :0]
             vectors = None
-        features = (
-            features
-            if self.input_identity
-            else _Permute.apply(features, self.input_index, self.input_inverse)
-        )
+        if vectors is not None and self.pack_inputs:
+            from ...kernels.layout import indexed_sum
+
+            if features.size(-1) != self.input_dim:
+                raise ValueError(
+                    "Feature dimensions do not match the tensor-product irreps."
+                )
+            features = indexed_sum(
+                features,
+                self.harmonic_input_index,
+                self.harmonic_input_ptr,
+                self.harmonic_input_transpose_index,
+                self.harmonic_input_transpose_ptr,
+                self.harmonic_input_count,
+            )
+        elif not self.input_identity:
+            features = _Permute.apply(features, self.input_index, self.input_inverse)
         if vectors is None and not self.attrs_identity:
             edge_attrs = _Permute.apply(
                 edge_attrs, self.attrs_index, self.attrs_inverse

@@ -204,6 +204,58 @@ def test_cartesian_output_components(degree, shared_output, double_precision):
         losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
 
 
+@pytest.mark.parametrize("degree", [2, 3, 4])
+@pytest.mark.parametrize("symmetric_inputs", [False, True])
+def test_cartesian_input_components(degree, symmetric_inputs, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+
+    ir = o3.Irrep(degree, (-1) ** degree)
+    tp = co3.TensorProduct(
+        f"2x{ir}",
+        f"2x{ir}",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+        project=False,
+    ).cuda()
+    modules = [
+        eqx_conv.CartesianTensorProductConv(
+            tp, backend=b, normalize=False, symmetric_inputs=symmetric_inputs
+        ).cuda()
+        for b in ("torch", "cuda")
+    ]
+    assert modules[1].pack_inputs
+    edges = torch.randint(4, (2, 19), device="cuda")
+    # Deliberately not symmetric: packing must also preserve ambient derivatives.
+    inputs = [
+        torch.randn(tp.irreps_in1.dim, 4, device="cuda").T,
+        torch.randn(19, 3, device="cuda") * 0.2,
+        torch.randn(19, tp.weight_numel, device="cuda"),
+        torch.randn(19, 2, device="cuda"),
+    ]
+    inputs[1][0] = 0
+    inputs = [x.requires_grad_() for x in inputs]
+    x, vectors, radial, amplitudes = inputs
+    projection = x.new_empty(0, tp.weight_numel)
+    values = [
+        m(x, None, radial, projection, edges, vectors=vectors, amplitudes=amplitudes)
+        for m in modules
+    ]
+    torch.testing.assert_close(*values, atol=2e-12, rtol=2e-12)
+    losses = [y.sin().sum() for y in values]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
+        tangents = [torch.randn_like(x) for x in inputs]
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+
+
 @pytest.mark.parametrize(
     "degrees",
     [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],
@@ -1494,8 +1546,12 @@ def test_reverse_edge_convolution(implementation, channels, double_precision):
     torch.testing.assert_close(actual, expected, atol=2e-8, rtol=2e-8)
 
 
-@pytest.mark.parametrize("implementation", ["o3", "co3"])
-def test_o3_cartesian_compile_and_empty_graph(double_precision, implementation):
+@pytest.mark.parametrize(
+    "implementation,symmetric_inputs", [("o3", False), ("co3", False), ("co3", True)]
+)
+def test_o3_cartesian_compile_and_empty_graph(
+    double_precision, implementation, symmetric_inputs
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx import co3
@@ -1507,19 +1563,20 @@ def test_o3_cartesian_compile_and_empty_graph(double_precision, implementation):
         else eqx_conv.O3TensorProductConv
     )
     tp = tp_cls(
-        "2x1o",
-        "1o",
+        "2x2e" if implementation == "co3" else "2x1o",
+        "2e" if implementation == "co3" else "1o",
         "2x0e+2x2e",
         [(0, 0, 0, "uvu", True), (0, 0, 1, "uvu", True)],
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = conv_cls(tp, normalize=False).cuda()
-    reference = conv_cls(tp, normalize=False, backend="torch").cuda()
+    kwargs = {"symmetric_inputs": symmetric_inputs} if implementation == "co3" else {}
+    conv = conv_cls(tp, normalize=False, **kwargs).cuda()
+    reference = conv_cls(tp, normalize=False, backend="torch", **kwargs).cuda()
     compiled = torch.compile(conv, backend="aot_eager", fullgraph=True, dynamic=True)
-    for edges_count in (1, 7, 0):
-        edges = torch.randint(3, (2, edges_count), device="cuda")
-        x = torch.randn(3, 6, device="cuda", requires_grad=True)
+    for nodes, edges_count in ((3, 1), (3, 7), (3, 0), (0, 0)):
+        edges = torch.randint(max(1, nodes), (2, edges_count), device="cuda")
+        x = torch.randn(nodes, tp.irreps_in1.dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edges_count, 3, device="cuda", requires_grad=True)
         radial = torch.randn(edges_count, 2, device="cuda", requires_grad=True)
         projection = torch.randn(2, tp.weight_numel, device="cuda", requires_grad=True)

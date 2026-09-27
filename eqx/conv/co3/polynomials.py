@@ -10,24 +10,102 @@ ANGULAR_TILE_SIZE = 27
 FUSED_TILE_LIMIT = 16
 
 
-def output_components(paths, irreps, normalization):
+@lru_cache(maxsize=None)
+def symmetric_indices(dim):
+    """Group Cartesian entries related by permutations of tensor axes."""
+    degree, width = 0, dim
+    while width > 1:
+        degree, width = degree + 1, width // 3
+    groups = defaultdict(list)
+    for a, indices in enumerate(product(range(3), repeat=degree)):
+        groups[tuple(sorted(indices))].append(a)
+    inverse = [None] * dim
+    for indices in groups.values():
+        for a in indices:
+            inverse[a] = tuple(indices)
+    return tuple(inverse)
+
+
+def input_components(paths, input_dim, symmetric=False):
+    """Sum input entries with identical contraction coefficients on nodes.
+
+    Harmonic indices must first be canonicalized by ``output_components``.
+    Without ``symmetric``, equivalence is checked over every output entry
+    and the map is exact even for nonsymmetric inputs. With ``symmetric``,
+    return index classes for the caller to average before contraction.
+    Independent instructions retain their weights and output offsets.
+    """
+    sources, targets, width = [], [], 0
+    layouts, result = {}, []
+    for path in paths:
+        columns = defaultdict(list)
+        for a, b, c, value in path[-1]:
+            columns[a].append((b, c, value))
+        groups = defaultdict(list)
+        for a, column in sorted(columns.items()):
+            groups[
+                (a, tuple(sorted(column))) if symmetric else tuple(sorted(column))
+            ].append(a)
+        compact = symmetric or (
+            path[5] <= 81
+            and path[6] <= 81
+            and any(len(group) > 1 for group in groups.values())
+        )
+        entries = (
+            tuple(tuple(g) for g in groups.values())
+            if compact
+            else tuple((a,) for a in range(path[5]))
+        )
+        if symmetric:
+            indices = symmetric_indices(path[5])
+            entries = tuple(tuple(i for a in g for i in indices[a]) for g in entries)
+        key = path[0], path[3], entries
+        if key not in layouts:
+            layouts[key] = width
+            start, mul, _ = key
+            for c, indices in enumerate(entries):
+                for a in indices:
+                    sources.extend(start + a * mul + u for u in range(mul))
+                    targets.extend(width + c * mul + u for u in range(mul))
+            width += len(entries) * mul
+        coefficients = (
+            tuple(
+                (a, b, c, value)
+                for a, column in enumerate(groups)
+                for b, c, value in (column[1] if symmetric else column)
+            )
+            if compact
+            else path[-1]
+        )
+        result.append(
+            (layouts[key], *path[1:5], len(entries), *path[6:-1], coefficients)
+        )
+    if not paths:
+        return paths, tuple(range(input_dim)), tuple(range(input_dim)), input_dim
+    return tuple(result), tuple(sources), tuple(targets), width
+
+
+def output_components(paths, irreps, normalization, symmetric=False):
     """Identify identical output polynomials without merging coupling paths.
 
     Equality is checked separately for every incoming instruction and every
-    input tensor entry. No symmetry of the input features is assumed.
-    Degrees above four retain their full Cartesian storage.
+    input tensor entry. ``symmetric`` identifies input index permutations.
+    Output degrees above four retain their full Cartesian storage.
     """
     groups = defaultdict(list)
     for path in paths:
-        if path[6] <= 81:
+        if path[6] <= 81 or symmetric:
             degree, dim = 0, path[6]
             while dim > 1:
                 degree, dim = degree + 1, dim // 3
             polynomials = polynomial_coefficients(degree, normalization)
             representatives = {}
             coefficients = defaultdict(list)
+            indices = symmetric_indices(path[5]) if symmetric else None
             for a, b, c, value in path[-1]:
                 b = representatives.setdefault(polynomials[b], b)
+                if indices is not None:
+                    a = indices[a][0]
                 coefficients[a, b, c].append(value)
             path = (
                 *path[:-1],
@@ -85,23 +163,22 @@ def output_components(paths, irreps, normalization):
 
 @lru_cache(maxsize=None)
 def coupling_coefficients(l1, l2, l3):
-    """Return sparse coefficients of an unprojected Cartesian coupling."""
+    """Return integer delta/epsilon coefficients, excluding path normalization."""
     k, odd = divmod(l1 + l2 - l3, 2)
     left, contracted, right = 3 ** (l1 - k - odd), 3**k, 3 ** (l2 - k - odd)
-    scale = 1 / math.sqrt(contracted * (2 if odd else 1))
     entries = []
     for i, j, t in product(range(left), range(right), range(contracted)):
         if odd:
             for c, (a, b) in enumerate(((1, 2), (2, 0), (0, 1))):
                 out = (i * 3 + c) * right + j
                 entries.append(
-                    ((i * 3 + a) * contracted + t, (t * 3 + b) * right + j, out, scale)
+                    ((i * 3 + a) * contracted + t, (t * 3 + b) * right + j, out, 1)
                 )
                 entries.append(
-                    ((i * 3 + b) * contracted + t, (t * 3 + a) * right + j, out, -scale)
+                    ((i * 3 + b) * contracted + t, (t * 3 + a) * right + j, out, -1)
                 )
         else:
-            entries.append((i * contracted + t, t * right + j, i * right + j, scale))
+            entries.append((i * contracted + t, t * right + j, i * right + j, 1))
     return tuple(entries)
 
 

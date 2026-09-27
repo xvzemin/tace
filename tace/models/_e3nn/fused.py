@@ -245,7 +245,9 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
         )
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = eqx_conv.CartesianTensorProductConv(self.tp, normalize=False)
+        self.eqx_tp = eqx_conv.CartesianTensorProductConv(
+            self.tp, normalize=False, symmetric_inputs=True
+        )
 
     def forward(self, x, y, w, edge_index):
         """Convert nodes, contract gathered features, and sum raw edge tensors."""

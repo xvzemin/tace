@@ -182,6 +182,7 @@ class O3TensorProductConv(torch.nn.Module):
         self.irreps_in2 = tensor_product.irreps_in2
         self.irreps_out = tensor_product.irreps_out
         self.input_dim = self.irreps_in1.dim
+        self.harmonic_input_dim = self.input_dim
         self.edge_dim = self.irreps_in2.dim
         self.output_dim = self.irreps_out.dim
         self.harmonic_output_dim = self.output_dim
@@ -298,7 +299,9 @@ class O3TensorProductConv(torch.nn.Module):
             raise ValueError("Features, radial inputs and projection must be matrices.")
         if edge_index.ndim != 2 or edge_index.size(0) != 2:
             raise ValueError("edge_index must have shape (2, edges).")
-        if features.size(1) != self.input_dim or edge_attrs.size(1) != (
+        if features.size(1) != (
+            self.harmonic_input_dim if vectors is not None else self.input_dim
+        ) or edge_attrs.size(1) != (
             self.amplitude_dim if vectors is not None else self.edge_dim
         ):
             raise ValueError(
