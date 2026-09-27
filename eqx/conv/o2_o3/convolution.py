@@ -3,7 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-"""Indexed aligned-frame contractions and their transposes."""
+"""Equivalent aligned and frame-free tensor-product convolutions."""
 
 import math
 from dataclasses import dataclass
@@ -186,6 +186,14 @@ class O2O3TensorProductConv(torch.nn.Module):
         and ordinary tensor operations on CPU.
         The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
         for channel-mixing ``"uvw"`` instructions.
+    method : {"auto", "baseline", "generator", "cg", "wigner"}, optional
+        ``"baseline"`` retains static path-wise expression selection.
+        ``"generator"`` uses generator polynomials, including their derivatives.
+        ``"cg"`` uses sparse CG contractions of harmonic polynomials.
+        ``"wigner"`` constructs a frame and contracts its order-zero CG slices.
+        ``"auto"`` measures complete CUDA evaluations and caches the fastest
+        method. Warm up before compilation or CUDA Graph capture; otherwise
+        these use the baseline until a method has been measured in eager mode.
 
     Notes
     -----
@@ -195,10 +203,9 @@ class O2O3TensorProductConv(torch.nn.Module):
     materializing global edge messages. Compatible paths share angular factors;
     radial projections use bounded workspaces and are recomputed for backward.
 
-    Supplying ``vectors`` eliminates alignment through transverse couplings
-    acting on spherical features. No Wigner matrices or Cartesian tensors are
-    required. Transposed contraction programs support force training and higher
-    derivatives. Without vectors, supplied matrix entries are differentiated.
+    Vector inputs support all methods. Without vectors, supplied Wigner matrix
+    entries are differentiated directly. Transposed contraction programs support
+    force training and higher derivatives.
     Harmonic amplitudes remain independent differentiable operands.
 
     CUDA programs compile lazily and are cached by static metadata. Atomic
@@ -206,7 +213,7 @@ class O2O3TensorProductConv(torch.nn.Module):
     derivatives before CUDA Graph capture.
     """
 
-    def __init__(self, tensor_product, *, backend="cuda"):
+    def __init__(self, tensor_product, *, backend="cuda", method="auto"):
         super().__init__()
         if backend not in ("torch", "cuda"):
             raise ValueError("backend must be torch or cuda.")
@@ -218,6 +225,17 @@ class O2O3TensorProductConv(torch.nn.Module):
                 "Use backend='torch' for other connection modes."
             )
         self.backend = backend
+        if method not in ("auto", "baseline", "generator", "cg", "wigner"):
+            raise ValueError("method must be auto, baseline, generator, cg or wigner.")
+        self.method = method
+        self.selected_method = "baseline"
+        self.tuning_results = {}
+        self.normalization = tensor_product.normalization
+        from ...o2.wigner import WignerD
+
+        self.frame = WignerD(tensor_product.lmax, tensor_product.lmax).to(
+            tensor_product.weight
+        )
         self.irreps_in = tensor_product.irreps_in1
         self.irreps_out = tensor_product.irreps_out
         self.output_dim = self.irreps_out.dim
@@ -233,6 +251,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         input_slices = self.irreps_in.slices()
         output_slices = self.irreps_out.slices()
         self.transverse_couplings = torch.nn.ModuleDict()
+        self.harmonics = torch.nn.ModuleDict()
         transverse_paths = []
         offset = 0
         self.path_data = []
@@ -290,6 +309,15 @@ class O2O3TensorProductConv(torch.nn.Module):
                 self.transverse_couplings[name] = SphericalCoupling(
                     ir.l, ir_sh.l, ir_out.l, tensor_product.normalization
                 ).to(tensor_product.weight)
+                self.register_buffer(
+                    f"full_cg_{name}",
+                    coefficients.to(tensor_product.weight),
+                    persistent=False,
+                )
+            if str(ir_sh.l) not in self.harmonics:
+                self.harmonics[str(ir_sh.l)] = o3.SphericalHarmonics(
+                    ir_sh.l, normalize=False, normalization=self.normalization
+                )
             transverse_paths.append(
                 (
                     path[0],
@@ -335,6 +363,22 @@ class O2O3TensorProductConv(torch.nn.Module):
                 ("transverse", tensor_product.normalization),
             )
         )
+        self.generator_metadata = repr(
+            (
+                self.transverse_paths,
+                self.weight_numel,
+                self.has_unweighted,
+                ("transverse", self.normalization, "generator"),
+            )
+        )
+        self.cg_metadata = repr(
+            (
+                self.transverse_paths,
+                self.weight_numel,
+                self.has_unweighted,
+                self.normalization,
+            )
+        )
 
     def forward(
         self,
@@ -347,6 +391,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         num_nodes,
         *,
         vectors=None,
+        method=None,
     ):
         """Gather, couple and sum features at target nodes.
 
@@ -365,7 +410,8 @@ class O2O3TensorProductConv(torch.nn.Module):
         wigner : torch.Tensor or None
             Packed degree-wise Wigner matrices, with shape
             ``(edges, sum((2*l+1)**2))`` or a shared leading dimension of one.
-            Unused when ``vectors`` is supplied; pass ``None`` to avoid alignment.
+            Used when vectors are absent. With vectors, each method evaluates
+            its own geometry, including Wigner construction when requested.
         amplitudes : torch.Tensor
             Invariant harmonic amplitudes of shape ``(edges, num_harmonics)``
             or ``(1, num_harmonics)``.
@@ -375,9 +421,9 @@ class O2O3TensorProductConv(torch.nn.Module):
             Number of target nodes.
         vectors : torch.Tensor, optional
             Nonzero frame directions, with shape ``(edges, 3)`` or ``(1, 3)``.
-            Evaluated through transverse restriction directly in spherical
-            storage. Derivatives do not pass through frame selection. Without
-            vectors, matrices remain independent differentiable inputs.
+            Without vectors, matrices remain independent differentiable inputs.
+        method : str, optional
+            Override the constructor's evaluation method for this call.
 
         Returns
         -------
@@ -385,10 +431,40 @@ class O2O3TensorProductConv(torch.nn.Module):
             Target features of shape ``(num_nodes, irreps_out.dim)`` in the
             declared, unsimplified ``ir_mul`` layout.
         """
+        method = getattr(self, "method", "baseline") if method is None else method
+        if method not in ("auto", "baseline", "generator", "cg", "wigner"):
+            raise ValueError("method must be auto, baseline, generator, cg or wigner.")
+        if vectors is None and method in ("generator", "cg"):
+            raise ValueError(f"method={method!r} requires vectors.")
         if vectors is not None:
-            return self.forward_transverse(
-                features, radial, projection, amplitudes, edge_index, num_nodes, vectors
-            )
+            if method == "auto":
+                from .autotune import select_method
+
+                method = select_method(
+                    self,
+                    features,
+                    radial,
+                    projection,
+                    amplitudes,
+                    edge_index,
+                    num_nodes,
+                    vectors,
+                )
+            if method == "wigner":
+                wigner = self.frame.forward_packed(
+                    vectors, method="auto" if self.backend == "cuda" else "recursive"
+                )
+            elif method in ("baseline", "generator", "cg"):
+                return self.forward_transverse(
+                    features,
+                    radial,
+                    projection,
+                    amplitudes,
+                    edge_index,
+                    num_nodes,
+                    vectors,
+                    method=method,
+                )
         if wigner is None:
             raise ValueError("Supply vectors or packed Wigner matrices.")
         # A zero-stride placeholder supplies the output shape without allocating
@@ -422,7 +498,16 @@ class O2O3TensorProductConv(torch.nn.Module):
         )[0]
 
     def forward_transverse(
-        self, features, radial, projection, amplitudes, edge_index, num_nodes, vectors
+        self,
+        features,
+        radial,
+        projection,
+        amplitudes,
+        edge_index,
+        num_nodes,
+        vectors,
+        *,
+        method="baseline",
     ):
         """Contract transverse tensors in spherical storage without alignment."""
         if self.backend == "cuda" and features.is_cuda:
@@ -439,7 +524,9 @@ class O2O3TensorProductConv(torch.nn.Module):
                 direction,
             ]
             return spherical_contraction(
-                self.transverse_metadata,
+                self.transverse_metadata
+                if method == "baseline"
+                else getattr(self, f"{method}_metadata"),
                 repr(((tuple(range(6)), False, ((4, 0),)),)),
                 edge_index[0],
                 edge_index[1],
@@ -473,10 +560,21 @@ class O2O3TensorProductConv(torch.nn.Module):
                 .reshape(edges, dim, mul)
                 .transpose(-1, -2)
             )
-            coupling = self.transverse_couplings[
-                f"{(dim - 1) // 2}_{(harmonic_dim - 1) // 2}_{(dim_out - 1) // 2}"
-            ]
-            value = coupling(x, direction.unsqueeze(-2)).transpose(-1, -2)
+            name = f"{(dim - 1) // 2}_{(harmonic_dim - 1) // 2}_{(dim_out - 1) // 2}"
+            if method == "cg":
+                harmonic_features = self.harmonics[str((harmonic_dim - 1) // 2)](
+                    direction
+                )
+                value = torch.einsum(
+                    "eua,eb,abc->ecu",
+                    x,
+                    harmonic_features,
+                    getattr(self, f"full_cg_{name}"),
+                )
+            else:
+                value = self.transverse_couplings[name](
+                    x, direction.unsqueeze(-2)
+                ).transpose(-1, -2)
             if weight >= 0:
                 width = mul if mode == "uvu" else mul * mul_out
                 w = weights[:, weight : weight + width]

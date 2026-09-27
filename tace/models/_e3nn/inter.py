@@ -8,7 +8,6 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from eqx import co3
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -343,12 +342,15 @@ class O3CartesianIctpIctcInteraction(O3CgtpInteraction):
         )
 
     def _setup_additional_modules(self) -> None:
-        self.linear_down.linear = co3.Linear(
+        from eqx.conv.co3.linear import Linear
+
+        self.linear_down.linear = Linear(
             self.linear_down.irreps_in,
             self.linear_down.irreps_out,
+            self.rejector.eqx_tp.harmonic_output_index,
             internal_weights=False,
             shared_weights=True,
-            output_basis="spherical",
+            backend="cuda" if self.use_eqx else "torch",
         )
 
 

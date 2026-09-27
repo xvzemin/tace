@@ -33,7 +33,9 @@ def execution_plan(
         for entries in groups.values()
     )
     cartesian = bool(
-        geometry and isinstance(geometry[0], tuple) and geometry[0][0] == "cartesian"
+        geometry
+        and isinstance(geometry[0], tuple)
+        and geometry[0][0] in ("cartesian", "cartesian_symmetric")
     )
     if cartesian:
         from ..co3.polynomials import ANGULAR_TILE_SIZE, FUSED_TILE_LIMIT

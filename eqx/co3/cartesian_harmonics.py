@@ -105,3 +105,19 @@ class CartesianHarmonics(torch.nn.Module):
 
     def extra_repr(self):
         return f"{self.irreps_out}, normalize={self.normalize}, normalization={self.normalization}"
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        for l in {ir.l for _, ir in self.irreps_out}:
+            matrix = path_matrix(l)
+            scale = math.sqrt(math.comb(2 * l, l) / 2**l)
+            if self.normalization == "component":
+                scale *= math.sqrt(2 * l + 1)
+            elif self.normalization == "integral":
+                scale *= math.sqrt((2 * l + 1) / (4 * math.pi))
+            for name, value in (
+                (f"basis_{l}", matrix),
+                (f"scaled_basis_{l}", scale * matrix.T),
+            ):
+                self._buffers[name] = value.to(self._buffers[name]).clone()
+        return self

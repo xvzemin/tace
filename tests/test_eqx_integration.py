@@ -27,6 +27,48 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
+@pytest.mark.parametrize("method", ["baseline", "generator", "cg", "wigner", "auto"])
+def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.fused import O2ScatterTensorProduct, O3ScatterTensorProduct
+
+    for backend in ("EQX", "OEQ", "EQT", "CUEQ"):
+        monkeypatch.setenv(f"TACE_USE_{backend}", "0")
+    irreps_in, irreps_sh, irreps_out = "2x1o", "0e+1o", "2x0e+2x1o+2x1e+2x2e"
+    module = O2ScatterTensorProduct(irreps_in, irreps_sh, irreps_out).cuda()
+    module.eqx_tp.method = method
+    reference = O3ScatterTensorProduct(irreps_in, irreps_sh, irreps_out).cuda()
+    x = torch.randn(3, 6, device="cuda", requires_grad=True)
+    vectors = torch.randn(8, 3, device="cuda", requires_grad=True)
+    radial = torch.randn(8, 4, device="cuda", requires_grad=True)
+    projection = torch.randn(4, module.weight_numel, device="cuda", requires_grad=True)
+    cutoff = torch.rand(8, 1, device="cuda", requires_grad=True)
+    edges = torch.randint(3, (2, 8), device="cuda")
+    graph = types.SimpleNamespace(
+        edge_vector=vectors, edge_length=vectors.norm(dim=-1, keepdim=True) + 1e-9
+    )
+    actual = module.forward_stream(x, radial, projection, edges, None, cutoff, graph)
+    harmonics = o3.spherical_harmonics(
+        irreps_sh, vectors / graph.edge_length, False, "component"
+    )
+    expected = reference(x, harmonics, (radial @ projection) * cutoff, edges)
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    inputs = x, vectors, radial, projection, cutoff
+    gradients = [
+        torch.autograd.grad(y.square().sum(), inputs, create_graph=True)
+        for y in (actual, expected)
+    ]
+    for value, target in zip(*gradients):
+        torch.testing.assert_close(value, target, atol=2e-9, rtol=2e-9)
+    gradients = [
+        torch.autograd.grad(g[1].square().sum(), inputs, retain_graph=True)
+        for g in gradients
+    ]
+    for value, target in zip(*gradients):
+        torch.testing.assert_close(value, target, atol=2e-7, rtol=2e-8)
+
+
 @pytest.mark.parametrize("wigner_lmax", [2, 4])
 @pytest.mark.parametrize("basis_change", [True, False])
 def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax, basis_change):

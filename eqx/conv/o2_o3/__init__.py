@@ -1,4 +1,4 @@
-"""O(3) tensor-product convolutions evaluated in aligned O(2) frames."""
+"""Equivalent aligned and frame-free harmonic tensor-product convolutions."""
 
 from .convolution import O2O3TensorProductConv
 

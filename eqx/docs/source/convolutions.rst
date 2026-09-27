@@ -60,10 +60,73 @@ of the backend:
      - Rotate, Linear--Gate--Linear, rotate back
      - Restrict to spherical order subspaces, Linear--Gate--Linear, lift
 
-Supply Wigner matrices for the standard evaluation. Supply ``vectors`` and
-``wigner=None`` for transverse evaluation; Uv additionally takes
-``wigner_inv=None``. The latter constructs neither an alignment rotation nor
-transverse axes. Both evaluations preserve the parameters and normalization.
+Supply Wigner matrices for the aligned evaluation. Uu and Uv select transverse
+evaluation with ``vectors`` and ``wigner=None``; Uv additionally takes
+``wigner_inv=None``. For O2 CGTP, ``method`` selects the evaluation of vector
+inputs as described below. Transverse evaluation constructs neither alignment
+rotations nor transverse axes. Both forms preserve parameters and normalization.
+
+O2 CGTP evaluation methods
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``O2O3TensorProductConv(..., method="auto")`` selects among complete evaluations
+when edge vectors are supplied. A call may override ``method`` without changing
+the module or its weights.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
+
+   * - Method
+     - Angular evaluation
+     - Direction derivatives
+   * - ``baseline``
+     - Original static choice of generator or sparse CG expressions per path
+     - Harmonic polynomial derivatives
+   * - ``generator``
+     - Minimum-degree coupling and generator polynomials
+     - Product-rule derivatives of the same generator expression
+   * - ``cg``
+     - Sparse CG contraction of harmonic polynomials
+     - Derivatives of those polynomials
+   * - ``wigner``
+     - Wigner-D construction, alignment, order-zero CG contraction, inverse rotation
+     - Derivatives through the Wigner matrices
+
+All paths, output multiplicities, radial weights and normalization are retained.
+The first three methods do not construct frames. The generator method still
+uses fixed CG coefficients for its minimum-degree coupling; it does not replace
+the full coupling with a direct CG expression. PyTorch ``baseline`` retains its
+original generator evaluation. ``backend="torch"`` remains available for every
+method.
+
+On CUDA, ``auto`` measures geometry construction, radial projection, contraction
+and reduction together. Gradient-enabled inputs include a reverse pass;
+training with differentiable vectors also measures the reverse pass of a force
+loss. Results are checked against the baseline before selection. Measurements
+exclude compilation and are cached by device, precision, channel shapes,
+node/edge size ranges and derivative requirements. ``selected_method`` reports
+the last autotuned method and ``tuning_results`` contains the measured
+milliseconds. CPU and the PyTorch backend use the baseline without timing.
+
+Warm up in eager mode with the intended gradient requirements before
+``torch.compile`` or CUDA Graph capture. Compiled and captured calls use the
+last measured method, or the baseline if none has been measured. They never
+benchmark during tracing or capture. Use an explicit method for controlled
+comparisons. Without vectors, supplied Wigner matrices retain their existing
+evaluation and are not included in method selection.
+
+.. code-block:: python
+
+   convolution = conv.O2O3TensorProductConv(tp, method="auto")
+   # Keep the previous implementation for a controlled comparison.
+   convolution.method = "baseline"
+   # Other fixed choices: "generator", "cg", "wigner".
+
+TACE's ``o2_cgtp`` CUDA interaction uses the same default selection. To fix its
+method, set ``interaction.rejector.eqx_tp.method`` on the corresponding fused
+convolution, or select all ``O2O3TensorProductConv`` modules through
+``model.modules()``.
 
 CUDA CGTPs support ``uvu`` instructions and float32/float64.
 The aligned PyTorch CGTP also supports ``uvw``. Its harmonic input must have

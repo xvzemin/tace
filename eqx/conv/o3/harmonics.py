@@ -90,19 +90,34 @@ def angular_source(
     start, attr, end, mul1, mul2, dim1, dim2, dim_out, _, _, cg = path
     degree = (dim2 - 1) // 2
     transverse = isinstance(normalization, tuple) and normalization[0] == "transverse"
+    method = normalization[2] if transverse and len(normalization) > 2 else "baseline"
     if transverse:
         normalization = normalization[1]
     if isinstance(normalization, tuple):
-        from ..co3.polynomials import polynomial_coefficients as cartesian_polynomials
+        from ..co3.polynomials import component_powers, harmonic_polynomial
 
-        degree, width = 0, dim2
-        while width > 1:
-            degree, width = degree + 1, width // 3
-        polynomials = cartesian_polynomials(degree, normalization[1])
+        if normalization[0] == "cartesian_symmetric":
+            from ...co3.symmetric import symmetric_powers
+
+            degree = (math.isqrt(8 * dim2 + 1) - 3) // 2
+            powers = symmetric_powers(degree)
+            polynomials = {
+                b: harmonic_polynomial(powers[b], normalization[1]) for _, b, _, _ in cg
+            }
+        else:
+            degree, width = 0, dim2
+            while width > 1:
+                degree, width = degree + 1, width // 3
+            polynomials = {
+                b: harmonic_polynomial(component_powers(b, degree), normalization[1])
+                for _, b, _, _ in cg
+            }
     else:
         polynomials = polynomial_coefficients(degree, normalization)
     rank = len(mapping) - 6
-    initial_cache = cache.copy() if transverse and rank == 0 else None
+    initial_cache = (
+        cache.copy() if transverse and rank == 0 and method == "baseline" else None
+    )
     line_start = len(lines)
     indices = {
         role: {entry[axis] for entry in cg} for role, axis in ((0, 0), (3, 1), (4, 2))
@@ -263,11 +278,14 @@ def angular_source(
     for v in range(mul2):
         for role in sorted(needed):
             width = {0: dim1, 3: 1, 4: dim_out}.get(role, 3)
-            if transverse and rank == 0 and role in (0, 3, 4):
-                from ..o2_o3.transverse import coupling_source
+            if transverse and (rank == 0 or method == "generator"):
+                from ..o2_o3.transverse import (
+                    coupling_derivative_source,
+                    coupling_source,
+                )
 
                 contracted_role = role
-                if role == 3:
+                if role not in (0, 4):
                     widths = {0: dim1, 4: dim_out}
                     contracted_role = min(
                         needed & widths.keys() or widths, key=widths.__getitem__
@@ -281,44 +299,61 @@ def angular_source(
                     load(other, offset + a * mul1, "u") for a in range(dim)
                 )
                 vector = tuple(load(5, a) for a in range(3))
-                coupled = coupling_source(
-                    (dim - 1) // 2,
-                    degree,
-                    (out - 1) // 2,
-                    vector,
-                    features,
-                    normalization,
-                    cache,
-                    lines,
-                )
                 sign = (
                     (-1) ** ((dim1 + dim_out - 2) // 2 + degree)
                     if contracted_role == 0
                     else 1
                 )
-                if role == 3:
-                    offset = start if contracted_role == 0 else end
-                    values[v, role, 0] = contraction_source(
-                        tuple(
-                            (
-                                float(sign),
-                                (
-                                    value,
-                                    load(contracted_role, offset + column * mul1, "u"),
-                                ),
-                            )
-                            for column, value in enumerate(coupled)
-                        ),
+                for axis in range(3 if role >= 6 else 1):
+                    directions = tuple(
+                        tuple(f"T({int(a == axis)})" for a in range(3))
+                        if index == role
+                        else tuple(load(index, a) for a in range(3))
+                        for index in range(6, len(mapping))
+                    )
+                    args = (
+                        (dim - 1) // 2,
+                        degree,
+                        (out - 1) // 2,
+                        vector,
+                        features,
+                        normalization,
                         cache,
                         lines,
                     )
-                    continue
-                amplitude = load(3, attr + v)
-                for column, value in enumerate(coupled):
-                    values[v, role, column] = variable(
-                        ("transverse_amplitude", value, amplitude, sign),
-                        f"T({sign}) * {value} * {amplitude}",
+                    coupled = (
+                        coupling_derivative_source(*args, directions)
+                        if directions
+                        else coupling_source(*args)
                     )
+                    if role not in (0, 4):
+                        offset = start if contracted_role == 0 else end
+                        value = contraction_source(
+                            tuple(
+                                (
+                                    float(sign),
+                                    (
+                                        value,
+                                        load(
+                                            contracted_role, offset + column * mul1, "u"
+                                        ),
+                                    ),
+                                )
+                                for column, value in enumerate(coupled)
+                            ),
+                            cache,
+                            lines,
+                        )
+                        if role >= 6:
+                            value = multiply(value, load(3, attr + v))
+                        values[v, role, axis] = value
+                    else:
+                        amplitude = load(3, attr + v)
+                        for column, value in enumerate(coupled):
+                            values[v, role, column] = variable(
+                                ("transverse_amplitude", value, amplitude, sign),
+                                f"T({sign}) * {value} * {amplitude}",
+                            )
                 continue
             if angular_derivatives and role >= 6:
                 # Transpose the prefix and reuse the suffix. This produces all

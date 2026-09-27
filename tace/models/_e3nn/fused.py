@@ -246,7 +246,11 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
         self.weight_numel = self.tp.weight_numel
 
         self.eqx_tp = eqx_conv.CartesianTensorProductConv(
-            self.tp, normalize=False, symmetric_inputs=True
+            self.tp,
+            normalize=False,
+            symmetric_inputs=True,
+            input_basis="spherical",
+            compact_output=True,
         )
 
     def forward(self, x, y, w, edge_index):
@@ -256,12 +260,13 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
                 x, y, w, w.new_empty((0, self.weight_numel)), edge_index, None
             )
         x = self.to_cartesian(x)
-        return scatter_sum(
+        output = scatter_sum(
             self.tp(x[edge_index[0]], y, w),
             edge_index[1],
             dim=0,
             dim_size=x.size(0),
         )
+        return output.index_select(-1, self.eqx_tp.output_pack_index)
 
     def forward_stream(
         self,
@@ -277,7 +282,7 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
         if edge_cutoff is not None and edge_vector is None:
             edge_attrs = edge_attrs * edge_cutoff
         return self.eqx_tp(
-            self.to_cartesian(node_feats),
+            node_feats,
             edge_attrs,
             radial,
             projection,
@@ -448,7 +453,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
 
 
 class O2ScatterTensorProduct(torch.nn.Module):
-    """Evaluate transverse CGTP paths and sum spherical features at target nodes."""
+    """Evaluate harmonic CGTP paths and sum spherical features at target nodes."""
 
     def __init__(self, irreps_in1, irreps_in2, irreps_out, *, l1l2=None):
         super().__init__()

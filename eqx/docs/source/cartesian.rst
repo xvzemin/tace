@@ -117,8 +117,8 @@ spherical features. Use ``Linear(..., project=True)`` when retaining Cartesian
 storage instead. Do not pass unprojected features into another tensor product
 or nonlinearity.
 
-Full Cartesian storage grows as :math:`3^\ell`; this implementation is a
-Cartesian alternative, not a claim of lower memory use at high degree.
+The native operators expose full Cartesian storage, which grows as
+:math:`3^\ell`. The fused convolution below can retain compact storage.
 All operators support ordinary autograd, including force training and
 higher derivatives.
 
@@ -133,27 +133,41 @@ without materializing edge harmonics or tensor-product messages.
 Final radial projections use bounded temporary workspaces and are recomputed
 in backward. Output paths remain separate. With ``project=False``, aggregate
 raw tensors, apply the node-level channel Linear, and then project as above.
-For degrees up to four, identical harmonic polynomials and identical output
-entries are evaluated once per path. Output equivalence is checked separately
-for every incoming instruction; independent path weights are never combined.
-The full Cartesian layout is restored after node aggregation. The derivative
-of this expansion sums the corresponding cotangents before the edge kernel.
-Input entries with identical contraction coefficients are summed once on
-nodes and reused by all outgoing edges. For a fully contracted symmetric
-rank-:math:`k` tensor, the :math:`3^k` summands reduce to
-:math:`\binom{k+2}{2}` index classes. Each class includes all its permutations;
-no multiplicity factor is discarded. Partially contracted paths use the same
-coefficient check without assuming full output symmetry. This also preserves
-derivatives with respect to individual input entries, not only symmetric
-perturbations. No additional edge tensor or trainable parameter is introduced.
-With ``symmetric_inputs=True``, inputs are averaged over index permutations.
-This is the identity on symmetric tensors and allows different paths to share
-their compact input storage. TACE enables it after the spherical-to-Cartesian
-basis change. The CUDA node map combines packing and layout conversion;
-its backward applies the transpose with the same kernel and no atomic sums.
-Delta/epsilon coefficients and permutation multiplicities are integers;
+With ``symmetric_inputs=True``, a rank-:math:`\ell` input uses
+:math:`\binom{\ell+2}{2}` exponent triples. Contracting :math:`k` indices sums
+over :math:`\binom{k+2}{2}` triples with integer permutation multiplicities.
+Raw outputs retain separate symmetric free-index groups; no symmetrization
+is performed between groups. Instructions sharing an output retain only
+their common permutation symmetries. Independent path weights are unchanged.
+Cartesian inputs are averaged over index permutations, including the
+corresponding transpose in backward. ``input_basis="spherical"`` instead
+applies the path matrix directly into compact storage on nodes.
+
+``compact_output=True`` retains packed raw outputs after aggregation and
+requires ``project=False``. ``eqx.conv.co3.Linear`` consumes these outputs,
+mixes channels with the same storage layout, and then applies the transposed
+path matrix. The full path-channel tensor is never expanded. The expansion
+indices passed to Linear describe storage only and do not alter its weights.
+
+.. code-block:: python
+
+   from eqx.conv.co3 import CartesianTensorProductConv, Linear
+
+   conv = CartesianTensorProductConv(
+       tp, symmetric_inputs=True, input_basis="spherical", compact_output=True,
+   )  # tp.project must be False
+   linear = Linear(tp.irreps_out, "16x0e + 16x1o", conv.harmonic_output_index)
+   message = conv(h, None, radial, projection, edge_index, vectors=rij)
+   output = linear(message)
+
+Without compact output, the public result retains flattened ``mul_ir`` order.
+Delta/epsilon coefficients and permutation multiplicities remain integers;
 their common normalization is applied once through the path factor.
-Higher derivatives use the same transposed contraction rules.
+Harmonic indices use the same exponent-triple layout, so CUDA tiles cover
+unique entries rather than redundant Cartesian permutations. Only requested
+harmonic polynomials are generated. Higher derivatives use
+the same transposed contraction rules, including derivatives at zero vectors
+when ``normalize=False``.
 High-rank contractions are tiled over Cartesian indices to limit register
 usage. Tiles sharing a path use the same weight and sum their contributions;
 this does not truncate the tensor or remove coupling paths.

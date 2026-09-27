@@ -219,6 +219,7 @@ class TensorProduct(torch.nn.Module):
             self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
         else:
             self.register_buffer("weight", torch.empty(0))
+        self.path_factors = tuple(scales)
         self.register_buffer("path_scales", torch.tensor(scales), persistent=False)
         self.projection = Projector(self.irreps_out) if project else torch.nn.Identity()
         self.slices_in1, self.slices_in2 = (
@@ -324,6 +325,13 @@ class TensorProduct(torch.nn.Module):
             else x.new_zeros((*shape, 0)) + zero
         )
         return self.projection(result)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        self.path_scales = torch.tensor(
+            self.path_factors, dtype=torch.float64, device="cpu"
+        ).to(self.path_scales)
+        return self
 
     def weight_view_for_instruction(self, instruction, weight=None):
         """Return a view of the weights for one instruction."""
