@@ -10,7 +10,6 @@ from .restriction import (
     Restriction,
     coupling_coefficients,
     restriction_scale,
-    tensor_power,
     transverse_quarter_turn,
 )
 
@@ -136,7 +135,9 @@ class O3TensorProduct(torch.nn.Module):
         self.projection = (
             co3.ChangeOfBasis(c, inverse=True)
             if output_basis == "spherical"
-            else co3.Projector(c) if project else torch.nn.Identity()
+            else co3.Projector(c)
+            if project
+            else torch.nn.Identity()
         )
         degrees = sorted({a[ins.i_in1].ir.l for ins in self.instructions})
         self.restrictions = torch.nn.ModuleDict(
@@ -243,16 +244,18 @@ class O3TensorProduct(torch.nn.Module):
         ):
             value = None
             for m, coefficient in enumerate(coefficients):
+                if value is not None:
+                    value = (direction.unsqueeze(-1) * value.unsqueeze(-2)).flatten(-2)
                 if coefficient == 0.0:
                     continue
                 local = inputs[ins.i_in1][m]
                 if (l1 + l2 + l3) % 2:
                     local = transverse_quarter_turn(local, direction)
-                term = (
-                    tensor_power(direction, l3 - m).unsqueeze(-1) * local.unsqueeze(-2)
-                ).flatten(-2)
-                term = term * (coefficient * ins.path_weight)
+                term = local * (coefficient * ins.path_weight)
                 value = term if value is None else value + term
+            if value is not None:
+                for _ in range(l3 - len(coefficients) + 1):
+                    value = (direction.unsqueeze(-1) * value.unsqueeze(-2)).flatten(-2)
             if value is None:
                 value = (
                     features.new_zeros(

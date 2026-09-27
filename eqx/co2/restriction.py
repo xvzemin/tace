@@ -1,21 +1,15 @@
 """Coordinate-free restriction of three-dimensional STF tensors."""
 
 import math
+from fractions import Fraction
 from functools import lru_cache
 
 import torch
 from e3nn import o3
 
 from ..co3.basis import path_matrix as spherical_path_matrix
+from ..co3.symmetric import SymmetricBasis
 from .basis import path_matrix
-
-
-def tensor_power(vector, rank):
-    """Return a flattened tensor power, preserving leading dimensions."""
-    value = vector.new_ones((*vector.shape[:-1], 1))
-    for _ in range(rank):
-        value = (value.unsqueeze(-1) * vector.unsqueeze(-2)).flatten(-2)
-    return value
 
 
 @lru_cache(maxsize=None)
@@ -90,6 +84,17 @@ def coupling_coefficients(l1, l2, l3, normalization="component"):
     return tuple(result)
 
 
+@lru_cache(maxsize=None)
+def detracing_coefficients(rank):
+    """Return coefficients of the averaged transverse STF projection."""
+    value = Fraction(1)
+    result = [1.0]
+    for k in range(1, rank // 2 + 1):
+        value *= -Fraction((rank - 2 * k + 2) * (rank - 2 * k + 1), 4 * k * (rank - k))
+        result.append(float(value))
+    return tuple(result)
+
+
 class TransverseProjector(torch.nn.Module):
     """Project a symmetric tensor onto transverse STF tensors.
 
@@ -104,31 +109,10 @@ class TransverseProjector(torch.nn.Module):
         if not isinstance(m, int) or m < 0:
             raise ValueError("The order must be a non-negative integer.")
         self.m = m
-        # Symmetrize by collecting equal index multisets, not by m! permutations.
-        labels, indices = {}, []
-        for i in range(3**m):
-            digits = tuple(sorted((i // 3**j) % 3 for j in range(m)))
-            indices.append(labels.setdefault(digits, len(labels)))
-        indices = torch.tensor(indices, dtype=torch.long, device="cpu")
-        self.num_symmetric = len(labels)
-        self.register_buffer("indices", indices, persistent=False)
-        self.register_buffer(
-            "counts",
-            torch.bincount(indices),
-            persistent=False,
+        self.bases = torch.nn.ModuleList(
+            SymmetricBasis(rank) for rank in (range(m, -1, -2) if m > 2 else ())
         )
-        self.coefficients = tuple(
-            (-1) ** k
-            * math.factorial(m)
-            * math.factorial(m - k - 1)
-            / (
-                4**k
-                * math.factorial(k)
-                * math.factorial(m - 2 * k)
-                * math.factorial(m - 1)
-            )
-            for k in range(1, m // 2 + 1)
-        )
+        self.coefficients = detracing_coefficients(m)
         self.register_buffer("identity", torch.eye(3), persistent=False)
 
     def forward(self, tensor, direction):
@@ -137,36 +121,31 @@ class TransverseProjector(torch.nn.Module):
         Leading dimensions broadcast. The result retains global Cartesian
         indices; it is not stored in the two-dimensional co2.Irreps layout.
         """
-        if tensor.shape[-1] != 3 ** self.m or direction.shape[-1] != 3:
+        if tensor.shape[-1] != 3**self.m or direction.shape[-1] != 3:
             raise ValueError("Tensor or direction has an incorrect trailing size.")
         if self.m == 0:
             shape = torch.broadcast_shapes(tensor.shape[:-1], direction.shape[:-1])
             return tensor.expand(*shape, 1)
         plane = self.identity - direction.unsqueeze(-1) * direction.unsqueeze(-2)
-        value = tensor
-        for axis in range(self.m):
-            shaped = value.reshape(
-                *value.shape[:-1], 3**axis, 3, 3 ** (self.m - axis - 1)
+        if self.m == 1:
+            return torch.einsum("...ij,...j->...i", plane, tensor)
+        if self.m == 2:
+            value = plane @ tensor.unflatten(-1, (3, 3)) @ plane
+            trace = value.diagonal(dim1=-2, dim2=-1).sum(-1)
+            return (value - 0.5 * trace[..., None, None] * plane).flatten(-2)
+        basis = self.bases[0]
+        traces = [basis(basis.pack(tensor), plane)]
+        entries = torch.cat(
+            (plane[..., 0, :], plane[..., 1, 1:], plane[..., 2, 2:]), -1
+        )
+        for basis in self.bases[:-1]:
+            traces.append(basis.trace(traces[-1]))
+        value = traces[-1] * self.coefficients[-1]
+        for k in range(len(traces) - 2, -1, -1):
+            value = self.coefficients[k] * traces[k] + self.bases[k].multiply(
+                value, entries
             )
-            value = torch.einsum("...aib,...ij->...ajb", shaped, plane).flatten(-3)
-        output, trace = value, value
-        for k, coefficient in enumerate(self.coefficients, start=1):
-            rank = self.m - 2 * k
-            trace = (
-                trace.reshape(*trace.shape[:-1], 3**rank, 3, 3)
-                .diagonal(dim1=-2, dim2=-1)
-                .sum(-1)
-            )
-            term = (
-                tensor_power(plane.flatten(-2), k).unsqueeze(-1) * trace.unsqueeze(-2)
-            ).flatten(-2)
-            summed = term.new_zeros((*term.shape[:-1], self.num_symmetric)).scatter_add(
-                -1, self.indices.expand_as(term), term
-            )
-            output = output + coefficient * (summed / self.counts).index_select(
-                -1, self.indices
-            )
-        return output
+        return self.bases[0].unpack(value)
 
     def extra_repr(self):
         return f"m={self.m}"
@@ -191,10 +170,15 @@ class Restriction(torch.nn.Module):
         if not isinstance(l, int) or l < 0:
             raise ValueError("The degree must be a non-negative integer.")
         self.l = l
-        self.projectors = torch.nn.ModuleList(
-            TransverseProjector(m) for m in range(l + 1)
+        self.bases = torch.nn.ModuleList(
+            SymmetricBasis(m) for m in (range(l + 1) if l > 2 else ())
+        )
+        self.coefficients = tuple(
+            tuple(abs(value) for value in detracing_coefficients(m))
+            for m in range(l + 1)
         )
         self.scales = tuple(restriction_scale(l, m) for m in range(l + 1))
+        self.register_buffer("identity", torch.eye(3), persistent=False)
         self.register_buffer(
             "basis",
             spherical_path_matrix(l).to(torch.get_default_dtype()).clone(),
@@ -203,13 +187,46 @@ class Restriction(torch.nn.Module):
 
     def forward(self, tensor, direction):
         """Return orders 0,...,l for STF tensors and unit, broadcastable directions."""
-        if tensor.shape[-1] != 3 ** self.l or direction.shape[-1] != 3:
+        if tensor.shape[-1] != 3**self.l or direction.shape[-1] != 3:
             raise ValueError("Tensor or direction has an incorrect trailing size.")
+        if self.l == 0:
+            shape = torch.broadcast_shapes(tensor.shape[:-1], direction.shape[:-1])
+            return (tensor.expand(*shape, 1),)
+        if self.l == 1:
+            scalar = (tensor * direction).sum(-1, keepdim=True)
+            return scalar, tensor - scalar * direction
+        plane = self.identity - direction.unsqueeze(-1) * direction.unsqueeze(-2)
+        if self.l == 2:
+            tensor = tensor.unflatten(-1, (3, 3))
+            vector = torch.einsum("...ij,...j->...i", tensor, direction)
+            scalar = (vector * direction).sum(-1, keepdim=True)
+            transverse = plane @ tensor @ plane + 0.5 * scalar.unsqueeze(-1) * plane
+            return (
+                self.scales[0] * scalar,
+                self.scales[1] * (vector - scalar * direction),
+                transverse.flatten(-2),
+            )
+        contractions = [self.bases[-1].pack(tensor)]
+        for m in range(self.l, 0, -1):
+            contractions.append(self.bases[m].contract(contractions[-1], direction))
+        contractions.reverse()
+        transverse = [basis(x, plane) for basis, x in zip(self.bases, contractions)]
+        entries = torch.cat(
+            (plane[..., 0, :], plane[..., 1, 1:], plane[..., 2, 2:]), -1
+        )
         values = []
-        for m, (projector, scale) in enumerate(zip(self.projectors, self.scales)):
-            x = tensor.reshape(*tensor.shape[:-1], 3**m, 3 ** (self.l - m))
-            x = (x @ tensor_power(direction, self.l - m).unsqueeze(-1)).squeeze(-1)
-            values.append(projector(x, direction) * scale)
+        for m, (basis, scale, coefficients) in enumerate(
+            zip(self.bases, self.scales, self.coefficients)
+        ):
+            # Tr^k(U_lm) = (-1)^k U_l,m-2k for a three-dimensional STF input.
+            # Nested symmetric products avoid repeated trace and permutation sums.
+            k = len(coefficients) - 1
+            value = coefficients[k] * transverse[m - 2 * k]
+            for k in range(k - 1, -1, -1):
+                value = coefficients[k] * transverse[m - 2 * k] + self.bases[
+                    m - 2 * k
+                ].multiply(value, entries)
+            values.append(basis.unpack(value * scale))
         return tuple(values)
 
     def inverse(self, tensors, direction, *, project=True):
@@ -220,10 +237,16 @@ class Restriction(torch.nn.Module):
         for m, (tensor, scale) in enumerate(zip(tensors, self.scales)):
             if tensor.shape[-1] != 3**m:
                 raise ValueError("A transverse tensor has an incorrect trailing size.")
-            value = (
-                tensor_power(direction, self.l - m).unsqueeze(-1) * tensor.unsqueeze(-2)
-            ).flatten(-2)
-            result = scale * value if result is None else result + scale * value
+            value = scale * tensor
+            result = (
+                value
+                if result is None
+                else (direction.unsqueeze(-1) * result.unsqueeze(-2)).flatten(-2)
+                + value
+            )
+        if self.l == 0:
+            shape = torch.broadcast_shapes(result.shape[:-1], direction.shape[:-1])
+            result = result.expand(*shape, 1)
         return (result @ self.basis) @ self.basis.T if project else result
 
     def extra_repr(self):

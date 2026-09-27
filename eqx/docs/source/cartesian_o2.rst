@@ -137,6 +137,16 @@ inputs. ``inverse`` reconstructs the tensor. The transverse projection
 uses finite trace-removal formulas; its constants are prepared at
 construction time.
 
+Intermediate symmetric tensors use :math:`\binom{m+2}{2}` normalized
+coordinates instead of :math:`3^m` repeated entries. Longitudinal contractions
+are shared across orders. Packing uses successive normalized symmetrizations
+rather than atomic sums over repeated entries. For an STF input, the unprojected transverse tensors
+satisfy :math:`\operatorname{tr}^k U_{\ell m}=(-1)^k U_{\ell,m-2k}`;
+restriction reuses these lower orders rather than computing their traces again.
+Plane transformations contract symmetric index groups, and trace corrections
+use nested symmetric products. Ranks one and two use direct formulas.
+External tensor shapes and normalization are unchanged.
+
 Exact harmonic tensor products
 -------------------------------
 
@@ -194,6 +204,9 @@ Cartesian messages, then projects on nodes. With Cartesian output and
 ``project=False``, a subsequent ``co3.Linear`` can compress channels before
 projection. Edge-dependent transverse projections cannot be moved after
 neighbor summation.
+Reconstruction uses nested products with the direction, avoiding a full-rank
+Cartesian temporary for every local order. Fixed STF projection remains a
+pair of rectangular path-matrix contractions.
 
 Scope and numerical behavior
 -----------------------------
