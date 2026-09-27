@@ -3,9 +3,9 @@
 Fused O(3)/O(2) Convolutions
 ============================
 
-EQX provides four convolution interfaces. The two CGTP forms retain the same
-instructions, independent path weights, and normalization. Uu and Uv instead
-parameterize native O(2) operations.
+EQX provides spherical, aligned-frame, and Cartesian convolutions. The CGTP
+forms retain the same instructions, independent path weights, and
+normalization. Uu and Uv instead parameterize native O(2) operations.
 
 |eqx-convolutions|
 
@@ -25,6 +25,9 @@ Choosing an operator
    * - ``O2O3TensorProductConv``
      - O(3) features and spherical-harmonic edges; aligned CGTP
      - PyTorch / CUDA
+   * - ``CartesianTensorProductConv``
+     - Cartesian features and harmonics; ``uvu`` delta/epsilon contractions
+     - PyTorch / CUDA
    * - ``UuO2TensorProductConv``
      - Source features and one externally weighted ``UuLinear``
      - PyTorch / CUDA
@@ -32,8 +35,9 @@ Choosing an operator
      - Linear--Gate--Linear; optional edge features and attention
      - CUDA
 
-Convolution features use flattened ``ir_mul`` storage. The first three
-interfaces default to CUDA on GPU and use PyTorch on CPU. Set
+Cartesian features use flattened ``mul_ir`` storage; the other convolutions
+use flattened ``ir_mul`` storage. Except for Uv, the interfaces default to
+CUDA on GPU and use PyTorch on CPU. Set
 ``backend="torch"`` to select their reference implementation on either device.
 For a native Uv reference, compose ``LocalFrame``, ``Linear``, and ``Gate``.
 
@@ -122,6 +126,9 @@ Fusion boundaries
    * - Uu O(2)
      - Gather, rotations, channelwise weighting, scatter
      - No full edge messages; bounded radial-projection workspaces
+   * - Cartesian O(3)
+     - Gather, harmonic polynomials, delta/epsilon contractions, scatter
+     - No edge harmonics or messages with vector inputs; bounded radial workspaces
    * - Uv O(2)
      - Rotations, radial multiplication, gate, optional attention, scatter
      - Radial weights and local GEMM operands remain explicit
@@ -151,11 +158,15 @@ mixed second derivatives required by force training. Registered operators
 provide fake implementations and autograd rules for ``torch.compile``.
 Atomic reductions can change floating-point summation order.
 
-Two geometry interfaces avoid differentiating stored angular intermediates:
+Vector interfaces avoid differentiating stored angular intermediates:
 
 * ``O3TensorProductConv.forward(..., vectors=...)`` differentiates fixed harmonic
   polynomials. ``normalization`` selects ``component``, ``integral``, or
   ``norm``; ``normalize=False`` selects regular solid harmonics.
+* ``CartesianTensorProductConv.forward(..., vectors=...)`` similarly evaluates
+  STF harmonic polynomials and their derivatives inside the contraction.
+  ``TensorProduct(project=False)`` defers projection until after node aggregation
+  and channel compression. See :doc:`cartesian`.
 * ``O2O3TensorProductConv.forward(..., vectors=...)`` uses analytic angular derivatives
   with matching cached Wigner matrices. Construct them with
   ``eqx.kernels.wigner_D(frame, vectors.detach())``. If vectors are omitted,

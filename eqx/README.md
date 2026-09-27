@@ -1,6 +1,6 @@
 # EquivariantX
 
-EquivariantX (EQX) provides PyTorch-native O(2) and Cartesian O(3) operators, e3nn-compatible
+EquivariantX (EQX) provides PyTorch-native O(2) and Cartesian O(2)/O(3) operators, e3nn-compatible
 O(3)/O(2) frame conversion, and fused CUDA convolutions. Time-reversal labels
 are optional.
 
@@ -58,6 +58,7 @@ directly. CUDA kernels support force training and higher derivatives.
 |---|---|
 | `eqx.o2` | Native O(2) operators and O(3)/O(2) frames |
 | `eqx.co3` | Cartesian O(3) irreps, harmonics, Linear, Gate, and tensor products in `mul_ir` layout |
+| `eqx.co2` | Cartesian O(2) operators and coordinate-free harmonic CGTP in `mul_ir` layout |
 | `eqx.conv` | General fused convolutions and graph attention |
 | `eqx.o3` | Element-dependent Linear and Gate in `mul_ir` layout |
 | `eqx.ace` | Atomic cluster expansions |
@@ -84,6 +85,15 @@ nonlinearities or subsequent tensor products.
 
 See the [Cartesian tutorial](docs/source/cartesian.rst) for normalization,
 operators, and equivalent-model conversion.
+
+## Cartesian O(2)
+
+`co2` provides two-dimensional STF tensors and conversions to compact O(2)
+features. `co2.O3TensorProduct` uses transverse Cartesian restriction to
+evaluate harmonic CGTP paths without explicit local frames. Paths, weights,
+and normalization are preserved, including conversions from `co3.TensorProduct`.
+These are PyTorch reference operators, not fused CUDA kernels. See the
+[Cartesian O(2) tutorial](docs/source/cartesian_o2.rst) for examples and limits.
 
 ## Tests
 

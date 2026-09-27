@@ -86,9 +86,22 @@ def angular_source(
     direction_offset=0,
 ):
     """Contract harmonic derivatives before reducing feature channels."""
+
     start, attr, end, mul1, mul2, dim1, dim2, dim_out, _, _, cg = path
     degree = (dim2 - 1) // 2
+    if isinstance(normalization, tuple):
+        from ..co3.polynomials import polynomial_coefficients as cartesian_polynomials
+
+        degree, width = 0, dim2
+        while width > 1:
+            degree, width = degree + 1, width // 3
+        polynomials = cartesian_polynomials(degree, normalization[1])
+    else:
+        polynomials = polynomial_coefficients(degree, normalization)
     rank = len(mapping) - 6
+    indices = {
+        role: {entry[axis] for entry in cg} for role, axis in ((0, 0), (3, 1), (4, 2))
+    }
 
     def variable(key, expression):
         if key not in cache:
@@ -139,7 +152,7 @@ def angular_source(
                         cache,
                         lines,
                     )
-                    for polynomial in polynomial_coefficients(degree, normalization)
+                    for polynomial in polynomials
                 )
             cache[key] = values
         return cache[key]
@@ -200,12 +213,16 @@ def angular_source(
         for orders, direction_factor in directions.items():
             if output is not None:
                 orders = tuple(n + (i == axis) for i, n in enumerate(orders))
-            partial_key = "partial", degree, m, mapping[5], tuple(orders), normalization
+            partial_key = (
+                "partial",
+                polynomials[m],
+                mapping[5],
+                tuple(orders),
+                normalization,
+            )
             if partial_key not in cache:
                 polynomial = []
-                for powers, coefficient in polynomial_coefficients(
-                    degree, normalization
-                )[m]:
+                for powers, coefficient in polynomials[m]:
                     if any(n > p for n, p in zip(orders, powers)):
                         continue
                     monomial = []
@@ -293,6 +310,8 @@ def angular_source(
                     )
                 continue
             for column in range(width):
+                if role in (0, 4) and column not in indices[role]:
+                    continue
                 key = (
                     "angular",
                     path,
@@ -307,6 +326,8 @@ def angular_source(
                         # The CG adjoint is shared by all three Cartesian
                         # directions and stays in registers until contraction.
                         for b, value in enumerate(harmonic_adjoint()):
+                            if b not in indices[3]:
+                                continue
                             y = harmonic(b, role if role >= 6 else None, column)
                             terms.append((1.0, (value, y)))
                     else:
@@ -341,6 +362,7 @@ def angular_source(
             terms = tuple(
                 (values[v, role, m], load(role, offset + m * channels, channel))
                 for m in range(width)
+                if (v, role, m) in values
             )
             key = "weight", terms
             if key not in cache:

@@ -184,6 +184,7 @@ class O3TensorProductConv(torch.nn.Module):
         self.input_dim = self.irreps_in1.dim
         self.edge_dim = self.irreps_in2.dim
         self.output_dim = self.irreps_out.dim
+        self.harmonic_output_dim = self.output_dim
         self.instructions = tuple(tensor_product.instructions)
         self.weight_numel = tensor_product.weight_numel
         slices = [
@@ -324,7 +325,10 @@ class O3TensorProductConv(torch.nn.Module):
             radial,
             projection,
             edge_attrs,
-            features.new_empty(1).expand(num_nodes, self.output_dim),
+            features.new_empty(1).expand(
+                num_nodes,
+                self.harmonic_output_dim if vectors is not None else self.output_dim,
+            ),
         ]
         if self.backend == "cuda" and features.is_cuda:
             if vectors is not None:

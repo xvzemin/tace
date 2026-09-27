@@ -92,6 +92,11 @@ class ChangeOfBasis(torch.nn.Module):
         self.irreps_in = cartesian if inverse else spherical
         self.irreps_out = spherical if inverse else cartesian
         self.slices_in = self.irreps_in.slices()
+        self.input_dim = self.irreps_in.dim
+        self.paths = tuple(
+            (mul, ir.l, ir.dim, section)
+            for (mul, ir), section in zip(self.irreps_in, self.slices_in)
+        )
         for l in sorted({ir.l for _, ir in cartesian}):
             self.register_buffer(
                 f"basis_{l}",
@@ -101,14 +106,21 @@ class ChangeOfBasis(torch.nn.Module):
 
     def forward(self, features):
         """Transform features of shape (..., irreps_in.dim) in mul_ir order."""
-        if features.shape[-1] != self.irreps_in.dim:
+        if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         values = []
-        for (mul, ir), section in zip(self.irreps_in, self.slices_in):
-            matrix = getattr(self, f"basis_{ir.l}")
-            x = features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
+        for mul, l, dim, section in self.paths:
+            matrix = getattr(self, f"basis_{l}")
+            x = features[..., section].reshape(*features.shape[:-1], mul, dim)
             values.append((x @ (matrix if self.inverse else matrix.T)).flatten(-2))
         return torch.cat(values, dim=-1) if values else features[..., :0]
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        for l in {path[1] for path in self.paths}:
+            name = f"basis_{l}"
+            self._buffers[name] = path_matrix(l).to(getattr(self, name)).clone()
+        return self
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}, inverse={self.inverse}"
@@ -130,12 +142,12 @@ class Projector(torch.nn.Module):
 
     def forward(self, features):
         """Apply C C.T without constructing a square Cartesian projector."""
-        if features.shape[-1] != self.irreps_in.dim:
+        if features.shape[-1] != self.basis.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         values = []
-        for (mul, ir), section in zip(self.irreps_in, self.basis.slices_in):
-            matrix = getattr(self.basis, f"basis_{ir.l}")
-            x = features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
+        for mul, l, dim, section in self.basis.paths:
+            matrix = getattr(self.basis, f"basis_{l}")
+            x = features[..., section].reshape(*features.shape[:-1], mul, dim)
             values.append(((x @ matrix) @ matrix.T).flatten(-2))
         return torch.cat(values, dim=-1) if values else features[..., :0]
 

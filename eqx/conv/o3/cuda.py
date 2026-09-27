@@ -32,6 +32,23 @@ def execution_plan(
         (tuple(sorted(entries, key=lambda p: (p[1], p[2]))), program)
         for entries in groups.values()
     )
+    cartesian = bool(
+        geometry and isinstance(geometry[0], tuple) and geometry[0][0] == "cartesian"
+    )
+    if cartesian:
+        from ..co3.polynomials import ANGULAR_TILE_SIZE, FUSED_TILE_LIMIT
+
+        # Cartesian angular tiles may share a weight column. Keep their live
+        # accumulators separate; compatible tiles are fused into one grid below.
+        pending = deque(
+            (tile, terms)
+            for entries, terms in pending
+            for tile in (
+                tuple(p for p in entries if max(p[5:8]) <= ANGULAR_TILE_SIZE),
+                *((p,) for p in entries if max(p[5:8]) > ANGULAR_TILE_SIZE),
+            )
+            if tile
+        )
     accepted = []
     scheduled = []
     while pending:
@@ -94,7 +111,11 @@ def execution_plan(
             accepted.append((kernel, paths[0][3], owner, threads))
             scheduled.append((paths, terms, owner))
     separate, accepted = accepted, []
-    pending = deque([tuple(range(len(scheduled)))]) if scheduled else deque()
+    limit = FUSED_TILE_LIMIT if cartesian else max(1, len(scheduled))
+    pending = deque(
+        tuple(range(start, min(start + limit, len(scheduled))))
+        for start in range(0, len(scheduled), limit)
+    )
     while pending:
         candidates = []
         while pending:

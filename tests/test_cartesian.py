@@ -16,8 +16,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 @pytest.mark.parametrize(
     "parity,node_embedding", [(False, "linear"), (True, "linear"), (True, "tensor")]
 )
+@pytest.mark.parametrize("fused", [False, True])
 def test_cartesian_conversion(
-    double_precision, monkeypatch, tmp_path, parity, node_embedding
+    double_precision, monkeypatch, tmp_path, parity, node_embedding, fused
 ):
     for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
@@ -85,6 +86,17 @@ def test_cartesian_conversion(
         fidelity_idx=torch.zeros(2, dtype=torch.long, device=DEVICE),
     )
     expected = reference({k: v.clone() for k, v in data.items()})
+    if fused:
+        monkeypatch.setenv("TACE_USE_EQX", "1")
+
+        def no_edge_harmonics(*args):
+            raise AssertionError(
+                "The fused convolution evaluates harmonics in registers."
+            )
+
+        monkeypatch.setattr(
+            representation.co3_angular_basis, "forward", no_edge_harmonics
+        )
     actual = module({k: v.clone() for k, v in data.items()})
     for key in ("energy", "forces", "stress", "virials"):
         torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-10)

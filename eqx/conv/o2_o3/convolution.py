@@ -179,7 +179,7 @@ class O2O3TensorProductConv(torch.nn.Module):
 
     Parameters
     ----------
-    tensor_product : O3TensorProduct
+    tensor_product : eqx.o2.O3TensorProduct
         Tensor product defining paths, normalization and feature layouts.
     backend : {"torch", "cuda"}, optional
         Execution backend. Defaults to generated ``"cuda"`` kernels on CUDA

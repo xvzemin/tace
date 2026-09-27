@@ -70,12 +70,16 @@ Fused O(3)/O(2) convolutions
 ----------------------------
 
 These interfaces retain their supplied paths, weights, and normalization.
-All feature operands use flattened ``ir_mul`` layout. CUDA kernels support
+Cartesian operands use flattened ``mul_ir`` layout; the other convolutions
+use flattened ``ir_mul``. CUDA kernels support
 float32 and float64, force training, and recursive higher derivatives.
 CGTP and uu convolutions also provide a PyTorch reference backend. The uv
 interface is CUDA-only; its reference is the composition of native operators.
 
 .. autoclass:: eqx.conv.O3TensorProductConv
+   :members: forward
+
+.. autoclass:: eqx.conv.CartesianTensorProductConv
    :members: forward
 
 .. autoclass:: eqx.conv.O2O3TensorProductConv
@@ -133,6 +137,61 @@ These operators use native PyTorch on CPU and GPU.
 .. autofunction:: eqx.co3.path_matrix
 
 .. autofunction:: eqx.co3.path_normalization
+
+Cartesian O(2) operations
+--------------------------
+
+Cartesian features use flattened ``mul_ir`` storage with ``2**m`` entries
+per channel. ``Restriction`` instead retains three-dimensional Cartesian
+indices on transverse tensors; see :ref:`equivariantx-cartesian-o2`.
+
+.. autoclass:: eqx.co2.Irrep
+   :members:
+
+.. autoclass:: eqx.co2.Irreps
+   :members:
+
+.. autoclass:: eqx.co2.ChangeOfBasis
+   :members: forward
+
+.. autoclass:: eqx.co2.Projector
+   :members: forward
+
+.. autoclass:: eqx.co2.CartesianHarmonics
+   :members: forward
+
+.. autoclass:: eqx.co2.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.co2.Activation
+   :members: forward
+
+.. autoclass:: eqx.co2.Gate
+   :members: forward
+
+.. autoclass:: eqx.co2.TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.co2.FullyConnectedTensorProduct
+
+.. autoclass:: eqx.co2.ElementwiseTensorProduct
+
+.. autoclass:: eqx.co2.TransverseProjector
+   :members: forward
+
+.. autoclass:: eqx.co2.Restriction
+   :members: forward, inverse
+
+.. autoclass:: eqx.co2.O3TensorProduct
+   :members: forward, forward_scatter, from_tensor_product, weight_views
+
+.. autofunction:: eqx.co2.path_matrix
+
+.. autofunction:: eqx.co2.restriction_scale
+
+.. autofunction:: eqx.co2.restriction_matrix
+
+.. autofunction:: eqx.co2.coupling_coefficients
 
 Supporting operators
 --------------------

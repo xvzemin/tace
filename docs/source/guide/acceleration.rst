@@ -130,6 +130,8 @@ EQX in TACE
      - ``eqx.conv.O3TensorProductConv``
    * - ``o2_cgtp``
      - ``eqx.conv.O2O3TensorProductConv``
+   * - ``co3``
+     - ``eqx.conv.CartesianTensorProductConv``
    * - ``uu_o2``
      - ``eqx.conv.UuO2TensorProductConv``
    * - ``o2`` / ``o2_mag``
@@ -151,6 +153,12 @@ without retraining:
    enable_acceleration(enable_eqx=True)
    model = load_tace("model.pt", device="cuda")
    model = convert_cgtp(model, implementation="o2")  # "o3" for direct CGTP
+
+Use ``implementation="co3"`` for Cartesian contractions with a spherical
+product basis. With ``TACE_USE_EQX=1``, Cartesian harmonics, delta/epsilon
+contractions, and graph reduction are fused. Edge messages are not stored;
+radial projection uses bounded temporary workspaces. Cartesian-to-spherical
+projection follows the node-level channel Linear, outside the kernel.
 
 The default ``implementation="auto"`` switches each CGTP interaction to the
 other form. Conversion returns a copy; recreate its optimizer before training.

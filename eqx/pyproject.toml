@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "EquivariantX"
 version = "0.1.0"
-description = "PyTorch O(2) and Cartesian O(3) operators, frame conversions, and fused CUDA convolutions."
+description = "PyTorch O(2) and Cartesian O(2)/O(3) operators, frame conversions, and fused CUDA convolutions."
 readme = "README.md"
 authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
 license = "MIT"
@@ -29,8 +29,8 @@ Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/tutorials.ht
 
 [tool.setuptools]
 packages = [
-    "eqx", "eqx.o2", "eqx.o3", "eqx.co3", "eqx.ace", "eqx.kernels",
-    "eqx.conv", "eqx.conv.o2_o3", "eqx.conv.o3",
+    "eqx", "eqx.o2", "eqx.o3", "eqx.co2", "eqx.co3", "eqx.ace", "eqx.kernels",
+    "eqx.conv", "eqx.conv.o2_o3", "eqx.conv.o3", "eqx.conv.co3",
     "eqx.conv.uu_o2", "eqx.conv.uv_o2", "eqx.models",
     "eqx.models.tace", "eqx.models.tace.tece_oam_rra",
     "eqx.models.mace", "eqx.models.nequip", "eqx.models.sevennet",

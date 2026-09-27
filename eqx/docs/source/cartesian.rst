@@ -118,6 +118,31 @@ storage instead. Do not pass unprojected features into another tensor product
 or nonlinearity.
 
 Full Cartesian storage grows as :math:`3^\ell`; this implementation is a
-native PyTorch alternative, not a claim of lower memory use at high degree.
+Cartesian alternative, not a claim of lower memory use at high degree.
 All operators support ordinary autograd, including force training and
 higher derivatives.
+
+Fused convolution
+------------------
+
+``eqx.conv.CartesianTensorProductConv`` accepts a Cartesian ``TensorProduct``
+with ``uvu`` instructions. Its arguments match ``O3TensorProductConv``, but
+features use Cartesian dimensions and ``mul_ir`` layout. Supply
+``vectors=...`` to evaluate harmonics and their derivatives inside CUDA,
+without materializing edge harmonics or tensor-product messages.
+Final radial projections use bounded temporary workspaces and are recomputed
+in backward. Output paths remain separate. With ``project=False``, aggregate
+raw tensors, apply the node-level channel Linear, and then project as above.
+For degrees up to four, identical harmonic polynomials and identical output
+entries are evaluated once per path. Output equivalence is checked separately
+for every incoming instruction; independent path weights are never combined.
+The full Cartesian layout is restored after node aggregation. The derivative
+of this expansion sums the corresponding cotangents before the edge kernel.
+Higher derivatives use the same transposed contraction rules.
+High-rank contractions are tiled over Cartesian indices to limit register
+usage. Tiles sharing a path use the same weight and sum their contributions;
+this does not truncate the tensor or remove coupling paths.
+
+In TACE, select ``atomic_basis.type: co3`` and ``TACE_USE_EQX=1``. Existing
+spherical models can be converted with ``convert_cgtp(model, "co3")``;
+the product basis remains spherical.

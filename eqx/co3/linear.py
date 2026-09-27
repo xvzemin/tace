@@ -125,13 +125,35 @@ class Linear(torch.nn.Module):
             else:
                 self.register_buffer(name, torch.empty(0))
         self.slices_in = self.irreps_in.slices()
+        groups = [[] for _ in cartesian_out]
+        offset, bias_offset = 0, 0
+        for ins in self.instructions:
+            size = math.prod(ins.path_shape)
+            section = (
+                slice(bias_offset, bias_offset + size)
+                if ins.i_in < 0
+                else slice(offset, offset + size)
+            )
+            groups[ins.i_out].append((ins, section))
+            if ins.i_in < 0:
+                bias_offset += size
+            else:
+                offset += size
+        self.groups = tuple(tuple(group) for group in groups)
+        self.group_sections = []
+        for group in self.groups:
+            sections = [self.slices_in[ins.i_in] for ins, _ in group if ins.i_in >= 0]
+            self.group_sections.append(
+                slice(sections[0].start, sections[-1].stop)
+                if sections
+                and all(a.stop == b.start for a, b in zip(sections, sections[1:]))
+                else None
+            )
         self.cartesian_out = cartesian_out
         self.projection = (
             ChangeOfBasis(cartesian_out, inverse=True)
             if output_basis == "spherical"
-            else Projector(cartesian_out)
-            if project
-            else torch.nn.Identity()
+            else Projector(cartesian_out) if project else torch.nn.Identity()
         )
         connected = {ins.i_out for ins in self.instructions if all(ins.path_shape)}
         self.register_buffer(
@@ -177,33 +199,47 @@ class Linear(torch.nn.Module):
             features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
         )
         zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
-        outputs = [
-            features.new_zeros((*shape, mul, ir.dim)) + zero
-            for mul, ir in self.cartesian_out
-        ]
-        offset, bias_offset = 0, 0
-        for ins in self.instructions:
-            size = math.prod(ins.path_shape)
-            if ins.i_in < 0:
-                value = bias[..., bias_offset : bias_offset + size].unsqueeze(-1)
-                bias_offset += size
+        outputs = []
+        for (mul, ir), group, input_section in zip(
+            self.cartesian_out, self.groups, self.group_sections
+        ):
+            inputs, weights, biases = [], [], []
+            for ins, section in group:
+                if ins.i_in < 0:
+                    biases.append(bias[..., section].unsqueeze(-1))
+                    continue
+                if input_section is None:
+                    inputs.append(
+                        features[..., self.slices_in[ins.i_in]].reshape(
+                            *features.shape[:-1], ins.path_shape[0], ir.dim
+                        )
+                    )
+                weights.append(
+                    weight[..., section].reshape(*weight.shape[:-1], *ins.path_shape)
+                    * ins.path_weight
+                )
+            if weights:
+                if input_section is not None:
+                    width = (input_section.stop - input_section.start) // ir.dim
+                    x = features[..., input_section].reshape(
+                        *features.shape[:-1], width, ir.dim
+                    )
+                else:
+                    x = inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
+                w = weights[0] if len(weights) == 1 else torch.cat(weights, dim=-2)
+                value = torch.einsum("...ui,...uv->...vi", x, w)
+                value = value.expand(*shape, mul, ir.dim)
             else:
-                mul, ir = self.irreps_in[ins.i_in]
-                x = features[..., self.slices_in[ins.i_in]].reshape(
-                    *features.shape[:-1], mul, ir.dim
-                )
-                w = weight[..., offset : offset + size].reshape(
-                    *weight.shape[:-1], *ins.path_shape
-                )
-                value = torch.einsum("...ui,...uv->...vi", x, w) * ins.path_weight
-                offset += size
-            outputs[ins.i_out] = outputs[ins.i_out] + value
+                value = features.new_zeros((*shape, mul, ir.dim)) + zero
+            for b in biases:
+                value = value + b
+            outputs.append(value)
         output = (
             torch.cat([x.flatten(-2) for x in outputs], -1)
             if outputs
             else features.new_zeros((*shape, 0)) + zero
         )
-        return self.projection(output)
+        return self.projection(output) + zero
 
     def weight_view_for_instruction(self, instruction, weight=None):
         """Return the channel-weight view for a weighted instruction."""

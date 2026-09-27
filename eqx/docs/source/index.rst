@@ -6,6 +6,7 @@ EquivariantX Documentation
 
    equivariantx
    cartesian
+   cartesian_o2
    convolutions
    models
    api

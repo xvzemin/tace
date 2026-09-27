@@ -61,12 +61,16 @@ def test_harmonics(double_precision, normalization, normalize):
 
 @pytest.mark.parametrize("normalization", ["element", "path"])
 @pytest.mark.parametrize("shared", [False, True])
-def test_linear(double_precision, normalization, shared):
+@pytest.mark.parametrize(
+    "instructions", [None, [(1, 0), (0, 0), (3, 2), (2, 1), (0, 0)]]
+)
+def test_linear(double_precision, normalization, shared, instructions):
     kwargs = dict(
         path_normalization=normalization,
         internal_weights=False,
         shared_weights=shared,
         biases=shared,
+        instructions=instructions,
     )
     ref = o3.Linear("2x0e+1x0e+2x1o+1x2e", "3x0e+2x1o+2x2e+1x0o", **kwargs).to(DEVICE)
     module = co3.Linear(
@@ -90,6 +94,21 @@ def test_linear(double_precision, normalization, shared):
         atol=2e-14,
         rtol=2e-14,
     )
+    inputs = [x.requires_grad_() for x in (raw, weights, bias)]
+    losses = [
+        module(*inputs).square().sum(),
+        ref(inverse(inputs[0]), inputs[1], inputs[2]).square().sum(),
+    ]
+    differentiable = [x for x in inputs if x.numel()]
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(loss, differentiable, create_graph=True)
+            for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-11, rtol=2e-11)
+        tangents = [torch.randn_like(x) for x in differentiable]
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
 
 
 @pytest.mark.parametrize(

@@ -245,14 +245,43 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
         )
         self.weight_numel = self.tp.weight_numel
 
+        self.eqx_tp = eqx_conv.CartesianTensorProductConv(self.tp, normalize=False)
+
     def forward(self, x, y, w, edge_index):
         """Convert nodes, contract gathered features, and sum raw edge tensors."""
+        if acceleration_enabled("eqx", kernel="conv"):
+            return self.forward_stream(
+                x, y, w, w.new_empty((0, self.weight_numel)), edge_index, None
+            )
         x = self.to_cartesian(x)
         return scatter_sum(
             self.tp(x[edge_index[0]], y, w),
             edge_index[1],
             dim=0,
             dim_size=x.size(0),
+        )
+
+    def forward_stream(
+        self,
+        node_feats,
+        edge_attrs,
+        radial,
+        projection,
+        edge_index,
+        edge_cutoff,
+        edge_vector=None,
+    ):
+        """Contract Cartesian edge tensors and reduce directly to nodes."""
+        if edge_cutoff is not None and edge_vector is None:
+            edge_attrs = edge_attrs * edge_cutoff
+        return self.eqx_tp(
+            self.to_cartesian(node_feats),
+            edge_attrs,
+            radial,
+            projection,
+            edge_index,
+            vectors=edge_vector,
+            amplitudes=edge_cutoff,
         )
 
 

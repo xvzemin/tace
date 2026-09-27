@@ -12,6 +12,198 @@ from eqx.ace import TACE
 from eqx.models.tace.tece_oam_rra import BilinearACE
 
 
+@pytest.mark.parametrize("degree", range(7))
+@pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
+def test_cartesian_harmonic_polynomials(degree, normalization, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+    from eqx.conv.co3.polynomials import polynomial_coefficients
+
+    vectors = torch.randn(8, 3, device="cuda")
+    vectors = torch.nn.functional.normalize(vectors, dim=-1)
+    vectors[:4] = torch.cat((torch.eye(3, device="cuda"), vectors.new_zeros(1, 3)))
+    values = []
+    for polynomial in polynomial_coefficients(degree, normalization):
+        values.append(
+            sum(c * vectors.pow(vectors.new_tensor(p)).prod(-1) for p, c in polynomial)
+        )
+    actual = torch.stack(values, dim=-1)
+    expected = co3.CartesianHarmonics(degree, False, normalization).cuda()(vectors)
+    torch.testing.assert_close(actual, expected, atol=2e-13, rtol=2e-12)
+
+
+@pytest.mark.parametrize(
+    "geometry,shared,projected",
+    [(True, False, False), (False, False, False), (True, True, True)],
+)
+def test_cartesian_convolution_derivatives(
+    geometry, shared, projected, double_precision
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+
+    tp = co3.TensorProduct(
+        "3x1o+2x2e",
+        "2x1o+1x2e",
+        "3x0e+3x1e+3x2e+2x1o+2x2o+2x3o+3x0e+3x1o+3x2o+3x3o",
+        [
+            (0, 0, 0, "uvu", True),
+            (0, 0, 1, "uvu", True),
+            (0, 0, 2, "uvu", True),
+            (1, 0, 3, "uvu", True),
+            (1, 0, 4, "uvu", True),
+            (1, 0, 5, "uvu", True),
+            (0, 0, 6, "uvu", False),
+            (0, 1, 7, "uvu", True),
+            (0, 1, 8, "uvu", True),
+            (0, 1, 9, "uvu", True),
+        ],
+        project=projected,
+        shared_weights=False,
+        internal_weights=False,
+    ).cuda()
+    conv = eqx_conv.CartesianTensorProductConv(tp).cuda()
+    reference = eqx_conv.CartesianTensorProductConv(tp, backend="torch").cuda()
+    edges = torch.randint(4, (2, 7), device="cuda")
+    x = co3.ChangeOfBasis(tp.irreps_in1).cuda()(
+        torch.randn(4, tp.irreps_in1.spherical().dim, device="cuda")
+    )
+    attrs = torch.randn(1 if shared else 7, tp.irreps_in2.dim, device="cuda")
+    inputs = [
+        x,
+        torch.randn(7, 3, device="cuda") if geometry else attrs,
+        torch.randn(1 if shared else 7, 2, device="cuda"),
+        torch.randn(2, tp.weight_numel, device="cuda"),
+    ]
+    if geometry:
+        inputs.append(torch.randn(1 if shared else 7, 1, device="cuda"))
+    inputs = [x.requires_grad_() for x in inputs]
+    outputs = []
+    for module in (reference, conv):
+        x, y, radial, projection = inputs[:4]
+        outputs.append(
+            module(
+                x,
+                None if geometry else y,
+                radial,
+                projection,
+                edges,
+                vectors=y if geometry else None,
+                amplitudes=inputs[-1] if geometry else None,
+            )
+        )
+    torch.testing.assert_close(outputs[0], outputs[1], atol=2e-12, rtol=2e-12)
+    losses = [out.sin().sum() for out in outputs]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=5e-9, rtol=5e-9)
+        tangents = [torch.randn_like(x) for x in inputs]
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+
+
+def test_cartesian_convolution_angular_tiles(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+
+    tp = co3.TensorProduct(
+        "2x4e",
+        "1o+4e",
+        "2x3o+2x4o+2x5o+2x0e",
+        [
+            (0, 0, 0, "uvu", True),
+            (0, 0, 1, "uvu", True),
+            (0, 0, 2, "uvu", True),
+            (0, 1, 3, "uvu", True),
+        ],
+        internal_weights=False,
+        shared_weights=False,
+        project=False,
+    ).cuda()
+    modules = [
+        eqx_conv.CartesianTensorProductConv(tp, backend=backend, normalize=False).cuda()
+        for backend in ("torch", "cuda")
+    ]
+    edges = torch.tensor([[0, 1, 0], [1, 0, 1]], device="cuda")
+    inputs = [
+        torch.randn(2, tp.irreps_in1.dim, device="cuda"),
+        torch.randn(3, 3, device="cuda") * 0.3,
+        torch.randn(3, 2, device="cuda"),
+        torch.randn(2, tp.weight_numel, device="cuda"),
+    ]
+    inputs[1][0] = 0
+    inputs = [x.requires_grad_() for x in inputs]
+    x, vectors, radial, projection = inputs
+    outputs = [m(x, None, radial, projection, edges, vectors=vectors) for m in modules]
+    torch.testing.assert_close(*outputs, atol=2e-12, rtol=2e-12)
+    losses = [out.square().sum() for out in outputs]
+    for _ in range(2):
+        grads = [
+            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*grads):
+            torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-10)
+        seed = [torch.randn_like(x) for x in inputs]
+        losses = [sum((g * s).sum() for g, s in zip(gs, seed)) for gs in grads]
+
+
+@pytest.mark.parametrize("degree", [2, 3, 4])
+@pytest.mark.parametrize("shared_output", [False, True])
+def test_cartesian_output_components(degree, shared_output, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+
+    ir = o3.Irrep(degree, (-1) ** degree)
+    tp = co3.TensorProduct(
+        f"2x0e+2x{ir}",
+        f"{ir}+0e",
+        f"0x0e+2x{ir}",
+        (
+            [(0, 0, 1, "uvu", True), (1, 1, 1, "uvu", True)]
+            if shared_output
+            else [(0, 0, 1, "uvu", True)]
+        ),
+        internal_weights=False,
+        shared_weights=False,
+        project=False,
+    ).cuda()
+    modules = [
+        eqx_conv.CartesianTensorProductConv(tp, backend=b, normalize=False).cuda()
+        for b in ("torch", "cuda")
+    ]
+    if shared_output:
+        assert modules[1].harmonic_output_dim == tp.irreps_out.dim
+    else:
+        assert modules[1].harmonic_output_dim == 2 * (degree + 1) * (degree + 2) // 2
+    edges = torch.randint(4, (2, 1025), device="cuda")
+    inputs = [
+        torch.randn(4, tp.irreps_in1.dim, device="cuda"),
+        torch.randn(1025, 3, device="cuda") * 0.2,
+        torch.randn(1025, tp.weight_numel, device="cuda"),
+    ]
+    inputs[1][0] = 0
+    inputs = [x.requires_grad_() for x in inputs]
+    x, vectors, radial = inputs
+    projection = x.new_empty(0, tp.weight_numel)
+    values = [m(x, None, radial, projection, edges, vectors=vectors) for m in modules]
+    torch.testing.assert_close(*values, atol=2e-11, rtol=2e-11)
+    losses = [y.sin().sum() for y in values]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-8)
+        tangents = [torch.randn_like(x) for x in inputs]
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+
+
 @pytest.mark.parametrize(
     "degrees",
     [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],
@@ -1302,10 +1494,19 @@ def test_reverse_edge_convolution(implementation, channels, double_precision):
     torch.testing.assert_close(actual, expected, atol=2e-8, rtol=2e-8)
 
 
-def test_o3_cartesian_compile_and_empty_graph(double_precision):
+@pytest.mark.parametrize("implementation", ["o3", "co3"])
+def test_o3_cartesian_compile_and_empty_graph(double_precision, implementation):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    tp = o3.TensorProduct(
+    from eqx import co3
+
+    tp_cls = co3.TensorProduct if implementation == "co3" else o3.TensorProduct
+    conv_cls = (
+        eqx_conv.CartesianTensorProductConv
+        if implementation == "co3"
+        else eqx_conv.O3TensorProductConv
+    )
+    tp = tp_cls(
         "2x1o",
         "1o",
         "2x0e+2x2e",
@@ -1313,10 +1514,8 @@ def test_o3_cartesian_compile_and_empty_graph(double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, normalize=False).cuda()
-    reference = eqx_conv.O3TensorProductConv(
-        tp, normalize=False, backend="torch"
-    ).cuda()
+    conv = conv_cls(tp, normalize=False).cuda()
+    reference = conv_cls(tp, normalize=False, backend="torch").cuda()
     compiled = torch.compile(conv, backend="aot_eager", fullgraph=True, dynamic=True)
     for edges_count in (1, 7, 0):
         edges = torch.randint(3, (2, edges_count), device="cuda")

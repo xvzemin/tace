@@ -461,7 +461,13 @@ class Representation(torch.nn.Module):
         )
         cartesian_edge_attrs = (
             self.co3_angular_basis(graph.edge_vector / graph.edge_length)
-            if getattr(self, "co3_angular_basis", None) is not None else None
+            if getattr(self, "co3_angular_basis", None) is not None
+            and not all(
+                interaction.use_eqx
+                for interaction in self.interactions
+                if isinstance(interaction, O3CartesianIctpIctcInteraction)
+            )
+            else None
         )
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")

@@ -197,6 +197,8 @@ def convolution_source(
                     if role in (0, 4):
                         offset, dim = (start, dim1) if role == 0 else (end, dim_out)
                         for m in range(dim):
+                            if (v, role, m) not in values:
+                                continue
                             key = slot, role, dimensions[pointer], offset + m * mul
                             node_terms.setdefault(key, []).append(
                                 (w, values[v, role, m])
