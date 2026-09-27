@@ -49,7 +49,12 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
-    harmonics = [m for m in model.modules() if isinstance(m, o3.SphericalHarmonics)]
+    harmonics = [
+        m
+        for m in model.modules()
+        if type(m).__name__ == "SphericalHarmonics"
+        and type(m).__module__.split(">.")[-1].startswith("e3nn.")
+    ]
     options = {(m.normalization, m.normalize) for m in harmonics}
     if implementation == "o2" and len(options) > 1:
         raise NotImplementedError(
@@ -62,7 +67,7 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
         nonlocal count
         if type(module).__name__ != "InteractionBlock" or not type(
             module
-        ).__module__.startswith("nequip."):
+        ).__module__.split(">.")[-1].startswith("nequip."):
             return None
         count += 1
         if isinstance(module.tp_scatter, TensorProductScatter):
@@ -75,7 +80,11 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
                 )
             return module
         tp = getattr(module.tp_scatter, "tp", None)
-        if not isinstance(tp, o3.TensorProduct):
+        if (
+            tp is None
+            or type(tp).__name__ != "TensorProduct"
+            or not type(tp).__module__.split(">.")[-1].startswith("e3nn.")
+        ):
             raise NotImplementedError(
                 "Load NequIP without another tensor-product backend first."
             )
@@ -87,6 +96,29 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
             raise NotImplementedError("Expected a ScalarLinearLayer radial projection.")
         parameter = next(module.parameters())
         with default_dtype(parameter.dtype):
+            # Packaged models carry their own e3nn class identities.
+            if not isinstance(tp, o3.TensorProduct):
+                tp = o3.TensorProduct(
+                    str(tp.irreps_in1),
+                    str(tp.irreps_in2),
+                    str(tp.irreps_out),
+                    [
+                        (
+                            i.i_in1,
+                            i.i_in2,
+                            i.i_out,
+                            i.connection_mode,
+                            i.has_weight,
+                            i.path_weight**2,
+                        )
+                        for i in tp.instructions
+                    ],
+                    irrep_normalization="none",
+                    path_normalization="none",
+                    internal_weights=False,
+                    shared_weights=False,
+                    compile_left_right=False,
+                )
             convolution = (
                 TensorProductScatter(
                     tp,

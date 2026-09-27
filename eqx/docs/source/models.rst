@@ -39,6 +39,9 @@ Supported models
    * - Prophet
      - 1.0.0
      - Spatial Prophet models loaded with use_kernel=False
+   * - EquFlashV2
+     - GGNN 0.1, cuEquivariance 0.6.0
+     - Uniform-channel FullConv interactions, including the 45M OAM checkpoint
 
 Install the model package separately. EQX also provides ``mace``, ``nequip``
 and ``sevennet`` extras, for example ``pip install './tace/eqx[nequip,cuda]'``.
@@ -89,6 +92,8 @@ NequIP
 
 Use the species order and cutoff of the loaded model when constructing transforms.
 For training, call ``model.train()`` before evaluating force losses.
+Packaged models are supported. For example, select ``["sole_model"]`` from
+``ModelFromPackage("NequIP-OAM-L-0.1.nequip.zip")`` before conversion.
 
 SevenNet
 --------
@@ -132,6 +137,30 @@ normalization and readouts are unchanged. Prophet-Spin is not included.
 The upstream ASE graph builder produces float32 inputs, so use a float32 model
 with ``KairosCalculator``.
 
+EquFlashV2
+----------
+
+Install GGNN in a separate environment using its upstream requirements
+(Python 3.12, PyTorch 2.9.1 and cuEquivariance 0.6.0 for the tested checkpoint).
+
+.. code-block:: python
+
+   from GGNN.common.calculator import UCalculator
+   from eqx.models.equflashv2 import convert_equflashv2_to_eqx
+
+   calculator = UCalculator(checkpoint_path="equflashv2-oam.pt", cpu=False)
+   calculator.trainer.model = convert_equflashv2_to_eqx(
+       calculator.trainer.model, implementation="o3", inplace=True,
+   )
+
+Use ``inplace=True`` with UCalculator to retain its EMA parameter references.
+For training, convert the uncompiled model after loading its checkpoint and
+before constructing the optimizer. FullConv paths, CG normalization and radial
+weight order are read from the cuEquivariance descriptor. Equivalent output
+irreps are merged along channels after node aggregation. Other layers, including
+bilinear gates and feed-forward blocks, are unchanged. EfficientConv and
+distributed ghost-atom exchange are not supported.
+
 Not yet supported
 -----------------
 
@@ -139,8 +168,3 @@ Allegro contracts edge tensors with learned environment tensors using
 channelwise ``uuu`` products. The current fused ``uvu`` convolution is not a
 drop-in replacement, and the environment is not a single spherical harmonic
 that can be reduced to order zero by alignment.
-
-EquFlashV2 uses custom cuEquivariance descriptors and path normalization.
-A conversion requires an explicit descriptor-to-instruction and weight mapping;
-matching dimensions alone does not establish equivalence. No converter is
-provided until that mapping and its derivatives are validated.

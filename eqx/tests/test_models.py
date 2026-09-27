@@ -9,6 +9,127 @@ from eqx.models.convolution import copy_model
 from eqx.models.nequip import convert_nequip_to_eqx
 from eqx.models.prophet import convert_prophet_to_eqx
 from eqx.models.sevennet import convert_sevennet_to_eqx
+from eqx.models.equflashv2 import convert_equflashv2_to_eqx
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_equflashv2_fullconv(implementation, backend, double_precision):
+    pytest.importorskip("GGNN")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn import o3
+    from GGNN.model.EquFlashV2.nn.convolution import FullConv
+
+    torch.manual_seed(17)
+    reference = FullConv(
+        o3.Irreps("4x0e+4x1o+4x2e"),
+        o3.Irreps("0e+1o+2e"),
+        o3.Irreps("0e+1o+2e"),
+        [8],
+        4,
+    ).cuda()
+    converted = convert_equflashv2_to_eqx(
+        reference,
+        implementation=implementation,
+        backend=backend,
+    )
+    x = torch.randn(5, reference.irreps_in.dim, device="cuda", requires_grad=True)
+    vectors = torch.randn(12, 3, device="cuda", requires_grad=True)
+    radial = torch.randn(12, 4, device="cuda", requires_grad=True)
+    edges = torch.randint(5, (2, 12), device="cuda", dtype=torch.int32)
+    harmonics = o3.spherical_harmonics(
+        reference.irreps_filter,
+        vectors,
+        True,
+        normalization="component",
+    )
+    expected = reference(x, edges, radial, harmonics)
+    actual = converted(x, edges, radial, harmonics)
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+    gradients = []
+    for output in (expected, actual):
+        gradients.append(
+            torch.autograd.grad(
+                output.square().mean(),
+                (x, vectors, radial),
+                create_graph=True,
+                retain_graph=True,
+            )
+        )
+    for actual, expected in zip(gradients[1], gradients[0]):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+    expected = torch.autograd.grad(
+        gradients[0][1].square().mean(),
+        reference.weight_nn[-1].weight,
+        retain_graph=True,
+    )[0]
+    actual = torch.autograd.grad(
+        gradients[1][1].square().mean(),
+        converted.convolution.projection.weight,
+    )[0]
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+
+
+def test_equflashv2_reject_efficient():
+    pytest.importorskip("GGNN")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn import o3
+    from GGNN.model.EquFlashV2.nn.convolution import EfficientConv
+
+    module = EfficientConv(
+        o3.Irreps("4x0e"),
+        o3.Irreps("0e"),
+        o3.Irreps("4x0e"),
+        [4],
+        2,
+    ).cuda()
+    with pytest.raises(NotImplementedError, match="Only EquFlashV2 FullConv"):
+        convert_equflashv2_to_eqx(module)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_nequip_package(implementation, atoms):
+    path = os.environ.get("EQX_NEQUIP_CHECKPOINT")
+    if not path:
+        pytest.skip("Set EQX_NEQUIP_CHECKPOINT to validate a packaged checkpoint")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    pytest.importorskip("nequip")
+    from nequip.model import ModelFromPackage
+    from nequip.utils.global_state import set_global_state
+    from nequip.integrations.ase import NequIPCalculator
+    from nequip.data.transforms import (
+        ChemicalSpeciesToAtomTypeMapper,
+        NeighborListTransform,
+    )
+
+    set_global_state()
+    model = ModelFromPackage(path)["sole_model"].cuda().eval()
+    reference = []
+    for convert in (False, True):
+        if convert:
+            parameters = {id(p) for p in model.parameters()}
+            model = convert_nequip_to_eqx(
+                model, implementation=implementation, inplace=True
+            )
+            assert {id(p) for p in model.parameters()} == parameters
+        atoms.calc = NequIPCalculator(
+            model,
+            device="cuda",
+            transforms=[
+                ChemicalSpeciesToAtomTypeMapper(model_type_names=model.type_names),
+                NeighborListTransform(r_max=float(model.metadata["r_max"])),
+            ],
+        )
+        reference.append(
+            (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+        )
+    for expected, actual in zip(*reference):
+        torch.testing.assert_close(
+            torch.as_tensor(actual), torch.as_tensor(expected), atol=5e-5, rtol=2e-5
+        )
 
 
 @pytest.fixture
