@@ -1,10 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 364" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 43 880 321" role="img" aria-labelledby="title desc">
   <title id="title">Recommended TACE acceleration workflows</title>
   <desc id="desc">Enable TACE_USE_EQX before model construction. For training also enable TACE_USE_COMPILE. For inference export with the aoti backend using tace-export-eval for ASE or TorchSim, or tace-export-lammps for LAMMPS.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#526276"/></marker></defs>
-  <rect width="880" height="364" rx="14" fill="#fff"/>
+  <rect y="43" width="880" height="321" rx="14" fill="#fff"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
-    <text x="440" y="32" text-anchor="middle" font-size="23" font-weight="600">Recommended GPU acceleration</text>
     <rect x="235" y="55" width="410" height="62" rx="9" fill="#e4efeb" stroke="#8595a6"/>
     <text x="440" y="84" text-anchor="middle" font-size="17" font-weight="600">TACE_USE_EQX=1</text>
     <text x="440" y="108" text-anchor="middle" font-size="14" font-weight="400">Fused operators in the model</text>

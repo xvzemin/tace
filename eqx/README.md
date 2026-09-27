@@ -4,8 +4,6 @@ EquivariantX (EQX) provides PyTorch-native O(2) operators, e3nn-compatible
 O(3)/O(2) frame conversion, and fused CUDA convolutions. Time-reversal labels
 are optional.
 
-![Native O(2) operators](docs/source/_static/operators.svg)
-
 ## Installation
 
 Install from source without installing TACE:

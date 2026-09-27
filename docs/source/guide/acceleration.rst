@@ -3,53 +3,63 @@
 Acceleration
 ============
 
-Combine fused operators with model compilation. Select acceleration settings
-before constructing, loading, or exporting the model.
+The standard NVIDIA GPU workflow combines EQX operators with compilation for training
+and AOTI export for inference. Set environment variables before constructing,
+loading, or exporting the model.
 
-Recommended workflow
---------------------
-
-To maximize model throughput, start with **EQX + compilation for training**
-and **EQX + AOTI export for inference**.
+Standard workflow
+-----------------
 
 .. figure:: ../_static/acceleration.svg
-   :alt: Enable EQX, then compile training or export inference with AOTI.
    :width: 100%
 
-   Operator fusion and model compilation are complementary.
-
-Install EQX build dependencies from the TACE source directory and provide a
+Install EQX build dependencies from the TACE source directory and provide a 
 CUDA toolkit:
 
 .. code-block:: bash
 
    pip install '.[eqx]'
 
-**Training:** enable both environment variables.
+Training
+~~~~~~~~
+
+Train with EQX operators and compile the model:
 
 .. code-block:: bash
 
    TACE_USE_EQX=1 TACE_USE_COMPILE=1 tace-train -cn tace.yaml
 
-**Inference:** keep EQX enabled and export a compiled model. The
-``tace-export-*`` entry points are ``tace-export-eval`` for ASE/TorchSim and
-``tace-export-lammps`` for LAMMPS.
+Inference
+~~~~~~~~~
+
+Export the trained checkpoint with EQX operators and load the compiled package
+for evaluation or simulation:
 
 .. code-block:: bash
 
    TACE_USE_EQX=1 tace-export-eval \
      -m model.ckpt --backend aoti --device cuda
 
-   TACE_USE_EQX=1 tace-export-lammps \
-     -m model.ckpt --backend aoti --device cuda
+.. code-block:: python
+
+   from tace.interface.ase import TACEAseCalc
+
+   calc = TACEAseCalc(model="model.pt2", device="cuda")
+
+``tace-export-eval`` produces the package for ASE/TorchSim. For LAMMPS, use
+``tace-export-lammps`` with the same ``--backend aoti --device cuda`` options;
+see :ref:`tace-export-tutorial` for loading instructions.
 
 The AOTI export commands enable the compilation path automatically.
 Exporting with ``state_dict`` or ``full_model`` does **not** compile the model.
-Measure speed after warming up the actual workload, including force-loss
-derivatives during training; gains depend on model, batch size, and hardware.
 
-Kernel selection
-----------------
+Alternative backends
+--------------------
+
+In either workflow, ``TACE_USE_EQX=1`` can be replaced by the backend flags
+below for supported operators. This changes operator implementations, not the
+training or export steps. Keep ``TACE_USE_COMPILE=1`` for training and
+``--backend aoti`` for compiled inference.
 
 .. list-table::
    :header-rows: 1
@@ -60,24 +70,38 @@ Kernel selection
      - Scope
    * - 1. EquivariantX
      - ``TACE_USE_EQX=1``
-     - Convolutions, ACE, element-dependent Linear, and supported gates
+     - Convolution, ACE, element-dependent Linear, and gates
    * - 2. OpenEquivariance
      - ``TACE_USE_OEQ=1``
-     - O(3) tensor-product convolutions
+     - Convolution
    * - 3. EquiTorch
      - ``TACE_USE_EQT=1``
-     - Product-basis tensor products
+     - ACE
    * - 4. cuEquivariance
      - ``TACE_USE_CUE=1``
-     - Supported O(3) tensor-product operations
+     - Convolution
 
-Each operator selects the highest-priority enabled backend it supports:
-**EQX > OEQ > EQT > CUEQ**. Unselected packages need not be installed.
-A missing dependency for a selected backend raises an error.
-``TACE_USE_COMPILE`` is independent of this selection.
-See :ref:`installation` for optional packages.
+If several flags are enabled, each operator selects the highest-priority
+backend it supports: **EQX > OEQ > EQT > CUEQ**. Different operators may therefore
+use different backends. Without an enabled, supported backend, an operator
+uses its reference PyTorch implementation.
 
-The equivalent Python setup is:
+For example, replace EQX with OEQ while keeping the same workflow:
+
+.. code-block:: bash
+
+   TACE_USE_EQX=0 TACE_USE_OEQ=1 TACE_USE_COMPILE=1 tace-train -cn tace.yaml
+
+   TACE_USE_EQX=0 TACE_USE_OEQ=1 tace-export-eval \
+     -m model.ckpt --backend aoti --device cuda
+
+Explicitly disabling EQX prevents an inherited ``TACE_USE_EQX=1`` from taking
+priority. Backend flags do not replace ``TACE_USE_COMPILE`` or control TF32.
+Install the dependencies for each selected backend; a missing dependency
+raises an error rather than silently selecting another backend.
+See :ref:`installation` for installation commands.
+
+For the standard EQX workflow, the equivalent Python setup is:
 
 .. code-block:: python
 
@@ -115,12 +139,6 @@ EQX in TACE
    * - Standard / gated bilinear ACE
      - ``eqx.ace.TACE`` / ``eqx.models.tace.tece_oam_rra.BilinearACE``
 
-Supported CUDA operations use fused forward and derivative kernels. CPU and
-unsupported cases retain their reference implementations. Products with
-active coefficient LoRA adapters retain their original tensor products.
-Feature layouts, paths, normalization, and checkpoint weights are preserved;
-floating-point summation order can differ.
-
 For fusion boundaries and standalone examples, see
 :ref:`equivariantx-convolutions`. To switch between equivalent CGTP forms
 without retraining:
@@ -140,7 +158,7 @@ other form. Conversion returns a copy; recreate its optimizer before training.
 Precision and warmup
 --------------------
 
-.. list-table:: TF32 for float32 operations
+.. list-table:: Default TF32 for FP32 operations
    :header-rows: 1
    :widths: 40 30 30
 
@@ -157,14 +175,8 @@ Precision and warmup
      - Disabled
      - Disabled
 
-TF32 changes eligible PyTorch matrix multiplication and cuDNN arithmetic, not
-float32 storage, float64 operations, or custom CUDA contraction arithmetic.
 Choose precision before compilation or export; changing the environment does
 not recompile an AOTI package.
-
-EQX generates and caches CUDA kernels on first use, including derivative
-kernels. ``EQX_USE_CUDA_GRAPH=1`` is an optional replay path, disabled by default.
-It can increase memory and is not required for the recommended workflow.
 
 .. _tace-export-tutorial:
 
@@ -204,23 +216,14 @@ precision. ``tace-compile`` aliases ``tace-export-eval``.
 ASE and TorchSim
 ~~~~~~~~~~~~~~~~
 
-The recommended export command above writes ``model.pt2``. TACE creates
+The standard export command above writes ``model.pt2``. TACE creates
 synthetic inputs with dynamic node, edge, and graph dimensions; ``--sample``
 is an optional override, not a requirement.
-
-.. code-block:: python
-
-   from tace.interface.ase import TACEAseCalc
-
-   calc = TACEAseCalc(model="model.pt2", device="cuda")
 
 ``load_tace("model.pt2", device="cuda")`` also loads the compiled graph directly.
 The package does not call ``torch.compile`` again, but external operator
 registrations and their runtime dependencies remain necessary. EQX-generated
 kernels may still require first-use compilation if their cache is absent.
-For TECE-OAM-RRA packages, import
-``eqx.models.tace.tece_oam_rra.interaction`` before loading to register its
-model-specific operators.
 Validate the exported model in the deployment environment.
 
 For non-compiled inference:
@@ -236,7 +239,14 @@ versions.
 LAMMPS
 ~~~~~~
 
-The AOTI export writes a package and an ML-IAP loader:
+Export a package and an ML-IAP loader:
+
+.. code-block:: bash
+
+   TACE_USE_EQX=1 tace-export-lammps \
+     -m model.ckpt --backend aoti --device cuda
+
+This writes:
 
 .. code-block:: text
 

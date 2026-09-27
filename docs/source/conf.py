@@ -71,10 +71,6 @@ html_static_path = ["_static"]
 html_favicon = "_static/favicon.svg"
 
 rst_prolog = """
-.. |eqx-operators| image:: /../../eqx/docs/source/_static/operators.svg
-   :alt: Native O(2) linear, gating, and tensor-product operations.
-   :width: 100%
-
 .. |eqx-frames| image:: /../../eqx/docs/source/_static/frames.svg
    :alt: Node layout conversion, edge gather, local O(2) update, and node scatter.
    :width: 100%

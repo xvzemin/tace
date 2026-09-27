@@ -7,8 +7,6 @@ EquivariantX (``eqx``) provides native :math:`O(2)` operators, e3nn-compatible
 :math:`O(3)`/:math:`O(2)` frame conversion, and fused CUDA convolutions.
 Time-reversal parity is optional.
 
-|eqx-operators|
-
 Installation
 ------------
 

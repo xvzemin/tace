@@ -5,8 +5,7 @@
   <rect width="1020" height="478" rx="14" fill="#fff"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
     <text x="28" y="35" text-anchor="start" font-size="22" font-weight="600">eqx.conv: four convolution interfaces</text>
-    <text x="28" y="105" text-anchor="start" font-size="17" font-weight="600">O3TensorProductConv</text>
-    <text x="28" y="129" text-anchor="start" font-size="14" font-weight="400">Preserve CGTP instructions</text>
+    <text x="28" y="119" text-anchor="start" font-size="17" font-weight="600">O3TensorProductConv</text>
     <rect x="300" y="80" width="212" height="66" rx="9" fill="#e4efeb" stroke="#8595a6"/>
     <text x="406" y="119" text-anchor="middle" font-size="17" font-weight="600">Gather</text>
     <path d="M512 113L534 113" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
@@ -15,8 +14,7 @@
     <path d="M750 113L772 113" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
     <rect x="776" y="80" width="212" height="66" rx="9" fill="#e4efeb" stroke="#8595a6"/>
     <text x="882" y="119" text-anchor="middle" font-size="17" font-weight="600">Scatter sum</text>
-    <text x="28" y="199" text-anchor="start" font-size="17" font-weight="600">O2O3TensorProductConv</text>
-    <text x="28" y="223" text-anchor="start" font-size="14" font-weight="400">Preserve CGTP instructions</text>
+    <text x="28" y="213" text-anchor="start" font-size="17" font-weight="600">O2O3TensorProductConv</text>
     <rect x="300" y="174" width="212" height="66" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
     <text x="406" y="213" text-anchor="middle" font-size="17" font-weight="600">Gather + rotate</text>
     <path d="M512 207L534 207" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
@@ -31,7 +29,7 @@
     <text x="406" y="307" text-anchor="middle" font-size="17" font-weight="600">Gather + rotate</text>
     <path d="M512 301L534 301" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
     <rect x="538" y="268" width="212" height="66" rx="9" fill="#f9eadc" stroke="#8595a6"/>
-    <text x="644" y="307" text-anchor="middle" font-size="17" font-weight="600">Weighted UuLinear</text>
+    <text x="644" y="307" text-anchor="middle" font-size="17" font-weight="600">UuO2Linear</text>
     <path d="M750 301L772 301" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
     <rect x="776" y="268" width="212" height="66" rx="9" fill="#f9eadc" stroke="#8595a6"/>
     <text x="882" y="307" text-anchor="middle" font-size="17" font-weight="600">Rotate + scatter</text>
@@ -45,7 +43,6 @@
     <path d="M750 395L772 395" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
     <rect x="776" y="362" width="212" height="66" rx="9" fill="#eee7f4" stroke="#8595a6"/>
     <text x="882" y="401" text-anchor="middle" font-size="17" font-weight="600">Rotate + scatter</text>
-    <text x="662" y="160" text-anchor="middle" font-size="14" font-weight="400">Spherical-harmonic input: same paths and weights in both CGTP forms</text>
     <text x="662" y="443" text-anchor="middle" font-size="14" font-weight="400">Uv: optional edge features and attention</text>
     <text x="510" y="468" text-anchor="middle" font-size="14" font-weight="400">Final radial projection supplies edge-dependent weights; CUDA supports force training.</text>
   </g>
