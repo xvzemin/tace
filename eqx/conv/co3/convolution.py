@@ -22,15 +22,15 @@ from .polynomials import (
 
 
 class CartesianTensorProductConv(O3TensorProductConv):
-    """Gather, couple and sum Cartesian tensors without storing edge messages.
+    """Gather, couple and sum Cartesian tensors.
 
     Parameters
     ----------
     tensor_product : eqx.co3.TensorProduct
         Defines the irreps, ``uvu`` instructions and normalization.
     backend : {"cuda", "torch"}, optional
-        CUDA fuses delta/epsilon contractions and graph reduction. CPU inputs
-        use ordinary PyTorch operations.
+        CUDA fuses delta/epsilon contractions and graph reduction. ``"torch"``
+        uses native Cartesian operations and automatic differentiation.
     normalization : {"component", "integral", "norm"}, optional
         Cartesian-harmonic normalization when vectors are supplied.
     normalize : bool, optional
@@ -302,12 +302,8 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Parameters follow :meth:`eqx.conv.O3TensorProductConv.forward`, with all tensor
         features in flattened ``mul_ir`` layout and Cartesian dimensions.
         """
-        packed_input = (
-            self.input_basis == "spherical"
-            and vectors is not None
-            and self.backend == "cuda"
-            and features.is_cuda
-        )
+        fused = self.backend == "cuda" and features.is_cuda
+        packed_input = self.input_basis == "spherical" and vectors is not None and fused
         if self.input_basis == "spherical":
             if packed_input:
                 if features.size(-1) != self.to_cartesian.input_dim:
@@ -322,16 +318,14 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 features = torch.cat(values, -1) if values else features[:, :0]
             else:
                 features = self.to_cartesian(features)
-        if self.symmetric_inputs and (
-            vectors is None or self.backend == "torch" or not features.is_cuda
-        ):
+        if self.symmetric_inputs and (vectors is None or not fused):
             values = features.new_zeros(
                 (features.size(0), self.symmetric_dim)
             ).index_add(-1, self.symmetric_index, features)
             features = (values / self.symmetric_count).index_select(
                 -1, self.symmetric_index
             )
-        if vectors is not None and (self.backend == "torch" or not features.is_cuda):
+        if vectors is not None and not fused:
             vectors = (
                 torch.nn.functional.normalize(vectors, dim=-1)
                 if self.normalize
@@ -352,6 +346,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 )
                 offset += mul
             edge_attrs = torch.cat(attrs, dim=-1) if attrs else vectors[:, :0]
+            edge_attrs = edge_attrs + vectors.sum() * 0
             vectors = None
         if vectors is not None and self.pack_inputs and not packed_input:
             from ...kernels.layout import indexed_sum
@@ -369,10 +364,16 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 self.harmonic_input_count,
             )
         elif not packed_input and not self.input_identity:
-            features = _Permute.apply(features, self.input_index, self.input_inverse)
+            features = (
+                _Permute.apply(features, self.input_index, self.input_inverse)
+                if fused
+                else features.index_select(-1, self.input_index)
+            )
         if vectors is None and not self.attrs_identity:
-            edge_attrs = _Permute.apply(
-                edge_attrs, self.attrs_index, self.attrs_inverse
+            edge_attrs = (
+                _Permute.apply(edge_attrs, self.attrs_index, self.attrs_inverse)
+                if fused
+                else edge_attrs.index_select(-1, self.attrs_index)
             )
         output = super().forward(
             features,
@@ -389,14 +390,14 @@ class CartesianTensorProductConv(O3TensorProductConv):
         if vectors is not None:
             output = output.index_select(-1, self.harmonic_output_index)
         elif not self.output_identity:
-            output = _Permute.apply(output, self.output_inverse, self.output_index)
+            output = (
+                _Permute.apply(output, self.output_inverse, self.output_index)
+                if fused
+                else output.index_select(-1, self.output_inverse)
+            )
         if self.compact_output:
             return output.index_select(-1, self.output_pack_index)
-        return (
-            self.projector(output)
-            if self.backend == "cuda" and features.is_cuda
-            else output
-        )
+        return self.projector(output) if fused else output
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

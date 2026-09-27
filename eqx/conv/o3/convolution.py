@@ -118,7 +118,7 @@ contraction.register_autograd(
 
 
 class O3TensorProductConv(torch.nn.Module):
-    """Gather, couple and sum O(3) features with a fused radial projection.
+    """Gather, couple and sum O(3) features with radial path weights.
 
     Parameters
     ----------
@@ -127,7 +127,8 @@ class O3TensorProductConv(torch.nn.Module):
         instructions are supported. Weights are supplied to :meth:`forward`.
     backend : {"cuda", "torch"}, optional
         CUDA generates sparse contractions on first use and caches the
-        compiled binaries. CPU inputs use ordinary PyTorch operations.
+        compiled binaries. ``"torch"`` evaluates the CG contractions with
+        native operations and automatic differentiation on either device.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization when vectors are supplied.
     normalize : bool, optional
@@ -357,9 +358,10 @@ class O3TensorProductConv(torch.nn.Module):
                 )
                 offset += mul
             edge_attrs = torch.cat(sections, dim=-1)
-        return self.reference(
+        result = self.reference(
             features, edge_attrs, radial, projection, edge_index, num_nodes
         )
+        return result if vectors is None else result + vectors.sum() * 0
 
     def reference(
         self, features, edge_attrs, radial, projection, edge_index, num_nodes

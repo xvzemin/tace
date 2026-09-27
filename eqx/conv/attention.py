@@ -272,11 +272,14 @@ class StreamingGraphAttention(Replay):
         Maximum number of edges evaluated together.
     eps : float
         Added to the denominator after shifting by the receiver maximum.
+    backend : {"cuda", "torch"}, optional
+        ``"cuda"`` replays tiles during differentiation. ``"torch"`` retains
+        the native online-softmax graph and uses automatic differentiation.
 
     Notes
     -----
-    Only node outputs, shifted denominators and detached maxima are saved.
-    The adjoint recomputes each score/value tile once. Its tensor expression
+    The replay backend saves node outputs, shifted denominators and detached
+    maxima. Its adjoint recomputes each score/value tile once. The tensor expression
     is itself replayable, including derivatives through the saved outputs
     and denominators, so force training and higher derivatives are supported.
     The callback must be deterministic and state-free. All differentiable
@@ -294,7 +297,12 @@ class StreamingGraphAttention(Replay):
         valid_slot,
         tile_size,
         eps,
+        *,
+        backend="cuda",
     ):
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.edge_function = function
         self.edge_axes = edge_axes
         self.target_slot = target_slot
@@ -306,6 +314,11 @@ class StreamingGraphAttention(Replay):
         super().__init__(self.forward, fake_function=fake_function)
         self.saved_outputs = (0, 1, 2)
         self.nondifferentiable = (2,)
+
+    def __call__(self, *inputs):
+        if self.backend == "torch":
+            return self.forward(inputs, create_graph=torch.is_grad_enabled())
+        return super().__call__(*inputs)
 
     def tiles(self, inputs):
         edges = inputs[self.valid_slot].shape[0]

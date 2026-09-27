@@ -40,6 +40,50 @@ use flattened ``ir_mul`` storage. The interfaces default to CUDA on GPU and
 use PyTorch on CPU. Set ``backend="torch"`` to use tensor operations on either
 device without loading CUDA extensions.
 
+PyTorch references
+------------------
+
+Each algorithm has a native PyTorch forward, selected by ``backend="torch"``.
+The reference retains the chosen mathematical formulation, not just an
+equivalent output computed by another convolution. Its gradients, including
+higher derivatives, are obtained by autograd without custom backward functions.
+CUDA uses its own fused derivatives, which can be checked against these
+references.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Algorithm
+     - PyTorch reference
+   * - O3 CGTP
+     - CG contraction with supplied edge features or spherical harmonics
+   * - O2 CGTP, ``generator``
+     - Minimum-degree CG coupling and a Chebyshev polynomial of the rotation generator
+   * - O2 CGTP, ``cg``
+     - Full CG contraction with directional spherical harmonics
+   * - O2 CGTP, ``wigner``
+     - Wigner-D rotation, order-zero CG contraction and inverse rotation
+   * - Uu O2
+     - Wigner rotations and UuLinear, or transformed order weights and directional couplings
+   * - Uv O2
+     - Linear--Gate--Linear in Wigner or transverse representations, including attention
+   * - Cartesian CGTP
+     - Cartesian harmonic construction, delta/epsilon contractions and optional STF projection
+
+The references retain path outputs, normalization and external weight layouts.
+They may materialize edge intermediates. When supplying Wigner matrices from
+outside a convolution, construct them with ``o2.WignerD(..., method="recursive")``
+to keep the entire reference graph in PyTorch. O2 CGTP's ``method="wigner"``
+does this internally for vector inputs.
+
+``graph_softmax(..., fused=False)`` provides native segmented normalization.
+``StreamingGraphAttention(..., backend="torch")`` uses the same tiled online
+softmax as its replay implementation, but retains the ordinary autograd graph.
+
+Aligned and transverse evaluations
+----------------------------------
+
 The three O(2)-based convolutions expose two equivalent evaluations, independent
 of the backend:
 
@@ -96,9 +140,10 @@ the module or its weights.
 All paths, output multiplicities, radial weights and normalization are retained.
 The first three methods do not construct frames. The generator method still
 uses fixed CG coefficients for its minimum-degree coupling; it does not replace
-the full coupling with a direct CG expression. PyTorch ``baseline`` retains its
-original generator evaluation. ``backend="torch"`` remains available for every
-method.
+the full coupling with a direct CG expression. ``baseline`` is a scheduling
+policy over these expressions, not an additional coupling formula. Its PyTorch
+reference uses the generator expression; ``cg`` independently checks the direct
+contraction. Every explicit method has its own differentiable PyTorch forward.
 
 On CUDA, ``auto`` measures geometry construction, radial projection, contraction
 and reduction together. Gradient-enabled inputs include a reverse pass;
@@ -158,6 +203,7 @@ float64 accuracy.
    from e3nn import o3
 
    torch.set_default_dtype(torch.float64)
+   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
    irreps_in = o3.Irreps("4x1o")
    irreps_sh = o3.Irreps("1o")
    irreps_out = o3.Irreps("4x0e+4x1e+4x2e")
@@ -168,16 +214,16 @@ float64 accuracy.
    aligned_tp = o2.O3TensorProduct(
        irreps_in, irreps_sh, irreps_out, instructions, **options
    )
-   direct = conv.O3TensorProductConv(tp, backend="torch")
-   aligned = conv.O2O3TensorProductConv(aligned_tp, backend="torch")
+   direct = conv.O3TensorProductConv(tp, backend="torch").to(device)
+   aligned = conv.O2O3TensorProductConv(aligned_tp, backend="torch").to(device)
 
-   features = torch.randn(8, irreps_in.dim, requires_grad=True)
-   vectors = torch.randn(24, 3, requires_grad=True)
-   edge_index = torch.randint(0, 8, (2, 24))
-   radial = torch.randn(24, 6, requires_grad=True)
-   projection = torch.randn(6, tp.weight_numel, requires_grad=True)
+   features = torch.randn(8, irreps_in.dim, device=device, requires_grad=True)
+   vectors = torch.randn(24, 3, device=device, requires_grad=True)
+   edge_index = torch.randint(0, 8, (2, 24), device=device)
+   radial = torch.randn(24, 6, device=device, requires_grad=True)
+   projection = torch.randn(6, tp.weight_numel, device=device, requires_grad=True)
    harmonics = o3.spherical_harmonics(irreps_sh, vectors, True, "component")
-   amplitudes = torch.ones(24, len(irreps_sh))
+   amplitudes = torch.ones(24, len(irreps_sh), device=device)
 
    output_o3 = direct(features, harmonics, radial, projection, edge_index)
    output_o2 = aligned(
@@ -186,6 +232,19 @@ float64 accuracy.
    )
    torch.testing.assert_close(output_o2, output_o3, atol=1e-10, rtol=1e-10)
    output_o2.square().sum().backward()
+
+To compare the O2 CGTP algorithms without changing the backend or parameters:
+
+.. code-block:: python
+
+   for method in ("generator", "cg", "wigner"):
+       output = aligned(
+           features, radial, projection, None, amplitudes, edge_index,
+           features.size(0), vectors=vectors, method=method,
+       )
+       torch.testing.assert_close(output, output_o3, atol=1e-10, rtol=1e-10)
+       forces = -torch.autograd.grad(output.square().sum(), vectors, create_graph=True)[0]
+       weight_gradient = torch.autograd.grad(forces.square().sum(), projection)[0]
 
 Use ``backend="cuda"`` with CUDA operands for fusion. If radial inputs already
 contain path weights, supply an empty projection of shape
@@ -239,14 +298,14 @@ Derivatives and compilation
         |
         +--> parameter gradients --> energy-loss training
 
-Transposed contraction programs support recursive derivatives, including the
+CUDA contraction programs support recursive derivatives, including the
 mixed second derivatives required by force training. Registered operators
 provide fake implementations and autograd rules for ``torch.compile``.
 Atomic reductions can change floating-point summation order.
 For force training, compile the graph including force evaluation. This avoids
 requesting double backward through an AOT-compiled energy-only wrapper.
 
-Vector interfaces avoid differentiating stored angular intermediates:
+CUDA vector interfaces avoid storing angular intermediates for differentiation:
 
 * ``O3TensorProductConv.forward(..., vectors=...)`` differentiates fixed harmonic
   polynomials. ``normalization`` selects ``component``, ``integral``, or
@@ -255,17 +314,18 @@ Vector interfaces avoid differentiating stored angular intermediates:
   STF harmonic polynomials and their derivatives inside the contraction.
   ``TensorProduct(project=False)`` defers projection until after node aggregation
   and channel compression. See :doc:`cartesian`.
-* ``O2O3TensorProductConv.forward(..., vectors=...)`` evaluates transverse
-  couplings directly on spherical features. Pass ``None`` for Wigner matrices:
-  no alignment or transverse axes are constructed. CUDA reuses minimum-degree
-  couplings and sparse generator actions; direction derivatives use harmonic
-  polynomials at every order. If vectors are omitted, supplied Wigner matrices
-  are used and differentiated instead.
+* ``O2O3TensorProductConv.forward(..., vectors=...)`` selects a complete evaluation
+  through ``method``. ``generator`` differentiates the generator polynomial;
+  ``cg`` uses harmonic polynomials; ``baseline`` uses harmonic derivatives with
+  its selected forward expression. These methods require no alignment matrices.
+  ``wigner`` constructs and differentiates the Wigner-D matrices. If vectors are
+  omitted, supplied matrices are used and differentiated instead.
 * ``UuO2TensorProductConv.forward(..., vectors=...)`` preserves every local
   order weight while evaluating in spherical storage without alignment.
   A fixed, degree-wise change of coefficients is applied to the radial
   projection before processing edges. ``forward_wigner`` retains the aligned
-  reference, including optional generator-based direction derivatives.
+  evaluation. With vector inputs, CUDA uses generator-based direction derivatives;
+  PyTorch constructs Wigner-D matrices and differentiates the full forward.
 
 ``UvO2TensorProductConv`` accepts packed degree matrices from
 ``WignerD.forward_packed``. Pass ``wigner_inv=None`` to reuse these matrices

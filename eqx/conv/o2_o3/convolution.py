@@ -122,58 +122,6 @@ contraction.register_autograd(
 )
 
 
-class _Contraction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, plan, program, source, target, *operands):
-        ctx.plan = plan
-        ctx.program = program
-        ctx.set_materialize_grads(False)
-        ctx.save_for_backward(source, target, *operands)
-        results = [None] * (
-            1 + max(slot for _, _, pairs in program for _, slot in pairs)
-        )
-        for mapping, _, pairs in program:
-            for role, slot in pairs:
-                if results[slot] is None:
-                    results[slot] = torch.zeros_like(
-                        operands[mapping[role]], memory_format=torch.contiguous_format
-                    )
-        if source.numel() and plan.path_data:
-            calls = [
-                (
-                    tuple(role for role, _ in pairs),
-                    tuple(operands[i] for i in mapping),
-                    tuple(results[slot] for _, slot in pairs),
-                    weighted_only,
-                )
-                for mapping, weighted_only, pairs in program
-            ]
-            for outputs, values, destinations, weighted_only in calls:
-                for output, result in zip(outputs, destinations):
-                    if result.numel():
-                        plan.reference(
-                            output, source, target, values, result, weighted_only
-                        )
-        return tuple(results)
-
-    @staticmethod
-    def backward(ctx, *grad_outputs):
-        source, target, *operands = ctx.saved_tensors
-        program, values, destinations = adjoint_program(
-            ctx.program,
-            operands,
-            grad_outputs,
-            ctx.needs_input_grad[4:],
-            ctx.plan.has_unweighted,
-        )
-        gradients = [None] * len(operands)
-        if program:
-            results = _Contraction.apply(ctx.plan, program, source, target, *values)
-            for index, slot in destinations.items():
-                gradients[index] = results[slot]
-        return None, None, None, None, *gradients
-
-
 class O2O3TensorProductConv(torch.nn.Module):
     """Evaluate an O(3) tensor-product convolution through O(2) restriction.
 
@@ -182,8 +130,9 @@ class O2O3TensorProductConv(torch.nn.Module):
     tensor_product : eqx.o2.O3TensorProduct
         Tensor product defining paths, normalization and feature layouts.
     backend : {"torch", "cuda"}, optional
-        Execution backend. Defaults to generated ``"cuda"`` kernels on CUDA
-        and ordinary tensor operations on CPU.
+        Execution backend. ``"torch"`` evaluates the selected algorithm with
+        native operations and automatic differentiation. Defaults to ``"cuda"``
+        on CUDA inputs and native operations on CPU.
         The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
         for channel-mixing ``"uvw"`` instructions.
     method : {"auto", "baseline", "generator", "cg", "wigner"}, optional
@@ -204,8 +153,8 @@ class O2O3TensorProductConv(torch.nn.Module):
     radial projections use bounded workspaces and are recomputed for backward.
 
     Vector inputs support all methods. Without vectors, supplied Wigner matrix
-    entries are differentiated directly. Transposed contraction programs support
-    force training and higher derivatives.
+    entries are differentiated directly. CUDA contraction programs support
+    force training and higher derivatives through recursive transposition.
     Harmonic amplitudes remain independent differentiable operands.
 
     CUDA programs compile lazily and are cached by static metadata. Atomic
@@ -467,6 +416,11 @@ class O2O3TensorProductConv(torch.nn.Module):
                 )
         if wigner is None:
             raise ValueError("Supply vectors or packed Wigner matrices.")
+        if self.backend == "torch" or not features.is_cuda:
+            result = self.reference(
+                features, radial, projection, wigner, amplitudes, edge_index, num_nodes
+            )
+            return result if vectors is None else result + vectors.sum() * 0
         # A zero-stride placeholder supplies the output shape without allocating
         # a second node output. It is never read by the forward contraction.
         output = features.new_empty(1).expand(num_nodes, self.output_dim)
@@ -481,20 +435,12 @@ class O2O3TensorProductConv(torch.nn.Module):
             amplitudes,
             output,
         ]
-        if self.backend == "cuda" and features.is_cuda:
-            return contraction(
-                self.kernel_metadata,
-                repr(program),
-                edge_index[0],
-                edge_index[1],
-                operands,
-            )[0]
-        return _Contraction.apply(
-            self,
-            program,
+        return contraction(
+            self.kernel_metadata,
+            repr(program),
             edge_index[0],
             edge_index[1],
-            *operands,
+            operands,
         )[0]
 
     def forward_transverse(
@@ -593,106 +539,40 @@ class O2O3TensorProductConv(torch.nn.Module):
             )
         return result
 
-    def reference(self, output, source, target, operands, result, weighted_only=False):
-        """Evaluate the same contractions using ordinary tensor operations."""
-        x, radial, projection, din, dout, amplitudes, y = operands
-        projected = projection.numel() != 0
+    def reference(
+        self, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
+    ):
+        """Rotate, contract order-zero CG slices, rotate back and aggregate."""
+        source, target = edge_index
         edges = source.numel()
+        weights = radial @ projection if projection.numel() else radial
+        zero = sum(
+            value.sum() * 0
+            for value in (features, radial, projection, wigner, amplitudes)
+        )
+        result = features.new_zeros((num_nodes, self.output_dim)) + zero
         for index, (mode, path) in enumerate(self.path_data):
             start, end, mul, mul_out, dim, dim_out, dstart, dend, weight, harmonic = (
                 path
             )
-            if ((weighted_only or output in (1, 2)) and weight < 0) or (
-                output == 2 and not projected
-            ):
-                continue
-            cg = getattr(self, f"cg_{index}").to(x)
-            tensors = [
-                None
-                if output == 0
-                else x[source, start : start + mul * dim].reshape(edges, dim, mul),
-                None,
-                None,
-                None
-                if output == 3
-                else din[:, dstart : dstart + dim * dim]
-                .reshape(-1, dim, dim)
-                .expand(edges, -1, -1),
-                None
-                if output == 4
-                else dout[:, dend : dend + dim_out * dim_out]
-                .reshape(-1, dim_out, dim_out)
-                .expand(edges, -1, -1),
-                None if output == 5 else amplitudes[:, harmonic].expand(edges),
-                None
-                if output == 6
-                else y[target, end : end + mul_out * dim_out].reshape(
-                    edges, dim_out, mul_out
-                ),
-            ]
-            tokens = ["eau", "ek", "kuv", "ema", "enb", "e", "ebv"]
-            width = mul if mode == "uvu" else mul * mul_out
-            weight_shape = (mul,) if mode == "uvu" else (mul, mul_out)
-            if mode == "uvu":
-                tokens[2], tokens[6] = "ku", "ebu"
-            if weight >= 0:
-                if projected:
-                    if output != 1:
-                        tensors[1] = radial.expand(edges, -1)
-                    if output != 2:
-                        tensors[2] = projection[:, weight : weight + width].reshape(
-                            projection.size(0), *weight_shape
-                        )
-                else:
-                    tokens[1] = "eu" if mode == "uvu" else "euv"
-                    if output != 1:
-                        tensors[1] = (
-                            radial[:, weight : weight + width]
-                            .reshape(-1, *weight_shape)
-                            .expand(edges, *weight_shape)
-                        )
-            active = [
-                (token, value)
-                for token, value in zip(tokens, tensors)
-                if value is not None
-            ]
-            value = torch.einsum(
-                ",".join([token for token, _ in active] + ["mn"])
-                + "->"
-                + tokens[output],
-                *[value for _, value in active],
-                cg,
+            x = features[source, start : start + dim * mul].reshape(edges, dim, mul)
+            din = wigner[:, dstart : dstart + dim * dim].reshape(
+                wigner.size(0), dim, dim
             )
-            if output in (0, 6):
-                node_indices = source if output == 0 else target
-                begin, size = (
-                    (start, mul * dim) if output == 0 else (end, mul_out * dim_out)
-                )
-                result[:, begin : begin + size].index_add_(
-                    0, node_indices, value.reshape(edges, size)
-                )
-            elif output in (3, 4):
-                begin, size = (
-                    (dstart, dim * dim) if output == 3 else (dend, dim_out * dim_out)
-                )
-                value = value.reshape(edges, size)
-                result[:, begin : begin + size].add_(
-                    value if result.size(0) != 1 else value.sum(0, keepdim=True)
-                )
-            elif output == 5:
-                result[:, harmonic].add_(
-                    value if result.size(0) != 1 else value.sum().reshape(1)
-                )
-            elif output == 2:
-                result[:, weight : weight + width].add_(
-                    value.reshape(projection.size(0), width)
-                )
-            elif projected:
-                result.add_(
-                    value if result.size(0) != 1 else value.sum(0, keepdim=True)
-                )
-            else:
-                value = value.reshape(edges, width)
-                result[:, weight : weight + width].add_(
-                    value if result.size(0) != 1 else value.sum(0, keepdim=True)
-                )
+            dout = wigner[:, dend : dend + dim_out * dim_out].reshape(
+                wigner.size(0), dim_out, dim_out
+            )
+            value = getattr(self, f"cg_{index}").to(features).T @ (din @ x)
+            if weight >= 0:
+                if mode == "uvu":
+                    value = value * weights[:, None, weight : weight + mul]
+                else:
+                    value = value @ weights[:, weight : weight + mul * mul_out].reshape(
+                        weights.size(0), mul, mul_out
+                    )
+            value = dout.transpose(-1, -2) @ value
+            message = (value * amplitudes[:, harmonic, None, None]).flatten(1)
+            result[:, end : end + dim_out * mul_out] += message.new_zeros(
+                (num_nodes, dim_out * mul_out)
+            ).index_add(0, target, message)
+        return result

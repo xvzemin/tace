@@ -6,7 +6,7 @@ import torch
 from e3nn import o3
 
 from ...co2 import SphericalCoupling
-from ...o2 import Irrep
+from ...o2 import Irrep, WignerD
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
@@ -25,7 +25,8 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         instruction order, weight layout and path normalization are preserved.
     backend : {"cuda", "torch"}, optional
         Execution backend. CUDA fuses directional couplings and aggregation
-        without storing edge messages. CPU uses tensor operations.
+        without storing edge messages. ``"torch"`` uses native operations
+        and automatic differentiation for both aligned and transverse forms.
 
     """
 
@@ -50,6 +51,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         if any(mul != channels for mul, _ in self.irreps_in + self.irreps_out):
             raise ValueError("Every global multiplicity must equal num_channel.")
         lmax = max(frame_in.lmax, frame_out.lmax)
+        self.frame = WignerD(lmax, lmax, method="recursive")
         self.degree_offsets = tuple(
             sum((2 * k + 1) ** 2 for k in range(l)) for l in range(lmax + 1)
         )
@@ -278,11 +280,18 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         *,
         vectors=None,
     ):
-        """Evaluate the aligned reference, optionally using generator derivatives."""
-        if vectors is None:
-            return super().forward(
+        """Evaluate the aligned convolution using packed Wigner-D matrices.
+
+        With vectors, the PyTorch backend constructs differentiable matrices
+        from them. CUDA uses the supplied matrices and generator derivatives.
+        """
+        if vectors is None or self.backend == "torch" or not features.is_cuda:
+            if vectors is not None:
+                wigner = self.frame.forward_packed(vectors, method="recursive")
+            result = super().forward(
                 features, radial, projection, wigner, cutoff, edge_index, num_nodes
             )
+            return result if vectors is None else result + vectors.sum() * 0
         from ..o2_o3.geometry import direction_contraction
 
         operands = [

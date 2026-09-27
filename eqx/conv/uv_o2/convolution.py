@@ -243,7 +243,7 @@ def gate_program(gate, transverse=False):
 
 
 class UvO2TensorProductConv(torch.nn.Module):
-    """Fuse a channel-mixing O(2) convolution with optional edge representations.
+    """Apply a channel-mixing O(2) convolution with optional edge representations.
 
     Parameters
     ----------
@@ -263,7 +263,8 @@ class UvO2TensorProductConv(torch.nn.Module):
     attention_scale, eps : float, optional
         Score normalization and shifted-softmax denominator regularization.
     backend : {"cuda", "torch"}, optional
-        Execution backend. PyTorch supports both devices without CUDA extensions.
+        Execution backend. ``"torch"`` evaluates aligned and transverse forms
+        with native operations and automatic differentiation on either device.
 
     Notes
     -----
