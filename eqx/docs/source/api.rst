@@ -131,7 +131,7 @@ conversion separately. Other adapters convert instantiated models.
 
 .. autofunction:: eqx.models.prophet.convert_prophet_to_eqx
 
-.. autofunction:: eqx.models.equflashv2.convert_equflashv2_to_eqx
+.. autofunction:: eqx.models.equflash.convert_equflash_to_eqx
 
 Utilities
 ---------

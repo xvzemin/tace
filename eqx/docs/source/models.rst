@@ -39,9 +39,9 @@ Supported models
    * - Prophet
      - 1.0.0
      - Spatial Prophet models loaded with use_kernel=False
-   * - EquFlashV2
+   * - EquFlash
      - GGNN 0.1, cuEquivariance 0.6.0
-     - Uniform-channel FullConv interactions, including the 45M OAM checkpoint
+     - Uniform-channel FullConv interactions in EquFlashV2, including the 45M OAM checkpoint
 
 Install the model package separately. EQX also provides ``mace``, ``nequip``
 and ``sevennet`` extras, for example ``pip install './tace/eqx[nequip,cuda]'``.
@@ -137,8 +137,10 @@ normalization and readouts are unchanged. Prophet-Spin is not included.
 The upstream ASE graph builder produces float32 inputs, so use a float32 model
 with ``KairosCalculator``.
 
-EquFlashV2
-----------
+EquFlash
+--------
+
+The ``equflash`` adapter supports the EquFlashV2 foundation model.
 
 Install GGNN in a separate environment using its upstream requirements
 (Python 3.12, PyTorch 2.9.1 and cuEquivariance 0.6.0 for the tested checkpoint).
@@ -146,10 +148,10 @@ Install GGNN in a separate environment using its upstream requirements
 .. code-block:: python
 
    from GGNN.common.calculator import UCalculator
-   from eqx.models.equflashv2 import convert_equflashv2_to_eqx
+   from eqx.models.equflash import convert_equflash_to_eqx
 
    calculator = UCalculator(checkpoint_path="equflashv2-oam.pt", cpu=False)
-   calculator.trainer.model = convert_equflashv2_to_eqx(
+   calculator.trainer.model = convert_equflash_to_eqx(
        calculator.trainer.model, implementation="o3", inplace=True,
    )
 

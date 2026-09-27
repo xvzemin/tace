@@ -9,12 +9,12 @@ from eqx.models.convolution import copy_model
 from eqx.models.nequip import convert_nequip_to_eqx
 from eqx.models.prophet import convert_prophet_to_eqx
 from eqx.models.sevennet import convert_sevennet_to_eqx
-from eqx.models.equflashv2 import convert_equflashv2_to_eqx
+from eqx.models.equflash import convert_equflash_to_eqx
 
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_equflashv2_fullconv(implementation, backend, double_precision):
+def test_equflash_fullconv(implementation, backend, double_precision):
     pytest.importorskip("GGNN")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -29,7 +29,7 @@ def test_equflashv2_fullconv(implementation, backend, double_precision):
         [8],
         4,
     ).cuda()
-    converted = convert_equflashv2_to_eqx(
+    converted = convert_equflash_to_eqx(
         reference,
         implementation=implementation,
         backend=backend,
@@ -71,7 +71,7 @@ def test_equflashv2_fullconv(implementation, backend, double_precision):
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
 
 
-def test_equflashv2_reject_efficient():
+def test_equflash_reject_efficient():
     pytest.importorskip("GGNN")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -85,8 +85,8 @@ def test_equflashv2_reject_efficient():
         [4],
         2,
     ).cuda()
-    with pytest.raises(NotImplementedError, match="Only EquFlashV2 FullConv"):
-        convert_equflashv2_to_eqx(module)
+    with pytest.raises(NotImplementedError, match="Only EquFlash FullConv"):
+        convert_equflash_to_eqx(module)
 
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])

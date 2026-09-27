@@ -1,4 +1,4 @@
-"""Convert EquFlashV2 FullConv interactions."""
+"""Convert EquFlash FullConv interactions."""
 
 from collections import OrderedDict
 
@@ -14,7 +14,7 @@ from eqx.models.convolution import (
 
 
 class FullConv(torch.nn.Module):
-    """Preserve EquFlashV2's convolution interface and output channel order."""
+    """Preserve EquFlash's convolution interface and output channel order."""
 
     def __init__(self, module, implementation, backend, normalization, normalize):
         super().__init__()
@@ -117,19 +117,19 @@ class FullConv(torch.nn.Module):
         )
 
 
-def convert_equflashv2_to_eqx(
+def convert_equflash_to_eqx(
     model,
     *,
     implementation="o3",
     inplace=False,
     backend="cuda",
 ):
-    """Replace EquFlashV2 FullConv interactions with EQX convolutions.
+    """Replace EquFlash FullConv interactions with EQX convolutions.
 
     Parameters
     ----------
     model : torch.nn.Module
-        Uncompiled model with uniform-channel FullConv interactions.
+        Uncompiled EquFlashV2 model with uniform-channel FullConv interactions.
     implementation : {"o3", "o2"}, optional
         Direct or aligned tensor product. Defaults to "o3".
     inplace : bool, optional
@@ -174,7 +174,7 @@ def convert_equflashv2_to_eqx(
         if not type(module).__module__.startswith("GGNN.model.EquFlashV2."):
             return None
         if type(module).__name__ == "EfficientConv":
-            raise NotImplementedError("Only EquFlashV2 FullConv is supported.")
+            raise NotImplementedError("Only EquFlash FullConv is supported.")
         if type(module).__name__ != "FullConv":
             return None
         count += 1
@@ -194,5 +194,5 @@ def convert_equflashv2_to_eqx(
 
     converted = convert_modules(model, factory, inplace=inplace)
     if not count:
-        raise ValueError("No EquFlashV2 FullConv interactions were found.")
+        raise ValueError("No supported EquFlash FullConv interactions were found.")
     return converted

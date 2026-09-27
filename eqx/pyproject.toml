@@ -34,7 +34,7 @@ packages = [
     "eqx.conv.uu_o2", "eqx.conv.uv_o2", "eqx.models",
     "eqx.models.tace", "eqx.models.tace.tece_oam_rra",
     "eqx.models.mace", "eqx.models.nequip", "eqx.models.sevennet",
-    "eqx.models.prophet", "eqx.models.equflashv2",
+    "eqx.models.prophet", "eqx.models.equflash",
 ]
 package-dir = { eqx = "." }
 
