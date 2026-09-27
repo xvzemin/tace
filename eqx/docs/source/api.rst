@@ -185,6 +185,9 @@ indices on transverse tensors; see :ref:`equivariantx-cartesian-o2`.
 .. autoclass:: eqx.co2.O3TensorProduct
    :members: forward, forward_scatter, from_tensor_product, weight_views
 
+.. autoclass:: eqx.co2.SphericalCoupling
+   :members: forward
+
 .. autofunction:: eqx.co2.path_matrix
 
 .. autofunction:: eqx.co2.restriction_scale

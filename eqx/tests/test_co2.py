@@ -11,6 +11,63 @@ from eqx import co2, co3, o2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize(
+    "degrees", [(0, 3, 3), (2, 1, 2), (2, 3, 3), (3, 4, 2), (6, 6, 6), (10, 5, 7)]
+)
+@pytest.mark.parametrize("normalization", ["component", "norm", "integral"])
+def test_spherical_coupling(degrees, normalization, double_precision):
+    l1, l2, l3 = degrees
+    module = co2.SphericalCoupling(*degrees, normalization).to(DEVICE)
+    vectors = torch.cat((torch.eye(3), -torch.eye(3), torch.randn(3, 3))).to(DEVICE)
+    vectors.requires_grad_()
+    features = torch.randn(9, 2 * l1 + 1, device=DEVICE, requires_grad=True)
+    actual = module(features, vectors)
+    expected = torch.einsum(
+        "...a,...b,abc->...c",
+        features,
+        o3.spherical_harmonics(
+            l2, vectors, normalize=True, normalization=normalization
+        ),
+        o3.wigner_3j(*degrees, device=DEVICE),
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+    if max(l1, l3) <= 3:
+        cartesian = co2.O3TensorProduct(
+            [(1, (l1, 1))],
+            [(1, (l2, (-1) ** l2))],
+            [(1, (l3, (-1) ** l2))],
+            [(0, 0, 0, "uvu", False)],
+            irrep_normalization="none",
+            path_normalization="none",
+            normalization=normalization,
+            input_basis="spherical",
+            output_basis="spherical",
+        ).to(DEVICE)
+        torch.testing.assert_close(
+            actual, cartesian(features, vectors), atol=2e-11, rtol=2e-11
+        )
+    actual, expected = actual.sin(), expected.sin()
+    for _ in range(3):
+        probe = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        value,
+                        (features, vectors),
+                        probe,
+                        create_graph=True,
+                        retain_graph=True,
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+    assert module(features[:0], vectors[:0]).shape == (0, 2 * l3 + 1)
+
+
 def test_basis_and_representations(double_precision):
     irreps = co2.Irreps("2x0e+1x0oo+3x1mo+2x3m+1x1mo")
     assert list(irreps)[0] == (2, co2.Irrep("0e"))

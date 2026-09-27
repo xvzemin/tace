@@ -12,6 +12,73 @@ from eqx.ace import TACE
 from eqx.models.tace.tece_oam_rra import BilinearACE
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
+def test_transverse_convolution(backend, normalization, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    a, b, c = "2x3o+2x2e", "1o+2e+3o", "2x3e+2x2e+2x3e+2x4o"
+    instructions = [
+        (0, 0, 0, "uvu", True),
+        (1, 1, 1, "uvu", True),
+        (0, 2, 2, "uvu", True),
+        (1, 2, 3, "uvu", False),
+    ]
+    options = dict(internal_weights=False, shared_weights=False)
+    tp = o2.O3TensorProduct(
+        a, b, c, instructions, normalization=normalization, **options
+    ).cuda()
+    module = eqx_conv.O2O3TensorProductConv(tp, backend=backend).cuda()
+    reference = o3.TensorProduct(a, b, c, instructions, **options).cuda()
+    x = torch.randn(4, tp.input_dim, device="cuda", requires_grad=True)
+    vectors = (
+        torch.cat((torch.eye(3), -torch.eye(3), torch.randn(2, 3)))
+        .cuda()
+        .requires_grad_()
+    )
+    edges = torch.randint(4, (2, 8), device="cuda")
+    radial = torch.randn(8, 3, device="cuda", requires_grad=True)
+    projection = torch.randn(3, tp.weight_numel, device="cuda", requires_grad=True)
+    amplitudes = torch.randn(1, 3, device="cuda", requires_grad=True)
+    inputs = x, vectors, radial, projection, amplitudes
+    actual = module(x, radial, projection, None, amplitudes, edges, 4, vectors=vectors)
+    harmonics = torch.cat(
+        [
+            o3.spherical_harmonics(
+                ir.l, vectors, normalize=True, normalization=normalization
+            )
+            * amplitudes[:, i : i + 1]
+            for i, (_, ir) in enumerate(tp.irreps_in2)
+        ],
+        -1,
+    )
+    message = layout(
+        reference(
+            layout(x, tp.irreps_in1, inverse=True)[edges[0]],
+            harmonics,
+            radial @ projection,
+        ),
+        tp.irreps_out,
+    )
+    expected = torch.zeros_like(actual).index_add(0, edges[1], message)
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    actual, expected = actual.sin(), expected.sin()
+    for _ in range(3):
+        probe = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        value, inputs, probe, create_graph=True, retain_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+
+
 @pytest.mark.parametrize("degree", range(7))
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 def test_cartesian_harmonic_polynomials(degree, normalization, double_precision):

@@ -1372,12 +1372,21 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
         for name, parameter in module.named_parameters():
             parameter.copy_(reference_parameters[name])
     representation = module.readout_fn.representation
-    assert representation.o2_angular_basis.mmax == max(Lmax, lmax)
+    if representation.use_local_frame:
+        assert representation.o2_angular_basis.mmax == max(Lmax, lmax)
+    else:
+        assert representation.o2_angular_basis is None
     if interaction == "o2_cgtp" and node_embedding == "linear":
         assert not representation.use_o3_angular_basis
+        assert not representation.use_local_frame
+
+        def no_alignment(*args):
+            raise AssertionError("o2_cgtp should not construct an alignment frame")
+
+        monkeypatch.setattr(o2.WignerD, "forward", no_alignment)
 
         def no_spherical_harmonics(*args):
-            raise AssertionError("o2_cgtp should not evaluate spherical harmonics")
+            raise AssertionError("o2_cgtp should not evaluate shared edge harmonics")
 
         monkeypatch.setattr(
             representation.o3_angular_basis, "forward", no_spherical_harmonics

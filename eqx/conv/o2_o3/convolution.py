@@ -175,7 +175,7 @@ class _Contraction(torch.autograd.Function):
 
 
 class O2O3TensorProductConv(torch.nn.Module):
-    """Evaluate an O(3) tensor-product convolution in aligned O(2) frames.
+    """Evaluate an O(3) tensor-product convolution through O(2) restriction.
 
     Parameters
     ----------
@@ -191,13 +191,14 @@ class O2O3TensorProductConv(torch.nn.Module):
     -----
     Features use flattened ``ir_mul`` layout. Instruction order, independent
     path outputs, weights and normalization follow the supplied tensor product.
-    CUDA fuses gather, rotations, sparse coupling and target reduction without
-    materializing global edge messages. Compatible paths reuse rotations;
+    CUDA fuses gather, angular coupling and target reduction without
+    materializing global edge messages. Compatible paths share angular factors;
     radial projections use bounded workspaces and are recomputed for backward.
 
-    Transposed contraction programs support force training and higher
-    derivatives. Supplying ``vectors`` uses rotation-generator derivatives
-    with cached Wigner matrices; otherwise matrix entries are differentiated.
+    Supplying ``vectors`` eliminates alignment through transverse couplings
+    acting on spherical features. No Wigner matrices or Cartesian tensors are
+    required. Transposed contraction programs support force training and higher
+    derivatives. Without vectors, supplied matrix entries are differentiated.
     Harmonic amplitudes remain independent differentiable operands.
 
     CUDA programs compile lazily and are cached by static metadata. Atomic
@@ -227,8 +228,12 @@ class O2O3TensorProductConv(torch.nn.Module):
             sum((2 * k + 1) ** 2 for k in range(l))
             for l in range(tensor_product.lmax + 1)
         )
+        from ...co2 import SphericalCoupling
+
         input_slices = self.irreps_in.slices()
         output_slices = self.irreps_out.slices()
+        self.transverse_couplings = torch.nn.ModuleDict()
+        transverse_paths = []
         offset = 0
         self.path_data = []
         self.sparse_paths = []
@@ -253,9 +258,10 @@ class O2O3TensorProductConv(torch.nn.Module):
             )
             if tensor_product.normalization == "integral":
                 pole /= math.sqrt(4 * math.pi)
-            cg = o3.wigner_3j(ir.l, ir_sh.l, ir_out.l, dtype=torch.float64)[
-                :, ir_sh.l, :
-            ]
+            coefficients = o3.wigner_3j(
+                ir.l, ir_sh.l, ir_out.l, dtype=torch.float64, device="cpu"
+            )
+            cg = coefficients[:, ir_sh.l, :]
             # Static coefficients and tensor buffers use the same construction
             # precision, including when the module is later promoted to float64.
             cg = (cg * (pole * ins.path_weight)).to(torch.get_default_dtype())
@@ -279,6 +285,29 @@ class O2O3TensorProductConv(torch.nn.Module):
             self.sparse_paths.append(
                 tuple((m, n, float(cg[m, n])) for m, n in cg.nonzero().tolist())
             )
+            name = f"{ir.l}_{ir_sh.l}_{ir_out.l}"
+            if name not in self.transverse_couplings:
+                self.transverse_couplings[name] = SphericalCoupling(
+                    ir.l, ir_sh.l, ir_out.l, tensor_product.normalization
+                ).to(tensor_product.weight)
+            transverse_paths.append(
+                (
+                    path[0],
+                    ins.i_in2,
+                    path[1],
+                    mul,
+                    1,
+                    ir.dim,
+                    ir_sh.dim,
+                    ir_out.dim,
+                    weight_offset,
+                    ins.path_weight,
+                    tuple(
+                        (a, b, c, float(coefficients[a, b, c]))
+                        for a, b, c in coefficients.nonzero().tolist()
+                    ),
+                )
+            )
 
         self.has_unweighted = any(path[8] < 0 for _, path in self.path_data)
         self.kernel_metadata = repr(
@@ -294,6 +323,15 @@ class O2O3TensorProductConv(torch.nn.Module):
                 *parse_metadata(self.kernel_metadata),
                 tuple(scalar_paths),
                 tuple(harmonic_degrees),
+            )
+        )
+        self.transverse_paths = tuple(transverse_paths)
+        self.transverse_metadata = repr(
+            (
+                self.transverse_paths,
+                self.weight_numel,
+                self.has_unweighted,
+                ("transverse", tensor_product.normalization),
             )
         )
 
@@ -323,9 +361,10 @@ class O2O3TensorProductConv(torch.nn.Module):
         projection : torch.Tensor
             Radial projection of shape ``(channels, weight_numel)``. Use
             shape ``(0, weight_numel)`` for directly supplied path weights.
-        wigner : torch.Tensor
+        wigner : torch.Tensor or None
             Packed degree-wise Wigner matrices, with shape
             ``(edges, sum((2*l+1)**2))`` or a shared leading dimension of one.
+            Unused when ``vectors`` is supplied; pass ``None`` to avoid alignment.
         amplitudes : torch.Tensor
             Invariant harmonic amplitudes of shape ``(edges, num_harmonics)``
             or ``(1, num_harmonics)``.
@@ -335,12 +374,9 @@ class O2O3TensorProductConv(torch.nn.Module):
             Number of target nodes.
         vectors : torch.Tensor, optional
             Nonzero frame directions, with shape ``(edges, 3)`` or ``(1, 3)``.
-            When supplied, ``wigner`` must contain their alignment matrices.
-            Direction derivatives use sparse angular contractions rather than
-            matrix adjoints. The matrices are treated as cached values. On CUDA,
-            harmonic degrees zero, one and two bypass feature rotations.
-            Without vectors, the matrices remain independent differentiable
-            inputs.
+            Evaluated through transverse restriction directly in spherical
+            storage. Derivatives do not pass through frame selection. Without
+            vectors, matrices remain independent differentiable inputs.
 
         Returns
         -------
@@ -348,6 +384,12 @@ class O2O3TensorProductConv(torch.nn.Module):
             Target features of shape ``(num_nodes, irreps_out.dim)`` in the
             declared, unsimplified ``ir_mul`` layout.
         """
+        if vectors is not None:
+            return self.forward_transverse(
+                features, radial, projection, amplitudes, edge_index, num_nodes, vectors
+            )
+        if wigner is None:
+            raise ValueError("Supply vectors or packed Wigner matrices.")
         # A zero-stride placeholder supplies the output shape without allocating
         # a second node output. It is never read by the forward contraction.
         output = features.new_empty(1).expand(num_nodes, self.output_dim)
@@ -362,19 +404,6 @@ class O2O3TensorProductConv(torch.nn.Module):
             amplitudes,
             output,
         ]
-        if vectors is not None:
-            from .geometry import direction_contraction
-
-            operands[3] = wigner.detach()
-            return direction_contraction(
-                self.direction_metadata,
-                repr(tuple((0, *term) for term in program)),
-                vectors,
-                edge_index[0],
-                edge_index[1],
-                operands,
-                self.backend == "cuda",
-            )[0]
         if self.backend == "cuda" and features.is_cuda:
             return contraction(
                 self.kernel_metadata,
@@ -390,6 +419,79 @@ class O2O3TensorProductConv(torch.nn.Module):
             edge_index[1],
             *operands,
         )[0]
+
+    def forward_transverse(
+        self, features, radial, projection, amplitudes, edge_index, num_nodes, vectors
+    ):
+        """Contract transverse tensors in spherical storage without alignment."""
+        direction = vectors / vectors.norm(dim=-1, keepdim=True)
+        if self.backend == "cuda" and features.is_cuda:
+            from ..o3.convolution import contraction as spherical_contraction
+
+            operands = [
+                features,
+                radial,
+                projection,
+                amplitudes,
+                features.new_empty(1).expand(num_nodes, self.output_dim),
+                direction,
+            ]
+            return spherical_contraction(
+                self.transverse_metadata,
+                repr(((tuple(range(6)), False, ((4, 0),)),)),
+                edge_index[0],
+                edge_index[1],
+                operands,
+            )[0]
+        source, target = edge_index
+        edges = source.numel()
+        weights = radial @ projection if projection.numel() else radial
+        zero = sum(
+            value.sum() * 0
+            for value in (features, radial, projection, amplitudes, direction)
+        )
+        result = features.new_zeros((num_nodes, self.output_dim)) + zero
+        for (mode, local), path in zip(self.path_data, self.transverse_paths):
+            (
+                start,
+                harmonic,
+                end,
+                mul,
+                _,
+                dim,
+                harmonic_dim,
+                dim_out,
+                weight,
+                factor,
+                _,
+            ) = path
+            mul_out = local[3]
+            x = (
+                features[source, start : start + dim * mul]
+                .reshape(edges, dim, mul)
+                .transpose(-1, -2)
+            )
+            coupling = self.transverse_couplings[
+                f"{(dim - 1) // 2}_{(harmonic_dim - 1) // 2}_{(dim_out - 1) // 2}"
+            ]
+            value = coupling(x, direction.unsqueeze(-2)).transpose(-1, -2)
+            if weight >= 0:
+                width = mul if mode == "uvu" else mul * mul_out
+                w = weights[:, weight : weight + width]
+                value = (
+                    value * w.unsqueeze(-2)
+                    if mode == "uvu"
+                    else value @ w.reshape(-1, mul, mul_out)
+                )
+            value = value * (factor * amplitudes[:, harmonic : harmonic + 1]).unsqueeze(
+                -1
+            )
+            result[:, end : end + dim_out * mul_out] += (
+                value.flatten(-2)
+                .new_zeros((num_nodes, dim_out * mul_out))
+                .index_add(0, target, value.flatten(-2))
+            )
+        return result
 
     def reference(self, output, source, target, operands, result, weighted_only=False):
         """Evaluate the same contractions using ordinary tensor operations."""

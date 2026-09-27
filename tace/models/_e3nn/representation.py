@@ -128,6 +128,11 @@ class Representation(torch.nn.Module):
             or uses_o2_interaction
             or uses_o2_cgtp_interaction
         )
+        self.use_local_frame = (
+            uses_so2_interaction
+            or uses_o2_interaction
+            or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+        )
         self._can_pack_wigner = (
             uses_o2_cgtp_interaction
             or any(issubclass(cls, UuO2Interaction) for cls in interaction_classes)
@@ -191,7 +196,7 @@ class Representation(torch.nn.Module):
             raise ValueError("Legacy SO2 interactions require Lmax == lmax.")
         if uses_o2_cgtp_interaction and self.use_so2 and mmax != lmax:
             raise ValueError("Mixing o2_cgtp with legacy so2 requires mmax == lmax.")
-        if self.use_so2 or self.use_o2:
+        if self.use_local_frame:
             self.o2_angular_basis = o2.WignerD(
                 max(Lmax, lmax)
                 if uses_o2_cgtp_interaction
@@ -415,9 +420,13 @@ class Representation(torch.nn.Module):
 
     @property
     def use_packed_wigner(self) -> bool:
-        return getattr(self, "_can_pack_wigner", False) and any(
-            getattr(interaction, "use_eqx", False)
-            for interaction in self.interactions
+        return (
+            getattr(self, "use_local_frame", True)
+            and getattr(self, "_can_pack_wigner", False)
+            and any(
+                getattr(interaction, "use_eqx", False)
+                for interaction in self.interactions
+            )
         )
 
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
@@ -443,7 +452,7 @@ class Representation(torch.nn.Module):
         # === angular basis ===
         edge_wigner = None
         edge_wigner_inv = None
-        if self.use_so2 or self.use_o2:
+        if getattr(self, "use_local_frame", self.use_so2 or self.use_o2):
             if getattr(self, "use_packed_wigner", False):
                 from eqx.kernels import wigner_D
 

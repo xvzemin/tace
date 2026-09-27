@@ -13,6 +13,7 @@ from .restriction import (
     restriction_matrix,
     restriction_scale,
 )
+from .spherical import SphericalCoupling
 from .tensor_product import (
     ElementwiseTensorProduct,
     FullyConnectedTensorProduct,
@@ -38,4 +39,5 @@ __all__ = [
     "restriction_matrix",
     "coupling_coefficients",
     "O3TensorProduct",
+    "SphericalCoupling",
 ]

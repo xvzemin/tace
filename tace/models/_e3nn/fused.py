@@ -448,7 +448,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
 
 
 class O2ScatterTensorProduct(torch.nn.Module):
-    """Evaluate the same CGTP paths in an aligned frame and sum at target nodes."""
+    """Evaluate transverse CGTP paths and sum spherical features at target nodes."""
 
     def __init__(self, irreps_in1, irreps_in2, irreps_out, *, l1l2=None):
         super().__init__()
@@ -477,11 +477,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
             layout_out="flatten_ir_mul",
         )
         self.reshape_out = LayoutTransform(
-            self.irreps_out.simplify(),
-            layout_in="flatten_ir_mul",
-            layout_out="flatten_mul_ir",
-        )
-        self.reshape_streamed = LayoutTransform(
             self.irreps_out,
             layout_in="flatten_ir_mul",
             layout_out="flatten_mul_ir",
@@ -498,11 +493,12 @@ class O2ScatterTensorProduct(torch.nn.Module):
             graph.edge_vector.norm(dim=-1, keepdim=True) / graph.edge_length
         ).pow(self.harmonic_degrees)
         node_feats = self.reshape_in(node_feats)
-        message = self.tp.local_frame_in.to_local(node_feats[edge_index[0]], wigner)
-        message = self.tp.forward_local(message, conv_weights, harmonic_scale)
-        message = self.tp.local_frame_out.to_global(message, wigner_inv)
-        message = scatter_sum(
-            message, edge_index[1], dim=0, dim_size=node_feats.size(0)
+        message = self.tp.forward_scatter(
+            node_feats,
+            edge_index,
+            weight=conv_weights,
+            harmonic_scale=harmonic_scale,
+            vectors=graph.edge_vector,
         )
         return self.reshape_out(message)
 
@@ -510,22 +506,6 @@ class O2ScatterTensorProduct(torch.nn.Module):
         self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
     ):
         """Evaluate the radial projection and fused angular convolution."""
-        if wigner.ndim == 3:
-            # Other local interactions may still require the shared dense
-            # frame. Extract its full degree blocks for the streamed CGTP.
-            lmax = math.isqrt(wigner.size(-1)) - 1
-            blocks = []
-            for l in range(self.tp.lmax + 1):
-                rows = [
-                    l
-                    if m == 0
-                    else l + (2 * m - 1) * (lmax + 1) - m * m
-                    if m > 0
-                    else l + 2 * (-m) * (lmax + 1) - (-m) * (-m + 1)
-                    for m in range(-l, l + 1)
-                ]
-                blocks.append(wigner[:, rows, l * l : (l + 1) ** 2].flatten(1))
-            wigner = torch.cat(blocks, dim=1)
         harmonic_scale = (
             graph.edge_vector.norm(dim=-1, keepdim=True) / graph.edge_length
         ).pow(self.harmonic_degrees)
@@ -541,7 +521,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             node_feats.size(0),
             vectors=graph.edge_vector,
         )
-        return self.reshape_streamed(message)
+        return self.reshape_out(message)
 
 
 class UuO2ScatterTensorProduct(torch.nn.Module):

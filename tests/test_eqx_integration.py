@@ -1206,7 +1206,8 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
         model = convert_cgtp(reference, "o2")
         representation = model.readout_fn.representation
         mixed = isinstance(interaction, list)
-        assert representation.use_packed_wigner == (not mixed)
+        assert not representation.use_packed_wigner
+        assert representation.use_local_frame == mixed
         assert representation.use_o3_angular_basis == mixed
 
         def no_edge_message(*args, **kwargs):
@@ -1259,12 +1260,10 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
             assert loaded is reference
             assert not loaded.readout_fn.representation.use_o2
             converted = convert_cgtp(reference)
-            assert converted.readout_fn.representation.use_packed_wigner
+            assert not converted.readout_fn.representation.use_packed_wigner
             for enabled in ("0", "1", "0"):
                 monkeypatch.setenv("TACE_USE_EQX", enabled)
-                assert converted.readout_fn.representation.use_packed_wigner == (
-                    enabled == "1"
-                )
+                assert not converted.readout_fn.representation.use_packed_wigner
                 output = converted({key: value.clone() for key, value in data.items()})
                 for key in ("energy", "forces", "stress", "virials"):
                     torch.testing.assert_close(

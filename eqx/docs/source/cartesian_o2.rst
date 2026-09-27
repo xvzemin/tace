@@ -7,6 +7,43 @@ Cartesian O(2)
 coordinate-free restriction of three-dimensional tensors. All operations use
 PyTorch, including on GPU. No compiled extension is required.
 
+Spherical storage without alignment
+-----------------------------------
+
+``SphericalCoupling(l1, l2, l3)`` evaluates the same transverse coupling on
+spherical coefficients, without constructing Cartesian tensors or selecting
+transverse axes. Inputs and outputs have last dimensions :math:`2\ell_1+1`
+and :math:`2\ell_3+1`, respectively.
+
+For a unit direction :math:`\mathbf n`, let :math:`G_{\mathbf n}` be the
+rotation generator in the smaller input or output representation. The minimum-degree harmonic
+coupling, of degree :math:`\delta=|\ell_1-\ell_3|`, connects matching transverse
+orders. A polynomial of :math:`-G_{\mathbf n}^2` supplies their required
+weights; odd couplings additionally apply :math:`G_{\mathbf n}`. Generator
+actions are placed on the smaller representation using equivariance. Its
+coefficients are obtained from the reference-axis coupling matrices in
+float64 and stored in a Chebyshev basis. No directional sampling is used.
+
+.. code-block:: python
+
+   import torch
+   from eqx import co2
+
+   coupling = co2.SphericalCoupling(3, 2, 3)
+   h = torch.randn(16, 7)
+   rij = torch.randn(16, 3, requires_grad=True)
+   output = coupling(h, rij)
+   gradient = torch.autograd.grad(output.square().sum(), rij, create_graph=True)
+
+``eqx.conv.O2O3TensorProductConv`` uses this construction when edge vectors
+are supplied. Its CUDA backend retains spherical features, independent path
+weights and outputs, and supports force training and higher derivatives.
+The generated CUDA code selects between the factored transverse expression
+and its direct sparse harmonic contraction by static operation count. Both
+expressions avoid alignment. Direction derivatives use the exact harmonic
+polynomial extension, with normalization differentiated through PyTorch.
+Directions are smooth on the nonzero-vector domain; no alignment chart is used.
+
 Representations and conversion
 ------------------------------
 

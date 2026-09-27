@@ -6,18 +6,8 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
+from ..co2.spherical import generators
 from ..kernels.codegen import contraction_source
-
-
-@lru_cache(maxsize=64)
-def generators(degree):
-    """Return the three real skew rotation generators in float64 on the CPU."""
-    if not degree:
-        return torch.zeros(3, 1, 1, dtype=torch.float64, device="cpu")
-    result = -math.sqrt(degree * (degree + 1) * (2 * degree + 1)) * o3.wigner_3j(
-        degree, 1, degree, dtype=torch.float64, device="cpu"
-    ).permute(1, 2, 0)
-    return result * result[1, degree - 1, degree + 1].sign()
 
 
 @lru_cache(maxsize=128)

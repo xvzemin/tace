@@ -29,7 +29,7 @@ def _entry_components(frame: LocalFrame, index: int):
 
 
 class O3TensorProduct(torch.nn.Module):
-    r"""Couple O(3) features to spherical harmonics in an edge-aligned frame.
+    r"""Couple O(3) features to directional spherical harmonics.
 
     Parameters
     ----------
@@ -70,6 +70,9 @@ class O3TensorProduct(torch.nn.Module):
     Rotation degrees follow the feature and output irreps. Shared Wigner
     matrices may cover additional degrees, but must retain all orders needed
     by those representations.
+
+    Alternatively, ``forward_scatter(..., vectors=...)`` evaluates transverse
+    couplings directly on spherical features without constructing an alignment.
     """
 
     def __init__(
@@ -366,13 +369,14 @@ class O3TensorProduct(torch.nn.Module):
         self,
         features: torch.Tensor,
         edge_index: torch.Tensor,
-        wigner: torch.Tensor,
+        wigner: Optional[torch.Tensor] = None,
         weight: Optional[torch.Tensor] = None,
         harmonic_scale: Optional[torch.Tensor] = None,
         *,
         radial_features: Optional[torch.Tensor] = None,
         radial_weight: Optional[torch.Tensor] = None,
         num_nodes: Optional[int] = None,
+        vectors: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Couple gathered features and accumulate directly at target nodes.
 
@@ -383,9 +387,10 @@ class O3TensorProduct(torch.nn.Module):
             ``ir_mul`` order.
         edge_index : torch.Tensor
             Source and target node indices, with shape ``(2, edges)``.
-        wigner : torch.Tensor
+        wigner : torch.Tensor, optional
             Packed degree-wise rotation matrices from
             :meth:`WignerD.forward_packed`. All required orders are retained.
+            Not needed when vectors are supplied.
         weight : torch.Tensor, optional
             Path weights with shape ``(edges, weight_numel)``,
             ``(1, weight_numel)`` or ``(weight_numel,)``. Mutually exclusive
@@ -399,6 +404,9 @@ class O3TensorProduct(torch.nn.Module):
             Final radial projection with shape ``(channels, weight_numel)``.
         num_nodes : int, optional
             Number of target nodes. Defaults to the input node count.
+        vectors : torch.Tensor, optional
+            Nonzero edge vectors, shape ``(edges, 3)`` or ``(1, 3)``. Evaluate
+            transverse couplings without selecting an alignment frame.
 
         Returns
         -------
@@ -421,14 +429,21 @@ class O3TensorProduct(torch.nn.Module):
             raise ValueError("edge_index and features must be on the same device.")
         edges = edge_index.size(1)
         required = sum((2 * l + 1) ** 2 for l in range(self.lmax + 1))
-        if (
-            wigner.ndim != 2
+        if vectors is None and (
+            wigner is None
+            or wigner.ndim != 2
             or wigner.size(0) not in (1, edges)
             or wigner.size(1) < required
         ):
             raise ValueError(
                 "Expected packed Wigner matrices covering all feature degrees."
             )
+        if vectors is not None and (
+            vectors.ndim != 2
+            or vectors.size(0) not in (1, edges)
+            or vectors.size(1) != 3
+        ):
+            raise ValueError("vectors must have shape (edges, 3) or (1, 3).")
         if radial_features is not None or radial_weight is not None:
             if weight is not None or radial_features is None or radial_weight is None:
                 raise ValueError(
@@ -463,7 +478,12 @@ class O3TensorProduct(torch.nn.Module):
             or harmonic_scale.size(1) != self.num_harmonics
         ):
             raise ValueError("Expected one amplitude per edge and harmonic entry.")
-        for value in (radial, projection, wigner, harmonic_scale):
+        for value in (
+            radial,
+            projection,
+            vectors if vectors is not None else wigner,
+            harmonic_scale,
+        ):
             if value.device != features.device or value.dtype != features.dtype:
                 raise ValueError(
                     "All convolution operands must share dtype and device."
@@ -476,4 +496,5 @@ class O3TensorProduct(torch.nn.Module):
             harmonic_scale,
             edge_index,
             features.size(0) if num_nodes is None else num_nodes,
+            vectors=vectors,
         )

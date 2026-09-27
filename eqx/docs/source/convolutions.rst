@@ -23,7 +23,7 @@ Choosing an operator
      - O(3) features and arbitrary edge irreps; ``uvu`` CGTP
      - PyTorch / CUDA
    * - ``O2O3TensorProductConv``
-     - O(3) features and spherical-harmonic edges; aligned CGTP
+     - O(3) features and harmonic edges; transverse or aligned CGTP
      - PyTorch / CUDA
    * - ``CartesianTensorProductConv``
      - Cartesian features and harmonics; ``uvu`` delta/epsilon contractions
@@ -90,13 +90,12 @@ float64 accuracy.
    radial = torch.randn(24, 6, requires_grad=True)
    projection = torch.randn(6, tp.weight_numel, requires_grad=True)
    harmonics = o3.spherical_harmonics(irreps_sh, vectors, True, "component")
-   frame = o2.WignerD(mmax=2, lmax=2, method="recursive")
-   packed = frame.forward_packed(vectors)
    amplitudes = torch.ones(24, len(irreps_sh))
 
    output_o3 = direct(features, harmonics, radial, projection, edge_index)
    output_o2 = aligned(
-       features, radial, projection, packed, amplitudes, edge_index, features.size(0)
+       features, radial, projection, None, amplitudes, edge_index, features.size(0),
+       vectors=vectors,
    )
    torch.testing.assert_close(output_o2, output_o3, atol=1e-10, rtol=1e-10)
    output_o2.square().sum().backward()
@@ -167,10 +166,12 @@ Vector interfaces avoid differentiating stored angular intermediates:
   STF harmonic polynomials and their derivatives inside the contraction.
   ``TensorProduct(project=False)`` defers projection until after node aggregation
   and channel compression. See :doc:`cartesian`.
-* ``O2O3TensorProductConv.forward(..., vectors=...)`` uses analytic angular derivatives
-  with matching cached Wigner matrices. Construct them with
-  ``eqx.kernels.wigner_D(frame, vectors.detach())``. If vectors are omitted,
-  gradients are taken with respect to the matrix operands instead.
+* ``O2O3TensorProductConv.forward(..., vectors=...)`` evaluates transverse
+  couplings directly on spherical features. Pass ``None`` for Wigner matrices:
+  no alignment or transverse axes are constructed. CUDA reuses minimum-degree
+  couplings and sparse generator actions; direction derivatives use harmonic
+  polynomials at every order. If vectors are omitted, supplied Wigner matrices
+  are used and differentiated instead.
 
 CUDA kernels compile lazily and are cached. Warm up the forward and derivatives
 used by the workload before measuring speed. ``EQX_USE_CUDA_GRAPH=1`` enables

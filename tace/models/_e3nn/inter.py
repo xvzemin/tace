@@ -353,7 +353,7 @@ class O3CartesianIctpIctcInteraction(O3CgtpInteraction):
 
 
 class O2CgtpInteraction(O3CgtpInteraction):
-    """Evaluate an O(3) CGTP through aligned-frame sparse contractions.
+    """Evaluate an O(3) CGTP through coordinate-free O(2) restriction.
 
     The paths, radial weights, normalization, and output layout are identical
     to :class:`O3CgtpInteraction`. All required local orders are retained.

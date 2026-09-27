@@ -89,6 +89,9 @@ def angular_source(
 
     start, attr, end, mul1, mul2, dim1, dim2, dim_out, _, _, cg = path
     degree = (dim2 - 1) // 2
+    transverse = isinstance(normalization, tuple) and normalization[0] == "transverse"
+    if transverse:
+        normalization = normalization[1]
     if isinstance(normalization, tuple):
         from ..co3.polynomials import polynomial_coefficients as cartesian_polynomials
 
@@ -99,6 +102,8 @@ def angular_source(
     else:
         polynomials = polynomial_coefficients(degree, normalization)
     rank = len(mapping) - 6
+    initial_cache = cache.copy() if transverse and rank == 0 else None
+    line_start = len(lines)
     indices = {
         role: {entry[axis] for entry in cg} for role, axis in ((0, 0), (3, 1), (4, 2))
     }
@@ -258,6 +263,63 @@ def angular_source(
     for v in range(mul2):
         for role in sorted(needed):
             width = {0: dim1, 3: 1, 4: dim_out}.get(role, 3)
+            if transverse and rank == 0 and role in (0, 3, 4):
+                from ..o2_o3.transverse import coupling_source
+
+                contracted_role = role
+                if role == 3:
+                    widths = {0: dim1, 4: dim_out}
+                    contracted_role = min(
+                        needed & widths.keys() or widths, key=widths.__getitem__
+                    )
+                other, offset, dim, out = (
+                    (4, end, dim_out, dim1)
+                    if contracted_role == 0
+                    else (0, start, dim1, dim_out)
+                )
+                features = tuple(
+                    load(other, offset + a * mul1, "u") for a in range(dim)
+                )
+                vector = tuple(load(5, a) for a in range(3))
+                coupled = coupling_source(
+                    (dim - 1) // 2,
+                    degree,
+                    (out - 1) // 2,
+                    vector,
+                    features,
+                    normalization,
+                    cache,
+                    lines,
+                )
+                sign = (
+                    (-1) ** ((dim1 + dim_out - 2) // 2 + degree)
+                    if contracted_role == 0
+                    else 1
+                )
+                if role == 3:
+                    offset = start if contracted_role == 0 else end
+                    values[v, role, 0] = contraction_source(
+                        tuple(
+                            (
+                                float(sign),
+                                (
+                                    value,
+                                    load(contracted_role, offset + column * mul1, "u"),
+                                ),
+                            )
+                            for column, value in enumerate(coupled)
+                        ),
+                        cache,
+                        lines,
+                    )
+                    continue
+                amplitude = load(3, attr + v)
+                for column, value in enumerate(coupled):
+                    values[v, role, column] = variable(
+                        ("transverse_amplitude", value, amplitude, sign),
+                        f"T({sign}) * {value} * {amplitude}",
+                    )
+                continue
             if angular_derivatives and role >= 6:
                 # Transpose the prefix and reuse the suffix. This produces all
                 # three vector components without three generator chains.
@@ -371,4 +433,37 @@ def angular_source(
                 lines.append(f"T {name} = 0;")
                 lines.extend(f"{name} = fma({a}, {b}, {name});" for a, b in terms)
             values[v, 1, 0] = cache[key]
+    if initial_cache is not None:
+        # Both expressions are frame-free and retain the same path. Prefer
+        # fewer scalar operations after common-subexpression elimination.
+        direct_lines = []
+        direct = angular_source(
+            path,
+            mapping,
+            dimensions,
+            shared,
+            roles,
+            initial_cache,
+            direct_lines,
+            normalization,
+            use_generators,
+            angular_derivatives,
+            direction_offset,
+        )
+
+        def cost(body):
+            return sum(
+                2 * line.count("fma(")
+                + line.count(" * ")
+                + line.count(" + ")
+                + line.count(" - ")
+                for line in body
+            ), len(body)
+
+        if cost(direct_lines) < cost(lines[line_start:]):
+            del lines[line_start:]
+            lines.extend(direct_lines)
+            cache.clear()
+            cache.update(initial_cache)
+            return direct
     return values
