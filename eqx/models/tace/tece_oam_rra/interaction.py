@@ -1,7 +1,5 @@
 """Native CUDA local updates with receiver-normalized rotary attention."""
 
-from functools import lru_cache
-
 import torch
 
 from ....utils import parse_metadata
@@ -22,10 +20,9 @@ def stream(
 ):
     """Fuse the complete edge update without graph replay or Python callbacks.
 
-    Receiver-wise tiles compute scores and messages together, accumulating
-    the shifted denominator and weighted output online. Independent tiles
-    are merged without evaluating edges again. No full-edge convolution
-    weights or local features are allocated.
+    Edge tiles use matrix products for dense contractions and CUDA kernels
+    for intervening expressions. Only attention scores span all edges;
+    convolution weights and local features are recomputed in bounded tiles.
     """
     if bias is None:
         bias = projection.new_zeros(projection.shape[1])
@@ -72,12 +69,6 @@ def base_program(metadata, inputs):
     )
 
 
-@lru_cache(maxsize=64)
-def forward_program(base):
-    nodes, score, value, *_ = base
-    return repr((nodes, ((score, 0, "target"), (value, 1, "target"))))
-
-
 @torch.library.custom_op("eqx::tece_interaction", mutates_args=(), device_types="cuda")
 def interaction(
     metadata: str,
@@ -85,7 +76,7 @@ def interaction(
     target: torch.Tensor,
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    from ....conv.codegen import launch
+    from .execution import forward
 
     inputs = [x.contiguous() for x in inputs]
     source, target = source.contiguous(), target.contiguous()
@@ -106,17 +97,7 @@ def interaction(
         denominator.fill_(base[-1])
         maximum.zero_()
         return [result, denominator, maximum]
-    launch(
-        forward_program(base),
-        inputs,
-        source,
-        target,
-        [result, denominator, maximum],
-        mode="online",
-        heads=base[4],
-        channels=base[5],
-        eps=base[-1],
-    )
+    forward(base, inputs, source, target, [result, denominator, maximum])
     return [result, denominator, maximum]
 
 
@@ -170,7 +151,7 @@ def contraction(
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate recursively differentiated local expressions as native kernels."""
-    from ....conv.codegen import launch
+    from .execution import launch
 
     inputs = [x.contiguous() for x in inputs]
     result = contraction_fake(metadata, source, target, inputs)

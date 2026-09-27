@@ -187,6 +187,12 @@ explicit parameter operands, without a live model callback. It supplies
 TECE-OAM-RRA interaction kernels and ``BilinearACE``; TACE owns the reference
 model. MACE adapters are separate in ``eqx.models.mace``.
 
+TECE-OAM-RRA evaluates dense contractions with tiled matrix products and fuses
+intervening expressions into CUDA kernels. Only attention scores span all
+edges; local features and radial weights are recomputed within each tile.
+Recursive adjoints use the same execution plan and reduce shared parameter
+gradients without materializing per-edge outer products.
+
 ``eqx.ace.TACE`` remains an independent atomic cluster expansion operator.
 ``eqx.o3.ElementLinear`` and ``MoEElementLinear`` read external element weights
 directly instead of allocating one weight matrix per node. Unlike the

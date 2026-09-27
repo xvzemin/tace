@@ -206,21 +206,22 @@ Earlier order-wise checkpoint weights are converted during ``load_state_dict``;
 no separate SO(2) implementation is required.
 ``TACE_USE_EQX=1`` also selects native CUDA fusion for attention-enabled
 ``UvSO2Interaction`` with SiLU, sigmoid, tanh or identity activations, including
-their scaled variants. A receiver-wise pass fuses feature gathering, rotations,
-the final radial projection, local linear maps, gates, optional edge products
-and rotary scores. Online softmax accumulates the denominator and weighted
-message together, evaluating each edge once. Split neighborhoods merge partial
-statistics and messages without repeating edge computations.
+their scaled variants. Bounded edge tiles evaluate dense contractions with
+matrix products and fuse the intervening expressions into CUDA kernels.
+The first pass retains only the attention scores, of shape ``(edges, heads)``,
+for receiver-wise softmax. The second pass recomputes local features and
+accumulates weighted messages at nodes. Convolution weights and intermediate
+features are allocated only within each tile, not across the full graph.
 Both existing cutoff factors and all checkpoint parameters are preserved.
 Other activations retain the PyTorch implementation.
 
 The operation saves its inputs and node outputs, denominators and detached
 maxima for backward, without retaining internal edge activations.
-Local intermediates use reusable shared memory; oversized derivative
-programs use a bounded overflow workspace rather than full-edge activations.
-The analytic attention adjoint and subsequent derivatives generate native CUDA
-expressions, including derivatives needed by force training. This path does
-not use CUDA Graph replay or a live Python callback registry.
+Backward recomputes tile-local activations. Shared parameter gradients contract
+over edges before forming the output matrix, avoiding per-edge outer products.
+The analytic attention adjoint and subsequent derivatives use the same tiled
+matrix products and CUDA expressions, including force-training derivatives.
+This path does not use CUDA Graph replay or a live Python callback registry.
 
 The registered operators expose tensor schemas, fake implementations and
 autograd rules to ``torch.compile``. Their architecture metadata is immutable

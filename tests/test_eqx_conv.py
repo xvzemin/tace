@@ -974,13 +974,21 @@ def test_streaming_graph_attention_weights(device, nodes):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("edges", [0, 7, 65, 257])
+@pytest.mark.parametrize("edges", [0, 7, 65, 257, 1025])
 def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     from eqx.models.tace.tece_oam_rra.interaction import stream
     from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.layout import LayoutTransform
+
+    if edges == 1025:
+        from functools import partial
+
+        from eqx.models.tace.tece_oam_rra import execution
+
+        monkeypatch.setattr(execution, "forward", partial(execution.forward, tile_size=256))
+        monkeypatch.setattr(execution, "launch", partial(execution.launch, tile_size=256))
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
     irreps = o3.Irreps("4x0e+4x1o+4x2e")
@@ -1029,7 +1037,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
             (torch.arange(edges, device=device) + 1) % nodes,
         )
     )
-    if edges == 257:
+    if edges >= 257:
         # Exercise split neighborhoods, empty receivers and zero edge weights.
         index[1] = (torch.arange(edges, device=device) % 5 == 0).long()
         with torch.no_grad():
@@ -1064,6 +1072,21 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         losses = [
             sum(g.square().sum() for g in values if g is not None) for values in grads
         ]
+    if device == "cuda" and edges == 7:
+        compiled = torch.compile(
+            lambda *args: stream(module, *args), backend="aot_eager", fullgraph=True
+        )
+        output = compiled(
+            x, radial, projection, bias, index, cutoff, rotation, inverse, basis
+        )
+        torch.testing.assert_close(output, expected, atol=1e-11, rtol=1e-10)
+        gradients = [
+            torch.autograd.grad(value.sum(), inputs, allow_unused=True, retain_graph=True)
+            for value in (output, expected)
+        ]
+        for a, b in zip(*gradients):
+            if a is not None and b is not None:
+                torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-7)
     if device == "cuda" and edges == 65:
         with torch.no_grad():
             module.temperature_logit.add_(0.2)
@@ -1656,7 +1679,7 @@ def test_local_channel_scaling():
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("experts", [1, 2, 4])
-@pytest.mark.parametrize("nodes", [0, 3, 5])
+@pytest.mark.parametrize("nodes", [0, 3, 9])
 @pytest.mark.parametrize("shared", [False, True])
 def test_bilinear_ace(device, experts, nodes, shared):
     if device == "cuda" and not torch.cuda.is_available():
