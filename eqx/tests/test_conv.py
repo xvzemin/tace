@@ -595,8 +595,13 @@ def test_shared_metadata_cache():
 @pytest.fixture
 def mace_model(double_precision):
     pytest.importorskip("mace")
+    import e3nn
     import numpy as np
     from mace import modules
+
+    defaults = e3nn.get_optimization_defaults()
+    if "jit_mode" in defaults:
+        e3nn.set_optimization_defaults(jit_mode="eager")
 
     def make(interaction="RealAgnosticResidualInteractionBlock"):
         return modules.ScaleShiftMACE(
@@ -620,7 +625,8 @@ def mace_model(double_precision):
             atomic_inter_shift=-0.4,
         )
 
-    return make
+    yield make
+    e3nn.set_optimization_defaults(**defaults)
 
 
 @pytest.fixture
@@ -646,6 +652,7 @@ def mace_data(mace_model):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize(
     "interaction",
     [
@@ -657,15 +664,21 @@ def mace_data(mace_model):
         "RealAgnosticResidualNonLinearInteractionBlock",
     ],
 )
-def test_mace_conversion_training(mace_model, mace_data, interaction, device):
+def test_mace_conversion_training(
+    mace_model, mace_data, interaction, device, implementation
+):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    from eqx.models.convolution import copy_model
     from eqx.models.mace import convert_mace_to_eqx
 
     reference = mace_model(interaction).to(device)
-    converted = deepcopy(reference)
+    converted = copy_model(reference)
     parameters = tuple(converted.parameters())
-    assert convert_mace_to_eqx(converted, inplace=True) is converted
+    assert (
+        convert_mace_to_eqx(converted, inplace=True, implementation=implementation)
+        is converted
+    )
     assert set(converted.parameters()) == set(parameters)
     assert type(converted) is type(reference)
     assert all(not hasattr(layer, "conv_fusion") for layer in reference.interactions)
@@ -691,33 +704,45 @@ def test_mace_conversion_training(mace_model, mace_data, interaction, device):
     assert not torch.equal(projection, before)
 
 
-def test_mace_conversion_ase_and_checkpoint(mace_model, mace_data, tmp_path):
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_mace_conversion_ase_and_checkpoint(
+    mace_model, mace_data, tmp_path, implementation
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     from mace.calculators import MACECalculator
 
     from eqx.models.mace import convert_mace_to_eqx
 
-    original = mace_model().eval()
+    original = mace_model().cuda().eval()
     original.interactions[0].conv_tp_weights.requires_grad_(False)
     # Conversion follows the model precision without changing the caller's default.
     torch.set_default_dtype(torch.float32)
-    converted = convert_mace_to_eqx(original)
+    converted = convert_mace_to_eqx(original, implementation=implementation)
     assert torch.get_default_dtype() == torch.float32
     assert not converted.training
     assert next(converted.parameters()).dtype == torch.float64
     assert not converted.interactions[0].conv_tp.projection.weight.requires_grad
     assert converted is not original
     assert not hasattr(original.interactions[0], "conv_fusion")
-    assert convert_mace_to_eqx(converted, inplace=True) is converted
-    assert convert_mace_to_eqx(converted) is not converted
+    assert (
+        convert_mace_to_eqx(converted, inplace=True, implementation=implementation)
+        is converted
+    )
+    assert (
+        convert_mace_to_eqx(converted, implementation=implementation) is not converted
+    )
     checkpoint = tmp_path / "mace-eqx.model"
     torch.save(converted, checkpoint)
     restored = torch.load(checkpoint, weights_only=False)
-    reloaded = convert_mace_to_eqx(original)
+    reloaded = convert_mace_to_eqx(original, implementation=implementation)
     reloaded.load_state_dict(converted.state_dict(), strict=True)
     results = []
     for model in (original, restored, reloaded):
         atoms = mace_data[0].copy()
-        atoms.calc = MACECalculator(models=model, device="cpu", default_dtype="float64")
+        atoms.calc = MACECalculator(
+            models=model, device="cuda", default_dtype="float64"
+        )
         results.append(
             (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
         )
@@ -728,13 +753,16 @@ def test_mace_conversion_ase_and_checkpoint(mace_model, mace_data, tmp_path):
             )
 
 
-def test_mace_conversion_solid_harmonics(mace_model, mace_data):
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_mace_conversion_solid_harmonics(mace_model, mace_data, implementation):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     from eqx.models.mace import convert_mace_to_eqx
 
-    original = mace_model()
+    original = mace_model().cuda()
     original.spherical_harmonics.normalize = False
-    converted = convert_mace_to_eqx(original)
-    batch = mace_data[1]
+    converted = convert_mace_to_eqx(original, implementation=implementation)
+    batch = mace_data[1].cuda()
     expected = original(batch.clone().to_dict(), training=True)
     actual = converted(batch.clone().to_dict(), training=True)
     for key in ("energy", "forces"):
@@ -742,7 +770,8 @@ def test_mace_conversion_solid_harmonics(mace_model, mace_data):
 
 
 @pytest.mark.parametrize("layout", ["mul_ir", "ir_mul"])
-def test_mace_conversion_cueq(mace_model, mace_data, layout):
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_mace_conversion_cueq(mace_model, mace_data, layout, implementation):
     if not torch.cuda.is_available():
         pytest.skip("cuEquivariance requires CUDA")
     pytest.importorskip("cuequivariance_torch")
@@ -752,9 +781,13 @@ def test_mace_conversion_cueq(mace_model, mace_data, layout):
 
     original = mace_model().cuda()
     if layout == "ir_mul":
-        converted = convert_mace_to_eqx(original, enable_cueq=True)
+        converted = convert_mace_to_eqx(
+            original, enable_cueq=True, implementation=implementation
+        )
     else:
-        converted = convert_mace_to_eqx(run(original, device="cuda", layout=layout))
+        converted = convert_mace_to_eqx(
+            run(original, device="cuda", layout=layout), implementation=implementation
+        )
     assert converted.interactions[0].cueq_config.layout_str == layout
     batch = mace_data[1].cuda()
     expected = original(batch.clone().to_dict(), training=True, compute_stress=True)

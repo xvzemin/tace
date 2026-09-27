@@ -60,13 +60,16 @@ directly. CUDA kernels support force training and higher derivatives.
 | `eqx.conv` | General fused convolutions and graph attention |
 | `eqx.o3` | Element-dependent Linear and Gate in `mul_ir` layout |
 | `eqx.ace` | Atomic cluster expansions |
-| `eqx.models` | TACE-specific fusion and MACE conversion |
+| `eqx.models` | TACE fusion and MACE, NequIP, SevenNet, Prophet conversion |
 | `eqx.kernels` | Shared geometry, compilation, and launch support |
 
 See the [convolution guide](https://tace.readthedocs.io/en/latest/equivariantx/convolutions.html)
 for fusion boundaries and the [API](https://tace.readthedocs.io/en/latest/equivariantx/api.html)
-for parameters. MACE conversion is available through
-`eqx.models.mace.convert_mace_to_eqx` with the optional `mace` dependency.
+for parameters. Model converters use `implementation="o3"` by default;
+`implementation="o2"` selects the equivalent aligned tensor product.
+Install the consuming model package separately or through the `mace`,
+`nequip`, or `sevennet` extras. Prophet is installed from its source repository.
+See [model integration](docs/source/models.rst) for usage and restrictions.
 
 ## Tests
 
@@ -78,7 +81,8 @@ pytest eqx/tests
 ```
 
 EQX tests do not require TACE. CUDA tests require the CUDA build dependencies
-and a GPU; MACE tests require MACE. Run TACE integration tests with `pytest tests`,
+and a GPU; model integration tests require the corresponding model package.
+Run TACE integration tests with `pytest tests`,
 or both suites with `pytest tests eqx/tests`.
 
 ## Citation

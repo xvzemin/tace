@@ -186,6 +186,12 @@ Supporting operators
      - TECE-OAM-RRA interaction and bilinear ACE fusion
    * - ``eqx.models.mace``
      - Conversion of existing MACE models
+   * - ``eqx.models.nequip``
+     - NequIP interaction conversion
+   * - ``eqx.models.sevennet``
+     - SevenNet convolution conversion
+   * - ``eqx.models.prophet``
+     - Prophet spatial convolution conversion
 
 TACE owns its model definition and checkpoint migration. TECE-OAM-RRA fusion
 stores attention scores, recomputes bounded edge tiles, and reduces shared
@@ -193,33 +199,4 @@ parameter gradients without per-edge weight matrices.
 ``StreamingGraphAttention`` is also available for tiled callbacks; those live
 Python callbacks are not standalone AOTI artifacts.
 
-MACE models
------------
-
-Install ``'./tace/eqx[mace,cuda]'`` from the parent of the cloned repository.
-The adapter supports spatial RealAgnostic MACE interactions, not magnetic
-models or all-even SO(3)-only harmonic inputs.
-
-Given an existing model:
-
-.. code-block:: python
-
-   from eqx.models.mace import convert_mace_to_eqx
-   from mace.calculators import MACECalculator
-
-   model = convert_mace_to_eqx(model)
-   calculator = MACECalculator(
-       models=model, device="cuda", default_dtype="float32"
-   )
-
-Conversion replaces interaction tensor products and their final radial
-projections, retaining the other model operations and all coupling paths.
-``enable_cueq=True`` converts the remaining supported operations through MACE;
-do not request a second conversion in the calculator.
-
-For training, convert before constructing the optimizer and call the model
-with ``training=True`` for force losses. Use a separate model instance for ASE,
-whose calculator disables parameter gradients. Load original checkpoints before
-conversion; converted state dictionaries have different parameter names.
-
-See :ref:`equivariantx-api` for signatures and supported interaction classes.
+See :doc:`models` for model conversion, training and ASE usage.

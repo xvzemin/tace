@@ -1,13 +1,13 @@
 """Convert MACE interactions to streamed tensor-product convolutions."""
 
 from collections import OrderedDict
-from copy import deepcopy
 
 import torch
+from e3nn import o3
 
-from eqx.conv import O2O3TensorProductConv
 from eqx.kernels import wigner_D
-from eqx.o2 import O3TensorProduct, WignerD
+from eqx.models.convolution import Convolution, RadialFeatures, copy_model
+from eqx.o2 import WignerD
 
 __all__ = ["convert_mace_to_eqx"]
 
@@ -45,101 +45,9 @@ class FrameAttributes(torch.nn.Module):
         return torch.cat(values, dim=-1)
 
 
-class RadialFeatures(torch.nn.Sequential):
-    """Evaluate the unchanged radial MLP except for its final projection."""
-
-    def __init__(self, layers, bias, hs):
-        super().__init__(layers)
-        self.bias = bias
-        # Preserve the full MLP widths for MACE's configuration extraction.
-        self.hs = list(hs)
-
-    def forward(self, inputs):
-        features = super().forward(inputs)
-        if self.bias:
-            features = torch.cat(
-                (features, features.new_ones((features.size(0), 1))), dim=-1
-            )
-        return features
-
-
-class Convolution(torch.nn.Module):
-    """Evaluate MACE paths with fused radial projection and target reduction."""
-
-    def __init__(self, tensor_product, projection, layout, attributes, backend):
-        super().__init__()
-        self.eqx_tp = O2O3TensorProductConv(tensor_product, backend=backend)
-        self.projection = projection
-        self.irreps_in1 = tensor_product.irreps_in1
-        self.irreps_in2 = tensor_product.irreps_in2
-        self.irreps_out = tensor_product.irreps_out
-        self.weight_numel = tensor_product.weight_numel
-        self.harmonic_dim = attributes.irreps_out.dim
-        self.packed_dim = attributes.packed_dim
-        self.normalize = attributes.normalize
-        self.affine = isinstance(projection, torch.nn.Linear)
-        self.projection_scale = (
-            1.0
-            if self.affine
-            else (projection.h_in * projection.var_in / projection.var_out) ** -0.5
-        )
-
-        input_index, output_index = [], []
-        if layout == "mul_ir":
-            for (mul, ir), section in zip(self.irreps_in1, self.irreps_in1.slices()):
-                input_index.extend(
-                    section.start + channel * ir.dim + m
-                    for m in range(ir.dim)
-                    for channel in range(mul)
-                )
-            for (mul, ir), section in zip(self.irreps_out, self.irreps_out.slices()):
-                output_index.extend(
-                    section.start + m * mul + channel
-                    for channel in range(mul)
-                    for m in range(ir.dim)
-                )
-        elif layout != "ir_mul":
-            raise ValueError(f"Unsupported MACE layout: {layout}")
-        self.register_buffer(
-            "input_index", torch.tensor(input_index, dtype=torch.long), persistent=False
-        )
-        self.register_buffer(
-            "output_index",
-            torch.tensor(output_index, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "amplitudes", torch.ones(1, len(self.irreps_in2)), persistent=False
-        )
-
-    def forward(self, node_feats, edge_attrs, radial, edge_index):
-        if self.input_index.numel():
-            node_feats = node_feats.index_select(-1, self.input_index)
-        if self.affine:
-            projection = self.projection.weight.T
-            if self.projection.bias is not None:
-                projection = torch.cat((projection, self.projection.bias[None]), dim=0)
-        else:
-            projection = self.projection.weight * self.projection_scale
-        end = self.harmonic_dim + self.packed_dim
-        amplitudes = (
-            self.amplitudes if self.normalize else edge_attrs[:, end:].contiguous()
-        )
-        message = self.eqx_tp(
-            node_feats.contiguous(),
-            radial.contiguous(),
-            projection,
-            edge_attrs[:, self.harmonic_dim : end].contiguous(),
-            amplitudes,
-            edge_index,
-            node_feats.size(0),
-        )
-        if self.output_index.numel():
-            message = message.index_select(-1, self.output_index)
-        return message
-
-
-def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cuda"):
+def convert_mace_to_eqx(
+    model, *, implementation="o3", enable_cueq=False, inplace=False, backend="cuda"
+):
     """Replace MACE spatial convolutions with streamed EQX operations.
 
     Parameters
@@ -147,6 +55,8 @@ def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cud
     model : torch.nn.Module
         MACE model with supported RealAgnostic interactions. Set its device
         and floating-point precision before conversion.
+    implementation : {"o3", "o2"}, optional
+        Direct or aligned convolution. Defaults to "o3".
     enable_cueq : bool, optional
         Also convert the remaining operators using MACE's cuEquivariance
         converter. Defaults to False. Existing cuEquivariance operators
@@ -174,7 +84,8 @@ def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cud
     RealAgnosticDensityInteractionBlock, RealAgnosticDensityResidualInteractionBlock,
     RealAgnosticAttResidualInteractionBlock and
     RealAgnosticResidualNonLinearInteractionBlock. Edge harmonics must have
-    natural spatial parity. Magnetic interactions are not supported.
+    natural spatial parity for the aligned implementation. Magnetic interactions
+    are not supported.
 
     The interaction classes, node linear maps, product bases and readouts
     remain unchanged. Only the convolution, radial MLP and harmonic attributes
@@ -187,20 +98,32 @@ def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cud
     it disables parameter gradients for inference, so use a separate model
     copy if training is also needed.
 
-    Save the converted module directly, or load its state dict into a model
-    converted in the same way. Original MACE state dicts must be loaded before
-    conversion. Importing this interface does not require MACE; calling it does.
+    Load a converted state dict into a model converted in the same way. Whole
+    module serialization follows the original model's pickling restrictions.
+    Original MACE state dicts must be loaded before conversion. Importing this
+    interface does not require MACE; calling it does.
     """
     from mace.modules.irreps_tools import tp_out_irreps_with_instructions
     from mace.modules.wrapper_ops import get_layout
     from mace.tools.torch_tools import default_dtype
 
+    if implementation not in ("o3", "o2"):
+        raise ValueError("implementation must be 'o3' or 'o2'.")
     if backend not in ("cuda", "torch"):
         raise ValueError("backend must be 'cuda' or 'torch'.")
     if not hasattr(model, "spherical_harmonics") or not hasattr(model, "interactions"):
         raise TypeError("Expected a MACE model with spatial interactions.")
-    if isinstance(model.spherical_harmonics, FrameAttributes):
-        return model if inplace else deepcopy(model)
+    converted = [isinstance(layer.conv_tp, Convolution) for layer in model.interactions]
+    if any(converted):
+        if not all(converted) or any(
+            layer.conv_tp.implementation != implementation
+            or layer.conv_tp.backend != backend
+            for layer in model.interactions
+        ):
+            raise ValueError(
+                "Convert the original model to select another implementation."
+            )
+        return model if inplace else copy_model(model)
     supported = {
         "RealAgnosticInteractionBlock",
         "RealAgnosticResidualInteractionBlock",
@@ -228,22 +151,25 @@ def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cud
             model = run(model, device=str(parameter.device), return_model=True)
             model.train(training)
         elif not inplace:
-            model = deepcopy(model)
+            model = copy_model(model)
 
         products, radials = [], []
         for layer in model.interactions:
-            irreps_out, instructions = tp_out_irreps_with_instructions(
-                layer.edge_irreps, layer.edge_attrs_irreps, layer.target_irreps
-            )
-            tp = O3TensorProduct(
-                layer.edge_irreps,
-                layer.edge_attrs_irreps,
-                irreps_out,
-                instructions,
-                internal_weights=False,
-                shared_weights=False,
-                normalization=model.spherical_harmonics.normalization,
-            )
+            if isinstance(layer.conv_tp, o3.TensorProduct):
+                tp = layer.conv_tp
+            else:
+                irreps_out, instructions = tp_out_irreps_with_instructions(
+                    layer.edge_irreps, layer.edge_attrs_irreps, layer.target_irreps
+                )
+                tp = o3.TensorProduct(
+                    layer.edge_irreps,
+                    layer.edge_attrs_irreps,
+                    irreps_out,
+                    instructions,
+                    internal_weights=False,
+                    shared_weights=False,
+                    compile_left_right=False,
+                )
             if tp.weight_numel != layer.conv_tp.weight_numel:
                 raise ValueError(
                     "MACE and EQX tensor-product path counts do not match."
@@ -263,9 +189,12 @@ def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cud
             products.append(tp)
             radials.append((radial, net, projection, affine))
 
-        attributes = FrameAttributes(
-            model.spherical_harmonics, max(tp.lmax for tp in products), backend
-        ).train(model.spherical_harmonics.training)
+        attributes = model.spherical_harmonics
+        if implementation == "o2":
+            lmax = max(max(tp.irreps_in1.lmax, tp.irreps_out.lmax) for tp in products)
+            attributes = FrameAttributes(attributes, lmax, backend).train(
+                attributes.training
+            )
         convolutions, radial_features = [], []
         for layer, tp, (radial, net, projection, affine) in zip(
             model.interactions, products, radials
@@ -274,9 +203,12 @@ def convert_mace_to_eqx(model, *, enable_cueq=False, inplace=False, backend="cud
                 Convolution(
                     tp,
                     projection,
-                    get_layout(getattr(layer, "cueq_config", None)),
-                    attributes,
-                    backend,
+                    layout=get_layout(getattr(layer, "cueq_config", None)),
+                    implementation=implementation,
+                    backend=backend,
+                    normalization=attributes.normalization,
+                    normalize=attributes.normalize,
+                    packed_dim=getattr(attributes, "packed_dim", 0),
                 ).train(layer.conv_tp.training)
             )
             radial_features.append(

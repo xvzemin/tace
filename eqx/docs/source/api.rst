@@ -118,12 +118,18 @@ Model-specific operators
 
 Specialized operators and adapters are organized by application under
 ``eqx.models``. TACE maintains its PyTorch model definition and checkpoint
-conversion separately; the MACE interface converts an existing model.
+conversion separately. Other adapters convert instantiated models.
 
 .. autoclass:: eqx.models.tace.tece_oam_rra.BilinearACE
    :members: forward
 
 .. autofunction:: eqx.models.mace.convert_mace_to_eqx
+
+.. autofunction:: eqx.models.nequip.convert_nequip_to_eqx
+
+.. autofunction:: eqx.models.sevennet.convert_sevennet_to_eqx
+
+.. autofunction:: eqx.models.prophet.convert_prophet_to_eqx
 
 Utilities
 ---------

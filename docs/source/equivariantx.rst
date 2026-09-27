@@ -6,4 +6,5 @@ EquivariantX
 
    equivariantx/tutorials
    equivariantx/convolutions
+   equivariantx/models
    equivariantx/api

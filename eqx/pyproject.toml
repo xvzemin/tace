@@ -20,6 +20,8 @@ dependencies = [
 dev = ["pytest"]
 cuda = ["ninja", "filelock"]
 mace = ["mace-torch>=0.3.17"]
+nequip = ["nequip>=0.19.1"]
+sevennet = ["sevenn>=0.13.0"]
 
 [project.urls]
 Homepage = "https://github.com/xvzemin/tace"
@@ -31,7 +33,8 @@ packages = [
     "eqx.conv", "eqx.conv.o2_o3", "eqx.conv.o3",
     "eqx.conv.uu_o2", "eqx.conv.uv_o2", "eqx.models",
     "eqx.models.tace", "eqx.models.tace.tece_oam_rra",
-    "eqx.models.mace",
+    "eqx.models.mace", "eqx.models.nequip", "eqx.models.sevennet",
+    "eqx.models.prophet",
 ]
 package-dir = { eqx = "." }
 
