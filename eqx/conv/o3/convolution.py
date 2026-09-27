@@ -11,7 +11,7 @@ import torch
 from e3nn import o3
 
 from ...utils import parse_metadata
-from ..contraction import adjoint_program
+from ..contraction import adjoint_program, gradient_mask
 
 
 @torch.library.custom_op("eqx::o3_contraction", mutates_args=(), device_types="cuda")
@@ -68,7 +68,8 @@ def contraction_backward(ctx, grad_outputs):
     source, target, *operands = ctx.saved_tensors
     metadata = parse_metadata(ctx.kernel_metadata)
     geometric = len(metadata) > 3
-    needs_grad = list(ctx.needs_input_grad[4])
+    required = gradient_mask(operands, ctx.needs_input_grad[4])
+    needs_grad = list(required)
     if geometric:
         for mapping, _, _ in ctx.program:
             needs_grad[mapping[5]] = False
@@ -84,7 +85,7 @@ def contraction_backward(ctx, grad_outputs):
         cotangents = {id(value): index for index, value in enumerate(values)}
         for mapping, weighted, pairs in ctx.program:
             index = mapping[5]
-            if not ctx.needs_input_grad[4][index]:
+            if not required[index]:
                 continue
             for output, slot in pairs:
                 if grad_outputs[slot] is None or (

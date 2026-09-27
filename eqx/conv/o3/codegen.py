@@ -135,7 +135,7 @@ def convolution_source(
         "int row_size",
     ]
     if concurrent:
-        args.append("int64_t tile")
+        args.extend(("int64_t tile", "int channel"))
     declaration = (
         "__device__ __forceinline__" if concurrent else 'extern "C" __global__'
     )
@@ -144,7 +144,7 @@ def convolution_source(
         "" if concurrent else HEADER.replace("SCALAR", dtype),
         f"{declaration} void {function or 'run'}(" + ", ".join(args) + ") {",
         "const int lane = threadIdx.x % 32;",
-        "const int u = int(blockIdx.y) * 32 + lane;",
+        f"const int u = {'channel' if concurrent else 'int(blockIdx.y)'} * 32 + lane;",
         f"const bool active = u < {mul};",
         f"const int64_t task = {tile} * (blockDim.x / 32) + threadIdx.x / 32;",
         "if (task >= tasks) return;",
@@ -367,19 +367,31 @@ def fused_source(
         'extern "C" __global__ void run(' + ", ".join(args) + ") {",
         "int64_t first = 0;",
     ]
-    for grouped in (True, False):
+    # Equal channel widths retain a rectangular grid. Unequal widths use
+    # only their own channel tiles, without padding to the largest phase.
+    uniform = len({(paths[0][3] + 31) // 32 for paths, _, _ in phases}) == 1
+    layouts = [
+        (owner >= 0, 1 if uniform else (paths[0][3] + 31) // 32)
+        for paths, _, owner in phases
+    ]
+    for grouped, channels in dict.fromkeys(layouts):
         indices = [
-            i for i, (_, _, owner) in enumerate(phases) if (owner >= 0) == grouped
+            i for i, layout in enumerate(layouts) if layout == (grouped, channels)
         ]
-        if not indices:
-            continue
         rows = "row_size" if grouped else "1"
+        tiles = len(indices) * channels
+        channel = (
+            "int(blockIdx.y)"
+            if uniform
+            else f"((int64_t(blockIdx.x) - first) / {len(indices)}) % {channels}"
+        )
         body += [
             "{",
             f"const int64_t tasks = (edges + {rows} - 1) / {rows};",
             "const int64_t blocks = (tasks + blockDim.x / 32 - 1) / (blockDim.x / 32);",
-            f"if (int64_t(blockIdx.x) < first + blocks * {len(indices)}) {{",
-            f"const int64_t tile = (int64_t(blockIdx.x) - first) / {len(indices)};",
+            f"if (int64_t(blockIdx.x) < first + blocks * {tiles}) {{",
+            f"const int64_t tile = (int64_t(blockIdx.x) - first) / {tiles};",
+            f"const int channel = {channel};",
             f"switch ((int64_t(blockIdx.x) - first) % {len(indices)}) {{",
         ]
         for local, i in enumerate(indices):
@@ -387,13 +399,11 @@ def fused_source(
             order = (
                 "source_order"
                 if owner == 0
-                else "target_order"
-                if owner == 1
-                else "nullptr"
+                else "target_order" if owner == 1 else "nullptr"
             )
             body.append(
-                f"case {local}: phase{i}({', '.join(names)}, source, target, {order}, edges, tasks, {rows}, tile); break;"
+                f"case {local}: phase{i}({', '.join(names)}, source, target, {order}, edges, tasks, {rows}, tile, channel); break;"
             )
-        body += ["}", "return; }", f"first += blocks * {len(indices)}; }}"]
+        body += ["}", "return; }", f"first += blocks * {tiles}; }}"]
     body.append("}")
     return "\n".join(body)

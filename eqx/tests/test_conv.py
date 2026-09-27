@@ -2798,6 +2798,148 @@ def test_cuda_degrees_and_channels(channels, dtype, double_precision):
         torch.testing.assert_close(value, target, atol=tolerance, rtol=tolerance)
 
 
+@pytest.mark.parametrize("edge_count", [35, 1031])
+def test_cuda_unequal_channels(edge_count, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.manual_seed(17)
+    irreps = o3.Irreps("3x0e + 33x1o + 65x2e")
+    harmonics = o3.Irreps("0e + 1o + 2e")
+    outputs, instructions = [], []
+    for i, (mul, ir1) in enumerate(irreps):
+        for j, (_, ir2) in enumerate(harmonics):
+            for ir in ir1 * ir2:
+                if ir.l <= 2:
+                    instructions.append((i, j, len(outputs), "uvu", True))
+                    outputs.append((mul, ir))
+    tp = o3.TensorProduct(
+        irreps,
+        harmonics,
+        outputs,
+        instructions,
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    module = eqx_conv.O3TensorProductConv(tp).cuda()
+    edges = torch.randint(7, (2, edge_count), device="cuda")
+    inputs = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (7, irreps.dim),
+            (edge_count, harmonics.dim),
+            (edge_count, 3),
+            (3, tp.weight_numel),
+        )
+    )
+    actual, expected = module(*inputs, edges), reference(tp, *inputs, edges)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        seed = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = (
+            torch.cat(
+                [
+                    value.flatten()
+                    for value in torch.autograd.grad(
+                        (value.sin() * seed).sum(), inputs, create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        )
+    torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+
+
+def test_cuda_requested_gradients(monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.kernels.cuda import runtime
+
+    tp = tensor_product().cuda()
+    module = eqx_conv.O3TensorProductConv(tp).cuda()
+    edges = torch.randint(4, (2, 13), device="cuda")
+    inputs = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (4, tp.irreps_in1.dim),
+            (13, tp.irreps_in2.dim),
+            (13, 3),
+            (3, tp.weight_numel),
+        )
+    )
+    masks = []
+    query = runtime().gradient_mask
+
+    def record(offset, count):
+        mask = query(offset, count)
+        masks.append(mask)
+        return mask
+
+    monkeypatch.setattr(runtime(), "gradient_mask", record)
+    actual, expected = module(*inputs, edges), reference(tp, *inputs, edges)
+    actual = torch.autograd.grad(actual.sin().sum(), inputs[0], create_graph=True)[0]
+    expected = torch.autograd.grad(expected.sin().sum(), inputs[0], create_graph=True)[
+        0
+    ]
+    assert masks[0] == [True, False, False, False, False]
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    # Pruning an unrequested first adjoint must preserve mixed derivatives.
+    actual = torch.autograd.grad(actual.square().sum(), inputs)
+    expected = torch.autograd.grad(expected.square().sum(), inputs)
+    for value, target in zip(actual, expected):
+        torch.testing.assert_close(value, target, atol=2e-9, rtol=2e-9)
+
+
+@pytest.mark.parametrize("directions", [False, True])
+def test_o2_requested_gradients(monkeypatch, directions, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.kernels.cuda import runtime
+
+    tp = o2.O3TensorProduct(
+        "3x1o", "1o", "3x0e+3x1e+3x2e", [(0, 0, i, "uvu", True) for i in range(3)]
+    ).cuda()
+    module = eqx_conv.O2O3TensorProductConv(tp).cuda()
+    reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+    frame = o2.WignerD(2, 2).cuda()
+    edges = torch.randint(4, (2, 13), device="cuda")
+    inputs = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in ((4, 9), (13, 3), (13, 3), (3, tp.weight_numel))
+    )
+    x, vectors, radial, projection = inputs
+    args = (
+        x,
+        radial,
+        projection,
+        frame.forward_packed(vectors),
+        x.new_ones(13, 1),
+        edges,
+        4,
+    )
+    masks = []
+    query = runtime().gradient_mask
+
+    def record(offset, count):
+        mask = query(offset, count)
+        masks.append(mask)
+        return mask
+
+    monkeypatch.setattr(runtime(), "gradient_mask", record)
+    actual = module(*args, vectors=vectors if directions else None)
+    expected = reference(*args)
+    actual = torch.autograd.grad(actual.sin().sum(), x, create_graph=True)[0]
+    count = len(masks)
+    expected = torch.autograd.grad(expected.sin().sum(), x, create_graph=True)[0]
+    # The native PyTorch backend must not load or call the CUDA runtime.
+    assert len(masks) == count
+    assert masks and all(sum(mask) == 1 for mask in masks)
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    actual = torch.autograd.grad(actual.square().sum(), inputs, retain_graph=True)
+    expected = torch.autograd.grad(expected.square().sum(), inputs)
+    for value, target in zip(actual, expected):
+        torch.testing.assert_close(value, target, atol=2e-9, rtol=2e-9)
+
+
 def test_empty_and_unsupported(double_precision):
     tp = tensor_product()
     conv = eqx_conv.O3TensorProductConv(tp)

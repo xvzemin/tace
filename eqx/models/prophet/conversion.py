@@ -89,8 +89,17 @@ def convert_prophet_to_eqx(
                 .to(parameter.device)
                 .train(module.tp.training)
             )
+        # Combine path sorting with the node output-layout permutation.
+        index = convolution.output_index
+        if not index.numel():
+            index = torch.arange(module.tp.irreps_out.dim, device=parameter.device)
+        convolution.output_index = torch.cat(
+            [index[section] for section in module.sort.slices_sorted]
+        )
+        convolution.irreps_out = module.sort.irreps_sorted
         module.tp_conv = convolution
         module.radial_mlp = radial
+        module.sort = torch.nn.Identity()
         del module.tp
         module.kernel = True
         return module

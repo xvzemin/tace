@@ -304,6 +304,14 @@ def test_conversion_training(model_case, implementation, backend, tolerance):
     )
     assert set(converted.parameters()) == set(parameters)
     assert type(converted) is type(reference)
+    if convert is convert_prophet_to_eqx:
+        for layer in converted.layers:
+            for convolution in layer.tpconv:
+                assert isinstance(convolution.sort, torch.nn.Identity)
+                assert (
+                    convolution.tp_conv.irreps_out
+                    == convolution.tp_conv.irreps_out.sort().irreps
+                )
     expected, actual = evaluate(reference), evaluate(converted)
     for a, b in zip(actual, expected):
         torch.testing.assert_close(a, b, **tolerance)

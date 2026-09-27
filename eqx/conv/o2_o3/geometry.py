@@ -8,6 +8,7 @@ from e3nn import o3
 
 from ...utils import parse_metadata
 from ..angular import generators
+from ..contraction import gradient_mask
 from .convolution import kernel_plan
 
 
@@ -175,6 +176,11 @@ def setup_context(ctx, inputs, output):
 
 def backward(ctx, grad_outputs):
     vectors, source, target, *operands = ctx.saved_tensors
+    required = (ctx.needs_input_grad[2], False, False, *ctx.needs_input_grad[5])
+    if ctx.use_cuda:
+        required = gradient_mask(
+            (vectors, source, target, *operands), required, offset=0
+        )
     values = list(operands)
     cotangents = {}
     for slot, gradient in enumerate(grad_outputs):
@@ -184,7 +190,7 @@ def backward(ctx, grad_outputs):
     terms, destinations = {}, {}
     direction_slot = None
     placeholder = len(values)
-    if ctx.needs_input_grad[2]:
+    if required[0]:
         values.append(vectors.new_empty(1).expand_as(vectors))
     plan = kernel_plan(ctx.kernel_metadata)
     for rank, mapping, weighted_only, pairs in ctx.program:
@@ -198,10 +204,10 @@ def backward(ctx, grad_outputs):
             weighted = plan.has_unweighted and (weighted_only or output in (1, 2))
             key = rank, tuple(replacement), weighted
             for role, index in enumerate(mapping):
-                if role not in (output, 3, 4) and ctx.needs_input_grad[5][index]:
+                if role not in (output, 3, 4) and required[3 + index]:
                     destination = destinations.setdefault(index, len(destinations))
                     terms.setdefault(key, []).append((role, destination))
-    if ctx.needs_input_grad[2]:
+    if required[0]:
         direction_slot = len(destinations)
         for rank, mapping, weighted_only, pairs in ctx.program:
             for output, slot in pairs:

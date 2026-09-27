@@ -4,6 +4,7 @@
 #include <nvrtc.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <torch/csrc/autograd/function.h>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -145,8 +146,18 @@ void launch(std::vector<Launch> calls, uint64_t stream,
     check(status);
 }
 
+std::vector<bool> gradient_mask(size_t offset, size_t count) {
+    auto node = torch::autograd::get_current_node();
+    if (!node || node->next_edges().size() != offset + count) return {};
+    std::vector<bool> result(count);
+    for (size_t i = 0; i < count; ++i)
+        result[i] = node->task_should_compute_output(offset + i);
+    return result;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("compile", &compile);
+    m.def("gradient_mask", &gradient_mask);
     m.def("launch", &launch, py::arg("calls"), py::arg("stream"),
           py::arg("shared_arguments") = std::vector<uint64_t>{});
     m.def("version", []() {

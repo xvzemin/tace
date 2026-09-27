@@ -1,5 +1,17 @@
 """Transpose multilinear convolution programs without truncating derivatives."""
 
+import torch
+
+
+def gradient_mask(operands, required, offset=2):
+    """Select input adjoints requested by the current autograd task."""
+    if not operands[0].is_cuda or torch.compiler.is_compiling():
+        return required
+    from ..kernels.cuda import runtime
+
+    active = runtime().gradient_mask(offset, len(operands))
+    return [a and b for a, b in zip(required, active)] if active else required
+
 
 def adjoint_program(program, operands, grad_outputs, needs_grad, has_unweighted):
     """Transpose requested outputs, retaining the dependencies of each path."""

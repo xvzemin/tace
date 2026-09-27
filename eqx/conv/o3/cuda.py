@@ -131,7 +131,9 @@ def execution_plan(
                 (
                     kernel,
                     max(paths[0][3] for paths, _, _ in phases),
-                    tuple(owner for _, _, owner in phases),
+                    tuple(
+                        (owner, (paths[0][3] + 31) // 32) for paths, _, owner in phases
+                    ),
                     threads,
                 )
             )
@@ -177,7 +179,9 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
         for owner in {
             owner
             for phase in phases
-            for owner in (phase[2] if isinstance(phase[2], tuple) else (phase[2],))
+            for owner, _ in (
+                phase[2] if isinstance(phase[2], tuple) else ((phase[2], 1),)
+            )
         }
         if owner >= 0
     }
@@ -197,8 +201,13 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
             warps = threads // 32
             edge_blocks = (source.numel() + warps - 1) // warps
             node_blocks = (source.numel() + ROW_SIZE * warps - 1) // (ROW_SIZE * warps)
-            count = sum(node_blocks if index >= 0 else edge_blocks for index in owner)
-            launches.append((kernel, arguments, count, (width + 31) // 32, threads, 0))
+            count = sum(
+                (node_blocks if index >= 0 else edge_blocks) * channels
+                for index, channels in owner
+            )
+            widths = {channels for _, channels in owner}
+            columns = widths.pop() if len(widths) == 1 else 1
+            launches.append((kernel, arguments, count // columns, columns, threads, 0))
             continue
         rows = ROW_SIZE if owner >= 0 else 1
         count = (source.numel() + rows - 1) // rows

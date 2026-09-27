@@ -13,7 +13,7 @@ import torch
 from e3nn import o3
 
 from ...utils import parse_metadata
-from ..contraction import adjoint_program
+from ..contraction import adjoint_program, gradient_mask
 
 
 @dataclass(eq=False)
@@ -100,7 +100,7 @@ def contraction_backward(ctx, grad_outputs):
         ctx.program,
         operands,
         grad_outputs,
-        ctx.needs_input_grad[4],
+        gradient_mask(operands, ctx.needs_input_grad[4]),
         kernel_plan(ctx.kernel_metadata).has_unweighted,
     )
     gradients = [None] * len(operands)
