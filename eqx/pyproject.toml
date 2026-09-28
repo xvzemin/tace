@@ -39,7 +39,7 @@ packages = [
 package-dir = { eqx = "." }
 
 [tool.setuptools.package-data]
-eqx = ["README.md", "kernels/csrc/*.cpp", "kernels/csrc/*.cuh", "kernels/csrc/*.in"]
+eqx = ["README.md", "kernels/csrc/*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

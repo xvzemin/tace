@@ -77,7 +77,7 @@ class CircularHarmonics(torch.nn.Module):
     Notes
     -----
     The output follows flattened ``ir_mul`` order from ``0ee`` through
-    ``mmax`` and has representation metadata in :attr:`irreps_out`.
+    ``mmax`` and has representation metadata in ``irreps_out``.
     """
 
     def __init__(

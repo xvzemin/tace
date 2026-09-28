@@ -268,11 +268,9 @@ class UvO2TensorProductConv(torch.nn.Module):
 
     Notes
     -----
-    CUDA fuses gather, degree-wise rotations, basis changes and radial scaling;
-    normalized gates; attention scores; and inverse rotation with aggregation.
-    Channel mixing uses batched GEMM rather than per-edge matrix-vector loops.
-    Local GEMM operands are materialized, but global edge messages are not.
-    Analytic expression adjoints support higher derivatives and torch.compile.
+    Features use flattened ``ir_mul`` storage. CUDA fuses frame operations,
+    gates and aggregation; channel mixing uses PyTorch matrix products.
+    Both backends support higher derivatives.
     """
 
     def __init__(

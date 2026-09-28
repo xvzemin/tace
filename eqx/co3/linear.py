@@ -27,7 +27,7 @@ class Linear(torch.nn.Module):
         Store trainable weights. Defaults to True unless shared_weights=False.
     shared_weights : bool, optional
         Share weights across leading feature dimensions. Defaults to True.
-    instructions : sequence of (int, int), optional
+    instructions : list of tuple of int, optional
         Input/output entry pairs. Defaults to all equal-irrep pairs.
     biases : bool or sequence of bool, optional
         Add biases to invariant scalar outputs.
@@ -150,11 +150,12 @@ class Linear(torch.nn.Module):
                 else None
             )
         self.cartesian_out = cartesian_out
-        self.projection = (
-            ChangeOfBasis(cartesian_out, inverse=True)
-            if output_basis == "spherical"
-            else Projector(cartesian_out) if project else torch.nn.Identity()
-        )
+        if output_basis == "spherical":
+            self.projection = ChangeOfBasis(cartesian_out, inverse=True)
+        elif project:
+            self.projection = Projector(cartesian_out)
+        else:
+            self.projection = torch.nn.Identity()
         connected = {ins.i_out for ins in self.instructions if all(ins.path_shape)}
         self.register_buffer(
             "output_mask",

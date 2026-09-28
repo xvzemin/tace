@@ -20,12 +20,24 @@ autodoc_typehints = "none"
 autosummary_generate = True
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
+napoleon_preprocess_types = True
+napoleon_type_aliases = {
+    "sequence": "collections.abc.Sequence",
+    "iterable": "collections.abc.Iterable",
+    "callable": "collections.abc.Callable",
+    "o3.Irreps": "e3nn.o3.Irreps",
+    "o3.Linear": "``e3nn.o3.Linear``",
+    "o3.TensorProduct": "e3nn.o3.TensorProduct",
+    "LocalFrame": "eqx.o2.LocalFrame",
+    "UuLinear": "eqx.o2.UuLinear",
+}
 napoleon_use_param = True
 napoleon_use_rtype = True
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "torch": ("https://docs.pytorch.org/docs/stable/", None),
+    "e3nn": ("https://docs.e3nn.org/en/stable/", None),
 }
 
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]

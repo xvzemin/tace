@@ -24,6 +24,7 @@ A CUDA toolkit is required; set `CUDA_HOME` if necessary. Generated kernels
 compile on first use and are cached. A standalone package release is planned.
 With e3nn 0.4.x, import `eqx` before `e3nn.o3`. Global time-odd irreps require
 the time-reversal e3nn extension.
+On e3nn 0.4.x, supported O(3) degrees are limited by its packaged CG table.
 
 ## Native operations and frames
 
@@ -51,7 +52,7 @@ for runnable Linear, Gate, TensorProduct, and frame-conversion examples.
 
 The CGTP interfaces preserve the supplied paths, weights, and normalization.
 The aligned CGTP requires natural-parity, time-even harmonic edge inputs with
-one channel per degree. Native Uu/Uv convolutions parameterize O(2) maps
+one channel per irrep entry. Native Uu/Uv convolutions parameterize O(2) maps
 directly. CUDA kernels support force training and higher derivatives.
 
 | Module | Role |
@@ -62,7 +63,7 @@ directly. CUDA kernels support force training and higher derivatives.
 | `eqx.conv` | General fused convolutions and graph attention |
 | `eqx.o3` | Element-dependent Linear and Gate in `mul_ir` layout |
 | `eqx.ace` | Atomic cluster expansions |
-| `eqx.models` | TACE fusion and MACE, NequIP, SevenNet, Prophet conversion |
+| `eqx.models` | TACE fusion and MACE, NequIP, SevenNet, Prophet, EquFlash conversion |
 | `eqx.kernels` | Shared geometry, compilation, and launch support |
 
 See the [convolution guide](https://tace.readthedocs.io/en/latest/equivariantx/convolutions.html)
@@ -73,27 +74,10 @@ Install the consuming model package separately or through the `mace`,
 `nequip`, or `sevennet` extras. Prophet is installed from its source repository.
 See [model integration](docs/source/models.rst) for usage and restrictions.
 
-## Cartesian O(3)
-
-`co3` stores each degree-`l` tensor as `(..., mul, 3**l)` before flattening.
-Iteration yields `(mul, ir)`. The symmetric traceless subspace has `2*l+1`
-independent coordinates; `ChangeOfBasis` converts to and from spherical
-features through orthonormal path matrices. Tensor products retain all
-requested delta/epsilon paths and their independent weights. `project=False`
-defers output projection past sums and channel-linear maps, but not past
-nonlinearities or subsequent tensor products.
-
-See the [Cartesian tutorial](docs/source/cartesian.rst) for normalization,
-operators, and equivalent-model conversion.
-
-## Cartesian O(2)
-
-`co2` provides two-dimensional STF tensors and conversions to compact O(2)
-features. `co2.O3TensorProduct` uses transverse Cartesian restriction to
-evaluate harmonic CGTP paths without explicit local frames. Paths, weights,
-and normalization are preserved, including conversions from `co3.TensorProduct`.
-These are PyTorch reference operators, not fused CUDA kernels. See the
-[Cartesian O(2) tutorial](docs/source/cartesian_o2.rst) for examples and limits.
+Cartesian operators use flattened `mul_ir` storage and retain all requested
+tensor-product paths. See the [Cartesian O(3)](docs/source/cartesian.rst) and
+[Cartesian O(2)](docs/source/cartesian_o2.rst) tutorials for basis conversion,
+normalization, and deferred projection.
 
 ## Tests
 
@@ -116,12 +100,12 @@ please cite:
 
 ```bibtex
 @misc{eqx,
-  title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local O(2) Frames}, 
+  title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local O(2) Frames},
   author={Zemin Xu and Peijun Hu and Wenbo Xie},
   year={2026},
   eprint={2608.16592},
   archivePrefix={arXiv},
   primaryClass={physics.chem-ph},
-  url={https://arxiv.org/abs/2608.16592}, 
+  url={https://arxiv.org/abs/2608.16592},
 }
 ```

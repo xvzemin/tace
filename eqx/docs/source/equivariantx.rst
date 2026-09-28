@@ -31,6 +31,7 @@ release is planned.
 
 With e3nn 0.4.x, import ``eqx`` before ``e3nn.o3``. Global time-odd irreps
 require the time-reversal e3nn extension.
+Supported O(3) degrees on e3nn 0.4.x are limited by its packaged CG table.
 
 Representations and layouts
 ---------------------------

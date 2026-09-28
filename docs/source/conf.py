@@ -32,6 +32,17 @@ myst_heading_anchors = 3
 
 autodoc_member_order = "bysource"
 autodoc_typehints = "none"
+napoleon_preprocess_types = True
+napoleon_type_aliases = {
+    "sequence": "collections.abc.Sequence",
+    "iterable": "collections.abc.Iterable",
+    "callable": "collections.abc.Callable",
+    "o3.Irreps": "e3nn.o3.Irreps",
+    "o3.Linear": "``e3nn.o3.Linear``",
+    "o3.TensorProduct": "e3nn.o3.TensorProduct",
+    "LocalFrame": "eqx.o2.LocalFrame",
+    "UuLinear": "eqx.o2.UuLinear",
+}
 autodoc_mock_imports = ["torch_sim"]
 autosummary_generate = True
 source_suffix = {

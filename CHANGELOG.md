@@ -10,11 +10,5 @@ modeling, with unified scalar and tensorial physical inputs and outputs.
 Integrated Cartesian, spherical, and SO(2) models with atomic and edge cluster
 expansions, optional attention, broad physical-property support, foundation
 models, and full, frozen, or LoRA fine-tuning. Added OEQ, CUEQ edge acceleration,
-EQT node acceleration, `uuSO2Interaction` Triton scatter,
-`torch.compile`, and AOTI workflows.
+EQT node acceleration, and AOTI workflows.
 
-## v0.3.0
-
-Focuses on code optimization and component refactoring while developing
-large-scale models, native long-range interactions, and noncollinear magnetic
-models.

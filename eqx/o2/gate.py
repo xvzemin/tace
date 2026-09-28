@@ -8,7 +8,7 @@ from typing import Callable, NamedTuple, Optional, Sequence
 import torch
 from e3nn.math import normalize2mom
 
-from ._layout import _Permute
+from .._layout import _Permute
 from .irreps import Irrep, Irreps, IrrepsLike
 
 

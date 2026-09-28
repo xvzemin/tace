@@ -122,12 +122,15 @@ include = [
     "eqx",
     "eqx.*",
 ]
-exclude = ["eqx.build", "eqx.build.*", "eqx.dist", "eqx.dist.*", "eqx.tests", "eqx.tests.*"]
+exclude = [
+    "eqx.build", "eqx.build.*", "eqx.dist", "eqx.dist.*",
+    "eqx.tests", "eqx.tests.*", "eqx.docs", "eqx.docs.*",
+]
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
 "tace.models.scf" = ["*.md", "longrange/*.md"]
-"eqx" = ["README.md", "kernels/csrc/*.cpp", "kernels/csrc/*.cuh", "kernels/csrc/*.in"]
+"eqx" = ["README.md", "kernels/csrc/*.cpp"]
 
 [tool.ruff]
 target-version = "py39"

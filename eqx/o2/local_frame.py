@@ -9,7 +9,8 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
-from ._layout import _Permute, wigner_indices, wigner_orders
+from .._layout import _Permute
+from ._layout import wigner_indices, wigner_orders
 from .irreps import Irrep, Irreps
 
 

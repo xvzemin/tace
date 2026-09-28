@@ -87,21 +87,10 @@ def convert_mace_to_eqx(
     natural spatial parity for the aligned implementation. Magnetic interactions
     are not supported.
 
-    The interaction classes, node linear maps, product bases and readouts
-    remain unchanged. Only the convolution, radial MLP and harmonic attributes
-    are adapted. The final radial projection is moved into the convolution,
-    changing its parameter names but not its values or trainability.
-
-    Convert before constructing the optimizer or distributed wrapper.
-    Force training requires the usual MACE ``training=True`` forward argument.
-    Do not enable another backend conversion in the ASE calculator afterwards;
-    it disables parameter gradients for inference, so use a separate model
-    copy if training is also needed.
-
-    Load a converted state dict into a model converted in the same way. Whole
-    module serialization follows the original model's pickling restrictions.
-    Original MACE state dicts must be loaded before conversion. Importing this
-    interface does not require MACE; calling it does.
+    Load weights before conversion, and construct the optimizer afterwards.
+    Force training requires ``training=True`` in the model's forward call.
+    Converted state dictionaries require an identically converted architecture.
+    Use a separate model instance for ASE, which disables parameter gradients.
     """
     from mace.modules.irreps_tools import tp_out_irreps_with_instructions
     from mace.modules.wrapper_ops import get_layout

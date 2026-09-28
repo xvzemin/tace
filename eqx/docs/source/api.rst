@@ -73,8 +73,8 @@ These interfaces retain their supplied paths, weights, and normalization.
 Cartesian operands use flattened ``mul_ir`` layout; the other convolutions
 use flattened ``ir_mul``. CUDA kernels support
 float32 and float64, force training, and recursive higher derivatives.
-CGTP and uu convolutions also provide a PyTorch reference backend. The uv
-interface is CUDA-only; its reference is the composition of native operators.
+Every convolution provides a native PyTorch reference backend with automatic
+differentiation, selected by ``backend="torch"``.
 
 .. autoclass:: eqx.conv.O3TensorProductConv
    :members: forward

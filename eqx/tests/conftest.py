@@ -29,3 +29,17 @@ def isolated_state():
 def double_precision():
     torch.set_default_dtype(torch.float64)
     torch.manual_seed(12)
+
+
+@pytest.fixture
+def wigner_3j():
+    """Skip reference degrees absent from the installed e3nn CG table."""
+    from e3nn import o3
+
+    def coefficients(*args, **kwargs):
+        try:
+            return o3.wigner_3j(*args, **kwargs)
+        except NotImplementedError as error:
+            pytest.skip(str(error))
+
+    return coefficients

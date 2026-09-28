@@ -137,26 +137,9 @@ class O3TensorProductConv(torch.nn.Module):
 
     Notes
     -----
-    Features use flattened ``ir_mul`` order within each irrep. Instruction
-    order, weight order and output multiplicities are preserved, including
-    repeated output irreps. The CUDA contraction fuses source gathering,
-    sparse Clebsch--Gordan products and target reduction.
-    Edge messages are not materialized. Radial projections use bounded
-    temporary workspaces that are recomputed rather than saved for backward.
-
-    Forward and transposed contractions share a multilinear program. Each
-    backward transposes that program again, supporting force training and
-    higher derivatives. Shared angular factors and partial gradients are
-    reused across paths and derivative terms.
-    Vector inputs use fixed Cartesian harmonic polynomials. Their derivatives
-    are contracted in registers before channel reduction, without storing
-    spherical-harmonic cotangents. Integer polynomial coefficients are
-    collected before normalization; there is no angular grid or fitted basis.
-    Compatible path tiles share a CUDA grid and are interleaved over the same
-    edge ranges. Compiled register usage limits fusion; larger programs retain
-    separate launches. Concurrent reductions preserve independent path outputs.
-    Reductions use atomic additions and are not generally deterministic.
-    Warm up required derivatives before CUDA Graph capture.
+    Features use flattened ``ir_mul`` storage. Instructions, weights and
+    output multiplicities are preserved. CUDA supports float32 and float64,
+    including higher derivatives. Atomic reductions are not bitwise deterministic.
     """
 
     def __init__(

@@ -5,7 +5,6 @@
 
 """Packed Wigner matrices with quaternion and recursive CUDA kernels."""
 
-from functools import lru_cache
 from weakref import ref
 
 import torch

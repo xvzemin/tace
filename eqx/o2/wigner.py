@@ -166,10 +166,26 @@ class WignerD(torch.nn.Module):
     def matrix_blocks(
         self, vectors: torch.Tensor, *, method=None
     ) -> list[torch.Tensor]:
-        """Return degree matrices, optionally overriding the construction method."""
+        """Return one rotation matrix per degree.
+
+        Parameters
+        ----------
+        vectors : torch.Tensor
+            Nonzero vectors with shape ``(batch, 3)``.
+        method : {"auto", "quaternion", "recursive"}, optional
+            Override the construction method for this call.
+
+        Returns
+        -------
+        list of torch.Tensor
+            Degree-l matrices with shape ``(batch, 2*l+1, 2*l+1)``, in
+            increasing degree order.
+        """
         if vectors.ndim != 2 or vectors.shape[-1] != 3:
             raise ValueError("vectors must have shape (batch, 3).")
         method = getattr(self, "method", "auto") if method is None else method
+        if method not in ("auto", "quaternion", "recursive"):
+            raise ValueError("method must be auto, quaternion or recursive.")
         if method != "recursive" and (vectors.is_cuda or method == "quaternion"):
             packed = self.forward_packed(vectors, method=method)
             return [

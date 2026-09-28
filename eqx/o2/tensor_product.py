@@ -427,7 +427,7 @@ class TensorProduct(torch.nn.Module):
         Parameters
         ----------
         instruction : int
-            Index into :attr:`instructions`.
+            Index into ``instructions``.
         weight : torch.Tensor, optional
             Weight storage to view. The module weight is used when omitted.
 

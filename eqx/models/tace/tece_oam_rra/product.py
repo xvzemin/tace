@@ -33,11 +33,8 @@ class BilinearACE(torch.nn.Module):
     -----
     Features use flattened ``mul_ir`` layout. Weights and biases remain owned
     by the caller. The order-one contribution is added by the caller.
-    Expert and shared maps reuse a block-local angular tile. Their transposes
-    are combined before differentiating the product inputs and gate, without
-    a full product-gradient buffer. Recursive contractions support higher
-    derivatives, including force training. Atomic reductions are used in
-    backward and need not be bitwise deterministic.
+    Both backends support higher derivatives. CUDA weight gradients use
+    atomic reductions and are not bitwise deterministic.
     """
 
     def __init__(

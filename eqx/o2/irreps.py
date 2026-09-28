@@ -202,7 +202,7 @@ class Irrep:
 
         Parameters
         ----------
-        angle : array-like
+        angle : torch.Tensor or float
             Rotation angle in radians.
         reflected : bool, optional
             Compose the rotation with the canonical reflection.
@@ -488,7 +488,7 @@ class Irreps:
         Returns
         -------
         torch.Tensor
-            Random features with ``-1`` replaced by :attr:`dim`. Within each
+            Random features with ``-1`` replaced by ``dim``. Within each
             entry, features use flattened ``ir_mul`` order.
         """
         if size.count(-1) != 1:
@@ -545,7 +545,7 @@ class Irreps:
 
         Parameters
         ----------
-        angle : array-like
+        angle : torch.Tensor or float
             Rotation angle in radians.
         reflected : bool, optional
             Compose the rotation with the canonical reflection.

@@ -1,4 +1,3 @@
-import doctest
 import re
 import subprocess
 import sys
@@ -46,20 +45,19 @@ assert 'eqx.kernels.cuda' not in sys.modules
 """
     subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=Path(__file__).resolve().parents[2],
         check=True,
         capture_output=True,
         text=True,
     )
 
 
-@pytest.mark.parametrize("page", ["equivariantx", "convolutions"])
+@pytest.mark.parametrize(
+    "page", ["equivariantx", "convolutions", "cartesian", "cartesian_o2"]
+)
 def test_documentation_examples(page):
     path = Path(__file__).resolve().parents[1] / "docs/source" / f"{page}.rst"
     source = path.read_text()
-    if page == "convolutions":
-        # MACE workflows require external checkpoints and data, not just EQX.
-        source = source.partition("\nMACE models\n")[0]
     blocks = re.findall(
         r"^\.\. code-block:: python\n\n((?:(?:   [^\n]*|)\n)+)",
         source,
@@ -77,16 +75,12 @@ def test_documentation_examples(page):
         torch.set_default_dtype(dtype)
 
 
-@pytest.mark.parametrize("operator", [o2.Linear, o2.TensorProduct])
-def test_operator_docstrings(operator):
-    examples = doctest.DocTestParser().get_doctest(
-        operator.__doc__,
-        {operator.__name__: operator, "torch": torch},
-        operator.__name__,
-        None,
-        None,
-    )
-    doctest.DebugRunner().run(examples)
+@pytest.mark.parametrize("device", ["cpu", DEVICE])
+def test_wigner_invalid_method(device):
+    wigner = o2.WignerD(lmax=2, mmax=2).to(device)
+    vectors = torch.randn(3, 3, device=device)
+    with pytest.raises(ValueError, match="method"):
+        wigner.matrix_blocks(vectors, method="invalid")
 
 
 def _transform(features, irreps, angle, reflected=False, time_reversal=False):
@@ -140,8 +134,8 @@ def test_eqx_without_optional_backends(device):
 import sys
 import torch
 
-# Match both import failure and find_spec returning None for absent packages.
-sys.modules.update({name: None for name in ("triton", "torch_geometric", "torch_scatter")})
+# Do not mask PyTorch's own dependencies, including Triton on recent CUDA builds.
+sys.modules.update({name: None for name in ("torch_geometric", "torch_scatter")})
 from eqx import conv as eqx_conv
 from eqx import o2
 
@@ -197,7 +191,7 @@ else:
         raise AssertionError("CUDA execution must report the missing toolkit")
     finally:
         torch.utils.cpp_extension.CUDA_HOME = cuda_home
-    # The default CUDA construction also works without Triton or PyG.
+    # The default CUDA construction also works without PyG.
     quaternion_frame = o2.WignerD(2, 2).to(device)
     for actual, expected in zip(quaternion_frame(vectors), (d, di)):
         torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
@@ -205,7 +199,7 @@ else:
 """
     result = subprocess.run(
         [sys.executable, "-c", script, device],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
         text=True,
     )

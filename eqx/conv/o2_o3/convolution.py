@@ -147,20 +147,11 @@ class O2O3TensorProductConv(torch.nn.Module):
 
     Notes
     -----
-    Features use flattened ``ir_mul`` layout. Instruction order, independent
-    path outputs, weights and normalization follow the supplied tensor product.
-    CUDA fuses gather, angular coupling and target reduction without
-    materializing global edge messages. Compatible paths share angular factors;
-    radial projections use bounded workspaces and are recomputed for backward.
-
-    Vector inputs support all methods. Without vectors, supplied Wigner matrix
-    entries are differentiated directly. CUDA contraction programs support
-    force training and higher derivatives through recursive transposition.
-    Harmonic amplitudes remain independent differentiable operands.
-
-    CUDA programs compile lazily and are cached by static metadata. Atomic
-    reductions are not generally bitwise deterministic. Warm up the required
-    derivatives before CUDA Graph capture.
+    Features use flattened ``ir_mul`` storage. Instructions, weights and
+    output multiplicities are preserved. Method selection applies to vector
+    inputs. Without vectors, supplied Wigner matrices are used directly.
+    CUDA supports float32, float64 and higher derivatives. Atomic reductions
+    are not bitwise deterministic.
     """
 
     def __init__(self, tensor_product, *, backend="cuda", method="auto"):

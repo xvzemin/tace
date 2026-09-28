@@ -47,17 +47,10 @@ class CartesianTensorProductConv(O3TensorProductConv):
 
     Notes
     -----
-    Inputs and outputs use flattened ``mul_ir`` layout. Inputs must be
-    symmetric traceless tensors. Every output path is retained.
-    ``tensor_product.project`` selects STF or raw outputs. CUDA applies
-    projection after aggregation.
-    Symmetric inputs use exponent triples and exact contraction multiplicities.
-    Raw output symmetry is retained within each free-index group, without
-    symmetrizing between groups. Full output storage is restored only when
-    ``compact_output=False``.
-    Radial projections use bounded temporary workspaces, recomputed during
-    backward. Vector inputs evaluate harmonics and their derivatives inside
-    the CUDA contraction. The same contraction supports higher derivatives.
+    Cartesian inputs must be symmetric traceless and use flattened ``mul_ir``
+    storage. Every output path is retained. ``tensor_product.project`` selects
+    STF or raw outputs; CUDA projects after aggregation. Both backends support
+    higher derivatives.
     """
 
     def __init__(

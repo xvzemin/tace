@@ -18,7 +18,7 @@ class Linear(torch.nn.Module):
         Cartesian input and output representations.
     internal_weights, shared_weights : bool, optional
         Store parameters and share weights over leading dimensions.
-    instructions : sequence of (int, int), optional
+    instructions : list of tuple of int, optional
         Input/output entry pairs. Defaults to all matching irreps.
     biases : bool or sequence of bool, optional
         Biases on reflection- and time-even scalar outputs.
@@ -85,11 +85,12 @@ class Linear(torch.nn.Module):
                 self.register_parameter(name, value)
             else:
                 self.register_buffer(name, value)
-        self.projection = (
-            ChangeOfBasis(self.cartesian_out, inverse=True)
-            if output_basis == "circular"
-            else Projector(self.cartesian_out) if project else torch.nn.Identity()
-        )
+        if output_basis == "circular":
+            self.projection = ChangeOfBasis(self.cartesian_out, inverse=True)
+        elif project:
+            self.projection = Projector(self.cartesian_out)
+        else:
+            self.projection = torch.nn.Identity()
         connected = {ins.i_out for ins in self.instructions if ins.path_weight}
         self.register_buffer(
             "output_mask",
@@ -110,9 +111,8 @@ class Linear(torch.nn.Module):
         """Mix (..., irreps_in.dim) features with optional external parameters."""
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        weight, bias = self.weight if weight is None else weight, (
-            self.bias if bias is None else bias
-        )
+        weight = self.weight if weight is None else weight
+        bias = self.bias if bias is None else bias
         if weight.shape[-1] != self.weight_numel or bias.shape[-1] != self.bias_numel:
             raise ValueError("Weight or bias size does not match the instructions.")
         shape = torch.broadcast_shapes(

@@ -1,7 +1,5 @@
 """O(3) and aligned-frame convolutions, including training and higher derivatives."""
 
-from copy import deepcopy
-
 import pytest
 import torch
 from e3nn import o3
@@ -1134,7 +1132,7 @@ def test_high_degree_angular_derivatives(degree, double_precision):
 @pytest.mark.parametrize("degree", [4, 12])
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_generator_cuda_paths(degree, implementation, dtype):
+def test_high_degree_cuda_paths(degree, implementation, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     previous_dtype = torch.get_default_dtype()
@@ -1156,10 +1154,13 @@ def test_generator_cuda_paths(degree, implementation, dtype):
         options = dict(internal_weights=False, shared_weights=False)
         tp = o3.TensorProduct(*args, **options)
         reference = eqx_conv.O3TensorProductConv(tp, backend="torch").cuda()
+        # Autotuning is tested separately; keep path selection deterministic here.
         module = (
             eqx_conv.O3TensorProductConv(tp)
             if implementation == "o3"
-            else eqx_conv.O2O3TensorProductConv(o2.O3TensorProduct(*args, **options))
+            else eqx_conv.O2O3TensorProductConv(
+                o2.O3TensorProduct(*args, **options), method="baseline"
+            )
         ).cuda()
         edges = torch.randint(3, (2, 5), device="cuda")
         inputs = [
@@ -1182,12 +1183,11 @@ def test_generator_cuda_paths(degree, implementation, dtype):
                 amplitudes=amplitudes,
             )
         else:
-            frame = o2.WignerD(degree + 2, degree + 2, method="recursive").cuda()
             actual = module(
                 x,
                 weights,
                 projection,
-                frame.forward_packed(vectors.detach()),
+                None,
                 amplitudes,
                 edges,
                 3,
@@ -1668,214 +1668,6 @@ def test_shared_metadata_cache():
     assert parse_metadata("None") is None
     with pytest.raises(ValueError):
         parse_metadata("tuple()")
-
-
-@pytest.fixture
-def mace_model(double_precision):
-    pytest.importorskip("mace")
-    import e3nn
-    import numpy as np
-    from mace import modules
-
-    defaults = e3nn.get_optimization_defaults()
-    if "jit_mode" in defaults:
-        e3nn.set_optimization_defaults(jit_mode="eager")
-
-    def make(interaction="RealAgnosticResidualInteractionBlock"):
-        return modules.ScaleShiftMACE(
-            r_max=3.0,
-            num_bessel=3,
-            num_polynomial_cutoff=5,
-            max_ell=2,
-            interaction_cls=getattr(modules, interaction),
-            interaction_cls_first=modules.RealAgnosticInteractionBlock,
-            num_interactions=2,
-            num_elements=2,
-            hidden_irreps=o3.Irreps("2x0e+2x1o+2x2e"),
-            MLP_irreps=o3.Irreps("2x0e"),
-            atomic_energies=np.array([0.2, -0.3]),
-            avg_num_neighbors=2.0,
-            atomic_numbers=[1, 8],
-            correlation=2,
-            gate=torch.nn.functional.silu,
-            radial_MLP=[4],
-            atomic_inter_scale=1.2,
-            atomic_inter_shift=-0.4,
-        )
-
-    yield make
-    e3nn.set_optimization_defaults(**defaults)
-
-
-@pytest.fixture
-def mace_data(mace_model):
-    from ase import Atoms
-    from mace import data
-    from mace.tools import AtomicNumberTable, torch_geometric
-
-    atoms = Atoms(
-        "OH2",
-        positions=[[0.2, 0.4, 0.1], [1.1, 0.2, 0.3], [-0.1, 1.3, 0.5]],
-        cell=[6.0, 6.0, 6.0],
-        pbc=True,
-    )
-    graph = data.AtomicData.from_config(
-        data.config_from_atoms(atoms),
-        z_table=AtomicNumberTable([1, 8]),
-        cutoff=3.0,
-    )
-    other = deepcopy(graph)
-    other.positions = other.positions * 1.1
-    return atoms, torch_geometric.Batch.from_data_list([graph, other])
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("implementation", ["o3", "o2"])
-@pytest.mark.parametrize(
-    "interaction",
-    [
-        "RealAgnosticInteractionBlock",
-        "RealAgnosticResidualInteractionBlock",
-        "RealAgnosticDensityInteractionBlock",
-        "RealAgnosticDensityResidualInteractionBlock",
-        "RealAgnosticAttResidualInteractionBlock",
-        "RealAgnosticResidualNonLinearInteractionBlock",
-    ],
-)
-def test_mace_conversion_training(
-    mace_model, mace_data, interaction, device, implementation
-):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    from eqx.models.convolution import copy_model
-    from eqx.models.mace import convert_mace_to_eqx
-
-    reference = mace_model(interaction).to(device)
-    converted = copy_model(reference)
-    parameters = tuple(converted.parameters())
-    assert (
-        convert_mace_to_eqx(converted, inplace=True, implementation=implementation)
-        is converted
-    )
-    assert set(converted.parameters()) == set(parameters)
-    assert type(converted) is type(reference)
-    assert all(not hasattr(layer, "conv_fusion") for layer in reference.interactions)
-    batch = mace_data[1].to(device)
-    expected = reference(batch.clone().to_dict(), training=True, compute_stress=True)
-    actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
-    for key in ("energy", "forces", "stress", "virials"):
-        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
-    # Force and stress losses differentiate through the convolution twice.
-    for output in (actual, expected):
-        loss = sum(output[key].square().sum() for key in ("energy", "forces", "stress"))
-        loss.backward()
-    for actual_param, expected_param in zip(parameters, reference.parameters()):
-        if expected_param.grad is None:
-            assert actual_param.grad is None
-        else:
-            torch.testing.assert_close(
-                actual_param.grad, expected_param.grad, atol=2e-9, rtol=2e-8
-            )
-    projection = converted.interactions[1].conv_tp.projection.weight
-    before = projection.detach().clone()
-    torch.optim.SGD(converted.parameters(), lr=0.01).step()
-    assert not torch.equal(projection, before)
-
-
-@pytest.mark.parametrize("implementation", ["o3", "o2"])
-def test_mace_conversion_ase_and_checkpoint(
-    mace_model, mace_data, tmp_path, implementation
-):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    from mace.calculators import MACECalculator
-
-    from eqx.models.mace import convert_mace_to_eqx
-
-    original = mace_model().cuda().eval()
-    original.interactions[0].conv_tp_weights.requires_grad_(False)
-    # Conversion follows the model precision without changing the caller's default.
-    torch.set_default_dtype(torch.float32)
-    converted = convert_mace_to_eqx(original, implementation=implementation)
-    assert torch.get_default_dtype() == torch.float32
-    assert not converted.training
-    assert next(converted.parameters()).dtype == torch.float64
-    assert not converted.interactions[0].conv_tp.projection.weight.requires_grad
-    assert converted is not original
-    assert not hasattr(original.interactions[0], "conv_fusion")
-    assert (
-        convert_mace_to_eqx(converted, inplace=True, implementation=implementation)
-        is converted
-    )
-    assert (
-        convert_mace_to_eqx(converted, implementation=implementation) is not converted
-    )
-    checkpoint = tmp_path / "mace-eqx.model"
-    torch.save(converted, checkpoint)
-    restored = torch.load(checkpoint, weights_only=False)
-    reloaded = convert_mace_to_eqx(original, implementation=implementation)
-    reloaded.load_state_dict(converted.state_dict(), strict=True)
-    results = []
-    for model in (original, restored, reloaded):
-        atoms = mace_data[0].copy()
-        atoms.calc = MACECalculator(
-            models=model, device="cuda", default_dtype="float64"
-        )
-        results.append(
-            (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
-        )
-    for actual in results[1:]:
-        for value, expected in zip(actual, results[0]):
-            torch.testing.assert_close(
-                torch.as_tensor(value), torch.as_tensor(expected), atol=2e-10, rtol=2e-9
-            )
-
-
-@pytest.mark.parametrize("implementation", ["o3", "o2"])
-def test_mace_conversion_solid_harmonics(mace_model, mace_data, implementation):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    from eqx.models.mace import convert_mace_to_eqx
-
-    original = mace_model().cuda()
-    original.spherical_harmonics.normalize = False
-    converted = convert_mace_to_eqx(original, implementation=implementation)
-    batch = mace_data[1].cuda()
-    expected = original(batch.clone().to_dict(), training=True)
-    actual = converted(batch.clone().to_dict(), training=True)
-    for key in ("energy", "forces"):
-        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
-
-
-@pytest.mark.parametrize("layout", ["mul_ir", "ir_mul"])
-@pytest.mark.parametrize("implementation", ["o3", "o2"])
-def test_mace_conversion_cueq(mace_model, mace_data, layout, implementation):
-    if not torch.cuda.is_available():
-        pytest.skip("cuEquivariance requires CUDA")
-    pytest.importorskip("cuequivariance_torch")
-    from mace.cli.convert_e3nn_cueq import run
-
-    from eqx.models.mace import convert_mace_to_eqx
-
-    original = mace_model().cuda()
-    if layout == "ir_mul":
-        converted = convert_mace_to_eqx(
-            original, enable_cueq=True, implementation=implementation
-        )
-    else:
-        converted = convert_mace_to_eqx(
-            run(original, device="cuda", layout=layout), implementation=implementation
-        )
-    assert converted.interactions[0].cueq_config.layout_str == layout
-    batch = mace_data[1].cuda()
-    expected = original(batch.clone().to_dict(), training=True, compute_stress=True)
-    actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
-    for key in ("energy", "forces", "stress"):
-        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
-    loss = sum(actual[key].square().sum() for key in ("energy", "forces", "stress"))
-    loss.backward()
-    gradient = converted.interactions[1].conv_tp.projection.weight.grad
-    assert gradient is not None and torch.isfinite(gradient).all()
 
 
 @pytest.mark.parametrize(
@@ -3698,10 +3490,12 @@ def test_mixed_path_higher_derivatives(
                 actual.sum(), w, create_graph=True, retain_graph=True
             )[0]
             assert empty.numel() == 0
-            gradients = torch.autograd.grad(
-                empty.sum(), inputs, allow_unused=True, retain_graph=True
-            )
-            assert all(g is None or torch.count_nonzero(g) == 0 for g in gradients)
+            # Native autograd can return a constant zero without a grad_fn.
+            if empty.requires_grad:
+                gradients = torch.autograd.grad(
+                    empty.sum(), inputs, allow_unused=True, retain_graph=True
+                )
+                assert all(g is None or torch.count_nonzero(g) == 0 for g in gradients)
         # Starting with a weight derivative catches reintroduced unweighted paths.
         actual = torch.autograd.grad(actual.sum(), r, create_graph=True)[0]
         expected = torch.autograd.grad(expected.sum(), r, create_graph=True)[0]
@@ -4109,7 +3903,7 @@ def test_o2_requested_gradients(monkeypatch, directions, double_precision):
     tp = o2.O3TensorProduct(
         "3x1o", "1o", "3x0e+3x1e+3x2e", [(0, 0, i, "uvu", True) for i in range(3)]
     ).cuda()
-    module = eqx_conv.O2O3TensorProductConv(tp).cuda()
+    module = eqx_conv.O2O3TensorProductConv(tp, method="baseline").cuda()
     reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
     frame = o2.WignerD(2, 2).cuda()
     edges = torch.randint(4, (2, 13), device="cuda")

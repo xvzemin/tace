@@ -12,14 +12,58 @@ from eqx.co3.symmetric import SymmetricBasis
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def test_coupling_recurrence_phase(monkeypatch, double_precision):
+    from eqx.co2.spherical import coupling_polynomial, coupling_recurrence, generators
+
+    reference = o3.wigner_3j
+
+    def coefficients(l1, l2, l3, **kwargs):
+        phase = -1 if l2 % 3 == 1 else 1
+        return phase * reference(l1, l2, l3, **kwargs)
+
+    caches = coupling_polynomial, coupling_recurrence, generators
+    for cached in caches:
+        cached.cache_clear()
+    try:
+        monkeypatch.setattr(o3, "wigner_3j", coefficients)
+        features = torch.randn(5, 5, device=DEVICE, requires_grad=True)
+        vectors = torch.randn(5, 3, device=DEVICE, requires_grad=True)
+        for l in range(5):
+            module = co2.SphericalCoupling(2, l, 2, method="recurrence").to(DEVICE)
+            actual = module(features, vectors)
+            expected = torch.einsum(
+                "...a,...b,abc->...c",
+                features,
+                o3.spherical_harmonics(l, vectors, True, "component"),
+                coefficients(2, l, 2, device=DEVICE),
+            )
+            torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+            if l == 0:
+                continue
+            for _ in range(2):
+                actual, expected = [
+                    torch.autograd.grad(value.sin().sum(), vectors, create_graph=True)[
+                        0
+                    ]
+                    for value in (actual, expected)
+                ]
+                torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+    finally:
+        for cached in caches:
+            cached.cache_clear()
+
+
 @pytest.mark.parametrize(
     "degrees",
     [(0, 3, 3), (2, 1, 2), (2, 3, 3), (3, 4, 2), (6, 6, 6), (10, 5, 7), (16, 8, 16)],
 )
 @pytest.mark.parametrize("normalization", ["component", "norm", "integral"])
 @pytest.mark.parametrize("method", ["chebyshev", "recurrence"])
-def test_spherical_coupling(degrees, normalization, method, double_precision):
+def test_spherical_coupling(
+    degrees, normalization, method, double_precision, wigner_3j
+):
     l1, l2, l3 = degrees
+    cg = wigner_3j(*degrees, device=DEVICE)
     module = co2.SphericalCoupling(*degrees, normalization, method=method).to(DEVICE)
     vectors = torch.cat((torch.eye(3), -torch.eye(3), torch.randn(3, 3))).to(DEVICE)
     vectors.requires_grad_()
@@ -31,7 +75,7 @@ def test_spherical_coupling(degrees, normalization, method, double_precision):
         o3.spherical_harmonics(
             l2, vectors, normalize=True, normalization=normalization
         ),
-        o3.wigner_3j(*degrees, device=DEVICE),
+        cg,
     )
     torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
     if max(l1, l3) <= 3:
@@ -72,16 +116,16 @@ def test_spherical_coupling(degrees, normalization, method, double_precision):
 
 
 @pytest.mark.parametrize("l1,l3", [(0, 7), (7, 0), (3, 5), (8, 6), (16, 16)])
-def test_coupling_recurrence(l1, l3, double_precision):
+def test_coupling_recurrence(l1, l3, double_precision, wigner_3j):
     from eqx.co2.spherical import coupling_recurrence, generators
 
-    coefficients = coupling_recurrence(l1, l3)
     degree, delta = min(l1, l3), abs(l1 - l3)
-    matrix = generators(degree).to(DEVICE)[1] / math.sqrt(max(1, degree * (degree + 1)))
     basis = [
-        o3.wigner_3j(l1, l, l3, device=DEVICE)[:, l, :].T * math.sqrt(2 * l + 1)
+        wigner_3j(l1, l, l3, device=DEVICE)[:, l, :].T * math.sqrt(2 * l + 1)
         for l in range(delta, l1 + l3 + 1)
     ]
+    coefficients = coupling_recurrence(l1, l3)
+    matrix = generators(degree).to(DEVICE)[1] / math.sqrt(max(1, degree * (degree + 1)))
     for k, value in enumerate(basis):
         actual = value @ matrix if l1 < l3 else matrix @ value
         expected = torch.zeros_like(actual)
@@ -93,8 +137,9 @@ def test_coupling_recurrence(l1, l3, double_precision):
 
 
 @pytest.mark.parametrize("degrees", [(5, 10, 5), (8, 12, 8), (16, 12, 16)])
-def test_spherical_recurrence_float32(degrees):
+def test_spherical_recurrence_float32(degrees, wigner_3j):
     l1, l2, l3 = degrees
+    cg = wigner_3j(*degrees, dtype=torch.float64, device=DEVICE)
     features = torch.randn(16, 2 * l1 + 1, device=DEVICE, requires_grad=True)
     vectors = torch.randn(16, 3, device=DEVICE, requires_grad=True)
     module = co2.SphericalCoupling(*degrees, method="recurrence").to(DEVICE)
@@ -103,7 +148,7 @@ def test_spherical_recurrence_float32(degrees):
         "...a,...b,abc->...c",
         features.double(),
         o3.spherical_harmonics(l2, vectors.double(), True, "component"),
-        o3.wigner_3j(l1, l2, l3, dtype=torch.float64, device=DEVICE),
+        cg,
     )
     for _ in range(3):
         error = (actual.double() - expected.double()).norm()

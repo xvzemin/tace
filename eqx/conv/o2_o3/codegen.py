@@ -1,6 +1,5 @@
 """CUDA source generation for aligned O(3) tensor-product contractions."""
 
-import math
 from functools import lru_cache
 
 from ...kernels.codegen import HEADER

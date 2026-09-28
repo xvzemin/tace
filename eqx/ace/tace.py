@@ -52,12 +52,9 @@ class TACE(torch.nn.Module):
 
     Notes
     -----
-    Inputs use flattened ``mul_ir`` order. The module owns no learned weights.
-    Intermediate correlation orders remain available for reuse. The highest
-    order path features and per-node coefficient matrices are not materialized
-    by the CUDA contraction. Transposed contractions support repeated
-    differentiation, including parameter gradients of force losses.
-    Weight gradients use atomic reductions and need not be bitwise repeatable.
+    Inputs use flattened ``mul_ir`` storage. The module owns no learned weights.
+    Both backends support higher derivatives. CUDA weight gradients use
+    atomic reductions and are not bitwise deterministic.
     """
 
     def __init__(self, tensor_products, linears, backend="cuda"):

@@ -60,7 +60,7 @@ See :ref:`eqx-streaming` for training support and requirements.
 .. autofunction:: tace.lightning.convert_cgtp
 
 Cartesian O(3) ICTP/ICTC
------------------------
+------------------------
 
 ``atomic_basis.type: co3`` selects
 ``O3CartesianIctpIctcInteraction`` and automatically constructs the

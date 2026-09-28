@@ -1,8 +1,6 @@
-"""Feature permutations and Wigner matrix indexing."""
+"""Wigner matrix indexing."""
 
 import math
-
-from .._layout import _Permute
 
 
 def wigner_orders(

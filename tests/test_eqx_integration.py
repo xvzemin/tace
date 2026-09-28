@@ -1220,7 +1220,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
-    for name in ("TACE_USE_EQX", "TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE"):
+    for name in ("TACE_USE_EQX", "TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
         monkeypatch.setenv(name, "0")
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -1254,7 +1254,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
         model = convert_cgtp(reference, "o2")
         representation = model.readout_fn.representation
         mixed = isinstance(interaction, list)
-        assert not representation.use_packed_wigner
+        assert representation.use_packed_wigner == mixed
         assert representation.use_local_frame == mixed
         assert representation.use_o3_angular_basis == mixed
 
@@ -1344,7 +1344,7 @@ def test_tace_radial_bias_cutoff_and_force_training(
     from tace.models.mlp import MLP
 
     monkeypatch.setenv("TACE_USE_OEQ", "0")
-    monkeypatch.setenv("TACE_USE_CUE", "0")
+    monkeypatch.setenv("TACE_USE_CUEQ", "0")
     monkeypatch.setenv("TACE_USE_EQX", "0")
     module = O3ScatterTensorProduct("3x0e+3x1o", "0e+1o", "3x0e+3x1o+3x2e").to(device)
     mlp = MLP([4, 5, module.weight_numel], bias=True).to(device)

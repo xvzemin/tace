@@ -86,22 +86,50 @@ def coupling_polynomial(l1, l2, l3, normalization="component"):
 
 
 @lru_cache(maxsize=256)
-def coupling_recurrence(l1, l3):
+def coupling_recurrence(l1, l3, lmax=None):
     """Return adjacent-degree coefficients of normalized CG operators.
 
+    Parameters
+    ----------
+    l1, l3 : int
+        Input and output angular degrees.
+    lmax : int, optional
+        Largest harmonic degree needed. Defaults to ``l1 + l3``.
+
+    Returns
+    -------
+    tuple of float
+        Coefficients connecting successive degrees from ``abs(l1 - l3)``
+        through ``lmax``, with signs following the installed CG convention.
+
+    Notes
+    -----
     The generator is divided by ``sqrt(d * (d + 1))``, where
     ``d = min(l1, l3)``. Reference-axis operators have unit Frobenius norm.
     Coefficients are independent of direction and feature multiplicity.
     """
     degree, delta = min(l1, l3), abs(l1 - l3)
-    return tuple(
-        -math.sqrt(
+    lmax = l1 + l3 if lmax is None else lmax
+    if not delta <= lmax <= l1 + l3:
+        raise ValueError("lmax must satisfy the triangle rule.")
+    if lmax == delta:
+        return ()
+    generator = generators(degree)[1]
+    previous = o3.wigner_3j(l1, delta, l3, dtype=torch.float64, device="cpu")[
+        :, delta, :
+    ].T
+    coefficients = []
+    for l in range(delta + 1, lmax + 1):
+        current = o3.wigner_3j(l1, l, l3, dtype=torch.float64, device="cpu")[:, l, :].T
+        acted = previous @ generator if l1 < l3 else generator @ previous
+        magnitude = math.sqrt(
             ((l1 + l3 + 1) ** 2 - l**2)
             * (l**2 - delta**2)
             / (4 * (4 * l**2 - 1) * degree * (degree + 1))
         )
-        for l in range(delta + 1, l1 + l3 + 1)
-    )
+        coefficients.append(math.copysign(magnitude, (acted * current).sum().item()))
+        previous = current
+    return tuple(coefficients)
 
 
 class SphericalCoupling(torch.nn.Module):
@@ -134,7 +162,7 @@ class SphericalCoupling(torch.nn.Module):
         self.odd = (l1 + l2 + l3) % 2
         self.spectral_scale = self.degree * (self.degree + 1) / max(1, self.degree**2)
         self.coefficients = coupling_polynomial(l1, l2, l3, normalization)
-        self.recurrence = coupling_recurrence(l1, l3)
+        self.recurrence = coupling_recurrence(l1, l3, l2)
         self.harmonics = o3.SphericalHarmonics(
             self.delta, normalize=False, normalization="norm"
         )

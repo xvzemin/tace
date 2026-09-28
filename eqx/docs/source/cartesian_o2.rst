@@ -35,14 +35,13 @@ float64 and stored in a Chebyshev basis. No directional sampling is used.
    output = coupling(h, rij)
    gradient = torch.autograd.grad(output.square().sum(), rij, create_graph=True)
 
-``eqx.conv.O2O3TensorProductConv`` uses this construction when edge vectors
-are supplied. Its CUDA backend retains spherical features, independent path
-weights and outputs, and supports force training and higher derivatives.
-The generated CUDA code selects between the factored transverse expression
-and its direct sparse harmonic contraction by static operation count. Both
-expressions avoid alignment. Direction derivatives use the exact harmonic
-polynomial extension, with normalization differentiated through PyTorch.
-Directions are smooth on the nonzero-vector domain; no alignment chart is used.
+``eqx.conv.O2O3TensorProductConv(method="generator")`` uses this construction
+when edge vectors are supplied. Its CUDA backend retains spherical features,
+independent path weights and outputs, and supports force training and higher
+derivatives. The default ``method="auto"`` selects an execution method by
+timing representative inputs. See :ref:`equivariantx-convolutions` for the
+available methods. The generator construction is smooth on the nonzero-vector
+domain and uses no alignment chart.
 
 Representations and conversion
 ------------------------------

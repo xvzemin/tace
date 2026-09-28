@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from ....conv.program import Program, next_adjoint
+from ....conv.program import Program
 from ....utils import parse_metadata
 
 

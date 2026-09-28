@@ -77,7 +77,7 @@ def coupling_source(
             for x in values
         )
         previous = ("T(0)",) * len(values)
-        coefficients = coupling_recurrence(l1, l3)
+        coefficients = coupling_recurrence(l1, l3, l2)
         odd = (l2 - delta) % 2
         if odd:
             values = tuple(
@@ -361,7 +361,7 @@ def coupling_program(l1, l2, l3, normalization, rank):
     values = features if l1 < l3 else bridge(features)
     values = tuple(contract(((math.sqrt(2 * delta + 1), (x,)),)) for x in values)
     previous = (zero,) * len(values)
-    coefficients = coupling_recurrence(l1, l3)
+    coefficients = coupling_recurrence(l1, l3, l2)
     odd = (l2 - delta) % 2
     if odd:
         values = tuple(

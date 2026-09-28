@@ -153,10 +153,21 @@ indices passed to Linear describe storage only and do not alter its weights.
 
    from eqx.conv.co3 import CartesianTensorProductConv, Linear
 
+   tp = co3.TensorProduct(
+       "2x1o", "1x1o", "2x0e + 2x1e + 2x2e",
+       [(0, 0, i, "uvu", True) for i in range(3)],
+       shared_weights=False, internal_weights=False, project=False,
+   )
    conv = CartesianTensorProductConv(
        tp, symmetric_inputs=True, input_basis="spherical", compact_output=True,
-   )  # tp.project must be False
-   linear = Linear(tp.irreps_out, "16x0e + 16x1o", conv.harmonic_output_index)
+       backend="torch",
+   )
+   linear = Linear(tp.irreps_out, "4x0e + 4x1e", conv.harmonic_output_index)
+   h = torch.randn(8, 6)
+   edge_index = torch.randint(8, (2, 24))
+   rij = torch.randn(24, 3)
+   radial = torch.randn(24, 4)
+   projection = torch.randn(4, tp.weight_numel)
    message = conv(h, None, radial, projection, edge_index, vectors=rij)
    output = linear(message)
 
