@@ -126,7 +126,11 @@ def execution_plan(
             accepted.append((kernel, paths[0][3], owner, threads))
             scheduled.append((paths, terms, owner))
     separate, accepted = accepted, []
-    limit = FUSED_TILE_LIMIT if cartesian else max(1, len(scheduled))
+    # Preserve each tile's resource usage and block size. A merged kernel
+    # makes independent tiles share its largest register footprint.
+    if not cartesian:
+        return tuple(separate)
+    limit = FUSED_TILE_LIMIT
     pending = deque(
         tuple(range(start, min(start + limit, len(scheduled))))
         for start in range(0, len(scheduled), limit)
