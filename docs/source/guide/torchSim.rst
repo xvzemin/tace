@@ -14,14 +14,12 @@ Install TACE with TorchSim support:
 
     pip install "tace[torchsim]"
 
-TACE requires ``torch-sim-atomistic>=0.6.1``. Version ``0.6.1`` is the safest
-and currently recommended version. TorchSim is under active development, so
-compatibility with versions newer than ``0.6.1`` is not guaranteed. To use the
-tested version explicitly:
+TACE requires ``torch-sim-atomistic>=0.6.1``. The recommended version is
+``0.6.2``. To install it explicitly:
 
 .. code-block:: bash
 
-    pip install "torch-sim-atomistic==0.6.1"
+    pip install "torch-sim-atomistic==0.6.2"
 
 For optimization, molecular dynamics, and batched examples, see the
 `TACE TorchSim examples <https://github.com/xvzemin/tace/tree/main/example/torchSim>`_.
@@ -49,6 +47,12 @@ Calculator
         compute_forces=True,
         compute_stress=True,
     )
+
+Direct calls convert the state's inputs to the calculator's device and dtype
+without modifying the state. For a multi-fidelity model, ``fidelity_idx`` sets
+the default for all systems. To select a different fidelity for each system,
+set ``state.system_extras["fidelity_idx"]`` to an integer tensor of shape
+``(n_systems,)``.
 
 .. autoclass:: tace.interface.torchsim.torchsim.TACETorchSimCalc
    :no-members:

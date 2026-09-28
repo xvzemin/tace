@@ -16,10 +16,11 @@ try:
 except ImportError as e:
     raise ImportError(
         "The TACE TorchSim interface requires 'torch-sim-atomistic'. "
-        "Install it with `pip install 'torch-sim-atomistic==0.6.1'`."
+        "Install it with `pip install 'torch-sim-atomistic==0.6.2'`."
     ) from e
 
 
+from tace.dataset.quantity import PROPERTY
 from tace.lightning import load_tace
 from tace.utils._global import DEVICE
 from tace.utils.env import enable_acceleration
@@ -80,19 +81,20 @@ class TACETorchSimCalc(ModelInterface):
             dtype (torch.dtype): The data type for tensor operations.
                 Defaults to torch.float32.
             atomic_numbers (torch.Tensor | None): Atomic numbers with shape [n_atoms].
-                If provided at initialization, cannot be provided again during forward.
+                If provided, each state's atomic numbers must match these values.
             system_idx (torch.Tensor | None): System indices with shape [n_atoms]
-                indicating which system each atom belongs to. If not provided with
-                atomic_numbers, all atoms are assumed to be in the same system.
+                indicating which system each atom belongs to. If provided, each
+                state's system indices must match these values.
             neighbor_list_fn (Callable): Function to compute neighbor lists.
-                Defaults to torch_nl_linked_cell.
+                Defaults to torchsim_nl.
             compute_forces (bool): Whether to compute forces. Defaults to True.
             compute_stress (bool): Whether to compute stress. Defaults to True.
             fidelity_idx : int
-                Specify which fidelity fidelity_idx to use.
+                Default fidelity. A state's system_extras["fidelity_idx"] may
+                override it with one integer index per system.
             target_property: list(str)
-                Extra caculate hessian, atomic_virials, Conservative polarizability, etc,
-                If you want to use this parameter, you must provide all the required physical quantities.
+                Requested model outputs. Forces and stress are controlled by
+                compute_forces and compute_stress; required derivatives are retained.
             enable_oeq (bool): Whether to enable Oeq acceleration. Defaults to False.
             enable_cue (bool): Whether to enable CuE acceleration. Defaults to False.
             enable_eqt (bool): Whether to enable Eqt acceleration. Defaults to False.
@@ -130,12 +132,18 @@ class TACETorchSimCalc(ModelInterface):
             dtype=dtype,
         )
         self._dtype = model.get_model_dtype()
-        if hasattr(model, "flags"):
-            model.flags.compute_forces = self._compute_forces
-            model.flags.compute_stress = self._compute_stress
-            model.compute_first_derivative = (
-                self._compute_forces or self._compute_stress
-            )
+        target_property = model.get_target_property()
+        for name, enabled in (
+            ("forces", self._compute_forces),
+            ("stress", self._compute_stress),
+        ):
+            required = any(name in PROPERTY[p]["must_be_with"] for p in target_property)
+            if enabled or required:
+                if name not in target_property:
+                    target_property.append(name)
+            elif name in target_property:
+                target_property.remove(name)
+        model.reset_target_property(target_property)
         model.reset_fidelity_idx(fidelity_idx)
         model.eval()
         for param in model.parameters():
@@ -156,12 +164,14 @@ class TACETorchSimCalc(ModelInterface):
 
         if atomic_numbers is not None:
             self.atomic_numbers = atomic_numbers.to(
-                device=self.device, dtype=torch.int64
+                device=self.device, dtype=torch.int64, copy=True
             )
             self._setup_node_attrs(self.atomic_numbers)
 
         if system_idx is not None:
-            self.system_idx = system_idx.to(device=self.device, dtype=torch.int64)
+            self.system_idx = system_idx.to(
+                device=self.device, dtype=torch.int64, copy=True
+            )
             self._setup_ptr(self.system_idx)
 
         if (
@@ -213,64 +223,72 @@ class TACETorchSimCalc(ModelInterface):
                     compute_stress=True
 
         Raises:
-            ValueError: If atomic numbers are not provided either in the constructor
-                or in the forward pass, or if provided in both places.
-            ValueError: If system indices are not provided when needed.
+            ValueError: If atomic numbers or system indices differ from the
+                values fixed at initialization, or fidelity indices have the wrong shape.
         """
+        atomic_numbers = state.atomic_numbers.to(device=self.device, dtype=torch.int64)
         if self.atomic_numbers_in_init:
-            if state.positions.shape[0] != self.atomic_numbers.shape[0]:
+            if not torch.equal(atomic_numbers, self.atomic_numbers):
                 raise ValueError(
-                    f"Expected {self.atomic_numbers.shape[0]} atoms, "
-                    f"got {state.positions.shape[0]}."
+                    "State atomic_numbers must match those provided at initialization."
                 )
-        else:
-            atomic_numbers = state.atomic_numbers.to(
-                device=self.device, dtype=torch.int64
-            )
-            if not hasattr(self, "atomic_numbers") or not torch.equal(
-                atomic_numbers, self.atomic_numbers
-            ):
-                self._setup_node_attrs(atomic_numbers)
-                self.atomic_numbers = atomic_numbers
+        elif not hasattr(self, "atomic_numbers") or not torch.equal(
+            atomic_numbers, self.atomic_numbers
+        ):
+            self._setup_node_attrs(atomic_numbers)
+            self.atomic_numbers = atomic_numbers.clone()
 
+        system_idx = state.system_idx.to(device=self.device, dtype=torch.int64)
         if self.system_idx_in_init:
-            if state.system_idx.shape[0] != self.system_idx.shape[0]:
+            if not torch.equal(system_idx, self.system_idx):
                 raise ValueError(
-                    f"Expected system_idx of length {self.system_idx.shape[0]}, "
-                    f"got {state.system_idx.shape[0]}."
+                    "State system_idx must match those provided at initialization."
                 )
-        else:
-            system_idx = state.system_idx.to(device=self.device, dtype=torch.int64)
-            if not hasattr(self, "system_idx") or not torch.equal(
-                system_idx, self.system_idx
-            ):
-                self._setup_ptr(system_idx)
-                self.system_idx = system_idx
+        elif not hasattr(self, "system_idx") or not torch.equal(
+            system_idx, self.system_idx
+        ):
+            self._setup_ptr(system_idx)
+            self.system_idx = system_idx.clone()
 
-        edge_index, mapping_system, unit_shifts = self.neighbor_list_fn(
-            state.positions,
-            state.row_vector_cell,
-            state.pbc,
+        # Detach before the model sets requires_grad, leaving the state unchanged.
+        positions = state.positions.detach().to(device=self.device, dtype=self.dtype)
+        lattice = state.row_vector_cell.detach().to(
+            device=self.device, dtype=self.dtype
+        )
+        pbc = state.pbc.to(device=self.device)
+        edge_index, _, unit_shifts = self.neighbor_list_fn(
+            positions,
+            lattice,
+            pbc,
             self.r_max,
             self.system_idx,
         )
-        # shifts = ts.transforms.compute_cell_shifts(
-        #     state.row_vector_cell, unit_shifts, mapping_system
-        # )
 
         data_dict = dict(
             ptr=self.ptr,
             node_attrs=self.node_attrs,
             batch=self.system_idx,
-            pbc=state.pbc,
-            lattice=state.row_vector_cell,
-            positions=state.positions,
+            pbc=pbc,
+            lattice=lattice,
+            positions=positions,
             edge_index=edge_index,
-            edge_shifts=unit_shifts,
-            # fidelity_idx=getattr(state, "fidelity_idx", None),
-            # total_charge=getattr(state, "total_charge", None),
-            # initial_noncollinear_magmoms=getattr(state, "initial_noncollinear_magmoms", None),
+            edge_shifts=unit_shifts.to(dtype=self.dtype),
         )
+        fidelity_idx = state.system_extras.get("fidelity_idx")
+        if fidelity_idx is not None:
+            if fidelity_idx.shape != (self.n_systems,):
+                raise ValueError("fidelity_idx must have shape (n_systems,).")
+            if fidelity_idx.dtype not in (
+                torch.uint8,
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            ):
+                raise TypeError("fidelity_idx must contain integer indices.")
+            data_dict["fidelity_idx"] = fidelity_idx.to(
+                device=self.device, dtype=torch.int64
+            )
 
         # Get model output
         out = self.model(data_dict)
@@ -282,7 +300,9 @@ class TACETorchSimCalc(ModelInterface):
         if energy is not None:
             results["energy"] = energy.detach()
         else:
-            results["energy"] = torch.zeros(self.n_systems, device=self.device)
+            results["energy"] = torch.zeros(
+                self.n_systems, device=self.device, dtype=self.dtype
+            )
 
         # Process forces
         if self.compute_forces:

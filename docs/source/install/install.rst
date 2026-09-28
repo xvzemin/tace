@@ -151,15 +151,12 @@ Install the optional TorchSim interface with:
 
 .. important::
 
-   TACE requires ``torch-sim-atomistic>=0.6.1``. Version ``0.6.1`` is the
-   safest and currently recommended version:
+   TACE requires ``torch-sim-atomistic>=0.6.1``. The recommended version is
+   ``0.6.2``:
 
    .. code-block:: bash
 
-      pip install "torch-sim-atomistic==0.6.1"
-
-   TorchSim is under active development, so compatibility with versions newer
-   than ``0.6.1`` is not guaranteed.
+      pip install "torch-sim-atomistic==0.6.2"
 
 See the :doc:`../guide/torchSim` tutorial for calculator usage.
 
