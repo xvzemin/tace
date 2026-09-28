@@ -151,37 +151,37 @@ If you use TACE, please cite our papers:
 
 ```bibtex
 @misc{xu2026spectralspatialtensoratomiccluster,
-   title={Spectral/Spatial Tensor Atomic Cluster Expansion with Universal Embeddings in Cartesian Space}, 
-   author={Zemin Xu and Wenbo Xie and P. Hu},
-   year={2026},
-   eprint={2509.14961},
-   archivePrefix={arXiv},
-   primaryClass={stat.ML},
-   url={https://arxiv.org/abs/2509.14961}, 
+  title={Spectral/Spatial Tensor Atomic Cluster Expansion with Universal Embeddings in Cartesian Space}, 
+  author={Zemin Xu and Wenbo Xie and P. Hu},
+  year={2026},
+  eprint={2509.14961},
+  archivePrefix={arXiv},
+  primaryClass={stat.ML},
+  url={https://arxiv.org/abs/2509.14961}, 
 }
 
 @misc{xu2026edgeclusterexpansionradial,
-   title={Edge Cluster Expansion with Radial Rotary Attention for Interatomic Potentials}, 
-   author={Zemin Xu and Wenbo Xie and P. Hu},
-   year={2026},
-   eprint={2607.10664},
-   archivePrefix={arXiv},
-   primaryClass={stat.ML},
-   url={https://arxiv.org/abs/2607.10664}, 
+  title={Edge Cluster Expansion with Radial Rotary Attention for Interatomic Potentials}, 
+  author={Zemin Xu and Wenbo Xie and P. Hu},
+  year={2026},
+  eprint={2607.10664},
+  archivePrefix={arXiv},
+  primaryClass={stat.ML},
+  url={https://arxiv.org/abs/2607.10664}, 
 }
 ```
 
 If you use Local O(2) Frame, please cite our papers: 
 
 ```bibtex
-@misc{eqx,
-   title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local O(2) Frames}, 
-   author={Zemin Xu and Peijun Hu and Wenbo Xie},
-   year={2026},
-   eprint={2608.16592},
-   archivePrefix={arXiv},
-   primaryClass={physics.chem-ph},
-   url={https://arxiv.org/abs/2608.16592}, 
+@misc{xu2026lookingglassefficientparitycompletelearning,
+  title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local $O(2)$ Frames}, 
+  author={Zemin Xu and Wenbo Xie},
+  year={2026},
+  eprint={2608.16592},
+  archivePrefix={arXiv},
+  primaryClass={physics.chem-ph},
+  url={https://arxiv.org/abs/2608.16592}, 
 }
 ```
 
@@ -189,11 +189,11 @@ If you use cartnn, Cartesian-3j, cMACE, cNequIP, cAllegro, please cite our paper
 
 ```bibtex
 @inproceedings{xu2026a,
-   title={A Cartesian-3j Framework for Machine Learning Interatomic Potentials},
-   author={Zemin Xu and Chenyu Wu and Wenbo Xie and Peijun Hu},
-   booktitle={Forty-third International Conference on Machine Learning},
-   year={2026},
-   url={https://openreview.net/forum?id=9ZWK6gneWq}
+  title={A Cartesian-3j Framework for Machine Learning Interatomic Potentials},
+  author={Zemin Xu and Chenyu Wu and Wenbo Xie and Peijun Hu},
+  booktitle={Forty-third International Conference on Machine Learning},
+  year={2026},
+  url={https://openreview.net/forum?id=9ZWK6gneWq}
 }
 ```
 

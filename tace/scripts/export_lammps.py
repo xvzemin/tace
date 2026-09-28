@@ -4,6 +4,7 @@
 ################################################################################
 
 import argparse
+import logging
 from pathlib import Path
 
 import torch
@@ -70,6 +71,12 @@ def _default_aoti_package_path(model_path: str) -> str:
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
     if args.backend == "aoti":
         enable_acceleration(enable_compile=True)
     model = load_tace(

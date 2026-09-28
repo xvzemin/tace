@@ -4,6 +4,7 @@
 ################################################################################
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Dict, Union
 
@@ -141,6 +142,12 @@ def _build_sample_data(
 
 def main():
     args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
     if args.backend == "aoti":
         enable_acceleration(enable_compile=True)
     model = load_tace(
