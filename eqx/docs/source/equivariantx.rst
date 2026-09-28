@@ -7,6 +7,9 @@ EquivariantX (``eqx``) provides native :math:`O(2)` and Cartesian :math:`O(2)`/:
 :math:`O(3)`/:math:`O(2)` frame conversion, and fused CUDA convolutions.
 Time-reversal parity is optional.
 
+EquivariantX is licensed under
+`Creative Commons Attribution 4.0 International (CC BY 4.0) <https://creativecommons.org/licenses/by/4.0/>`_.
+
 Installation
 ------------
 

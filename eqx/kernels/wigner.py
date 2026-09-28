@@ -1,6 +1,6 @@
 ################################################################################
 # Authors: Zemin Xu
-# License: MIT, see LICENSE.md
+# License: CC-BY-4.0, see LICENSE.md
 ################################################################################
 
 """Packed Wigner matrices with quaternion and recursive CUDA kernels."""

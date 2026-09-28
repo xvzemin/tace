@@ -130,7 +130,7 @@ exclude = [
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
 "tace.models.scf" = ["*.md", "longrange/*.md"]
-"eqx" = ["README.md", "kernels/csrc/*.cpp"]
+"eqx" = ["README.md", "LICENSE.md", "kernels/csrc/*.cpp"]
 
 [tool.ruff]
 target-version = "py39"

@@ -93,19 +93,24 @@ and a GPU; model integration tests require the corresponding model package.
 Run TACE integration tests with `pytest tests`,
 or both suites with `pytest tests eqx/tests`.
 
+## License
+
+EquivariantX is licensed under
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](LICENSE.md).
+
 ## Citation
 
 If you use the local O(2) method or its global O(3)/local O(2) conversion,
 please cite:
 
 ```bibtex
-@misc{eqx,
-  title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local O(2) Frames},
-  author={Zemin Xu and Peijun Hu and Wenbo Xie},
+@misc{xu2026lookingglassefficientparitycompletelearning,
+  title={Through the Looking-Glass: Efficient Parity-Complete Learning via Local $O(2)$ Frames}, 
+  author={Zemin Xu and Wenbo Xie},
   year={2026},
   eprint={2608.16592},
   archivePrefix={arXiv},
   primaryClass={physics.chem-ph},
-  url={https://arxiv.org/abs/2608.16592},
+  url={https://arxiv.org/abs/2608.16592}, 
 }
 ```

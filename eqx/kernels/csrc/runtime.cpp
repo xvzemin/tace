@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Zemin Xu. SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zemin Xu. SPDX-License-Identifier: CC-BY-4.0
 // A small, model-independent CUDA compiler and launcher.
 #include <cuda.h>
 #include <nvrtc.h>

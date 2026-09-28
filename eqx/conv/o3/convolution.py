@@ -1,6 +1,6 @@
 ################################################################################
 # Authors: Zemin Xu
-# License: MIT, see LICENSE.md
+# License: CC-BY-4.0, see LICENSE.md
 ################################################################################
 
 """O(3) convolutions with external radial projections."""
