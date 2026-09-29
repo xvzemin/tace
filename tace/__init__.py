@@ -8,7 +8,7 @@
 
 # __version__ = get_version()
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 from .utils.env import set_tf32
 
