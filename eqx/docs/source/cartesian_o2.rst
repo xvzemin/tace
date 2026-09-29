@@ -77,7 +77,7 @@ the two rectangular matrices without constructing a square projector.
 
 ``path_matrix(m)`` builds the real and imaginary tensor-power columns by
 block concatenation and sign changes, then normalizes once.
-:ref:`eqx.ICTD <equivariantx-ictd>` instead retains every irreducible path of
+:ref:`eqx.o2.ICTD <equivariantx-ictd>` instead retains every irreducible path of
 an arbitrary Cartesian tensor, including both zero-order reflection signs.
 
 Operators
@@ -150,6 +150,49 @@ restriction reuses these lower orders rather than computing their traces again.
 Plane transformations contract symmetric index groups, and trace corrections
 use nested symmetric products. Ranks one and two use direct formulas.
 External tensor shapes and normalization are unchanged.
+
+Separate plane projection and detracing
+---------------------------------------
+
+``plane_projector(direction)`` constructs :math:`P=I-\bm n\bm n^T` from
+unit directions. ``PlaneProjector(rank)`` applies this matrix to every
+Cartesian index without removing traces or imposing symmetry.
+``PlanarDetracer(rank)`` then removes the traces of an already symmetric,
+transverse tensor. Both retain the flattened three-dimensional storage
+``(..., 3**rank)``. Leading dimensions broadcast.
+
+.. code-block:: python
+
+   import torch
+   from eqx import co2
+
+   direction = torch.randn(8, 3)
+   direction = direction / direction.norm(dim=-1, keepdim=True)
+   plane = co2.plane_projector(direction)
+   tensor = torch.randn(8, 64, 3, 3)
+   tensor = ((tensor + tensor.transpose(-1, -2)) / 2).flatten(-2)
+   projected = co2.PlaneProjector(2)(tensor, plane[:, None])
+   detracer = co2.PlanarDetracer(2)
+   result = detracer(projected, plane[:, None])
+
+   # Build one matrix per edge and share it across all channels.
+   matrix = detracer.matrix(plane)
+   expected = torch.einsum("eij,ecj->eci", matrix, projected)
+   torch.testing.assert_close(result, expected)
+
+For rank two, the detracing matrix is
+:math:`D_2(P)=I_9-\tfrac12\operatorname{vec}(P)\operatorname{vec}(P)^T`.
+Higher ranks use the finite analytic STF coefficients. Scalar and vector
+inputs require no trace removal. The input must already be symmetric and
+projected; this matrix is not a general STF projector on arbitrary inputs.
+No transverse axes, Wigner matrices, or numerical inverses are constructed.
+
+``PlanarDetracer`` explicitly forms :math:`3^{2\,\mathrm{rank}}` entries
+per plane and is a reference implementation. Its constants are registered
+buffers, regenerated when increasing precision. Matrix construction and
+application support ordinary autograd and higher derivatives.
+The existing ``TransverseProjector`` instead combines projection and trace
+removal through symmetric contractions without forming this dense matrix.
 
 Exact harmonic tensor products
 -------------------------------

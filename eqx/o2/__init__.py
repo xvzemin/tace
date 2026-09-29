@@ -3,6 +3,7 @@
 from .asymmetric_contraction import AsymmetricContraction
 from .circular_harmonics import CircularHarmonics, circular_harmonics
 from .gate import Activation, Gate
+from .ictd import ICTD, path_matrices
 from .irreps import Irrep, Irreps
 from .linear import Linear, UuLinear
 from .local_frame import LocalFrame
@@ -16,6 +17,8 @@ from .tensor_product import TensorProduct
 from .wigner import WignerD
 
 __all__ = [
+    "ICTD",
+    "path_matrices",
     "Irrep",
     "Irreps",
     "Linear",

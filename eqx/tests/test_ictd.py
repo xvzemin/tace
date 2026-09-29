@@ -4,17 +4,18 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx import ICTD, co2, co3, o2
-from eqx.ictd import path_matrices
+from eqx import co2, co3, o2
+from eqx import o3 as eqx_o3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SPACES = {2: o2, 3: eqx_o3}
 
 
 @pytest.mark.parametrize(
     "rank,d", [(n, d) for d in (2, 3) for n in range(5)] + [(9, 2), (6, 3)]
 )
 def test_basis(rank, d, double_precision):
-    module = ICTD(rank, d, device=DEVICE)
+    module = SPACES[d].ICTD(rank, device=DEVICE)
     matrix = module.change_of_basis
     identity = torch.eye(d**rank, device=DEVICE)
     torch.testing.assert_close(matrix.T @ matrix, identity, atol=3e-14, rtol=3e-14)
@@ -36,7 +37,7 @@ def test_basis(rank, d, double_precision):
 
 @pytest.mark.parametrize("d", [2, 3])
 def test_projectors(d, double_precision):
-    module = ICTD(3, d, device=DEVICE)
+    module = SPACES[d].ICTD(3, device=DEVICE)
     x = torch.randn(5, d**3, device=DEVICE)
     projections = [module.project(x, i) for i in range(len(module.paths))]
     torch.testing.assert_close(sum(projections), x, atol=3e-14, rtol=3e-14)
@@ -53,7 +54,7 @@ def test_projectors(d, double_precision):
 @pytest.mark.parametrize("rank", [0, 1, 2, 3, 4])
 @pytest.mark.parametrize("reflected", [False, True])
 def test_equivariance(rank, d, reflected, double_precision):
-    module = ICTD(rank, d, device=DEVICE)
+    module = SPACES[d].ICTD(rank, device=DEVICE)
     if d == 3:
         rotation = o3.rand_matrix(device=DEVICE) * (-1 if reflected else 1)
         output_rotation = module.irreps_out.D_from_matrix(rotation.cpu()).to(DEVICE)
@@ -75,7 +76,7 @@ def test_equivariance(rank, d, reflected, double_precision):
 
 def test_rank_two_decomposition(double_precision):
     for d in (2, 3):
-        module = ICTD(2, d, device=DEVICE)
+        module = SPACES[d].ICTD(2, device=DEVICE)
         x = torch.randn(4, d, d, device=DEVICE)
         transpose = x.transpose(-1, -2)
         trace = x.diagonal(dim1=-2, dim2=-1).sum(-1)
@@ -101,14 +102,14 @@ def test_rank_two_decomposition(double_precision):
                 atol=2e-14,
                 rtol=2e-14,
             )
-    assert ICTD(2, d=2).irreps_out == o2.Irreps("1x2m+1x0e+1x0o")
-    assert ICTD(2, d=3).irreps_out == o3.Irreps("1x2e+1x1e+1x0e")
+    assert o2.ICTD(2).irreps_out == o2.Irreps("1x2m+1x0e+1x0o")
+    assert eqx_o3.ICTD(2).irreps_out == o3.Irreps("1x2e+1x1e+1x0e")
 
 
 @pytest.mark.parametrize("d", [2, 3])
 def test_precision_and_derivatives(d):
-    module = ICTD(3, d, dtype=torch.float32, device=DEVICE).double()
-    reference = ICTD(3, d, dtype=torch.float64, device=DEVICE)
+    module = SPACES[d].ICTD(3, dtype=torch.float32, device=DEVICE).double()
+    reference = SPACES[d].ICTD(3, dtype=torch.float64, device=DEVICE)
     torch.testing.assert_close(
         module.change_of_basis, reference.change_of_basis, atol=0, rtol=0
     )
@@ -119,9 +120,18 @@ def test_precision_and_derivatives(d):
     torch.testing.assert_close(compiled(x), module(x))
 
 
-@pytest.mark.parametrize("rank,d", [(-1, 3), (1.5, 3), (2, 1), (2, 4), (2, 2.0)])
-def test_invalid_rank_or_dimension(rank, d):
+@pytest.mark.parametrize("d", [2, 3])
+@pytest.mark.parametrize("rank", [-1, 1.5])
+def test_invalid_rank(rank, d):
     with pytest.raises(ValueError):
-        ICTD(rank, d)
+        SPACES[d].ICTD(rank)
     with pytest.raises(ValueError):
-        list(path_matrices(rank, d))
+        list(SPACES[d].path_matrices(rank))
+
+
+@pytest.mark.parametrize("d", [2, 3])
+def test_fixed_dimension(d):
+    with pytest.raises(TypeError):
+        SPACES[d].ICTD(2, d=d)
+    with pytest.raises(TypeError):
+        list(SPACES[d].path_matrices(2, d=d))

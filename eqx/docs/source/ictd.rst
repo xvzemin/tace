@@ -3,8 +3,9 @@
 Cartesian tensor decomposition
 ==============================
 
-``eqx.ICTD(rank, d=3)`` decomposes an arbitrary rank-``rank`` Cartesian
-tensor in dimension ``d=2`` or ``d=3``. It retains all irreducible paths,
+``eqx.o3.ICTD(rank)`` decomposes a three-dimensional Cartesian tensor;
+``eqx.o2.ICTD(rank)`` provides the two-dimensional decomposition.
+Both retain all irreducible paths,
 including repeated irreps. This differs from ``co2.path_matrix(m)`` and
 ``co3.path_matrix(l)``, which select only the highest-order STF subspace.
 
@@ -21,13 +22,17 @@ The two-dimensional version uses native real O(2) coupling coefficients.
 .. code-block:: python
 
    import torch
-   from eqx import ICTD
+   from eqx import o2, o3
 
-   decomposition = ICTD(rank=2, d=3)
+   decomposition = o3.ICTD(rank=2)
    x = torch.randn(8, 3, 3)
    h = decomposition(x.flatten(-2))
    reconstructed = decomposition.inverse(h).reshape_as(x)
    torch.testing.assert_close(reconstructed, x)
+
+   planar = o2.ICTD(rank=2)
+   y = torch.randn(8, 4)
+   torch.testing.assert_close(planar.inverse(planar(y)), y)
 
    # Each path is identified by its sequence of intermediate irreps.
    for index, path in enumerate(decomposition.paths):
@@ -56,6 +61,7 @@ precision regenerates the constants instead of promoting rounded values.
 
 The full change-of-basis matrix stores :math:`d^{2\,\mathrm{rank}}` entries.
 Individual square projectors are not stored. For higher ranks,
-``eqx.ictd.path_matrices(rank, d)`` yields rectangular matrices one path at a
-time without assembling the full matrix. Use the existing STF-only
+``eqx.o3.path_matrices(rank)`` and ``eqx.o2.path_matrices(rank)`` yield
+rectangular matrices one path at a time without assembling the full matrix.
+Use the existing STF-only
 ``path_matrix`` functions when other irreducible subspaces are not needed.

@@ -102,10 +102,15 @@ Cartesian tensor decomposition
 ``ICTD`` retains all irreducible paths of a Cartesian tensor power in
 two or three dimensions. See :ref:`equivariantx-ictd` for layout and examples.
 
-.. autoclass:: eqx.ICTD
+.. autoclass:: eqx.o3.ICTD
    :members: forward, inverse, path_matrix, project
 
-.. autofunction:: eqx.ictd.path_matrices
+.. autofunction:: eqx.o3.path_matrices
+
+.. autoclass:: eqx.o2.ICTD
+   :members: forward, inverse, path_matrix, project
+
+.. autofunction:: eqx.o2.path_matrices
 
 Cartesian O(3) operations
 --------------------------
@@ -189,6 +194,14 @@ indices on transverse tensors; see :ref:`equivariantx-cartesian-o2`.
 
 .. autoclass:: eqx.co2.TransverseProjector
    :members: forward
+
+.. autofunction:: eqx.co2.plane_projector
+
+.. autoclass:: eqx.co2.PlaneProjector
+   :members: forward
+
+.. autoclass:: eqx.co2.PlanarDetracer
+   :members: forward, matrix
 
 .. autoclass:: eqx.co2.Restriction
    :members: forward, inverse

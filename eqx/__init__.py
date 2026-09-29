@@ -16,10 +16,7 @@ with (
 ):
     from . import o2
 
-from .ictd import ICTD
-
 __all__ = [
-    "ICTD",
     "o2",
     "o3",
     "co2",

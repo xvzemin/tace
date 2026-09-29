@@ -6,6 +6,7 @@ from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
 from .linear import Linear
 from .o3_tensor_product import O3TensorProduct
+from .projection import PlanarDetracer, PlaneProjector, plane_projector
 from .restriction import (
     Restriction,
     TransverseProjector,
@@ -35,6 +36,9 @@ __all__ = [
     "ElementwiseTensorProduct",
     "Restriction",
     "TransverseProjector",
+    "PlaneProjector",
+    "PlanarDetracer",
+    "plane_projector",
     "restriction_scale",
     "restriction_matrix",
     "coupling_coefficients",

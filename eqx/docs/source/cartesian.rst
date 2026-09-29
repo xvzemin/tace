@@ -23,7 +23,7 @@ Let :math:`C_\ell` denote the orthonormal path matrix, with shape
 :math:`C_\ell C_\ell^T`. ``ChangeOfBasis`` and ``Projector`` apply these
 rectangular matrices without materializing the square projector.
 
-For arbitrary tensors, :ref:`eqx.ICTD <equivariantx-ictd>` retains all
+For arbitrary tensors, :ref:`eqx.o3.ICTD <equivariantx-ictd>` retains all
 irreducible paths rather than selecting only the STF subspace.
 
 .. code-block:: python

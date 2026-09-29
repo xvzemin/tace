@@ -1,7 +1,6 @@
 """Coordinate-free restriction of three-dimensional STF tensors."""
 
 import math
-from fractions import Fraction
 from functools import lru_cache
 
 import torch
@@ -10,6 +9,7 @@ from e3nn import o3
 from ..co3.basis import path_matrix as spherical_path_matrix
 from ..co3.symmetric import SymmetricBasis
 from .basis import path_matrix
+from .projection import detracing_coefficients
 
 
 @lru_cache(maxsize=None)
@@ -81,17 +81,6 @@ def coupling_coefficients(l1, l2, l3, normalization="component"):
             else torch.eye(block.shape[0], dtype=torch.float64, device="cpu")
         )
         result.append(pole * float((block * transform).sum() / block.shape[0]))
-    return tuple(result)
-
-
-@lru_cache(maxsize=None)
-def detracing_coefficients(rank):
-    """Return coefficients of the averaged transverse STF projection."""
-    value = Fraction(1)
-    result = [1.0]
-    for k in range(1, rank // 2 + 1):
-        value *= -Fraction((rank - 2 * k + 2) * (rank - 2 * k + 1), 4 * k * (rank - k))
-        result.append(float(value))
     return tuple(result)
 
 
