@@ -9,7 +9,7 @@ from .irreps import Irreps
 
 @lru_cache(maxsize=None)
 def path_matrix(m):
-    """Return the Cartesian-to-circular path matrix.
+    """Return the orthonormal circular-to-Cartesian path matrix.
 
     Parameters
     ----------
@@ -20,20 +20,25 @@ def path_matrix(m):
     -------
     torch.Tensor
         Cached CPU float64 matrix of shape (2**m, 1 if m == 0 else 2).
-        Columns are orthonormal. Do not modify this matrix in place.
+        Columns are orthonormal.
+
+    Notes
+    -----
+    The columns are the real and imaginary parts of the m-fold tensor
+    product of ``(1, 1j)``. Each step prepends a Cartesian index.
+    Normalization is applied once after constructing the integer entries.
     """
     if not isinstance(m, int) or m < 0:
         raise ValueError("The order must be a non-negative integer.")
     if m == 0:
         return torch.ones(1, 1, dtype=torch.float64, device="cpu")
-    # Tensor powers of (1, i), evaluated with integer phases rather than angles.
-    counts = torch.tensor([bin(i).count("1") % 4 for i in range(2**m)], device="cpu")
-    phases = torch.tensor(
-        [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]],
-        dtype=torch.float64,
-        device="cpu",
-    )
-    return phases[counts] * 2.0 ** ((1 - m) / 2)
+    matrix = torch.eye(2, dtype=torch.float64, device="cpu")
+    for _ in range(1, m):
+        real, imag = matrix.unbind(-1)
+        matrix = torch.stack(
+            (torch.cat((real, -imag)), torch.cat((imag, real))), dim=-1
+        )
+    return matrix * 2.0 ** ((1 - m) / 2)
 
 
 class ChangeOfBasis(torch.nn.Module):

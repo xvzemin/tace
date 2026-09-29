@@ -12,6 +12,20 @@ from eqx.co3.symmetric import SymmetricBasis
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize("m", [0, 1, 2, 3, 8, 16])
+def test_path_matrix(m):
+    tensor = torch.ones(1, dtype=torch.complex128, device=DEVICE)
+    vector = torch.tensor([1, 1j], dtype=torch.complex128, device=DEVICE)
+    for _ in range(m):
+        tensor = torch.kron(tensor, vector)
+    expected = (
+        torch.stack((tensor.real, tensor.imag), dim=-1) * 2.0 ** ((1 - m) / 2)
+        if m
+        else tensor.real[:, None]
+    )
+    assert torch.equal(co2.path_matrix(m).to(DEVICE), expected)
+
+
 def test_coupling_recurrence_phase(monkeypatch, double_precision):
     from eqx.co2.spherical import coupling_polynomial, coupling_recurrence, generators
 

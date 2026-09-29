@@ -96,6 +96,17 @@ differentiation, selected by ``backend="torch"``.
 .. autoclass:: eqx.conv.StreamingGraphAttention
    :members: forward
 
+Cartesian tensor decomposition
+------------------------------
+
+``ICTD`` retains all irreducible paths of a Cartesian tensor power in
+two or three dimensions. See :ref:`equivariantx-ictd` for layout and examples.
+
+.. autoclass:: eqx.ICTD
+   :members: forward, inverse, path_matrix, project
+
+.. autofunction:: eqx.ictd.path_matrices
+
 Cartesian O(3) operations
 --------------------------
 

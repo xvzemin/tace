@@ -75,6 +75,11 @@ tensors. Embedding, extraction, and projection use :math:`C_m`,
 :math:`C_m^T`, and :math:`C_m C_m^T`, respectively. ``Projector`` applies
 the two rectangular matrices without constructing a square projector.
 
+``path_matrix(m)`` builds the real and imaginary tensor-power columns by
+block concatenation and sign changes, then normalizes once.
+:ref:`eqx.ICTD <equivariantx-ictd>` instead retains every irreducible path of
+an arbitrary Cartesian tensor, including both zero-order reflection signs.
+
 Operators
 ---------
 
