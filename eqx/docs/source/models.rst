@@ -32,7 +32,7 @@ Supported models
      - Spatial RealAgnostic interactions, including density and attention variants
    * - NequIP
      - 0.19.1
-     - Uncompiled InteractionBlock models with native TensorProductScatter
+     - Uncompiled InteractionBlock models with TensorProductScatter
    * - SevenNet
      - 0.13.0
      - Instantiated serial IrrepsConvolution models, including Omni-i12
@@ -115,7 +115,7 @@ SevenNet
 Choose the desired fidelity through the calculator's ``modal`` argument.
 For training, retain the original batching and modal fields and call
 ``model.train()``. Convert before constructing the optimizer.
-SevenNet's native embedding uses float32; converting only the model to float64
+SevenNet's embedding uses float32; converting only the model to float64
 does not change that upstream behavior.
 
 Prophet

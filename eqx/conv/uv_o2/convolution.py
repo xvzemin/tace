@@ -264,7 +264,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         Score normalization and shifted-softmax denominator regularization.
     backend : {"cuda", "torch"}, optional
         Execution backend. ``"torch"`` evaluates aligned and transverse forms
-        with native operations and automatic differentiation on either device.
+        with PyTorch operations and automatic differentiation on either device.
 
     Notes
     -----

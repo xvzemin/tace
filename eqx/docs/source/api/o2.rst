@@ -1,0 +1,56 @@
+.. _equivariantx-api-o2:
+
+Spherical O(2)
+==============
+
+Features use a flattened ``ir_mul`` axis with trailing size ``irreps.dim``.
+Iteration over ``Irreps`` yields ``(ir, mul)`` entries. Each irrep has
+dimension one at order zero and two at positive orders.
+
+Representations
+---------------
+
+.. autoclass:: eqx.o2.Irrep
+   :members:
+   :special-members: __mul__
+
+.. autoclass:: eqx.o2.Irreps
+   :members:
+
+Harmonics
+---------
+
+.. autofunction:: eqx.o2.circular_harmonics
+
+.. autoclass:: eqx.o2.CircularHarmonics
+   :members: forward
+
+Linear maps and activations
+---------------------------
+
+.. autoclass:: eqx.o2.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.o2.UuLinear
+   :members: forward
+
+.. autoclass:: eqx.o2.Activation
+   :members: forward
+
+.. autoclass:: eqx.o2.Gate
+   :members: forward
+
+Tensor products
+---------------
+
+.. autoclass:: eqx.o2.TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: eqx.o2.AsymmetricContraction
+   :members: forward
+
+Harmonic O(3) coupling
+----------------------
+
+.. autoclass:: eqx.o2.O3TensorProduct
+   :members: forward, forward_local, forward_scatter

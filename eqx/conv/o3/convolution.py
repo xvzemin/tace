@@ -1,8 +1,3 @@
-################################################################################
-# Authors: Zemin Xu
-# License: CC-BY-4.0, see LICENSE.md
-################################################################################
-
 """O(3) convolutions with external radial projections."""
 
 import math
@@ -128,7 +123,7 @@ class O3TensorProductConv(torch.nn.Module):
     backend : {"cuda", "torch"}, optional
         CUDA generates sparse contractions on first use and caches the
         compiled binaries. ``"torch"`` evaluates the CG contractions with
-        native operations and automatic differentiation on either device.
+        PyTorch operations and automatic differentiation on either device.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization when vectors are supplied.
     normalize : bool, optional

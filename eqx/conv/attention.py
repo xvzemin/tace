@@ -45,7 +45,7 @@ def merge_source(dtype, width, channels, heads, splits, eps):
 
 
 def merge_attention(values, denominators, maxima, channels, eps, outputs):
-    """Merge unnormalized online attention tiles inside a native operation.
+    """Merge unnormalized online attention tiles inside a CUDA operation.
 
     Values have shape ``(nodes, splits, ..., channels)``; statistics have
     shape ``(nodes, splits, heads)``. Heads partition the channel dimension.
@@ -274,7 +274,7 @@ class StreamingGraphAttention(Replay):
         Added to the denominator after shifting by the receiver maximum.
     backend : {"cuda", "torch"}, optional
         ``"cuda"`` replays tiles during differentiation. ``"torch"`` retains
-        the native online-softmax graph and uses automatic differentiation.
+        the PyTorch online-softmax graph and uses automatic differentiation.
 
     Notes
     -----

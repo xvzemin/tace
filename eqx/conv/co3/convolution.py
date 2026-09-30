@@ -30,7 +30,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Defines the irreps, ``uvu`` instructions and normalization.
     backend : {"cuda", "torch"}, optional
         CUDA fuses delta/epsilon contractions and graph reduction. ``"torch"``
-        uses native Cartesian operations and automatic differentiation.
+        uses PyTorch Cartesian operations and automatic differentiation.
     normalization : {"component", "integral", "norm"}, optional
         Cartesian-harmonic normalization when vectors are supplied.
     normalize : bool, optional
@@ -405,7 +405,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
     def reference(
         self, features, edge_attrs, radial, projection, edge_index, num_nodes
     ):
-        """Evaluate the same instructions using native Cartesian operations."""
+        """Evaluate the same instructions using PyTorch Cartesian operations."""
         features = (
             features
             if self.input_identity

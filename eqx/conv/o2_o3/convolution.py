@@ -1,8 +1,3 @@
-################################################################################
-# Authors: Zemin Xu
-# License: CC-BY-4.0, see LICENSE.md
-################################################################################
-
 """Equivalent aligned and frame-free tensor-product convolutions."""
 
 import math
@@ -131,8 +126,8 @@ class O2O3TensorProductConv(torch.nn.Module):
         Tensor product defining paths, normalization and feature layouts.
     backend : {"torch", "cuda"}, optional
         Execution backend. ``"torch"`` evaluates the selected algorithm with
-        native operations and automatic differentiation. Defaults to ``"cuda"``
-        on CUDA inputs and native operations on CPU.
+        PyTorch operations and automatic differentiation. Defaults to ``"cuda"``
+        on CUDA inputs and PyTorch operations on CPU.
         The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
         for channel-mixing ``"uvw"`` instructions.
     method : {"auto", "baseline", "generator", "recurrence", "cg", "wigner"}, optional

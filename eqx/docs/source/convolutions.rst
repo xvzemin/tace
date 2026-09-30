@@ -4,7 +4,7 @@ Fused Convolutions
 ==================
 
 CGTP convolutions preserve the supplied instructions, independent path weights
-and normalization. Uu and Uv convolutions instead parameterize native O(2) maps.
+and normalization. Uu and Uv convolutions parameterize spherical O(2) maps.
 
 |eqx-convolutions|
 
@@ -29,7 +29,7 @@ Interfaces
      - Linear--Gate--Linear with optional edge representations and attention
 
 Each interface defaults to CUDA on GPU and PyTorch on CPU.
-``backend="torch"`` selects native PyTorch operations on either device,
+``backend="torch"`` selects PyTorch operations on either device,
 without custom backward functions or CUDA extensions. The CUDA backend
 supports float32, float64 and higher derivatives, including force training.
 
@@ -157,8 +157,8 @@ been selected. They do not run autotuning. An explicit ``method`` disables
 selection. When vectors are omitted, supplied Wigner matrices are used
 directly, without autotuning.
 
-Native O(2) convolutions
-------------------------
+Spherical O(2) convolutions
+----------------------------
 
 Uu applies a single externally weighted channelwise Linear to source features.
 Uv mixes source, target and optional edge features using Linear--Gate--Linear.

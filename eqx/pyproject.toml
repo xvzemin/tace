@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "EquivariantX"
 version = "0.1.0"
-description = "PyTorch O(2) and Cartesian O(2)/O(3) operators, frame conversions, and fused CUDA convolutions."
+description = "Spherical and Cartesian O(3)/O(2) operators, frame conversions, and fused CUDA convolutions."
 readme = "README.md"
 authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
-license = "CC-BY-4.0"
+license = "Apache-2.0"
 license-files = ["LICENSE.md"]
 requires-python = ">=3.9"
 dependencies = [

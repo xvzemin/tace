@@ -1,4 +1,4 @@
-"""O(2), Cartesian O(2)/O(3), frame conversion, and CUDA convolutions."""
+"""Spherical and Cartesian O(3)/O(2) operators and fused convolutions."""
 
 from contextlib import nullcontext
 from importlib import import_module

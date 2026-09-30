@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 478" role="img" aria-labelledby="title desc">
   <title id="title">Four fused convolution interfaces</title>
-  <desc id="desc">The first two lanes implement equivalent instructed O(3) tensor products. The last two lanes parameterize native O(2) linear and gated convolutions. All lanes gather input features and reduce messages at destination nodes.</desc>
+  <desc id="desc">The first two lanes implement equivalent instructed O(3) tensor products. The last two lanes parameterize spherical O(2) linear and gated convolutions. All lanes gather input features and reduce messages at destination nodes.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#526276"/></marker></defs>
   <rect width="1020" height="478" rx="14" fill="#fff"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
@@ -24,7 +24,7 @@
     <rect x="776" y="174" width="212" height="66" rx="9" fill="#e8f0f8" stroke="#8595a6"/>
     <text x="882" y="213" text-anchor="middle" font-size="17" font-weight="600">Rotate + scatter</text>
     <text x="28" y="293" text-anchor="start" font-size="17" font-weight="600">UuO2TensorProductConv</text>
-    <text x="28" y="317" text-anchor="start" font-size="14" font-weight="400">Native O(2) parameterization</text>
+    <text x="28" y="317" text-anchor="start" font-size="14" font-weight="400">Spherical O(2) parameterization</text>
     <rect x="300" y="268" width="212" height="66" rx="9" fill="#f9eadc" stroke="#8595a6"/>
     <text x="406" y="307" text-anchor="middle" font-size="17" font-weight="600">Gather + rotate</text>
     <path d="M512 301L534 301" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>
@@ -34,7 +34,7 @@
     <rect x="776" y="268" width="212" height="66" rx="9" fill="#f9eadc" stroke="#8595a6"/>
     <text x="882" y="307" text-anchor="middle" font-size="17" font-weight="600">Rotate + scatter</text>
     <text x="28" y="387" text-anchor="start" font-size="17" font-weight="600">UvO2TensorProductConv</text>
-    <text x="28" y="411" text-anchor="start" font-size="14" font-weight="400">Native O(2) parameterization</text>
+    <text x="28" y="411" text-anchor="start" font-size="14" font-weight="400">Spherical O(2) parameterization</text>
     <rect x="300" y="362" width="212" height="66" rx="9" fill="#eee7f4" stroke="#8595a6"/>
     <text x="406" y="401" text-anchor="middle" font-size="17" font-weight="600">Gather + rotate</text>
     <path d="M512 395L534 395" fill="none" stroke="#526276" stroke-width="2" marker-end="url(#arrow)"/>

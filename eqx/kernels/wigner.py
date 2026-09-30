@@ -1,8 +1,3 @@
-################################################################################
-# Authors: Zemin Xu
-# License: CC-BY-4.0, see LICENSE.md
-################################################################################
-
 """Packed Wigner matrices with quaternion and recursive CUDA kernels."""
 
 from weakref import ref

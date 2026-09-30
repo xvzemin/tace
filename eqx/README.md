@@ -1,8 +1,8 @@
 # EquivariantX
 
-EquivariantX (EQX) provides PyTorch-native O(2) and Cartesian O(2)/O(3) operators, e3nn-compatible
-O(3)/O(2) frame conversion, and fused CUDA convolutions. Time-reversal labels
-are optional.
+EquivariantX (EQX) provides spherical and Cartesian O(3)/O(2) operators,
+basis and frame conversions, and fused CUDA convolutions.
+Time-reversal labels are optional.
 
 ## Installation
 
@@ -13,7 +13,7 @@ git clone https://github.com/xvzemin/tace.git
 pip install ./tace/eqx
 ```
 
-Native operations require **PyTorch >= 2.4** and **e3nn >= 0.4.4**, not PyG
+PyTorch operations require **PyTorch >= 2.4** and **e3nn >= 0.4.4**, not PyG
 or custom CUDA extensions. For fused kernels:
 
 ```bash
@@ -26,7 +26,21 @@ With e3nn 0.4.x, import `eqx` before `e3nn.o3`. Global time-odd irreps require
 the time-reversal e3nn extension.
 On e3nn 0.4.x, supported O(3) degrees are limited by its packaged CG table.
 
-## Native operations and frames
+## Representations and operators
+
+| Representation | Module | Entry layout before flattening | API |
+|---|---|---|---|
+| Spherical O(3) | `eqx.o3` | `(..., mul, 2 * l + 1)` | [O(3)](https://tace.readthedocs.io/en/latest/equivariantx/api/o3.html) |
+| Cartesian O(3) | `eqx.co3` | `(..., mul, 3**l)` | [Cartesian O(3)](https://tace.readthedocs.io/en/latest/equivariantx/api/co3.html) |
+| Cartesian O(2) | `eqx.co2` | `(..., mul, 2**m)` | [Cartesian O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/co2.html) |
+| Spherical O(2) | `eqx.o2` | `(..., ir.dim, mul)` | [O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/o2.html) |
+
+`eqx.o3` supplies element-dependent linear maps and gates using e3nn irreps.
+The other three modules also provide their own irreps, harmonics, and tensor
+products. Basis conversions, rotations, projections, and tensor decomposition
+have a separate [tools API](https://tace.readthedocs.io/en/latest/equivariantx/api/tools.html).
+
+For example, a spherical O(2) linear map:
 
 ```python
 import torch
@@ -37,13 +51,13 @@ features = linear.irreps_in.randn(32, -1)
 output = linear(features)
 ```
 
-O(2) features use flattened `ir_mul` storage: `(..., ir.dim, mul)` within
+Spherical O(2) features use flattened `ir_mul` storage: `(..., ir.dim, mul)` within
 each irrep entry. Transpose each entry when converting from e3nn's `mul_ir`
 storage. `WignerD` builds rotations; `LocalFrame` applies rotations and
 reflection-basis changes. Use `WignerD(method="recursive")` for a purely
 PyTorch construction, including on GPU.
 
-See the [tutorial](https://tace.readthedocs.io/en/latest/equivariantx/tutorials.html)
+See the [spherical O(2) tutorial](https://tace.readthedocs.io/en/latest/equivariantx/spherical_o2.html)
 for runnable Linear, Gate, TensorProduct, and frame-conversion examples.
 
 ## Fused convolutions
@@ -52,16 +66,12 @@ for runnable Linear, Gate, TensorProduct, and frame-conversion examples.
 
 The CGTP interfaces preserve the supplied paths, weights, and normalization.
 The aligned CGTP requires natural-parity, time-even harmonic edge inputs with
-one channel per irrep entry. Native Uu/Uv convolutions parameterize O(2) maps
+one channel per irrep entry. Uu/Uv convolutions parameterize spherical O(2) maps
 directly. CUDA kernels support force training and higher derivatives.
 
 | Module | Role |
 |---|---|
-| `eqx.o2` | Native O(2) operators and O(3)/O(2) frames |
-| `eqx.co3` | Cartesian O(3) irreps, harmonics, Linear, Gate, and tensor products in `mul_ir` layout |
-| `eqx.co2` | Cartesian O(2) operators and coordinate-free harmonic CGTP in `mul_ir` layout |
 | `eqx.conv` | General fused convolutions and graph attention |
-| `eqx.o3` | Element-dependent Linear and Gate in `mul_ir` layout |
 | `eqx.ace` | Atomic cluster expansions |
 | `eqx.models` | TACE fusion and MACE, NequIP, SevenNet, Prophet, EquFlash conversion |
 | `eqx.kernels` | Shared geometry, compilation, and launch support |
@@ -95,8 +105,7 @@ or both suites with `pytest tests eqx/tests`.
 
 ## License
 
-EquivariantX is licensed under
-[Creative Commons Attribution 4.0 International (CC BY 4.0)](LICENSE.md).
+EquivariantX is licensed under the [Apache License 2.0](LICENSE.md).
 
 ## Citation
 

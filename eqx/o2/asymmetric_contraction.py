@@ -1,8 +1,3 @@
-################################################################################
-# Authors: Zemin Xu
-# License: CC-BY-4.0, see LICENSE.md
-################################################################################
-
 from typing import NamedTuple, Sequence
 
 import torch

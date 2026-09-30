@@ -1,0 +1,23 @@
+.. _equivariantx-api-o3:
+
+Spherical O(3)
+==============
+
+These operators use ``e3nn.o3.Irreps`` and flattened ``mul_ir`` features:
+``(..., mul, 2 * l + 1)`` within each entry. Linear weights are supplied
+externally; biases are applied by the caller.
+
+Linear maps
+-----------
+
+.. autoclass:: eqx.o3.ElementLinear
+   :members: forward
+
+.. autoclass:: eqx.o3.MoEElementLinear
+   :members: forward
+
+Gated activations
+-----------------
+
+.. autoclass:: eqx.o3.Gate
+   :members: forward

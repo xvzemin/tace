@@ -1,4 +1,4 @@
-"""Operators for spatial irreducible representations."""
+"""Spherical O(3) operators and Cartesian tensor decomposition."""
 
 from .gate import Gate
 from .ictd import ICTD, path_matrices

@@ -25,7 +25,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         instruction order, weight layout and path normalization are preserved.
     backend : {"cuda", "torch"}, optional
         Execution backend. CUDA fuses directional couplings and aggregation
-        without storing edge messages. ``"torch"`` uses native operations
+        without storing edge messages. ``"torch"`` uses PyTorch operations
         and automatic differentiation for both aligned and transverse forms.
 
     """

@@ -4,44 +4,8 @@ Cartesian O(2)
 ==============
 
 ``eqx.co2`` provides two-dimensional Cartesian tensor operations and a
-coordinate-free restriction of three-dimensional tensors. All operations use
-PyTorch, including on GPU. No compiled extension is required.
-
-Spherical storage without alignment
------------------------------------
-
-``SphericalCoupling(l1, l2, l3)`` evaluates the same transverse coupling on
-spherical coefficients, without constructing Cartesian tensors or selecting
-transverse axes. Inputs and outputs have last dimensions :math:`2\ell_1+1`
-and :math:`2\ell_3+1`, respectively.
-
-For a unit direction :math:`\mathbf n`, let :math:`G_{\mathbf n}` be the
-rotation generator in the smaller input or output representation. The minimum-degree harmonic
-coupling, of degree :math:`\delta=|\ell_1-\ell_3|`, connects matching transverse
-orders. A polynomial of :math:`-G_{\mathbf n}^2` supplies their required
-weights; odd couplings additionally apply :math:`G_{\mathbf n}`. Generator
-actions are placed on the smaller representation using equivariance. Its
-coefficients are obtained from the reference-axis coupling matrices in
-float64 and stored in a Chebyshev basis. No directional sampling is used.
-
-.. code-block:: python
-
-   import torch
-   from eqx import co2
-
-   coupling = co2.SphericalCoupling(3, 2, 3)
-   h = torch.randn(16, 7)
-   rij = torch.randn(16, 3, requires_grad=True)
-   output = coupling(h, rij)
-   gradient = torch.autograd.grad(output.square().sum(), rij, create_graph=True)
-
-``eqx.conv.O2O3TensorProductConv(method="generator")`` uses this construction
-when edge vectors are supplied. Its CUDA backend retains spherical features,
-independent path weights and outputs, and supports force training and higher
-derivatives. The default ``method="auto"`` selects an execution method by
-timing representative inputs. See :ref:`equivariantx-convolutions` for the
-available methods. The generator construction is smooth on the nonzero-vector
-domain and uses no alignment chart.
+coordinate-free restriction of three-dimensional tensors. The operators
+use PyTorch.
 
 Representations and conversion
 ------------------------------
@@ -75,8 +39,8 @@ tensors. Embedding, extraction, and projection use :math:`C_m`,
 :math:`C_m^T`, and :math:`C_m C_m^T`, respectively. ``Projector`` applies
 the two rectangular matrices without constructing a square projector.
 
-``path_matrix(m)`` builds the real and imaginary tensor-power columns by
-block concatenation and sign changes, then normalizes once.
+For positive orders, ``path_matrix(m)`` contains the normalized real and
+imaginary parts of :math:`(1,i)^{\otimes m}`; ``path_matrix(0)`` is ``[[1]]``.
 :ref:`eqx.o2.ICTD <equivariantx-ictd>` instead retains every irreducible path of
 an arbitrary Cartesian tensor, including both zero-order reflection signs.
 
@@ -120,19 +84,19 @@ Coordinate-free restriction
 ---------------------------
 
 ``Restriction(l)`` accepts three-dimensional STF tensors with trailing size
-:math:`3^\ell` and unit directions :math:`\bm n`. It returns one transverse
+:math:`3^\ell` and unit directions :math:`\mathbf n`. It returns one transverse
 tensor for each order :math:`m=0,\ldots,\ell`. These tensors retain global
 Cartesian indices, with trailing sizes :math:`3^m`, rather than the
 :math:`2^m` storage of ``co2.Irreps``. No transverse axes or Wigner rotation
 matrices are constructed.
 
-With :math:`P=I-\bm n\bm n^T`, the normalized restriction is
+With :math:`P=I-\mathbf n\mathbf n^T`, the normalized restriction is
 
 .. math::
 
    B_{\ell m}T = a_{\ell m}\operatorname{STF}_{\perp}
    \left[P^{\otimes m}
-   \left(T\mathbin{\lrcorner}\bm n^{\otimes(\ell-m)}\right)\right],
+   \left(T\mathbin{\lrcorner}\mathbf n^{\otimes(\ell-m)}\right)\right],
    \qquad
    a_{\ell m}^2=2^{m-\ell}\binom{2\ell}{\ell-m}.
 
@@ -141,20 +105,10 @@ inputs. ``inverse`` reconstructs the tensor. The transverse projection
 uses finite trace-removal formulas; its constants are prepared at
 construction time.
 
-Intermediate symmetric tensors use :math:`\binom{m+2}{2}` normalized
-coordinates instead of :math:`3^m` repeated entries. Longitudinal contractions
-are shared across orders. Packing uses successive normalized symmetrizations
-rather than atomic sums over repeated entries. For an STF input, the unprojected transverse tensors
-satisfy :math:`\operatorname{tr}^k U_{\ell m}=(-1)^k U_{\ell,m-2k}`;
-restriction reuses these lower orders rather than computing their traces again.
-Plane transformations contract symmetric index groups, and trace corrections
-use nested symmetric products. Ranks one and two use direct formulas.
-External tensor shapes and normalization are unchanged.
-
 Separate plane projection and detracing
 ---------------------------------------
 
-``plane_projector(direction)`` constructs :math:`P=I-\bm n\bm n^T` from
+``plane_projector(direction)`` constructs :math:`P=I-\mathbf n\mathbf n^T` from
 unit directions. ``PlaneProjector(rank)`` applies this matrix to every
 Cartesian index without removing traces or imposing symmetry.
 ``PlanarDetracer(rank)`` then removes the traces of an already symmetric,
@@ -187,12 +141,9 @@ inputs require no trace removal. The input must already be symmetric and
 projected; this matrix is not a general STF projector on arbitrary inputs.
 No transverse axes, Wigner matrices, or numerical inverses are constructed.
 
-``PlanarDetracer`` explicitly forms :math:`3^{2\,\mathrm{rank}}` entries
-per plane and is a reference implementation. Its constants are registered
-buffers, regenerated when increasing precision. Matrix construction and
-application support ordinary autograd and higher derivatives.
-The existing ``TransverseProjector`` instead combines projection and trace
-removal through symmetric contractions without forming this dense matrix.
+The detracing matrix has :math:`3^{2\,\mathrm{rank}}` entries per plane.
+``TransverseProjector`` instead combines projection and trace removal
+without forming this dense matrix.
 
 Exact harmonic tensor products
 -------------------------------
@@ -208,10 +159,10 @@ For each retained path :math:`\pi=(\ell_1,\ell_2,\ell_3)`,
 
 .. math::
 
-   K_\pi(\bm n)=
+   K_\pi(\mathbf n)=
    \sum_{m=0}^{\min(\ell_1,\ell_3)}
-   c_{\pi m} B_{\ell_3m}^{\dagger}(\bm n)
-   J_m^{s_\pi}(\bm n) B_{\ell_1m}(\bm n),
+   c_{\pi m} B_{\ell_3m}^{\dagger}(\mathbf n)
+   J_m^{s_\pi}(\mathbf n) B_{\ell_1m}(\mathbf n),
    \qquad s_\pi=(\ell_1+\ell_2+\ell_3)\bmod 2.
 
 Here :math:`J_m` is the normalized transverse rotation generator. The odd
@@ -251,18 +202,47 @@ Cartesian messages, then projects on nodes. With Cartesian output and
 ``project=False``, a subsequent ``co3.Linear`` can compress channels before
 projection. Edge-dependent transverse projections cannot be moved after
 neighbor summation.
-Reconstruction uses nested products with the direction, avoiding a full-rank
-Cartesian temporary for every local order. Fixed STF projection remains a
-pair of rectangular path-matrix contractions.
+
+Spherical storage without alignment
+-----------------------------------
+
+``SphericalCoupling(l1, l2, l3)`` evaluates the same transverse coupling on
+spherical coefficients, without constructing Cartesian tensors or selecting
+transverse axes. Inputs and outputs have last dimensions :math:`2\ell_1+1`
+and :math:`2\ell_3+1`, respectively.
+
+For a unit direction :math:`\mathbf n`, let :math:`G_{\mathbf n}` be the
+rotation generator in the smaller input or output representation. The minimum-degree harmonic
+coupling, of degree :math:`\delta=|\ell_1-\ell_3|`, connects matching transverse
+orders. A polynomial of :math:`-G_{\mathbf n}^2` supplies their required
+weights; odd couplings additionally apply :math:`G_{\mathbf n}`. Generator
+actions are placed on the smaller representation using equivariance. Its
+coefficients are obtained from the reference-axis coupling matrices in
+float64 and stored in a Chebyshev basis. No directional sampling is used.
+
+.. code-block:: python
+
+   import torch
+   from eqx import co2
+
+   coupling = co2.SphericalCoupling(3, 2, 3)
+   h = torch.randn(16, 7)
+   rij = torch.randn(16, 3, requires_grad=True)
+   output = coupling(h, rij)
+   gradient = torch.autograd.grad(output.square().sum(), rij, create_graph=True)
+
+``eqx.conv.O2O3TensorProductConv(method="generator")`` uses this construction
+when edge vectors are supplied. Its CUDA backend retains spherical features,
+independent path weights and outputs, and supports force training and higher
+derivatives. See :ref:`equivariantx-convolutions` for execution methods. The generator construction is smooth on the nonzero-vector
+domain and uses no alignment chart.
 
 Scope and numerical behavior
 -----------------------------
 
-All formulas support arbitrary integer degrees, but explicit Cartesian
-storage grows exponentially with rank. This implementation establishes
-equivalence and conversion; it does not claim a speed advantage over fused
-CGTP kernels. Large-degree trace removal can suffer cancellation and should
-be validated at the intended dtype. Use float64 for strict comparisons.
+Explicit Cartesian storage grows exponentially with rank. High-rank
+trace removal can suffer cancellation; validate at the intended dtype
+and use float64 for strict comparisons.
 
 For nonzero edge vectors, the construction supports ordinary autograd,
 including mixed parameter/position derivatives and higher derivatives.

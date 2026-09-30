@@ -17,7 +17,7 @@ Successive vector couplings construct the normalized path matrices
 Construction follows the path expansion in
 `ICTD, Algorithm 1 <https://www.jmlr.org/papers/v26/25-0134.html>`_
 and its `reference implementation <https://github.com/ShihaoShao-GH/ICT-decomposition-and-equivariant-bases>`_.
-The two-dimensional version uses native real O(2) coupling coefficients.
+The two-dimensional version uses real O(2) coupling coefficients.
 
 .. code-block:: python
 

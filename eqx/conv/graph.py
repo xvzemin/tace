@@ -1,8 +1,3 @@
-################################################################################
-# Authors: Zemin Xu
-# License: CC-BY-4.0, see LICENSE.md
-################################################################################
-
 """Reusable source- and receiver-ordered convolution tiles."""
 
 from collections import OrderedDict

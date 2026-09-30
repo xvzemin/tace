@@ -3,19 +3,14 @@
 Cartesian O(3)
 ==============
 
-``eqx.co3`` implements Cartesian irreps, harmonics, linear maps, gates, and
-tensor products using PyTorch. It does not require a CUDA extension or
-TorchScript.
+``eqx.co3`` implements Cartesian O(3) irreps, harmonics, linear maps, gates, and
+tensor products using PyTorch.
 
 Representations and basis
 -------------------------
 
-``Irrep(l, p)`` labels angular degree and spatial inversion parity.
-Both natural and unnatural parities are supported. ``Irreps`` iterates over
-``(mul, ir)`` entries. Each entry uses ``(..., mul, 3**l)`` storage, flattened
-into the final feature axis. Thus ``ir.dim`` is the Cartesian storage size,
-while ``ir.spherical_dim`` is the dimension of the symmetric traceless (STF)
-subspace. Redundant Cartesian entries are not independent channels.
+``Irreps`` iterates over ``(mul, ir)`` entries and each entry uses
+``(..., mul, 3**l)`` storage, flattened into the final feature axis.
 
 Let :math:`C_\ell` denote the orthonormal path matrix, with shape
 :math:`3^\ell\times(2\ell+1)`. For column vectors,
@@ -120,7 +115,7 @@ spherical features. Use ``Linear(..., project=True)`` when retaining Cartesian
 storage instead. Do not pass unprojected features into another tensor product
 or nonlinearity.
 
-The native operators expose full Cartesian storage, which grows as
+Cartesian operators expose full tensor storage, which grows as
 :math:`3^\ell`. The fused convolution below can retain compact storage.
 All operators support ordinary autograd, including force training and
 higher derivatives.
@@ -139,12 +134,8 @@ raw tensors, apply the node-level channel Linear, and then project as above.
 With ``symmetric_inputs=True``, a rank-:math:`\ell` input uses
 :math:`\binom{\ell+2}{2}` exponent triples. Contracting :math:`k` indices sums
 over :math:`\binom{k+2}{2}` triples with integer permutation multiplicities.
-Raw outputs retain separate symmetric free-index groups; no symmetrization
-is performed between groups. Instructions sharing an output retain only
-their common permutation symmetries. Independent path weights are unchanged.
-Cartesian inputs are averaged over index permutations, including the
-corresponding transpose in backward. ``input_basis="spherical"`` instead
-applies the path matrix directly into compact storage on nodes.
+``input_basis="spherical"`` applies the path matrix directly into compact
+storage on nodes.
 
 ``compact_output=True`` retains packed raw outputs after aggregation and
 requires ``project=False``. ``eqx.conv.co3.Linear`` consumes these outputs,
@@ -175,16 +166,6 @@ indices passed to Linear describe storage only and do not alter its weights.
    output = linear(message)
 
 Without compact output, the public result retains flattened ``mul_ir`` order.
-Delta/epsilon coefficients and permutation multiplicities remain integers;
-their common normalization is applied once through the path factor.
-Harmonic indices use the same exponent-triple layout, so CUDA tiles cover
-unique entries rather than redundant Cartesian permutations. Only requested
-harmonic polynomials are generated. Higher derivatives use
-the same transposed contraction rules, including derivatives at zero vectors
-when ``normalize=False``.
-High-rank contractions are tiled over Cartesian indices to limit register
-usage. Tiles sharing a path use the same weight and sum their contributions;
-this does not truncate the tensor or remove coupling paths.
 
 In TACE, select ``atomic_basis.type: co3`` and ``TACE_USE_EQX=1``. Existing
 spherical models can be converted with ``convert_cgtp(model, "co3")``;
