@@ -187,13 +187,18 @@ The two upstream NVIDIA repositories are provided for reference:
 - `nvalchemi-toolkit-ops <https://github.com/NVIDIA/nvalchemi-toolkit-ops>`_
 
 
-Time-reversal e3nn
-------------------
+Time-reversal e3nn (T-e3nn)
+----------------------------
 
-To enforce time-reversal equivariance in mTACE, install the ``time-reversal``
-branch of `e3nn
-<https://github.com/xvzemin/e3nn/tree/time-reversal>`_ to ensure time-reversal
-equivariance:
+**T-e3nn** is a time-reversal extension of `e3nn <https://github.com/e3nn/e3nn>`_,
+developed by **Hongyu Yu et al.**
+
+Project repository: `T-e3nn <https://github.com/Hongyu-yu/T-e3nn>`_
+
+Since the original T-e3nn was developed based on an older version of e3nn, we 
+have migrated and adapted its implementation to the latest version of 
+`e3nn <https://github.com/xvzemin/e3nn/tree/time-reversal>`_ for compatibility 
+with the latest APIs and features.
 
 .. code-block:: bash
 
