@@ -7,13 +7,13 @@ from .ictd import ICTD, path_matrices
 from .irreps import Irrep, Irreps
 from .linear import Linear, UuLinear
 from .local_frame import LocalFrame
+from .o2grid import O2Grid
 from .o3_tensor_product import O3TensorProduct
 from .rotation_matrix import (
     rotation_matrix_to_x_axis,
     rotation_matrix_to_y_axis,
     rotation_matrix_to_z_axis,
 )
-from .s1grid import S1Grid
 from .tensor_product import TensorProduct
 from .wigner import WignerD
 
@@ -29,7 +29,7 @@ __all__ = [
     "AsymmetricContraction",
     "LocalFrame",
     "CircularHarmonics",
-    "S1Grid",
+    "O2Grid",
     "TensorProduct",
     "O3TensorProduct",
     "WignerD",

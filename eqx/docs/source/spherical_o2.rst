@@ -32,14 +32,14 @@ Representations
 ``CircularHarmonics`` evaluates harmonics of a two-dimensional vector;
 ``normalize=False`` gives homogeneous polynomials that are smooth at zero.
 
-Circular grid
--------------
+O(2) grid
+----------
 
-``S1Grid`` evaluates real Fourier coefficients on a uniform circle and
-projects grid values back by quadrature. Coefficients are ordered
-``0, +1, -1, ..., +mmax, -mmax``, with cosine before sine. Channels are
-leading dimensions, so reshape and transpose equal-multiplicity ``ir_mul``
-features before the transform:
+``O2Grid`` evaluates flattened ``ir_mul`` features on uniform circular grids
+and projects values back by quadrature. It uses one coefficient set per
+channel without ``0o``, and two sets when ``0o`` is present. Multiplicities
+may differ across orders, and repeated irrep entries retain their original
+order. Time-odd irreps are not supported.
 
 .. code-block:: python
 
@@ -47,17 +47,35 @@ features before the transform:
    from eqx import o2
    from eqx.nn import PolynomialActivation
 
-   mmax, channels = 3, 64
-   irreps = o2.Irreps([(o2.Irrep(0, 1), channels)] + [
-       (o2.Irrep(m, 0), channels) for m in range(1, mmax + 1)
-   ])
+   irreps = o2.Irreps("64x0e + 64x1m + 64x2m + 64x3m")
    act = PolynomialActivation("silu", degree=8, bound=3.0)
-   grid = o2.S1Grid(mmax, resolution=(act.degree + 1) * mmax + 1)
+   grid = o2.O2Grid(irreps, resolution=(act.degree + 1) * irreps.mmax + 1)
    features = irreps.randn(8, -1)
-   coefficients = features.reshape(8, 2 * mmax + 1, channels).transpose(-1, -2)
-   values = grid.to_grid(coefficients)
-   coefficients = grid.from_grid(act(values))
-   output = coefficients.transpose(-1, -2).flatten(-2)
+   values = grid(features)  # (8, 64, 1, 28)
+   output = grid.from_grid(act(values))
+   assert output.shape == features.shape
+
+Adding ``0o`` selects two coefficient sets:
+
+.. code-block:: python
+
+   irreps = o2.Irreps("64x0e + 64x0o + 128x1m + 128x2m + 128x3m")
+   grid = o2.O2Grid(irreps, resolution=(act.degree + 1) * irreps.mmax + 1)
+   features = irreps.randn(8, -1)
+   values = grid(features)  # (8, 64, 2, 28)
+   output = grid.from_grid(act(values))
+   assert output.shape == features.shape
+
+In the two-set construction, ``0e`` and ``0o`` occupy the scalar and
+pseudoscalar fields, respectively. Positive-order copies fill the scalar
+set first, then the pseudoscalar set; the latter uses the fixed inverse
+basis change :math:`J^{-1}(h_{+m},h_{-m})=(h_{-m},-h_{+m})`.
+Unused coefficients are zero-filled. The two sampled fields are combined
+as :math:`(f_{\mathrm e}+f_{\mathrm o})/\sqrt{2}` and
+:math:`(f_{\mathrm e}-f_{\mathrm o})/\sqrt{2}`. Reflection exchanges these
+sheets while reversing the angle, so apply the same activation to both.
+Reconstruction reverses the sum-and-difference transform and projects onto
+the requested irreps.
 
 The default ``resolution=4*mmax+1`` integrates a cubic pointwise polynomial
 followed by projection without aliasing. In general, a degree-:math:`d`
@@ -68,19 +86,13 @@ uses a fixed Chebyshev approximation and supports ``silu``, ``gelu``, ``relu``,
 break equivariance when the grid meets the sampling condition. Outside the
 interval, the polynomial may grow rapidly.
 
-The eight-degree default activation needs a finer grid than the default
-cubic sampling rule; set ``resolution`` as in the example. Applying the
+The eighth-degree default activation needs a finer grid than the default
+cubic sampling rule; set ``resolution`` as in the examples. Applying the
 original SiLU directly instead requires a resolution-convergence check.
 Finite sampling does not guarantee exact equivariance for non-polynomial
 activations. See
 `Nonlinearities in Steerable SO(2)-Equivariant CNNs
-<https://arxiv.org/abs/2109.06861>`_.
-
-The scalar field above has a reflection-even zero order. A reflection-odd
-scalar field or a time-odd field requires an odd pointwise activation to
-preserve its sign label. The ``tanh`` polynomial retains exact odd parity.
-``S1Grid`` does not assign or mix those labels. See
-:ref:`equivariantx-api-nn` for activation parameters.
+<https://arxiv.org/abs/2109.06861>`_ and :ref:`equivariantx-api-nn`.
 
 Linear maps and gates
 ---------------------
