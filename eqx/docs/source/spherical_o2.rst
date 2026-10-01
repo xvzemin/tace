@@ -36,10 +36,11 @@ O(2) grid
 ----------
 
 ``O2Grid`` evaluates flattened ``ir_mul`` features on uniform circular grids
-and projects values back by quadrature. It uses one coefficient set per
-channel without ``0o``, and two sets when ``0o`` is present. Multiplicities
-may differ across orders, and repeated irrep entries retain their original
-order. Time-odd irreps are not supported.
+and projects values back by quadrature. Inputs require ``C x 0e + C x 0o``
+and ``2C`` copies of every positive order through ``mmax``, with ``C > 0``.
+Each grid channel contains two coefficient sets. A positive order can be
+declared as ``2C x m`` or split into ``C x m + C x m``; combined features
+follow the declared irrep order. Time-odd irreps are not supported.
 
 .. code-block:: python
 
@@ -47,35 +48,52 @@ order. Time-odd irreps are not supported.
    from eqx import o2
    from eqx.nn import PolynomialActivation
 
-   irreps = o2.Irreps("64x0e + 64x1m + 64x2m + 64x3m")
-   act = PolynomialActivation("silu", degree=8, bound=3.0)
-   grid = o2.O2Grid(irreps, resolution=(act.degree + 1) * irreps.mmax + 1)
-   features = irreps.randn(8, -1)
-   values = grid(features)  # (8, 64, 1, 28)
-   output = grid.from_grid(act(values))
-   assert output.shape == features.shape
-
-Adding ``0o`` selects two coefficient sets:
-
-.. code-block:: python
-
    irreps = o2.Irreps("64x0e + 64x0o + 128x1m + 128x2m + 128x3m")
+   act = PolynomialActivation("silu", degree=8, bound=3.0)
    grid = o2.O2Grid(irreps, resolution=(act.degree + 1) * irreps.mmax + 1)
    features = irreps.randn(8, -1)
    values = grid(features)  # (8, 64, 2, 28)
    output = grid.from_grid(act(values))
    assert output.shape == features.shape
 
-In the two-set construction, ``0e`` and ``0o`` occupy the scalar and
+The two sets may also be passed separately. Each uses ``C`` channels at
+every order, with ``0e`` in the first and ``0o`` in the second:
+
+.. code-block:: python
+
+   first = grid.irreps_in1.randn(8, -1)   # 64x0e + 64x1m + 64x2m + 64x3m
+   second = grid.irreps_in2.randn(8, -1)  # 64x0o + 64x1m + 64x2m + 64x3m
+   values = grid(first, second)          # (8, 64, 2, 28)
+   first_out, second_out = grid.from_grid(act(values), split=True)
+   assert first_out.shape == first.shape
+   assert second_out.shape == second.shape
+
+For a combined positive-order entry, concatenate the two ``(..., 2, C)``
+tensors along their channel axis before flattening. To concatenate two
+complete feature vectors instead, declare ``irreps_in1 + irreps_in2``:
+
+.. code-block:: python
+
+   separate = o2.O2Grid(
+       grid.irreps_in1 + grid.irreps_in2, resolution=grid.resolution
+   )
+   joined = torch.cat((first, second), dim=-1)
+   torch.testing.assert_close(separate(joined), grid(first, second))
+
+In this construction, ``0e`` and ``0o`` occupy the scalar and
 pseudoscalar fields, respectively. Positive-order copies fill the scalar
 set first, then the pseudoscalar set; the latter uses the fixed inverse
 basis change :math:`J^{-1}(h_{+m},h_{-m})=(h_{-m},-h_{+m})`.
-Unused coefficients are zero-filled. The two sampled fields are combined
-as :math:`(f_{\mathrm e}+f_{\mathrm o})/\sqrt{2}` and
+The two sampled fields are combined as
+:math:`(f_{\mathrm e}+f_{\mathrm o})/\sqrt{2}` and
 :math:`(f_{\mathrm e}-f_{\mathrm o})/\sqrt{2}`. Reflection exchanges these
 sheets while reversing the angle, so apply the same activation to both.
 Reconstruction reverses the sum-and-difference transform and projects onto
 the requested irreps.
+
+Pointwise squaring includes antisymmetric couplings between the two sets:
+:math:`h^A_{+m}h^B_{-m}-h^A_{-m}h^B_{+m}` contributes to ``0o``. Distinct
+coupling paths are summed in the projected output, not retained separately.
 
 The default ``resolution=4*mmax+1`` integrates a cubic pointwise polynomial
 followed by projection without aliasing. In general, a degree-:math:`d`

@@ -23,24 +23,20 @@ def quadrature(request):
 @pytest.mark.parametrize(
     "irreps",
     [
-        "",
-        "0e",
-        "0o",
-        "2x0o+3x0e",
-        "2x0e+2x1m+2x3m",
-        "2x1m+0o+3x2m+1m+0e+0o",
+        "0e+0o",
+        "2x0o+2x0e",
+        "0e+0o+2x1m",
+        "1m+0o+2m+1m+0e+2m",
         "2x0e+2x0o+4x1m+4x2m+4x3m",
-        "2x32m",
-        "0o+2x32m",
+        "0e+0o+" + "+".join(f"2x{m}m" for m in range(1, 33)),
     ],
 )
 def test_o2_grid_round_trip(irreps, normalization, device):
     grid = O2Grid(
         irreps, normalization=normalization, dtype=torch.float64, device=device
     )
-    expected_sheets = 2 if any(ir.is_odd_scalar() for ir, _ in grid.irreps) else 1
-    assert grid.num_sheets == expected_sheets
-    assert grid.grid_shape == (grid.num_channels, expected_sheets, grid.resolution)
+    assert grid.num_sheets == 2
+    assert grid.grid_shape == (grid.num_channels, 2, grid.resolution)
     for count in (0, 4):
         x = torch.randn(grid.dim, count, 3, dtype=torch.float64, device=device).movedim(
             0, -1
@@ -64,12 +60,14 @@ def test_o2_grid_round_trip(irreps, normalization, device):
 def test_o2_grid_fourier_transform(mmax, normalization, double_precision, device):
     channels = 3
     irreps = Irreps(
-        [(Irrep(0, 1), channels)]
-        + [(Irrep(m, 0), channels) for m in range(1, mmax + 1)]
+        [(Irrep(0, 1), channels), (Irrep(0, -1), channels)]
+        + [(Irrep(m, 0), 2 * channels) for m in range(1, mmax + 1)]
     )
     grid = O2Grid(irreps, normalization=normalization, device=device)
-    x = irreps.randn(2, -1, device=device)
-    coefficients = x.unflatten(-1, (2 * mmax + 1, channels)).transpose(-1, -2)
+    x1 = grid.irreps_in1.randn(2, -1, device=device)
+    x2 = grid.irreps_in2.randn(2, -1, device=device)
+    first = x1.unflatten(-1, (2 * mmax + 1, channels)).transpose(-1, -2)
+    second = x2.unflatten(-1, (2 * mmax + 1, channels)).transpose(-1, -2)
     alpha = torch.arange(grid.resolution, device=device) * (
         2 * torch.pi / grid.resolution
     )
@@ -89,12 +87,33 @@ def test_o2_grid_fourier_transform(mmax, normalization, double_precision, device
     norm = torch.full_like(scale, 0.5)
     norm[0] = 1
     analysis = (basis / (norm * scale * grid.resolution)).T
-    expected = (coefficients @ synthesis.T).unsqueeze(-2)
-    torch.testing.assert_close(grid(x), expected, atol=3e-12, rtol=3e-12)
+    second_basis = [synthesis[:, 0]]
+    for m in range(1, mmax + 1):
+        second_basis.extend((-synthesis[:, 2 * m], synthesis[:, 2 * m - 1]))
+    second_basis = torch.stack(second_basis, -1)
+    even, odd = first @ synthesis.T, second @ second_basis.T
+    expected = torch.stack((even + odd, even - odd), -2) / 2**0.5
+    torch.testing.assert_close(grid(x1, x2), expected, atol=3e-12, rtol=3e-12)
     values = torch.randn_like(expected)
-    expected = (values.squeeze(-2) @ analysis.T).transpose(-1, -2).flatten(-2)
-    torch.testing.assert_close(grid.from_grid(values), expected, atol=3e-12, rtol=3e-12)
-    torch.testing.assert_close(grid.from_grid(grid(x)), x, atol=3e-12, rtol=3e-12)
+    positive, negative = values.unbind(-2)
+    first = ((positive + negative) / 2**0.5) @ analysis.T
+    second = ((positive - negative) / 2**0.5) @ analysis.T
+    second = torch.stack(
+        [second[..., 0]]
+        + [
+            value
+            for m in range(1, mmax + 1)
+            for value in (-second[..., 2 * m], second[..., 2 * m - 1])
+        ],
+        -1,
+    )
+    expected = tuple(value.transpose(-1, -2).flatten(-2) for value in (first, second))
+    torch.testing.assert_close(
+        grid.from_grid(values, split=True), expected, atol=3e-12, rtol=3e-12
+    )
+    torch.testing.assert_close(
+        grid.from_grid(grid(x1, x2), split=True), (x1, x2), atol=3e-12, rtol=3e-12
+    )
     torch.testing.assert_close(grid.weights.sum(), grid.weights.new_tensor(1))
 
 
@@ -108,7 +127,7 @@ def test_o2_grid_two_coefficient_sets(double_precision, device):
     torch.testing.assert_close(grid(x), expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("irreps", ["2x0e+3x1m", "0e+0o+2x1m+2x2m", "0o"])
+@pytest.mark.parametrize("irreps", ["2x0e+2x0o+4x1m", "0e+0o+2x1m+2x2m", "0e+0o"])
 def test_o2_grid_sample_permutations(irreps, double_precision, device):
     grid = O2Grid(irreps, device=device)
     x = grid.irreps.randn(3, -1, device=device)
@@ -123,7 +142,9 @@ def test_o2_grid_sample_permutations(irreps, double_precision, device):
 
 @pytest.mark.parametrize("normalization", ["component", "norm", "integral"])
 @pytest.mark.parametrize("reflected", [False, True])
-@pytest.mark.parametrize("irreps", ["2x0e+3x1m+2m", "2x1m+0o+3x2m+1m+0e+0o", "0o"])
+@pytest.mark.parametrize(
+    "irreps", ["2x0e+2x0o+4x1m+4x2m", "1m+0o+2m+1m+0e+2m", "0e+0o"]
+)
 def test_o2_grid_polynomial_equivariance(
     irreps, normalization, reflected, double_precision, device
 ):
@@ -149,7 +170,7 @@ def test_o2_grid_polynomial_equivariance(
             ]
 
 
-@pytest.mark.parametrize("irreps", ["", "0e+1m", "0e+0o+2x1m"])
+@pytest.mark.parametrize("irreps", ["0e+0o", "0e+0o+2x1m", "1m+0o+2m+1m+0e+2m"])
 def test_o2_grid_dtype_and_derivatives(irreps, double_precision, device):
     grid = O2Grid(irreps, dtype=torch.float32).to(device, torch.float64)
     reference = O2Grid(irreps, dtype=torch.float64, device=device)
@@ -175,7 +196,7 @@ def test_o2_grid_dtype_and_derivatives(irreps, double_precision, device):
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("irreps", ["", "0e+2x1m", "0o+2x1m+0e+2m"])
+@pytest.mark.parametrize("irreps", ["0e+0o", "0e+0o+2x1m", "1m+0o+2m+1m+0e+2m"])
 def test_o2_grid_compile(irreps, double_precision, device):
     grid = O2Grid(irreps, device=device)
 
@@ -200,16 +221,142 @@ def test_o2_grid_invalid_inputs(device):
         with pytest.raises(ValueError, match="time-even"):
             O2Grid(irreps)
     with pytest.raises(ValueError, match="resolution"):
-        O2Grid("2m", resolution=4)
+        O2Grid("0e+0o+2x1m+2x2m", resolution=4)
     with pytest.raises(ValueError, match="normalization"):
-        O2Grid("0e", normalization="invalid")
-    grid = O2Grid("0e+0o+1m", device=device)
+        O2Grid("0e+0o", normalization="invalid")
+    for irreps in (
+        "",
+        "0e",
+        "0o",
+        "2x1m",
+        "0e+0o+1m",
+        "0e+2x0o+2x1m",
+        "2x0e+2x0o+2x1m",
+        "0e+0o+2x2m",
+        "0e+0o+2x1m+4x2m",
+    ):
+        with pytest.raises(ValueError, match="C copies"):
+            O2Grid(irreps)
+    grid = O2Grid("0e+0o+2x1m", device=device)
     with pytest.raises(ValueError, match="features"):
         grid(torch.zeros(grid.dim + 1, device=device))
     with pytest.raises(ValueError, match="grid dimensions"):
         grid.from_grid(
             torch.zeros(grid.num_channels, 1, grid.resolution, device=device)
         )
+    with pytest.raises(ValueError, match="coefficient set"):
+        grid(torch.zeros(grid.dim, device=device), torch.zeros(grid.dim, device=device))
+    with pytest.raises(ValueError, match="same shape"):
+        grid(
+            torch.zeros(2, grid.irreps_in1.dim, device=device),
+            torch.zeros(1, grid.irreps_in2.dim, device=device),
+        )
+
+
+@pytest.mark.parametrize("mmax", [0, 1, 6])
+@pytest.mark.parametrize("channels", [1, 3])
+@pytest.mark.parametrize("normalization", ["component", "norm", "integral"])
+def test_o2_grid_split_inputs(mmax, channels, normalization, double_precision, device):
+    irreps = Irreps(
+        [(Irrep(0, 1), channels), (Irrep(0, -1), channels)]
+        + [(Irrep(m, 0), 2 * channels) for m in range(1, mmax + 1)]
+    )
+    grid = O2Grid(irreps, normalization=normalization, device=device)
+    separate = O2Grid(
+        grid.irreps_in1 + grid.irreps_in2, normalization=normalization, device=device
+    )
+    for count in (0, 4):
+        first, second = [
+            torch.randn(grid.irreps_in1.dim, count, 3, device=device)
+            .movedim(0, -1)
+            .requires_grad_()
+            for _ in range(2)
+        ]
+        parts = [first[..., :channels], second[..., :channels]]
+        for ir_slice in grid.irreps_in1.slices()[1:]:
+            parts.append(
+                torch.cat(
+                    (
+                        first[..., ir_slice].unflatten(-1, (2, channels)),
+                        second[..., ir_slice].unflatten(-1, (2, channels)),
+                    ),
+                    -1,
+                ).flatten(-2)
+            )
+        combined = torch.cat(parts, -1)
+        actual = grid(first, second)
+        expected = grid(combined)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        torch.testing.assert_close(
+            separate(torch.cat((first, second), -1)), expected, atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            grid.from_grid(actual, split=True), (first, second), atol=3e-12, rtol=3e-12
+        )
+        torch.testing.assert_close(
+            grid.from_grid(actual), combined, atol=3e-12, rtol=3e-12
+        )
+        for _ in range(2):
+            actual, expected = [
+                torch.cat(
+                    torch.autograd.grad(
+                        value.sin().sum(), (first, second), create_graph=True
+                    ),
+                    -1,
+                )
+                for value in (actual, expected)
+            ]
+            torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+
+
+@pytest.mark.parametrize("mmax", [0, 2])
+def test_o2_grid_split_derivatives_and_compile(mmax, double_precision, device):
+    irreps = "0e+0o" + "".join(f"+2x{m}m" for m in range(1, mmax + 1))
+    grid = O2Grid(irreps, device=device)
+
+    def nonlinear(first, second):
+        return grid.from_grid(torch.nn.functional.silu(grid(first, second)), split=True)
+
+    first = grid.irreps_in1.randn(2, -1, device=device, requires_grad=True)
+    second = grid.irreps_in2.randn(2, -1, device=device, requires_grad=True)
+    assert torch.autograd.gradcheck(nonlinear, (first, second))
+    assert torch.autograd.gradgradcheck(nonlinear, (first, second))
+    torch.testing.assert_close(
+        torch.vmap(nonlinear)(first, second), nonlinear(first, second)
+    )
+    tangents = (torch.randn_like(first), torch.randn_like(second))
+    _, actual = torch.func.jvp(nonlinear, (first, second), tangents)
+    _, expected = torch.autograd.functional.jvp(nonlinear, (first, second), tangents)
+    torch.testing.assert_close(actual, expected)
+    compiled = torch.compile(
+        nonlinear, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for count in (3, 7, 0):
+        first = grid.irreps_in1.randn(count, -1, device=device, requires_grad=True)
+        second = grid.irreps_in2.randn(count, -1, device=device, requires_grad=True)
+        actual, expected = compiled(first, second), nonlinear(first, second)
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+        actual, expected = [
+            torch.autograd.grad(sum(x.square().sum() for x in result), (first, second))
+            for result in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+
+
+@pytest.mark.parametrize("mmax", [1, 2, 6, 32])
+def test_o2_grid_antisymmetric_product(mmax, double_precision, device):
+    grid = O2Grid(
+        "0e+0o" + "".join(f"+2x{m}m" for m in range(1, mmax + 1)), device=device
+    )
+    first = torch.zeros(8, grid.irreps_in1.dim, device=device)
+    second = torch.zeros_like(first)
+    a, b = torch.randn(2, 8, 2, device=device).unbind(0)
+    first[..., -2:], second[..., -2:] = a, b
+    _, odd = grid.from_grid(grid(first, second).square(), split=True)
+    expected = (a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]) / (2 * (mmax + 1)) ** 0.5
+    torch.testing.assert_close(odd[..., 0], expected, atol=2e-13, rtol=2e-13)
+    _, swapped = grid.from_grid(grid(second, first).square(), split=True)
+    torch.testing.assert_close(swapped[..., 0], -expected, atol=2e-13, rtol=2e-13)
 
 
 @pytest.mark.parametrize("normalization", ["component", "norm", "integral"])
@@ -248,16 +395,8 @@ def test_s2_e3nn(normalization, double_precision, device):
 @pytest.mark.parametrize("power", [2, 3])
 @pytest.mark.parametrize("reflection", [False, True])
 def test_o2_grid_polynomial_projection(power, reflection, double_precision, device):
-    grid = O2Grid("0e+1m+2m+3m+4m+5m", (power + 1) * 5 + 1).to(device)
-    angle = torch.tensor(0.731, device=device)
-    matrices = [torch.ones(1, 1, device=device)]
-    for m in range(1, 6):
-        c, s = (m * angle).cos(), (m * angle).sin()
-        matrix = torch.stack((c, -s, s, c)).reshape(2, 2)
-        if reflection:
-            matrix = matrix @ torch.diag(angle.new_tensor([1, -1]))
-        matrices.append(matrix)
-    rotation = torch.block_diag(*matrices)
+    grid = O2Grid("0e+0o+2x1m+2x2m+2x3m+2x4m+2x5m", (power + 1) * 5 + 1).to(device)
+    rotation = grid.irreps.D_from_angle(0.731, reflected=reflection, device=device)
     x = torch.randn(3, 4, grid.dim, device=device)
     actual = grid.from_grid(grid(x @ rotation.T).pow(power))
     expected = grid.from_grid(grid(x).pow(power)) @ rotation.T
@@ -305,7 +444,7 @@ def test_s2_dtype_and_derivatives(double_precision, device):
 @pytest.mark.parametrize("cls", [O2Grid, S2Grid])
 def test_nonlinear_convergence(cls, double_precision, device):
     kwargs = {} if cls is O2Grid else {"quadrature": "gauss_legendre"}
-    irreps = "0e+1m+2m" if cls is O2Grid else 2
+    irreps = "0e+0o+2x1m+2x2m" if cls is O2Grid else 2
     grids = [cls(irreps, resolution, **kwargs).to(device) for resolution in (9, 25, 49)]
     x = torch.randn(2, grids[0].dim, device=device)
     outputs = [grid.from_grid(torch.nn.functional.silu(grid(x))) for grid in grids]
@@ -397,7 +536,7 @@ def test_polynomial_activation(act, double_precision, device):
 
 
 @pytest.mark.parametrize(
-    "representation", ["0e+1m+2m+3m", "0e+0o+2x1m+2x2m+2x3m", "s2"]
+    "representation", ["1m+2m+3m+0e+1m+2m+3m+0o", "0e+0o+2x1m+2x2m+2x3m", "s2"]
 )
 @pytest.mark.parametrize("act", ["silu", "gelu", "relu", "tanh", "sigmoid", "softplus"])
 def test_polynomial_grid_equivariance(representation, act, double_precision, device):

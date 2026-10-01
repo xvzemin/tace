@@ -5,20 +5,22 @@ from collections import Counter
 
 import torch
 
-from .irreps import Irreps
+from .irreps import Irrep, Irreps
 
 __all__ = ["O2Grid"]
 
 
 class O2Grid(torch.nn.Module):
-    """Transform O(2) features to one or two circular grids per channel.
+    """Transform O(2) features to two circular grids per channel.
 
     Parameters
     ----------
     irreps : Irreps, str, or sequence
         Input and reconstructed representation in flattened ``ir_mul`` order.
-        Only time-even irreps are supported. Repeated entries and unequal
-        multiplicities are allowed.
+        Requires ``C x 0e + C x 0o`` and ``2C x m`` at every order from one
+        to ``mmax``, with ``C > 0``. Multiplicities are summed over repeated
+        entries, so ``2C x m`` may also be supplied as ``C x m + C x m``.
+        Only time-even irreps are supported.
     resolution : int, optional
         Angular samples per grid, at least ``2 * mmax + 1``. Defaults to
         ``4 * mmax + 1``, where ``mmax`` is the largest input order.
@@ -36,10 +38,12 @@ class O2Grid(torch.nn.Module):
     Attributes
     ----------
     num_sheets : int
-        Two when ``irreps`` contains a reflection-odd scalar, otherwise one.
+        Number of reflection sheets, always two.
     num_channels : int
-        Number of grid channels. Scalars occupy their respective coefficient
-        sets; positive-order copies fill the first set before the second.
+        Number of grid channels, equal to ``C``.
+    irreps_in1, irreps_in2 : Irreps
+        Representations for separate inputs. Each has ``C`` copies per order
+        in increasing order, starting with ``0e`` and ``0o``, respectively.
     grid_shape : tuple of int
         ``(num_channels, num_sheets, resolution)``.
     grid : torch.Tensor
@@ -49,12 +53,11 @@ class O2Grid(torch.nn.Module):
 
     Notes
     -----
-    Without ``0o``, each channel carries an ordinary scalar field on the
-    circle. With ``0o``, the two coefficient sets carry a scalar and a
-    pseudoscalar field. Their normalized sum and difference are exchanged
-    by reflection. The second set uses the inverse of the fixed O(2)
-    basis change on positive orders. Unused coefficients are zero-filled;
-    reconstruction projects onto the supplied irreps in their original order.
+    The first and second sets contain ``0e`` and ``0o``, respectively, and
+    ``C`` copies of each positive-order irrep. For a combined input, the
+    first ``C`` copies at each positive order enter the first set. The second
+    set uses the inverse of the fixed O(2) basis change on positive orders.
+    Their normalized sum and difference are exchanged by reflection.
 
     Apply the same pointwise activation to both sheets. Projection of a
     degree-d polynomial is exactly O(2)-equivariant up to roundoff when
@@ -77,6 +80,17 @@ class O2Grid(torch.nn.Module):
             raise ValueError("O2Grid only supports time-even irreps.")
         self.dim = self.irreps.dim
         self.mmax = max(0, self.irreps.mmax)
+        self.num_channels = self.irreps.count("0e")
+        if self.num_channels == 0:
+            raise ValueError("O2Grid requires C copies of 0e, with C > 0.")
+        irrep_list = [(Irrep(m, 0), self.num_channels) for m in range(1, self.mmax + 1)]
+        self.irreps_in1 = Irreps([(Irrep(0, 1), self.num_channels)] + irrep_list)
+        self.irreps_in2 = Irreps([(Irrep(0, -1), self.num_channels)] + irrep_list)
+        if self.irreps.regroup() != (self.irreps_in1 + self.irreps_in2).regroup():
+            raise ValueError(
+                "O2Grid requires C copies of 0e and 0o and 2C copies of each "
+                "order from 1 to mmax, with C > 0."
+            )
         resolution = 4 * self.mmax + 1 if resolution is None else resolution
         if not isinstance(resolution, int) or resolution < 2 * self.mmax + 1:
             raise ValueError("resolution must be an integer at least 2 * mmax + 1.")
@@ -84,14 +98,7 @@ class O2Grid(torch.nn.Module):
             raise ValueError("normalization must be component, norm, or integral.")
         self.resolution = resolution
         self.normalization = normalization
-        self.num_sheets = 2 if any(ir.is_odd_scalar() for ir, _ in self.irreps) else 1
-        self.num_channels = max(
-            (
-                mul if ir.m == 0 else (mul + self.num_sheets - 1) // self.num_sheets
-                for ir, mul in self.irreps.regroup()
-            ),
-            default=0,
-        )
+        self.num_sheets = 2
         self.grid_shape = (self.num_channels, self.num_sheets, self.resolution)
         dim = 2 * self.mmax + 1
         self._coefficient_shape = (self.num_channels, self.num_sheets, dim)
@@ -154,16 +161,21 @@ class O2Grid(torch.nn.Module):
 
         output_index = torch.tensor(locations, dtype=torch.long, device="cpu")
         output_sign = torch.tensor(signs, dtype=torch.int8, device="cpu")
-        size = math.prod(self._coefficient_shape)
-        input_index = torch.zeros(size, dtype=torch.long, device="cpu")
-        input_sign = torch.zeros(size, dtype=torch.int8, device="cpu")
-        input_index[output_index] = torch.arange(self.dim, device="cpu")
-        input_sign[output_index] = output_sign
+        input_index = output_index.argsort()
+        input_sign = output_sign[input_index]
+        second_index = torch.arange(dim, device="cpu")
+        second_index[1:] = (
+            second_index[1:].unflatten(0, (self.mmax, 2)).flip(-1).flatten()
+        )
+        second_sign = torch.ones(dim, dtype=torch.int8, device="cpu")
+        second_sign[2::2] = -1
         for name, value in (
             ("input_index", input_index),
             ("input_sign", input_sign),
             ("output_index", output_index),
             ("output_sign", output_sign),
+            ("second_index", second_index),
+            ("second_sign", second_sign),
         ):
             self.register_buffer(
                 name, value.to(device=self.grid.device), persistent=False
@@ -175,64 +187,96 @@ class O2Grid(torch.nn.Module):
             self._buffers[name] = value.to(self._buffers[name], copy=True)
         return self
 
-    def forward(self, features):
+    def forward(self, features, features2=None):
         """Evaluate O(2) features on the grid.
 
         Parameters
         ----------
         features : torch.Tensor
-            Features of shape ``(..., irreps.dim)`` in flattened ``ir_mul`` order.
+            Combined features of shape ``(..., irreps.dim)``, or the first
+            coefficient set of shape ``(..., irreps_in1.dim)`` when
+            ``features2`` is given. Both use flattened ``ir_mul`` order.
+        features2 : torch.Tensor, optional
+            Second coefficient set of shape ``(..., irreps_in2.dim)``, with
+            the same leading dimensions as ``features``.
 
         Returns
         -------
         torch.Tensor
             Values of shape ``(..., num_channels, num_sheets, resolution)``.
         """
-        return self.to_grid(features)
+        return self.to_grid(features, features2)
 
-    def to_grid(self, features):
+    def to_grid(self, features, features2=None):
         """Evaluate circular coefficient sets and combine reflection sheets.
 
         Parameters
         ----------
         features : torch.Tensor
-            Features of shape ``(..., irreps.dim)`` in flattened ``ir_mul`` order.
+            Combined features of shape ``(..., irreps.dim)``, or the first
+            coefficient set of shape ``(..., irreps_in1.dim)`` when
+            ``features2`` is given. Both use flattened ``ir_mul`` order.
+        features2 : torch.Tensor, optional
+            Second coefficient set of shape ``(..., irreps_in2.dim)``, with
+            the same leading dimensions as ``features``.
 
         Returns
         -------
         torch.Tensor
             Values of shape ``(..., num_channels, num_sheets, resolution)``.
         """
-        if features.ndim < 1 or features.shape[-1] != self.dim:
-            raise ValueError(f"Expected {self.dim} features on the last axis.")
-        coefficients = features.index_select(-1, self.input_index) * self.input_sign
-        values = coefficients.unflatten(-1, self._coefficient_shape) @ self.synthesis.T
-        if self.num_sheets == 2:
-            even, odd = values.unbind(-2)
-            values = torch.stack((even + odd, even - odd), dim=-2) / math.sqrt(2)
-        return values
+        if features2 is None:
+            if features.ndim < 1 or features.shape[-1] != self.dim:
+                raise ValueError(f"Expected {self.dim} features on the last axis.")
+            coefficients = features.index_select(-1, self.input_index) * self.input_sign
+            coefficients = coefficients.unflatten(-1, self._coefficient_shape)
+        else:
+            if features.ndim < 1 or features.shape[-1] != self.irreps_in1.dim:
+                raise ValueError(
+                    f"Expected {self.irreps_in1.dim} features in each coefficient set."
+                )
+            if features2.shape != features.shape:
+                raise ValueError("Both coefficient sets must have the same shape.")
+            shape = (2 * self.mmax + 1, self.num_channels)
+            first = features.unflatten(-1, shape).transpose(-1, -2)
+            second = features2.unflatten(-1, shape).transpose(-1, -2)
+            second = second.index_select(-1, self.second_index) * self.second_sign
+            coefficients = torch.stack((first, second), dim=-2)
+        values = coefficients @ self.synthesis.T
+        even, odd = values.unbind(-2)
+        return torch.stack((even + odd, even - odd), dim=-2) / math.sqrt(2)
 
-    def from_grid(self, features):
+    def from_grid(self, features, *, split=False):
         """Project grid values onto the original O(2) irreps.
 
         Parameters
         ----------
         features : torch.Tensor
             Values of shape ``(..., num_channels, num_sheets, resolution)``.
+        split : bool, optional
+            Return the two coefficient sets separately. Defaults to ``False``.
 
         Returns
         -------
-        torch.Tensor
-            Features of shape ``(..., irreps.dim)`` in flattened ``ir_mul`` order.
+        torch.Tensor or tuple of torch.Tensor
+            Combined features of shape ``(..., irreps.dim)``, or two tensors
+            with trailing dimensions ``irreps_in1.dim`` and ``irreps_in2.dim``
+            when ``split=True``. All use flattened ``ir_mul`` order.
         """
         if features.ndim < 3 or features.shape[-3:] != self.grid_shape:
             raise ValueError(f"Expected trailing grid dimensions {self.grid_shape}.")
-        if self.num_sheets == 2:
-            positive, negative = features.unbind(-2)
-            features = torch.stack(
-                (positive + negative, positive - negative), dim=-2
-            ) / math.sqrt(2)
-        coefficients = (features @ self.analysis.T).flatten(-3)
+        positive, negative = features.unbind(-2)
+        features = torch.stack(
+            (positive + negative, positive - negative), dim=-2
+        ) / math.sqrt(2)
+        coefficients = features @ self.analysis.T
+        if split:
+            first, second = coefficients.unbind(-2)
+            second = (second * self.second_sign).index_select(-1, self.second_index)
+            return first.transpose(-1, -2).flatten(-2), second.transpose(
+                -1, -2
+            ).flatten(-2)
+        coefficients = coefficients.flatten(-3)
         return coefficients.index_select(-1, self.output_index) * self.output_sign
 
     def extra_repr(self):

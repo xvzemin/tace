@@ -5,8 +5,9 @@ Spherical O(2)
 
 Features use a flattened ``ir_mul`` axis with trailing size ``irreps.dim``.
 Iteration over ``Irreps`` yields ``(ir, mul)`` entries. Each irrep has
-dimension one at order zero and two at positive orders. ``O2Grid`` accepts
-this layout, including reflection-odd scalars.
+dimension one at order zero and two at positive orders. ``O2Grid`` requires
+``C`` copies of both scalars and ``2C`` copies of each positive order,
+supplied as a combined tensor or two coefficient sets.
 
 Representations
 ---------------
