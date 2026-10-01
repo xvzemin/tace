@@ -19,7 +19,7 @@ dependencies = [
     "ase",
     "numpy",
     "e3nn>=0.4.4",
-    "scipy",
+    "scipy>=1.15",
     "configargparse",
     "pandas",
     "matplotlib",

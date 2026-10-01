@@ -213,5 +213,3 @@ ruff format --check tace
 ## License
 
 The TACE code is published and distributed under the MIT License.
-EquivariantX (`eqx`) is licensed separately under
-[Creative Commons Attribution 4.0 International (CC BY 4.0)](eqx/LICENSE.md).

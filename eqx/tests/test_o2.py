@@ -53,7 +53,8 @@ assert 'eqx.kernels.cuda' not in sys.modules
 
 
 @pytest.mark.parametrize(
-    "page", ["equivariantx", "convolutions", "cartesian", "cartesian_o2"]
+    "page",
+    ["spherical_o3", "spherical_o2", "convolutions", "cartesian", "cartesian_o2"],
 )
 def test_documentation_examples(page):
     path = Path(__file__).resolve().parents[1] / "docs/source" / f"{page}.rst"

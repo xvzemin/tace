@@ -5,7 +5,8 @@ Spherical O(2)
 
 Features use a flattened ``ir_mul`` axis with trailing size ``irreps.dim``.
 Iteration over ``Irreps`` yields ``(ir, mul)`` entries. Each irrep has
-dimension one at order zero and two at positive orders.
+dimension one at order zero and two at positive orders. ``S1Grid`` instead
+keeps channel dimensions before the circular coefficient axis.
 
 Representations
 ---------------
@@ -24,6 +25,12 @@ Harmonics
 
 .. autoclass:: eqx.o2.CircularHarmonics
    :members: forward
+
+Grid transforms
+---------------
+
+.. autoclass:: eqx.o2.S1Grid
+   :members: forward, to_grid, from_grid
 
 Linear maps and activations
 ---------------------------

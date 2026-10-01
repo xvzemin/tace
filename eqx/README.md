@@ -13,8 +13,8 @@ git clone https://github.com/xvzemin/tace.git
 pip install ./tace/eqx
 ```
 
-PyTorch operations require **PyTorch >= 2.4** and **e3nn >= 0.4.4**, not PyG
-or custom CUDA extensions. For fused kernels:
+Dependencies include **PyTorch >= 2.4**, **e3nn >= 0.4.4**.
+For fused kernels:
 
 ```bash
 pip install './tace/eqx[cuda]'
@@ -35,7 +35,6 @@ On e3nn 0.4.x, supported O(3) degrees are limited by its packaged CG table.
 | Cartesian O(2) | `eqx.co2` | `(..., mul, 2**m)` | [Cartesian O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/co2.html) |
 | Spherical O(2) | `eqx.o2` | `(..., ir.dim, mul)` | [O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/o2.html) |
 
-`eqx.o3` supplies element-dependent linear maps and gates using e3nn irreps.
 The other three modules also provide their own irreps, harmonics, and tensor
 products. Basis conversions, rotations, projections, and tensor decomposition
 have a separate [tools API](https://tace.readthedocs.io/en/latest/equivariantx/api/tools.html).

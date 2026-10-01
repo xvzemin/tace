@@ -46,7 +46,7 @@ Install from source without installing TACE:
    git clone https://github.com/xvzemin/tace.git
    pip install ./tace/eqx
 
-PyTorch operations require PyTorch >= 2.4 and e3nn >= 0.4.4.
+Dependencies include PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
 For CUDA kernels, install the build dependencies and provide a CUDA toolkit:
 
 .. code-block:: bash

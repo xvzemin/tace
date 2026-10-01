@@ -25,6 +25,7 @@ __all__ = [
     "conv",
     "kernels",
     "models",
+    "nn",
     "utils",
 ]
 
