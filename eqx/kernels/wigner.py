@@ -4,7 +4,7 @@ from weakref import ref
 
 import torch
 
-from ..utils import parse_metadata
+from ..utils.metadata import parse_metadata
 from .quaternion import quaternion_wigner
 
 _PLANS = {}

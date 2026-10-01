@@ -1,4 +1,4 @@
-"""Shared utilities for operator specifications."""
+"""Cached operator specifications."""
 
 from ast import literal_eval
 from functools import lru_cache

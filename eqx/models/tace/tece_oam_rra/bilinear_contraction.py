@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from ....utils import parse_metadata
+from ....utils.metadata import parse_metadata
 
 
 def encode_metadata(plans):

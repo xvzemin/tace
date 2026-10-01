@@ -4,9 +4,9 @@ from collections import defaultdict
 
 import torch
 
-from ..._layout import _Permute
 from ...co3 import Linear as CartesianLinear
 from ...co3.basis import path_matrix
+from ...utils.layout import _Permute
 
 
 class Linear(CartesianLinear):

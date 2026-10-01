@@ -4,10 +4,10 @@ import math
 
 import torch
 
-from .._grid import Grid
+__all__ = ["S1Grid"]
 
 
-class S1Grid(Grid):
+class S1Grid(torch.nn.Module):
     """Transform real circular coefficients to a uniform angular grid.
 
     Parameters
@@ -26,6 +26,13 @@ class S1Grid(Grid):
         Buffer dtype. Defaults to the default floating-point dtype.
     device : torch.device or str, optional
         Buffer device. Defaults to the default device.
+
+    Attributes
+    ----------
+    grid : torch.Tensor
+        Angles of shape ``(resolution,)``, in radians.
+    weights : torch.Tensor
+        Quadrature weights of shape ``(resolution,)``, summing to one.
 
     Notes
     -----
@@ -48,6 +55,7 @@ class S1Grid(Grid):
         dtype=None,
         device=None,
     ):
+        super().__init__()
         if not isinstance(mmax, int) or mmax < 0:
             raise ValueError("mmax must be a non-negative integer.")
         resolution = 4 * mmax + 1 if resolution is None else resolution
@@ -79,16 +87,78 @@ class S1Grid(Grid):
         else:
             scale /= math.sqrt(2 * math.pi)
         weights = torch.full_like(alpha, 1 / resolution)
-        super().__init__(
-            dict(
-                grid=alpha,
-                weights=weights,
-                synthesis=basis * scale,
-                analysis=(basis * (weights[:, None] / scale)).T,
-            ),
-            dtype=dtype,
-            device=device,
+        self.dim = 2 * mmax + 1
+        self.grid_shape = (resolution,)
+        self._constants = dict(
+            grid=alpha,
+            weights=weights,
+            synthesis=basis * scale,
+            analysis=(basis * (weights[:, None] / scale)).T,
         )
+        dtype = torch.get_default_dtype() if dtype is None else dtype
+        device = torch.get_default_device() if device is None else device
+        for name, value in self._constants.items():
+            self.register_buffer(
+                name, value.to(dtype=dtype, device=device, copy=True), persistent=False
+            )
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        for name, value in self._constants.items():
+            self._buffers[name] = value.to(self._buffers[name], copy=True)
+        return self
+
+    def forward(self, features):
+        """Evaluate circular coefficients on the grid.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Coefficients of shape ``(..., 2 * mmax + 1)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Grid values of shape ``(..., resolution)``.
+        """
+        return self.to_grid(features)
+
+    def to_grid(self, features):
+        """Evaluate a band-limited signal on the circle.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Coefficients of shape ``(..., 2 * mmax + 1)``. Leading dimensions
+            may include independent batch and channel axes.
+
+        Returns
+        -------
+        torch.Tensor
+            Grid values of shape ``(..., resolution)``.
+        """
+        if features.ndim < 1 or features.shape[-1] != self.dim:
+            raise ValueError(f"Expected {self.dim} coefficients on the last axis.")
+        return features @ self.synthesis.T
+
+    def from_grid(self, features):
+        """Project grid values onto circular coefficients.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Grid values of shape ``(..., resolution)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Coefficients of shape ``(..., 2 * mmax + 1)``.
+        """
+        if features.ndim < 1 or features.shape[-1] != self.resolution:
+            raise ValueError(
+                f"Expected {self.resolution} grid values on the last axis."
+            )
+        return features @ self.analysis.T
 
     def extra_repr(self):
         return (

@@ -3,7 +3,7 @@
 import torch
 
 from ....conv.program import next_adjoint
-from ....utils import parse_metadata
+from ....utils.metadata import parse_metadata
 from .program import build, first_adjoint
 
 

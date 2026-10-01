@@ -6,7 +6,7 @@ from functools import lru_cache, partial
 import torch
 
 from ...kernels.cuda import kernels, runtime
-from ...utils import parse_metadata
+from ...utils.metadata import parse_metadata
 from ..graph import prepare_graph
 from ..radial import project
 from .codegen import convolution_source, fused_source

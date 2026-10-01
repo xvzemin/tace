@@ -7,7 +7,7 @@ import torch
 from ....conv.codegen import source as expression_source
 from ....conv.program import Program
 from ....kernels.cuda import kernels, runtime
-from ....utils import parse_metadata
+from ....utils.metadata import parse_metadata
 
 
 @lru_cache(maxsize=128)

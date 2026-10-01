@@ -100,4 +100,4 @@ Graph attention
 Operator metadata
 -----------------
 
-.. autofunction:: eqx.utils.parse_metadata
+.. autofunction:: eqx.utils.metadata.parse_metadata

@@ -1,4 +1,4 @@
-"""Feature permutations with inverse-permutation derivatives."""
+"""Shared feature permutations with inverse-permutation derivatives."""
 
 import torch
 

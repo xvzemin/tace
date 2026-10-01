@@ -6,10 +6,10 @@ import torch
 from e3nn import o3
 from scipy.integrate import lebedev_rule
 
-from .._grid import Grid
+__all__ = ["S2Grid"]
 
 
-def sphere_grid(resolution, quadrature):
+def _sphere_grid(resolution, quadrature):
     """Return CPU float64 sphere points, normalized weights, and exactness degree."""
     if quadrature == "lebedev":
         orders = (*range(3, 32, 2), *range(35, 132, 6))
@@ -43,8 +43,8 @@ def sphere_grid(resolution, quadrature):
     return points, weights, resolution
 
 
-def wigner_basis(lmax, alpha, beta):
-    """Evaluate real Wigner matrices without changing the default dtype."""
+def _wigner_basis(lmax, alpha, beta):
+    """Yield real Wigner D matrices without changing the default dtype."""
     from ..co2.spherical import generators
 
     for l in range(lmax + 1):
@@ -54,7 +54,7 @@ def wigner_basis(lmax, alpha, beta):
         )
 
 
-class S2Grid(Grid):
+class S2Grid(torch.nn.Module):
     """Transform spherical-harmonic coefficients to a sphere grid.
 
     Parameters
@@ -69,11 +69,20 @@ class S2Grid(Grid):
         equal variance per degree for unit-variance and unit-norm inputs,
         respectively. ``"integral"`` uses surface-orthonormal harmonics.
     quadrature : {"lebedev", "gauss_legendre", "equiangular"}, optional
-        Sphere integration rule.
+        Sphere integration rule. Defaults to ``"lebedev"``.
     dtype : torch.dtype, optional
         Buffer dtype. Defaults to the default floating-point dtype.
     device : torch.device or str, optional
         Buffer device. Defaults to the default device.
+
+    Attributes
+    ----------
+    grid : torch.Tensor
+        Unit-sphere positions of shape ``(n_points, 3)``.
+    weights : torch.Tensor
+        Quadrature weights of shape ``(n_points,)``, summing to one.
+    degree : int
+        Polynomial exactness degree of the selected quadrature.
 
     Notes
     -----
@@ -94,6 +103,7 @@ class S2Grid(Grid):
         dtype=None,
         device=None,
     ):
+        super().__init__()
         if not isinstance(lmax, int) or lmax < 0:
             raise ValueError("lmax must be a non-negative integer.")
         resolution = max(1, 3 * lmax) if resolution is None else resolution
@@ -139,7 +149,7 @@ class S2Grid(Grid):
             analysis = (synthesis * weights[:, None] / scale.square()).T
             self.degree = min(res_beta - 1, res_alpha - 1)
         else:
-            points, weights, self.degree = sphere_grid(resolution, quadrature)
+            points, weights, self.degree = _sphere_grid(resolution, quadrature)
             if lmax <= 12:
                 basis = o3.spherical_harmonics(
                     list(range(lmax + 1)),
@@ -152,17 +162,81 @@ class S2Grid(Grid):
                 basis = torch.cat(
                     [
                         matrix[:, :, l] * math.sqrt(2 * l + 1)
-                        for l, matrix in enumerate(wigner_basis(lmax, alpha, beta))
+                        for l, matrix in enumerate(_wigner_basis(lmax, alpha, beta))
                     ],
                     dim=-1,
                 )
             synthesis = basis * scale
             analysis = (basis * (weights[:, None] / scale)).T
-        super().__init__(
-            dict(grid=points, weights=weights, synthesis=synthesis, analysis=analysis),
-            dtype=dtype,
-            device=device,
+        self.dim = (lmax + 1) ** 2
+        self.grid_shape = tuple(weights.shape)
+        self._constants = dict(
+            grid=points, weights=weights, synthesis=synthesis, analysis=analysis
         )
+        dtype = torch.get_default_dtype() if dtype is None else dtype
+        device = torch.get_default_device() if device is None else device
+        for name, value in self._constants.items():
+            self.register_buffer(
+                name, value.to(dtype=dtype, device=device, copy=True), persistent=False
+            )
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        for name, value in self._constants.items():
+            self._buffers[name] = value.to(self._buffers[name], copy=True)
+        return self
+
+    def forward(self, features):
+        """Evaluate spherical-harmonic coefficients on the grid.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Coefficients of shape ``(..., (lmax + 1)**2)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Grid values of shape ``(..., n_points)``.
+        """
+        return self.to_grid(features)
+
+    def to_grid(self, features):
+        """Evaluate a band-limited signal on the sphere.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Coefficients of shape ``(..., (lmax + 1)**2)``. Leading dimensions
+            may include independent batch and channel axes.
+
+        Returns
+        -------
+        torch.Tensor
+            Grid values of shape ``(..., n_points)``.
+        """
+        if features.ndim < 1 or features.shape[-1] != self.dim:
+            raise ValueError(f"Expected {self.dim} coefficients on the last axis.")
+        return features @ self.synthesis.T
+
+    def from_grid(self, features):
+        """Project grid values onto spherical-harmonic coefficients.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Grid values of shape ``(..., n_points)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Coefficients of shape ``(..., (lmax + 1)**2)``.
+        """
+        if features.ndim < 1 or features.shape[-1] != self.weights.numel():
+            raise ValueError(
+                f"Expected {self.weights.numel()} grid values on the last axis."
+            )
+        return features @ self.analysis.T
 
     def extra_repr(self):
         return (

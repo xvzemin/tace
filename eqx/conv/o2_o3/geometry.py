@@ -6,7 +6,7 @@ from string import ascii_letters
 import torch
 from e3nn import o3
 
-from ...utils import parse_metadata
+from ...utils.metadata import parse_metadata
 from ..angular import generators
 from ..contraction import gradient_mask
 from .convolution import kernel_plan

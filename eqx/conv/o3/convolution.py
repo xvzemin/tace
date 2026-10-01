@@ -5,7 +5,7 @@ import math
 import torch
 from e3nn import o3
 
-from ...utils import parse_metadata
+from ...utils.metadata import parse_metadata
 from ..contraction import adjoint_program, gradient_mask
 
 

@@ -1655,10 +1655,10 @@ def test_streaming_attention_torch(tile_size, edges, double_precision):
 
 
 def test_shared_metadata_cache():
-    from eqx import utils
-    from eqx.conv.program import parse_metadata
+    from eqx.conv import program
+    from eqx.utils.metadata import parse_metadata
 
-    assert parse_metadata is utils.parse_metadata
+    assert program.parse_metadata is parse_metadata
     specification = (2, ((0, 1, "uvu", True, 0.5),))
     metadata = repr(specification)
     result = parse_metadata(metadata)
