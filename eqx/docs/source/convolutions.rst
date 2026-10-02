@@ -27,6 +27,8 @@ Interfaces
      - Source features, externally weighted UuLinear, and aggregation
    * - ``UvO2TensorProductConv``
      - Linear--Gate--Linear with optional edge representations and attention
+   * - ``EceO2TensorProductConv``
+     - Radial UuLinear--Linear--edge expansion--Linear and aggregation
 
 Each interface defaults to CUDA on GPU and PyTorch on CPU.
 ``backend="torch"`` selects PyTorch operations on either device,

@@ -166,8 +166,23 @@ class AsymmetricContraction(torch.nn.Module):
                     (order_index, path_index, path)
                 )
         self._paths_by_output = tuple(tuple(paths) for paths in paths_by_output)
-        if algorithm == "dense":
+        self.register_buffer(
+            "_basis_reference", torch.empty(0, dtype=torch.float64), persistent=False
+        )
+        self.set_algorithm(algorithm)
+
+    def set_algorithm(self, algorithm: str) -> None:
+        """Select a contraction order without changing paths or weights."""
+        if algorithm not in ("recursive", "dense"):
+            raise ValueError("algorithm must be 'recursive' or 'dense'.")
+        if algorithm == "dense" and not hasattr(self, "generalized_cg_1"):
             self._register_coupling_tensors()
+        elif algorithm == "recursive":
+            for order in range(1, self.correlation + 1):
+                name = f"generalized_cg_{order}"
+                if hasattr(self, name):
+                    delattr(self, name)
+        self.algorithm = algorithm
 
     def _enumerate_states(self):
         previous = tuple(
@@ -236,7 +251,7 @@ class AsymmetricContraction(torch.nn.Module):
                 ] = compact * scale
             self.register_buffer(
                 f"generalized_cg_{order}",
-                coefficient,
+                coefficient.to(self._basis_reference),
                 persistent=False,
             )
 
@@ -263,23 +278,32 @@ class AsymmetricContraction(torch.nn.Module):
         zero = sum(features[..., :0].sum() for features in inputs)
         zero = zero + sum(weight[..., :0].sum() for weight in order_weights)
         outputs = []
+        cache = {}
         for output_index, ir_out in enumerate(self._base_irreps_out.expanded()):
             output = (
                 inputs[0].new_zeros((*leading_shape, ir_out.dim, self.num_channels))
                 + zero
             )
             for order_index, path_index, path in self._paths_by_output[output_index]:
-                value = inputs[0][..., self._base_input_slices[path.leaves[0]], :]
+                key = (path.leaves[:1], path.intermediates[:1])
+                if key not in cache:
+                    cache[key] = inputs[0][
+                        ..., self._base_input_slices[path.leaves[0]], :
+                    ]
+                value = cache[key]
                 for i in range(1, len(path.leaves)):
                     i_in = path.leaves[i]
-                    value = clebsch_gordan_product(
-                        value,
-                        path.intermediates[i - 1],
-                        inputs[i][..., self._base_input_slices[i_in], :],
-                        self._input_irreps[i_in],
-                        path.intermediates[i],
-                        elementwise=True,
-                    )
+                    key = (path.leaves[: i + 1], path.intermediates[: i + 1])
+                    if key not in cache:
+                        cache[key] = clebsch_gordan_product(
+                            value,
+                            path.intermediates[i - 1],
+                            inputs[i][..., self._base_input_slices[i_in], :],
+                            self._input_irreps[i_in],
+                            path.intermediates[i],
+                            elementwise=True,
+                        )
+                    value = cache[key]
                 output = output + (
                     value
                     * order_weights[order_index][..., path_index, :].unsqueeze(-2)
@@ -301,16 +325,19 @@ class AsymmetricContraction(torch.nn.Module):
         for order_index in range(self.correlation):
             order = order_index + 1
             indices = letters[:order]
-            equation = (
-                ",".join(
-                    [f"o{indices}p"] + [f"...{index}c" for index in indices] + ["...pc"]
-                )
-                + "->...oc"
-            )
             coefficient = getattr(self, f"generalized_cg_{order}").to(inputs[0])
+            # Weight the generalized tensor, then contract one input at a time.
             contribution = torch.einsum(
-                equation, coefficient, *inputs[:order], order_weights[order_index]
+                f"o{indices}p,...pc->...o{indices}c",
+                coefficient,
+                order_weights[order_index],
             )
+            for i in reversed(range(order)):
+                contribution = torch.einsum(
+                    f"...o{indices[: i + 1]}c,...{indices[i]}c->...o{indices[:i]}c",
+                    contribution,
+                    inputs[i],
+                )
             output = contribution if output is None else output + contribution
         return self._flatten_output(output)
 

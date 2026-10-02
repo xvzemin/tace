@@ -26,6 +26,8 @@ from .representation import Representation
 
 
 class e3nnTACE(torch.nn.Module):
+    representation_cls = Representation
+
     def __init__(
         self,
         Lmax: int,
@@ -111,7 +113,7 @@ class e3nnTACE(torch.nn.Module):
             self.target_irreps = with_natural_parity(self.target_irreps)
 
         # === Representation/Descriptor ===
-        self.representation = Representation(
+        self.representation = self.representation_cls(
             num_layers=cfg["num_layers"],
             atomic_numbers=cfg["atomic_numbers"],
             cutoff=cfg["cutoff"],
@@ -153,7 +155,7 @@ class e3nnTACE(torch.nn.Module):
             "num_fidelities": len(cfg["fidelity"]),
             "use_alllayer": self.use_alllayer,
             "parity": cfg["parity"],
-            "irreps_in": [prod.irreps_out for prod in self.representation.products],
+            "irreps_in": self.representation.irreps_outs,
         }
         for_tensor_readout = {
             "num_layers": cfg["num_layers"],
@@ -163,7 +165,7 @@ class e3nnTACE(torch.nn.Module):
             "num_fidelities": len(cfg["fidelity"]),
             "use_alllayer": self.use_alllayer,
             "parity": cfg["parity"],
-            "irreps_in": [prod.irreps_out for prod in self.representation.products],
+            "irreps_in": self.representation.irreps_outs,
         }
 
         # === Energy ===

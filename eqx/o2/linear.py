@@ -447,8 +447,9 @@ class Linear(torch.nn.Module):
 class UuLinear(torch.nn.Module):
     """Mix equivalent O(2) representations without mixing channels.
 
-    External weights are normalized by the inverse square root of the number
-    of input irrep copies. There are no internal weights or biases.
+    Summed paths are normalized by the inverse square root of the number of
+    input irrep copies. Expanded paths each have unit normalization. There
+    are no internal weights or biases.
 
     Parameters
     ----------
@@ -459,6 +460,9 @@ class UuLinear(torch.nn.Module):
     num_channel : int
         Number of matching channels. Each multiplicity must be divisible by
         this value and is interpreted as ``(copies, num_channel)``.
+    path_mode : {"sum", "expand"}, optional
+        Sum input copies or retain each input-output copy path as a separate
+        output channel. The external weight layout is identical in both modes.
     """
 
     def __init__(
@@ -466,11 +470,17 @@ class UuLinear(torch.nn.Module):
         irreps_in: IrrepsLike,
         irreps_out: IrrepsLike,
         num_channel: int,
+        *,
+        path_mode: str = "sum",
     ) -> None:
         super().__init__()
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)
         self.num_channel = num_channel
+        if path_mode not in ("sum", "expand"):
+            raise ValueError("path_mode must be 'sum' or 'expand'.")
+        self.path_mode = path_mode
+        self.requested_irreps_out = self.irreps_out
         if num_channel < 1 or any(
             mul % num_channel for _, mul in self.irreps_in + self.irreps_out
         ):
@@ -480,7 +490,9 @@ class UuLinear(torch.nn.Module):
                 i_in,
                 i_out,
                 (mul_in // num_channel, mul_out // num_channel, num_channel),
-                (self.irreps_in.count(ir_in) // num_channel) ** -0.5,
+                1.0
+                if path_mode == "expand"
+                else (self.irreps_in.count(ir_in) // num_channel) ** -0.5,
             )
             for i_in, (ir_in, mul_in) in enumerate(self.irreps_in)
             for i_out, (ir_out, mul_out) in enumerate(self.irreps_out)
@@ -504,6 +516,17 @@ class UuLinear(torch.nn.Module):
         self._weight_offsets = tuple(offsets)
         self._input_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
         self._weight_sizes = tuple(size for _, size in offsets)
+        if path_mode == "expand":
+            self.irreps_out = Irreps(
+                (
+                    ir,
+                    sum(
+                        math.prod(self.instructions[i].path_shape)
+                        for i in self._instructions_by_output[j]
+                    ),
+                )
+                for j, (ir, _) in enumerate(self.requested_irreps_out)
+            )
 
     def forward(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Apply externally weighted channelwise paths.
@@ -548,12 +571,20 @@ class UuLinear(torch.nn.Module):
                 )
                 contributions.append(
                     torch.einsum(
-                        "...diu,...iou->...dou", inputs[instruction.i_in], matrix
+                        "...diu,...iou->...diou"
+                        if self.path_mode == "expand"
+                        else "...diu,...iou->...dou",
+                        inputs[instruction.i_in],
+                        matrix,
                     )
                     * instruction.path_weight
                 )
             if contributions:
-                output = sum(contributions[1:], contributions[0])
+                output = (
+                    torch.cat([x.flatten(-3) for x in contributions], dim=-1)
+                    if self.path_mode == "expand"
+                    else sum(contributions[1:], contributions[0])
+                )
                 outputs.append(output.reshape(*leading_shape, ir.dim * mul))
             else:
                 if zero is None:

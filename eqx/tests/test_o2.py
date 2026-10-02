@@ -1274,3 +1274,64 @@ def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(
             torch.autograd.grad(expected.square().sum(), (x, w)),
         ):
             torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("parity", [False, True])
+@pytest.mark.parametrize("correlation", [1, 2, 3])
+@pytest.mark.parametrize("batch", [0, 4])
+def test_symmetric_contraction_algorithms(parity, correlation, batch, double_precision):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    irreps = o2.Irreps("2x0e+2x0o+2x1m+2x2m" if parity else "2x0e+2x1m+2x2m")
+    module = o2.SymmetricContraction(irreps, irreps, correlation).to(device)
+    x = torch.randn(batch, irreps.dim, device=device, requires_grad=True)
+    weight = torch.randn(batch, module.weight_numel, device=device, requires_grad=True)
+    expected = module(x, weight)
+    module.set_algorithm("dense")
+    actual = module(x, weight)
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+    for _ in range(2):
+        seed = torch.randn_like(actual)
+        actual, expected = [
+            torch.cat(
+                [
+                    grad.flatten()
+                    for grad in torch.autograd.grad(
+                        (value * seed).sum(),
+                        (x, weight),
+                        create_graph=True,
+                        retain_graph=True,
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    module.set_algorithm("recursive")
+    assert not list(module.state_dict())
+
+
+def test_symmetric_contraction_removes_antisymmetric_self_product(double_precision):
+    module = o2.SymmetricContraction("2x1m", "2x0e+2x0o+2x2m", 2)
+    assert module.order_num_paths == (0, 2)
+    value = module(torch.randn(3, 4), torch.ones(module.weight_numel))
+    torch.testing.assert_close(value[:, 2:4], torch.zeros(3, 2))
+
+
+@pytest.mark.parametrize("batch", [0, 3])
+def test_uu_linear_expanded_paths(batch, double_precision):
+    expanded = o2.UuLinear("4x0e+4x1m", "6x0e+6x1m", 2, path_mode="expand")
+    reduced = o2.UuLinear(expanded.irreps_in, expanded.requested_irreps_out, 2)
+    x = torch.randn(batch, expanded.irreps_in.dim)
+    weight = torch.randn(batch, expanded.weight_numel)
+    y = expanded(x, weight)
+    actual = torch.cat(
+        [
+            part.reshape(batch, ir.dim, 2, 3, 2).sum(-3).flatten(-3)
+            for part, (ir, _) in zip(
+                y.split([entry.dim for entry in expanded.irreps_out], -1),
+                expanded.irreps_out,
+            )
+        ],
+        -1,
+    )
+    torch.testing.assert_close(actual / 2**0.5, reduced(x, weight))

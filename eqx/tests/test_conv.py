@@ -4134,3 +4134,73 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
             [x, weights, projection, attrs, cotangent],
         )[0]
         torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("algorithm", ["recursive", "dense"])
+@pytest.mark.parametrize("asymmetric", [False, True])
+@pytest.mark.parametrize("edges", [0, 5])
+def test_ece_convolution(algorithm, asymmetric, edges, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e", 1).cuda()
+    local = frame.irreps_out
+    radial = o2.UuLinear(
+        o2.Irreps((ir, mul * 2) for ir, mul in local), local, 2, path_mode="expand"
+    )
+    hidden = o2.Irreps((ir, 2) for ir, _ in local)
+    cls = o2.AsymmetricContraction if asymmetric else o2.SymmetricContraction
+    contraction = cls(hidden, hidden, 2, algorithm=algorithm).cuda()
+    copies = 2 if asymmetric else 1
+    up = o2.Linear(
+        radial.irreps_out, o2.Irreps((ir, mul * copies) for ir, mul in hidden)
+    ).cuda()
+    down = o2.Linear(hidden, local).cuda()
+    module = eqx_conv.EceO2TensorProductConv(
+        frame, radial, up, contraction, down, frame
+    )
+    values = [
+        torch.randn(*shape, device="cuda", requires_grad=True)
+        for shape in (
+            (3, frame.irreps_in.dim),
+            (edges, 3),
+            (3, radial.weight_numel),
+            (radial.weight_numel,),
+            (up.weight_numel,),
+            (down.weight_numel,),
+            (3, contraction.weight_numel),
+            (3, contraction.weight_numel),
+            (edges, 3),
+            (edges, 1),
+        )
+    ]
+    wigner, inverse = o2.WignerD(1, 1).cuda()(values[-2])
+    index = torch.randint(3, (2, edges), device="cuda")
+    outputs = [
+        module(*values[:8], index, wigner, inverse, values[-1], backend=backend)
+        for backend in ("cuda", "torch")
+    ]
+    if not asymmetric and edges:
+        module.programs.clear()
+        compiled = torch.compile(module, backend="eager", fullgraph=True)
+        torch.testing.assert_close(
+            compiled(*values[:8], index, wigner, inverse, values[-1]),
+            outputs[0],
+            atol=2e-9,
+            rtol=2e-9,
+        )
+    for order in range(3):
+        torch.testing.assert_close(*outputs, atol=2e-9, rtol=2e-9)
+        if order == 2:
+            break
+        seed = torch.randn_like(outputs[0])
+        outputs = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (y * seed).sum(), values, retain_graph=True, create_graph=True
+                    )
+                ]
+            )
+            for y in outputs
+        ]

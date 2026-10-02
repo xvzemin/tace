@@ -1,0 +1,22 @@
+defaults:
+  - 3bpa_cgtp@_global_
+  - _self_
+
+model:
+  config:
+    _target_: tace.models.TECE
+    node_embedding:
+      type: tensor
+    radial_basis:
+      hidden: [64, 64, 64, 1024]
+      apply_cutoff: false
+    atomic_basis:
+      type: ece_o2
+      nonlinear: null
+      edge_nonlinear: null
+      correlation: 3
+      algorithm: recursive # [recursive, dense]; identical parameter layout
+      use_asymmetric_contraction: false
+      use_radial_rotary_attention: false
+    product_basis:
+      type: null

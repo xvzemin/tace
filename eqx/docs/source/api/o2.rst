@@ -55,7 +55,10 @@ Tensor products
    :members: forward, weight_view_for_instruction, weight_views
 
 .. autoclass:: eqx.o2.AsymmetricContraction
-   :members: forward
+   :members: forward, set_algorithm
+
+.. autoclass:: eqx.o2.SymmetricContraction
+   :members: forward, set_algorithm
 
 Harmonic O(3) coupling
 ----------------------

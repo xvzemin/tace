@@ -23,3 +23,6 @@ and fusion boundaries.
 
 .. autoclass:: eqx.conv.UvO2TensorProductConv
    :members: forward
+
+.. autoclass:: eqx.conv.EceO2TensorProductConv
+   :members: forward, set_algorithm

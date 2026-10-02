@@ -14,6 +14,7 @@ from .rotation_matrix import (
     rotation_matrix_to_y_axis,
     rotation_matrix_to_z_axis,
 )
+from .symmetric_contraction import SymmetricContraction
 from .tensor_product import TensorProduct
 from .wigner import WignerD
 
@@ -27,6 +28,7 @@ __all__ = [
     "Activation",
     "Gate",
     "AsymmetricContraction",
+    "SymmetricContraction",
     "LocalFrame",
     "CircularHarmonics",
     "O2Grid",

@@ -415,6 +415,10 @@ class Representation(torch.nn.Module):
             )
 
     @property
+    def irreps_outs(self):
+        return [prod.irreps_out for prod in self.products]
+
+    @property
     def use_packed_wigner(self) -> bool:
         return (
             getattr(self, "use_local_frame", True)

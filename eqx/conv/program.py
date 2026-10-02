@@ -115,6 +115,13 @@ class Program:
             "product", width * dims[role], values, (metadata, role, required)
         )
 
+    def channel_contract(self, values, rows, width, channels, role=2):
+        """Contract ``auc, uc -> ac`` or either of its transposes."""
+        sizes = (rows * width * channels, width * channels, rows * channels)
+        return self.add(
+            "channel_contract", sizes[role], values, (rows, width, channels, role)
+        )
+
     def adjoint(self, outputs, seeds, active):
         """Differentiate a vector program, without evaluating tensor operations."""
         count = len(self.nodes)
@@ -211,6 +218,16 @@ class Program:
                         self.transpose(x, rows, inputs), grad, inputs, rows, outputs
                     ),
                 )
+            elif op == "channel_contract":
+                rows, width, channels, output = data
+                values = list(args)
+                values[output] = grad
+                for role, x in enumerate(args):
+                    if role != output:
+                        accumulate(
+                            x,
+                            self.channel_contract(values, rows, width, channels, role),
+                        )
             elif op == "product":
                 metadata, output, required = data
                 values = list(args)

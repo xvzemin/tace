@@ -67,8 +67,8 @@ model:
     edge_update:
       type: identity
 
-    mmax: 2
-    Lmax: 2
+    mmax: 3
+    Lmax: 3
     lmax: 3
     num_layers: 2
     num_channel: 64
