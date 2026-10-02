@@ -228,6 +228,7 @@ class Representation(torch.nn.Module):
             lmax=lmax,
             avg_num_neighbors=avg_num_neighbors,
             bias=False,
+            radial_mlp=radial_basis["hidden"],
         )
         self.edge_embedding = EDGE_EMBEDDING[edge_embedding["type"]](
             num_elements=self.num_elements,

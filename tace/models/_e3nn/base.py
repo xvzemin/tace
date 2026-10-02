@@ -42,6 +42,7 @@ class NodeEmbedding(torch.nn.Module):
         lmax: int,
         avg_num_neighbors: float,
         bias: bool = False,
+        radial_mlp: Union[list[int], None] = None,
     ) -> None:
         super().__init__()
 
@@ -53,6 +54,9 @@ class NodeEmbedding(torch.nn.Module):
         self.Lmax = Lmax
         self.lmax = lmax
         self.avg_num_neighbors = avg_num_neighbors
+        self.radial_mlp = (
+            [num_channel, num_channel] if radial_mlp is None else list(radial_mlp)
+        )
 
         self._setup()
 

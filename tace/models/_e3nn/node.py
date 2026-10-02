@@ -143,6 +143,8 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         Mean neighbor count used to normalize the sum.
     bias : bool, optional
         Include biases in scalar embedding and radial projections.
+    radial_mlp : list of int, optional
+        Radial MLP hidden widths. Defaults to two layers of ``num_channel``.
     """
 
     use_wigner = False
@@ -158,15 +160,17 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         self.node_embedding = e3nnLinear(
             f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
         )
+        input_dim = self.num_radial_basis + (
+            2 * self.num_channel if self.element_dependent else 0
+        )
         self.edge_info = MLP(
             [
-                self.num_radial_basis
-                + (2 * self.num_channel if self.element_dependent else 0),
-                self.num_channel,
-                self.num_channel,
+                input_dim,
+                *self.radial_mlp,
                 len(self.irreps_out) * self.num_channel,
             ],
             bias=self.bias,
+            layer_norm=input_dim != self.num_radial_basis,
         )
         self.normalization = math.sqrt(self.avg_num_neighbors)
         self.reshape = LayoutTransform(

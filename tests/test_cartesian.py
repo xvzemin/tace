@@ -43,6 +43,11 @@ def test_cartesian_conversion(
     config["radial_basis"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
     reference = TensorModel(e3nnTACE(**config)).to(DEVICE).train()
+    if node_embedding == "spherical_tensor":
+        assert (
+            reference.readout_fn.representation.node_embedding.edge_info.dims[1:-1]
+            == config["radial_basis"]["hidden"]
+        )
     module = convert_cgtp(reference, implementation="co3")
     parameters = dict(reference.named_parameters())
     assert parameters.keys() == dict(module.named_parameters()).keys()

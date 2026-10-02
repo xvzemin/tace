@@ -456,14 +456,17 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
 @pytest.mark.parametrize("element_dependent", [False, True])
 @pytest.mark.parametrize("mmax", [0, 2])
 @pytest.mark.parametrize("edges", [0, 5])
+@pytest.mark.parametrize("hidden", [None, [], [7, 5]])
 def test_tensor_embedding_constructions(
-    element_dependent, mmax, edges, double_precision
+    element_dependent, mmax, edges, hidden, double_precision
 ):
     suffix = "_element2" if element_dependent else ""
-    spherical = NODE_EMBEDDING[f"spherical_tensor{suffix}"](2, 4, 0, 3, 2, 2, 2.0).to(
-        DEVICE
-    )
-    wigner = NODE_EMBEDDING[f"wigner_tensor{suffix}"](2, 4, 0, 3, 2, 2, 2.0).to(DEVICE)
+    spherical = NODE_EMBEDDING[f"spherical_tensor{suffix}"](
+        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden
+    ).to(DEVICE)
+    wigner = NODE_EMBEDDING[f"wigner_tensor{suffix}"](
+        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden
+    ).to(DEVICE)
     wigner.load_state_dict(spherical.state_dict(), strict=True)
     positions = torch.randn(edges, 3, device=DEVICE, requires_grad=True)
     radial = torch.randn(edges, 4, device=DEVICE, requires_grad=True)
@@ -475,7 +478,15 @@ def test_tensor_embedding_constructions(
     )
     actual = wigner(attrs, radial, index, None, None, rotation, inverse)
     expected = spherical(attrs, radial, index, harmonics, None, None, None)
-    assert spherical.edge_info.mlp[0].in_dim == 4 + 6 * element_dependent
+    widths = [3, 3] if hidden is None else hidden
+    for embedding in (spherical, wigner):
+        assert embedding.edge_info.dims == [4 + 6 * element_dependent, *widths, 9]
+        norms = [
+            layer.normalized_shape
+            for layer in embedding.edge_info.mlp
+            if isinstance(layer, torch.nn.LayerNorm)
+        ]
+        assert norms == ([(width,) for width in widths] if element_dependent else [])
     for order in range(3):
         torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
         if order < 2:

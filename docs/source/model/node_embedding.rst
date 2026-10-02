@@ -43,6 +43,11 @@ same output layout:
      - Inverse Wigner rotation of local scalars
      - Radial basis and both element embeddings
 
+The radial MLP hidden widths are set by ``radial_basis.hidden``. LayerNorm is
+applied to hidden layers when the input width differs from the radial basis
+width, as in the ``element2`` variants. An empty hidden list gives a linear
+projection without LayerNorm.
+
 Element-independent weights do not remove element information from the node
 features. Corresponding spherical and Wigner variants share learned weights
 and produce the same output when supplied with the same normalized directions.

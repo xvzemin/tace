@@ -316,6 +316,7 @@ class TECERepresentation(torch.nn.Module):
             lmax=lmax,
             avg_num_neighbors=avg_num_neighbors,
             bias=radial_basis["bias"],
+            radial_mlp=radial_basis["hidden"],
         )
         irreps = o3.Irreps(
             [

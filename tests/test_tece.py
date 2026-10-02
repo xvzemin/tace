@@ -223,10 +223,12 @@ def test_tece_layer_layout(
         use_asymmetric_contraction=False,
     )
     cfg["radial_basis"].update(num_radial_basis=3, hidden=[4])
+    cfg["product_basis"]["correlation"] = 2
     cfg["readout_emlp"].update(hidden=[4], use_alllayer=True)
     cfg["scale_shift"]["enable"] = False
     model = TensorModel(TECE(**cfg)).cuda().train()
     rep = model.readout_fn.representation
+    assert rep.node_embedding.edge_info.dims[1:-1] == cfg["radial_basis"]["hidden"]
     assert len(rep.interactions) + 1 == num_layers
     assert hasattr(rep.product, "eqx_ace")
     gates = [rep.embedding_gate, *(layer.gate for layer in rep.interactions)]
