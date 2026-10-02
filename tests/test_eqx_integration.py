@@ -843,13 +843,16 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if edges == 1025:
         from functools import partial
 
+        from eqx.conv import execution as convolution_execution
         from eqx.models.tace.tece_oam_rra import execution
 
         monkeypatch.setattr(
             execution, "forward", partial(execution.forward, tile_size=256)
         )
         monkeypatch.setattr(
-            execution, "launch", partial(execution.launch, tile_size=256)
+            convolution_execution,
+            "launch",
+            partial(convolution_execution.launch, tile_size=256),
         )
 
     monkeypatch.setenv("TACE_USE_EQX", "1")

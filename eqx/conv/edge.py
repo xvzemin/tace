@@ -5,6 +5,7 @@ from functools import lru_cache
 import torch
 
 from ..utils.metadata import parse_metadata
+from .contraction import gradient_mask
 from .program import next_adjoint
 
 
@@ -123,6 +124,8 @@ def evaluate(
     num_nodes: int,
 ) -> list[torch.Tensor]:
     from .codegen import launch
+    from .execution import launch as launch_tiled
+    from .execution import uses_matrix_products
 
     if inputs[0].dtype not in (torch.float32, torch.float64):
         raise TypeError("Fused edge expressions require float32 or float64.")
@@ -140,9 +143,11 @@ def evaluate(
     slots = sorted({slot for _, slot, _ in descriptions})
     for slot, output in zip(slots, outputs):
         writes = [kind for _, s, kind in descriptions if s == slot]
-        if writes != ["edge"] or not source.numel():
+        if writes != ["edge"] or not source.numel() or uses_matrix_products(metadata):
             output.zero_()
     if source.numel() and outputs:
+        if uses_matrix_products(metadata):
+            launch = launch_tiled
         launch(metadata, inputs, source.contiguous(), target.contiguous(), outputs)
     return outputs
 
@@ -184,7 +189,8 @@ def setup_context(ctx, inputs, output):
 def backward(ctx, gradients):
     source, target, *inputs = ctx.saved_tensors
     slots = sorted({slot for _, slot, _ in parse_metadata(ctx.kernel_metadata)[1]})
-    active = tuple(i for i, need in enumerate(ctx.needs_input_grad[1]) if need)
+    required = gradient_mask(inputs, ctx.needs_input_grad[1], offset=0, trailing=2)
+    active = tuple(i for i, need in enumerate(required) if need)
     seeds = tuple(slot for slot, grad in zip(slots, gradients) if grad is not None)
     metadata = next_adjoint(ctx.kernel_metadata, active, seeds, len(inputs))
     adjoints = parse_metadata(metadata)[1]

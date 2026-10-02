@@ -399,6 +399,10 @@ class EceO2TensorProductConv(torch.nn.Module):
             backend = "cuda" if node_features.is_cuda else "torch"
         if backend == "cuda" and not node_features.is_cuda:
             raise ValueError("The CUDA backend requires CUDA tensors.")
+        if torch.compiler.is_compiling():
+            torch._dynamo.mark_static(radial_features, -1)
+            torch._dynamo.mark_static(wigner, 1)
+            torch._dynamo.mark_static(wigner, 2)
         key = (
             self.contraction.algorithm,
             radial_features.shape[-1],

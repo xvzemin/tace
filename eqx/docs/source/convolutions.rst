@@ -35,6 +35,13 @@ Each interface defaults to CUDA on GPU and PyTorch on CPU.
 without custom backward functions or CUDA extensions. The CUDA backend
 supports float32, float64 and higher derivatives, including force training.
 
+Radial projections use tiled matrix products in the CGTP and Uu convolutions.
+Fused edge programs also use this schedule for radial input widths above 128;
+64- and 128-channel projections retain their cooperative CUDA evaluation.
+In the matrix-product schedule, parameter gradients are reduced without
+per-edge outer products. Temporary tiles are released after their last use and are
+recomputed for higher derivatives instead of being retained for every edge.
+
 Spherical features use flattened ``ir_mul`` storage. Cartesian features use
 flattened ``mul_ir`` storage, except for explicitly requested compact output.
 See :doc:`cartesian` for Cartesian storage and projection.

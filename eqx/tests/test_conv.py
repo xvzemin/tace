@@ -712,11 +712,17 @@ def test_cartesian_harmonic_polynomials(degree, normalization, double_precision)
 
 
 @pytest.mark.parametrize(
-    "geometry,shared,projected",
-    [(True, False, False), (False, False, False), (True, True, True)],
+    "geometry,shared,projected,radial_channels",
+    [
+        (True, False, False, 2),
+        (False, False, False, 2),
+        (True, True, True, 2),
+        (True, False, False, 1024),
+        (False, True, True, 1024),
+    ],
 )
 def test_cartesian_convolution_derivatives(
-    geometry, shared, projected, double_precision
+    geometry, shared, projected, radial_channels, double_precision
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -752,8 +758,9 @@ def test_cartesian_convolution_derivatives(
     inputs = [
         x,
         torch.randn(7, 3, device="cuda") if geometry else attrs,
-        torch.randn(1 if shared else 7, 2, device="cuda"),
-        torch.randn(2, tp.weight_numel, device="cuda"),
+        torch.randn(1 if shared else 7, radial_channels, device="cuda"),
+        torch.randn(radial_channels, tp.weight_numel, device="cuda")
+        / radial_channels**0.5,
     ]
     if geometry:
         inputs.append(torch.randn(1 if shared else 7, 1, device="cuda"))
@@ -1675,11 +1682,25 @@ def test_shared_metadata_cache():
 )
 @pytest.mark.parametrize("direction", [False, True, "wigner"])
 @pytest.mark.parametrize(
-    "mmax,shared,projected",
-    [(0, False, False), (1, True, False), (2, False, True), (1, True, True)],
+    "mmax,shared,projected,radial_channels",
+    [
+        (0, False, False, 3),
+        (1, True, False, 3),
+        (2, False, True, 3),
+        (1, True, True, 3),
+        (2, False, True, 1024),
+        (1, True, True, 1024),
+    ],
 )
 def test_uu_o2_convolution_derivatives(
-    double_precision, device, backend, direction, mmax, shared, projected
+    double_precision,
+    device,
+    backend,
+    direction,
+    mmax,
+    shared,
+    projected,
+    radial_channels,
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -1697,9 +1718,9 @@ def test_uu_o2_convolution_derivatives(
         return (torch.randn(*shape, device=device) * 0.2).requires_grad_()
 
     x, vectors = rand(3, frame_in.input_dim), rand(rows, 3)
-    radial = rand(rows, 3 if projected else linear.weight_numel)
+    radial = rand(rows, radial_channels if projected else linear.weight_numel)
     projection = (
-        rand(3, linear.weight_numel)
+        rand(radial_channels, linear.weight_numel) / radial_channels**0.5
         if projected
         else torch.empty(0, linear.weight_numel, device=device)
     )
@@ -3285,6 +3306,7 @@ def test_cuda_streams_capture_compile(monkeypatch, row_size):
         (0, torch.float64),
         (3, torch.float64),
         (128, torch.float64),
+        (1024, torch.float64),
         (129, torch.float32),
         (33, torch.float32),
     ],
@@ -4033,12 +4055,18 @@ def test_compile_and_cuda_graph(double_precision):
 
 
 @pytest.mark.parametrize("channels", [3, 65])
+@pytest.mark.parametrize("radial_channels", [5, 1024])
 @pytest.mark.parametrize(
     "shared_attrs,shared_radial",
     [(False, False), (True, False), (False, True), (True, True)],
 )
 def test_o3_chunked_shared_gradients(
-    monkeypatch, channels, shared_attrs, shared_radial, double_precision
+    monkeypatch,
+    channels,
+    shared_attrs,
+    shared_radial,
+    radial_channels,
+    double_precision,
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -4055,10 +4083,12 @@ def test_o3_chunked_shared_gradients(
         for shape in (
             (257, tp.irreps_in1.dim),
             (1 if shared_attrs else 2051, tp.irreps_in2.dim),
-            (1 if shared_radial else 2051, 5),
-            (5, tp.weight_numel),
+            (1 if shared_radial else 2051, radial_channels),
+            (radial_channels, tp.weight_numel),
         )
     ]
+    with torch.no_grad():
+        inputs[-1].div_(radial_channels**0.5)
     actual = conv(*inputs, edges)
     expected = reference(tp, *inputs, edges)
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-11)
@@ -4139,7 +4169,10 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
 @pytest.mark.parametrize("algorithm", ["recursive", "dense"])
 @pytest.mark.parametrize("asymmetric", [False, True])
 @pytest.mark.parametrize("edges", [0, 5])
-def test_ece_convolution(algorithm, asymmetric, edges, double_precision):
+@pytest.mark.parametrize("radial_channels", [3, 1024])
+def test_ece_convolution(
+    algorithm, asymmetric, edges, radial_channels, double_precision
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e", 1).cuda()
@@ -4162,8 +4195,8 @@ def test_ece_convolution(algorithm, asymmetric, edges, double_precision):
         torch.randn(*shape, device="cuda", requires_grad=True)
         for shape in (
             (3, frame.irreps_in.dim),
-            (edges, 3),
-            (3, radial.weight_numel),
+            (edges, radial_channels),
+            (radial_channels, radial.weight_numel),
             (radial.weight_numel,),
             (up.weight_numel,),
             (down.weight_numel,),
@@ -4173,6 +4206,8 @@ def test_ece_convolution(algorithm, asymmetric, edges, double_precision):
             (edges, 1),
         )
     ]
+    with torch.no_grad():
+        values[2].div_(radial_channels**0.5)
     wigner, inverse = o2.WignerD(1, 1).cuda()(values[-2])
     index = torch.randint(3, (2, edges), device="cuda")
     outputs = [
@@ -4204,3 +4239,59 @@ def test_ece_convolution(algorithm, asymmetric, edges, double_precision):
             )
             for y in outputs
         ]
+
+
+@pytest.mark.parametrize("width", [64, 128, 1024])
+@pytest.mark.parametrize("edges", [0, 7])
+def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import edge, execution
+    from eqx.conv.program import Program
+    from eqx.kernels.cuda import runtime
+
+    program = Program()
+    x = program.input(0, "source", 4)
+    z = program.input(1, "edge", width)
+    w = program.input(2, "shared", width * 4)
+    b = program.input(3, "shared", 4)
+    value = program.binary("add", program.matmul(z, w, 1, width, 4), b)
+    value = program.unary("silu", program.binary("mul", x, value))
+    metadata = repr((tuple(program.nodes), ((value, 0, "target"),)))
+    assert execution.uses_matrix_products(metadata) == (width > 128)
+    tiled = execution.launch
+
+    def launch(*args):
+        return tiled(*args, tile_size=3)
+
+    monkeypatch.setattr(execution, "launch", launch)
+    values = [
+        (torch.randn(shape, device="cuda") * 0.1).requires_grad_()
+        for shape in ((3, 4), (edges, width), (1, width * 4), (1, 4))
+    ]
+    index = torch.randint(3, (2, edges), device="cuda")
+    actual = edge.evaluate(metadata, values, *index, 3)[0]
+    expected = edge.evaluate_torch(metadata, values, *index, 3)[0]
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+    masks = []
+    query = runtime().gradient_mask
+
+    def record(offset, count):
+        mask = query(offset, count)
+        masks.append(mask)
+        return mask
+
+    monkeypatch.setattr(runtime(), "gradient_mask", record)
+    # A position-dependent radial input needs no parameter adjoints on the
+    # first pass, but its mixed derivatives must still include all parameters.
+    actual = torch.autograd.grad(actual.sin().sum(), values[1], create_graph=True)[0]
+    expected = torch.autograd.grad(expected.sin().sum(), values[1], create_graph=True)[
+        0
+    ]
+    assert masks[0] == [False, True, False, False, False, False]
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+        a = torch.autograd.grad(actual.sin().sum(), values, create_graph=True)
+        b = torch.autograd.grad(expected.sin().sum(), values, create_graph=True)
+        actual, expected = (torch.cat([v.flatten() for v in g]) for g in (a, b))
+    torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)

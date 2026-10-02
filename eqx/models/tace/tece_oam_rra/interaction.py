@@ -2,6 +2,7 @@
 
 import torch
 
+from ....conv.contraction import gradient_mask
 from ....conv.program import next_adjoint
 from ....utils.metadata import parse_metadata
 from .program import build, first_adjoint
@@ -130,7 +131,8 @@ def backward(ctx, gradients):
     grad_denominator = (
         torch.zeros_like(denominator) if grad_denominator is None else grad_denominator
     )
-    active = tuple(i for i, need in enumerate(ctx.needs_input_grad[3]) if need)
+    required = gradient_mask(values, ctx.needs_input_grad[3])
+    active = tuple(i for i, need in enumerate(required) if need)
     output = [None] * ctx.num_inputs
     if active:
         metadata = first_adjoint(base_program(ctx.kernel_metadata, values), active)
@@ -152,7 +154,7 @@ def contraction(
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate recursively differentiated local expressions as native kernels."""
-    from .execution import launch
+    from ....conv.execution import launch
 
     inputs = [x.contiguous() for x in inputs]
     result = contraction_fake(metadata, source, target, inputs)
@@ -182,7 +184,8 @@ def contraction_backward(ctx, gradients):
     source, target, *inputs = ctx.saved_tensors
     slots = sorted({slot for _, slot, _ in parse_metadata(ctx.kernel_metadata)[1]})
     seeds = tuple(slot for slot, grad in zip(slots, gradients) if grad is not None)
-    active = tuple(i for i, need in enumerate(ctx.needs_input_grad[3]) if need)
+    required = gradient_mask(inputs, ctx.needs_input_grad[3])
+    active = tuple(i for i, need in enumerate(required) if need)
     result = [None] * len(inputs)
     if active and seeds:
         metadata = next_adjoint(ctx.kernel_metadata, active, seeds, len(inputs))
