@@ -14,12 +14,14 @@ from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import MLP
 from ..radial import RadialBasis
-from .node import NODE_EMBEDDING
+from .node import NODE_EMBEDDING, SphericalTensorNodeEmbedding
+from .nonlinear import get_nonlinear_layer
+from .prod import CgtpACE
 from .tace import e3nnTACE
 
 
 class EceO2Interaction(torch.nn.Module):
-    """Apply an element-weighted edge expansion and a residual update.
+    """Apply an edge expansion, node gate and residual update.
 
     Parameters
     ----------
@@ -39,6 +41,14 @@ class EceO2Interaction(torch.nn.Module):
         Use independent factors instead of powers of one feature tensor.
     avg_num_neighbors : float
         Normalization of the neighbor sum.
+    element_dependent : bool, optional
+        Multiply radial path weights by learned endpoint element coefficients.
+    nonlinear : {"gate", None}, optional
+        Nonlinearity after node aggregation.
+    gate_m0 : bool, optional
+        Gate scalars as well as tensors.
+    scalar_act, tensor_act : str or list of str, optional
+        Scalar and gate activations, following the node Gate configuration.
     """
 
     def __init__(
@@ -53,22 +63,37 @@ class EceO2Interaction(torch.nn.Module):
         algorithm,
         asymmetric,
         avg_num_neighbors,
+        element_dependent=False,
+        nonlinear="gate",
+        gate_m0=False,
+        scalar_act=None,
+        tensor_act=None,
     ):
         super().__init__()
         self.irreps_in = self.irreps_out = o3.Irreps(irreps)
         self.num_channel = num_channel
         self.num_inputs = correlation if asymmetric else 1
         self.asymmetric = asymmetric
+        self.element_dependent = element_dependent
         self.normalization = math.sqrt(avg_num_neighbors)
         self.use_eqx = bool(acceleration_enabled("eqx", kernel="conv"))
         self.reshape_in = LayoutTransform(
             irreps, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
         )
+        self.gate, self.linear_node, gate_irreps = get_nonlinear_layer(
+            nonlinear,
+            self.irreps_out,
+            self.irreps_out,
+            gate_m0=gate_m0,
+            scalar_act=scalar_act,
+            tensor_act=tensor_act,
+            bias=False,
+        )
         self.reshape_out = LayoutTransform(
-            irreps, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+            gate_irreps, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
         )
         self.frame_in = o2.LocalFrame(irreps, mmax)
-        self.frame_out = o2.LocalFrame(irreps, mmax, reverse=True)
+        self.frame_out = o2.LocalFrame(gate_irreps, mmax, reverse=True)
         local = self.frame_in.irreps_out
         paired = o2.Irreps((ir, 2 * mul) for ir, mul in local)
         parity = any(ir.p != (-1) ** ir.l for _, ir in self.irreps_in)
@@ -82,12 +107,9 @@ class EceO2Interaction(torch.nn.Module):
         radial_out = o2.LocalFrame.restrict(intermediate, mmax).filter(
             keep=lambda ir_mul: paired.count(ir_mul.ir) > 0
         )
-        self.radial_linear = o2.UuLinear(
-            paired, radial_out, num_channel, path_mode="expand"
-        )
         hidden = o2.Irreps((ir, num_channel) for ir, _ in radial_out)
         self.linear_up = o2.Linear(
-            self.radial_linear.irreps_out,
+            paired,
             o2.Irreps((ir, mul * self.num_inputs) for ir, mul in hidden),
         )
         contraction = (
@@ -95,30 +117,47 @@ class EceO2Interaction(torch.nn.Module):
         )
         self.contraction = contraction(
             hidden,
-            o2.Irreps((ir, num_channel) for ir, _ in local),
+            hidden,
             correlation,
             algorithm=algorithm,
         )
-        self.linear_down = o2.Linear(self.contraction.irreps_out, local)
+        self.radial_linear = o2.UuLinear(
+            self.contraction.irreps_out, radial_out, num_channel, path_mode="expand"
+        )
+        self.linear_down = o2.Linear(
+            self.radial_linear.irreps_out, self.frame_out.irreps_out
+        )
         self.source_weight = torch.nn.Parameter(
             torch.randn(num_elements, self.contraction.weight_numel)
         )
         self.target_weight = torch.nn.Parameter(torch.randn_like(self.source_weight))
+        self.weight_numel = self.radial_linear.weight_numel
+        if element_dependent:
+            self.radial_source_weight = torch.nn.Parameter(
+                torch.randn(num_elements, self.weight_numel)
+            )
+            self.radial_target_weight = torch.nn.Parameter(
+                torch.randn_like(self.radial_source_weight)
+            )
+        else:
+            self.register_parameter("radial_source_weight", None)
+            self.register_parameter("radial_target_weight", None)
         self.edge_info = MLP(
             [
                 radial_basis["num_radial_basis"],
                 *radial_basis["hidden"],
-                self.radial_linear.weight_numel,
+                self.weight_numel,
             ],
             bias=radial_basis["bias"],
         )
         self.eqx_tp = EceO2TensorProductConv(
             self.frame_in,
-            self.radial_linear,
             self.linear_up,
             self.contraction,
+            self.radial_linear,
             self.linear_down,
             self.frame_out,
+            element_dependent=element_dependent,
         )
 
     def set_algorithm(self, algorithm):
@@ -132,6 +171,12 @@ class EceO2Interaction(torch.nn.Module):
         source, target = edge_index
         source_weight = self.source_weight[node_type]
         target_weight = self.target_weight[node_type]
+        radial_source_weight = (
+            self.radial_source_weight[node_type] if self.element_dependent else None
+        )
+        radial_target_weight = (
+            self.radial_target_weight[node_type] if self.element_dependent else None
+        )
         if self.use_eqx and features.is_cuda:
             for layer in self.edge_info.mlp[:-1]:
                 radial = layer(radial)
@@ -153,6 +198,8 @@ class EceO2Interaction(torch.nn.Module):
                 wigner,
                 wigner_inv,
                 cutoff,
+                radial_source_weight=radial_source_weight,
+                radial_target_weight=radial_target_weight,
             )
         else:
             # Rotate the two endpoints together; concatenate matching channels.
@@ -172,9 +219,7 @@ class EceO2Interaction(torch.nn.Module):
                 ],
                 dim=-1,
             )
-            features = self.linear_up(
-                self.radial_linear(paired, self.edge_info(radial))
-            )
+            features = self.linear_up(paired)
             if self.asymmetric:
                 inputs = [
                     torch.cat(
@@ -199,16 +244,23 @@ class EceO2Interaction(torch.nn.Module):
             features = self.contraction(
                 inputs, source_weight[source] * target_weight[target]
             )
+            conv_weights = self.edge_info(radial)
+            if self.element_dependent:
+                conv_weights = conv_weights * (
+                    radial_source_weight[source] * radial_target_weight[target]
+                )
+            features = self.radial_linear(features, conv_weights)
             message = (
                 self.frame_out.to_global(self.linear_down(features), wigner_inv)
                 * cutoff
             )
             message = scatter_sum(message, target, dim=0, dim_size=node_feats.shape[0])
-        return node_feats + self.reshape_out(message) / self.normalization
+        message = self.reshape_out(message) / self.normalization
+        return node_feats + self.linear_node(self.gate(message))
 
 
 class TECERepresentation(torch.nn.Module):
-    """Build node descriptors with transient edge cluster expansions."""
+    """Build descriptors with tensor embedding, edge expansions and a final ACE."""
 
     def __init__(
         self,
@@ -223,6 +275,8 @@ class TECERepresentation(torch.nn.Module):
         node_embedding,
         radial_basis,
         atomic_basis,
+        product_basis,
+        target_irreps,
         parity,
         invariant_property,
         equivariant_property,
@@ -231,8 +285,13 @@ class TECERepresentation(torch.nn.Module):
         super().__init__()
         if invariant_property or equivariant_property:
             raise ValueError("TECE currently accepts positions and element types only.")
-        if node_embedding["type"] not in ("linear", "tensor"):
-            raise ValueError("TECE supports linear and tensor node embeddings.")
+        embedding_cls = NODE_EMBEDDING[node_embedding["type"]]
+        if not issubclass(embedding_cls, SphericalTensorNodeEmbedding):
+            raise ValueError(
+                "TECE requires a spherical or Wigner tensor node embedding."
+            )
+        if num_layers < 1:
+            raise ValueError("TECE requires at least one layer.")
         self.use_dens = self.use_time_reversal = self.use_magnetic_interaction = False
         self.register_buffer(
             "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.long)
@@ -248,38 +307,53 @@ class TECERepresentation(torch.nn.Module):
             apply_cutoff=False,
             gaussian_width=radial_basis["gaussian_width"],
         )
-        self.node_embedding = NODE_EMBEDDING[node_embedding["type"]](
-            len(atomic_numbers),
-            radial_basis["num_radial_basis"],
-            0,
-            num_channel,
-            Lmax,
-            lmax,
-            avg_num_neighbors,
+        self.node_embedding = embedding_cls(
+            num_elements=len(atomic_numbers),
+            num_radial_basis=radial_basis["num_radial_basis"],
+            num_mag_radial_basis=0,
+            num_channel=num_channel,
+            Lmax=Lmax,
+            lmax=lmax,
+            avg_num_neighbors=avg_num_neighbors,
+            bias=radial_basis["bias"],
         )
-        self.irreps_out = o3.Irreps(
+        irreps = o3.Irreps(
             [
                 (num_channel, (ell, p))
                 for ell in range(Lmax + 1)
                 for p in ((1, -1) if parity else ((-1) ** ell,))
             ]
         )
-        self.embedding_linear = e3nnLinear(
-            self.node_embedding.irreps_out, self.irreps_out
+        self.embedding_gate, self.embedding_down, gate_irreps = get_nonlinear_layer(
+            atomic_basis["nonlinear"][0],
+            irreps,
+            irreps,
+            gate_m0=atomic_basis["gate_m0"],
+            scalar_act=atomic_basis["scalar_act"],
+            tensor_act=atomic_basis["tensor_act"],
+            bias=False,
         )
-        self.irreps_outs = [self.irreps_out] * num_layers
+        self.embedding_linear = e3nnLinear(
+            self.node_embedding.irreps_out, gate_irreps, bias=False
+        )
         self.angular_basis = (
             o3.SphericalHarmonics(
-                list(range(lmax + 1)), normalize=True, normalization="component"
+                list(range(self.node_embedding.irreps_out.lmax + 1)),
+                normalize=True,
+                normalization="component",
             )
-            if node_embedding["type"] == "tensor"
+            if not self.node_embedding.use_wigner
             else None
         )
-        self.wigner = o2.WignerD(min(mmax, Lmax), Lmax)
+        self.wigner = (
+            o2.WignerD(min(mmax, Lmax), Lmax)
+            if num_layers > 1 or self.node_embedding.use_wigner
+            else None
+        )
         self.interactions = torch.nn.ModuleList(
             [
                 EceO2Interaction(
-                    self.irreps_out,
+                    irreps,
                     lmax,
                     mmax,
                     len(atomic_numbers),
@@ -289,13 +363,39 @@ class TECERepresentation(torch.nn.Module):
                     atomic_basis.get("algorithm", "recursive"),
                     atomic_basis["use_asymmetric_contraction"],
                     avg_num_neighbors,
+                    atomic_basis.get("element_dependent", False),
+                    nonlinear=atomic_basis["nonlinear"][layer + 1],
+                    gate_m0=atomic_basis["gate_m0"],
+                    scalar_act=atomic_basis["scalar_act"],
+                    tensor_act=atomic_basis["tensor_act"],
                 )
-                for _ in range(num_layers)
+                for layer in range(num_layers - 1)
             ]
         )
+        self.product = CgtpACE(
+            layer=num_layers - 1,
+            num_layers=num_layers,
+            num_elements=len(atomic_numbers),
+            Lmax=Lmax,
+            lmax=lmax,
+            num_channel=num_channel,
+            num_expert=None,
+            num_channel_per_expert=None,
+            target_irreps=target_irreps,
+            irreps_in=irreps,
+            correlation=product_basis["correlation"],
+            l1l2=product_basis["l1l2"],
+            bias=False,
+            nonlinear=None,
+            parity=parity,
+            agnostic=product_basis["agnostic"],
+        )
+        self.product_skip = e3nnLinear(irreps, self.product.irreps_out, bias=False)
+        self.irreps_out = self.product.irreps_out
+        self.irreps_outs = [irreps] * (num_layers - 1) + [self.irreps_out]
 
     def set_algorithm(self, algorithm):
-        """Change the expansion algorithm in every interaction."""
+        """Change the evaluation order of the edge expansions."""
         for interaction in self.interactions:
             interaction.set_algorithm(algorithm)
 
@@ -314,22 +414,25 @@ class TECERepresentation(torch.nn.Module):
             self.atomic_numbers,
             node_type=node_type,
         )
-        wigner, wigner_inv = self.wigner(graph.edge_vector)
+        wigner, wigner_inv = (
+            self.wigner(graph.edge_vector) if self.wigner is not None else (None, None)
+        )
         angular = (
             self.angular_basis(graph.edge_vector)
             if self.angular_basis is not None
             else None
         )
-        features = self.embedding_linear(
-            self.node_embedding(
-                data["node_attrs"],
-                radial,
-                data["edge_index"],
-                angular,
-                cutoff,
-                wigner,
-                wigner_inv,
-            )
+        features = self.node_embedding(
+            data["node_attrs"],
+            radial,
+            data["edge_index"],
+            angular,
+            cutoff,
+            wigner,
+            wigner_inv,
+        )
+        features = self.embedding_down(
+            self.embedding_gate(self.embedding_linear(features))
         )
         descriptors = []
         for interaction in self.interactions:
@@ -343,6 +446,14 @@ class TECERepresentation(torch.nn.Module):
                 cutoff,
             )
             descriptors.append(features)
+        features = self.product(
+            features,
+            data["node_attrs"],
+            self.product_skip(features),
+            data["batch"],
+            node_type=node_type,
+        )
+        descriptors.append(features)
         return {
             "descriptors": descriptors,
             "uie_feats": None,
@@ -353,10 +464,12 @@ class TECERepresentation(torch.nn.Module):
 
 
 class TECE(e3nnTACE):
-    """TACE readouts with residual O(2) edge cluster expansions.
+    """Tensor embedding, N-1 edge cluster expansions and one final node ACE.
 
     Parameters follow ``e3nnTACE``. ``atomic_basis`` selects ``correlation``,
-    ``algorithm`` and ``use_asymmetric_contraction``. There is no node product.
+    ``algorithm``, ``use_asymmetric_contraction`` and ``element_dependent``.
+    ``node_embedding.type`` selects one of the four tensor embeddings.
+    ``product_basis`` configures the final ACE.
     """
 
     representation_cls = TECERepresentation
@@ -364,7 +477,12 @@ class TECE(e3nnTACE):
     def __init__(self, **kwargs):
         atomic_basis = dict(kwargs.get("atomic_basis", {}))
         atomic_basis.setdefault("use_asymmetric_contraction", False)
+        atomic_basis.setdefault("element_dependent", False)
         kwargs["atomic_basis"] = atomic_basis
+        kwargs.setdefault("node_embedding", {"type": "wigner_tensor"})
+        product_basis = dict(kwargs.get("product_basis", {}))
+        product_basis["type"] = "cgtp"
+        kwargs["product_basis"] = product_basis
         if set(kwargs.get("target_property", ("energy",))) - {
             "energy",
             "forces",

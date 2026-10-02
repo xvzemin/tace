@@ -146,7 +146,7 @@ def contraction_program(program, module, inputs, weight):
 
 
 class EceO2TensorProductConv(torch.nn.Module):
-    """Fuse a radial Linear, channel maps, edge expansion and graph reduction.
+    """Fuse channel mixing, edge expansion, radial weighting and graph reduction.
 
     Parameters
     ----------
@@ -158,6 +158,8 @@ class EceO2TensorProductConv(torch.nn.Module):
         Bias-free channel maps before and after the expansion.
     contraction : o2.SymmetricContraction or o2.AsymmetricContraction
         Many-body basis with ``path_mode="sum"``.
+    element_dependent : bool, optional
+        Multiply radial path weights by source and target element coefficients.
 
     Notes
     -----
@@ -167,7 +169,15 @@ class EceO2TensorProductConv(torch.nn.Module):
     """
 
     def __init__(
-        self, frame_in, radial_linear, linear_up, contraction, linear_down, frame_out
+        self,
+        frame_in,
+        linear_up,
+        contraction,
+        radial_linear,
+        linear_down,
+        frame_out,
+        *,
+        element_dependent=False,
     ):
         super().__init__()
         if radial_linear.path_mode != "expand" or contraction.path_mode != "sum":
@@ -183,18 +193,20 @@ class EceO2TensorProductConv(torch.nn.Module):
         object.__setattr__(self, "linear_up", linear_up)
         object.__setattr__(self, "linear_down", linear_down)
         object.__setattr__(self, "contraction", contraction)
+        self.element_dependent = element_dependent
+        self.weight_numel = radial_linear.weight_numel
         self.num_inputs = (
             1
             if isinstance(contraction, SymmetricContraction)
             else contraction.correlation
         )
         if (
-            radial_linear.irreps_in
+            linear_up.irreps_in
             != Irreps((ir, 2 * mul) for ir, mul in frame_in.irreps_out)
-            or linear_up.irreps_in != radial_linear.irreps_out
             or linear_up.irreps_out
             != Irreps((ir, mul * self.num_inputs) for ir, mul in contraction.irreps_in)
-            or linear_down.irreps_in != contraction.irreps_out
+            or radial_linear.irreps_in != contraction.irreps_out
+            or linear_down.irreps_in != radial_linear.irreps_out
             or linear_down.irreps_out != frame_out.irreps_out
         ):
             raise ValueError("The representations of successive ECE stages must match.")
@@ -219,8 +231,8 @@ class EceO2TensorProductConv(torch.nn.Module):
         specs = (
             ("source", frame_in.irreps_in.dim),
             ("edge", radial_width),
-            ("shared", radial_width * radial.weight_numel),
-            ("shared", radial.weight_numel),
+            ("shared", radial_width * self.weight_numel),
+            ("shared", self.weight_numel),
             ("shared", self.linear_up.weight_numel),
             ("shared", self.linear_down.weight_numel),
             ("source", contraction.weight_numel),
@@ -232,6 +244,11 @@ class EceO2TensorProductConv(torch.nn.Module):
         values = [
             program.input(i, kind, width) for i, (kind, width) in enumerate(specs)
         ]
+        if self.element_dependent:
+            values.extend(
+                program.input(i, kind, self.weight_numel)
+                for i, kind in ((11, "source"), (12, "target"))
+            )
         target = program.input(0, "target", frame_in.irreps_in.dim)
         local = [
             rotate(
@@ -257,11 +274,34 @@ class EceO2TensorProductConv(torch.nn.Module):
                 for c in range(mul)
             ),
         )
+        up = linear_program(program, self.linear_up, paired, values[4])
+        channels = contraction.num_channels
+        copies = [
+            program.gather(
+                up,
+                (
+                    s.start + (a * self.num_inputs + copy) * channels + c
+                    for (ir, _), s in zip(
+                        self.linear_up.irreps_out, self.linear_up.irreps_out.slices()
+                    )
+                    for a in range(ir.dim)
+                    for c in range(channels)
+                ),
+            )
+            for copy in range(self.num_inputs)
+        ]
+        inputs = copies * contraction.correlation if self.num_inputs == 1 else copies
+        coefficients = program.binary("mul", values[6], values[7])
+        features = contraction_program(program, contraction, inputs, coefficients)
         weights = program.binary(
             "add",
-            program.matmul(values[1], values[2], 1, radial_width, radial.weight_numel),
+            program.matmul(values[1], values[2], 1, radial_width, self.weight_numel),
             values[3],
         )
+        if self.element_dependent:
+            weights = program.binary(
+                "mul", weights, program.binary("mul", values[11], values[12])
+            )
         radial_outputs = []
         for j, (ir, _) in enumerate(radial.irreps_out):
             parts = []
@@ -271,7 +311,7 @@ class EceO2TensorProductConv(torch.nn.Module):
                 ni, no, channels = ins.path_shape
                 begin = radial._input_slices[ins.i_in].start
                 x = program.gather(
-                    paired,
+                    features,
                     (
                         begin + (a * ni + u) * channels + c
                         for a in range(ir.dim)
@@ -311,28 +351,9 @@ class EceO2TensorProductConv(torch.nn.Module):
                     ),
                 )
             )
-        up = linear_program(
-            program, self.linear_up, program.concatenate(radial_outputs), values[4]
+        down = linear_program(
+            program, self.linear_down, program.concatenate(radial_outputs), values[5]
         )
-        channels = contraction.num_channels
-        copies = [
-            program.gather(
-                up,
-                (
-                    s.start + (a * self.num_inputs + copy) * channels + c
-                    for (ir, _), s in zip(
-                        self.linear_up.irreps_out, self.linear_up.irreps_out.slices()
-                    )
-                    for a in range(ir.dim)
-                    for c in range(channels)
-                ),
-            )
-            for copy in range(self.num_inputs)
-        ]
-        inputs = copies * contraction.correlation if self.num_inputs == 1 else copies
-        coefficients = program.binary("mul", values[6], values[7])
-        features = contraction_program(program, contraction, inputs, coefficients)
-        down = linear_program(program, self.linear_down, features, values[5])
         message = rotate(
             program,
             frame_description(frame_out),
@@ -361,6 +382,8 @@ class EceO2TensorProductConv(torch.nn.Module):
         wigner_inv,
         cutoff,
         *,
+        radial_source_weight=None,
+        radial_target_weight=None,
         backend="auto",
     ):
         """Evaluate a convolution with shared native and CUDA parameter layouts.
@@ -377,7 +400,7 @@ class EceO2TensorProductConv(torch.nn.Module):
         weight_up, weight_down : torch.Tensor
             Flattened weights of the two channel maps.
         source_weight, target_weight : torch.Tensor
-            Node coefficient arrays of shape
+            Node ECE coefficients of shape
             ``(num_nodes, contraction.weight_numel)``.
         edge_index : torch.Tensor
             Source and target indices, of shape ``(2, num_edges)``.
@@ -385,6 +408,9 @@ class EceO2TensorProductConv(torch.nn.Module):
             Dense forward and inverse matrices returned by ``o2.WignerD``.
         cutoff : torch.Tensor
             Message envelope of shape ``(num_edges, 1)``.
+        radial_source_weight, radial_target_weight : torch.Tensor, optional
+            Node radial coefficients of shape ``(num_nodes, weight_numel)``.
+            Required when ``element_dependent=True``.
         backend : {"auto", "cuda", "torch"}, optional
             ``"auto"`` selects CUDA for CUDA tensors and PyTorch otherwise.
 
@@ -399,6 +425,11 @@ class EceO2TensorProductConv(torch.nn.Module):
             backend = "cuda" if node_features.is_cuda else "torch"
         if backend == "cuda" and not node_features.is_cuda:
             raise ValueError("The CUDA backend requires CUDA tensors.")
+        if self.element_dependent:
+            if radial_source_weight is None or radial_target_weight is None:
+                raise ValueError("Element-dependent weights require both endpoints.")
+        elif radial_source_weight is not None or radial_target_weight is not None:
+            raise ValueError("Set element_dependent=True to use element coefficients.")
         if torch.compiler.is_compiling():
             torch._dynamo.mark_static(radial_features, -1)
             torch._dynamo.mark_static(wigner, 1)
@@ -424,6 +455,8 @@ class EceO2TensorProductConv(torch.nn.Module):
             wigner,
             wigner_inv,
         ]
+        if self.element_dependent:
+            inputs.extend((radial_source_weight, radial_target_weight))
         function = evaluate if backend == "cuda" else evaluate_torch
         return function(
             metadata, inputs, edge_index[0], edge_index[1], node_features.shape[0]

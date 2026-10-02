@@ -315,7 +315,7 @@ model:
       }
 
     node_embedding:
-      type: linear    # [linear, linear_spin, nonlinear_spin, tensor, o2_tensor], linear is safer
+      type: linear # [linear, linear_spin, nonlinear_spin, spherical_tensor, spherical_tensor_element2, wigner_tensor, wigner_tensor_element2]
 
     edge_embedding:
       type: identity # identity  # [identity, linear, nonlinear, element2], identity is safer

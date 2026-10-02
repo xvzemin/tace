@@ -32,8 +32,8 @@ from .magnetic import MagneticBasis
 from .node import (
     NODE_EMBEDDING,
     NODE_UPDATE,
-    O2TensorNodeEmbedding,
-    TensorNodeEmbedding,
+    SphericalTensorNodeEmbedding,
+    WignerTensorNodeEmbedding,
 )
 from .prod import PRODUCT, BilinearMoEACE, CgtpACE
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
@@ -110,8 +110,9 @@ class Representation(torch.nn.Module):
             issubclass(interaction_cls, O2CgtpInteraction)
             for interaction_cls in interaction_classes
         )
-        self.use_o3_angular_basis = issubclass(
-            node_embedding_cls, TensorNodeEmbedding
+        self.use_o3_angular_basis = (
+            issubclass(node_embedding_cls, SphericalTensorNodeEmbedding)
+            and not node_embedding_cls.use_wigner
         ) or any(
             not issubclass(
                 interaction_cls, (O2CgtpInteraction, O3CartesianIctpIctcInteraction)
@@ -124,18 +125,18 @@ class Representation(torch.nn.Module):
         )
         self.use_so2 = uses_so2_interaction
         self.use_o2 = (
-            issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+            issubclass(node_embedding_cls, WignerTensorNodeEmbedding)
             or uses_o2_interaction
             or uses_o2_cgtp_interaction
         )
         self.use_local_frame = (
             uses_so2_interaction
             or uses_o2_interaction
-            or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+            or issubclass(node_embedding_cls, WignerTensorNodeEmbedding)
         )
         self._can_pack_wigner = not (
             uses_so2_interaction
-            or issubclass(node_embedding_cls, O2TensorNodeEmbedding)
+            or issubclass(node_embedding_cls, WignerTensorNodeEmbedding)
         )
         self._can_skip_wigner = self._can_pack_wigner and not any(
             issubclass(cls, UvO2Interaction) for cls in interaction_classes

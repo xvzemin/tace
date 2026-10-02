@@ -6,17 +6,19 @@ model:
   config:
     _target_: tace.models.TECE
     node_embedding:
-      type: tensor
+      type: wigner_tensor
     radial_basis:
       hidden: [64, 64, 64, 1024]
       apply_cutoff: false
     atomic_basis:
       type: ece_o2
-      nonlinear: null
+      nonlinear: gate
       edge_nonlinear: null
       correlation: 3
       algorithm: recursive # [recursive, dense]; identical parameter layout
       use_asymmetric_contraction: false
+      element_dependent: false # radial weights only; ECE always uses element tables
       use_radial_rotary_attention: false
     product_basis:
-      type: null
+      type: cgtp
+      correlation: 3

@@ -10,11 +10,13 @@ from typing import Union
 import torch
 from e3nn import o3
 
+from eqx import o2
+
+from ...utils.torch_scatter import scatter_sum
+from ..layout import LayoutTransform
 from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import MLP, get_scaled_activation
 from .base import NodeEmbedding, NodeUpdate
-from .fused import O3ScatterTensorProduct
-from .o2 import UvO2ScatterTensorProduct
 
 
 class LinearNodeEmbedding(NodeEmbedding):
@@ -121,154 +123,124 @@ class NonLinearSpinNodeEmbedding(LinearSpinNodeEmbedding):
         )
 
 
-class TensorNodeEmbedding(NodeEmbedding):
+class SphericalTensorNodeEmbedding(NodeEmbedding):
+    """Aggregate element scalars weighted by radial functions and harmonics.
+
+    Radial weights depend only on distance. The output contains natural-parity
+    degrees up to ``min(Lmax, lmax)``, with ``num_channel`` copies per degree.
+
+    Parameters
+    ----------
+    num_elements : int
+        Number of chemical elements.
+    num_radial_basis : int
+        Input radial basis width.
+    num_channel : int
+        Channel multiplicity of each output irrep.
+    Lmax, lmax : int
+        Node and angular degree cutoffs.
+    avg_num_neighbors : float
+        Mean neighbor count used to normalize the sum.
+    bias : bool, optional
+        Include biases in scalar embedding and radial projections.
+    """
+
+    use_wigner = False
+    element_dependent = False
+
     def _setup(self) -> None:
-
-        self.node_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
-        )
-        self.source_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
-        )
-        self.target_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
-        )
-        torch.nn.init.uniform_(self.source_embedding.weight, a=-0.001, b=0.001)
-        torch.nn.init.uniform_(self.target_embedding.weight, a=-0.001, b=0.001)
-
-        self.rejector = O3ScatterTensorProduct(
-            [(self.num_channel, (0, 1))],
-            [(1, (l, (-1) ** l)) for l in range(self.lmax + 1)],
-            [(1, (l, (-1) ** l)) for l in range(self.Lmax + 1)],
-        )
-
-        self.irreps_out = self.rejector.irreps_out
-
-        self.edge_info = MLP(
-            channels=[
-                self.num_radial_basis + self.num_channel * 2,
-                self.num_channel,
-                self.num_channel,
-                self.rejector.weight_numel,
-            ],
-            bias=True,
-            layer_norm=True,
-        )
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        wigner,
-        wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-    ) -> torch.Tensor:
-
-        base_node_feats = self.node_embedding(node_attrs)
-        source_feats = self.source_embedding(node_attrs)[edge_index[0]]
-        target_feats = self.target_embedding(node_attrs)[edge_index[1]]
-        conv_weights = self.edge_info(
-            torch.cat([edge_feats, source_feats, target_feats], dim=-1)
-        )
-        if cutoff is not None:
-            conv_weights = conv_weights * cutoff
-
-        node_feats = (
-            self.rejector(
-                torch.ones_like(base_node_feats),
-                edge_attrs,
-                conv_weights,
-                edge_index,
-            )
-            / self.avg_num_neighbors
-        )
-
-        node_feats[:, : self.num_channel] = (
-            node_feats.narrow(1, 0, self.num_channel) + base_node_feats
-        )
-
-        return node_feats
-
-
-class O2TensorNodeEmbedding(NodeEmbedding):
-    def _setup(self) -> None:
-        self.node_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
-        )
-        self.source_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
-        )
-        self.target_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
-        )
-        torch.nn.init.uniform_(self.source_embedding.weight, a=-0.001, b=0.001)
-        torch.nn.init.uniform_(self.target_embedding.weight, a=-0.001, b=0.001)
         self.irreps_out = o3.Irreps(
-            [(self.num_channel, (l, (-1) ** l)) for l in range(self.Lmax + 1)]
+            [
+                (self.num_channel, (ell, (-1) ** ell))
+                for ell in range(min(self.Lmax, self.lmax) + 1)
+            ]
         )
-        self.rejector = UvO2ScatterTensorProduct(
-            self.node_embedding.irreps_out,
-            self.irreps_out,
-            num_channel=self.num_channel,
-            mmax=0,
-            even_scalar_act=torch.nn.SiLU(),
-            odd_scalar_act=torch.nn.Tanh(),
-            tensor_act=torch.nn.Sigmoid(),
-            num_head=1,
-            num_radial_basis=self.num_radial_basis,
-            use_radial_rotary_attention=False,
+        self.node_embedding = e3nnLinear(
+            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
         )
         self.edge_info = MLP(
-            channels=[
-                self.num_radial_basis + self.num_channel * 2,
+            [
+                self.num_radial_basis
+                + (2 * self.num_channel if self.element_dependent else 0),
                 self.num_channel,
                 self.num_channel,
-                self.rejector.weight_numel,
+                len(self.irreps_out) * self.num_channel,
             ],
-            bias=True,
-            layer_norm=True,
+            bias=self.bias,
         )
+        self.normalization = math.sqrt(self.avg_num_neighbors)
+        self.reshape = LayoutTransform(
+            self.irreps_out,
+            layout_in="flatten_ir_mul",
+            layout_out="flatten_mul_ir",
+        )
+        if self.use_wigner:
+            self.frame = o2.LocalFrame(self.irreps_out, mmax=0, reverse=True)
 
     def forward(
         self,
-        node_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
+        node_attrs,
+        edge_feats,
+        edge_index,
+        edge_attrs,
+        cutoff,
         wigner,
-        wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-    ) -> torch.Tensor:
-
-        base_node_feats = self.node_embedding(node_attrs)
-        source_feats = self.source_embedding(node_attrs)[edge_index[0]]
-        target_feats = self.target_embedding(node_attrs)[edge_index[1]]
-        conv_weights = self.edge_info(
-            torch.cat([edge_feats, source_feats, target_feats], dim=-1)
-        )
-        node_feats = (
-            self.rejector(
-                torch.ones_like(base_node_feats),
-                conv_weights,
-                edge_index,
-                wigner,
-                wigner_inv,
-                edge_cutoff=(
-                    cutoff
-                    if cutoff is not None
-                    else edge_feats.new_ones(edge_feats.size(0), 1)
-                ),
+        wigner_inv,
+        magnetic_radial_basis=None,
+    ):
+        """Return aggregated node features in flattened ``mul_ir`` layout."""
+        source, target = edge_index
+        scalars = self.node_embedding(node_attrs)
+        if self.element_dependent:
+            edge_feats = torch.cat(
+                (edge_feats, scalars[source], scalars[target]), dim=-1
             )
-            / self.avg_num_neighbors
+        weights = self.edge_info(edge_feats).view(
+            source.shape[0], len(self.irreps_out), self.num_channel
         )
-        node_feats[:, : self.num_channel] = (
-            node_feats.narrow(1, 0, self.num_channel) + base_node_feats
+        features = scalars[source, None, :] * weights
+        if self.use_wigner:
+            message = self.frame.to_global(features.flatten(1), wigner_inv)
+        else:
+            message = torch.cat(
+                [
+                    (
+                        edge_attrs[:, ir.l**2 : (ir.l + 1) ** 2, None]
+                        * features[:, i, None, :]
+                    ).flatten(1)
+                    for i, (_, ir) in enumerate(self.irreps_out)
+                ],
+                dim=-1,
+            )
+        if cutoff is not None:
+            message = message * cutoff
+        node_feats = (
+            scatter_sum(message, target, dim=0, dim_size=node_attrs.shape[0])
+            / self.normalization
         )
-        return node_feats
+        return self.reshape(node_feats)
+
+
+class Element2SphericalTensorNodeEmbedding(SphericalTensorNodeEmbedding):
+    """Tensor embedding with radial weights conditioned on both elements."""
+
+    element_dependent = True
+
+
+class WignerTensorNodeEmbedding(SphericalTensorNodeEmbedding):
+    """Lift local scalars with inverse Wigner matrices and aggregate at nodes.
+
+    The scalar lift includes component spherical-harmonic normalization.
+    Radial weights depend only on distance.
+    """
+
+    use_wigner = True
+
+
+class Element2WignerTensorNodeEmbedding(WignerTensorNodeEmbedding):
+    """Wigner tensor embedding with weights conditioned on both elements."""
+
+    element_dependent = True
 
 
 class IdentityNodeUpdate(NodeUpdate):
@@ -344,8 +316,10 @@ NODE_EMBEDDING = {
     "linear": LinearNodeEmbedding,
     "linear_spin": LinearSpinNodeEmbedding,
     "nonlinear_spin": NonLinearSpinNodeEmbedding,
-    "tensor": TensorNodeEmbedding,
-    "o2_tensor": O2TensorNodeEmbedding,
+    "spherical_tensor": SphericalTensorNodeEmbedding,
+    "spherical_tensor_element2": Element2SphericalTensorNodeEmbedding,
+    "wigner_tensor": WignerTensorNodeEmbedding,
+    "wigner_tensor_element2": Element2WignerTensorNodeEmbedding,
 }
 
 NODE_UPDATE = {

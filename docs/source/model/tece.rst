@@ -3,24 +3,52 @@ TECE
 
 TECE stores node features and computes edge cluster expansions within each
 interaction. It reuses TACE's energy readouts, scales and shifts, and derivatives
-for forces, stress and virials. There is no node product module.
+for forces, stress and virials. With ``num_layers=N``, it applies ``N-1`` edge
+cluster expansions and one final node ACE, giving ``N`` many-body expansions.
 
-Each interaction applies:
+Only tensor node embeddings are accepted: ``spherical_tensor``,
+``spherical_tensor_element2``, ``wigner_tensor``, and ``wigner_tensor_element2``.
+The Wigner variants lift local ``0e`` features into component-normalized
+spherical harmonics using the inverse rotation, without evaluating harmonics
+separately. Unnatural-parity initialization is zero when ``parity: true``.
+
+The computation is:
 
 .. code-block:: text
 
-   source / target node features
+   tensor node embedding -> neighbor sum -> node Gate
+
+   repeat N-1 times:
+       source / target node features
        -> local frame and channel concatenation
-       -> radial UuLinear (retain all paths)
        -> Linear up (equal channel counts)
        -> symmetric edge cluster expansion
+       -> radial UuLinear (retain all radial paths)
        -> Linear down -> global frame -> neighbor sum
-       -> residual addition
+       -> neighbor normalization -> Gate -> node Linear
+       -> single residual addition
+
+   final node ACE -> projected residual addition -> readout
+
+``num_layers=1`` uses tensor embedding and node ACE without an ECE block.
+``atomic_basis.correlation`` controls ECE; ``product_basis.correlation``
+controls the final ACE. Intermediate ECE outputs may also contribute to
+readout through ``readout_emlp.use_alllayer``.
 
 Two element tables of shape ``(num_elements, weight_numel)`` supply the
 expansion coefficients: ``source_weight[Z_source] * target_weight[Z_target]``.
-Only the radial weights are produced by an MLP. The cutoff multiplies the
-complete edge message after the expansion.
+These coefficients do not depend on distance and do not pass through an MLP.
+Only the UuLinear weights are produced by a radial MLP. By default they
+depend on distance alone. ``atomic_basis.element_dependent: true`` adds
+two element tables that multiplicatively modulate these radial weights.
+The cutoff multiplies the complete edge message after the expansion.
+
+Gate acts after every neighbor sum, including the initial embedding.
+It follows TACE's ``atomic_basis.nonlinear`` (a single value or one per layer),
+``gate_m0``, ``scalar_act`` and ``tensor_act`` settings. ``nonlinear: null``
+disables it. Each ECE block adds its input once, after the gated node update.
+The final ACE uses one projected skip connection. There is no skip inside
+the tensor embedding or the edge expansion.
 
 ``atomic_basis.algorithm`` chooses the evaluation order without changing the
 basis, parameters or output:

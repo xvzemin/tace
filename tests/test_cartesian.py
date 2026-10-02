@@ -14,7 +14,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.mark.parametrize(
-    "parity,node_embedding", [(False, "linear"), (True, "linear"), (True, "tensor")]
+    "parity,node_embedding",
+    [(False, "linear"), (True, "linear"), (True, "spherical_tensor")],
 )
 @pytest.mark.parametrize("fused", [False, True])
 def test_cartesian_conversion(
@@ -49,7 +50,7 @@ def test_cartesian_conversion(
         torch.testing.assert_close(p, parameters[name], rtol=0, atol=0)
     representation = module.readout_fn.representation
     assert representation.co3_angular_basis is not None
-    assert representation.use_o3_angular_basis == (node_embedding == "tensor")
+    assert representation.use_o3_angular_basis == (node_embedding == "spherical_tensor")
     for original, converted in zip(
         reference.readout_fn.representation.products, representation.products
     ):

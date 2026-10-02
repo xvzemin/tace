@@ -4170,34 +4170,40 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
 @pytest.mark.parametrize("asymmetric", [False, True])
 @pytest.mark.parametrize("edges", [0, 5])
 @pytest.mark.parametrize("radial_channels", [3, 1024])
+@pytest.mark.parametrize("element_dependent", [False, True])
 def test_ece_convolution(
-    algorithm, asymmetric, edges, radial_channels, double_precision
+    algorithm, asymmetric, edges, radial_channels, element_dependent, double_precision
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e", 1).cuda()
     local = frame.irreps_out
-    radial = o2.UuLinear(
-        o2.Irreps((ir, mul * 2) for ir, mul in local), local, 2, path_mode="expand"
-    )
     hidden = o2.Irreps((ir, 2) for ir, _ in local)
+    radial = o2.UuLinear(hidden, local, 2, path_mode="expand")
     cls = o2.AsymmetricContraction if asymmetric else o2.SymmetricContraction
     contraction = cls(hidden, hidden, 2, algorithm=algorithm).cuda()
     copies = 2 if asymmetric else 1
     up = o2.Linear(
-        radial.irreps_out, o2.Irreps((ir, mul * copies) for ir, mul in hidden)
+        o2.Irreps((ir, mul * 2) for ir, mul in local),
+        o2.Irreps((ir, mul * copies) for ir, mul in hidden),
     ).cuda()
-    down = o2.Linear(hidden, local).cuda()
+    down = o2.Linear(radial.irreps_out, local).cuda()
     module = eqx_conv.EceO2TensorProductConv(
-        frame, radial, up, contraction, down, frame
+        frame,
+        up,
+        contraction,
+        radial,
+        down,
+        frame,
+        element_dependent=element_dependent,
     )
     values = [
         torch.randn(*shape, device="cuda", requires_grad=True)
         for shape in (
             (3, frame.irreps_in.dim),
             (edges, radial_channels),
-            (radial_channels, radial.weight_numel),
-            (radial.weight_numel,),
+            (radial_channels, module.weight_numel),
+            (module.weight_numel,),
             (up.weight_numel,),
             (down.weight_numel,),
             (3, contraction.weight_numel),
@@ -4206,19 +4212,37 @@ def test_ece_convolution(
             (edges, 1),
         )
     ]
+    if element_dependent:
+        values.extend(
+            torch.randn(3, module.weight_numel, device="cuda", requires_grad=True)
+            for _ in range(2)
+        )
     with torch.no_grad():
         values[2].div_(radial_channels**0.5)
-    wigner, inverse = o2.WignerD(1, 1).cuda()(values[-2])
+    wigner, inverse = o2.WignerD(1, 1).cuda()(values[8])
     index = torch.randint(3, (2, edges), device="cuda")
+    element_weights = (
+        dict(radial_source_weight=values[10], radial_target_weight=values[11])
+        if element_dependent
+        else {}
+    )
     outputs = [
-        module(*values[:8], index, wigner, inverse, values[-1], backend=backend)
+        module(
+            *values[:8],
+            index,
+            wigner,
+            inverse,
+            values[9],
+            **element_weights,
+            backend=backend,
+        )
         for backend in ("cuda", "torch")
     ]
     if not asymmetric and edges:
         module.programs.clear()
         compiled = torch.compile(module, backend="eager", fullgraph=True)
         torch.testing.assert_close(
-            compiled(*values[:8], index, wigner, inverse, values[-1]),
+            compiled(*values[:8], index, wigner, inverse, values[9], **element_weights),
             outputs[0],
             atol=2e-9,
             rtol=2e-9,

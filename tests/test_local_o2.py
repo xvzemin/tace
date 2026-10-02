@@ -22,7 +22,6 @@ from tace.models._e3nn.node import (
     NODE_UPDATE,
     LinearSpinNodeEmbedding,
     NonLinearSpinNodeEmbedding,
-    O2TensorNodeEmbedding,
 )
 from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
@@ -371,8 +370,18 @@ def test_spin_node_embedding(name, embedding_type):
     torch.testing.assert_close(output, expected)
 
 
-def test_o2_tensor_node_embedding_is_equivariant():
-    embedding = O2TensorNodeEmbedding(
+@pytest.mark.parametrize(
+    "name",
+    [
+        "spherical_tensor",
+        "spherical_tensor_element2",
+        "wigner_tensor",
+        "wigner_tensor_element2",
+    ],
+)
+@pytest.mark.parametrize("determinant", [-1, 1])
+def test_tensor_node_embedding_is_equivariant(name, determinant, double_precision):
+    embedding = NODE_EMBEDDING[name](
         num_elements=2,
         num_radial_basis=4,
         num_mag_radial_basis=3,
@@ -400,32 +409,37 @@ def test_o2_tensor_node_embedding_is_equivariant():
         node_attrs,
         edge_feats,
         edge_index,
-        torch.empty(4, 0, dtype=DTYPE, device=DEVICE),
+        o3.spherical_harmonics(
+            list(range(3)), edge_vectors, True, normalization="component"
+        ),
         edge_cutoff,
         wigner,
         wigner_inv,
     )
 
-    rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
+    rotation = determinant * o3.rand_matrix(dtype=DTYPE, device=DEVICE)
     rotated_wigner, rotated_wigner_inv = wigner_module(edge_vectors @ rotation.T)
     rotated_output = embedding(
         node_attrs,
         edge_feats,
         edge_index,
-        torch.empty(4, 0, dtype=DTYPE, device=DEVICE),
+        o3.spherical_harmonics(
+            list(range(3)), edge_vectors @ rotation.T, True, normalization="component"
+        ),
         edge_cutoff,
         rotated_wigner,
         rotated_wigner_inv,
     )
 
-    assert NODE_EMBEDDING["o2_tensor"] is O2TensorNodeEmbedding
     assert embedding.irreps_out == o3.Irreps("3x0e+3x1o+3x2e")
     assert torch.isfinite(
         embedding(
             node_attrs,
             edge_feats,
             edge_index,
-            torch.empty(4, 0, dtype=DTYPE, device=DEVICE),
+            o3.spherical_harmonics(
+                list(range(3)), edge_vectors, True, normalization="component"
+            ),
             None,
             wigner,
             wigner_inv,
@@ -437,6 +451,49 @@ def test_o2_tensor_node_embedding_is_equivariant():
         atol=1.0e-6,
         rtol=1.0e-5,
     )
+
+
+@pytest.mark.parametrize("element_dependent", [False, True])
+@pytest.mark.parametrize("mmax", [0, 2])
+@pytest.mark.parametrize("edges", [0, 5])
+def test_tensor_embedding_constructions(
+    element_dependent, mmax, edges, double_precision
+):
+    suffix = "_element2" if element_dependent else ""
+    spherical = NODE_EMBEDDING[f"spherical_tensor{suffix}"](2, 4, 0, 3, 2, 2, 2.0).to(
+        DEVICE
+    )
+    wigner = NODE_EMBEDDING[f"wigner_tensor{suffix}"](2, 4, 0, 3, 2, 2, 2.0).to(DEVICE)
+    wigner.load_state_dict(spherical.state_dict(), strict=True)
+    positions = torch.randn(edges, 3, device=DEVICE, requires_grad=True)
+    radial = torch.randn(edges, 4, device=DEVICE, requires_grad=True)
+    index = torch.randint(3, (2, edges), device=DEVICE)
+    attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], device=DEVICE)
+    rotation, inverse = o2.WignerD(mmax, 2).to(DEVICE)(positions)
+    harmonics = o3.spherical_harmonics(
+        list(range(3)), positions, True, normalization="component"
+    )
+    actual = wigner(attrs, radial, index, None, None, rotation, inverse)
+    expected = spherical(attrs, radial, index, harmonics, None, None, None)
+    assert spherical.edge_info.mlp[0].in_dim == 4 + 6 * element_dependent
+    for order in range(3):
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+        if order < 2:
+            seed = torch.randn_like(actual)
+            actual, expected = (
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (value * seed).sum(),
+                            (positions, radial),
+                            create_graph=True,
+                        )
+                    ]
+                )
+                for value in (actual, expected)
+            )
+    assert "tensor" not in NODE_EMBEDDING and "o2_tensor" not in NODE_EMBEDDING
 
 
 def test_universal_embedding_is_filtered_by_default_config():
@@ -690,9 +747,9 @@ def test_graph_softmax_matches_groupwise_sums_and_gradients(shape, dim, use_ptr)
 def _scatter_module(use_attention, linear_type="uv"):
     irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e")
     if linear_type == "uu":
-        return UuO2ScatterTensorProduct(
-            irreps, irreps, num_channel=2, mmax=1
-        ).to(DEVICE, DTYPE)
+        return UuO2ScatterTensorProduct(irreps, irreps, num_channel=2, mmax=1).to(
+            DEVICE, DTYPE
+        )
     return UvO2ScatterTensorProduct(
         irreps,
         irreps,
@@ -1312,7 +1369,7 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
     [
         ("o2_cgtp", "linear", 2, 2),
         (["cgtp", "o2_cgtp"], "linear", 2, 2),
-        ("o2_cgtp", "tensor", 2, 2),
+        ("o2_cgtp", "spherical_tensor", 2, 2),
         ("o2_cgtp", "linear", 4, 2),
         ("o2_cgtp", "linear", 1, 3),
     ],
