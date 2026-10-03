@@ -51,6 +51,20 @@ Linear maps and activations
 Tensor products
 ---------------
 
+.. code-block:: python
+
+   import torch
+   from eqx import o2
+
+   tp = o2.TensorProduct(
+       "4x1m", "1x1m", "4x0e + 4x0o + 4x2m",
+       [(0, 0, i, "u1u", True) for i in range(3)],
+       internal_weights=False, shared_weights=False,
+   )
+   x = tp.irreps_in1.randn(8, -1)
+   y = tp.irreps_in2.randn(8, -1)
+   output = tp(x, y, torch.randn(8, tp.weight_numel))
+
 .. autoclass:: eqx.o2.TensorProduct
    :members: forward, weight_view_for_instruction, weight_views
 

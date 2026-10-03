@@ -201,7 +201,7 @@ def gate_program(gate, transverse=False):
         width = gate.irreps_gated[path.i_gated].mul
         scalar = program.slice(gates[path.i_gate], path.gate_start, path.mul)
         if transverse and path.ir_gate.is_odd_scalar() and path.ir_gated.m > 0:
-            from ...co2.spherical import generators
+            from ...o3 import so3_generators
 
             value = program.concatenate(
                 [
@@ -214,7 +214,7 @@ def gate_program(gate, transverse=False):
             vector = program.gather(
                 direction, tuple(a for a in range(3) for _ in range(path.mul))
             )
-            generator = generators(path.ir_gated.m) / path.ir_gated.m
+            generator = so3_generators(path.ir_gated.m) / path.ir_gated.m
             paths = tuple(
                 ((i, a, j), float(generator[a, j, i]))
                 for a, j, i in generator.nonzero().tolist()

@@ -5,12 +5,8 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import (
-    Convolution,
-    RadialFeatures,
-    convert_modules,
-    default_dtype,
-)
+from eqx.models.convolution import Convolution, RadialFeatures
+from eqx.utils import convert_modules, default_dtype
 
 
 class IrrepsConvolution(torch.nn.Module):
@@ -73,7 +69,7 @@ def convert_sevennet_to_eqx(
     Parameters
     ----------
     model : torch.nn.Module
-        Instantiated, uncompiled SevenNet model. Modalities are retained.
+        Instantiated, uncompiled serial SevenNet model. Modalities are retained.
     implementation : {"o3", "o2"}, optional
         Direct or aligned tensor product. Defaults to "o3".
     inplace : bool, optional
@@ -86,6 +82,11 @@ def convert_sevennet_to_eqx(
     torch.nn.Module
         Model for training or SevenNetCalculator with file_type="model_instance".
         Load checkpoints before conversion and construct the optimizer afterwards.
+
+    Notes
+    -----
+    Select the fidelity through the calculator's ``modal`` argument. SevenNet's
+    embedding produces float32 features even if the model is cast to float64.
     """
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(

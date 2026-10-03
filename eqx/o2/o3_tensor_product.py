@@ -54,20 +54,11 @@ class O3TensorProduct(torch.nn.Module):
 
     Notes
     -----
-    The second input is implicit: its direction defines the supplied frame.
-    At the positive y-axis, only its order-zero component survives. Its
-    constant value is folded into the CG coefficients during construction.
-    Only nonzero couplings with ``m_in = +/- m_out`` are stored. The forward
-    pass uses indexed products and sparse summation, without evaluating or
-    rotating spherical harmonics or contracting a dense CG tensor.
-    The local frames use ``basis_change=False`` to retain the spherical
-    harmonic basis of the CG coefficients, including unnatural-parity entries.
-    Rotation degrees follow the feature and output irreps. Shared Wigner
-    matrices may cover additional degrees, but must retain all orders needed
-    by those representations.
-
-    Alternatively, ``forward_scatter(..., vectors=...)`` evaluates transverse
-    couplings directly on spherical features without constructing an alignment.
+    The second input is implicit in the supplied frame. Its order-zero
+    harmonic amplitude is included in the coupling coefficients. Frames use
+    ``basis_change=False`` and must retain every required angular order.
+    ``forward_scatter(..., vectors=...)`` instead evaluates the coupling
+    without constructing a frame. Both forms preserve the requested paths.
     """
 
     def __init__(

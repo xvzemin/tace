@@ -6,8 +6,9 @@ import torch
 from e3nn import o3
 
 from eqx.kernels import wigner_D
-from eqx.models.convolution import Convolution, RadialFeatures, copy_model
+from eqx.models.convolution import Convolution, RadialFeatures
 from eqx.o2 import WignerD
+from eqx.utils import copy_model, default_dtype
 
 __all__ = ["convert_mace_to_eqx"]
 
@@ -91,10 +92,17 @@ def convert_mace_to_eqx(
     Force training requires ``training=True`` in the model's forward call.
     Converted state dictionaries require an identically converted architecture.
     Use a separate model instance for ASE, which disables parameter gradients.
+
+    Examples
+    --------
+    Given a loaded MACE model:
+
+    >>> model = convert_mace_to_eqx(model.cuda())
+    >>> from mace.calculators import MACECalculator
+    >>> calculator = MACECalculator(models=model, device="cuda")
     """
     from mace.modules.irreps_tools import tp_out_irreps_with_instructions
     from mace.modules.wrapper_ops import get_layout
-    from mace.tools.torch_tools import default_dtype
 
     if implementation not in ("o3", "o2"):
         raise ValueError("implementation must be 'o3' or 'o2'.")

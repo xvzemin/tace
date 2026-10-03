@@ -67,6 +67,11 @@ class TensorProduct(torch.nn.Module):
         Store weights and share them over leading feature dimensions.
     project : bool, optional
         Apply STF projection. False defers it until after linear operations.
+
+    Notes
+    -----
+    Inputs must be symmetric traceless. Unprojected outputs must be projected
+    before another tensor product or nonlinearity.
     """
 
     def __init__(

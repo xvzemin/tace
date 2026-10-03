@@ -7,13 +7,13 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import copy_model
 from eqx.models.equflash import convert_equflash_to_eqx
 from eqx.models.mace import convert_mace_to_eqx
 from eqx.models.nequip import convert_nequip_to_eqx
 from eqx.models.prophet import convert_prophet_to_eqx
 from eqx.models.sevennet import convert_sevennet_to_eqx
 from eqx.models.tace.tece_oam_rra import BilinearACE
+from eqx.utils import copy_model
 
 
 @pytest.fixture

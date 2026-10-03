@@ -5,12 +5,8 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import (
-    Convolution,
-    RadialFeatures,
-    convert_modules,
-    default_dtype,
-)
+from eqx.models.convolution import Convolution, RadialFeatures
+from eqx.utils import convert_modules, default_dtype
 
 
 class FullConv(torch.nn.Module):
@@ -142,6 +138,12 @@ def convert_equflash_to_eqx(
     torch.nn.Module
         Model with the original forward interface and differentiable parameters.
         Load original weights before conversion and construct the optimizer after it.
+
+    Notes
+    -----
+    Supports uniform-channel FullConv interactions in EquFlashV2. EfficientConv
+    and distributed ghost-atom exchange are not supported. With UCalculator,
+    use ``inplace=True`` to preserve its EMA parameter references.
     """
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(

@@ -1034,44 +1034,28 @@ def test_cartesian_compact_linear(backend, double_precision):
     [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],
 )
 def test_cg_generator_constraints(degrees, double_precision):
-    from eqx.conv.angular import generators
+    from eqx.o3 import so3_generators
 
     ell1, ell2, ell3 = degrees
     cg = o3.wigner_3j(ell1, ell2, ell3)
-    for g1, g2, g3 in zip(*(generators(ell) for ell in degrees)):
+    for g1, g2, g3 in zip(*(so3_generators(ell) for ell in degrees)):
         left = torch.einsum("dk,abk->abd", g3, cg)
         right = torch.einsum("qbd,qa->abd", cg, g1)
         right += torch.einsum("aqd,qb->abd", cg, g2)
         torch.testing.assert_close(left, right, atol=2e-13, rtol=2e-13)
 
 
-@pytest.mark.parametrize("degree", range(6))
-def test_rotation_generators_match_wigner(degree, double_precision):
-    from eqx.conv.o2_o3.geometry import generators
-
-    angle = torch.zeros((), dtype=torch.float64)
-    half_pi = angle.new_tensor(torch.pi / 2)
-    matrices = (
-        lambda a: o3.wigner_D(degree, angle, a, angle),
-        lambda a: o3.wigner_D(degree, a, angle, angle),
-        lambda a: o3.wigner_D(degree, -half_pi, a, half_pi),
-    )
-    expected = torch.stack(
-        [torch.autograd.functional.jacobian(matrix, angle) for matrix in matrices]
-    )
-    torch.testing.assert_close(generators(degree), expected, atol=1e-13, rtol=1e-13)
-
-
 @pytest.mark.parametrize("degree", [1, 5, 10, 16])
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 def test_generator_polynomials(degree, normalization, double_precision):
-    from eqx.conv.angular import generator_scale, generators
+    from eqx.conv.angular import generator_scale
+    from eqx.o3 import so3_generators
 
     torch.manual_seed(91)
     vectors = torch.randn(19, 3)
     vectors[:3] = torch.eye(3)
     vectors = torch.nn.functional.normalize(vectors, dim=-1)
-    matrix = torch.einsum("ba,aij->bij", vectors, generators(degree))
+    matrix = torch.einsum("ba,aij->bij", vectors, so3_generators(degree))
     matrix /= (degree * (degree + 1)) ** 0.5
     identity = torch.eye(2 * degree + 1)
     for harmonic in (1, 2):
@@ -1089,8 +1073,8 @@ def test_generator_polynomials(degree, normalization, double_precision):
 
 @pytest.mark.parametrize("degree", [2, 8, 16])
 def test_high_degree_angular_derivatives(degree, double_precision):
-    from eqx.conv.angular import generators
     from eqx.conv.o2_o3.geometry import angular_coefficients
+    from eqx.o3 import so3_generators
 
     tp = o2.O3TensorProduct(f"{degree}e", "2e", f"{degree}e", [(0, 0, 0, "uvu", True)])
     conv = eqx_conv.O2O3TensorProductConv(tp, backend="torch")
@@ -1098,7 +1082,7 @@ def test_high_degree_angular_derivatives(degree, double_precision):
     for rank in range(1, 5):
         expected = torch.zeros(*previous.shape, 3)
         for axis, ell in enumerate((degree, degree, *([1] * (rank - 1)))):
-            term = torch.tensordot(previous, -generators(ell), dims=([axis], [1]))
+            term = torch.tensordot(previous, -so3_generators(ell), dims=([axis], [1]))
             expected += term.movedim(-1, axis)
         expected[..., 1] = 0
         actual = angular_coefficients(conv.direction_metadata, rank)[0]

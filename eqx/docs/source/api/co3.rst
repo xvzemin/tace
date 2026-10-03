@@ -5,7 +5,6 @@ Cartesian O(3)
 
 Features use flattened ``mul_ir`` storage with ``3**l`` entries per channel.
 Tensor-product inputs lie in the symmetric traceless subspace.
-See :ref:`equivariantx-cartesian` for normalization and deferred projection.
 
 Representations
 ---------------

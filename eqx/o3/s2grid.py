@@ -6,6 +6,8 @@ import torch
 from e3nn import o3
 from scipy.integrate import lebedev_rule
 
+from ._rotation import so3_generators
+
 __all__ = ["S2Grid"]
 
 
@@ -45,10 +47,8 @@ def _sphere_grid(resolution, quadrature):
 
 def _wigner_basis(lmax, alpha, beta):
     """Yield real Wigner D matrices without changing the default dtype."""
-    from ..co2.spherical import generators
-
     for l in range(lmax + 1):
-        generator = generators(l)
+        generator = so3_generators(l)
         yield torch.matrix_exp(alpha[:, None, None] * generator[1]) @ torch.matrix_exp(
             beta[:, None, None] * generator[0]
         )
@@ -91,6 +91,9 @@ class S2Grid(torch.nn.Module):
     Channels occupy a leading dimension. Weights integrate the normalized
     sphere measure and sum to one. A degree-d pointwise polynomial is
     projected exactly when the quadrature degree is at least ``(d + 1) * lmax``.
+    General nonlinearities require a resolution-convergence check. The grid
+    represents scalar functions with natural spatial parity; it does not
+    encode arbitrary spatial or time-parity assignments.
     """
 
     def __init__(

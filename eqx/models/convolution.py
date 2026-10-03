@@ -1,57 +1,12 @@
 """Tensor-product adapters shared by atomistic models."""
 
 import math
-from contextlib import contextmanager
-from copy import deepcopy
 
 import torch
 
 from eqx.conv import O2O3TensorProductConv, O3TensorProductConv
 from eqx.kernels import wigner_D
 from eqx.o2 import O3TensorProduct, WignerD
-
-
-@contextmanager
-def default_dtype(dtype):
-    """Construct floating-point constants in the model dtype."""
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    try:
-        yield
-    finally:
-        torch.set_default_dtype(previous)
-
-
-def copy_model(model):
-    """Copy a model, sharing stateless TorchScript functions like Python functions."""
-    functions = {
-        id(value): value
-        for module in model.modules()
-        for value in vars(module).values()
-        if isinstance(value, torch.jit.ScriptFunction)
-    }
-    return deepcopy(model, functions)
-
-
-def convert_modules(model, factory, *, inplace=False):
-    """Replace selected modules while preserving shared submodules."""
-    if not inplace:
-        model = copy_model(model)
-    replacements = {}
-
-    def convert(module):
-        if id(module) in replacements:
-            return replacements[id(module)]
-        result = factory(module)
-        replacements[id(module)] = module if result is None else result
-        if result is None:
-            for name, child in module._modules.items():
-                if child is not None:
-                    module._modules[name] = convert(child)
-            return module
-        return result
-
-    return convert(model)
 
 
 class RadialFeatures(torch.nn.Sequential):

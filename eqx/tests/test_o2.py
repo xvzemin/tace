@@ -1,7 +1,5 @@
-import re
 import subprocess
 import sys
-import textwrap
 from copy import deepcopy
 from pathlib import Path
 
@@ -50,30 +48,6 @@ assert 'eqx.kernels.cuda' not in sys.modules
         capture_output=True,
         text=True,
     )
-
-
-@pytest.mark.parametrize(
-    "page",
-    ["spherical_o3", "spherical_o2", "convolutions", "cartesian", "cartesian_o2"],
-)
-def test_documentation_examples(page):
-    path = Path(__file__).resolve().parents[1] / "docs/source" / f"{page}.rst"
-    source = path.read_text()
-    blocks = re.findall(
-        r"^\.\. code-block:: python\n\n((?:(?:   [^\n]*|)\n)+)",
-        source,
-        re.MULTILINE,
-    )
-    assert blocks
-    namespace = {"__name__": "__main__"}
-    dtype = torch.get_default_dtype()
-    try:
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(0)
-            for block in blocks:
-                exec(compile(textwrap.dedent(block), str(path), "exec"), namespace)
-    finally:
-        torch.set_default_dtype(dtype)
 
 
 @pytest.mark.parametrize("device", ["cpu", DEVICE])

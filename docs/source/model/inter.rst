@@ -103,7 +103,7 @@ can use ``example/train/benchmark_configs/3bpa_co3.yaml``.
 
 This interaction uses native PyTorch, not the fused spherical CUDA kernel.
 Cartesian storage grows as ``3**l`` and can cost more memory at high degree.
-See :ref:`equivariantx-cartesian` for the layout and normalization conventions.
+See :ref:`equivariantx-api-co3` for layout and normalization conventions.
 
 .. autoclass:: tace.models._e3nn.inter.O3CartesianIctpIctcInteraction
    :no-members:

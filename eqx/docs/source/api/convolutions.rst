@@ -3,11 +3,23 @@
 Fused convolutions
 ==================
 
-Spherical features use flattened ``ir_mul`` layout. Cartesian features use
-``mul_ir`` or the explicitly selected compact layout. Each convolution
-provides a PyTorch reference with automatic differentiation through
-``backend="torch"``. See :ref:`equivariantx-convolutions` for CUDA methods
-and fusion boundaries.
+Spherical features use flattened ``ir_mul`` storage. Cartesian features use
+``mul_ir`` unless compact storage is selected explicitly.
+
+|eqx-convolutions|
+
+CUDA backends support float32, float64, and higher derivatives, including
+force training. Use ``backend="torch"`` for the differentiable PyTorch
+reference on either device. CPU inputs use PyTorch. Atomic reductions may
+change floating-point summation order.
+
+Warm up the required derivatives and automatic method selection before
+``torch.compile`` or timing. Exported models require EQX operator registration
+and the CUDA runtime. Node-level channel maps and preceding radial MLP layers
+remain outside the fused CGTP operators.
+
+Tensor-product convolutions
+---------------------------
 
 .. autoclass:: eqx.conv.O3TensorProductConv
    :members: forward
@@ -26,3 +38,17 @@ and fusion boundaries.
 
 .. autoclass:: eqx.conv.EceO2TensorProductConv
    :members: forward, set_algorithm
+
+Compact Cartesian output
+------------------------
+
+.. autoclass:: eqx.conv.co3.Linear
+   :members: forward
+
+Graph attention
+---------------
+
+.. autofunction:: eqx.conv.graph_softmax
+
+.. autoclass:: eqx.conv.StreamingGraphAttention
+   :members: forward

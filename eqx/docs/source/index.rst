@@ -1,15 +1,11 @@
-EquivariantX Documentation
-==========================
+EquivariantX
+============
+
+Spherical and Cartesian equivariant operators, frame conversions, and fused
+CUDA convolutions.
 
 .. toctree::
-   :maxdepth: 3
+   :maxdepth: 2
 
-   equivariantx
-   spherical_o3
-   cartesian
-   cartesian_o2
-   spherical_o2
-   ictd
-   convolutions
-   models
+   installation
    api

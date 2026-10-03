@@ -5,8 +5,8 @@ Cartesian O(2)
 
 Features use flattened ``mul_ir`` storage with ``2**m`` entries per channel.
 Positive-order tensors lie in the two-dimensional symmetric traceless
-subspace. See :ref:`equivariantx-cartesian-o2` for basis conversion and
-restriction of three-dimensional tensors.
+subspace. Basis conversions and plane projections are in
+:ref:`equivariantx-api-tools`.
 
 Representations
 ---------------

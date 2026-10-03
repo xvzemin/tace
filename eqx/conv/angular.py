@@ -6,15 +6,15 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-from ..co2.spherical import generators
 from ..kernels.codegen import contraction_source
+from ..o3 import so3_generators
 
 
 @lru_cache(maxsize=128)
 def generator_scale(degree, harmonic, normalization):
     """Return the CG normalization of a degree-one/two generator polynomial."""
     casimir = degree * (degree + 1)
-    matrix = generators(degree) / math.sqrt(casimir)
+    matrix = so3_generators(degree) / math.sqrt(casimir)
     cg = o3.wigner_3j(degree, harmonic, degree, dtype=torch.float64, device="cpu")
     if harmonic == 1:
         scale = float(cg[degree - 1, 1, degree + 1] / matrix[1, degree + 1, degree - 1])
@@ -31,7 +31,7 @@ def generator_scale(degree, harmonic, normalization):
 
 def generator_action(degree, vector, features, cache, lines, normalized=False):
     """Apply a sparse generator to a vector of scalar expressions."""
-    matrix = generators(degree)
+    matrix = so3_generators(degree)
     if normalized:
         matrix = matrix / math.sqrt(degree * (degree + 1))
     result = []
@@ -87,7 +87,7 @@ def generator_source(degree, harmonic, vector, features, cache, lines, normaliza
 
 def generator_adjoint(degree, features, cotangent, cache, lines):
     """Contract the vector adjoint of a sparse generator action."""
-    matrix = generators(degree)
+    matrix = so3_generators(degree)
     return tuple(
         contraction_source(
             tuple(

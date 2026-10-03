@@ -6,16 +6,7 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-
-@lru_cache(maxsize=64)
-def generators(l):
-    """Return real rotation generators in the spherical basis, in CPU float64."""
-    if l == 0:
-        return torch.zeros(3, 1, 1, dtype=torch.float64, device="cpu")
-    value = -math.sqrt(l * (l + 1) * (2 * l + 1)) * o3.wigner_3j(
-        l, 1, l, dtype=torch.float64, device="cpu"
-    ).permute(1, 2, 0)
-    return value * value[1, l - 1, l + 1].sign()
+from ..o3 import so3_generators
 
 
 @lru_cache(maxsize=256)
@@ -36,11 +27,9 @@ def coupling_polynomial(l1, l2, l3, normalization="component"):
 
     Notes
     -----
-    The minimum-degree coupling maps degree l1 to l3. Each transverse order
-    is then weighted by a polynomial of the squared rotation generator.
-    Odd couplings additionally apply that generator once. Coefficients are
-    resolved from exact reference-axis CG entries, not sampled directions.
-    No Cartesian tensors or alignment rotations are constructed.
+    Coefficients are computed from reference-axis CG entries in float64.
+    Odd couplings apply the rotation generator once in addition to the
+    polynomial of its square.
     """
     if not abs(l1 - l3) <= l2 <= l1 + l3:
         raise ValueError("The degrees must satisfy the triangle rule.")
@@ -53,7 +42,7 @@ def coupling_polynomial(l1, l2, l3, normalization="component"):
         :, delta, :
     ].T
     degree = min(l1, l3)
-    generator = generators(degree)[1] / math.sqrt(max(1, degree * (degree + 1)))
+    generator = so3_generators(degree)[1] / math.sqrt(max(1, degree * (degree + 1)))
 
     def apply_generator(value):
         return value @ generator if l1 < l3 else generator @ value
@@ -114,7 +103,7 @@ def coupling_recurrence(l1, l3, lmax=None):
         raise ValueError("lmax must satisfy the triangle rule.")
     if lmax == delta:
         return ()
-    generator = generators(degree)[1]
+    generator = so3_generators(degree)[1]
     previous = o3.wigner_3j(l1, delta, l3, dtype=torch.float64, device="cpu")[
         :, delta, :
     ].T
@@ -184,7 +173,8 @@ class SphericalCoupling(torch.nn.Module):
             self.l1, self.delta, self.l3, dtype=torch.float64, device="cpu"
         ).to(self.cg)
         self.generator = (
-            generators(self.degree) / math.sqrt(max(1, self.degree * (self.degree + 1)))
+            so3_generators(self.degree)
+            / math.sqrt(max(1, self.degree * (self.degree + 1)))
         ).to(self.generator)
         return self
 

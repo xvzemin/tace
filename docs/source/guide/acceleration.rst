@@ -142,7 +142,7 @@ EQX in TACE
      - ``eqx.ace.TACE`` / ``eqx.models.tace.tece_oam_rra.BilinearACE``
 
 For fusion boundaries and standalone examples, see
-:ref:`equivariantx-convolutions`. To switch between equivalent CGTP forms
+:ref:`equivariantx-api-convolutions`. To switch between equivalent CGTP forms
 without retraining:
 
 .. code-block:: python

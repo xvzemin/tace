@@ -27,7 +27,8 @@ def test_path_matrix(m):
 
 
 def test_coupling_recurrence_phase(monkeypatch, double_precision):
-    from eqx.co2.spherical import coupling_polynomial, coupling_recurrence, generators
+    from eqx.co2.spherical import coupling_polynomial, coupling_recurrence
+    from eqx.o3 import so3_generators
 
     reference = o3.wigner_3j
 
@@ -35,7 +36,7 @@ def test_coupling_recurrence_phase(monkeypatch, double_precision):
         phase = -1 if l2 % 3 == 1 else 1
         return phase * reference(l1, l2, l3, **kwargs)
 
-    caches = coupling_polynomial, coupling_recurrence, generators
+    caches = coupling_polynomial, coupling_recurrence, so3_generators
     for cached in caches:
         cached.cache_clear()
     try:
@@ -131,7 +132,8 @@ def test_spherical_coupling(
 
 @pytest.mark.parametrize("l1,l3", [(0, 7), (7, 0), (3, 5), (8, 6), (16, 16)])
 def test_coupling_recurrence(l1, l3, double_precision, wigner_3j):
-    from eqx.co2.spherical import coupling_recurrence, generators
+    from eqx.co2.spherical import coupling_recurrence
+    from eqx.o3 import so3_generators
 
     degree, delta = min(l1, l3), abs(l1 - l3)
     basis = [
@@ -139,7 +141,9 @@ def test_coupling_recurrence(l1, l3, double_precision, wigner_3j):
         for l in range(delta, l1 + l3 + 1)
     ]
     coefficients = coupling_recurrence(l1, l3)
-    matrix = generators(degree).to(DEVICE)[1] / math.sqrt(max(1, degree * (degree + 1)))
+    matrix = so3_generators(degree).to(DEVICE)[1] / math.sqrt(
+        max(1, degree * (degree + 1))
+    )
     for k, value in enumerate(basis):
         actual = value @ matrix if l1 < l3 else matrix @ value
         expected = torch.zeros_like(actual)

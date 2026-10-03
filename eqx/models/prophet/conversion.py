@@ -5,12 +5,8 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import (
-    Convolution,
-    RadialFeatures,
-    convert_modules,
-    default_dtype,
-)
+from eqx.models.convolution import Convolution, RadialFeatures
+from eqx.utils import convert_modules, default_dtype
 
 
 class TensorProductConvolution(Convolution):
@@ -41,7 +37,11 @@ def convert_prophet_to_eqx(
     torch.nn.Module
         Model with the original forward interface. Convert before constructing
         the optimizer, or assign the returned model to KairosCalculator.model.
-        Prophet-Spin is not included in this conversion.
+
+    Notes
+    -----
+    Prophet-Spin is not supported. KairosCalculator produces float32 graph
+    inputs, so its model must also use float32.
     """
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(

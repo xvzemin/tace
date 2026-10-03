@@ -6,8 +6,8 @@ from string import ascii_letters
 import torch
 from e3nn import o3
 
+from ...o3 import so3_generators
 from ...utils.metadata import parse_metadata
-from ..angular import generators
 from ..contraction import gradient_mask
 from .convolution import kernel_plan
 
@@ -16,12 +16,12 @@ from .convolution import kernel_plan
 def harmonic_derivatives(degree, rank):
     """Return angular derivatives at the pole, including rotating vector indices."""
     if rank == 1:
-        return generators(degree)[:, :, degree].T.contiguous()
+        return so3_generators(degree)[:, :, degree].T.contiguous()
     previous = harmonic_derivatives(degree, rank - 1)
-    value = torch.tensordot(generators(degree), previous, dims=([2], [0]))
+    value = torch.tensordot(so3_generators(degree), previous, dims=([2], [0]))
     value = value.movedim(0, -1).contiguous()
     for axis in range(1, rank):
-        term = torch.tensordot(previous, -generators(1), dims=([axis], [1]))
+        term = torch.tensordot(previous, -so3_generators(1), dims=([axis], [1]))
         value += term.movedim(-1, axis)
     value[..., 1] = 0
     return value
@@ -75,7 +75,7 @@ def angular_coefficients(metadata, rank):
                 ):
                     # F(Q n; x) = F(n; D(Q)^T x). The generators are skew.
                     term = torch.tensordot(
-                        base, -generators(degree), dims=([axis], [1])
+                        base, -so3_generators(degree), dims=([axis], [1])
                     )
                     value += term.movedim(-1, axis)
                 # Rotation about the aligned direction fixes the direction.

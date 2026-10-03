@@ -234,8 +234,8 @@ The library imports as ``eqx`` and depends on PyTorch >= 2.4 and e3nn >= 0.4.4,
 but not on TACE or PyG. Its scope covers native O(2)
 operators, e3nn-compatible O(3)/O(2) frame conversion, and fused CUDA
 convolutions. Install ``'./tace/eqx[cuda]'`` and provide a CUDA toolkit to
-use the fused backend. See :ref:`equivariantx-tutorials` and
-:ref:`equivariantx-convolutions` for conventions, examples, and backend support.
+use the fused backend. See :ref:`equivariantx-installation` and
+:ref:`equivariantx-api-convolutions` for installation and operator parameters.
 When using e3nn 0.4.x with recent PyTorch, import ``eqx`` before ``e3nn.o3``
 so its packaged constants are loaded in the scoped compatibility context.
 

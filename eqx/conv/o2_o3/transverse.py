@@ -7,8 +7,9 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-from ...co2.spherical import coupling_polynomial, coupling_recurrence, generators
+from ...co2.spherical import coupling_polynomial, coupling_recurrence
 from ...kernels.codegen import ScalarProgram, contraction_source
+from ...o3 import so3_generators
 from ..angular import generator_action
 
 
@@ -308,7 +309,7 @@ def coupling_program(l1, l2, l3, normalization, rank):
     features = tuple(program.add("input", 0, i) for i in range(2 * l1 + 1))
     vector = tuple(program.add("input", 1, i) for i in range(3))
     degree, delta = min(l1, l3), abs(l1 - l3)
-    matrix = generators(degree) / math.sqrt(max(1, degree * (degree + 1)))
+    matrix = so3_generators(degree) / math.sqrt(max(1, degree * (degree + 1)))
     entries = tuple(
         (a, i, j, float(matrix[a, i, j])) for a, i, j in matrix.nonzero().tolist()
     )

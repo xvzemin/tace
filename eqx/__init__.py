@@ -17,10 +17,10 @@ with (
     from . import o2
 
 __all__ = [
-    "o2",
     "o3",
-    "co2",
     "co3",
+    "co2",
+    "o2",
     "ace",
     "conv",
     "kernels",
