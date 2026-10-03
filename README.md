@@ -106,7 +106,6 @@ TACE currently supports the following plugin:
 
 - **mTACE**    (Magnetic, with and without Spin-Orbit Coupling)
 - **TACE-LES** (Latent Ewald Summation)
-- **TACE-QEq** (Lagrangian, under reconstruction)
 
 ## Interfaces
 

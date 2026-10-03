@@ -8,16 +8,10 @@ from .compile import CompileTensorModel
 # Compatibility export for configurations created before cartTACE was removed.
 cartTACE = None
 
-try:
-    from .scf import SCFTACE
-except Exception:
-    SCFTACE = None
-
 __all__ = [
     "cartTACE",
     "e3nnTACE",
     "TECE",
     "TensorModel",
     "CompileTensorModel",
-    "SCFTACE",
 ]

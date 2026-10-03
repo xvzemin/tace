@@ -36,5 +36,3 @@ and `Hydra <https://hydra.cc/>`_.
    les.rst
    mTACE.rst
    magnetic_relax.rst
-   qeq.rst
-   scf.rst

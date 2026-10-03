@@ -28,9 +28,7 @@ _KERNELS = OrderedDict()
 _LAUNCH_CONFIGS = OrderedDict()
 _RUNTIME_LOCK = threading.Lock()
 _POOL = ThreadPoolExecutor(
-    max_workers=max(
-        1, min(int(os.environ.get("MAX_JOBS", "16")), len(os.sched_getaffinity(0)))
-    )
+    max_workers=max(1, min(int(os.environ.get("MAX_JOBS", "16")), os.cpu_count() or 1))
 )
 
 

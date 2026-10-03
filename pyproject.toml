@@ -53,8 +53,6 @@ nvalchemi = [
     "nvalchemi-toolkit-ops",
 ]
 
-scf = []
- 
 cueq12 = [
     "cuequivariance",
     "cuequivariance-torch",
@@ -129,7 +127,6 @@ exclude = [
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
-"tace.models.scf" = ["*.md", "longrange/*.md"]
 "eqx" = ["README.md", "LICENSE.md", "kernels/csrc/*.cpp"]
 
 [tool.ruff]
