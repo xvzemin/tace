@@ -61,24 +61,46 @@ def contraction_setup_context(ctx, inputs, output):
 
 def contraction_backward(ctx, grad_outputs):
     source, target, *operands = ctx.saved_tensors
-    metadata = parse_metadata(ctx.kernel_metadata)
-    geometric = len(metadata) > 3
     required = gradient_mask(operands, ctx.needs_input_grad[4])
+    return (
+        None,
+        None,
+        None,
+        None,
+        contraction_adjoint(
+            ctx.kernel_metadata,
+            ctx.program,
+            source,
+            target,
+            operands,
+            grad_outputs,
+            required,
+        ),
+    )
+
+
+def contraction_adjoint(
+    metadata, terms, source, target, operands, grad_outputs, required
+):
+    """Evaluate the contraction VJP without replaying its forward operation."""
+    kernel_metadata = metadata
+    metadata = parse_metadata(metadata)
+    geometric = len(metadata) > 3
     needs_grad = list(required)
     if geometric:
-        for mapping, _, _ in ctx.program:
+        for mapping, _, _ in terms:
             needs_grad[mapping[5]] = False
     program, values, destinations = adjoint_program(
-        ctx.program,
+        terms,
         operands,
         grad_outputs,
         needs_grad,
         metadata[2],
     )
     if geometric:
-        terms = {}
+        geometric_terms = {}
         cotangents = {id(value): index for index, value in enumerate(values)}
-        for mapping, weighted, pairs in ctx.program:
+        for mapping, weighted, pairs in terms:
             index = mapping[5]
             if not required[index]:
                 continue
@@ -92,19 +114,17 @@ def contraction_backward(ctx, grad_outputs):
                 replacement[output] = cotangents[id(grad_outputs[slot])]
                 replacement.append(index)
                 key = tuple(replacement), metadata[2] and (weighted or output in (1, 2))
-                terms.setdefault(key, []).append((len(mapping), destination))
+                geometric_terms.setdefault(key, []).append((len(mapping), destination))
         program += tuple(
             (mapping, weighted, tuple(pairs))
-            for (mapping, weighted), pairs in terms.items()
+            for (mapping, weighted), pairs in geometric_terms.items()
         )
     gradients = [None] * len(operands)
     if program:
-        results = contraction(
-            ctx.kernel_metadata, repr(program), source, target, values
-        )
+        results = contraction(kernel_metadata, repr(program), source, target, values)
         for index, slot in destinations.items():
             gradients[index] = results[slot]
-    return None, None, None, None, gradients
+    return gradients
 
 
 contraction.register_autograd(

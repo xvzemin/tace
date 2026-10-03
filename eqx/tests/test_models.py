@@ -3,6 +3,7 @@
 import os
 from copy import deepcopy
 
+import numpy as np
 import pytest
 import torch
 from e3nn import o3
@@ -14,6 +15,244 @@ from eqx.models.prophet import convert_prophet_to_eqx
 from eqx.models.sevennet import convert_sevennet_to_eqx
 from eqx.models.tace.tece_oam_rra import BilinearACE
 from eqx.utils import copy_model
+
+
+@pytest.mark.parametrize("bilinear", [False, True])
+def test_oam_inference(monkeypatch, double_precision, tmp_path, bilinear):
+    pytest.importorskip("tace")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from ase import Atoms
+    from matscipy.neighbours import neighbour_list
+
+    from eqx.models.tace import OAM
+    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_OEQ", "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=3.0,
+        max_neighbors=None,
+        num_channel=4,
+        num_layers=3,
+        Lmax=2,
+        lmax=2,
+        statistics=[
+            dict(
+                atomic_numbers=[1, 8],
+                avg_num_neighbors=2.0,
+                atomic_energy={1: -0.5, 8: -2.0},
+                rms_forces={1: 1.1, 8: 0.9},
+            )
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["atomic_basis"]["scatter_norm"] = "density"
+    config["edge_embedding"]["type"] = "nonlinear"
+    config["edge_update"]["type"] = "element2"
+    config["radial_basis"].update(hidden=[5], bias=True, apply_cutoff=False)
+    config["readout_emlp"].update(hidden=[4], use_one_body_magmoms=False)
+    config["short_range"]["zbl"]["enable"] = True
+    if bilinear:
+        config["product_basis"].update(nonlinear="bilinear", scalar_act="silu")
+        config["resnet"].update(type="BAB", linear_type="identity")
+        config["layer_norm"]["pre_norm_type"] = "merge_rms_norm"
+    reference = TensorModel(e3nnTACE(**config)).cuda().eval().requires_grad_(False)
+    evaluator = OAM(deepcopy(reference), tile_size=3, workspace=tmp_path)
+    atoms = Atoms(
+        numbers=[1, 8, 1, 8, 1, 8],
+        positions=[
+            [0.1, 0, 0],
+            [1.0, 0.3, 0.2],
+            [47.5, 0, 0.1],
+            [16.1, 16, 16],
+            [15.2, 16, 16],
+            [17, 16.3, 16.1],
+        ],
+        cell=[48] * 3,
+        pbc=True,
+    )
+    chain = Atoms(
+        numbers=[1, 8] * 8 + [1],
+        positions=[[0.1 + 2.5 * k, 16, 16] for k in range(17)],
+        cell=[48] * 3,
+        pbc=True,
+    )
+    for atoms in (atoms, chain, atoms[:1]):
+        source, target, shifts = neighbour_list("ijS", atoms, 3.0)
+        types = torch.tensor([0 if z == 1 else 1 for z in atoms.numbers], device="cuda")
+        data = dict(
+            positions=torch.tensor(atoms.positions, device="cuda"),
+            node_attrs=torch.eye(2, device="cuda")[types],
+            edge_index=torch.tensor(
+                np.array([source, target]), device="cuda", dtype=torch.long
+            ),
+            edge_shifts=torch.tensor(shifts, device="cuda", dtype=torch.float64),
+            lattice=torch.tensor(np.asarray(atoms.cell)[None], device="cuda"),
+            batch=torch.zeros(len(atoms), device="cuda", dtype=torch.long),
+            ptr=torch.tensor([0, len(atoms)], device="cuda"),
+            fidelity_idx=torch.zeros(1, device="cuda", dtype=torch.long),
+        )
+        expected = reference(data)
+        for storage, cache in (
+            ("cuda", False),
+            ("cuda", True),
+            ("cpu", False),
+            ("disk", False),
+        ):
+            evaluator.storage, evaluator.cache_messages = storage, cache
+            actual = evaluator(atoms)
+            for key in ("energy", "forces", "stress", "virials"):
+                np.testing.assert_allclose(
+                    actual[key],
+                    expected[key].detach().cpu().numpy().reshape(np.shape(actual[key])),
+                    atol=3e-10,
+                    rtol=3e-10,
+                )
+        if len(atoms) > 1:
+            evaluator.storage, evaluator.domain_size = "cuda", 1
+            actual = evaluator(atoms)
+            for key in ("energy", "forces", "stress", "virials"):
+                np.testing.assert_allclose(
+                    actual[key],
+                    expected[key].detach().cpu().numpy().reshape(np.shape(actual[key])),
+                    atol=3e-10,
+                    rtol=3e-10,
+                )
+            evaluator.domain_size = 0
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("tile_size", [1, 2, 8])
+@pytest.mark.parametrize("empty", [False, True])
+def test_tace_receiver_sweep(monkeypatch, double_precision, tile_size, empty):
+    pytest.importorskip("tace")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.models.tace import convert_tace_to_eqx
+    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_OEQ", "0")
+    monkeypatch.setenv("TACE_USE_TF32", "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        num_layers=3,
+        num_channel=3,
+        Lmax=2,
+        lmax=2,
+        statistics=[
+            dict(
+                atomic_numbers=[1, 8],
+                avg_num_neighbors=2.0,
+                atomic_energy={1: 0.0, 8: -2.0},
+                rms_forces={1: 1.1, 8: 0.9},
+            )
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["atomic_basis"]["type"] = "cgtp"
+    config["atomic_basis"]["scatter_norm"] = "density"
+    config["node_embedding"]["type"] = "linear"
+    config["radial_basis"].update(
+        hidden=[] if tile_size == 2 else [4], bias=True, apply_cutoff=tile_size == 8
+    )
+    config["readout_emlp"].update(
+        hidden=[3], use_one_body_magmoms=False, use_alllayer=tile_size == 1
+    )
+    reference = TensorModel(e3nnTACE(**config)).cuda()
+    converted = convert_tace_to_eqx(
+        reference, tile_size=tile_size, cache_messages=not empty
+    )
+    reference_parameters = tuple(reference.parameters())
+    converted_parameters = tuple(converted.parameters())
+    for actual, expected in zip(converted_parameters, reference_parameters):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    data = dict(
+        positions=torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.3, 0.2],
+                [0.4, 1.1, -0.2],
+                [0.0, 0.0, 0.0],
+                [1.2, 0.1, 0.2],
+                [0.3, 1.3, -0.1],
+                [7.0, 7.0, 7.0],
+            ],
+            device="cuda",
+        ),
+        node_attrs=torch.eye(2, device="cuda")[[0, 1, 0, 1, 0, 1, 0]],
+        edge_index=torch.tensor(
+            [
+                [0, 4, 1, 0, 3, 2, 5, 3, 1, 4, 2, 5],
+                [1, 3, 0, 2, 5, 0, 4, 4, 2, 5, 1, 3],
+            ],
+            device="cuda",
+        ),
+        edge_shifts=torch.zeros(12, 3, device="cuda"),
+        lattice=torch.eye(3, device="cuda").unsqueeze(0).repeat(2, 1, 1) * 8,
+        batch=torch.tensor([0, 0, 0, 1, 1, 1, 1], device="cuda"),
+        ptr=torch.tensor([0, 3, 7], device="cuda"),
+        fidelity_idx=torch.zeros(2, dtype=torch.long, device="cuda"),
+    )
+    if empty:
+        data["edge_index"] = data["edge_index"][:, :0]
+        data["edge_shifts"] = data["edge_shifts"][:0]
+    for training, trainable in ((False, False), (False, True), (True, True)):
+        outputs = []
+        for model in (reference, converted):
+            model.train(training).requires_grad_(trainable).zero_grad(set_to_none=True)
+            outputs.append(model({key: value.clone() for key, value in data.items()}))
+        for key in (
+            "energy",
+            "forces",
+            "stress",
+            "virials",
+            "node_energy",
+            "scalar_descriptor",
+        ):
+            if outputs[0][key] is not None:
+                torch.testing.assert_close(
+                    outputs[1][key], outputs[0][key], atol=2e-9, rtol=2e-9
+                )
+        if training:
+            for output in outputs:
+                sum(
+                    output[key].square().sum() for key in ("energy", "forces", "stress")
+                ).backward()
+            for actual, expected in zip(converted_parameters, reference_parameters):
+                if expected.grad is not None:
+                    torch.testing.assert_close(
+                        actual.grad, expected.grad, atol=2e-8, rtol=2e-8
+                    )
+    if tile_size == 2 and not empty:
+        restored = convert_tace_to_eqx(reference, tile_size=tile_size)
+        restored.load_state_dict(converted.state_dict())
+        with torch.no_grad():
+            for a, b in zip(restored.parameters(), converted.parameters()):
+                torch.testing.assert_close(a, b, atol=0, rtol=0)
+    assert (
+        convert_tace_to_eqx(
+            converted, tile_size=tile_size, cache_messages=not empty, inplace=True
+        )
+        is converted
+    )
+    # The first-order parameter sweep is distinct from force-loss replay.
+    for model in (reference, converted):
+        model.zero_grad(set_to_none=True)
+        inputs = {key: value.clone() for key, value in data.items()}
+        graph = model.prepare_graph(inputs)
+        model.readout_fn(inputs, graph)["energy"].square().sum().backward()
+    for actual, expected in zip(converted_parameters, reference_parameters):
+        if expected.grad is not None:
+            torch.testing.assert_close(actual.grad, expected.grad, atol=2e-8, rtol=2e-8)
 
 
 @pytest.fixture

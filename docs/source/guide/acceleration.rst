@@ -113,6 +113,70 @@ This preserves existing settings. ``force=True`` also disables unselected
 backends. ASE and TorchSim calculators expose backend options, but an exported
 AOTI package already contains its chosen operator graph.
 
+Receiver-tiled TACE-OAM-L
+-------------------------
+
+For eager single-GPU evaluation, an optional model-level schedule reduces
+intermediate storage across interactions and ACE. Load the checkpoint with
+EQX enabled, then convert it:
+
+.. code-block:: python
+
+   from tace.interface.ase import TACEAseCalc
+   from eqx.models.tace import convert_tace_to_eqx
+
+   calc = TACEAseCalc("TACE-OAM-L", device="cuda", enable_eqx=True)
+   calc.model = convert_tace_to_eqx(calc.model, tile_size=2048, inplace=True)
+
+Each receiver tile completes convolution, density normalization, Gate, and
+ACE before its workspace is released. Inter-layer node features remain
+graph-wide. Edge embeddings, radial functions, learned weights, and readout
+are unchanged mathematically; no spline approximation is used. Smaller tiles
+reduce memory but can increase execution time.
+
+For frozen models, compressed node messages avoid repeating convolution
+forwards in the force sweep. Set ``cache_messages=False`` during conversion
+to recompute them instead, reducing persistent storage.
+
+This plan is opt-in and does not replace the compiled workflow above.
+Force-training derivatives are supported through differentiable replay,
+but its memory use is larger than the inference reverse sweep. Compilation,
+AOTI, magnetic interactions, and distributed ghost exchange are not supported
+by this model-level plan.
+
+Standalone OAM inference
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+For TACE-OAM-7M and TACE-OAM-L, a separate frozen evaluator repacks weights
+and bounds the live interaction and product workspaces:
+
+.. code-block:: python
+
+   from eqx.models.tace import OAM, ase_calculator
+
+   evaluator = OAM.from_checkpoint(
+       "TACE-OAM-L", device="cuda", dtype="float32", tile_size=4096,
+   )
+   atoms.calc = ase_calculator(evaluator)
+   energy = atoms.get_potential_energy()
+   forces = atoms.get_forces()
+
+It evaluates radial functions and MLPs exactly, without spline tables. The
+energy, residuals, normalization, ACE, scale/shift, and ZBL definitions are
+preserved. This evaluator is inference-only and separate from AOTI and
+training. Lower memory does not guarantee higher throughput.
+
+For large orthorhombic periodic cells, pass ``domain_size=32768`` and
+``storage="cuda"`` to evaluate independent domains with complete halos.
+Hidden states stay on the GPU for one domain at a time. Owned energies are
+summed, and force derivatives on halo atoms are accumulated into the original
+atom order. This bounds hidden-state memory but repeats boundary computation.
+
+Alternatively, ``storage="cpu"`` offloads layer boundaries to host RAM;
+``storage="disk", workspace="/path/to/workspace"`` uses private temporary
+files. These modes reduce device storage at the cost of transfers. They
+must not be interpreted as keeping the whole model state resident on the GPU.
+
 .. _eqx-streaming:
 
 EQX in TACE
