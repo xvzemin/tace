@@ -263,7 +263,7 @@ class _FlatE3nnCompileModel(torch.nn.Module):
                 "ni,nij->nj", data["edge_shifts"], data["lattice"][edge_batch]
             )
         )
-        edge_length = (edge_vector**2).sum(dim=1, keepdim=True).sqrt() + 1e-9
+        edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
         num_atoms_arange = torch.arange(
             data["positions"].shape[0],
             device=data["positions"].device,
@@ -375,7 +375,7 @@ class _FlatE3nnLammpsCompileModel(torch.nn.Module):
         device = data["node_attrs"].device
         positions = torch.zeros((nlocal, 3), dtype=dtype, device=device)
         edge_vector = data["edge_vector"].requires_grad_(True)
-        edge_length = (edge_vector**2).sum(dim=1, keepdim=True).sqrt() + 1e-9
+        edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
         return Graph(
             lmp=True,
             lmp_data=AOTI_LAMMPS_GHOST_EXCHANGE,

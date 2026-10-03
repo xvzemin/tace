@@ -199,7 +199,7 @@ class O3CgtpInteraction(Interaction):
                 projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
             return self.rejector.forward_stream(
                 node_feats, edge_attrs, radial, projection, edge_index, edge_cutoff,
-                edge_vector=graph.edge_vector / graph.edge_length
+                edge_vector=graph.edge_vector / graph.edge_length.clamp_min(1e-12)
                 if graph is not None else None,
             )
         conv_weights = self.edge_info(edge_feats)

@@ -471,12 +471,16 @@ class Representation(torch.nn.Module):
             else:
                 edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
         edge_attrs = (
-            self.o3_angular_basis(graph.edge_vector / graph.edge_length)
+            self.o3_angular_basis(
+                graph.edge_vector / graph.edge_length.clamp_min(1e-12)
+            )
             if getattr(self, "use_o3_angular_basis", True)
             else graph.edge_vector.new_empty((graph.edge_vector.size(0), 0))
         )
         cartesian_edge_attrs = (
-            self.co3_angular_basis(graph.edge_vector / graph.edge_length)
+            self.co3_angular_basis(
+                graph.edge_vector / graph.edge_length.clamp_min(1e-12)
+            )
             if getattr(self, "co3_angular_basis", None) is not None
             and not all(
                 interaction.use_eqx

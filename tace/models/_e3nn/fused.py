@@ -493,9 +493,9 @@ class O2ScatterTensorProduct(torch.nn.Module):
         )
 
     def forward(self, node_feats, conv_weights, edge_index, wigner, wigner_inv, graph):
-        # Preserve the magnitude and derivatives of the reference harmonic input.
+        # Match the clamped direction normalization of the harmonic basis.
         harmonic_scale = (
-            graph.edge_vector.norm(dim=-1, keepdim=True) / graph.edge_length
+            graph.edge_length / graph.edge_length.clamp_min(1e-12)
         ).pow(self.harmonic_degrees)
         node_feats = self.reshape_in(node_feats)
         message = self.tp.forward_scatter(
@@ -512,7 +512,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
     ):
         """Evaluate the radial projection and fused angular convolution."""
         harmonic_scale = (
-            graph.edge_vector.norm(dim=-1, keepdim=True) / graph.edge_length
+            graph.edge_length / graph.edge_length.clamp_min(1e-12)
         ).pow(self.harmonic_degrees)
         if edge_cutoff is not None:
             harmonic_scale = harmonic_scale * edge_cutoff

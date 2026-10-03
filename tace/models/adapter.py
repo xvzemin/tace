@@ -304,7 +304,7 @@ class TensorModel(torch.nn.Module):
                 device=device,
             )
             edge_vector = data["edge_vector"].requires_grad_(True)
-            edge_length = (edge_vector**2).sum(dim=1, keepdim=True).sqrt() + 1e-9
+            edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
             lmp_data = data["lmp_data"]
             lmp_natoms = (nlocal, nghosts)
             num_atoms_arange = torch.arange(
@@ -349,7 +349,7 @@ class TensorModel(torch.nn.Module):
                 "atomic_virials",
             }:
                 edge_vector.requires_grad_(True)
-            edge_length = (edge_vector**2).sum(dim=1, keepdim=True).sqrt() + 1e-9
+            edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
             lattice = data["lattice"]
             lmp_data = None
             lmp_natoms = (positions.size(0), 0)
