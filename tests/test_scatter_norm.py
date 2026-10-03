@@ -8,22 +8,34 @@ import torch
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.scatter_norm import (
-    SCATTER_NORM,
+    AvgNumNeighborsScatterNorm,
     DensityScatterNorm,
     IdentityScatterNorm,
+    NoCutoffDensityScatterNorm,
+    get_scatter_norm_layer,
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-@pytest.mark.parametrize("key", list(SCATTER_NORM))
+@pytest.mark.parametrize(
+    "key",
+    [
+        None,
+        "identity",
+        "avg_num_neighbors",
+        "sqrt_avg_num_neighbors",
+        "density",
+        "no_cutoff_density",
+    ],
+)
 @pytest.mark.parametrize("shape", [(4, 4, 7), (2, 4, 7), (4, 4, 0), (0, 0, 0)])
 @pytest.mark.parametrize("use_cutoff", [False, True])
 def test_scatter_norm_values_and_derivatives(double_precision, key, shape, use_cutoff):
     nlocal, num_nodes, num_edges = shape
-    module = SCATTER_NORM[key](9.0, 4, radial_bias=True, radial_layer_norm=True).to(
-        DEVICE
-    )
+    module = get_scatter_norm_layer(
+        key, 9.0, 4, radial_bias=True, radial_layer_norm=True
+    ).to(DEVICE)
     node_feats = torch.randn(nlocal, 3, device=DEVICE, requires_grad=True)
     edge_feats = torch.randn(num_edges, 4, device=DEVICE, requires_grad=True)
     edge_index = (
@@ -70,7 +82,7 @@ def test_scatter_norm_values_and_derivatives(double_precision, key, shape, use_c
 
 @pytest.mark.parametrize("key", ["density", "no_cutoff_density"])
 def test_density_accepts_indexed_features(double_precision, key):
-    module = SCATTER_NORM[key](4.0, 7, radial_layer_norm=True).to(DEVICE)
+    module = get_scatter_norm_layer(key, 4.0, 7, radial_layer_norm=True).to(DEVICE)
     with torch.no_grad():
         module.beta.fill_(0.3)
     nodes = torch.randn(4, 2, device=DEVICE)
@@ -122,10 +134,16 @@ def small_model():
 
 
 @pytest.mark.parametrize(
-    "key", [None, "avg_num_neighbors", "density", "no_cutoff_density"]
+    "key, norm_class",
+    [
+        (None, IdentityScatterNorm),
+        ("avg_num_neighbors", AvgNumNeighborsScatterNorm),
+        ("density", DensityScatterNorm),
+        ("no_cutoff_density", NoCutoffDensityScatterNorm),
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_legacy_scatter_norm_loading(tmp_path, small_model, key, dtype):
+def test_legacy_scatter_norm_loading(tmp_path, small_model, key, norm_class, dtype):
     torch.set_default_dtype(dtype)
     reference = small_model(key).eval()
     for layer in reference.readout_fn.representation.interactions:
@@ -148,7 +166,7 @@ def test_legacy_scatter_norm_loading(tmp_path, small_model, key, dtype):
     for name, value in loaded.state_dict().items():
         torch.testing.assert_close(value, expected[name], atol=0, rtol=0)
     for layer in loaded.readout_fn.representation.interactions:
-        assert isinstance(layer.scatter_norm, SCATTER_NORM[key])
+        assert type(layer.scatter_norm) is norm_class
         assert not hasattr(layer, "alpha") and not hasattr(layer, "edge_density")
 
     data = dict(

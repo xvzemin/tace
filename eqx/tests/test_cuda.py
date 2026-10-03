@@ -10,6 +10,41 @@ import torch
 from eqx.kernels import cuda
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("edges", [0, 17])
+@pytest.mark.parametrize("first_indexed", [False, True])
+def test_gather_sum(dtype, edges, first_indexed):
+    from eqx.kernels.layout import gather_sum
+
+    indices = [torch.randint(5, (2 * edges,), device="cuda")[::2] for _ in range(3)]
+    if not first_indexed:
+        indices[0] = None
+    inputs = [
+        torch.randn(9, 2 * (edges if index is None else 5), device="cuda", dtype=dtype)
+        .T[::2]
+        .requires_grad_()
+        for index in indices
+    ]
+    reference = sum(
+        value if index is None else value.index_select(0, index)
+        for value, index in zip(inputs, indices)
+    )
+    actual = gather_sum(inputs, indices)
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    outputs = [value.sin().sum() / max(value.numel(), 1) for value in (actual, reference)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(output, inputs, create_graph=True, retain_graph=True)
+            for output in outputs
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+        outputs = [sum(value.square().sum() for value in grad) for grad in gradients]
+    compiled = torch.compile(gather_sum, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(compiled(inputs, indices), reference, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "cpu_count,max_jobs,expected",
     [(8, None, 8), (None, None, 1), (64, None, 16), (8, "0", 1), (8, "3", 3)],

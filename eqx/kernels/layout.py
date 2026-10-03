@@ -9,6 +9,106 @@ from .cuda import kernels, runtime
 
 
 @lru_cache(maxsize=128)
+def gather_sum_source(dtype, indexed):
+    scalar = "double" if dtype == torch.float64 else "float"
+    arguments, values = [], []
+    for i, gather in enumerate(indexed):
+        arguments.extend((f"const T* input{i}", f"int64_t s{i}0", f"int64_t s{i}1"))
+        if gather:
+            arguments.append(f"const int64_t* index{i}")
+        row = f"index{i}[row]" if gather else "row"
+        values.append(f"input{i}[({row}) * s{i}0 + col * s{i}1]")
+    accumulation = "\n".join(f"value += {value};" for value in values[1:])
+    return f"""
+    using T = {scalar};
+    using int64_t = long long;
+    extern "C" __global__ void run({', '.join(arguments)},
+        T* output, int64_t rows, int64_t width) {{
+        const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+        if (i >= rows * width) return;
+        const int64_t row = i / width, col = i % width;
+        T value = {values[0]};
+        {accumulation}
+        output[i] = value;
+    }}
+    """
+
+
+@torch.library.custom_op("eqx::gather_sum", mutates_args=(), device_types="cuda")
+def gather_sum(
+    features: list[torch.Tensor],
+    indices: list[torch.Tensor | None],
+) -> torch.Tensor:
+    """Sum feature matrices after optional row gathers.
+
+    Parameters
+    ----------
+    features : list of torch.Tensor
+        Matrices with the same channel width, dtype and device.
+    indices : list of torch.Tensor or None
+        Row indices for each matrix. ``None`` leaves its rows unchanged.
+    """
+    if not features or len(features) != len(indices):
+        raise ValueError("Each feature matrix requires an index tensor or None.")
+    if features[0].dtype not in (torch.float32, torch.float64):
+        raise TypeError("Gather sums require float32 or float64 features.")
+    for value, index in zip(features, indices):
+        if value.ndim != 2 or value.dtype != features[0].dtype or value.device != features[0].device:
+            raise ValueError("Feature matrices must have the same dtype and device.")
+        if index is not None and (index.dtype != torch.int64 or index.ndim != 1 or index.device != value.device):
+            raise ValueError("Row indices must be one-dimensional int64 tensors on the feature device.")
+    result = gather_sum_fake(features, indices)
+    for value, index in zip(features, indices):
+        if value.size(1) != result.size(1) or (value.size(0) if index is None else index.numel()) != result.size(0):
+            raise ValueError("Gathered feature matrices must have the same shape.")
+    if result.numel():
+        indices = [None if index is None else index.contiguous() for index in indices]
+        code = gather_sum_source(features[0].dtype, tuple(i is not None for i in indices))
+        kernel = kernels([code], result.device)[code]
+        arguments = []
+        for value, index in zip(features, indices):
+            arguments.extend((value.data_ptr(), *value.stride()))
+            if index is not None:
+                arguments.append(index.data_ptr())
+        arguments.extend((result.data_ptr(), *result.shape))
+        runtime().launch(
+            [(kernel, arguments, (result.numel() + 255) // 256, 1, 256, 0)],
+            torch.cuda.current_stream(result.device).cuda_stream,
+        )
+    return result
+
+
+@gather_sum.register_fake
+def gather_sum_fake(features, indices):
+    rows = features[0].size(0) if indices[0] is None else indices[0].numel()
+    return features[0].new_empty((rows, features[0].size(1)))
+
+
+def gather_sum_setup_context(ctx, inputs, output):
+    features, indices = inputs
+    ctx.shapes = [value.shape for value in features]
+    ctx.save_for_backward(*indices)
+
+
+def gather_sum_backward(ctx, gradient):
+    indices = ctx.saved_tensors
+    gradients = [
+        None
+        if not required
+        else gradient
+        if index is None
+        else gradient.new_zeros(shape).index_add(0, index, gradient)
+        for shape, index, required in zip(ctx.shapes, indices, ctx.needs_input_grad[0])
+    ]
+    return gradients, [None] * len(indices) if all(i is not None for i in indices) else None
+
+
+gather_sum.register_autograd(
+    gather_sum_backward, setup_context=gather_sum_setup_context
+)
+
+
+@lru_cache(maxsize=128)
 def permutation_source(widths, dtype, transpose):
     """Transpose the batch and group axes without expanding feature entries."""
     scalar = "double" if dtype == torch.float64 else "float"

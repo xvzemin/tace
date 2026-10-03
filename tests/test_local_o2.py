@@ -38,11 +38,16 @@ DTYPE = torch.float64
 @pytest.mark.parametrize("lora", [False, True])
 @pytest.mark.parametrize("hidden", [[], [7]])
 @pytest.mark.parametrize("num_edges", [0, 8])
-def test_element2_projects_nodes_before_gather(bias, lora, hidden, num_edges):
+@pytest.mark.parametrize("use_eqx", [False, True])
+def test_element2_projects_nodes_before_gather(bias, lora, hidden, num_edges, use_eqx, monkeypatch):
     from tace.models._e3nn.edge import Element2EdgeUpdate
     from tace.models.linear import enable_lora
     from tace.models.mlp import MLP
 
+    if use_eqx and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setenv("TACE_USE_EQX", str(int(use_eqx)))
+    device = DEVICE if use_eqx else torch.device("cpu")
     module = Element2EdgeUpdate(
         layer=0,
         num_layers=2,
@@ -51,8 +56,8 @@ def test_element2_projects_nodes_before_gather(bias, lora, hidden, num_edges):
         num_channel=4,
         edge_embedding_channel=6,
         bias=bias,
-    ).double()
-    mlp = MLP([14, *hidden, 3], bias=bias).double()
+    ).to(device=device, dtype=DTYPE)
+    mlp = MLP([14, *hidden, 3], bias=bias).to(device=device, dtype=DTYPE)
     if lora:
         enable_lora(mlp.mlp[0], r=2, freeze_base=False)
         with torch.no_grad():
@@ -61,9 +66,9 @@ def test_element2_projects_nodes_before_gather(bias, lora, hidden, num_edges):
         for name, parameter in (*module.named_parameters(), *mlp.named_parameters()):
             if name.endswith("bias"):
                 parameter.normal_()
-    attrs = torch.randn(5, 3, dtype=DTYPE, requires_grad=True)
-    edges = torch.randint(5, (2, num_edges))
-    feats = torch.randn(num_edges, 6, dtype=DTYPE, requires_grad=True)
+    attrs = torch.randn(5, 3, dtype=DTYPE, device=device, requires_grad=True)
+    edges = torch.randint(5, (2, num_edges), device=device)
+    feats = torch.randn(num_edges, 6, dtype=DTYPE, device=device, requires_grad=True)
     source = module.source_embedding(attrs[edges[0]])
     target = module.target_embedding(attrs[edges[1]])
     expected = mlp(torch.cat((feats, target, source), -1))

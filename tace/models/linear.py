@@ -287,6 +287,21 @@ class mlpLinear(torch.nn.Module):
         weight = self.get_weight()
         if isinstance(input, tuple):
             weights = weight.split([value.size(-1) for value, _ in input], dim=0)
+            if (
+                weight.is_cuda
+                and weight.dtype in (torch.float32, torch.float64)
+                and len(input) > 1
+                and acceleration_enabled("eqx", kernel="linear")
+            ):
+                from eqx.kernels.layout import gather_sum
+
+                projected = [
+                    torch.addmm(self.bias, value, part)
+                    if i == 0 and self.bias is not None
+                    else torch.mm(value, part)
+                    for i, ((value, _), part) in enumerate(zip(input, weights))
+                ]
+                return gather_sum(projected, [index for _, index in input])
             output = None
             for (value, index), part in zip(input, weights):
                 projected = (

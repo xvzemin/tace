@@ -11,7 +11,6 @@ import torch
 from e3nn import o3
 
 from ..lammps import e3nnGhostExchangeMixin
-from ..linear import IndexedFeatures
 from ..time_reversal import with_natural_parity
 
 
@@ -137,47 +136,6 @@ class EdgeUpdate(torch.nn.Module):
 
     @abc.abstractmethod
     def _setup(self) -> None:
-        raise NotImplementedError
-
-
-class ScatterNorm(torch.nn.Module):
-    """Normalize aggregated node features.
-
-    Parameters
-    ----------
-    avg_num_neighbors : float
-        Mean neighbor count in the training data.
-    edge_feats_channel : int
-        Number of input edge feature channels.
-    radial_bias : bool, optional
-        Include biases in the density network.
-    radial_layer_norm : bool, optional
-        Apply layer normalization in the density network.
-    """
-
-    def __init__(
-        self,
-        avg_num_neighbors: float,
-        edge_feats_channel: int,
-        radial_bias: bool = False,
-        radial_layer_norm: bool = False,
-    ) -> None:
-        super().__init__()
-        self.avg_num_neighbors = avg_num_neighbors
-        self.edge_feats_channel = edge_feats_channel
-        self.radial_bias = radial_bias
-        self.radial_layer_norm = radial_layer_norm
-
-    @abc.abstractmethod
-    def forward(
-        self,
-        node_feats: torch.Tensor,
-        edge_feats: torch.Tensor | IndexedFeatures,
-        edge_index: torch.Tensor,
-        edge_cutoff: torch.Tensor | None,
-        num_nodes: int,
-    ) -> torch.Tensor:
-        """Normalize local node features using edges over local and ghost nodes."""
         raise NotImplementedError
 
 

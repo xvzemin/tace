@@ -3,13 +3,55 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import abc
+
 import torch
 
 from tace.utils.torch_scatter import scatter_sum
 
 from ..linear import IndexedFeatures
 from ..mlp import MLP
-from .base import ScatterNorm
+
+
+class ScatterNorm(torch.nn.Module):
+    """Normalize aggregated node features.
+
+    Parameters
+    ----------
+    avg_num_neighbors : float
+        Mean neighbor count in the training data.
+    edge_feats_channel : int
+        Number of input edge feature channels.
+    radial_bias : bool, optional
+        Include biases in the density network.
+    radial_layer_norm : bool, optional
+        Apply layer normalization in the density network.
+    """
+
+    def __init__(
+        self,
+        avg_num_neighbors: float,
+        edge_feats_channel: int,
+        radial_bias: bool = False,
+        radial_layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.avg_num_neighbors = avg_num_neighbors
+        self.edge_feats_channel = edge_feats_channel
+        self.radial_bias = radial_bias
+        self.radial_layer_norm = radial_layer_norm
+
+    @abc.abstractmethod
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
+        edge_index: torch.Tensor,
+        edge_cutoff: torch.Tensor | None,
+        num_nodes: int,
+    ) -> torch.Tensor:
+        """Normalize local node features using edges over local and ghost nodes."""
+        raise NotImplementedError
 
 
 class IdentityScatterNorm(ScatterNorm):
@@ -108,11 +150,44 @@ class NoCutoffDensityScatterNorm(DensityScatterNorm):
     apply_cutoff = False
 
 
-SCATTER_NORM: dict[str | None, type[ScatterNorm]] = {
-    None: IdentityScatterNorm,
-    "identity": IdentityScatterNorm,
-    "avg_num_neighbors": AvgNumNeighborsScatterNorm,
-    "sqrt_avg_num_neighbors": SqrtAvgNumNeighborsScatterNorm,
-    "density": DensityScatterNorm,
-    "no_cutoff_density": NoCutoffDensityScatterNorm,
-}
+def get_scatter_norm_layer(
+    norm_type: str | None,
+    avg_num_neighbors: float,
+    edge_feats_channel: int,
+    radial_bias: bool = False,
+    radial_layer_norm: bool = False,
+) -> ScatterNorm:
+    """Construct a scatter normalization layer.
+
+    Parameters
+    ----------
+    norm_type : str or None
+        ``None``, ``"identity"``, ``"avg_num_neighbors"``,
+        ``"sqrt_avg_num_neighbors"``, ``"density"`` or ``"no_cutoff_density"``.
+    avg_num_neighbors : float
+        Mean neighbor count in the training data.
+    edge_feats_channel : int
+        Number of input edge feature channels.
+    radial_bias : bool, optional
+        Include biases in the density network.
+    radial_layer_norm : bool, optional
+        Apply layer normalization in the density network.
+    """
+    if norm_type is None or norm_type == "identity":
+        norm_class = IdentityScatterNorm
+    elif norm_type == "avg_num_neighbors":
+        norm_class = AvgNumNeighborsScatterNorm
+    elif norm_type == "sqrt_avg_num_neighbors":
+        norm_class = SqrtAvgNumNeighborsScatterNorm
+    elif norm_type == "density":
+        norm_class = DensityScatterNorm
+    elif norm_type == "no_cutoff_density":
+        norm_class = NoCutoffDensityScatterNorm
+    else:
+        raise ValueError(f"Unknown scatter normalization: {norm_type!r}.")
+    return norm_class(
+        avg_num_neighbors,
+        edge_feats_channel,
+        radial_bias=radial_bias,
+        radial_layer_norm=radial_layer_norm,
+    )

@@ -21,11 +21,11 @@ from .fused import (
     O3ScatterTensorProduct,
     UuO2ScatterTensorProduct,
 )
+from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
-from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
 from .residual import get_resnet_layer
-from .scatter_norm import SCATTER_NORM
+from .scatter_norm import get_scatter_norm_layer
 from .tece_oam_rra import Convolution
 
 
@@ -101,11 +101,8 @@ class O3CgtpInteraction(Interaction):
         )
         self._setup_additional_modules()
 
-        if self.scatter_norm_type not in SCATTER_NORM:
-            raise ValueError(
-                f"Unknown scatter normalization: {self.scatter_norm_type!r}."
-            )
-        self.scatter_norm = SCATTER_NORM[self.scatter_norm_type](
+        self.scatter_norm = get_scatter_norm_layer(
+            self.scatter_norm_type,
             avg_num_neighbors=self.avg_num_neighbors,
             edge_feats_channel=self.edge_feats_channel,
             radial_bias=self.radial_bias,
