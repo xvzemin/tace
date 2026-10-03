@@ -9,7 +9,6 @@ import torch
 from e3nn import o3
 
 from tace.utils.env import acceleration_enabled
-from tace.utils.torch_scatter import scatter_sum
 
 from ..lammps import Graph
 from ..layout import LayoutTransform
@@ -26,6 +25,7 @@ from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
 from .residual import get_resnet_layer
+from .scatter_norm import SCATTER_NORM
 from .tece_oam_rra import Convolution
 
 
@@ -101,17 +101,16 @@ class O3CgtpInteraction(Interaction):
         )
         self._setup_additional_modules()
 
-        if self._uses_edge_density():
-            self.edge_density = MLP(
-                [self.edge_feats_channel, 64, 1],
-                bias=self.radial_bias,
-                layer_norm=self.radial_layer_norm,
-                act="silu",
+        if self.scatter_norm_type not in SCATTER_NORM:
+            raise ValueError(
+                f"Unknown scatter normalization: {self.scatter_norm_type!r}."
             )
-            self.alpha = torch.nn.Parameter(
-                torch.tensor(self.avg_num_neighbors**0.5)
-            )
-            self.beta = torch.nn.Parameter(torch.tensor(0.0))
+        self.scatter_norm = SCATTER_NORM[self.scatter_norm_type](
+            avg_num_neighbors=self.avg_num_neighbors,
+            edge_feats_channel=self.edge_feats_channel,
+            radial_bias=self.radial_bias,
+            radial_layer_norm=self.radial_layer_norm,
+        )
 
         if (self.use_first_resnet or self.layer > 0) and self.resnet_type == "BB":
             self.resnetBB = get_resnet_layer(
@@ -242,7 +241,6 @@ class O3CgtpInteraction(Interaction):
                 dim=-1,
             )
 
-        density = None
         resBB = None
         resBA = None
         resAB = None
@@ -285,17 +283,9 @@ class O3CgtpInteraction(Interaction):
             )
         )
 
-        if hasattr(self, "edge_density"):
-            density = torch.tanh(self.edge_density(edge_feats) ** 2)
-            if edge_cutoff is not None and self.apply_density_cutoff:
-                density = density * edge_cutoff
-            density = scatter_sum(
-                density, edge_index[1], dim=0, dim_size=node_attrs_total.size(0)
-            )
-            density = self.truncate_ghosts(density, nlocal)
-            density = density * self.beta + self.alpha
-
-        m_i = self._normalize_messages(m_i, density)
+        m_i = self.scatter_norm(
+            m_i, edge_feats, edge_index, edge_cutoff, node_attrs_total.size(0)
+        )
 
         m_i = self.linear_nonlinearity(self.nonlinearity(m_i))
 
@@ -431,7 +421,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             )
         if self.edge_nonlinear is None:
             raise ValueError("UvSO2Interaction requires edge_nonlinear to be set.")
-        self.scatter_norm = None
+        self.scatter_norm_type = None
 
     def _build_rejector(self) -> torch.nn.Module:
         if self.scalar_act is None:
@@ -561,7 +551,7 @@ class UvO2Interaction(O3CgtpInteraction):
             use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
         if rejector.attention is not None:
-            self.scatter_norm = None
+            self.scatter_norm_type = None
         return rejector
 
     def _apply_rejector(
@@ -793,7 +783,7 @@ class O2MagneticInteraction(UvO2Interaction):
             use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
         if rejector.attention is not None:
-            self.scatter_norm = None
+            self.scatter_norm_type = None
         return rejector
 
     def _setup_additional_modules(self) -> None:

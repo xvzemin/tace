@@ -11,6 +11,7 @@ import torch
 from e3nn import o3
 
 from ..lammps import e3nnGhostExchangeMixin
+from ..linear import IndexedFeatures
 from ..time_reversal import with_natural_parity
 
 
@@ -139,7 +140,54 @@ class EdgeUpdate(torch.nn.Module):
         raise NotImplementedError
 
 
+class ScatterNorm(torch.nn.Module):
+    """Normalize aggregated node features.
+
+    Parameters
+    ----------
+    avg_num_neighbors : float
+        Mean neighbor count in the training data.
+    edge_feats_channel : int
+        Number of input edge feature channels.
+    radial_bias : bool, optional
+        Include biases in the density network.
+    radial_layer_norm : bool, optional
+        Apply layer normalization in the density network.
+    """
+
+    def __init__(
+        self,
+        avg_num_neighbors: float,
+        edge_feats_channel: int,
+        radial_bias: bool = False,
+        radial_layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.avg_num_neighbors = avg_num_neighbors
+        self.edge_feats_channel = edge_feats_channel
+        self.radial_bias = radial_bias
+        self.radial_layer_norm = radial_layer_norm
+
+    @abc.abstractmethod
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        edge_feats: torch.Tensor | IndexedFeatures,
+        edge_index: torch.Tensor,
+        edge_cutoff: torch.Tensor | None,
+        num_nodes: int,
+    ) -> torch.Tensor:
+        """Normalize local node features using edges over local and ghost nodes."""
+        raise NotImplementedError
+
+
 class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
+    _legacy_state_dict_keys = {
+        "alpha": "scatter_norm.alpha",
+        "beta": "scatter_norm.beta",
+        "edge_density": "scatter_norm.edge_density",
+    }
+
     def __init__(
         self,
         layer: int,
@@ -161,7 +209,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         tensor_act: str,
         edge_ace_hidden: Union[int, None],
         l1l2: Union[str, None] = None,
-        scatter_norm: str = "avg_num_neighbors",
+        scatter_norm: Union[str, None] = "avg_num_neighbors",
         bias: bool = True,
         nonlinear: Union[str, None] = None,
         edge_nonlinear: Union[str, None] = None,
@@ -199,7 +247,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.radial_mlp = radial_mlp
         self.radial_bias = radial_bias
         self.use_bias = bias
-        self.scatter_norm = scatter_norm
+        self.scatter_norm_type = scatter_norm
         self.scalar_act = scalar_act
         self.tensor_act = tensor_act
         activation_names = (
@@ -220,10 +268,6 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
                 "the 'scaled_' prefix."
             )
         self.edge_ace_hidden = edge_ace_hidden or num_channel
-        if self.scatter_norm == "no_cutoff_density":
-            self.apply_density_cutoff = False
-        else:
-            self.apply_density_cutoff = True
         self.radial_layer_norm = False
         if self.edge_feats_channel != self.num_radial_basis:
             self.radial_layer_norm = True
@@ -274,21 +318,36 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
     def _setup(self) -> None:
         raise NotImplementedError
 
-    def _uses_edge_density(self) -> bool:
-        return self.scatter_norm in {"density", "no_cutoff_density"}
-
-    def _normalize_messages(
+    def _load_from_state_dict(
         self,
-        messages: torch.Tensor,
-        density: Union[torch.Tensor, None],
-    ) -> torch.Tensor:
-        if self.scatter_norm is None:
-            return messages
-        if self.scatter_norm == "avg_num_neighbors":
-            return messages / self.avg_num_neighbors
-        if self.scatter_norm == "sqrt_avg_num_neighbors":
-            return messages / self.avg_num_neighbors**0.5
-        return messages / density
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Density parameters previously belonged directly to the interaction.
+        for key in list(state_dict):
+            name, separator, suffix = key[len(prefix) :].partition(".")
+            if name in self._legacy_state_dict_keys:
+                new_key = (
+                    prefix + self._legacy_state_dict_keys[name] + separator + suffix
+                )
+                if new_key in state_dict:
+                    error_msgs.append(f"Checkpoint contains both {key} and {new_key}.")
+                else:
+                    state_dict[new_key] = state_dict.pop(key)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
 
 class Product(torch.nn.Module):
