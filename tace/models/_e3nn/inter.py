@@ -294,7 +294,6 @@ class O3CgtpInteraction(Interaction):
             )
             density = self.truncate_ghosts(density, nlocal)
             density = density * self.beta + self.alpha
-            density = density.masked_fill(density == 0, 1e-9)
 
         m_i = self._normalize_messages(m_i, density)
 

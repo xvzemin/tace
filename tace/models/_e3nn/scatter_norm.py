@@ -36,7 +36,6 @@
 #             density = scatter_sum(density, edge_index[1], dim=0, dim_size=node_attrs_total.size(0))
 #             density  = self.truncate_ghosts(density , nlocal)
 #             density = density * self.beta + self.alpha
-#             density = density.masked_fill(density == 0, 1e-9)
 
 #     def __repr__(self) -> str:
 #         return f"{self.__class__.__name__}
