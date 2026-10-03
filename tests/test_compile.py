@@ -5,6 +5,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Union
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from tace.dataset.quantity import (
     get_embedding_property,
     get_need_property,
 )
+from tace.foundations import resolve_model_path, tace_foundations
 from tace.lightning.torch_model import (
     _prune_removed_keys,
     _should_warn_without_aoti,
@@ -28,6 +30,179 @@ from tace.models.compile.aot import (
 )
 from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
+
+
+@pytest.fixture
+def foundation_model(tmp_path, monkeypatch, double_precision):
+    import tace.foundations.download_link as downloads
+    from tace.lightning import create_model, export_tace
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=1, num_channel=2, Lmax=1, lmax=1, cutoff=4.0, max_neighbors=None
+    )
+    config["radial_basis"]["hidden"] = [4]
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    statistics = [
+        {
+            "atomic_numbers": [1],
+            "atomic_energy": {1: 0.0},
+            "avg_num_neighbors": 2.0,
+        }
+    ]
+    model = create_model(config, statistics, ["energy", "forces"], [])
+    path = tmp_path / "download.pt"
+    export_tace(model, str(path))
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    download = Mock(return_value=str(path))
+    monkeypatch.setattr(downloads, "CACHE_DIR", cache)
+    monkeypatch.setattr(downloads, "hf_hub_download", download)
+    return path, download
+
+
+@pytest.mark.parametrize("name", ["TACE-OAM-7M", "TECE-OAM-RRA-1.0"])
+def test_foundation_name_resolution(foundation_model, name):
+    source, download = foundation_model
+    assert name in tace_foundations
+    assert "unknown" not in tace_foundations
+    download.assert_not_called()
+    path = resolve_model_path(name)
+    assert path.name == name + ".pt"
+    assert path.read_bytes() == source.read_bytes()
+    assert resolve_model_path(Path(name)) == path
+    assert resolve_model_path(path) == path
+    download.assert_called_once_with(
+        repo_id="xvzemin/tace-foundations",
+        filename=name + ".pt",
+        revision="main",
+        cache_dir=path.parent,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_load_foundation_matches_file(foundation_model, dtype):
+    from tace.lightning import load_tace
+
+    source, download = foundation_model
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    reference = load_tace(source, device=device, dtype=dtype).eval()
+    module = load_tace("TACE-OAM-7M", device=device, dtype=dtype).eval()
+    assert module.get_model_dtype() == dtype
+    for name, value in reference.state_dict().items():
+        torch.testing.assert_close(module.state_dict()[name], value, atol=0, rtol=0)
+    data = {
+        key: value.to(device) for key, value in _magnetic_embedding_sample().items()
+    }
+    results = [
+        model({key: value.clone() for key, value in data.items()})
+        for model in (reference, module)
+    ]
+    for key in ("energy", "forces"):
+        torch.testing.assert_close(results[0][key], results[1][key])
+    assert load_tace(module, device=device, target_property=["energy"]) is module
+    assert module.get_target_property() == ["energy"]
+    download.assert_called_once()
+
+
+@pytest.mark.parametrize("suffix", [".pt", ".pth", ".PT", ".ckpt", ".pt2"])
+def test_local_model_dispatch(foundation_model, tmp_path, monkeypatch, suffix):
+    import tace.models.compile as compile_model
+    from tace.lightning import load_tace
+    from tace.lightning.lit_model import LightningWrapperModel
+
+    source, download = foundation_model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    reference = load_tace(source, device=device)
+    path = tmp_path / ("TACE-OAM-7M" + suffix)
+    checkpoint = Mock(return_value=reference)
+    aoti = Mock(return_value=reference)
+    monkeypatch.setattr(LightningWrapperModel, "load_from_checkpoint", checkpoint)
+    monkeypatch.setattr(compile_model, "load_aotinductor", aoti)
+    if suffix.lower() in (".pt", ".pth"):
+        path.write_bytes(source.read_bytes())
+    module = load_tace(path, device=device, use_ema=False)
+    assert module.get_model_dtype() == reference.get_model_dtype()
+    assert checkpoint.call_count == (suffix == ".ckpt")
+    assert aoti.call_count == (suffix == ".pt2")
+    if suffix == ".ckpt":
+        checkpoint.assert_called_once_with(
+            path, map_location=device, strict=True, use_ema=False, dtype=None
+        )
+    elif suffix == ".pt2":
+        aoti.assert_called_once_with(path, device)
+    download.assert_not_called()
+
+
+def test_unknown_model_does_not_download(foundation_model, tmp_path):
+    from tace.lightning import load_tace
+
+    _, download = foundation_model
+    for name in ("unknown", "model.bin", str(tmp_path / "TACE-OAM-7M")):
+        with pytest.raises(ValueError, match="registered foundation model"):
+            load_tace(name)
+    with pytest.raises(FileNotFoundError):
+        load_tace(tmp_path / "TACE-OAM-7M.pt")
+    download.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "script,output",
+    [
+        ("export_train", "-state.pt"),
+        ("export_eval", "-state_dict.pt"),
+        ("convert_cgtp", "-converted.pt"),
+    ],
+)
+def test_foundation_cli_exports(
+    foundation_model, monkeypatch, tmp_path, script, output
+):
+    import importlib
+
+    name = "TECE-OAM-RRA-1.0"
+    module = importlib.import_module("tace.scripts." + script)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [script, "-m", name, "--device", device])
+    module.main()
+    assert (tmp_path / (name + output)).is_file()
+    foundation_model[1].assert_called_once()
+
+
+def test_foundation_aoti_output_keeps_version():
+    from tace.scripts.export_eval import _default_aoti_output_path
+
+    assert _default_aoti_output_path("TECE-OAM-RRA-1.0") == "TECE-OAM-RRA-1.0.pt2"
+    assert (
+        _default_aoti_output_path("models/TACE-OAM-7M.pt") == "models/TACE-OAM-7M.pt2"
+    )
+
+
+def test_foundation_ase_and_finetune(foundation_model):
+    from ase import Atoms
+
+    from tace.interface.ase import TACEAseCalc
+    from tace.lightning.lit_model import finetune
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    results = []
+    for model in (foundation_model[0], "TACE-OAM-7M"):
+        atoms = Atoms("H2", positions=[[0, 0, 0], [1, 0.2, 0]], cell=[6, 6, 6])
+        atoms.calc = TACEAseCalc(
+            model, device=device, dtype="float64", neighborlist_backend="ase"
+        )
+        results.append((atoms.get_potential_energy(), atoms.get_forces()))
+    for actual, expected in zip(*results):
+        torch.testing.assert_close(
+            torch.as_tensor(actual), torch.as_tensor(expected), atol=1e-12, rtol=1e-12
+        )
+    model = finetune(
+        {"finetune_from_model": "TACE-OAM-7M", "trainer": {"precision": 64}}
+    )
+    assert model.training
+    assert model.get_model_dtype() == torch.float64
+    foundation_model[1].assert_called_once()
 
 
 @pytest.mark.parametrize("value", [None, "0", "1"])

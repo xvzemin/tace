@@ -111,9 +111,10 @@ Run the update from the directory containing the statistics files:
 Example
 -------
 
-First, download a pretrained model from the
-:doc:`foundation model guide <foundation>`
-(you may also use a model pretrained by yourself).
+Choose a registered model name from the :doc:`foundation model guide <foundation>`
+or a local model file. Registered names are downloaded and cached automatically.
+Set ``finetune_from_model: TACE-OAM-7M`` in the training configuration to start
+from that model. ``resume_from_model``.
 
 You can then follow the example below, which consists of three main steps:
 
@@ -134,7 +135,7 @@ Example commands are shown below:
 
 .. code-block:: bash
 
-   tace-finetune -m TACE-OMat24-7M.pt
+   tace-finetune -m TACE-OMat24-7M
 
    # Start finetuning (configuration file specified as needed)
    tace-train -cn tace

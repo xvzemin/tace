@@ -14,6 +14,7 @@ from torch_geometric.loader import DataLoader
 
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KEYS, KeySpecification, update_keyspec_from_kwargs
+from tace.foundations import tace_foundations
 from tace.lightning import export_tace, load_tace
 from tace.models.compile import export_aotinductor
 from tace.utils.env import enable_acceleration
@@ -26,7 +27,13 @@ def parse_args():
         description="Export a TACE model for eval or native torch deployment.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", "--model", type=str, required=True, help="Model path")
+    parser.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        required=True,
+        help="Model file or registered foundation model name",
+    )
     parser.add_argument("-o", "--output", type=str, default=None, help="Output path")
     parser.add_argument(
         "--backend",
@@ -81,7 +88,10 @@ def parse_args():
 
 
 def _default_aoti_output_path(model_path: str) -> str:
-    return str(Path(model_path).with_suffix(".pt2"))
+    path = Path(model_path)
+    if str(model_path) in tace_foundations:
+        return str(path.with_name(path.name + ".pt2"))
+    return str(path.with_suffix(".pt2"))
 
 
 def _default_state_dict_output_path(model_path: str) -> str:

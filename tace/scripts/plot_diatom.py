@@ -31,7 +31,12 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Plot diatomic energy and radial-force curves for a TACE model."
     )
-    parser.add_argument("-m", "--model", required=True, help="Path to a TACE model")
+    parser.add_argument(
+        "-m",
+        "--model",
+        required=True,
+        help="Model file or registered foundation model name",
+    )
     parser.add_argument("-i", "--input", help="Optional ASE-readable DFT dataset")
     parser.add_argument(
         "--energy_key", default="energy", help="DFT energy key in atoms.info"

@@ -13,11 +13,10 @@ import openmm.unit as unit
 from openmmml import MLPotential
 from ase.io import read
 
-from tace.foundations import tace_foundations
 from tace.interface.ase import TACEAseCalc, add_dispersion
 
 
-model = tace_foundations["TACE-OAM-7M"]
+model = "TACE-OAM-7M"
 calculator = TACEAseCalc(
     model=model,
     dtype='float32',

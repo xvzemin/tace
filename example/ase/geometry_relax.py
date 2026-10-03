@@ -33,12 +33,11 @@ optimizer_cls = {
     "GOQN": ase.optimize.GoodOldQuasiNewton,
 }
 
-from tace.foundations import tace_foundations
 from tace.interface.ase import TACEAseCalc, add_dispersion
 
 
-# Put your (auto)download model in ~/.cache/tace
-model = tace_foundations["TACE-OAM-7M"]
+# Foundation models are downloaded and cached automatically.
+model = "TACE-OAM-7M"
 
 dtype = 'float32'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'

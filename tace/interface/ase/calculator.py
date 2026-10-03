@@ -32,8 +32,9 @@ class TACEAseCalc(Calculator):
 
     Parameters
     ----------
-    model_path : str
-        Path to the trained model, file ends with pt, .pth or .ckpt.
+    model : str, pathlib.Path or torch.nn.Module
+        Model file, registered foundation model name, or loaded model instance.
+        Files may end in .pt, .pth, .ckpt, or .pt2.
     dtype : str, optional
         Model dtype for computations, e.g., float32 or float64.
     device : str, optional

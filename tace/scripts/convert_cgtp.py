@@ -8,6 +8,7 @@
 import argparse
 from pathlib import Path
 
+from tace.foundations import tace_foundations
 from tace.lightning import convert_cgtp, export_tace, load_tace
 
 
@@ -16,7 +17,12 @@ def main():
         description="Automatically switch cgtp and o2_cgtp interactions.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", "--model", required=True, help="Model path")
+    parser.add_argument(
+        "-m",
+        "--model",
+        required=True,
+        help="Model file or registered foundation model name",
+    )
     parser.add_argument(
         "--dtype",
         choices=["float32", "float64"],
@@ -27,7 +33,8 @@ def main():
     args = parser.parse_args()
 
     path = Path(args.model)
-    output = path.with_name(f"{path.stem}-converted.pt")
+    name = path.name if args.model in tace_foundations else path.stem
+    output = path.with_name(f"{name}-converted.pt")
     if output.exists():
         parser.error(f"Output already exists: {output}")
 

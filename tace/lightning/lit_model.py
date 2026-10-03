@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 from torchmetrics import MetricCollection
 
 from tace.dataset.quantity import get_embedding_property, get_target_property
+from tace.foundations import resolve_model_path
 from tace.models.adapter import TensorModel
 from tace.utils._global import DEVICE, DTYPE
 from tace.utils.env import get_tace_apply_u_shift, get_tace_use_dens, set_tf32
@@ -582,7 +583,11 @@ def load_tace(
     dtype: Union[str, int, torch.dtype, None] = None,
     **kwargs: Any,
 ) -> TensorModel:
-    """Load an eager model or an AOTInductor package."""
+    """Load a model file, a registered foundation model, or a model instance.
+
+    Foundation model names are downloaded and cached automatically. File paths
+    support ``.pt``, ``.pth``, ``.ckpt``, and ``.pt2`` packages.
+    """
     set_tf32()
     device = DEVICE[device]
     try:
@@ -591,8 +596,9 @@ def load_tace(
         raise ValueError(f"Unsupported model dtype: {dtype!r}") from exc
     is_aoti = False
     if isinstance(model, (str, Path)):
-        model_path = str(model)
-        if model_path.endswith(".ckpt"):
+        model_path = resolve_model_path(model)
+        suffix = model_path.suffix.lower()
+        if suffix == ".ckpt":
             model = LightningWrapperModel.load_from_checkpoint(
                 model_path,
                 map_location=device,
@@ -600,12 +606,12 @@ def load_tace(
                 use_ema=use_ema,
                 dtype=requested_dtype,
             )
-        elif model_path.endswith(".pt2"):
+        elif suffix == ".pt2":
             from tace.models.compile import load_aotinductor
 
             model = load_aotinductor(model_path, device)
             is_aoti = True
-        elif model_path.endswith(".pt") or model_path.endswith(".pth"):
+        elif suffix in (".pt", ".pth"):
             model = torch.load(
                 model_path,
                 map_location=device,
@@ -625,7 +631,9 @@ def load_tace(
     elif isinstance(model, torch.nn.Module):
         is_aoti = hasattr(model, "compiled_model") and hasattr(model, "compile_device")
     else:
-        raise TypeError("Model must be a path or torch.nn.Module")
+        raise TypeError(
+            "Model must be a file path, foundation model name, or torch.nn.Module"
+        )
 
     model_dtype = (
         _dominant_floating_dtype(model["state_dict"].values())

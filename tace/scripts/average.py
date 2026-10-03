@@ -45,7 +45,11 @@ def average_models(model_paths, ema=False):
 def main():
     parser = argparse.ArgumentParser(description="SWA average TACE models")
     parser.add_argument(
-        "-m", "--models", nargs="+", required=True, help="Paths to model checkpoints"
+        "-m",
+        "--models",
+        nargs="+",
+        required=True,
+        help="Model files or registered foundation model names",
     )
     parser.add_argument(
         "-e",

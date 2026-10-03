@@ -23,7 +23,7 @@ def parse_args():
         "--model",
         type=str,
         required=True,
-        help="Model path, *.ckpt, *.pt, *.pth",
+        help="Model file or registered foundation model name",
     )
     parser.add_argument(
         "-u",

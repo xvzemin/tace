@@ -121,8 +121,24 @@ Dataset Overview
 Model Download and Cache
 ------------------------
 
-When loading a model through ``from tace.foundations import tace_foundations``, 
-the pretrained weights will be **downloaded automatically** and cached locally.
+Pass a registered model name directly to ``load_tace``, ``TACEAseCalc``,
+``TACETorchSimCalc``, or a command's ``--model`` argument. The weights are
+downloaded automatically and cached locally. Files ending in ``.pt``, ``.pth``,
+``.ckpt``, or ``.pt2`` are loaded as local files instead.
+
+.. code-block:: python
+
+    from tace.lightning import load_tace
+
+    model = load_tace("TACE-OAM-7M", device="cuda", dtype="float32")
+
+.. code-block:: bash
+
+    tace-eval -m TACE-OAM-7M -i structures.xyz
+    tace-export-eval -m TACE-OAM-7M --backend aoti --device cuda
+
+Names must match the registry exactly, including version suffixes such as
+``TECE-OAM-RRA-1.0``. An unknown name raises an error and lists available models.
 
 By default, all models are stored under::
 
@@ -157,12 +173,11 @@ as an ASE calculator:
 
     import torch
     from ase.io import read
-    from tace.foundations import tace_foundations
     from tace.interface.ase import TACEAseCalc, add_dispersion
 
     # Load a pretrained foundational model
     # The model will be auto-downloaded to ~/.cache/tace if not present
-    model = tace_foundations["TACE-OAM-7M"]
+    model = "TACE-OAM-7M"
 
     dtype = "float32"
     device = "cuda" if torch.cuda.is_available() else "cpu"

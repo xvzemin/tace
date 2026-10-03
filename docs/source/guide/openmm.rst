@@ -21,10 +21,9 @@ OpenMM-ML documentation: `docs <https://openmm.github.io/openmm-ml/dev/index.htm
     from openmmml import MLPotential
     from ase.io import read
 
-    from tace.foundations import tace_foundations
     from tace.interface.ase import TACEAseCalc, add_dispersion
 
-    model = tace_foundations["TACE-OAM-L"]
+    model = "TACE-OAM-L"
     calculator = TACEAseCalc(
         model=model,
         dtype='float32',

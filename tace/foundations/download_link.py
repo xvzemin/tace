@@ -6,6 +6,7 @@
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Union
 from urllib.parse import urlparse
 
 from huggingface_hub import hf_hub_download
@@ -107,6 +108,9 @@ class CachedModelRegistry(Mapping):
     def __iter__(self):
         return iter(self._registry)
 
+    def __contains__(self, key):
+        return key in self._registry
+
     def __len__(self):
         return len(self._registry)
 
@@ -122,3 +126,29 @@ class CachedModelRegistry(Mapping):
 tace_foundations = CachedModelRegistry(
     registry=OAM_SERIES | REICO_SERIES, legacy=LEGACY
 )
+
+
+def resolve_model_path(model: Union[str, Path]) -> Path:
+    """Resolve a model file or download a registered foundation model.
+
+    Parameters
+    ----------
+    model : str or pathlib.Path
+        Model file ending in ``.pt``, ``.pth``, ``.ckpt``, or ``.pt2``,
+        or an exact name from ``tace_foundations.list_models()``.
+
+    Returns
+    -------
+    pathlib.Path
+        Local model path. Registered models are cached under ``~/.cache/tace``.
+    """
+    path = Path(model).expanduser()
+    if path.suffix.lower() in (".pt", ".pth", ".ckpt", ".pt2"):
+        return path
+    if str(model) in tace_foundations:
+        return tace_foundations[str(model)]
+    raise ValueError(
+        f"Unknown model {str(model)!r}. Provide a .pt, .pth, .ckpt, or .pt2 file "
+        "or a registered foundation model name. Available models: "
+        + ", ".join(tace_foundations.list_models())
+    )

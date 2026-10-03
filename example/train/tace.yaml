@@ -9,7 +9,7 @@ defaults:
 # Specify the path to resume training, Files must be end with .ckpt
 resume_from_model: null
 
-# Specify the model to be fine-tuned. Files must be end with .ckpt, .pt, or .pth
+# Local .ckpt/.pt/.pth file or foundation model name, e.g. TACE-OAM-7M.
 finetune_from_model: null
 
 finetune: null # this field equals ./finetune_config.yaml, auto read or write directly here

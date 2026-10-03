@@ -22,8 +22,6 @@ integrator_cls = {
 
 from ase.io import read
 
-
-from tace.foundations import tace_foundations
 from tace.interface.torchsim import TACETorchSimCalc
 
 # === model ===
@@ -34,8 +32,8 @@ BaTiO3 = read('../data/BaTiO3.xyz', '0')
 init_conf = BaTiO3
 
 init_atomsList = [init_conf] * 2
-# Put your (auto)download model in ~/.cache/tace
-model = tace_foundations["TACE-OAM-7M"]
+# Foundation models are downloaded and cached automatically.
+model = "TACE-OAM-7M"
 
 dtype = 'float32'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'

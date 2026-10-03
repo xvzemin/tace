@@ -75,7 +75,8 @@ class TACETorchSimCalc(ModelInterface):
 
         Args:
             model (str | Path | torch.nn.Module | None): The TACE neural network model,
-                either as a path to a saved model or as a loaded torch.nn.Module instance.
+                as a model file, a registered foundation model name, or a loaded
+                torch.nn.Module instance.
             device (torch.device | None): The device to run computations on.
                 Defaults to CUDA if available, otherwise CPU.
             dtype (torch.dtype): The data type for tensor operations.

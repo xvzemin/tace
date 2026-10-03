@@ -17,7 +17,7 @@ def parse_args():
         "--model",
         type=str,
         required=True,
-        help="Path to model checkpoint (.ckpt or .pt or .pth)",
+        help="Model file or registered foundation model name",
     )
     return parser.parse_args()
 

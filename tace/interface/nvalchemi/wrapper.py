@@ -29,6 +29,7 @@ except ImportError as e:
         "`pip install nvalchemi-toolkit nvalchemi-toolkit-ops`."
     ) from e
 
+from tace.foundations import resolve_model_path
 from tace.lightning import export_tace, load_tace
 from tace.models.adapter import TensorModel
 from tace.models.utils import compute_symmetric_displacement
@@ -356,8 +357,7 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         model, so they belong to this factory rather than ``__init__``.
         """
 
-        # Checkpoint_path must be end with .ckpt, .pt, .pth or .pt2
-        checkpoint_path = Path(checkpoint_path)
+        checkpoint_path = resolve_model_path(checkpoint_path)
         _enable_tace_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,

@@ -14,7 +14,13 @@ def parse_args():
         description="Export a TACE model for training, fine-tuning, or transfer.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", "--model", type=str, required=True, help="Model path")
+    parser.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        required=True,
+        help="Model file or registered foundation model name",
+    )
     parser.add_argument(
         "-o", "--output", type=str, default=None, help="Output .pt path"
     )
