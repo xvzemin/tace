@@ -55,25 +55,6 @@ def evaluate_torch(metadata, inputs, source, target, num_nodes):
                 operands[0].reshape(edges, rows, width),
                 operands[1].reshape(edges, width, columns),
             ).flatten(1)
-        elif op == "channel_contract":
-            rows, width, channels, role = data
-            if role == 2:
-                value = torch.einsum(
-                    "bauc,buc->bac",
-                    operands[0].reshape(edges, rows, width, channels),
-                    operands[1].reshape(edges, width, channels),
-                )
-            elif role == 1:
-                value = torch.einsum(
-                    "bauc,bac->buc",
-                    operands[0].reshape(edges, rows, width, channels),
-                    operands[2].reshape(edges, rows, channels),
-                )
-            else:
-                value = operands[2].reshape(edges, rows, 1, channels) * operands[
-                    1
-                ].reshape(edges, 1, width, channels)
-            value = value.flatten(1)
         elif op == "product":
             (width, dims, paths), role, required = data
             parts = [[] for _ in range(dims[role])]

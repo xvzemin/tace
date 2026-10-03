@@ -17,4 +17,3 @@ Only the components recommended for users will be presented; components that are
    edge_update.rst
    inter.rst
    prod.rst
-   tece.rst

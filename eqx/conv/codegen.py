@@ -40,7 +40,7 @@ def source(
         for i in live
         if nodes[i][1]
         and (
-            nodes[i][0] in ("scatter", "product", "channel_contract")
+            nodes[i][0] in ("scatter", "product")
             or (nodes[i][0] == "matmul" and (nodes[i][3][1] > 2 or nodes[i][1] <= 256))
             or (
                 uses[i] > 1
@@ -175,13 +175,6 @@ def source(
         if op == "matmul":
             _, inner, columns = data
             return f"scalar sum=0; for(int k=0;k<{inner};++k) sum+={get(args[0], f'(i/{columns})*{inner}+k')}*{get(args[1], f'k*{columns}+i%{columns}')}; return sum;"
-        if op == "channel_contract":
-            rows, width, channels, role = data
-            if role == 0:
-                return f"return {get(args[2], f'(i/{width * channels})*{channels}+i%{channels}')}*{get(args[1], f'i%{width * channels}')};"
-            if role == 1:
-                return f"scalar sum=0; for(int k=0;k<{rows};++k) sum+={get(args[0], f'k*{width * channels}+i')}*{get(args[2], f'k*{channels}+i%{channels}')}; return sum;"
-            return f"scalar sum=0; for(int k=0;k<{width};++k) sum+={get(args[0], f'(i/{channels})*{width * channels}+k*{channels}+i%{channels}')}*{get(args[1], f'k*{channels}+i%{channels}')}; return sum;"
         if op == "product":
             (width, dims, entries), role, required = data
             groups = defaultdict(list)

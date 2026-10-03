@@ -26,8 +26,6 @@ from .representation import Representation
 
 
 class e3nnTACE(torch.nn.Module):
-    representation_cls = Representation
-
     def __init__(
         self,
         Lmax: int,
@@ -113,7 +111,7 @@ class e3nnTACE(torch.nn.Module):
             self.target_irreps = with_natural_parity(self.target_irreps)
 
         # === Representation/Descriptor ===
-        self.representation = self.representation_cls(
+        self.representation = Representation(
             num_layers=cfg["num_layers"],
             atomic_numbers=cfg["atomic_numbers"],
             cutoff=cfg["cutoff"],

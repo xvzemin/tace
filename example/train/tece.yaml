@@ -1,3 +1,0 @@
-defaults:
-  - benchmark_configs/3bpa_tece@_global_
-  - _self_
