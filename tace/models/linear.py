@@ -366,7 +366,7 @@ class e3nnLinear(torch.nn.Module):
         else:
             self.register_parameter("bias", None)
         bias_index = torch.zeros(self.irreps_out.dim, dtype=torch.long)
-        bias_mask = torch.zeros(self.irreps_out.dim)
+        bias_mask = torch.zeros(self.irreps_out.dim, dtype=torch.float64)
         for sl, bias_sl in zip(self._0e_slices, self._bias_slices):
             bias_index[sl] = torch.arange(bias_sl.start, bias_sl.stop)
             bias_mask[sl] = 1.0
@@ -474,7 +474,7 @@ class e3nnElementLinear(torch.nn.Module):
             else:
                 self.register_parameter("bias", None)
         bias_index = torch.zeros(self.irreps_out.dim, dtype=torch.long)
-        bias_mask = torch.zeros(self.irreps_out.dim)
+        bias_mask = torch.zeros(self.irreps_out.dim, dtype=torch.float64)
         for sl, bias_sl in zip(self._0e_slices, self._bias_slices):
             bias_index[sl] = torch.arange(bias_sl.start, bias_sl.stop)
             bias_mask[sl] = 1.0

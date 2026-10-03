@@ -32,20 +32,22 @@ class j0SphericalBesselBasis(torch.nn.Module):
                 start=1.0,
                 end=num_basis,
                 steps=num_basis,
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float64,
             )
         )
         if trainable:
-            self.bessel_weights = torch.nn.Parameter(bessel_roots)
+            self.bessel_weights = torch.nn.Parameter(
+                bessel_roots.to(torch.get_default_dtype())
+            )
         else:
             self.register_buffer("bessel_weights", bessel_roots)
 
         self.register_buffer(
-            "cutoff", torch.tensor(cutoff, dtype=torch.get_default_dtype())
+            "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
         self.register_buffer(
             "prefactor",
-            torch.tensor(math.sqrt(2.0 / cutoff), dtype=torch.get_default_dtype()),
+            torch.tensor(math.sqrt(2.0 / cutoff), dtype=torch.float64),
         )
 
     def forward(
@@ -291,17 +293,17 @@ class jnSphericalBesselBasis(torch.nn.Module):
         )
         self.register_buffer(
             "normalizer",
-            torch.tensor(normalizer, dtype=torch.get_default_dtype()).unsqueeze(0),
+            torch.tensor(normalizer, dtype=torch.float64).unsqueeze(0),
         )
         zeros = torch.tensor(
-            np.concatenate(zeros), dtype=torch.get_default_dtype()
+            np.concatenate(zeros), dtype=torch.float64
         ).unsqueeze(0)
         if trainable:
-            self.zeros = torch.nn.Parameter(zeros)
+            self.zeros = torch.nn.Parameter(zeros.to(torch.get_default_dtype()))
         else:
             self.register_buffer("zeros", zeros)
         self.register_buffer(
-            "cutoff", torch.tensor(cutoff, dtype=torch.get_default_dtype())
+            "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
         self.order = list(order)
         self.num_zero = list(num_basis)
@@ -354,7 +356,7 @@ class GaussianBasis(torch.nn.Module):
         self.cutoff = cutoff
         self.num_basis = num_basis
         self.width = width
-        offset = torch.linspace(0.0, cutoff, num_basis)
+        offset = torch.linspace(0.0, cutoff, num_basis, dtype=torch.float64)
         self.coeff = -0.5 / (width * (offset[1] - offset[0])).item() ** 2
         self.register_buffer("offset", offset, persistent=False)
 
@@ -414,7 +416,7 @@ class CosineCutoff(torch.nn.Module):
         super().__init__()
         self.register_buffer(
             "cutoff",
-            torch.tensor(cutoff, dtype=torch.get_default_dtype()),
+            torch.tensor(cutoff, dtype=torch.float64),
         )
 
     def forward(
@@ -442,7 +444,7 @@ class MollifierCutoff(torch.nn.Module):
     def __init__(self, cutoff: float, eps: float = 1e-9):
         super().__init__()
         self.register_buffer(
-            "cutoff", torch.tensor(cutoff, dtype=torch.get_default_dtype())
+            "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
         self.eps = eps
 
@@ -478,7 +480,7 @@ class C2PolynomialCutoff(torch.nn.Module):
         super().__init__()
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
         self.register_buffer(
-            "cutoff", torch.tensor(cutoff, dtype=torch.get_default_dtype())
+            "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
 
     def forward(
@@ -515,7 +517,7 @@ class C3PolynomialCutoff(torch.nn.Module):
         super().__init__()
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
         self.register_buffer(
-            "cutoff", torch.tensor(cutoff, dtype=torch.get_default_dtype())
+            "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
 
     def forward(
@@ -680,7 +682,7 @@ class AgnesiTransform(torch.nn.Module):
             "covalent_radii",
             torch.tensor(
                 ase.data.covalent_radii,
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float64,
             ),
         )
         if trainable:
@@ -688,9 +690,9 @@ class AgnesiTransform(torch.nn.Module):
             self.q = torch.nn.Parameter(torch.tensor(q, requires_grad=True))
             self.p = torch.nn.Parameter(torch.tensor(p, requires_grad=True))
         else:
-            self.register_buffer("q", torch.tensor(q, dtype=torch.get_default_dtype()))
-            self.register_buffer("p", torch.tensor(p, dtype=torch.get_default_dtype()))
-            self.register_buffer("a", torch.tensor(a, dtype=torch.get_default_dtype()))
+            self.register_buffer("q", torch.tensor(q, dtype=torch.float64))
+            self.register_buffer("p", torch.tensor(p, dtype=torch.float64))
+            self.register_buffer("a", torch.tensor(a, dtype=torch.float64))
 
     def forward(
         self,
@@ -735,15 +737,15 @@ class SoftTransform(torch.nn.Module):
             "covalent_radii",
             torch.tensor(
                 ase.data.covalent_radii,
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float64,
             ),
         )
         if trainable:
             self.a = torch.nn.Parameter(torch.tensor(a, requires_grad=True))
             self.b = torch.nn.Parameter(torch.tensor(b, requires_grad=True))
         else:
-            self.register_buffer("a", torch.tensor(a))
-            self.register_buffer("b", torch.tensor(b))
+            self.register_buffer("a", torch.tensor(a, dtype=torch.float64))
+            self.register_buffer("b", torch.tensor(b, dtype=torch.float64))
 
     def forward(
         self,
@@ -788,7 +790,7 @@ class ZBLBasis(torch.nn.Module):
         self.register_buffer(
             "c",
             torch.tensor(
-                [0.1818, 0.5099, 0.2802, 0.02817], dtype=torch.get_default_dtype()
+                [0.1818, 0.5099, 0.2802, 0.02817], dtype=torch.float64
             ),
         )
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
@@ -796,7 +798,7 @@ class ZBLBasis(torch.nn.Module):
             "covalent_radii",
             torch.tensor(
                 ase.data.covalent_radii,
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float64,
             ),
         )
         if trainable:
@@ -805,8 +807,8 @@ class ZBLBasis(torch.nn.Module):
                 torch.tensor(0.4543, requires_grad=True)
             )
         else:
-            self.register_buffer("a_exp", torch.tensor(0.300))
-            self.register_buffer("a_prefactor", torch.tensor(0.4543))
+            self.register_buffer("a_exp", torch.tensor(0.300, dtype=torch.float64))
+            self.register_buffer("a_prefactor", torch.tensor(0.4543, dtype=torch.float64))
 
         self.is_polynomial_cutoff = False
         if cutoff_fn == "mollifier":

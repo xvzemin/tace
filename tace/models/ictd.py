@@ -19,7 +19,7 @@ def ICTD(
     n_total: int,
     w: int = -1,  # if not -1, return first rank = n_total, weight = w
     decomposition: bool = True,
-    dtype=None,
+    dtype=torch.float64,
     device=None,
 ) -> Tuple[List[List[int]], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     n_now = 0

@@ -83,7 +83,7 @@ class e3nnTACE(torch.nn.Module):
             cfg["invariant_property"] + cfg["equivariant_property"]
         )
         self.register_buffer(
-            "cutoff", torch.tensor(cfg["cutoff"], dtype=torch.get_default_dtype())
+            "cutoff", torch.tensor(cfg["cutoff"], dtype=torch.float64)
         )
         self.register_buffer(
             "atomic_numbers", torch.tensor(cfg["atomic_numbers"], dtype=torch.int64)
@@ -284,6 +284,9 @@ class e3nnTACE(torch.nn.Module):
         #         cfg['normalizer'][p].get('mean', 0.0),
         #         cfg['normalizer'][p].get('rmsd', 1.0),
         #     )
+
+        # Constants are constructed in float64, then cast once for model execution.
+        self.to(dtype=torch.get_default_dtype())
 
     def readout_fn(
         self,

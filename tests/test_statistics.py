@@ -190,7 +190,9 @@ def test_energy_statistics_use_canonical_names(monkeypatch):
         },
         atomic_numbers=[1, 2],
     )
-    torch.testing.assert_close(scale_shift.shift, torch.tensor([[3.5, 3.5]]))
+    torch.testing.assert_close(
+        scale_shift.shift, torch.tensor([[3.5, 3.5]], dtype=torch.float64)
+    )
 
 
 def test_forces_statistics_use_canonical_names(monkeypatch):
@@ -279,7 +281,7 @@ def test_forces_statistics_use_canonical_names(monkeypatch):
     )
     torch.testing.assert_close(
         scale_shift.scale,
-        torch.full((1, 2), math.sqrt(35.0 / 9.0)),
+        torch.full((1, 2), math.sqrt(35.0 / 9.0), dtype=torch.float64),
     )
     assert stats["num_forces_by_element"] == {1: 2, 2: 1}
     torch.testing.assert_close(

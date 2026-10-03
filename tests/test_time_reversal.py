@@ -512,7 +512,7 @@ def test_gate_is_time_reversal_equivariant(gate_m0):
 )
 def test_linear_is_time_reversal_equivariant():
     irreps = o3.Irreps("2x0ee + 2x0eo + 2x1ee + 2x1eo")
-    linear = e3nnLinear(irreps, irreps)
+    linear = e3nnLinear(irreps, irreps).to(dtype=torch.get_default_dtype())
     assert type(linear.linear).__module__.startswith("e3nn.")
 
     features = torch.randn(5, irreps.dim)
@@ -534,7 +534,7 @@ def test_merge_layer_norm_is_time_reversal_equivariant():
         ls=irreps.ls,
         num_channels=2,
         irreps=irreps,
-    )
+    ).to(dtype=torch.get_default_dtype())
     with torch.no_grad():
         norm.affine_bias.fill_(0.25)
 

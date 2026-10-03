@@ -113,7 +113,9 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             self.model.reset_target_property(["energy"])
 
         atomic_numbers = model.get_atomic_numbers()
-        node_emb = torch.zeros(max(atomic_numbers) + 1, len(atomic_numbers))
+        node_emb = torch.zeros(
+            max(atomic_numbers) + 1, len(atomic_numbers), dtype=torch.float64
+        )
         for index, atomic_number in enumerate(atomic_numbers):
             node_emb[atomic_number, index] = 1.0
         self.register_buffer(

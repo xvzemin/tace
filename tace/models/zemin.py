@@ -39,7 +39,7 @@ def _cartesian_3j(l1: int, l2: int, l3: int) -> torch.Tensor:
     with torch.no_grad():
         Z = torch.einsum(
             "ijk, ai, bj, ck -> abc",
-            wigner_3j(l1, l2, l3),
+            wigner_3j(l1, l2, l3, dtype=torch.float64),
             ICTD(l1, l1, decomposition=False)[2][0],
             ICTD(l2, l2, decomposition=False)[2][0],
             ICTD(l3, l3, decomposition=False)[2][0],

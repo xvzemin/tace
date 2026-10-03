@@ -114,12 +114,12 @@ class CartesianHarmonics(torch.nn.Module):
             _, _, cart2sph, sph2cart = ICTD(l, l, decomposition=False)
             self.register_buffer(
                 f"C{l}",
-                cart2sph[0].to(torch.get_default_dtype()),
+                cart2sph[0],
                 persistent=False,
             )
             self.register_buffer(
                 f"CT{l}",
-                sph2cart[0].to(torch.get_default_dtype()),
+                sph2cart[0],
                 persistent=False,
             )
 

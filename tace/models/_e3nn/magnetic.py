@@ -126,7 +126,7 @@ class MagneticBasis(torch.nn.Module):
                 )
             values.append(row)
 
-        magnetic_scale = torch.tensor(values, dtype=torch.get_default_dtype())
+        magnetic_scale = torch.tensor(values, dtype=torch.float64)
         if not torch.isfinite(magnetic_scale).all() or (magnetic_scale <= 0.0).any():
             raise ValueError("all magnetic_scale values must be finite and positive")
         return magnetic_scale

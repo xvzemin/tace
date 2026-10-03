@@ -39,7 +39,7 @@ def test_tace_les_reads_out_latent_quantities_and_passes_them_to_upstream():
         use_alllayer=False,
         parity=True,
         irreps_in=[o3.Irreps("4x0e+3x1o+2x2e")],
-    )
+    ).to(dtype=torch.get_default_dtype())
     assert model.batch_external_field
     assert model.scale == {
         "latent_charges": 0.1,

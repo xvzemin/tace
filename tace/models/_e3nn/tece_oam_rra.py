@@ -171,9 +171,8 @@ class Convolution(torch.nn.Module):
                     for j in range(i + 1)
                     if ir in orders[i] * orders[j]
                 ]
-                # Older ECE used unnormalized complex products and a per-output
-                # path factor stored in the construction dtype.
-                scale = torch.tensor(len(paths) ** -0.5).item()
+                # Convert unnormalized complex products to normalized O(2) products.
+                scale = len(paths) ** -0.5
                 instructions.extend(
                     (i, j, m, "uuu", True, scale**2 * (2 if i and j else 1))
                     for i, j in paths

@@ -110,7 +110,7 @@ class EquivariantMergeLayerNorm(torch.nn.Module):
         self.normalization = normalization
 
         if self.std_balance_degrees:
-            balance_degree_weight = torch.zeros(self.dim, 1)
+            balance_degree_weight = torch.zeros(self.dim, 1, dtype=torch.float64)
             offset = 0
             for l in self.ls:
                 length = 2 * l + 1

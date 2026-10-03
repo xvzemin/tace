@@ -32,6 +32,145 @@ from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
 
 
+def test_constant_construction_precision():
+    from e3nn import o3
+
+    from tace.models._e3nn.basis_change import DirectVirials
+    from tace.models._e3nn.layer_norm import EquivariantMergeLayerNorm
+    from tace.models._e3nn.magnetic import MagneticBasis
+    from tace.models._e3nn.symmetric_contraction import Contraction
+    from tace.models.angular import CartesianHarmonics
+    from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
+    from tace.models.linear import e3nnLinear
+    from tace.models.radial import (
+        AgnesiTransform,
+        C2PolynomialCutoff,
+        C3PolynomialCutoff,
+        CosineCutoff,
+        GaussianBasis,
+        MollifierCutoff,
+        SoftTransform,
+        ZBLBasis,
+        j0SphericalBesselBasis,
+        jnSphericalBesselBasis,
+    )
+
+    constants = []
+    for dtype in (torch.float32, torch.float64):
+        torch.set_default_dtype(dtype)
+        modules = torch.nn.ModuleList(
+            [
+                j0SphericalBesselBasis(cutoff=4.123456789),
+                jnSphericalBesselBasis(cutoff=4.123456789, order=2),
+                GaussianBasis(cutoff=4.123456789),
+                CosineCutoff(4.123456789),
+                MollifierCutoff(4.123456789),
+                C2PolynomialCutoff(4.123456789),
+                C3PolynomialCutoff(4.123456789),
+                AgnesiTransform(),
+                SoftTransform(),
+                ZBLBasis("cosine"),
+                OneHotToAtomicEnergy([{1: -0.123456789}], [1]),
+                ScaleShift([1], [{1: 0.123456789}], [{1: -0.123456789}]),
+                MagneticBasis([3.123456789], 4, 1, [1]),
+                CartesianHarmonics(3),
+                DirectVirials(),
+                EquivariantMergeLayerNorm([0, 1, 2], 2),
+                e3nnLinear("2x0e + 2x1o", "2x0e + 2x1o"),
+                Contraction(
+                    o3.Irreps("2x0e + 2x1o"), o3.Irreps("0e"), 2, num_elements=1
+                ),
+            ]
+        )
+        buffers = {
+            f"{name}.{key}": value
+            for name, module in modules.named_modules()
+            if type(module).__module__.startswith("tace.")
+            for key, value in module.named_buffers(recurse=False)
+            if value.is_floating_point()
+        }
+        assert buffers
+        assert all(value.dtype == torch.float64 for value in buffers.values())
+        assert all(parameter.dtype == dtype for parameter in modules.parameters())
+        constants.append(buffers)
+
+    assert constants[0].keys() == constants[1].keys()
+    for name in constants[0]:
+        torch.testing.assert_close(
+            constants[0][name], constants[1][name], atol=0, rtol=0
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("interaction", ["cgtp", "o2"])
+def test_lightning_model_training_precision(dtype, interaction):
+    import lightning as L
+    from torch.utils.data import DataLoader
+
+    from tace.lightning import create_model
+
+    torch.set_default_dtype(dtype)
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=2,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        cutoff=4.0,
+        max_neighbors=None,
+    )
+    config["atomic_basis"]["type"] = interaction
+    config["atomic_basis"]["num_head"] = 1
+    config["radial_basis"]["hidden"] = [4]
+    config["radial_basis"]["apply_cutoff"] = False
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    statistics = [
+        {"atomic_numbers": [1], "atomic_energy": {1: 0.0}, "avg_num_neighbors": 2.0}
+    ]
+    model = create_model(config, statistics, ["energy", "forces"], [])
+    assert all(p.dtype == dtype for p in model.parameters())
+    assert all(b.dtype == dtype for b in model.buffers() if b.is_floating_point())
+    assert model.readout_fn.atomic_numbers.dtype == torch.int64
+
+    class TrainingModel(L.LightningModule):
+        def __init__(self):
+            super().__init__()
+            self.model = model
+
+        def training_step(self, batch, batch_idx):
+            output = self.model(batch)
+            assert output["energy"].dtype == dtype
+            assert output["forces"].dtype == dtype
+            loss = output["energy"].square().mean() + output["forces"].square().mean()
+            assert torch.isfinite(loss)
+            return loss
+
+        def on_after_backward(self):
+            gradients = [p.grad for p in self.parameters() if p.grad is not None]
+            assert gradients
+            assert all(g.dtype == dtype and torch.isfinite(g).all() for g in gradients)
+
+        def configure_optimizers(self):
+            return torch.optim.SGD(self.parameters(), lr=1e-3)
+
+    trainer = L.Trainer(
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1,
+        precision="32-true" if dtype == torch.float32 else "64-true",
+        max_steps=2,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        num_sanity_val_steps=0,
+    )
+    data = DataLoader([_magnetic_embedding_sample() for _ in range(2)], batch_size=None)
+    trainer.fit(TrainingModel(), train_dataloaders=data)
+    assert trainer.global_step == 2
+
+
 @pytest.fixture
 def foundation_model(tmp_path, monkeypatch, double_precision):
     import tace.foundations.download_link as downloads

@@ -29,7 +29,7 @@ def _wigner_nj(
     irrepss: List[o3.Irreps],
     normalization: str = "component",
     filter_ir_mid=None,
-    dtype=None,
+    dtype=torch.float64,
 ):
     irrepss = [o3.Irreps(irreps) for irreps in irrepss]
     if filter_ir_mid is not None:
@@ -103,7 +103,7 @@ def U_matrix_real(
     correlation: int,
     normalization: str = "component",
     filter_ir_mid=None,
-    dtype=None,
+    dtype=torch.float64,
     use_cueq_cg=True,
     use_nonsymmetric_product=False,
 ):
@@ -134,7 +134,7 @@ def U_matrix_real(
 
     current_ir = wigners[0][0]
     out = []
-    stack = torch.tensor([])
+    stack = torch.tensor([], dtype=dtype)
 
     for ir, _, base_o3 in wigners:
         if ir in irreps_out and ir == current_ir:
@@ -164,7 +164,7 @@ if CUET_AVAILABLE:
         irreps_in, irreps_out, correlation=2, use_nonsymmetric_product=False, dtype=None
     ):
         if dtype is None:
-            dtype = torch.get_default_dtype()
+            dtype = torch.float64
         U = []
         irreps_in = cue.Irreps(O3_e3nn, str(irreps_in))
         irreps_out = cue.Irreps(O3_e3nn, str(irreps_out))
@@ -203,7 +203,7 @@ if CUET_AVAILABLE:
                 return [
                     torch.zeros(
                         out_shape,
-                        dtype=torch.get_default_dtype(),
+                        dtype=dtype,
                     )
                 ]
             if U_matrix_full.shape[-1] == 0:
@@ -214,7 +214,7 @@ if CUET_AVAILABLE:
                 return [
                     torch.zeros(
                         out_shape,
-                        dtype=torch.get_default_dtype(),
+                        dtype=dtype,
                     )
                 ]
             ir_str = str(ir)
@@ -242,9 +242,9 @@ if CUET_AVAILABLE:
             rep1, rep2, rep3 = cls._from(rep1), cls._from(rep2), cls._from(rep3)
 
             if rep1.p * rep2.p == rep3.p:
-                return o3.wigner_3j(rep1.l, rep2.l, rep3.l).numpy()[None] * np.sqrt(
-                    rep3.dim
-                )
+                return o3.wigner_3j(
+                    rep1.l, rep2.l, rep3.l, dtype=torch.float64
+                ).numpy()[None] * np.sqrt(rep3.dim)
             return np.zeros((0, rep1.dim, rep2.dim, rep3.dim))
 
         def __lt__(  # pylint: disable=no-self-argument
@@ -351,8 +351,6 @@ class Contraction(torch.nn.Module):
         self.num_features = irreps_in.count((0, 1))
         self.coupling_irreps = o3.Irreps([irrep.ir for irrep in irreps_in])
         self.correlation = correlation
-        dtype = torch.get_default_dtype()
-
         path_weight = []
         for nu in range(1, correlation + 1):
             U_matrix = U_matrix_real(
@@ -360,7 +358,7 @@ class Contraction(torch.nn.Module):
                 irreps_out=irrep_out,
                 correlation=nu,
                 use_cueq_cg=use_reduced_cg,
-                dtype=dtype,
+                dtype=torch.float64,
             )[-1]
             path_weight.append(not torch.equal(U_matrix, torch.zeros_like(U_matrix)))
             self.register_buffer(f"U_matrix_{nu}", U_matrix)

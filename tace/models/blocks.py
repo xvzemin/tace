@@ -39,7 +39,7 @@ class OneHotToAtomicEnergy(torch.nn.Module):
             "atomic_energy",
             torch.tensor(
                 atomic_energy_list,
-                dtype=torch.get_default_dtype(),
+                dtype=torch.float64,
             ),
         )
 
@@ -87,9 +87,11 @@ class ScaleShift(torch.nn.Module):
             scale_list = []
             for d in scale_dicts:
                 scale_list.append([d.get(z, 1.0) for z in atomic_numbers])
-            scale_tensor = torch.tensor(scale_list, dtype=torch.get_default_dtype())
+            scale_tensor = torch.tensor(scale_list, dtype=torch.float64)
             if scale_trainable:
-                self.scale = torch.nn.Parameter(scale_tensor)
+                self.scale = torch.nn.Parameter(
+                    scale_tensor.to(torch.get_default_dtype())
+                )
             else:
                 self.register_buffer("scale", scale_tensor)
 
@@ -97,9 +99,11 @@ class ScaleShift(torch.nn.Module):
             shift_list = []
             for d in shift_dicts:
                 shift_list.append([d.get(z, 0.0) for z in atomic_numbers])
-            shift_tensor = torch.tensor(shift_list, dtype=torch.get_default_dtype())
+            shift_tensor = torch.tensor(shift_list, dtype=torch.float64)
             if shift_trainable:
-                self.shift = torch.nn.Parameter(shift_tensor)
+                self.shift = torch.nn.Parameter(
+                    shift_tensor.to(torch.get_default_dtype())
+                )
             else:
                 self.register_buffer("shift", shift_tensor)
 

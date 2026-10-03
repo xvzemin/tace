@@ -19,8 +19,8 @@ class FibonacciLattice:
             "num_points musst should be int and > 0"
         )
         GOLDEN_ANGLE = math.pi * (3 - math.sqrt(5))
-        i = torch.arange(num_points, dtype=torch.float32)
-        z = 1 - 2 * i / (num_points - 1) if num_points > 1 else torch.zeros(1)
+        i = torch.arange(num_points, dtype=torch.float64)
+        z = 1 - 2 * i / (num_points - 1) if num_points > 1 else torch.zeros_like(i)
         radius = torch.sqrt(1 - z * z)
         theta = GOLDEN_ANGLE * i
         x = torch.cos(theta) * radius
@@ -103,9 +103,9 @@ class HealpixLattice:
         npix = 12 * nside**2
         theta, phi = hp.pix2ang(nside, np.arange(npix), nest=False)
 
-        x = torch.from_numpy(np.sin(theta) * np.cos(phi)).float()
-        y = torch.from_numpy(np.sin(theta) * np.sin(phi)).float()
-        z = torch.from_numpy(np.cos(theta)).float()
+        x = torch.from_numpy(np.sin(theta) * np.cos(phi))
+        y = torch.from_numpy(np.sin(theta) * np.sin(phi))
+        z = torch.from_numpy(np.cos(theta))
 
         return torch.stack([x, y, z], dim=1)
 
@@ -179,7 +179,7 @@ class PlatonicSolidLattice:
                 [phi, 0, -1],
                 [-phi, 0, -1],
             ],
-            dtype=torch.float32,
+            dtype=torch.float64,
         )
 
         # Unitization: Projection onto the unit sphere

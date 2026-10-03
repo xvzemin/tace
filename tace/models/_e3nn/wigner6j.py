@@ -410,7 +410,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
 
         self.register_buffer(
             "node_node_weights",
-            torch.ones(self.node_tp.weight_numel),
+            torch.ones(self.node_tp.weight_numel, dtype=torch.float64),
             persistent=False,
         )
         self.register_buffer(

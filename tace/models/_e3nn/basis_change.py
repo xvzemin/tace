@@ -16,12 +16,12 @@ class _SymmetricRankTwoBasisChange(torch.nn.Module):
         PS, DS, CS, SS = ICTD(2)
         self.register_buffer(
             "zero",
-            SS[2].view(3, 3).to(dtype=torch.get_default_dtype()),
+            SS[2].view(3, 3),
             persistent=False,
         )
         self.register_buffer(
             "two",
-            SS[0].view(5, 3, 3).to(dtype=torch.get_default_dtype()),
+            SS[0].view(5, 3, 3),
             persistent=False,
         )
         del PS, DS, CS, SS
