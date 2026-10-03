@@ -158,9 +158,7 @@ class UvuTensorProduct(torch.nn.Module):
         self.shared_weights = shared_weights
         use_oeq = acceleration_enabled("oeq")
         oeq_compatible = all(mul == 1 for mul, _ in irreps_in2)
-        oeq_compatible = oeq_compatible and all(
-            ins[4] for ins in instructions
-        )
+        oeq_compatible = oeq_compatible and all(ins[4] for ins in instructions)
         self.use_oeq = use_oeq and oeq_compatible
 
         if use_oeq and not oeq_compatible:
@@ -277,6 +275,7 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
         edge_index,
         edge_cutoff,
         edge_vector=None,
+        radial_network=None,
     ):
         """Contract Cartesian edge tensors and reduce directly to nodes."""
         if edge_cutoff is not None and edge_vector is None:
@@ -289,6 +288,7 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
             edge_index,
             vectors=edge_vector,
             amplitudes=edge_cutoff,
+            radial_network=radial_network,
         )
 
 
@@ -436,6 +436,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
         edge_index,
         edge_cutoff,
         edge_vector=None,
+        radial_network=None,
     ):
         """Fuse the final radial projection with the indexed CGTP."""
         if edge_cutoff is not None and edge_vector is None:
@@ -448,6 +449,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
             edge_index,
             vectors=edge_vector,
             amplitudes=edge_cutoff,
+            radial_network=radial_network,
         )
         return self.reshape_out(message)
 
@@ -508,7 +510,16 @@ class O2ScatterTensorProduct(torch.nn.Module):
         return self.reshape_out(message)
 
     def forward_stream(
-        self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
+        self,
+        node_feats,
+        radial,
+        projection,
+        edge_index,
+        wigner,
+        edge_cutoff,
+        graph,
+        *,
+        radial_network=None,
     ):
         """Evaluate the radial projection and fused angular convolution."""
         harmonic_scale = (
@@ -525,6 +536,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
             edge_index,
             node_feats.size(0),
             vectors=graph.edge_vector,
+            radial_network=radial_network,
         )
         return self.reshape_out(message)
 
@@ -592,7 +604,16 @@ class UuO2ScatterTensorProduct(torch.nn.Module):
         return self.reshape_out.inverse(message)
 
     def forward_stream(
-        self, node_feats, radial, projection, edge_index, wigner, edge_cutoff, graph
+        self,
+        node_feats,
+        radial,
+        projection,
+        edge_index,
+        wigner,
+        edge_cutoff,
+        graph,
+        *,
+        radial_network=None,
     ):
         """Fuse rotations, local paths, radial projection, and gather/scatter."""
         vectors = graph.edge_vector if graph is not None else None
@@ -630,5 +651,6 @@ class UuO2ScatterTensorProduct(torch.nn.Module):
             edge_index,
             node_feats.size(0),
             vectors=vectors,
+            radial_network=radial_network,
         )
         return self.reshape_out.inverse(message)

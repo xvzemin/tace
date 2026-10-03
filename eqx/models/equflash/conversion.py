@@ -74,6 +74,9 @@ class FullConv(torch.nn.Module):
             layout="ir_mul",
             normalization=normalization,
             normalize=normalize,
+            radial_network=torch.nn.Sequential(
+                OrderedDict(list(module.weight_nn.named_children())[:-1])
+            ),
         )
         # Merge paths along channels after node aggregation, not on edges.
         indices = []
@@ -88,7 +91,6 @@ class FullConv(torch.nn.Module):
                         )
         self.convolution.output_index = torch.tensor(indices, dtype=torch.long)
         self.weight_nn = RadialFeatures(
-            OrderedDict(list(module.weight_nn.named_children())[:-1]),
             hs=module.weight_nn.hs[:-1],
         ).train(module.weight_nn.training)
         self.denominator = module.denominator
@@ -149,10 +151,16 @@ def convert_equflash_to_eqx(
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
+    converted_modules = {
+        child
+        for module in model.modules()
+        if isinstance(module, Convolution)
+        for child in module.modules()
+    }
     options = {
         (m.normalization, m.normalize)
         for m in model.modules()
-        if isinstance(m, o3.SphericalHarmonics)
+        if m not in converted_modules and isinstance(m, o3.SphericalHarmonics)
     }
     if len(options) > 1:
         raise NotImplementedError(

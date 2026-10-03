@@ -439,9 +439,20 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
             rand(edges, 3),
             rand(edges, 1).sigmoid(),
         )
+        width = 1024 if magnetic and attention and packed else 128 if attention else 64
+        network = (
+            torch.nn.Sequential(
+                torch.nn.Linear(module.weight_numel, width),
+                torch.nn.SiLU(),
+                torch.nn.Linear(width, module.weight_numel),
+            )
+            .cuda()
+            .double()
+        )
         index = torch.randint(4, (2, edges), device="cuda")
         inputs = (x, vectors, weights, radial, cutoff) + ((mag,) if magnetic else ())
         inputs += tuple(module.parameters())
+        inputs += tuple(network.parameters())
 
         def run(enabled):
             monkeypatch.setenv("TACE_USE_EQX", str(int(enabled)))
@@ -451,11 +462,16 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
                 else frame(vectors)
             )
             args = (
-                (x, mag, weights, index, w, wi)
+                (x, mag, weights if enabled else network(weights), index, w, wi)
                 if magnetic
-                else (x, weights, index, w, wi)
+                else (x, weights if enabled else network(weights), index, w, wi)
             )
-            value = module(*args, edge_radial_basis=radial, edge_cutoff=cutoff)
+            value = module(
+                *args,
+                edge_radial_basis=radial,
+                edge_cutoff=cutoff,
+                radial_network=network if enabled else None,
+            )
             result = [value]
             if edges:
                 for _ in range(3 if magnetic and attention and mmax == 2 else 2):
@@ -888,6 +904,13 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         ]
     ]
     x, radial, projection, bias, rotation, inverse, basis = values
+    network = (
+        torch.nn.Sequential(
+            torch.nn.Linear(9, 64), torch.nn.SiLU(), torch.nn.Linear(64, 3)
+        ).to(device=device, dtype=torch.float64)
+        if edges == 7
+        else torch.nn.Sequential()
+    )
     # Frames rotate each O(3) degree independently; rows are ordered by m.
     degrees = torch.tensor([0, 1, 2, 1, 2, 1, 2, 2, 2], device=device)
     columns = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2], device=device)
@@ -905,10 +928,20 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         index[1] = (torch.arange(edges, device=device) % 5 == 0).long()
         with torch.no_grad():
             cutoff[::7] = 0
+    radial_input = (
+        ((radial, "edge"), (x[:, :3], "source"), (x[:, :3], "target"))
+        if edges == 7
+        else radial
+    )
+    reference_radial = (
+        torch.cat((radial, x[index[0], :3], x[index[1], :3]), -1)
+        if edges == 7
+        else radial
+    )
     actual = stream(
         module,
         x,
-        radial,
+        radial_input,
         projection,
         bias,
         index,
@@ -916,12 +949,19 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         rotation,
         inverse,
         basis,
+        radial_network=network,
     )
     expected = module(
-        x, radial @ projection + bias, index, cutoff, rotation, inverse, basis
+        x,
+        network(reference_radial) @ projection + bias,
+        index,
+        cutoff,
+        rotation,
+        inverse,
+        basis,
     )
     torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-10)
-    inputs = (*values, cutoff, *module.parameters())
+    inputs = (*values, cutoff, *module.parameters(), *network.parameters())
     losses = [v.square().sum() for v in (actual, expected)]
     for _ in range(3):
         grads = [
@@ -937,10 +977,12 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         ]
     if device == "cuda" and edges == 7:
         compiled = torch.compile(
-            lambda *args: stream(module, *args), backend="aot_eager", fullgraph=True
+            lambda *args: stream(module, *args, radial_network=network),
+            backend="aot_eager",
+            fullgraph=True,
         )
         output = compiled(
-            x, radial, projection, bias, index, cutoff, rotation, inverse, basis
+            x, radial_input, projection, bias, index, cutoff, rotation, inverse, basis
         )
         torch.testing.assert_close(output, expected, atol=1e-11, rtol=1e-10)
         gradients = [

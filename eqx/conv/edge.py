@@ -29,7 +29,15 @@ def evaluate_torch(metadata, inputs, source, target, num_nodes):
             value = operands[0] + operands[1]
         elif op == "mul":
             value = operands[0] * operands[1]
-        elif op in ("exp", "sin", "cos", "tanh", "sigmoid", "reciprocal"):
+        elif op in ("normalize", "inv_norm"):
+            x = operands[0]
+            if data[1]:
+                x = x - x.mean(-1, keepdim=True)
+            inverse = (x.square().mean(-1, keepdim=True) + data[0]).rsqrt()
+            value = x * inverse if op == "normalize" else inverse.expand_as(x)
+        elif op == "mean":
+            value = operands[0].mean(-1, keepdim=True).expand_as(operands[0])
+        elif op in ("exp", "sin", "cos", "tanh", "sigmoid", "reciprocal", "rsqrt"):
             value = getattr(torch, op)(operands[0])
         elif op == "silu":
             value = torch.nn.functional.silu(operands[0])

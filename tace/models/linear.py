@@ -16,6 +16,16 @@ from tace.utils.env import acceleration_enabled, get_tace_use_matrix_weight
 IndexedFeatures = tuple[tuple[torch.Tensor, torch.Tensor | None], ...]
 
 
+def radial_features(features):
+    """Retain radial, target and source partitions from Element2EdgeUpdate."""
+    if isinstance(features, tuple):
+        return tuple(
+            (value, kind)
+            for (value, _), kind in zip(features, ("edge", "target", "source"))
+        )
+    return features
+
+
 def _lora_scaling(module: torch.nn.Module) -> float:
     return float(module.lora_alpha) / float(module.lora_r)
 

@@ -63,6 +63,8 @@ def source(
         # them into each edge's workspace dominates wide derivative programs.
         and (dependent[i] or nodes[i][1] <= 256)
     }
+    if mode == "pointwise":
+        stored = set()
     order = sorted(stored)
     position = {i: k for k, i in enumerate(order)}
 
@@ -316,6 +318,18 @@ def source(
           __syncthreads();
         }}"""
         count_outputs = 3
+    elif mode == "pointwise":
+        root, slot, kind = outputs[0]
+        if len(outputs) != 1 or kind != "edge":
+            raise ValueError("Pointwise programs require one edge output.")
+        width = nodes[root][1]
+        body = f"""
+        for(long long k=(long long)blockIdx.x*blockDim.x+threadIdx.x;k<count*{width};k+=(long long)blockDim.x*gridDim.x) {{
+          long long edge=k/{width}; int i=k%{width};
+          State state{{{initializer}, nullptr, edge, 0, 0}};
+          out0[k]=state.v{root}(i);
+        }}"""
+        count_outputs = 1
     else:
         destinations = sorted(set(slot for _, slot, _ in outputs))
         writes = []

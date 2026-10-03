@@ -157,8 +157,13 @@ without retraining:
 Use ``implementation="co3"`` for Cartesian contractions with a spherical
 product basis. With ``TACE_USE_EQX=1``, Cartesian harmonics, delta/epsilon
 contractions, and graph reduction are fused. Edge messages are not stored;
-radial projection uses bounded temporary workspaces. Cartesian-to-spherical
+the full radial MLP uses bounded temporary workspaces and recomputes hidden
+activations during backward. Edge embedding is unchanged. Cartesian-to-spherical
 projection follows the node-level channel Linear, outside the kernel.
+
+Full radial-MLP streaming also applies to spherical CGTP, aligned CGTP,
+Uu/Uv O(2), magnetic Uv O(2), and TECE-OAM-RRA interactions. It preserves the
+weights and supports force training; runtime depends on graph size and MLP width.
 
 The default ``implementation="auto"`` switches each CGTP interaction to the
 other form. Conversion returns a copy; recreate its optimizer before training.

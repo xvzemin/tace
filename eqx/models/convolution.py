@@ -9,19 +9,12 @@ from eqx.kernels import wigner_D
 from eqx.o2 import O3TensorProduct, WignerD
 
 
-class RadialFeatures(torch.nn.Sequential):
-    """Evaluate radial layers preceding an affine projection."""
+class RadialFeatures(torch.nn.Identity):
+    """Pass radial inputs to the convolution while retaining width metadata."""
 
-    def __init__(self, layers, bias=False, hs=()):
-        super().__init__(layers)
-        self.bias = bias
+    def __init__(self, hs=()):
+        super().__init__()
         self.hs = list(hs)
-
-    def forward(self, inputs):
-        features = super().forward(inputs)
-        if self.bias:
-            features = torch.cat((features, torch.ones_like(features[:, :1])), dim=-1)
-        return features
 
 
 class Convolution(torch.nn.Module):
@@ -45,6 +38,8 @@ class Convolution(torch.nn.Module):
         Whether edge harmonics are evaluated on unit vectors.
     packed_dim : int
         Packed Wigner entries appended after edge harmonics, if supplied.
+    radial_network : torch.nn.Module, optional
+        Radial layers preceding the final affine projection.
     """
 
     def __init__(
@@ -58,6 +53,7 @@ class Convolution(torch.nn.Module):
         normalization="component",
         normalize=True,
         packed_dim=0,
+        radial_network=None,
     ):
         super().__init__()
         if implementation not in ("o3", "o2"):
@@ -67,6 +63,7 @@ class Convolution(torch.nn.Module):
         self.implementation = implementation
         self.backend = backend
         self.projection = projection
+        self.radial_network = radial_network
         self.irreps_in1 = tensor_product.irreps_in1
         self.irreps_in2 = tensor_product.irreps_in2
         self.irreps_out = tensor_product.irreps_out
@@ -165,6 +162,10 @@ class Convolution(torch.nn.Module):
         if self.input_index.numel():
             node_feats = node_feats.index_select(-1, self.input_index)
         projection = self.empty_projection
+        network = self.radial_network
+        if network is not None and (self.backend != "cuda" or not node_feats.is_cuda):
+            radial = network(radial)
+            network = None
         if self.projection is not None:
             if self.affine:
                 projection = self.projection.weight.T
@@ -177,6 +178,8 @@ class Convolution(torch.nn.Module):
             bias = getattr(self.projection, "bias", None)
             if bias is not None:
                 projection = torch.cat((projection, bias[None]), dim=0)
+                if network is None:
+                    radial = torch.cat((radial, torch.ones_like(radial[:, :1])), dim=-1)
         if self.implementation == "o3":
             attributes = edge_attrs[:, : self.harmonic_dim]
             if self.attribute_index.numel():
@@ -187,6 +190,7 @@ class Convolution(torch.nn.Module):
                 radial.contiguous(),
                 projection,
                 edge_index,
+                radial_network=network,
             )
         else:
             vectors = None
@@ -223,6 +227,7 @@ class Convolution(torch.nn.Module):
                 edge_index,
                 node_feats.size(0),
                 vectors=vectors,
+                radial_network=network,
             )
         if self.output_index.numel():
             message = message.index_select(-1, self.output_index)

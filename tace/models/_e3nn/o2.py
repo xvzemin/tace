@@ -109,6 +109,7 @@ def uv_convolution(
     wigner_inv,
     edge_radial_basis,
     edge_cutoff,
+    radial_network=None,
 ):
     """Call the shared UV kernel without changing checkpoint parameter ownership."""
     linears = [module.linear_up, module.linear_down]
@@ -130,6 +131,7 @@ def uv_convolution(
         edge_cutoff,
         tuple(value for linear in linears for value in (linear.weight, linear.bias)),
         radial_attention,
+        radial_network=radial_network,
     )
     return module.reshape_out.inverse(message)
 
@@ -343,6 +345,7 @@ class UvO2ScatterTensorProduct(torch.nn.Module):
         wigner_inv: Optional[torch.Tensor],
         edge_radial_basis: Optional[torch.Tensor] = None,
         edge_cutoff: Optional[torch.Tensor] = None,
+        radial_network=None,
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
@@ -362,6 +365,7 @@ class UvO2ScatterTensorProduct(torch.nn.Module):
                 wigner_inv,
                 edge_radial_basis,
                 edge_cutoff,
+                radial_network=radial_network,
             )
         node_features, source_features, target_features = self._to_local(
             node_feats, edge_index, wigner
@@ -634,6 +638,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
         wigner_inv: Optional[torch.Tensor],
         edge_radial_basis: Optional[torch.Tensor] = None,
         edge_cutoff: Optional[torch.Tensor] = None,
+        radial_network=None,
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
@@ -657,6 +662,7 @@ class O2ScatterMagneticTensorProduct(torch.nn.Module):
                 wigner_inv,
                 edge_radial_basis,
                 edge_cutoff,
+                radial_network=radial_network,
             )
         (
             node_features,

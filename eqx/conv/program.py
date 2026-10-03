@@ -18,19 +18,36 @@ def activate(program, value, module):
         return program.scale(
             activate(program, value, module.activation), module.scale_factor
         )
+    if name in ("ScaledSiLU", "ScaledSigmoid", "ScaledTanh"):
+        return program.scale(
+            program.unary(
+                {
+                    "ScaledSiLU": "silu",
+                    "ScaledSigmoid": "sigmoid",
+                    "ScaledTanh": "tanh",
+                }[name],
+                value,
+            ),
+            module.scale_factor,
+        )
     operations = {
         "SiLU": "silu",
         "Sigmoid": "sigmoid",
         "Tanh": "tanh",
         "Identity": "identity",
+        "silu": "silu",
+        "tanh": "tanh",
+        "sigmoid": "sigmoid",
     }
+    if hasattr(module, "__name__"):
+        name = module.__name__
     if name not in operations:
         raise NotImplementedError(f"Fused activation does not support {name}.")
     return value if name == "Identity" else program.unary(operations[name], value)
 
 
 class Program:
-    """A vector expression evaluated by one cooperative CUDA block per edge.
+    """A fixed-width expression graph for fused edge operations.
 
     Parameters and node features remain external arrays. Intermediate vectors
     have a fixed width independent of the number of edges. Reverse programs
@@ -107,6 +124,21 @@ class Program:
         )
 
     def matmul(self, x, weight, rows, inputs, outputs):
+        if rows == 1 and self.nodes[x][0] == "concat":
+            parts, offset = [], 0
+            for value in self.nodes[x][2]:
+                width = self.size(value)
+                parts.append(
+                    self.matmul(
+                        value,
+                        self.slice(weight, offset * outputs, width * outputs),
+                        1,
+                        width,
+                        outputs,
+                    )
+                )
+                offset += width
+            return self.sum(parts, outputs)
         return self.add("matmul", rows * outputs, (x, weight), (rows, inputs, outputs))
 
     def product(self, values, metadata, role, required=0):
@@ -150,6 +182,54 @@ class Program:
                 x, y = args
                 accumulate(x, self.binary("mul", grad, y))
                 accumulate(y, self.binary("mul", grad, x))
+            elif op == "convolution":
+                kind, metadata, output, weighted, shape, order = data
+                geometric = kind == "o3" and len(parse_metadata(metadata)) > 3
+                values = list(args)
+                values[output] = grad
+                weighted = weighted or output in (1, 2)
+                for role, x in enumerate(args):
+                    if role == output or not needed[x] or not self.size(x):
+                        continue
+                    operands, result = values, role
+                    if geometric and role == 5:
+                        operands = values + [x]
+                        result = len(values)
+                    accumulate(
+                        x,
+                        self.add(
+                            "convolution",
+                            self.size(x),
+                            operands,
+                            (kind, metadata, result, weighted, shape, order + 1),
+                        ),
+                    )
+            elif op in ("normalize", "inv_norm"):
+                x = args[0]
+                inverse = self.add("inv_norm", size, (x,), data)
+                normalized = self.add("normalize", size, (x,), data)
+                if op == "inv_norm":
+                    factor = self.binary("mul", inverse, inverse)
+                    factor = self.binary("mul", factor, normalized)
+                    dx = self.scale(
+                        self.binary("mul", self.unary("mean", grad), factor), -1
+                    )
+                else:
+                    dot = self.unary("mean", self.binary("mul", grad, normalized))
+                    dx = self.binary(
+                        "add", grad, self.scale(self.binary("mul", normalized, dot), -1)
+                    )
+                    if data[1]:
+                        dx = self.binary(
+                            "add", dx, self.scale(self.unary("mean", grad), -1)
+                        )
+                    dx = self.binary("mul", dx, inverse)
+                accumulate(x, dx)
+            elif op == "mean":
+                accumulate(args[0], self.unary("mean", grad))
+            elif op == "rsqrt":
+                cube = self.binary("mul", self.binary("mul", i, i), i)
+                accumulate(args[0], self.binary("mul", grad, self.scale(cube, -0.5)))
             elif op == "reciprocal":
                 factor = self.scale(self.binary("mul", i, i), -1)
                 accumulate(args[0], self.binary("mul", grad, factor))

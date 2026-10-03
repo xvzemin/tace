@@ -206,13 +206,14 @@ def convert_mace_to_eqx(
                     normalization=attributes.normalization,
                     normalize=attributes.normalize,
                     packed_dim=getattr(attributes, "packed_dim", 0),
+                    radial_network=torch.nn.Sequential(
+                        OrderedDict(list(net.named_children())[:-1])
+                    ),
                 ).train(layer.conv_tp.training)
             )
             radial_features.append(
                 RadialFeatures(
-                    OrderedDict(list(net.named_children())[:-1]),
-                    affine and projection.bias is not None,
-                    radial.hs,
+                    hs=radial.hs,
                 ).train(radial.training)
             )
         for layer, convolution, radial in zip(

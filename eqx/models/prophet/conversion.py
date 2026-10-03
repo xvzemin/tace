@@ -76,7 +76,7 @@ def convert_prophet_to_eqx(
         for index, layer in enumerate(net.layers[:-1]):
             layers[f"linear_{index}"] = layer
             layers[f"activation_{index}"] = net.activation
-        radial = RadialFeatures(layers, projection.bias is not None).train(net.training)
+        radial = RadialFeatures().train(net.training)
         parameter = next(module.parameters())
         with default_dtype(parameter.dtype):
             convolution = (
@@ -85,6 +85,7 @@ def convert_prophet_to_eqx(
                     projection,
                     implementation=implementation,
                     backend=backend,
+                    radial_network=torch.nn.Sequential(layers),
                 )
                 .to(parameter.device)
                 .train(module.tp.training)

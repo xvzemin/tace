@@ -13,7 +13,7 @@ from tace.utils.torch_scatter import scatter_sum
 
 from ..lammps import Graph
 from ..layout import LayoutTransform
-from ..linear import IndexedFeatures, e3nnLinear
+from ..linear import IndexedFeatures, e3nnLinear, radial_features
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
@@ -42,7 +42,9 @@ class O3CgtpInteraction(Interaction):
 
     @property
     def use_eqx(self) -> bool:
-        return hasattr(self.rejector, "eqx_tp") and bool(acceleration_enabled("eqx", kernel="conv"))
+        return hasattr(self.rejector, "eqx_tp") and bool(
+            acceleration_enabled("eqx", kernel="conv")
+        )
 
     def _prepare_setup(self) -> None:
         pass
@@ -92,9 +94,7 @@ class O3CgtpInteraction(Interaction):
         )
 
         self.edge_info = MLP(
-            [self.edge_feats_channel]
-            + self.radial_mlp
-            + [self.rejector.weight_numel],
+            [self.edge_feats_channel] + self.radial_mlp + [self.rejector.weight_numel],
             bias=self.radial_bias,
             layer_norm=self.radial_layer_norm,
             act="silu",
@@ -108,9 +108,7 @@ class O3CgtpInteraction(Interaction):
                 layer_norm=self.radial_layer_norm,
                 act="silu",
             )
-            self.alpha = torch.nn.Parameter(
-                torch.tensor(self.avg_num_neighbors**0.5)
-            )
+            self.alpha = torch.nn.Parameter(torch.tensor(self.avg_num_neighbors**0.5))
             self.beta = torch.nn.Parameter(torch.tensor(0.0))
 
         if (self.use_first_resnet or self.layer > 0) and self.resnet_type == "BB":
@@ -180,27 +178,27 @@ class O3CgtpInteraction(Interaction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ] = None,
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
         if self.use_eqx:
-            radial = edge_feats
-            for layer in self.edge_info.mlp[:-1]:
-                radial = layer(radial)
+            radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
             projection = last.get_weight()
             if last.bias is not None:
-                radial = torch.cat(
-                    (radial, radial.new_ones((radial.size(0), 1))), dim=-1
-                )
                 projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
             return self.rejector.forward_stream(
-                node_feats, edge_attrs, radial, projection, edge_index, edge_cutoff,
+                node_feats,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                edge_cutoff,
                 edge_vector=graph.edge_vector / graph.edge_length
-                if graph is not None else None,
+                if graph is not None
+                else None,
+                radial_network=self.edge_info.mlp[:-1],
             )
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
@@ -219,9 +217,7 @@ class O3CgtpInteraction(Interaction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None],
         edge_wigner_inv: Union[torch.Tensor, None],
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ],
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         batch: torch.Tensor,
         graph: Graph,
@@ -238,7 +234,10 @@ class O3CgtpInteraction(Interaction):
         # projection; there is no hidden linear map to consume the partitions.
         if isinstance(edge_feats, tuple) and self.edge_info.num_layers == 1:
             edge_feats = torch.cat(
-                [value if index is None else value[index] for value, index in edge_feats],
+                [
+                    value if index is None else value[index]
+                    for value, index in edge_feats
+                ],
                 dim=-1,
             )
 
@@ -386,15 +385,10 @@ class O2CgtpInteraction(O3CgtpInteraction):
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
         if self.use_eqx:
-            radial = edge_feats
-            for layer in self.edge_info.mlp[:-1]:
-                radial = layer(radial)
+            radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
             projection = last.get_weight()
             if last.bias is not None:
-                radial = torch.cat(
-                    (radial, radial.new_ones((radial.size(0), 1))), dim=-1
-                )
                 projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
             return self.rejector.forward_stream(
                 node_feats,
@@ -404,6 +398,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
                 edge_wigner,
                 edge_cutoff,
                 graph,
+                radial_network=self.edge_info.mlp[:-1],
             )
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
@@ -485,9 +480,7 @@ class UvSO2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ] = None,
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
@@ -498,9 +491,7 @@ class UvSO2Interaction(O3CgtpInteraction):
         ):
             from eqx.models.tace.tece_oam_rra.interaction import stream
 
-            radial = edge_feats
-            for layer in self.edge_info.mlp[:-1]:
-                radial = layer(radial)
+            radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
             return stream(
                 self.rejector,
@@ -513,6 +504,7 @@ class UvSO2Interaction(O3CgtpInteraction):
                 edge_wigner,
                 edge_wigner_inv,
                 edge_radial_basis,
+                radial_network=self.edge_info.mlp[:-1],
             )
         return self.rejector(
             node_feats,
@@ -549,9 +541,7 @@ class UvO2Interaction(O3CgtpInteraction):
             ](),
             odd_scalar_act=ACTIVATION[
                 (
-                    self.scalar_act[1]
-                    if isinstance(self.scalar_act, list)
-                    else "tanh"
+                    self.scalar_act[1] if isinstance(self.scalar_act, list) else "tanh"
                 ).removeprefix("scaled_")
             ](),
             tensor_act=ACTIVATION[
@@ -568,9 +558,7 @@ class UvO2Interaction(O3CgtpInteraction):
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ],
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
@@ -578,6 +566,7 @@ class UvO2Interaction(O3CgtpInteraction):
         edge_wigner_inv: Union[torch.Tensor, None],
         edge_radial_basis: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
+        radial_network=None,
     ) -> torch.Tensor:
         return self.rejector(
             node_feats,
@@ -587,6 +576,7 @@ class UvO2Interaction(O3CgtpInteraction):
             edge_wigner_inv,
             edge_radial_basis=edge_radial_basis,
             edge_cutoff=edge_cutoff,
+            radial_network=radial_network,
         )
 
     def _prepare_setup(self) -> None:
@@ -620,13 +610,20 @@ class UvO2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ] = None,
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
-        conv_weights = self.edge_info(edge_feats)
+        radial_network = (
+            self.edge_info
+            if self.use_eqx and self.rejector.eqx_tp is not None and node_feats.is_cuda
+            else None
+        )
+        conv_weights = (
+            radial_features(edge_feats)
+            if radial_network is not None
+            else self.edge_info(edge_feats)
+        )
         return self._apply_rejector(
             node_feats,
             magnetic_node_info,
@@ -637,6 +634,7 @@ class UvO2Interaction(O3CgtpInteraction):
             edge_wigner_inv,
             edge_radial_basis,
             edge_cutoff,
+            radial_network=radial_network,
         )
 
 
@@ -682,15 +680,10 @@ class UuO2Interaction(O3CgtpInteraction):
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
         if self.use_eqx:
-            radial = edge_feats
-            for layer in self.edge_info.mlp[:-1]:
-                radial = layer(radial)
+            radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
             projection = last.get_weight()
             if last.bias is not None:
-                radial = torch.cat(
-                    (radial, radial.new_ones((radial.size(0), 1))), dim=-1
-                )
                 projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
             return self.rejector.forward_stream(
                 node_feats,
@@ -700,6 +693,7 @@ class UuO2Interaction(O3CgtpInteraction):
                 edge_wigner,
                 edge_cutoff,
                 graph,
+                radial_network=self.edge_info.mlp[:-1],
             )
         conv_weights = self.edge_info(edge_feats)
         return self.rejector(
@@ -722,9 +716,11 @@ class O2MagneticInteraction(UvO2Interaction):
             raise ValueError("o2_mag requires magnetic_edge_irreps.")
         if not 0 <= self.magnetic_edge_irreps.lmax <= self.Lmax:
             raise ValueError("magnetic edge irreps must satisfy 0 <= lmax <= Lmax.")
-        self.magnetic_edge_irreps_out = o3.Irreps(
-            [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
-        ).sort().irreps.simplify()
+        self.magnetic_edge_irreps_out = (
+            o3.Irreps([(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps])
+            .sort()
+            .irreps.simplify()
+        )
 
         # A magnetic SOC edge carries both the spatial bond harmonics and the
         # magnetic source-target tensor product.  We do not truncate their
@@ -744,17 +740,19 @@ class O2MagneticInteraction(UvO2Interaction):
             lmax=output_lmax,
         )
         self.irreps_out = (
-            self.irrreps_tp_out * self.num_channel
-        ).sort().irreps.simplify()
+            (self.irrreps_tp_out * self.num_channel).sort().irreps.simplify()
+        )
 
         # Match the skip connection to the product-basis output constructed
         # from the corrected interaction irreps.
         if self.layer == self.num_layers - 1:
             irreps_sc = o3.Irreps(self.target_irreps)
         elif self.correlation == 1:
-            irreps_sc = o3.Irreps(
-                [(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax]
-            ).sort().irreps.simplify()
+            irreps_sc = (
+                o3.Irreps([(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax])
+                .sort()
+                .irreps.simplify()
+            )
         else:
             irreps_sc = _to_possible_tp_irreps(
                 self.irreps_out,
@@ -781,9 +779,7 @@ class O2MagneticInteraction(UvO2Interaction):
             ](),
             odd_scalar_act=ACTIVATION[
                 (
-                    self.scalar_act[1]
-                    if isinstance(self.scalar_act, list)
-                    else "tanh"
+                    self.scalar_act[1] if isinstance(self.scalar_act, list) else "tanh"
                 ).removeprefix("scaled_")
             ](),
             tensor_act=ACTIVATION[
@@ -831,16 +827,15 @@ class O2MagneticInteraction(UvO2Interaction):
     ) -> torch.Tensor:
         source_info, target_info = magnetic_node_info
         source, target = edge_index
-        return self.source_magnetic_info(source_info)[source] * (
-            self.target_magnetic_info(target_info)[target]
+        return (
+            self.source_magnetic_info(source_info)[source]
+            * (self.target_magnetic_info(target_info)[target])
         )
 
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ],
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,
@@ -848,6 +843,7 @@ class O2MagneticInteraction(UvO2Interaction):
         edge_wigner_inv: Union[torch.Tensor, None],
         edge_radial_basis: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
+        radial_network=None,
     ) -> torch.Tensor:
         if magnetic_node_info is None or magnetic_edge_attrs is None:
             raise ValueError(
@@ -867,6 +863,7 @@ class O2MagneticInteraction(UvO2Interaction):
             edge_wigner_inv,
             edge_radial_basis,
             edge_cutoff,
+            radial_network=radial_network,
         )
 
 
@@ -888,8 +885,5 @@ interaction_aliases = {
 }
 
 INTERACTION.update(
-    {
-        alias: INTERACTION[target]
-        for alias, target in interaction_aliases.items()
-    }
+    {alias: INTERACTION[target] for alias, target in interaction_aliases.items()}
 )

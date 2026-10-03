@@ -34,9 +34,7 @@ class IrrepsConvolution(torch.nn.Module):
         if not isinstance(net, torch.nn.Sequential) or not len(net):
             raise NotImplementedError("Expected a sequential SevenNet radial MLP.")
         projection = net[-1]
-        self.weight_nn = RadialFeatures(
-            OrderedDict(list(net.named_children())[:-1]), hs=net.hs
-        )
+        self.weight_nn = RadialFeatures(hs=net.hs)
         self.convolution = Convolution(
             module.convolution,
             projection,
@@ -44,6 +42,9 @@ class IrrepsConvolution(torch.nn.Module):
             backend=backend,
             normalization=normalization,
             normalize=normalize,
+            radial_network=torch.nn.Sequential(
+                OrderedDict(list(net.named_children())[:-1])
+            ),
         )
 
     def forward(self, data):
@@ -92,7 +93,17 @@ def convert_sevennet_to_eqx(
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
-    harmonics = [m for m in model.modules() if isinstance(m, o3.SphericalHarmonics)]
+    converted_modules = {
+        child
+        for module in model.modules()
+        if isinstance(module, Convolution)
+        for child in module.modules()
+    }
+    harmonics = [
+        m
+        for m in model.modules()
+        if m not in converted_modules and isinstance(m, o3.SphericalHarmonics)
+    ]
     options = {(m.normalization, m.normalize) for m in harmonics}
     if implementation == "o2" and len(options) > 1:
         raise NotImplementedError(

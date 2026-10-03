@@ -21,7 +21,7 @@ class TensorProductScatter(Convolution):
 
 
 def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend="cuda"):
-    """Replace NequIP interaction contractions and final radial projections.
+    """Fuse NequIP interaction contractions and radial networks.
 
     Parameters
     ----------
@@ -45,10 +45,17 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
+    converted_modules = {
+        child
+        for module in model.modules()
+        if isinstance(module, Convolution)
+        for child in module.modules()
+    }
     harmonics = [
         m
         for m in model.modules()
-        if type(m).__name__ == "SphericalHarmonics"
+        if m not in converted_modules
+        and type(m).__name__ == "SphericalHarmonics"
         and type(m).__module__.split(">.")[-1].startswith("e3nn.")
     ]
     options = {(m.normalization, m.normalize) for m in harmonics}
@@ -123,14 +130,14 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
                     backend=backend,
                     normalization=normalization,
                     normalize=normalize,
+                    radial_network=torch.nn.Sequential(
+                        OrderedDict(list(net.named_children())[:-1])
+                    ),
                 )
                 .to(parameter.device)
                 .train(module.tp_scatter.training)
             )
-        radial = RadialFeatures(
-            OrderedDict(list(net.named_children())[:-1]),
-            projection.bias is not None,
-        ).train(module.edge_mlp.training)
+        radial = RadialFeatures().train(module.edge_mlp.training)
         module.tp_scatter = convolution
         module.edge_mlp = radial
         return module

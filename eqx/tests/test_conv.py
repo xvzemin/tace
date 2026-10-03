@@ -8,6 +8,216 @@ from eqx import conv as eqx_conv
 from eqx import o2
 
 
+@pytest.mark.parametrize("kind", ["o3", "o2", "wigner", "uu", "cartesian"])
+@pytest.mark.parametrize("width", [64, 128, 1024])
+def test_radial_network(kind, width, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    args = (
+        "2x0e+2x1o",
+        "0e+1o",
+        "2x0e+2x1o",
+        [(0, 0, 0, "uvu", True), (1, 1, 0, "uvu", True), (0, 1, 1, "uvu", True)],
+    )
+    if kind == "uu":
+        frame = o2.LocalFrame(args[0])
+        linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 2)
+        module = eqx_conv.UuO2TensorProductConv(frame, linear, frame).cuda()
+    else:
+        from eqx import co3
+
+        tp = (
+            co3.TensorProduct
+            if kind == "cartesian"
+            else o3.TensorProduct
+            if kind == "o3"
+            else o2.O3TensorProduct
+        )(*args, internal_weights=False, shared_weights=False)
+        module = (
+            eqx_conv.CartesianTensorProductConv
+            if kind == "cartesian"
+            else eqx_conv.O3TensorProductConv
+            if kind == "o3"
+            else eqx_conv.O2O3TensorProductConv
+        )(tp).cuda()
+    network = torch.nn.Sequential(
+        torch.nn.Linear(3, width),
+        torch.nn.LayerNorm(width),
+        torch.nn.SiLU(),
+        torch.nn.Linear(width, width),
+        torch.nn.RMSNorm(width),
+        torch.nn.SiLU(),
+    ).cuda()
+    x = torch.randn(3, 8, device="cuda", requires_grad=True)
+    radial = torch.randn(7, 3, device="cuda", requires_grad=True)
+    projection = (
+        torch.randn(width, module.weight_numel, device="cuda", requires_grad=True)
+        / width**0.5
+    )
+    vectors = torch.randn(7, 3, device="cuda", requires_grad=True)
+    index = torch.randint(3, (2, 7), device="cuda")
+    amplitude = torch.ones(
+        7, 1 if kind == "uu" else 2, device="cuda", requires_grad=True
+    )
+    if kind == "uu":
+        with pytest.raises(ValueError, match="final linear weight"):
+            module(
+                x,
+                radial,
+                projection.new_empty((0, module.weight_numel)),
+                None,
+                amplitude,
+                index,
+                3,
+                vectors=vectors,
+                radial_network=network,
+            )
+
+    def evaluate(fused):
+        r = radial
+        if not fused:
+            for layer in network:
+                if isinstance(layer, torch.nn.LayerNorm):
+                    # An explicit expression also supplies third derivatives;
+                    # native LayerNorm saves detached variance statistics.
+                    r = r - r.mean(-1, keepdim=True)
+                    r = r * (r.square().mean(-1, keepdim=True) + layer.eps).rsqrt()
+                    r = r * layer.weight + layer.bias
+                else:
+                    r = layer(r)
+        kwargs = dict(vectors=vectors, radial_network=network if fused else None)
+        if kind in ("o3", "cartesian"):
+            return module(x, None, r, projection, index, amplitudes=amplitude, **kwargs)
+        if kind == "uu":
+            return module(x, r, projection, None, amplitude, index, 3, **kwargs)
+        return module(
+            x,
+            r,
+            projection,
+            None,
+            amplitude,
+            index,
+            3,
+            method="wigner" if kind == "wigner" else "baseline",
+            **kwargs,
+        )
+
+    actual, expected = evaluate(True), evaluate(False)
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    inputs = (x, radial, projection, vectors, amplitude, *network.parameters())
+    for order in range(3):
+        seed = torch.randn_like(actual)
+        ga = torch.autograd.grad(
+            actual, inputs, seed, create_graph=True, allow_unused=True
+        )
+        gb = torch.autograd.grad(
+            expected, inputs, seed, create_graph=True, allow_unused=True
+        )
+        for input_index, (a, b) in enumerate(zip(ga, gb)):
+            if b is not None:
+                torch.testing.assert_close(
+                    a,
+                    b,
+                    atol=1e-8,
+                    rtol=1e-8,
+                    msg=lambda message: (
+                        f"derivative order {order + 1}, input {input_index}: {message}"
+                    ),
+                )
+        actual = sum(g.square().sum() for g in ga if g is not None) / 100
+        expected = sum(g.square().sum() for g in gb if g is not None) / 100
+
+
+@pytest.mark.parametrize("kind", ["o3", "o2"])
+@pytest.mark.parametrize("edges", [0, 7])
+def test_radial_network_compiled(kind, edges, monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import execution
+
+    launch = execution.launch
+    monkeypatch.setattr(execution, "launch", lambda *args: launch(*args, tile_size=3))
+    tp = (o3.TensorProduct if kind == "o3" else o2.O3TensorProduct)(
+        "2x0e+2x1o",
+        "0e+1o",
+        "2x0e",
+        [(0, 0, 0, "uvu", True), (1, 1, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    module = (
+        eqx_conv.O3TensorProductConv if kind == "o3" else eqx_conv.O2O3TensorProductConv
+    )(tp).cuda()
+    network = torch.nn.Sequential(torch.nn.Linear(6, 8), torch.nn.SiLU()).cuda()
+    inputs = [
+        torch.randn(*shape, device="cuda", requires_grad=True)
+        for shape in (
+            (3, 8),
+            (edges, 2),
+            (3, 2),
+            (3, 2),
+            (edges, 3),
+            (9, tp.weight_numel),
+        )
+    ]
+    index = torch.randint(3, (2, edges), device="cuda")
+    amplitudes = torch.ones(edges, 2, device="cuda")
+
+    def evaluate(x, radial, source, target, vectors, projection, stream=True):
+        if stream:
+            radial = ((radial, "edge"), (source, "source"), (target, "target"))
+        else:
+            radial = network(
+                torch.cat((radial, source[index[0]], target[index[1]]), -1)
+            )
+            radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+        kwargs = dict(vectors=vectors, radial_network=network if stream else None)
+        if kind == "o3":
+            return module(
+                x, None, radial, projection, index, amplitudes=amplitudes, **kwargs
+            )
+        return module(
+            x,
+            radial,
+            projection,
+            None,
+            amplitudes,
+            index,
+            3,
+            method="baseline",
+            **kwargs,
+        )
+
+    compiled = torch.compile(
+        evaluate, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    actual, expected = compiled(*inputs), evaluate(*inputs, stream=False)
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+    if edges:
+        variables = (*inputs, *network.parameters())
+        actual_grads = torch.autograd.grad(actual.sum(), variables)
+        expected_grads = torch.autograd.grad(expected.sum(), variables)
+        for a, b in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        def force(*values):
+            energy = evaluate(*values)
+            return torch.autograd.grad(
+                energy.square().sum(), values[4], create_graph=True
+            )[0]
+
+        traced = make_fx(force)(*inputs)
+        compiled = torch.compile(traced, backend="aot_eager", fullgraph=True)
+        actual, expected = compiled(*inputs), force(*inputs)
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+        actual_grads = torch.autograd.grad(actual.square().sum(), variables)
+        expected_grads = torch.autograd.grad(expected.square().sum(), variables)
+        for a, b in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-8)
+
+
 def assert_native_autograd(value):
     """Reject custom autograd functions in a PyTorch reference graph."""
     pending, visited = [value.grad_fn], set()
@@ -3872,7 +4082,7 @@ def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     value = program.binary("add", program.matmul(z, w, 1, width, 4), b)
     value = program.unary("silu", program.binary("mul", x, value))
     metadata = repr((tuple(program.nodes), ((value, 0, "target"),)))
-    assert execution.uses_matrix_products(metadata) == (width > 128)
+    assert execution.uses_matrix_products(metadata)
     tiled = execution.launch
 
     def launch(*args):

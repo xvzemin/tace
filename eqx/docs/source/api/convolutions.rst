@@ -15,8 +15,24 @@ change floating-point summation order.
 
 Warm up the required derivatives and automatic method selection before
 ``torch.compile`` or timing. Exported models require EQX operator registration
-and the CUDA runtime. Node-level channel maps and preceding radial MLP layers
-remain outside the fused CGTP operators.
+and the CUDA runtime. Node-level channel maps and edge embeddings remain outside
+the fused operators.
+
+Pass ``radial_network`` to evaluate the full radial MLP in bounded CUDA tiles.
+Hidden activations and path weights are not retained over all edges; backward
+recomputes them within each tile. Dense layers use matrix multiplication,
+including wide hidden layers. This is exact evaluation, not interpolation.
+The PyTorch backend evaluates the same network with ordinary autograd.
+
+For tensor-product convolutions, ``radial_network`` supplies the layers before
+``projection``. For ``UvO2TensorProductConv`` it includes the final layer that
+produces the convolution coefficients. Linear, SiLU, sigmoid, tanh, LayerNorm
+and RMSNorm layers are supported.
+
+Radial inputs may be partitioned as ``((edge, "edge"), (node, "source"),
+(node, "target"))``. Their channels are concatenated in the declared order.
+Node contributions to the first linear layer are projected before gathering.
+Edge embeddings themselves are unchanged.
 
 Tensor-product convolutions
 ---------------------------

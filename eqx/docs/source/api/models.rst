@@ -13,6 +13,10 @@ harmonic convolution, not a different model symmetry. Load weights and set
 the device and dtype before conversion, then construct the optimizer.
 Converted state dictionaries require the same converted architecture.
 
+The adapters move the complete radial MLP into the convolution. Edge embedding
+and radial basis evaluation are unchanged. Parameters retain their values and
+remain trainable; only their module paths change.
+
 Converters
 ----------
 
