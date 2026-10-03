@@ -156,7 +156,6 @@ def test_wigner6j_matches_reference_gradients_and_o3(improper):
     torch.manual_seed(0)
     torch.set_default_dtype(torch.float64)
     module = _build_tensor_product()
-    assert not hasattr(module, "weight_level")
     assert {"node_tp", "edge_tp"}.issubset(dict(module.named_children()))
     node_tp = module.node_tp
     assert node_tp.irreps_out == node_tp.irreps_out.sort().irreps

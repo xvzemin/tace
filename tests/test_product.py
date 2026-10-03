@@ -7,9 +7,12 @@ import pytest
 import torch
 from e3nn import o3
 
+import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
+import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
 from tace.models._e3nn.fused import UuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
+from tace.models.eqt.equitorch.nn import TensorProduct
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
@@ -460,3 +463,127 @@ def test_time_reversal_labels_preserved(monkeypatch):
     features = torch.randn(3, model.irreps_in.dim, requires_grad=True)
     out = model(features, torch.ones(3, 1), None, torch.zeros(3, dtype=torch.long))
     assert torch.isfinite(torch.autograd.grad(out.square().sum(), features)[0]).all()
+
+
+@pytest.mark.parametrize(
+    ("setting", "correlation", "expected_setting", "expected_product"),
+    [
+        (None, 2, None, False),
+        (None, 3, None, True),
+        ("0", 3, False, False),
+        ("1", 2, True, True),
+    ],
+)
+def test_product_eqt_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str | None,
+    correlation: int,
+    expected_setting: bool | None,
+    expected_product: bool,
+) -> None:
+    if setting is None:
+        monkeypatch.delenv("TACE_USE_EQT", raising=False)
+    else:
+        monkeypatch.setenv("TACE_USE_EQT", setting)
+
+    product = make_product("2x0e+2x1o", correlation, nonlinear=None)
+    assert acceleration_enabled("eqt") is expected_setting
+    assert all(ace.use_eqt is expected_product for ace in product.aces)
+    assert all(hasattr(ace, "fused_tp") is expected_product for ace in product.aces)
+
+
+def _reference_segment(
+    source: torch.Tensor,
+    indptr: torch.Tensor,
+    *,
+    reduce: str,
+) -> torch.Tensor:
+    assert reduce == "sum"
+    indptr = indptr.squeeze(0)
+    return torch.stack(
+        [
+            source[:, start:end].sum(dim=1)
+            for start, end in zip(indptr[:-1].tolist(), indptr[1:].tolist())
+        ],
+        dim=1,
+    )
+
+
+def test_eqt_first_derivative_skips_unused_intermediate_gradient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tensor_product = TensorProduct(
+        "0e+1o",
+        "0e+1o",
+        "0e+1o",
+        channels_in1=2,
+        channels_in2=2,
+        channels_out=2,
+        internal_weights=True,
+    ).to(device="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.float64)
+    tensor_product.weight.requires_grad_(False)
+    input1 = torch.randn(
+        2,
+        tensor_product.irreps_in1_dim,
+        2,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    input2 = torch.randn_like(input1, requires_grad=True)
+
+    sparse_mul_calls = 0
+    sparse_mul = tensor_products.sparse_mul
+
+    def tracked_sparse_mul(*args, **kwargs):
+        nonlocal sparse_mul_calls
+        sparse_mul_calls += 1
+        return sparse_mul(*args, **kwargs)
+
+    monkeypatch.setattr(tensor_products, "sparse_mul", tracked_sparse_mul)
+    output = tensor_product(input1, input2)
+    torch.autograd.grad(output.sum(), (input1, input2))
+
+    assert sparse_mul_calls == 6
+
+
+@pytest.mark.parametrize("channels", [4, 64])
+def test_eqt_scatter_values_and_derivatives(monkeypatch, channels):
+    tensor_product = TensorProduct(
+        "0e+1o+2e",
+        "0e+1o+2e",
+        "0e+1o+2e",
+        channels_in1=channels,
+        channels_in2=channels,
+        channels_out=channels,
+        internal_weights=True,
+    ).to(device="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.float64)
+    input1 = torch.randn(
+        3,
+        tensor_product.irreps_in1_dim,
+        channels,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    input2 = torch.randn_like(input1, requires_grad=True)
+    inputs = (input1, input2, tensor_product.weight)
+    installed_segment = sparse_product.segment_csr
+
+    def derivatives(segment):
+        monkeypatch.setattr(sparse_product, "segment_csr", segment)
+        value = tensor_product(input1, input2)
+        result = [value.detach()]
+        for _ in range(3):
+            gradients = torch.autograd.grad(
+                value.sin().sum(), inputs, create_graph=True
+            )
+            result.extend(g.detach() for g in gradients)
+            value = torch.cat([g.flatten() for g in gradients]) / channels
+        return result
+
+    expected = derivatives(_reference_segment)
+    segments = [None] if installed_segment is None else [None, installed_segment]
+    for segment in segments:
+        for actual, reference in zip(derivatives(segment), expected):
+            torch.testing.assert_close(actual, reference, atol=1e-10, rtol=1e-10)

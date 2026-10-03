@@ -28,6 +28,7 @@ from tace.models._e3nn.o2 import (
     UvO2ScatterTensorProduct,
 )
 from tace.models._e3nn.representation import Representation
+from tace.models.layout import LayoutTransform
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
@@ -1482,6 +1483,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     actual = module({key: value.clone() for key, value in data.items()})
     for key in ("energy", "forces", "stress", "virials"):
         torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
+
     for model, output in ((reference, expected), (module, actual)):
         sum(
             output[key].square().sum() for key in ("energy", "forces", "stress")
@@ -1601,3 +1603,60 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     actual = module({key: value.clone() for key, value in data.items()})
     for key in ("energy", "forces", "stress", "virials"):
         torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
+
+
+@pytest.mark.parametrize(
+    "layout_in",
+    ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
+)
+@pytest.mark.parametrize(
+    "layout_out",
+    ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
+)
+def test_layout_transform_supports_every_layout_pair(layout_in, layout_out) -> None:
+    irreps = o3.Irreps("3x0e+3x1o+3x1o+3x2e")
+    flatten_mul_ir = torch.randn(
+        5, irreps.dim, dtype=DTYPE, device=DEVICE, requires_grad=True
+    )
+    blocks = []
+    offset = 0
+    for mul, ir in irreps:
+        width = mul * ir.dim
+        blocks.append(
+            flatten_mul_ir[..., offset : offset + width].reshape(5, mul, ir.dim)
+        )
+        offset += width
+    mul_ir = torch.cat(blocks, dim=-1)
+    ir_mul = mul_ir.transpose(-1, -2)
+    layouts = {
+        "ir_mul": ir_mul,
+        "mul_ir": mul_ir,
+        "flatten_ir_mul": ir_mul.flatten(-2),
+        "flatten_mul_ir": flatten_mul_ir,
+    }
+    transform = LayoutTransform(
+        irreps,
+        layout_in=layout_in,
+        layout_out=layout_out,
+    ).to(DEVICE)
+    observed = transform(layouts[layout_in])
+    torch.testing.assert_close(observed, layouts[layout_out])
+    torch.testing.assert_close(transform.inverse(observed), layouts[layout_in])
+    seed = torch.randn_like(observed)
+    gradients = [
+        torch.autograd.grad((output * seed).sum(), flatten_mul_ir, retain_graph=True)[0]
+        for output in (observed, layouts[layout_out])
+    ]
+    torch.testing.assert_close(*gradients)
+    assert not transform.state_dict()
+
+
+def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> None:
+    irreps = o3.Irreps("2x0e+3x1o")
+    features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)
+    transform = LayoutTransform(
+        irreps,
+        layout_in="flatten_mul_ir",
+        layout_out="flatten_ir_mul",
+    ).to(DEVICE)
+    torch.testing.assert_close(transform.inverse(transform(features)), features)

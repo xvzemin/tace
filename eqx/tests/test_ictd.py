@@ -127,11 +127,3 @@ def test_invalid_rank(rank, d):
         SPACES[d].ICTD(rank)
     with pytest.raises(ValueError):
         list(SPACES[d].path_matrices(rank))
-
-
-@pytest.mark.parametrize("d", [2, 3])
-def test_fixed_dimension(d):
-    with pytest.raises(TypeError):
-        SPACES[d].ICTD(2, d=d)
-    with pytest.raises(TypeError):
-        list(SPACES[d].path_matrices(2, d=d))

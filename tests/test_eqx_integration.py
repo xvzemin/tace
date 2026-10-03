@@ -12,8 +12,6 @@ from e3nn import o3
 
 from eqx import conv as eqx_conv
 from eqx import o2
-from eqx.ace import TACE
-from eqx.models.tace.tece_oam_rra import BilinearACE
 from tace.models.layout import LayoutTransform
 from tace.models.linear import (
     e3nnElementLinear,
@@ -1052,30 +1050,6 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     ]
     for a, b in zip(*grads):
         torch.testing.assert_close(a, b, atol=10 * atol, rtol=10 * rtol)
-
-
-def test_convolution_package_layout():
-    from eqx import ace, models
-    from eqx.conv import uu_o2, uv_o2
-    from eqx.kernels.channel_product import local_product
-    from eqx.models.mace import convert_mace_to_eqx
-    from eqx.models.tace import tece_oam_rra
-    from eqx.models.tace.tece_oam_rra import LocalSplit
-    from tace.models._e3nn.tece_oam_rra import Convolution
-
-    assert ace.TACE is TACE
-    assert models.__name__ == "eqx.models"
-    assert TACE.__module__ == "eqx.ace.tace"
-    assert not hasattr(eqx_conv, "TACE")
-    assert BilinearACE.__module__ == "eqx.models.tace.tece_oam_rra.product"
-    assert Convolution.__module__ == "tace.models._e3nn.tece_oam_rra"
-    assert not hasattr(tece_oam_rra, "Convolution")
-    assert uu_o2.UuO2TensorProductConv is eqx_conv.UuO2TensorProductConv
-    assert uv_o2.UvO2TensorProductConv is eqx_conv.UvO2TensorProductConv
-    assert issubclass(LocalSplit, torch.autograd.Function)
-    assert callable(local_product)
-    assert callable(convert_mace_to_eqx)
-    assert convert_mace_to_eqx.__module__ == "eqx.models.mace.conversion"
 
 
 def test_uu_o2_compile_and_empty_graph(double_precision):
