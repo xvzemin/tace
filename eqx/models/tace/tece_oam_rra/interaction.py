@@ -19,18 +19,24 @@ def stream(
     wigner,
     wigner_inv,
     radial_basis,
+    *,
+    radial_network=None,
 ):
     """Fuse the complete edge update without graph replay or Python callbacks.
 
     Edge tiles use matrix products for dense contractions and CUDA kernels
-    for intervening expressions. Only attention scores span all edges;
-    convolution weights and local features are recomputed in bounded tiles.
+    for intervening expressions. Only attention scores are retained per edge.
+    Other intermediates are recomputed in bounded tiles.
     """
     if bias is None:
         bias = projection.new_zeros(projection.shape[1])
     if cutoff is None:
-        cutoff = radial.new_ones((radial.shape[0], 1))
+        cutoff = features.new_ones((edge_index.shape[1], 1))
     if not features.is_cuda or module._eqx_metadata is None:
+        if radial_network is not None:
+            from ....conv.network import materialize
+
+            radial = radial_network(materialize(radial, edge_index))
         return module(
             features,
             radial @ projection + bias,
@@ -42,26 +48,54 @@ def stream(
         )
     if features.dtype not in (torch.float32, torch.float64):
         raise TypeError("The fused local interaction requires float32 or float64.")
+    inputs = [
+        module.reshape_in(features),
+        radial,
+        projection,
+        bias,
+        cutoff,
+        wigner,
+        wigner_inv,
+        radial_basis,
+        *module.parameters(),
+    ]
+    metadata = module._eqx_metadata
+    if radial_network is not None:
+        from ....conv.network import compose_radial
+
+        nodes, score, value, specs, *settings = build(
+            metadata,
+            projection.shape[0],
+            radial_basis.shape[1],
+            wigner.shape[2],
+            wigner_inv.shape[1],
+        )
+        program, inputs = compose_radial(
+            repr((nodes, ((score, 0, "edge"), (value, 1, "edge")))),
+            inputs,
+            1,
+            radial_network,
+        )
+        nodes, outputs = parse_metadata(program)
+        specs = list(specs) + [None] * (len(inputs) - len(specs))
+        for op, width, _, data in nodes:
+            if op == "input":
+                specs[data[0]] = (width, data[1])
+        base = (nodes, outputs[0][0], outputs[1][0], tuple(specs), *settings)
+        metadata = repr((metadata, base))
     result = interaction(
-        module._eqx_metadata,
+        metadata,
         edge_index[0],
         edge_index[1],
-        [
-            module.reshape_in(features),
-            radial,
-            projection,
-            bias,
-            cutoff,
-            wigner,
-            wigner_inv,
-            radial_basis,
-            *module.parameters(),
-        ],
+        inputs,
     )[0]
     return module.reshape_out.inverse(result)
 
 
 def base_program(metadata, inputs):
+    description = parse_metadata(metadata)
+    if len(description) == 2:
+        return description[1]
     return build(
         metadata,
         inputs[1].shape[1],
@@ -105,7 +139,10 @@ def interaction(
 
 @interaction.register_fake
 def interaction_fake(metadata, source, target, inputs):
-    channels, heads = parse_metadata(metadata)[2:4]
+    description = parse_metadata(metadata)
+    if len(description) == 2:
+        description = parse_metadata(description[0])
+    channels, heads = description[2:4]
     nodes = inputs[0].shape[0]
     return [
         inputs[0].new_empty((nodes, inputs[6].shape[1], channels)),

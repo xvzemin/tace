@@ -345,6 +345,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         *,
         vectors=None,
         method=None,
+        radial_network=None,
     ):
         """Gather, couple and sum features at target nodes.
 
@@ -353,10 +354,12 @@ class O2O3TensorProductConv(torch.nn.Module):
         features : torch.Tensor
             Node features of shape ``(nodes, irreps_in.dim)`` in flattened
             ``ir_mul`` order.
-        radial : torch.Tensor
+        radial : torch.Tensor or tuple
             Radial features of shape ``(edges, channels)`` or
             ``(1, channels)``. With an empty projection, these are the
             tensor-product path weights in instruction order.
+            With ``radial_network``, ``(tensor, kind)`` partitions may use
+            ``kind="edge"``, ``"source"`` or ``"target"``.
         projection : torch.Tensor
             Radial projection of shape ``(channels, weight_numel)``. Use
             shape ``(0, weight_numel)`` for directly supplied path weights.
@@ -377,6 +380,10 @@ class O2O3TensorProductConv(torch.nn.Module):
             Without vectors, matrices remain independent differentiable inputs.
         method : str, optional
             Override the constructor's evaluation method for this call.
+        radial_network : torch.nn.Module, optional
+            Sequential network preceding ``projection``, evaluated in bounded
+            CUDA tiles. Nonlinear activations are recomputed during backward.
+            A final affine bias may be appended to ``projection`` as a row.
 
         Returns
         -------
@@ -384,6 +391,15 @@ class O2O3TensorProductConv(torch.nn.Module):
             Target features of shape ``(num_nodes, irreps_out.dim)`` in the
             declared, unsimplified ``ir_mul`` layout.
         """
+        if radial_network is not None and (
+            self.backend != "cuda" or not features.is_cuda
+        ):
+            from ..network import materialize
+
+            radial = radial_network(materialize(radial, edge_index))
+            if radial.shape[-1] + 1 == projection.shape[0]:
+                radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+            radial_network = None
         method = getattr(self, "method", "baseline") if method is None else method
         if method not in (
             "auto",
@@ -411,6 +427,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                     edge_index,
                     num_nodes,
                     vectors,
+                    radial_network=radial_network,
                 )
             if method == "wigner":
                 wigner = self.frame.forward_packed(
@@ -426,6 +443,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                     num_nodes,
                     vectors,
                     method=method,
+                    radial_network=radial_network,
                 )
         if wigner is None:
             raise ValueError("Supply vectors or packed Wigner matrices.")
@@ -448,6 +466,16 @@ class O2O3TensorProductConv(torch.nn.Module):
             amplitudes,
             output,
         ]
+        if radial_network is not None:
+            from ..network import convolve
+
+            return convolve(
+                "o2",
+                self.kernel_metadata,
+                [features, radial, projection, wigner, wigner, amplitudes, output],
+                edge_index,
+                radial_network,
+            )
         return contraction(
             self.kernel_metadata,
             repr(program),
@@ -467,12 +495,15 @@ class O2O3TensorProductConv(torch.nn.Module):
         vectors,
         *,
         method="baseline",
+        radial_network=None,
     ):
         """Contract transverse tensors in spherical storage without alignment."""
         if self.backend == "cuda" and features.is_cuda:
             from ...kernels.wigner import alignment_cuda
             from ..o3.convolution import contraction as spherical_contraction
 
+            if torch.compiler.is_compiling():
+                torch._dynamo.mark_static(vectors, -1)
             direction = alignment_cuda(repr("normalize"), [vectors])[0]
             operands = [
                 features,
@@ -482,6 +513,18 @@ class O2O3TensorProductConv(torch.nn.Module):
                 features.new_empty(1).expand(num_nodes, self.output_dim),
                 direction,
             ]
+            if radial_network is not None:
+                from ..network import convolve
+
+                return convolve(
+                    "o3",
+                    self.transverse_metadata
+                    if method == "baseline"
+                    else getattr(self, f"{method}_metadata"),
+                    operands,
+                    edge_index,
+                    radial_network,
+                )
             return spherical_contraction(
                 self.transverse_metadata
                 if method == "baseline"

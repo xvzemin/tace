@@ -279,17 +279,30 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         num_nodes,
         *,
         vectors=None,
+        radial_network=None,
     ):
         """Evaluate the aligned convolution using packed Wigner-D matrices.
 
         With vectors, the PyTorch backend constructs differentiable matrices
         from them. CUDA uses the supplied matrices and generator derivatives.
         """
-        if vectors is None or self.backend == "torch" or not features.is_cuda:
+        if (
+            vectors is None
+            or self.backend == "torch"
+            or not features.is_cuda
+            or radial_network is not None
+        ):
             if vectors is not None:
                 wigner = self.frame.forward_packed(vectors, method="recursive")
             result = super().forward(
-                features, radial, projection, wigner, cutoff, edge_index, num_nodes
+                features,
+                radial,
+                projection,
+                wigner,
+                cutoff,
+                edge_index,
+                num_nodes,
+                radial_network=radial_network,
             )
             return result if vectors is None else result + vectors.sum() * 0
         from ..o2_o3.geometry import direction_contraction
@@ -313,16 +326,37 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         )[0]
 
     def forward_transverse(
-        self, features, radial, projection, cutoff, edge_index, num_nodes, vectors
+        self,
+        features,
+        radial,
+        projection,
+        cutoff,
+        edge_index,
+        num_nodes,
+        vectors,
+        *,
+        radial_network=None,
     ):
         """Evaluate local order weights without constructing alignment matrices."""
+        if radial_network is not None and not projection.numel():
+            raise ValueError(
+                "A streamed radial network requires its final linear weight "
+                "as projection."
+            )
         if projection.numel():
             projection = self.transform_weights(projection)
         else:
             radial = self.transform_weights(radial)
             projection = projection.new_empty((0, self.transverse_weight_numel))
         return super().forward_transverse(
-            features, radial, projection, cutoff, edge_index, num_nodes, vectors
+            features,
+            radial,
+            projection,
+            cutoff,
+            edge_index,
+            num_nodes,
+            vectors,
+            radial_network=radial_network,
         )
 
     def forward(
@@ -336,6 +370,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         num_nodes,
         *,
         vectors=None,
+        radial_network=None,
     ):
         """Evaluate the convolution and its differentiable radial projection.
 
@@ -343,9 +378,11 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         ----------
         features : torch.Tensor
             Node features, ``(nodes, irreps_in.dim)``, in flattened ir_mul order.
-        radial : torch.Tensor
+        radial : torch.Tensor or tuple
             Radial features, ``(edges, channels)`` or ``(1, channels)``.
             With an empty projection, supply UuLinear weights directly.
+            With ``radial_network``, ``(tensor, kind)`` partitions may use
+            ``kind="edge"``, ``"source"`` or ``"target"``.
         projection : torch.Tensor
             Final radial weight matrix, ``(channels, weight_numel)``. An empty
             matrix of shape ``(0, weight_numel)`` selects direct path weights.
@@ -363,15 +400,35 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             Frame directions, ``(edges, 3)`` or ``(1, 3)``. When supplied,
             evaluate the same map without selecting a transverse basis.
             Otherwise use the supplied matrices as the rotation reference.
+        radial_network : torch.nn.Module, optional
+            Sequential network preceding ``projection``. CUDA streams its
+            layers with the convolution and recomputes activations in backward.
+            Supply a nonempty final projection when using this network.
 
         Returns
         -------
         torch.Tensor
             Aggregated features, ``(num_nodes, irreps_out.dim)``, in ir_mul order.
         """
+        if radial_network is not None and (
+            self.backend != "cuda" or not features.is_cuda
+        ):
+            from ..network import materialize
+
+            radial = radial_network(materialize(radial, edge_index))
+            if radial.shape[-1] + 1 == projection.shape[0]:
+                radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+            radial_network = None
         if vectors is not None:
             return self.forward_transverse(
-                features, radial, projection, cutoff, edge_index, num_nodes, vectors
+                features,
+                radial,
+                projection,
+                cutoff,
+                edge_index,
+                num_nodes,
+                vectors,
+                radial_network=radial_network,
             )
         return self.forward_wigner(
             features,
@@ -382,4 +439,5 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             edge_index,
             num_nodes,
             vectors=vectors,
+            radial_network=radial_network,
         )

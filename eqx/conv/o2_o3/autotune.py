@@ -7,7 +7,15 @@ import torch
 
 
 def select_method(
-    module, features, radial, projection, amplitudes, edge_index, num_nodes, vectors
+    module,
+    features,
+    radial,
+    projection,
+    amplitudes,
+    edge_index,
+    num_nodes,
+    vectors,
+    radial_network=None,
 ):
     """Cache a measured method for the device, shapes and derivative workload.
 
@@ -24,13 +32,22 @@ def select_method(
         if torch.cuda.is_current_stream_capturing():
             return module.selected_method
 
-    inputs = features, radial, projection, amplitudes, vectors
+    parts = radial if isinstance(radial, tuple) else ((radial, "edge"),)
+    inputs = features, projection, amplitudes, *(x for x, _ in parts), vectors
+    parameters = (
+        tuple(radial_network.parameters()) if radial_network is not None else ()
+    )
     required = tuple(torch.is_grad_enabled() and x.requires_grad for x in inputs)
-    order = 2 if module.training and required[-1] else int(any(required))
+    parameter_grads = tuple(
+        torch.is_grad_enabled() and p.requires_grad for p in parameters
+    )
+    order = (
+        2 if module.training and required[-1] else int(any(required + parameter_grads))
+    )
     # Neighbor counts vary between MD steps and training batches. Tune a size
     # range rather than recompiling and timing for each individual edge count.
     shapes = tuple(
-        tuple(x.shape) if i == 2 else (max(0, x.size(0) - 1).bit_length(), *x.shape[1:])
+        tuple(x.shape) if i == 1 else (max(0, x.size(0) - 1).bit_length(), *x.shape[1:])
         for i, x in enumerate(inputs)
     )
     key = (
@@ -41,6 +58,14 @@ def select_method(
         shapes,
         tuple(tuple(x.stride()) for x in inputs),
         required,
+        parameter_grads,
+        tuple(
+            (type(layer), tuple(p.shape for p in layer.parameters(recurse=False)))
+            for layer in radial_network.modules()
+        )
+        if radial_network is not None
+        else (),
+        tuple(kind for _, kind in parts),
         order,
         torch.get_float32_matmul_precision(),
         torch.backends.cuda.matmul.allow_tf32,
@@ -60,13 +85,22 @@ def select_method(
             x.detach().clone().requires_grad_(need) for x, need in zip(inputs, required)
         )
         differentiable = tuple(x for x in copied if x.requires_grad)
+        vector_index = len(differentiable) - 1 if required[-1] else None
+        differentiable += tuple(
+            p for p, need in zip(parameters, parameter_grads) if need
+        )
 
         def run(method):
-            x, radial, projection, amplitudes, vectors = copied
+            x, projection, amplitudes, *values, vectors = copied
+            radial_input = (
+                tuple((value, kind) for value, (_, kind) in zip(values, parts))
+                if isinstance(radial, tuple)
+                else values[0]
+            )
             with torch.set_grad_enabled(bool(order)):
                 value = module(
                     x,
-                    radial,
+                    radial_input,
                     projection,
                     None,
                     amplitudes,
@@ -74,6 +108,7 @@ def select_method(
                     num_nodes,
                     vectors=vectors,
                     method=method,
+                    radial_network=radial_network,
                 )
                 results = [value]
                 if order:
@@ -85,7 +120,7 @@ def select_method(
                     )
                     results.extend(g for g in gradients if g is not None)
                     if order == 2:
-                        force = gradients[-1]
+                        force = gradients[vector_index]
                         if force is not None and force.requires_grad:
                             gradients = torch.autograd.grad(
                                 force.square().sum(), differentiable, allow_unused=True

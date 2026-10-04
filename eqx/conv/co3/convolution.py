@@ -289,6 +289,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
         *,
         vectors=None,
         amplitudes=None,
+        radial_network=None,
     ):
         """Convolve node tensors with edge attributes or Cartesian harmonics.
 
@@ -377,6 +378,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
             num_nodes,
             vectors=vectors,
             amplitudes=amplitudes,
+            radial_network=radial_network,
         )
         if vectors is not None and self.compact_output:
             return output

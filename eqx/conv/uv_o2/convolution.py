@@ -508,6 +508,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         radial_attention=None,
         *,
         vectors=None,
+        radial_network=None,
     ):
         """Evaluate the convolution with explicit weights and optional attention.
 
@@ -517,8 +518,10 @@ class UvO2TensorProductConv(torch.nn.Module):
             Node features in flattened ``ir_mul`` layout.
         edge_features : torch.Tensor or None
             Optional edge features in flattened ``ir_mul`` layout.
-        conv_weights : torch.Tensor
+        conv_weights : torch.Tensor or tuple
             Radial coefficients with shape ``(edges, weight_numel)``.
+            With ``radial_network``, its inputs may instead be ``(tensor, kind)``
+            partitions with ``kind="edge"``, ``"source"`` or ``"target"``.
         edge_index : torch.Tensor
             Source and target indices with shape ``(2, edges)``.
         wigner, wigner_inv : torch.Tensor or None
@@ -537,6 +540,10 @@ class UvO2TensorProductConv(torch.nn.Module):
             Nonzero directions, shape ``(edges, 3)``. Select transverse
             restriction without alignment; pass None for both Wigner tensors.
             Positive orders use spherical subspaces of width ``2*m+1``.
+        radial_network : torch.nn.Module, optional
+            Network mapping ``conv_weights`` inputs to radial coefficients.
+            CUDA evaluates nonlinear layers in bounded tiles without retaining
+            activations or full-edge coefficients.
 
         Returns
         -------
@@ -548,6 +555,11 @@ class UvO2TensorProductConv(torch.nn.Module):
         transverse = vectors is not None
         fused = self.backend == "cuda" and features.is_cuda
         execute = evaluate if fused else evaluate_torch
+        if radial_network is not None and not fused:
+            from ..network import materialize
+
+            conv_weights = radial_network(materialize(conv_weights, edge_index))
+            radial_network = None
         if edge_features is None:
             edge_features = features.new_empty((source.shape[0], 0))
         if transverse:
@@ -592,8 +604,15 @@ class UvO2TensorProductConv(torch.nn.Module):
                 wigner_inv = wigner
             local_inputs = [features, edge_features, conv_weights, wigner]
             linears = self.linears
+        metadata = self.prepare_program(local_dim, global_dim, packed, transverse)
+        if radial_network is not None:
+            from ..network import compose_radial
+
+            metadata, local_inputs = compose_radial(
+                metadata, local_inputs, 3 if transverse else 2, radial_network
+            )
         local = execute(
-            self.prepare_program(local_dim, global_dim, packed, transverse),
+            metadata,
             local_inputs,
             source,
             target,

@@ -44,7 +44,7 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
     cutoff = torch.rand(8, 1, device="cuda", requires_grad=True)
     edges = torch.randint(3, (2, 8), device="cuda")
     graph = types.SimpleNamespace(
-        edge_vector=vectors, edge_length=vectors.norm(dim=-1, keepdim=True) + 1e-9
+        edge_vector=vectors, edge_length=vectors.norm(dim=-1, keepdim=True)
     )
     actual = module.forward_stream(x, radial, projection, edges, None, cutoff, graph)
     harmonics = o3.spherical_harmonics(
@@ -606,7 +606,9 @@ def so2_v021():
 @pytest.mark.parametrize("ece", [False, True])
 @pytest.mark.parametrize("attention", [False, True])
 @pytest.mark.parametrize("gate_m0", [False, True])
-def test_tece_v021_state_dict(so2_v021, device, mmax, ece, attention, gate_m0):
+def test_tece_v021_state_dict(
+    so2_v021, device, mmax, ece, attention, gate_m0, double_precision
+):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     from tace.models._e3nn.tece_oam_rra import Convolution
@@ -1037,13 +1039,40 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     index = torch.tensor([[0, 1, 2, 3, 0], [1, 1, 2, 2, 2]], device="cuda")
     with torch.no_grad():
         module.radial_proj.weight.normal_(std=0.2)
-    actual = stream(
-        module, x, radial, projection, None, index, cutoff, rotation, inverse, basis
+    network = (
+        torch.nn.Sequential(
+            torch.nn.Linear(3, 3), torch.nn.LayerNorm(3), torch.nn.SiLU()
+        ).to(device="cuda", dtype=dtype)
+        if gate_m0
+        else None
     )
-    expected = module(x, radial @ projection, index, cutoff, rotation, inverse, basis)
+    actual = stream(
+        module,
+        x,
+        radial,
+        projection,
+        None,
+        index,
+        cutoff,
+        rotation,
+        inverse,
+        basis,
+        radial_network=network,
+    )
+    expected = module(
+        x,
+        (network(radial) if network is not None else radial) @ projection,
+        index,
+        cutoff,
+        rotation,
+        inverse,
+        basis,
+    )
     atol, rtol = (2e-6, 1e-4) if dtype == torch.float32 else (2e-11, 1e-10)
     torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
     variables = (*inputs, cutoff, *module.parameters())
+    if network is not None:
+        variables += tuple(network.parameters())
     grads = [
         torch.autograd.grad(value.square().sum(), variables, create_graph=True)
         for value in (actual, expected)

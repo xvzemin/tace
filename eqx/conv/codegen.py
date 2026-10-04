@@ -63,6 +63,8 @@ def source(
         # them into each edge's workspace dominates wide derivative programs.
         and (dependent[i] or nodes[i][1] <= 256)
     }
+    if mode in ("pointwise", "row"):
+        stored = set()
     order = sorted(stored)
     position = {i: k for k, i in enumerate(order)}
 
@@ -108,6 +110,14 @@ def source(
         pending.append(i)
 
     declarations, tables = [], {}
+    reductions = {}
+    statistics = {}
+    if mode == "row":
+        for i in sorted(live):
+            op, _, args, data = nodes[i]
+            if op in ("normalize", "inv_norm", "mean"):
+                key = args[0], data, op == "mean"
+                reductions[i] = statistics.setdefault(key, i)
 
     def table(values):
         values = tuple(values)
@@ -140,6 +150,15 @@ def source(
             return f"return {a} {'+' if op == 'add' else '*'} {get(args[1], 'i')};"
         if op == "reciprocal":
             return f"return scalar(1)/{a};"
+        if op == "rsqrt":
+            return f"return rsqrt({a});"
+        if op in ("normalize", "inv_norm", "mean"):
+            j = reductions[i]
+            if op == "mean":
+                return f"return mean{j};"
+            if op == "inv_norm":
+                return f"return inverse{j};"
+            return f"return ({a}-mean{j})*inverse{j};"
         if op in ("exp", "sin", "cos", "tanh"):
             return f"return {op}({a});"
         if op in ("sigmoid", "silu"):
@@ -316,6 +335,52 @@ def source(
           __syncthreads();
         }}"""
         count_outputs = 3
+    elif mode == "row":
+        root, _, kind = outputs[0]
+        if len(outputs) != 1 or kind != "edge":
+            raise ValueError("Row expressions require one edge output.")
+        width = nodes[root][1]
+        reductions_code = []
+        for (arg, data, mean_only), j in statistics.items():
+            size = nodes[arg][1]
+            centered = mean_only or data[1]
+            if centered:
+                reductions_code.append(f"""
+                scalar mean{j}=0;
+                for(int i=lane;i<{size};i+=32) mean{j}+=state.v{arg}(i);
+                for(int stride=16;stride;stride/=2)
+                  mean{j}+=__shfl_xor_sync(0xffffffffu,mean{j},stride);
+                state.mean{j}=mean{j}/scalar({size});""")
+            if not mean_only:
+                reductions_code.append(f"""
+                scalar variance{j}=0;
+                for(int i=lane;i<{size};i+=32) {{
+                  scalar x=state.v{arg}(i)-state.mean{j}; variance{j}+=x*x;
+                }}
+                for(int stride=16;stride;stride/=2)
+                  variance{j}+=__shfl_xor_sync(0xffffffffu,variance{j},stride);
+                state.inverse{j}=rsqrt(variance{j}/scalar({size})+scalar({data[0]:.17g}));""")
+        body = f"""
+        int lane=threadIdx.x%32;
+        for(long long edge=((long long)blockIdx.x*blockDim.x+threadIdx.x)/32;
+            edge<count;edge+=(long long)blockDim.x*gridDim.x/32) {{
+          State state{{{initializer}, nullptr, edge, source[edge], target[edge]}};
+          {"".join(reductions_code)}
+          for(int i=lane;i<{width};i+=32) out0[edge*{width}+i]=state.v{root}(i);
+        }}"""
+        count_outputs = 1
+    elif mode == "pointwise":
+        root, slot, kind = outputs[0]
+        if len(outputs) != 1 or kind != "edge":
+            raise ValueError("Pointwise programs require one edge output.")
+        width = nodes[root][1]
+        body = f"""
+        for(long long k=(long long)blockIdx.x*blockDim.x+threadIdx.x;k<count*{width};k+=(long long)blockDim.x*gridDim.x) {{
+          long long edge=k/{width}; int i=k%{width};
+          State state{{{initializer}, nullptr, edge, source[edge], target[edge]}};
+          out0[k]=state.v{root}(i);
+        }}"""
+        count_outputs = 1
     else:
         destinations = sorted(set(slot for _, slot, _ in outputs))
         writes = []
@@ -348,11 +413,15 @@ def source(
         count_outputs = len(destinations)
     output_args = ", ".join(f"scalar* out{i}" for i in range(count_outputs))
     scalar = "double" if dtype == torch.float64 else "float"
+    statistic_fields = " ".join(
+        f"scalar mean{j}=0, inverse{j}=0;" for j in statistics.values()
+    )
     code = f"""
     using scalar={scalar};
     {"".join(declarations)}
     struct State {{
       {fields} scalar* buffer; long long edge,source,target;
+      {statistic_fields}
       {"".join(methods)}
     }};
     extern "C" __global__ void run({pointers},const long long* source,const long long* target,

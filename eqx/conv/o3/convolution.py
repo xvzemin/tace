@@ -229,6 +229,7 @@ class O3TensorProductConv(torch.nn.Module):
         *,
         vectors=None,
         amplitudes=None,
+        radial_network=None,
     ):
         """Evaluate the indexed convolution.
 
@@ -238,9 +239,11 @@ class O3TensorProductConv(torch.nn.Module):
             Source features, shape ``(nodes, irreps_in1.dim)``.
         edge_attrs : torch.Tensor
             Edge features, shape ``(edges, irreps_in2.dim)`` or a shared row.
-        radial : torch.Tensor
+        radial : torch.Tensor or tuple
             Radial features, shape ``(edges, radial_dim)`` or a shared row.
             With an empty projection, these are path weights directly.
+            With ``radial_network``, a tuple of ``(tensor, kind)`` partitions
+            may use ``kind="edge"``, ``"source"`` or ``"target"``.
         projection : torch.Tensor
             Shared weights, shape ``(radial_dim, weight_numel)``. Shape
             ``(0, weight_numel)`` selects directly supplied path weights.
@@ -257,12 +260,26 @@ class O3TensorProductConv(torch.nn.Module):
             Harmonic amplitudes in irrep multiplicity order. Shape is
             ``(edges, irreps_in2.num_irreps)``; either dimension may be one.
             Used only with ``vectors``; defaults to one.
+        radial_network : torch.nn.Module, optional
+            Sequential network preceding ``projection``. CUDA evaluates its
+            nonlinear layers in bounded edge tiles and recomputes activations
+            during backward. A final affine bias may be appended as the last
+            row of ``projection``. PyTorch evaluates the network normally.
 
         Returns
         -------
         torch.Tensor
             Target features, shape ``(num_nodes, irreps_out.dim)``.
         """
+        if radial_network is not None and (
+            self.backend != "cuda" or not features.is_cuda
+        ):
+            from ..network import materialize
+
+            radial = radial_network(materialize(radial, edge_index))
+            if radial.shape[-1] + 1 == projection.shape[0]:
+                radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+            radial_network = None
         if vectors is not None:
             if vectors.ndim != 2 or vectors.shape != (edge_index.size(1), 3):
                 raise ValueError("vectors must have shape (edges, 3).")
@@ -274,7 +291,11 @@ class O3TensorProductConv(torch.nn.Module):
                 else amplitudes.expand(amplitudes.size(0), self.amplitude_dim)
             )
             edge_attrs = amplitudes
-        if any(value.ndim != 2 for value in (features, edge_attrs, radial, projection)):
+        radial_values = radial[0][0] if isinstance(radial, tuple) else radial
+        if any(
+            value.ndim != 2
+            for value in (features, edge_attrs, radial_values, projection)
+        ):
             raise ValueError("Features, radial inputs and projection must be matrices.")
         if edge_index.ndim != 2 or edge_index.size(0) != 2:
             raise ValueError("edge_index must have shape (2, edges).")
@@ -288,7 +309,7 @@ class O3TensorProductConv(torch.nn.Module):
             )
         if projection.size(1) != self.weight_numel:
             raise ValueError("Projection width must equal weight_numel.")
-        if radial.size(1) != (
+        if radial_network is None and radial.size(1) != (
             projection.size(0) if projection.numel() else self.weight_numel
         ):
             raise ValueError(
@@ -296,7 +317,9 @@ class O3TensorProductConv(torch.nn.Module):
             )
         if any(
             value.size(0) not in (1, edge_index.size(1))
-            for value in (edge_attrs, radial)
+            for value in (
+                (edge_attrs,) if isinstance(radial, tuple) else (edge_attrs, radial)
+            )
         ):
             raise ValueError(
                 "Edge attributes and radial features need one row per edge or one shared row."
@@ -315,6 +338,18 @@ class O3TensorProductConv(torch.nn.Module):
         if self.backend == "cuda" and features.is_cuda:
             if vectors is not None:
                 operands.append(vectors)
+            if radial_network is not None:
+                from ..network import convolve
+
+                return convolve(
+                    "o3",
+                    self.harmonic_metadata
+                    if vectors is not None
+                    else self.kernel_metadata,
+                    operands,
+                    edge_index,
+                    radial_network,
+                )
             return contraction(
                 self.harmonic_metadata if vectors is not None else self.kernel_metadata,
                 repr(((tuple(range(len(operands))), False, ((4, 0),)),)),

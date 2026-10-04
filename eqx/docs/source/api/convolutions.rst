@@ -15,8 +15,15 @@ change floating-point summation order.
 
 Warm up the required derivatives and automatic method selection before
 ``torch.compile`` or timing. Exported models require EQX operator registration
-and the CUDA runtime. Node-level channel maps and preceding radial MLP layers
-remain outside the fused CGTP operators.
+and the CUDA runtime. Node-level channel maps remain outside the operators.
+
+Pass ``radial_network`` to stream the preceding radial MLP in bounded edge
+tiles. Nonlinear activations are recomputed during backward and full-edge
+convolution weights are not retained. Linear layers, SiLU,
+sigmoid, tanh, LayerNorm, and RMSNorm are supported. For CGTP and UuO2 operators,
+``projection`` supplies the final linear weight separately. Omit
+``radial_network`` to stream only this final projection.
+Recomputation reduces activation storage but may increase runtime on small graphs.
 
 Tensor-product convolutions
 ---------------------------

@@ -141,6 +141,11 @@ EQX in TACE
    * - Standard / gated bilinear ACE
      - ``eqx.ace.TACE`` / ``eqx.models.tace.tece_oam_rra.BilinearACE``
 
+By default, EQX streams the convolution's complete radial MLP in bounded edge
+tiles and recomputes nonlinear activations during backward, including force training.
+Edge embedding remains an ordinary PyTorch operation. Model parameters and
+checkpoint layouts are unchanged.
+
 For fusion boundaries and standalone examples, see
 :ref:`equivariantx-api-convolutions`. To switch between equivalent CGTP forms
 without retraining:
