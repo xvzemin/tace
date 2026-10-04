@@ -47,7 +47,13 @@ class FrameAttributes(torch.nn.Module):
 
 
 def convert_mace_to_eqx(
-    model, *, implementation="o3", enable_cueq=False, inplace=False, backend="cuda"
+    model,
+    *,
+    implementation="o3",
+    enable_cueq=False,
+    inplace=False,
+    backend="cuda",
+    stream_radial=True,
 ):
     """Replace MACE spatial convolutions with streamed EQX operations.
 
@@ -71,6 +77,9 @@ def convert_mace_to_eqx(
         Convolution backend. Defaults to CUDA kernels on CUDA tensors and
         PyTorch operations on CPU. Select "torch" for a reference on either
         device.
+    stream_radial : bool, optional
+        Stream the full radial MLP. If False, fuse only its final projection.
+        Defaults to True.
 
     Returns
     -------
@@ -115,6 +124,7 @@ def convert_mace_to_eqx(
         if not all(converted) or any(
             layer.conv_tp.implementation != implementation
             or layer.conv_tp.backend != backend
+            or layer.conv_tp_weights.stream_radial != stream_radial
             for layer in model.interactions
         ):
             raise ValueError(
@@ -213,6 +223,7 @@ def convert_mace_to_eqx(
                     OrderedDict(list(net.named_children())[:-1]),
                     affine and projection.bias is not None,
                     radial.hs,
+                    stream_radial=stream_radial,
                 ).train(radial.training)
             )
         for layer, convolution, radial in zip(

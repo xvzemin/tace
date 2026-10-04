@@ -5,14 +5,16 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import Convolution, RadialFeatures
+from eqx.models.convolution import Convolution, RadialFeatures, harmonic_convention
 from eqx.utils import convert_modules, default_dtype
 
 
 class FullConv(torch.nn.Module):
     """Preserve EquFlash's convolution interface and output channel order."""
 
-    def __init__(self, module, implementation, backend, normalization, normalize):
+    def __init__(
+        self, module, implementation, backend, normalization, normalize, stream_radial
+    ):
         super().__init__()
         import cuequivariance as cue
 
@@ -90,6 +92,7 @@ class FullConv(torch.nn.Module):
         self.weight_nn = RadialFeatures(
             OrderedDict(list(module.weight_nn.named_children())[:-1]),
             hs=module.weight_nn.hs[:-1],
+            stream_radial=stream_radial,
         ).train(module.weight_nn.training)
         self.denominator = module.denominator
         self.irreps_in = module.irreps_in
@@ -119,6 +122,7 @@ def convert_equflash_to_eqx(
     implementation="o3",
     inplace=False,
     backend="cuda",
+    stream_radial=True,
 ):
     """Replace EquFlash FullConv interactions with EQX convolutions.
 
@@ -132,6 +136,9 @@ def convert_equflash_to_eqx(
         Modify the supplied model instead of returning a copy.
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
+    stream_radial : bool, optional
+        Stream the full radial MLP. If False, fuse only its final projection.
+        Defaults to True.
 
     Returns
     -------
@@ -149,25 +156,23 @@ def convert_equflash_to_eqx(
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
-    options = {
-        (m.normalization, m.normalize)
-        for m in model.modules()
-        if isinstance(m, o3.SphericalHarmonics)
-    }
-    if len(options) > 1:
-        raise NotImplementedError(
-            "Multiple harmonic conventions require separate conversion."
-        )
-    normalization, normalize = next(iter(options), ("component", True))
+    normalization, normalize = (
+        harmonic_convention(model) if implementation == "o2" else ("component", True)
+    )
     count = 0
 
     def factory(module):
         nonlocal count
         if isinstance(module, FullConv):
             count += 1
-            if (module.convolution.implementation, module.convolution.backend) != (
+            if (
+                module.convolution.implementation,
+                module.convolution.backend,
+                module.weight_nn.stream_radial,
+            ) != (
                 implementation,
                 backend,
+                stream_radial,
             ):
                 raise ValueError(
                     "Convert the original model to select another implementation."
@@ -189,6 +194,7 @@ def convert_equflash_to_eqx(
                     backend,
                     normalization,
                     normalize,
+                    stream_radial,
                 )
                 .to(parameter.device)
                 .train(module.training)

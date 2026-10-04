@@ -17,7 +17,7 @@ class TensorProductConvolution(Convolution):
 
 
 def convert_prophet_to_eqx(
-    model, *, implementation="o3", inplace=False, backend="cuda"
+    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=True
 ):
     """Replace Prophet spatial convolutions, retaining cutoff branches.
 
@@ -31,6 +31,9 @@ def convert_prophet_to_eqx(
         Modify the model instead of returning a copy.
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
+    stream_radial : bool, optional
+        Stream the full radial MLP. If False, fuse only its final projection.
+        Defaults to True.
 
     Returns
     -------
@@ -61,6 +64,7 @@ def convert_prophet_to_eqx(
             if (
                 module.tp_conv.implementation != implementation
                 or module.tp_conv.backend != backend
+                or module.radial_mlp.stream_radial != stream_radial
             ):
                 raise ValueError(
                     "Convert the original model to select another implementation."
@@ -76,7 +80,9 @@ def convert_prophet_to_eqx(
         for index, layer in enumerate(net.layers[:-1]):
             layers[f"linear_{index}"] = layer
             layers[f"activation_{index}"] = net.activation
-        radial = RadialFeatures(layers, projection.bias is not None).train(net.training)
+        radial = RadialFeatures(
+            layers, projection.bias is not None, stream_radial=stream_radial
+        ).train(net.training)
         parameter = next(module.parameters())
         with default_dtype(parameter.dtype):
             convolution = (

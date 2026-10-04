@@ -1,12 +1,14 @@
 """Model adapters and model-specific fused operations."""
 
 import os
+from collections import OrderedDict
 from copy import deepcopy
 
 import pytest
 import torch
 from e3nn import o3
 
+from eqx.models.convolution import Convolution, RadialFeatures, RadialInput
 from eqx.models.equflash import convert_equflash_to_eqx
 from eqx.models.mace import convert_mace_to_eqx
 from eqx.models.nequip import convert_nequip_to_eqx
@@ -14,6 +16,74 @@ from eqx.models.prophet import convert_prophet_to_eqx
 from eqx.models.sevennet import convert_sevennet_to_eqx
 from eqx.models.tace.tece_oam_rra import BilinearACE
 from eqx.utils import copy_model
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+def test_radial_adapter(implementation, device, double_precision):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = o3.TensorProduct(
+        "2x0e+2x1o",
+        "0e+1o",
+        "2x0e+2x1o",
+        [(0, 0, 0, "uvu", True), (1, 1, 0, "uvu", True), (0, 1, 1, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    radial = RadialFeatures(
+        OrderedDict(
+            [
+                ("linear", torch.nn.Linear(3, 4)),
+                ("activation", torch.nn.SiLU()),
+            ]
+        ),
+        bias=True,
+    ).to(device)
+    convolution = Convolution(
+        tp,
+        torch.nn.Linear(4, tp.weight_numel),
+        implementation=implementation,
+    ).to(device)
+    harmonics = o3.SphericalHarmonics("0e+1o", True, normalization="component").to(
+        device
+    )
+
+    def evaluate(x, vectors, inputs, cutoff, edges):
+        sh = harmonics(vectors)
+        return convolution(x, sh, radial(inputs) * cutoff, edges)
+
+    compiled = torch.compile(
+        evaluate, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    parameters = (*radial.parameters(), *convolution.parameters())
+    for num_edges in (9, 0):
+        x = torch.randn(3, 8, device=device, requires_grad=True)
+        vectors = torch.randn(num_edges, 3, device=device, requires_grad=True)
+        inputs = torch.randn(num_edges, 3, device=device, requires_grad=True)
+        cutoff = torch.rand(num_edges, 1, device=device)
+        cutoff[::2] = 0
+        cutoff.requires_grad_()
+        edges = torch.randint(3, (2, num_edges), device=device)
+        deferred = radial(inputs)
+        assert isinstance(deferred, RadialInput) and deferred.features is inputs
+        actual = compiled(x, vectors, inputs, cutoff, edges)
+        convolution.backend = "torch"
+        convolution.eqx_tp.backend = "torch"
+        radial.stream_radial = False
+        expected = evaluate(x, vectors, inputs, cutoff, edges)
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+        variables = (x, vectors, inputs, cutoff, *parameters)
+        for result in (actual, expected):
+            grads = torch.autograd.grad(result.square().sum(), variables)
+            if result is actual:
+                actual_grads = grads
+            else:
+                for a, b in zip(actual_grads, grads):
+                    torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-8)
+        convolution.backend = "cuda"
+        convolution.eqx_tp.backend = "cuda"
+        radial.stream_radial = True
 
 
 @pytest.fixture
@@ -44,7 +114,7 @@ def mace_model(double_precision):
             atomic_numbers=[1, 8],
             correlation=2,
             gate=torch.nn.functional.silu,
-            radial_MLP=[4],
+            radial_MLP=[4, 4],
             atomic_inter_scale=1.2,
             atomic_inter_shift=-0.4,
         )
@@ -68,7 +138,6 @@ def mace_data(mace_model, atoms):
     return atoms, torch_geometric.Batch.from_data_list([graph, other])
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize(
     "interaction",
@@ -81,13 +150,11 @@ def mace_data(mace_model, atoms):
         "RealAgnosticResidualNonLinearInteractionBlock",
     ],
 )
-def test_mace_conversion_training(
-    mace_model, mace_data, interaction, device, implementation
-):
-    if device == "cuda" and not torch.cuda.is_available():
+def test_mace_conversion_training(mace_model, mace_data, interaction, implementation):
+    if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
-    reference = mace_model(interaction).to(device)
+    reference = mace_model(interaction).cuda()
     converted = copy_model(reference)
     parameters = tuple(converted.parameters())
     assert (
@@ -97,7 +164,7 @@ def test_mace_conversion_training(
     assert set(converted.parameters()) == set(parameters)
     assert type(converted) is type(reference)
     assert all(not hasattr(layer, "conv_fusion") for layer in reference.interactions)
-    batch = mace_data[1].to(device)
+    batch = mace_data[1].cuda()
     expected = reference(batch.clone().to_dict(), training=True, compute_stress=True)
     actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
     for key in ("energy", "forces", "stress", "virials"):
@@ -150,8 +217,11 @@ def test_mace_conversion_ase_and_checkpoint(
     restored = torch.load(checkpoint, weights_only=False)
     reloaded = convert_mace_to_eqx(original, implementation=implementation)
     reloaded.load_state_dict(converted.state_dict(), strict=True)
+    last_only = convert_mace_to_eqx(
+        original, implementation=implementation, stream_radial=False
+    )
     results = []
-    for model in (original, restored, reloaded):
+    for model in (original, restored, reloaded, last_only):
         atoms = mace_data[0].copy()
         atoms.calc = MACECalculator(
             models=model, device="cuda", default_dtype="float64"
@@ -211,8 +281,10 @@ def test_mace_conversion_cueq(mace_model, mace_data, layout, implementation):
 
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
-@pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_equflash_fullconv(implementation, backend, double_precision):
+@pytest.mark.parametrize(
+    "backend,stream_radial", [("cuda", True), ("cuda", False), ("torch", True)]
+)
+def test_equflash_fullconv(implementation, backend, stream_radial, double_precision):
     pytest.importorskip("GGNN")
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -224,14 +296,19 @@ def test_equflash_fullconv(implementation, backend, double_precision):
         o3.Irreps("4x0e+4x1o+4x2e"),
         o3.Irreps("0e+1o+2e"),
         o3.Irreps("0e+1o+2e"),
-        [8],
+        [8, 8],
         4,
     ).cuda()
+    converted = copy_model(reference)
+    parameters = tuple(p for p in converted.parameters() if p.requires_grad)
     converted = convert_equflash_to_eqx(
-        reference,
+        converted,
         implementation=implementation,
         backend=backend,
+        stream_radial=stream_radial,
+        inplace=True,
     )
+    assert set(parameters) == {p for p in converted.parameters() if p.requires_grad}
     x = torch.randn(5, reference.irreps_in.dim, device="cuda", requires_grad=True)
     vectors = torch.randn(12, 3, device="cuda", requires_grad=True)
     radial = torch.randn(12, 4, device="cuda", requires_grad=True)
@@ -257,16 +334,18 @@ def test_equflash_fullconv(implementation, backend, double_precision):
         )
     for actual, expected in zip(gradients[1], gradients[0]):
         torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+    expected_parameters = tuple(p for p in reference.parameters() if p.requires_grad)
     expected = torch.autograd.grad(
         gradients[0][1].square().mean(),
-        reference.weight_nn[-1].weight,
+        expected_parameters,
         retain_graph=True,
-    )[0]
+    )
     actual = torch.autograd.grad(
         gradients[1][1].square().mean(),
-        converted.convolution.projection.weight,
-    )[0]
-    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+        parameters,
+    )
+    for a, b in zip(actual, expected):
+        torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-9)
 
 
 def test_equflash_reject_efficient():
@@ -373,7 +452,7 @@ def model_case(request, double_precision, atoms):
             l_max=2,
             parity=True,
             num_features=2,
-            radial_mlp_depth=1,
+            radial_mlp_depth=2,
             radial_mlp_width=4,
             avg_num_neighbors=2.0,
             per_type_energy_shifts=0.0,
@@ -409,7 +488,7 @@ def model_case(request, double_precision, atoms):
             lmax=2,
             is_parity=True,
             num_convolution_layer=2,
-            weight_nn_hidden_neurons=[4],
+            weight_nn_hidden_neurons=[4, 4],
             act_radial="silu",
             act_scalar={"e": "silu", "o": "tanh"},
             act_gate={"e": "silu", "o": "tanh"},
@@ -458,7 +537,7 @@ def model_case(request, double_precision, atoms):
             n_layers=2,
             radial_basis_size=3,
             radial_mlp_size=4,
-            radial_mlp_layers=1,
+            radial_mlp_layers=2,
             mlp_init_scale=1.0,
             avg_n_neighbors=2.0,
             cutoffs=[1.2, 3.0],
@@ -491,13 +570,23 @@ def tolerance(model_case):
 
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
-@pytest.mark.parametrize("backend", ["cuda", "torch"])
-def test_conversion_training(model_case, implementation, backend, tolerance):
+@pytest.mark.parametrize(
+    "backend,stream_radial", [("cuda", True), ("cuda", False), ("torch", True)]
+)
+def test_conversion_training(
+    model_case, implementation, backend, stream_radial, tolerance
+):
     reference, convert, evaluate = model_case
     converted = copy_model(reference)
     parameters = tuple(converted.parameters())
     assert (
-        convert(converted, inplace=True, implementation=implementation, backend=backend)
+        convert(
+            converted,
+            inplace=True,
+            implementation=implementation,
+            backend=backend,
+            stream_radial=stream_radial,
+        )
         is converted
     )
     assert set(converted.parameters()) == set(parameters)

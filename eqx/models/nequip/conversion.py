@@ -5,7 +5,7 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import Convolution, RadialFeatures
+from eqx.models.convolution import Convolution, RadialFeatures, harmonic_convention
 from eqx.utils import convert_modules, default_dtype
 
 
@@ -20,8 +20,10 @@ class TensorProductScatter(Convolution):
         )
 
 
-def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend="cuda"):
-    """Replace NequIP interaction contractions and final radial projections.
+def convert_nequip_to_eqx(
+    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=True
+):
+    """Replace NequIP interactions with streamed radial convolutions.
 
     Parameters
     ----------
@@ -33,6 +35,9 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
         Modify the model instead of returning a copy.
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
+    stream_radial : bool, optional
+        Stream the full radial MLP. If False, fuse only its final projection.
+        Defaults to True.
 
     Returns
     -------
@@ -45,18 +50,9 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
-    harmonics = [
-        m
-        for m in model.modules()
-        if type(m).__name__ == "SphericalHarmonics"
-        and type(m).__module__.split(">.")[-1].startswith("e3nn.")
-    ]
-    options = {(m.normalization, m.normalize) for m in harmonics}
-    if implementation == "o2" and len(options) > 1:
-        raise NotImplementedError(
-            "Multiple edge harmonic conventions require separate conversion."
-        )
-    normalization, normalize = next(iter(options), ("component", True))
+    normalization, normalize = (
+        harmonic_convention(model) if implementation == "o2" else ("component", True)
+    )
     count = 0
 
     def factory(module):
@@ -70,6 +66,7 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
             if (
                 module.tp_scatter.implementation != implementation
                 or module.tp_scatter.backend != backend
+                or module.edge_mlp.stream_radial != stream_radial
             ):
                 raise ValueError(
                     "Convert the original model to select another implementation."
@@ -130,6 +127,7 @@ def convert_nequip_to_eqx(model, *, implementation="o3", inplace=False, backend=
         radial = RadialFeatures(
             OrderedDict(list(net.named_children())[:-1]),
             projection.bias is not None,
+            stream_radial=stream_radial,
         ).train(module.edge_mlp.training)
         module.tp_scatter = convolution
         module.edge_mlp = radial

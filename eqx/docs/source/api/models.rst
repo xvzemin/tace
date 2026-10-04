@@ -13,6 +13,12 @@ harmonic convolution, not a different model symmetry. Load weights and set
 the device and dtype before conversion, then construct the optimizer.
 Converted state dictionaries require the same converted architecture.
 
+The full radial MLP is streamed by default. Set ``stream_radial=False`` to
+compute its hidden features in PyTorch and fuse only the final projection.
+Edge embeddings remain unchanged. Both modes retain the original parameters,
+cutoff factors, and force-training gradients. The ``backend="torch"`` reference
+and CPU fallback evaluate radial layers in PyTorch.
+
 Converters
 ----------
 

@@ -5,14 +5,16 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import Convolution, RadialFeatures
+from eqx.models.convolution import Convolution, RadialFeatures, harmonic_convention
 from eqx.utils import convert_modules, default_dtype
 
 
 class IrrepsConvolution(torch.nn.Module):
     """Preserve SevenNet graph fields and neighbor normalization."""
 
-    def __init__(self, module, implementation, backend, normalization, normalize):
+    def __init__(
+        self, module, implementation, backend, normalization, normalize, stream_radial
+    ):
         super().__init__()
         if module.is_parallel:
             raise NotImplementedError("Parallel SevenNet partitions are not supported.")
@@ -35,7 +37,9 @@ class IrrepsConvolution(torch.nn.Module):
             raise NotImplementedError("Expected a sequential SevenNet radial MLP.")
         projection = net[-1]
         self.weight_nn = RadialFeatures(
-            OrderedDict(list(net.named_children())[:-1]), hs=net.hs
+            OrderedDict(list(net.named_children())[:-1]),
+            hs=net.hs,
+            stream_radial=stream_radial,
         )
         self.convolution = Convolution(
             module.convolution,
@@ -62,7 +66,7 @@ class IrrepsConvolution(torch.nn.Module):
 
 
 def convert_sevennet_to_eqx(
-    model, *, implementation="o3", inplace=False, backend="cuda"
+    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=True
 ):
     """Replace SevenNet convolutions with the same paths and normalization.
 
@@ -76,6 +80,9 @@ def convert_sevennet_to_eqx(
         Modify the model instead of returning a copy.
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
+    stream_radial : bool, optional
+        Stream the full radial MLP. If False, fuse only its final projection.
+        Defaults to True.
 
     Returns
     -------
@@ -92,13 +99,9 @@ def convert_sevennet_to_eqx(
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
         )
-    harmonics = [m for m in model.modules() if isinstance(m, o3.SphericalHarmonics)]
-    options = {(m.normalization, m.normalize) for m in harmonics}
-    if implementation == "o2" and len(options) > 1:
-        raise NotImplementedError(
-            "Multiple edge harmonic conventions require separate conversion."
-        )
-    normalization, normalize = next(iter(options), ("component", True))
+    normalization, normalize = (
+        harmonic_convention(model) if implementation == "o2" else ("component", True)
+    )
     count = 0
 
     def factory(module):
@@ -108,6 +111,7 @@ def convert_sevennet_to_eqx(
             if (
                 module.convolution.implementation != implementation
                 or module.convolution.backend != backend
+                or module.weight_nn.stream_radial != stream_radial
             ):
                 raise ValueError(
                     "Convert the original model to select another implementation."
@@ -122,7 +126,12 @@ def convert_sevennet_to_eqx(
         with default_dtype(parameter.dtype):
             return (
                 IrrepsConvolution(
-                    module, implementation, backend, normalization, normalize
+                    module,
+                    implementation,
+                    backend,
+                    normalization,
+                    normalize,
+                    stream_radial,
                 )
                 .to(
                     device=parameter.device,

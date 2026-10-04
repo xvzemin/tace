@@ -1,6 +1,7 @@
 """Tensor-product adapters shared by atomistic models."""
 
 import math
+import operator
 
 import torch
 
@@ -9,16 +10,75 @@ from eqx.kernels import wigner_D
 from eqx.o2 import O3TensorProduct, WignerD
 
 
-class RadialFeatures(torch.nn.Sequential):
-    """Evaluate radial layers preceding an affine projection."""
+def harmonic_convention(model):
+    """Return the edge harmonic convention, excluding converted convolutions."""
+    modules = [model]
+    options = set()
+    while modules:
+        module = modules.pop()
+        if isinstance(module, Convolution):
+            continue
+        if type(module).__name__ == "SphericalHarmonics" and type(
+            module
+        ).__module__.split(">.")[-1].startswith("e3nn."):
+            options.add((module.normalization, module.normalize))
+        modules.extend(module.children())
+    if len(options) > 1:
+        raise NotImplementedError(
+            "Multiple edge harmonic conventions require separate conversion."
+        )
+    return next(iter(options), ("component", True))
 
-    def __init__(self, layers, bias=False, hs=()):
-        super().__init__(layers)
+
+class RadialInput:
+    """Radial inputs, a deferred network, and an optional edge multiplier."""
+
+    def __init__(self, features, network, cutoff=None):
+        self.features = features
+        self.network = network
+        self.cutoff = cutoff
+
+    def __mul__(self, cutoff):
+        if self.cutoff is not None:
+            cutoff = self.cutoff * cutoff
+        return RadialInput(self.features, self.network, cutoff)
+
+    __rmul__ = __mul__
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if func not in (operator.mul, torch.mul, torch.Tensor.mul) or kwargs:
+            return NotImplemented
+        left, right = args
+        return left.__mul__(right) if isinstance(left, cls) else right.__mul__(left)
+
+
+class RadialFeatures(torch.nn.Module):
+    """Evaluate radial layers eagerly or defer them to the convolution.
+
+    Parameters
+    ----------
+    layers : OrderedDict
+        Layers preceding the final affine projection.
+    bias : bool
+        Append a constant channel for the final projection in eager mode.
+    hs : sequence of int
+        Layer widths retained for the consuming model.
+    stream_radial : bool
+        Evaluate the layers inside convolution tiles. Defaults to True.
+    """
+
+    def __init__(self, layers, bias=False, hs=(), stream_radial=True):
+        super().__init__()
+        self.mlp = torch.nn.Sequential(layers)
         self.bias = bias
         self.hs = list(hs)
+        self.stream_radial = stream_radial
 
     def forward(self, inputs):
-        features = super().forward(inputs)
+        if self.stream_radial:
+            return RadialInput(inputs, self.mlp)
+        features = self.mlp(inputs)
         if self.bias:
             features = torch.cat((features, torch.ones_like(features[:, :1])), dim=-1)
         return features
@@ -162,6 +222,12 @@ class Convolution(torch.nn.Module):
             ) ** -0.5
 
     def forward(self, node_feats, edge_attrs, radial, edge_index):
+        radial_network = None
+        cutoff = None
+        if isinstance(radial, RadialInput):
+            radial_network = radial.network
+            cutoff = radial.cutoff
+            radial = radial.features
         if self.input_index.numel():
             node_feats = node_feats.index_select(-1, self.input_index)
         projection = self.empty_projection
@@ -181,12 +247,16 @@ class Convolution(torch.nn.Module):
             attributes = edge_attrs[:, : self.harmonic_dim]
             if self.attribute_index.numel():
                 attributes = attributes.index_select(-1, self.attribute_index)
+            if cutoff is not None:
+                # The tensor product is linear in both attributes and weights.
+                attributes = attributes * cutoff
             message = self.eqx_tp(
                 node_feats.contiguous(),
                 attributes.contiguous(),
                 radial.contiguous(),
                 projection,
                 edge_index,
+                radial_network=radial_network,
             )
         else:
             vectors = None
@@ -214,6 +284,8 @@ class Convolution(torch.nn.Module):
                     if self.normalize
                     else vectors.norm(dim=-1, keepdim=True).pow(self.degrees)
                 )
+            if cutoff is not None:
+                amplitudes = amplitudes * cutoff
             message = self.eqx_tp(
                 node_feats.contiguous(),
                 radial.contiguous(),
@@ -223,6 +295,7 @@ class Convolution(torch.nn.Module):
                 edge_index,
                 node_feats.size(0),
                 vectors=vectors,
+                radial_network=radial_network,
             )
         if self.output_index.numel():
             message = message.index_select(-1, self.output_index)
