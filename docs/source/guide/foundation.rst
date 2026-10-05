@@ -63,11 +63,11 @@ and MPtrj.
    * - ``TACE-OMat24-RRA-1.0``
      - XL
      - OMat24
-     - ``>=0.2.0``
+     - ``==0.2.0``
    * - ``TACE-OAM-RRA-Preview``
      - XL
      - OMat24 → sAlex + MPtrj
-     - ``>=0.2.0``
+     - ``==0.2.0``
    * - ``TACE-OMat24-L``
      - L
      - OMat24
