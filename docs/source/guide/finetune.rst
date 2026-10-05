@@ -76,6 +76,22 @@ However, in our current version, we do not include replay data such as
 multi-fidelity or multi-head training data during finetuning by default.
 
 
+Selecting Elements
+------------------
+
+``tace-export-elements`` exports a model for a selected set of elements. Supply
+chemical symbols or atomic numbers. The list replaces the original vocabulary
+and may contain fewer or more elements:
+
+.. code-block:: bash
+
+   tace-export-elements -m TACE-OAM-7M -e H C O -o HCO.pt
+
+Parameters for retained elements and shared layers are preserved, including
+the normalization of element embeddings. New element weights
+use the original layer initialization; their atomic energies and shifts default
+to zero and scales to one. 
+
 Updating Atomic Energies
 ------------------------
 
