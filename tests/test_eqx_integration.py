@@ -601,6 +601,90 @@ def so2_v021():
     return module
 
 
+@pytest.mark.parametrize("mmax", [0, 1, 2])
+@pytest.mark.parametrize("edges", [0, 7])
+def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from eqx.models.tace.tece_oam_rra.interaction import stream
+    from tace.models._e3nn.tece_oam_rra import Convolution
+    from tace.models.layout import LayoutTransform
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    irreps = o3.Irreps("4x0e+4x1o+4x2e")
+    module = Convolution(
+        mmax,
+        2,
+        4,
+        2,
+        2,
+        3,
+        False,
+        True,
+        True,
+        LayoutTransform(irreps),
+        LayoutTransform(irreps),
+        torch.nn.SiLU(),
+        torch.nn.Sigmoid(),
+    ).cuda()
+    frame = o2.WignerD(mmax, 2).cuda()
+    inputs = [
+        (torch.randn(shape, device="cuda") * 0.1).requires_grad_()
+        for shape in (
+            (4, irreps.dim),
+            (edges, 3),
+            (3, module.weight_numel),
+            (edges, 35),
+            (edges, 3),
+        )
+    ]
+    x, radial, weight, packed, basis = inputs
+    cutoff = torch.rand(edges, 1, device="cuda", requires_grad=True)
+    index = torch.randint(4, (2, edges), device="cuda")
+    local_dim = frame.local_indices.numel()
+    selected = packed.index_select(1, frame._packed_indices)
+    dense = (
+        packed.new_zeros((edges, local_dim * 9))
+        .index_copy(1, frame._dense_indices, selected)
+        .view(edges, local_dim, 9)
+    )
+    inverse = dense.transpose(1, 2) * frame.inverse_scale
+    actual = stream(
+        module, x, radial, weight, None, index, cutoff, packed, packed, basis
+    )
+    expected = module(x, radial @ weight, index, cutoff, dense, inverse, basis)
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-10)
+    if edges == 7 and mmax == 2:
+        compiled = torch.compile(
+            lambda *args: stream(module, *args), backend="aot_eager", fullgraph=True
+        )
+        output = compiled(
+            x, radial, weight, None, index, cutoff, packed, packed, basis
+        )
+        torch.testing.assert_close(output, expected, atol=1e-11, rtol=1e-10)
+        gradients = [
+            torch.autograd.grad(result.sum(), packed, retain_graph=True)[0]
+            for result in (output, expected)
+        ]
+        torch.testing.assert_close(*gradients, atol=1e-11, rtol=1e-10)
+    inputs = (*inputs, cutoff, *module.parameters())
+    losses = [value.square().sum() for value in (actual, expected)]
+    for _ in range(2):
+        grads = [
+            torch.autograd.grad(loss, inputs, create_graph=True, allow_unused=True)
+            for loss in losses
+        ]
+        for value, a, b in zip(inputs, *grads):
+            a = torch.zeros_like(value) if a is None else a
+            b = torch.zeros_like(value) if b is None else b
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-7)
+        if not edges:
+            break
+        losses = [
+            sum(g.square().sum() for g in values if g is not None) for values in grads
+        ]
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("mmax", [0, 1, 2])
 @pytest.mark.parametrize("ece", [False, True])
@@ -846,6 +930,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         from eqx.conv import execution as convolution_execution
         from eqx.models.tace.tece_oam_rra import execution
 
+        monkeypatch.setattr(execution, "BACKWARD_TILE_SIZE", 256)
         monkeypatch.setattr(
             execution, "forward", partial(execution.forward, tile_size=256)
         )

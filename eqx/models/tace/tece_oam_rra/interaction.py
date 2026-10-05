@@ -26,7 +26,8 @@ def stream(
 
     Edge tiles use matrix products for dense contractions and CUDA kernels
     for intervening expressions. Only attention scores are retained per edge.
-    Other intermediates are recomputed in bounded tiles.
+    Other intermediates are recomputed in bounded tiles. CUDA frame arguments
+    may contain dense matrices or packed degree blocks shared by both directions.
     """
     if bias is None:
         bias = projection.new_zeros(projection.shape[1])
@@ -67,8 +68,9 @@ def stream(
             metadata,
             projection.shape[0],
             radial_basis.shape[1],
-            wigner.shape[2],
-            wigner_inv.shape[1],
+            inputs[0].shape[1],
+            (module.lmax + 1) ** 2 if wigner.ndim == 2 else wigner_inv.shape[1],
+            wigner.ndim == 2,
         )
         program, inputs = compose_radial(
             repr((nodes, ((score, 0, "edge"), (value, 1, "edge")))),
@@ -100,8 +102,9 @@ def base_program(metadata, inputs):
         metadata,
         inputs[1].shape[1],
         inputs[7].shape[1],
-        inputs[5].shape[2],
-        inputs[6].shape[1],
+        inputs[0].shape[1],
+        (description[0] + 1) ** 2 if inputs[5].ndim == 2 else inputs[6].shape[1],
+        inputs[5].ndim == 2,
     )
 
 
@@ -145,7 +148,15 @@ def interaction_fake(metadata, source, target, inputs):
     channels, heads = description[2:4]
     nodes = inputs[0].shape[0]
     return [
-        inputs[0].new_empty((nodes, inputs[6].shape[1], channels)),
+        inputs[0].new_empty(
+            (
+                nodes,
+                (description[0] + 1) ** 2
+                if inputs[5].ndim == 2
+                else inputs[6].shape[1],
+                channels,
+            )
+        ),
         inputs[0].new_empty((nodes, heads)),
         inputs[0].new_empty((nodes, heads)),
     ]
@@ -192,13 +203,21 @@ def contraction(
 ) -> list[torch.Tensor]:
     """Evaluate recursively differentiated local expressions as native kernels."""
     from ....conv.execution import launch
+    from .execution import BACKWARD_TILE_SIZE
 
     inputs = [x.contiguous() for x in inputs]
     result = contraction_fake(metadata, source, target, inputs)
     for value in result:
         value.zero_()
     if result and source.numel():
-        launch(metadata, inputs, source.contiguous(), target.contiguous(), result)
+        launch(
+            metadata,
+            inputs,
+            source.contiguous(),
+            target.contiguous(),
+            result,
+            tile_size=BACKWARD_TILE_SIZE,
+        )
     return result
 
 

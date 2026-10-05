@@ -134,12 +134,13 @@ class Representation(torch.nn.Module):
             or uses_o2_interaction
             or issubclass(node_embedding_cls, WignerTensorNodeEmbedding)
         )
-        self._can_pack_wigner = not (
-            uses_so2_interaction
-            or issubclass(node_embedding_cls, WignerTensorNodeEmbedding)
+        self._can_pack_wigner = not issubclass(
+            node_embedding_cls, WignerTensorNodeEmbedding
         )
-        self._can_skip_wigner = self._can_pack_wigner and not any(
-            issubclass(cls, UvO2Interaction) for cls in interaction_classes
+        self._can_skip_wigner = (
+            self._can_pack_wigner
+            and not uses_so2_interaction
+            and not any(issubclass(cls, UvO2Interaction) for cls in interaction_classes)
         )
         uses_magnetic_interaction = any(
             issubclass(interaction_cls, O2MagneticInteraction)
@@ -425,6 +426,11 @@ class Representation(torch.nn.Module):
         return (
             getattr(self, "use_local_frame", True)
             and getattr(self, "_can_pack_wigner", False)
+            and all(
+                interaction.use_eqx
+                for interaction in self.interactions
+                if isinstance(interaction, UvSO2Interaction)
+            )
             and any(
                 getattr(interaction, "use_eqx", False)
                 for interaction in self.interactions
@@ -463,7 +469,9 @@ class Representation(torch.nn.Module):
             getattr(self, "use_local_frame", self.use_so2 or self.use_o2)
             and not skip_wigner
         ):
-            if getattr(self, "use_packed_wigner", False):
+            if getattr(self, "use_packed_wigner", False) and (
+                not self.use_so2 or graph.edge_vector.is_cuda
+            ):
                 from eqx.kernels import wigner_D
 
                 edge_wigner = wigner_D(self.o2_angular_basis, graph.edge_vector)

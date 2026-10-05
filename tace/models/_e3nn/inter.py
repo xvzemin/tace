@@ -403,6 +403,12 @@ class UvSO2Interaction(O3CgtpInteraction):
     This interaction block add nonlinearity to the message.
     """
 
+    @property
+    def use_eqx(self) -> bool:
+        return self.rejector._eqx_metadata is not None and bool(
+            acceleration_enabled("eqx", kernel="conv")
+        )
+
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
         if self.parity:

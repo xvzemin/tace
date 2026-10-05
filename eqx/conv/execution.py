@@ -32,6 +32,27 @@ def execution_plan(metadata):
         result.append(
             data[1] != "shared" if op == "input" else any(result[i] for i in args)
         )
+    # Keep shared subexpressions within a tile. Inlining them into every
+    # channel slice repeats tensor products and attention reductions.
+    consumers, live = Counter(root for root, _, _ in outputs), set()
+
+    def visit(i):
+        if i not in live:
+            live.add(i)
+            for j in nodes[i][2]:
+                consumers[j] += 1
+                visit(j)
+
+    for root, _, _ in outputs:
+        visit(root)
+    boundaries = frozenset(
+        i
+        for i in live
+        if result[i]
+        and consumers[i] > 1
+        and nodes[i][0]
+        in ("product", "scatter", "add", "mul", "silu", "sigmoid", "tanh", "exp")
+    )
     expressions, dependencies, uses = {}, {}, Counter()
 
     def require(kind, i):
@@ -56,10 +77,15 @@ def execution_plan(metadata):
                         and nodes[j][3][1] in ("source", "target")
                     )
                 )
-            elif op == "matmul" or not result[i]:
+            elif (
+                op == "matmul"
+                or not result[i]
+                or op == "slice"
+                and (args[0] in boundaries or nodes[args[0]][0] == "matmul")
+            ):
                 children = tuple(("value", j) for j in args)
             else:
-                expressions[i] = expression(nodes, i, result)
+                expressions[i] = expression(nodes, i, result, boundaries)
                 children = tuple(("value", j) for j in expressions[i][1])
         elif not result[i]:
             children = (("value", i),)
@@ -117,7 +143,7 @@ def uses_matrix_products(metadata):
     )
 
 
-def expression(nodes, root, dependent):
+def expression(nodes, root, dependent, boundaries=frozenset()):
     """Separate dense contractions from the surrounding fused operations."""
     program, leaves, translated = Program(), [], {}
 
@@ -132,6 +158,8 @@ def expression(nodes, root, dependent):
                     "convolution",
                 )
                 or not dependent[i]
+                or i != root
+                and i in boundaries
             ):
                 slot = len(leaves)
                 leaves.append(i)
@@ -285,7 +313,12 @@ class TiledProgram:
                         normal = value * inverse
                     self.values[key] = normal, inverse.expand_as(value)
                 x = self.values[key][op == "inv_norm"]
-            elif op == "matmul" or not self.dependent[i]:
+            elif (
+                op == "matmul"
+                or not self.dependent[i]
+                or op == "slice"
+                and i not in self.expressions
+            ):
                 x = transform(op, size, [self.value(j) for j in args], data)
             else:
                 if i not in self.expressions:

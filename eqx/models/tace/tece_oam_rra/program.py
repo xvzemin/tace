@@ -93,7 +93,7 @@ def metadata(module):
 
 
 @lru_cache(maxsize=64)
-def build(metadata, radial_width, basis_width, angular_in, angular_out):
+def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=False):
     """Build score and value expressions once for each static architecture."""
     (
         ell,
@@ -119,14 +119,15 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out):
     n = ell + 1
     angular = sum((n - m) * (1 if m == 0 else 2) for m in range(mmax + 1))
     radial_channels = sum(n - m for m in range(mmax + 1)) * 2 * channels
+    rotation_width = sum((2 * l + 1) ** 2 for l in range(n))
     specs = [
         (angular_in * channels, "source"),
         (radial_width, "edge"),
         (radial_width * radial_channels, "shared"),
         (radial_channels, "shared"),
         (1, "edge"),
-        (angular * angular_in, "edge"),
-        (angular_out * angular, "edge"),
+        (rotation_width if packed else angular * angular_in, "edge"),
+        (rotation_width if packed else angular_out * angular, "edge"),
         (basis_width, "edge"),
     ]
     specs.extend((size, "shared") for size in parameter_sizes)
@@ -143,7 +144,46 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out):
             for c in range(channels)
         ),
     )
-    local = program.matmul(values[5], paired, angular, angular_in, 2 * channels)
+    rotation, inverse = values[5:7]
+    if packed:
+        # Expand only the current tile. Full-graph frames and their adjoints
+        # retain degree blocks, rather than storing the off-degree zeros.
+        local_indices = [
+            (l, l + signed_m)
+            for m in range(mmax + 1)
+            for signed_m in ((0,) if m == 0 else (m, -m))
+            for l in range(m, n)
+        ]
+        indices = [
+            l * (4 * l * l - 1) // 3 + row * (2 * l + 1) + column - l * l
+            if l * l <= column < (l + 1) ** 2
+            else rotation_width
+            for l, row in local_indices
+            for column in range(angular_in)
+        ]
+        rotation = program.gather(
+            program.concatenate((rotation, program.constant(1, 0))), indices
+        )
+        indices = [
+            l * (4 * l * l - 1) // 3 + row * (2 * l + 1) + column - l * l
+            if l * l <= column < (l + 1) ** 2
+            else rotation_width
+            for column in range(angular_out)
+            for l, row in local_indices
+        ]
+        inverse = program.gather(
+            program.concatenate((inverse, program.constant(1, 0))), indices
+        )
+        if mmax < ell:
+            scale = program.concatenate(
+                [
+                    program.constant(1, ((2 * l + 1) / (2 * min(l, mmax) + 1)) ** 0.5)
+                    for _ in range(angular_out)
+                    for l, _ in local_indices
+                ]
+            )
+            inverse = program.binary("mul", inverse, scale)
+    local = program.matmul(rotation, paired, angular, angular_in, 2 * channels)
     descriptions = {entry[0]: entry[1:] for entry in linears}
 
     def linear(name, features):
@@ -270,7 +310,7 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out):
         tensors = program.binary("mul", tensors, program.gather(gate, mapped))
         message = tensors if gate_m0 else program.concatenate((scalar, tensors))
     message = linear("linear_down", message)
-    value = program.matmul(values[6], message, angular_out, angular, channels)
+    value = program.matmul(inverse, message, angular_out, angular, channels)
     return tuple(program.nodes), score, value, tuple(specs), heads, channels, eps
 
 
