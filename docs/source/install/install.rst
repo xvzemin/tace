@@ -35,7 +35,7 @@ libraries and simulation interfaces are optional and can be installed
 independently as described below. When working from a source checkout, replace
 ``tace[extra]`` with ``.[extra]`` in the commands.
 
-CPU execution does not require CUDA or a C++ compiler. On Windows and macOS,
+Core CPU inference does not require CUDA or a C++ compiler. On Windows and macOS,
 start with ``device="cpu"`` and leave the CUDA acceleration backends disabled.
 EQX CUDA kernels require an NVIDIA GPU, the CUDA toolkit and a compatible
 C++ compiler (MSVC on Windows). They are not available on macOS.

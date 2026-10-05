@@ -15,6 +15,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Set up MSVC for TorchSim CPU kernels
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - run: python -m pip install ".[dev]" "torch-sim-atomistic==0.6.2"
       - name: Test TACE CPU operations and interfaces
         run: >-

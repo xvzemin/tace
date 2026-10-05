@@ -5,7 +5,7 @@ import subprocess
 import sys
 import zipfile
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Union
 from unittest.mock import Mock
 
@@ -385,13 +385,18 @@ def test_foundation_cli_exports(
     foundation_model[1].assert_called_once()
 
 
-def test_foundation_aoti_output_keeps_version():
-    from tace.scripts.export_eval import _default_aoti_output_path
+@pytest.mark.parametrize("path_class", [PurePosixPath, PureWindowsPath])
+def test_foundation_aoti_output_keeps_version(monkeypatch, path_class):
+    from tace.scripts import export_eval
 
-    assert _default_aoti_output_path("TECE-OAM-RRA-1.0") == "TECE-OAM-RRA-1.0.pt2"
+    monkeypatch.setattr(export_eval, "Path", path_class)
     assert (
-        _default_aoti_output_path("models/TACE-OAM-7M.pt") == "models/TACE-OAM-7M.pt2"
+        export_eval._default_aoti_output_path("TECE-OAM-RRA-1.0")
+        == "TECE-OAM-RRA-1.0.pt2"
     )
+    assert path_class(
+        export_eval._default_aoti_output_path("models/TACE-OAM-7M.pt")
+    ) == path_class("models/TACE-OAM-7M.pt2")
 
 
 def test_foundation_ase_and_finetune(foundation_model):
