@@ -209,7 +209,9 @@ def test_radial_network_compiled(kind, edges, monkeypatch, double_precision):
                 energy.square().sum(), values[4], create_graph=True
             )[0]
 
-        traced = make_fx(force)(*inputs)
+        traced = make_fx(force, tracing_mode="symbolic", _allow_non_fake_inputs=True)(
+            *inputs
+        )
         compiled = torch.compile(traced, backend="aot_eager", fullgraph=True)
         actual, expected = compiled(*inputs), force(*inputs)
         torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)

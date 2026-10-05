@@ -99,7 +99,7 @@ def main():
 
     try:
         from tace.interface.lammps import TACEAOTILammpsCalc, TACELammpsCalc
-    except (ImportError, NameError) as exc:
+    except ImportError as exc:
         raise RuntimeError("LAMMPS export requires the LAMMPS Python package.") from exc
 
     if args.backend == "mliap":

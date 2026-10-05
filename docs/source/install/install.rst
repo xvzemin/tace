@@ -35,16 +35,13 @@ libraries and simulation interfaces are optional and can be installed
 independently as described below. When working from a source checkout, replace
 ``tace[extra]`` with ``.[extra]`` in the commands.
 
-PyTorch Geometric
------------------
+CPU execution does not require CUDA or a C++ compiler. On Windows and macOS,
+start with ``device="cpu"`` and leave the CUDA acceleration backends disabled.
+EQX CUDA kernels require an NVIDIA GPU, the CUDA toolkit and a compatible
+C++ compiler (MSVC on Windows). They are not available on macOS.
+The LAMMPS interface additionally requires a CUDA Kokkos ML-IAP build; the
+host-only LAMMPS backend is not supported. See :doc:`../guide/lammps`.
 
-TACE requires the core ``torch_geometric`` package, but not its optional
-binary extensions at import time
-(``torch-scatter``, ``torch-sparse``, ``torch-cluster``, ``torch-spline-conv``,
-or ``pyg-lib``). Standard sum and mean reductions use native PyTorch operations.
-TACE's ``scatter_min``, ``scatter_max``, and ``scatter_mul`` require registered
-``torch-scatter`` operators only when called. EquivariantX does not depend on
-PyG or its extensions.
 
 OpenEquivariance (OEQ)
 ----------------------

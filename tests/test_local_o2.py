@@ -39,7 +39,9 @@ DTYPE = torch.float64
 @pytest.mark.parametrize("hidden", [[], [7]])
 @pytest.mark.parametrize("num_edges", [0, 8])
 @pytest.mark.parametrize("use_eqx", [False, True])
-def test_element2_projects_nodes_before_gather(bias, lora, hidden, num_edges, use_eqx, monkeypatch):
+def test_element2_projects_nodes_before_gather(
+    bias, lora, hidden, num_edges, use_eqx, monkeypatch
+):
     from tace.models._e3nn.edge import Element2EdgeUpdate
     from tace.models.linear import enable_lora
     from tace.models.mlp import MLP
@@ -1361,7 +1363,7 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
     edge_index = torch.tensor([[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]])
     graph = SimpleNamespace(
         edge_vector=r,
-        edge_length=r.square().sum(-1, keepdim=True).sqrt() + 1e-9,
+        edge_length=r.norm(dim=-1, keepdim=True),
     )
     d, di = o2.WignerD(lmax + 2, lmax + 2)(r)
     actual = module(x, w, edge_index, d, di, graph)

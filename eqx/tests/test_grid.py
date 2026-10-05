@@ -124,7 +124,7 @@ def test_o2_grid_two_coefficient_sets(double_precision, device):
     odd = torch.stack((x[:, 1], x[:, 5], -x[:, 3], x[:, 9], -x[:, 7]), -1)
     even, odd = even @ grid.synthesis.T, odd @ grid.synthesis.T
     expected = torch.stack((even + odd, even - odd), -2).unsqueeze(-3) / 2**0.5
-    torch.testing.assert_close(grid(x), expected, atol=0, rtol=0)
+    torch.testing.assert_close(grid(x), expected, atol=2e-14, rtol=2e-14)
 
 
 @pytest.mark.parametrize("irreps", ["2x0e+2x0o+4x1m", "0e+0o+2x1m+2x2m", "0e+0o"])

@@ -1,0 +1,29 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ".[dev]" "torch-sim-atomistic==0.6.2"
+      - name: Test TACE CPU operations and interfaces
+        run: >-
+          python -m pytest
+          tests/test_compile.py tests/test_radial.py tests/test_loss.py
+          tests/test_statistics.py tests/test_scatter_norm.py tests/test_torchsim.py
+          -q
+      - name: Test EQX portable operations
+        run: >-
+          python -m pytest eqx/tests/test_o2.py eqx/tests/test_o3.py
+          eqx/tests/test_co2.py eqx/tests/test_co3.py eqx/tests/test_ictd.py
+          eqx/tests/test_grid.py eqx/tests/test_cuda.py eqx/tests/test_utils.py -q

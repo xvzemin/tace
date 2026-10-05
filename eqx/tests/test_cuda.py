@@ -3,11 +3,44 @@
 import logging
 import os
 import runpy
+import sys
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
 
 from eqx.kernels import cuda
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_runtime_linker_flags(monkeypatch, tmp_path, platform):
+    import torch.utils.cpp_extension as extension
+
+    namespace = runpy.run_path(cuda.__file__)
+    load = Mock(return_value=object())
+    dll_directory = MagicMock()
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(os, "add_dll_directory", dll_directory, raising=False)
+    monkeypatch.setattr(extension, "CUDA_HOME", str(tmp_path))
+    monkeypatch.setattr(extension, "load", load)
+    try:
+        assert namespace["runtime"]() is load.return_value
+        kwargs = load.call_args.kwargs
+        if platform == "win32":
+            dll_directory.assert_called_once_with(str(tmp_path / "bin"))
+            assert kwargs["extra_cflags"] == ["/O2"]
+            assert kwargs["extra_ldflags"] == [
+                f"/LIBPATH:{tmp_path / 'lib' / 'x64'}",
+                "nvrtc.lib",
+                "cuda.lib",
+            ]
+        else:
+            dll_directory.assert_not_called()
+            assert kwargs["extra_cflags"] == ["-O3"]
+            assert "-lnvrtc" in kwargs["extra_ldflags"]
+            assert "-lcuda" in kwargs["extra_ldflags"]
+    finally:
+        namespace["_POOL"].shutdown()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -32,7 +65,9 @@ def test_gather_sum(dtype, edges, first_indexed):
     )
     actual = gather_sum(inputs, indices)
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
-    outputs = [value.sin().sum() / max(value.numel(), 1) for value in (actual, reference)]
+    outputs = [
+        value.sin().sum() / max(value.numel(), 1) for value in (actual, reference)
+    ]
     for _ in range(3):
         gradients = [
             torch.autograd.grad(output, inputs, create_graph=True, retain_graph=True)

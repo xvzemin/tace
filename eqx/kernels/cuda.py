@@ -3,10 +3,12 @@
 import hashlib
 import logging
 import os
+import sys
 import tempfile
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from functools import lru_cache
 from pathlib import Path
 
@@ -42,19 +44,27 @@ def runtime():
             "The EQX CUDA backend requires a CUDA toolkit; set CUDA_HOME."
         )
     cuda_home = Path(CUDA_HOME)
-    with _RUNTIME_LOCK:
+    if sys.platform == "win32":
+        cflags = ["/O2"]
+        ldflags = [f"/LIBPATH:{cuda_home / 'lib' / 'x64'}", "nvrtc.lib", "cuda.lib"]
+    else:
+        cflags = ["-O3"]
+        ldflags = [
+            f"-L{cuda_home / 'lib64'}",
+            f"-Wl,-rpath,{cuda_home / 'lib64'}",
+            f"-L{cuda_home / 'lib64' / 'stubs'}",
+            "-lnvrtc",
+            "-lcuda",
+        ]
+    with _RUNTIME_LOCK, ExitStack() as stack:
+        if sys.platform == "win32":
+            stack.enter_context(os.add_dll_directory(str(cuda_home / "bin")))
         return load(
             name="eqx_cuda_runtime",
             sources=[str(Path(__file__).parent / "csrc" / "runtime.cpp")],
             extra_include_paths=[str(cuda_home / "include")],
-            extra_cflags=["-O3"],
-            extra_ldflags=[
-                f"-L{cuda_home / 'lib64'}",
-                f"-Wl,-rpath,{cuda_home / 'lib64'}",
-                f"-L{cuda_home / 'lib64' / 'stubs'}",
-                "-lnvrtc",
-                "-lcuda",
-            ],
+            extra_cflags=cflags,
+            extra_ldflags=ldflags,
             with_cuda=False,
             verbose=False,
         )

@@ -27,7 +27,7 @@ def radial_program(network, inputs, program, value):
     def parameter(tensor):
         slot = len(inputs)
         inputs.append(tensor.reshape(1, -1))
-        return program.input(slot, "shared", tensor.numel())
+        return program.input(slot, "shared", int(tensor.numel()))
 
     layers = network.mlp if hasattr(network, "mlp") else network
     for layer in layers:
@@ -68,7 +68,9 @@ def radial_program(network, inputs, program, value):
                 weight = weight / math.sqrt(scale)
             if weight.ndim != 2 or weight.shape[0] != program.size(value):
                 raise ValueError("Radial linear weight has an incompatible shape.")
-            value = program.matmul(value, parameter(weight), 1, *weight.shape)
+            value = program.matmul(
+                value, parameter(weight), 1, *(int(dim) for dim in weight.shape)
+            )
             if getattr(layer, "bias", None) is not None:
                 value = program.binary("add", value, parameter(layer.bias))
             if hasattr(layer, "h_in") and layer.act is not None:
@@ -94,10 +96,10 @@ def compose_radial(metadata, inputs, slot, network):
                 inputs[slot] = feature
             else:
                 inputs.append(feature)
-            parts.append(program.input(index, storage, feature.shape[-1]))
+            parts.append(program.input(index, storage, int(feature.shape[-1])))
         value = program.concatenate(parts)
     else:
-        value = program.input(slot, "edge", radial.shape[-1])
+        value = program.input(slot, "edge", int(radial.shape[-1]))
     value = radial_program(network, inputs, program, value)
     translated = {}
     for i, (op, size, args, data) in enumerate(nodes):
@@ -130,7 +132,7 @@ def convolve(kind, metadata, operands, edge_index, network):
             for feature, storage in tensor:
                 if torch.compiler.is_compiling():
                     torch._dynamo.mark_static(feature, -1)
-                parts.append(program.input(len(inputs), storage, feature.size(-1)))
+                parts.append(program.input(len(inputs), storage, int(feature.size(-1))))
                 inputs.append(feature)
             values.append(program.concatenate(parts))
             continue
@@ -139,7 +141,7 @@ def convolve(kind, metadata, operands, edge_index, network):
             if role == 2:
                 torch._dynamo.mark_static(tensor, 0)
         if role == output_role:
-            values.append(program.constant(tensor.size(-1), 0))
+            values.append(program.constant(int(tensor.size(-1)), 0))
             continue
         storage = (
             "source"
@@ -148,7 +150,8 @@ def convolve(kind, metadata, operands, edge_index, network):
             if role == 2 or tensor.shape[0] == 1
             else "edge"
         )
-        width = tensor.numel() if storage == "shared" else tensor.size(-1)
+        # Program widths are model constants, unlike dynamic node/edge counts.
+        width = int(tensor.numel() if storage == "shared" else tensor.size(-1))
         values.append(program.input(len(inputs), storage, width))
         inputs.append(tensor.reshape(1, -1) if storage == "shared" else tensor)
     values[1] = radial_program(network, inputs, program, values[1])
@@ -159,9 +162,16 @@ def convolve(kind, metadata, operands, edge_index, network):
         raise ValueError("Radial network output does not match projection input.")
     root = program.add(
         "convolution",
-        output.shape[-1],
+        int(output.shape[-1]),
         values,
-        (kind, metadata, output_role, False, tuple(operands[2].shape), 0),
+        (
+            kind,
+            metadata,
+            output_role,
+            False,
+            tuple(int(dim) for dim in operands[2].shape),
+            0,
+        ),
     )
     return evaluate(
         repr((tuple(program.nodes), ((root, 0, "target"),))),

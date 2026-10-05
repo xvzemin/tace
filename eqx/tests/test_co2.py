@@ -162,10 +162,17 @@ def test_spherical_recurrence_float32(degrees, wigner_3j):
     vectors = torch.randn(16, 3, device=DEVICE, requires_grad=True)
     module = co2.SphericalCoupling(*degrees, method="recurrence").to(DEVICE)
     actual = module(features, vectors)
+    try:
+        harmonics = o3.spherical_harmonics(l2, vectors.double(), True, "component")
+    except NotImplementedError:
+        # Use Wigner matrices above the reference implementation's degree limit.
+        alpha, beta = o3.xyz_to_angles(vectors.double().cpu())
+        harmonics = o3.wigner_D(l2, alpha, beta, torch.zeros_like(alpha))[..., l2]
+        harmonics = harmonics.to(DEVICE) * math.sqrt(2 * l2 + 1)
     expected = torch.einsum(
         "...a,...b,abc->...c",
         features.double(),
-        o3.spherical_harmonics(l2, vectors.double(), True, "component"),
+        harmonics,
         cg,
     )
     for _ in range(3):

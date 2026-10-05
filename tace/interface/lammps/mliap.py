@@ -16,10 +16,10 @@ from tace.models.lammps import use_lammps_mliap_data
 
 try:
     from lammps.mliap.mliap_unified_abc import MLIAPUnified
-
-    LAMMPS_ML_IAP_AVAILABLE = True
-except ImportError:
-    LAMMPS_ML_IAP_AVAILABLE = False
+except ImportError as error:
+    raise ImportError(
+        "The TACE LAMMPS interface requires LAMMPS built with Python ML-IAP support."
+    ) from error
 
 
 class EdgeForcesWrapper(torch.nn.Module):
@@ -96,15 +96,11 @@ class TACELammpsCalc(MLIAPUnified):
     def compute_forces(self, data):
         nlocal = data.nlocal
         ntotal = data.ntotal
-        npairs = data.npairs
         nghosts = ntotal - nlocal
         species = torch.as_tensor(data.elems, dtype=torch.int64)
 
         if not self.initialized:
             self._initialize_device(data)
-
-        if nlocal == 0 or npairs <= 1:
-            return
 
         batch = self._prepare_batch(data, nlocal, nghosts, species)
 
@@ -115,20 +111,26 @@ class TACELammpsCalc(MLIAPUnified):
         self._update_lammps_data(data, node_energy, pair_forces, nlocal)
 
     def _prepare_batch(self, data, nlocal, nghosts, species):
-        edge_vector = torch.as_tensor(data.rij).to(self.dtype).to(self.device)
+        if data.npairs:
+            edge_vector = torch.as_tensor(data.rij).to(self.device, self.dtype)
+            edge_index = torch.stack(
+                [
+                    torch.as_tensor(data.pair_j, dtype=torch.int64).to(self.device),
+                    torch.as_tensor(data.pair_i, dtype=torch.int64).to(self.device),
+                ],
+                dim=0,
+            )
+        else:
+            # ML-IAP exposes null edge arrays when there are no neighbors.
+            edge_vector = torch.empty(0, 3, dtype=self.dtype, device=self.device)
+            edge_index = torch.empty(2, 0, dtype=torch.int64, device=self.device)
         edge_vector.requires_grad_(True)
         return {
             "edge_vector": edge_vector,
             "node_attrs": torch.nn.functional.one_hot(
                 species.to(self.device), num_classes=self.num_species
             ).to(self.dtype),
-            "edge_index": torch.stack(
-                [
-                    torch.as_tensor(data.pair_j, dtype=torch.int64).to(self.device),
-                    torch.as_tensor(data.pair_i, dtype=torch.int64).to(self.device),
-                ],
-                dim=0,
-            ),
+            "edge_index": edge_index,
             "batch": torch.zeros(nlocal, dtype=torch.int64, device=self.device),
             "ptr": torch.tensor([0, nlocal], dtype=torch.int64, device=self.device),
             "lmp_data": data,
@@ -142,7 +144,8 @@ class TACELammpsCalc(MLIAPUnified):
         eatoms = torch.as_tensor(data.eatoms)
         eatoms.copy_(node_energy[:nlocal])
         data.energy = node_energy[:nlocal].sum().item()
-        data.update_pair_forces(pair_forces)
+        if pair_forces.numel():
+            data.update_pair_forces(pair_forces)
 
     def compute_descriptors(self, data):
         pass
@@ -197,15 +200,12 @@ class TACEAOTILammpsCalc(TACELammpsCalc):
     def compute_forces(self, data):
         nlocal = data.nlocal
         ntotal = data.ntotal
-        npairs = data.npairs
         nghosts = ntotal - nlocal
         species = torch.as_tensor(data.elems, dtype=torch.int64)
 
         if not self.initialized:
             self._initialize_device(data)
 
-        if nlocal == 0 or npairs <= 1:
-            return
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
