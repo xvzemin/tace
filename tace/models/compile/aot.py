@@ -3,7 +3,6 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-import logging
 import importlib
 import json
 import logging
@@ -28,6 +27,29 @@ TACE_AOTI_FORMAT = "tace_graph_v1"
 ASE_AOTI_FORMAT = "tace_ase_v1"
 LAMMPS_AOTI_FORMAT = "tace_lammps_v1"
 TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY = "tace_custom_ops_libs.txt"
+EQX_CUSTOM_OPS_MODULES = {
+    "eqx::ace_contract": "eqx.ace.contraction",
+    "eqx::alignment_cuda": "eqx.kernels.wigner",
+    "eqx::bilinear_ace": "eqx.models.tace.tece_oam_rra.bilinear_contraction",
+    "eqx::contraction": "eqx.conv.o2_o3.convolution",
+    "eqx::direction_contraction": "eqx.conv.o2_o3.geometry",
+    "eqx::edge_program": "eqx.conv.edge",
+    "eqx::element_linear": "eqx.o3.contraction",
+    "eqx::frame_rotation": "eqx.kernels.rotation",
+    "eqx::gather_sum": "eqx.kernels.layout",
+    "eqx::graph_normalized_exp": "eqx.conv.attention",
+    "eqx::grouped_permute": "eqx.kernels.layout",
+    "eqx::indexed_sum": "eqx.kernels.layout",
+    "eqx::local_channel_product": "eqx.kernels.channel_product",
+    "eqx::o3_contraction": "eqx.conv.o3.convolution",
+    "eqx::packed_wigner": "eqx.kernels.wigner",
+    "eqx::quaternion_polynomial": "eqx.kernels.quaternion",
+    "eqx::replay": "eqx.kernels.recompute",
+    "eqx::rotary_product": "eqx.kernels.rotary",
+    "eqx::rotation": "eqx.kernels.wigner",
+    "eqx::tece_contraction": "eqx.models.tace.tece_oam_rra.interaction",
+    "eqx::tece_interaction": "eqx.models.tace.tece_oam_rra.interaction",
+}
 TACE_AOTI_INPUT_KEYS = (
     "positions",
     "node_attrs",
@@ -254,6 +276,7 @@ def export_aotinductor(
             prefer_deferred_runtime_asserts_over_guards=True,
         )
 
+    custom_ops_libs.update(_custom_ops_libs_from_model(exported.graph_module))
     output_path = _normalize_pt2_path(output_path)
     metadata = _export_metadata(
         compile_model,
@@ -335,6 +358,7 @@ def export_lammps_aotinductor(
             prefer_deferred_runtime_asserts_over_guards=True,
         )
 
+    custom_ops_libs.update(_custom_ops_libs_from_model(exported.graph_module))
     output_path = _normalize_pt2_path(output_path)
     metadata = _export_metadata(
         compile_model,
@@ -683,6 +707,7 @@ def _normalize_pt2_path(output_path: Union[str, Path]) -> str:
 
 
 def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
+    """Collect registration modules from model layers and traced operators."""
     libs: Set[str] = set()
     for module in model.modules():
         module_name = type(module).__module__.lower()
@@ -690,6 +715,12 @@ def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
             libs.add("openequivariance")
         if module_name.startswith("cuequivariance") or ".models.cue" in module_name:
             libs.update({"cuequivariance", "cuequivariance_torch"})
+        if isinstance(module, torch.fx.GraphModule):
+            for node in module.graph.nodes:
+                if isinstance(node.target, torch._ops.OpOverload):
+                    lib = EQX_CUSTOM_OPS_MODULES.get(node.target._schema.name)
+                    if lib is not None:
+                        libs.add(lib)
     return libs
 
 
@@ -707,13 +738,23 @@ def _embed_custom_ops_libs(
 
 
 def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
+    """Register external operators before constructing the AOTI runner."""
     with zipfile.ZipFile(pt2_path, "r") as archive:
         archive_root = archive.namelist()[0].split("/", 1)[0]
         entry = f"{archive_root}/{TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY}"
-        if entry not in archive.namelist():
-            return
-        libs = archive.read(entry).decode().split()
-    for lib in libs:
+        libs = (
+            set(archive.read(entry).decode().split())
+            if entry in archive.namelist()
+            else set()
+        )
+        # Earlier packages did not record EQX registration modules.
+        for name in archive.namelist():
+            if name.endswith(".wrapper.json"):
+                for item in json.loads(archive.read(name)).get("nodes", []):
+                    lib = EQX_CUSTOM_OPS_MODULES.get(item["node"]["target"])
+                    if lib is not None:
+                        libs.add(lib)
+    for lib in sorted(libs):
         importlib.import_module(lib)
 
 
