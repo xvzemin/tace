@@ -9,7 +9,7 @@ import torch
 
 from ..adapter import TensorModel
 from ..lammps import AOTI_LAMMPS_GHOST_EXCHANGE, Graph
-from ..utils import compute_symmetric_displacement
+from ..utils import compute_symmetric_displacement, stress_from_virials
 from .compile import compiled_call, trace_and_compile
 
 
@@ -135,6 +135,8 @@ class CompileTensorModel(TensorModel):
         ]
         if "fidelity_idx" in data:
             required.append("fidelity_idx")
+        if "pbc" in data:
+            required.append("pbc")
         if self._requires_noncollinear_magmoms():
             required.append("initial_noncollinear_magmoms")
         if self._requires_total_charge():
@@ -319,12 +321,11 @@ class _FlatE3nnCompileModel(torch.nn.Module):
         if self.compute_stress or self.compute_virials:
             grad = grads[grad_index]
             virials = torch.zeros_like(data["lattice"]) if grad is None else -grad
-            volume = torch.linalg.det(data["lattice"]).abs().unsqueeze(-1)
-            stress = -virials / volume.view(-1, 1, 1)
             output["virials"] = virials
-            output["stress"] = torch.where(
-                torch.abs(stress) < 1e10, stress, torch.zeros_like(stress)
-            )
+            if self.compute_stress:
+                output["stress"] = stress_from_virials(
+                    virials, data["lattice"], data.get("pbc")
+                )
             grad_index += 1
         if self.compute_noncollinear_magnetic_forces:
             grad = grads[grad_index]

@@ -4,7 +4,7 @@
 ################################################################################
 
 import copy
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, Union
 
 import torch
 from e3nn import o3
@@ -89,6 +89,7 @@ def compute_atomic_virials_stresses(
     num_nodes: torch.Tensor,
     compute_atomic_virials: bool,
     compute_atomic_stresses: bool,
+    pbc: Union[torch.Tensor, None] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
     atomic_virials = None
@@ -105,13 +106,8 @@ def compute_atomic_virials_stresses(
         atomic_virials = (atomic_virials_source + atomic_virials_target) / 2
         atomic_virials = -1 * (atomic_virials + atomic_virials.transpose(-1, -2)) / 2
 
-        volume = torch.linalg.det(lattice).abs().unsqueeze(-1)
-        atomic_stresses = -1 * atomic_virials / volume[batch].view(-1, 1, 1)
-        atomic_stresses = torch.where(
-            torch.abs(atomic_stresses) < 1e10,
-            atomic_stresses,
-            torch.zeros_like(atomic_stresses),
-        )
+        if compute_atomic_stresses:
+            atomic_stresses = stress_from_virials(atomic_virials, lattice, pbc, batch)
 
     return atomic_virials, atomic_stresses
 
@@ -122,6 +118,7 @@ def compute_forces_stress_from_edge_forces(
     edge_index: torch.Tensor,
     batch: torch.Tensor,
     lattice: torch.Tensor,
+    pbc: Union[torch.Tensor, None] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert edge forces to atomic forces and per-structure stress."""
     source = edge_index[0]
@@ -143,14 +140,42 @@ def compute_forces_stress_from_edge_forces(
     ).index_add(0, edge_batch, -edge_virials)
     virials = 0.5 * (virials + virials.transpose(-1, -2))
 
-    volume = torch.linalg.det(lattice).abs().view(-1, 1, 1)
-    stress = -virials / volume
-    stress = torch.where(
-        torch.abs(stress) < 1e10,
-        stress,
-        torch.zeros_like(stress),
-    )
+    stress = stress_from_virials(virials, lattice, pbc)
     return forces, stress
+
+
+def stress_from_virials(
+    virials: torch.Tensor,
+    lattice: torch.Tensor,
+    pbc: Union[torch.Tensor, None] = None,
+    batch: Union[torch.Tensor, None] = None,
+) -> torch.Tensor:
+    """Convert virials to stress, with zero placeholders for undefined volumes.
+
+    Parameters
+    ----------
+    virials : torch.Tensor
+        Structure or atomic virials of shape ``(..., 3, 3)``.
+    lattice : torch.Tensor
+        Row-vector cells of shape ``(num_graphs, 3, 3)``.
+    pbc : torch.Tensor, optional
+        Periodic directions of shape ``(num_graphs, 3)``. When absent, only
+        cell volumes determine validity.
+    batch : torch.Tensor, optional
+        Structure indices for atomic virials.
+    """
+    # The scalar triple product also has finite derivatives at singular cells.
+    volume = (
+        (lattice[:, 0] * torch.linalg.cross(lattice[:, 1], lattice[:, 2])).sum(-1).abs()
+    )
+    valid = torch.isfinite(volume) & (volume > 0)
+    if pbc is not None:
+        valid = valid & pbc.reshape(-1, 3).any(dim=-1)
+    volume = torch.where(valid, volume, torch.ones_like(volume))
+    if batch is not None:
+        volume, valid = volume[batch], valid[batch]
+    stress = -virials / volume[:, None, None]
+    return torch.where(valid[:, None, None], stress, torch.zeros_like(stress))
 
 
 def compute_hessians_vmap(
@@ -346,6 +371,7 @@ def replace_module_recursively(
         else:
             replace_module_recursively(child, target_cls, factory)
     return model
+
 
 def repr_without(module: torch.nn.Module, *names: str) -> str:
     visible = copy.copy(module)

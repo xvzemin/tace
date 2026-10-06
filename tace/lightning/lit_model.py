@@ -163,6 +163,8 @@ class LightningWrapperModel(L.LightningModule):
         if "stress" in batch:
             batch["direct_stress"] = batch["stress"]
             batch["direct_stress_weight"] = batch["stress_weight"]
+            if "stress_mask" in batch:
+                batch["direct_stress_mask"] = batch["stress_mask"]
 
         if self.force_dtype is not None:
             batch = batch.apply(

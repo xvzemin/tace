@@ -11,7 +11,7 @@ from .common import (
     apply_element_weights,
     num_atoms_per_graph,
     polarization_error_per_atom,
-    voigt6_stress,
+    tensor_loss,
 )
 from .mse_fn import register_loss
 
@@ -58,11 +58,7 @@ def mae_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "stress"
-    total_weight = label["entropy"] * label["stress_weight"]
-    return torch.mean(
-        torch.abs(pred[key] - label[key]) * total_weight.unsqueeze(-1).unsqueeze(-1)
-    )
+    return tensor_loss(pred, label, "stress", "mae")
 
 
 @register_loss
@@ -70,10 +66,7 @@ def mae_voigt_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "stress"
-    total_weight = label["entropy"] * label["stress_weight"]
-    error = voigt6_stress(pred[key] - label[key])
-    return torch.mean(torch.abs(error) * total_weight.unsqueeze(-1))
+    return tensor_loss(pred, label, "stress", "mae", voigt=True)
 
 
 @register_loss
@@ -81,11 +74,7 @@ def mae_virials(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "virials"
-    total_weight = label["entropy"] * label["virials_weight"]
-    return torch.mean(
-        torch.abs(pred[key] - label[key]) * total_weight.unsqueeze(-1).unsqueeze(-1)
-    )
+    return tensor_loss(pred, label, "virials", "mae")
 
 
 @register_loss
@@ -93,13 +82,7 @@ def mae_virials_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "virials"
-    total_weight = label["entropy"] * label["virials_weight"]
-    num_atoms = (label["ptr"][1:] - label["ptr"][:-1]).view(-1, 1, 1)
-    return torch.mean(
-        torch.abs((pred[key] - label[key]) / num_atoms)
-        * total_weight.unsqueeze(-1).unsqueeze(-1)
-    )
+    return tensor_loss(pred, label, "virials", "mae", per_atom=True)
 
 
 @register_loss
@@ -122,11 +105,7 @@ def mae_direct_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "direct_stress"
-    total_weight = label["entropy"] * label["direct_stress_weight"]
-    return torch.mean(
-        torch.abs(pred[key] - label[key]) * total_weight.unsqueeze(-1).unsqueeze(-1)
-    )
+    return tensor_loss(pred, label, "direct_stress", "mae")
 
 
 @register_loss
@@ -134,10 +113,7 @@ def mae_voigt_direct_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "direct_stress"
-    total_weight = label["entropy"] * label["direct_stress_weight"]
-    error = voigt6_stress(pred[key] - label[key])
-    return torch.mean(torch.abs(error) * total_weight.unsqueeze(-1))
+    return tensor_loss(pred, label, "direct_stress", "mae", voigt=True)
 
 
 @register_loss
@@ -145,13 +121,7 @@ def mae_direct_virials_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "direct_virials"
-    total_weight = label["entropy"] * label["direct_virials_weight"]
-    num_atoms = (label["ptr"][1:] - label["ptr"][:-1]).view(-1, 1, 1)
-    return torch.mean(
-        torch.abs((pred[key] - label[key]) / num_atoms)
-        * total_weight.unsqueeze(-1).unsqueeze(-1)
-    )
+    return tensor_loss(pred, label, "direct_virials", "mae", per_atom=True)
 
 
 @register_loss

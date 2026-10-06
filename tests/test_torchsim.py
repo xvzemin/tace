@@ -116,6 +116,30 @@ def test_energy_only(state, calculator):
     assert not state.positions.requires_grad
 
 
+@pytest.mark.parametrize("periodic", [False, True])
+def test_mad_boundary_conditions(double_precision, periodic):
+    from ase.io import read
+    from test_stress import DATA, mad_graphs, make_model
+    from torch_geometric.data import Batch
+
+    graphs = mad_graphs()
+    model = make_model(graphs).eval()
+    indices = [2, 3, 4] if periodic else [0, 1]
+    expected = model(
+        Batch.from_data_list([graphs[i] for i in indices]).to(DEVICE).to_dict()
+    )
+    calc = TACETorchSimCalc(model, device=DEVICE, dtype=DTYPE)
+    atoms = read(DATA, ":")
+    state = ts.io.atoms_to_state(
+        [atoms[i] for i in indices], device=DEVICE, dtype=DTYPE
+    )
+    actual = calc(state)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key], atol=1e-10, rtol=1e-10)
+    if not periodic:
+        assert not actual["stress"].any()
+
+
 def test_derivative_dependencies_are_retained(state, calculator):
     calc = calculator(
         target_property=["energy", "hessian"],

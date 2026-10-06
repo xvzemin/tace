@@ -71,6 +71,43 @@ def test_ase(checkpoint, calculator, atoms):
     assert np.isfinite(atoms.get_total_energy())
 
 
+def test_mad_mixed_boundaries(calculator, double_precision):
+    from ase.calculators.calculator import PropertyNotImplementedError
+    from ase.io import read
+    from test_stress import DATA, mad_graphs
+    from torch_geometric.data import Batch
+
+    model = calculator.model
+    graphs = mad_graphs(model.get_torch_element(), model.get_cutoff())
+    batch = Batch.from_data_list(graphs).to(calculator.device).to_dict()
+    output = model(batch)
+    assert torch.isfinite(output["energy"]).all()
+    assert torch.isfinite(output["forces"]).all()
+    assert torch.isfinite(output["stress"]).all()
+    assert not output["stress"][:2].any()
+    for i, atoms in enumerate(read(DATA, ":")):
+        atoms.calc = calculator
+        np.testing.assert_allclose(
+            atoms.get_potential_energy(), output["energy"][i].detach().cpu(), atol=2e-7
+        )
+        start, end = int(batch["ptr"][i]), int(batch["ptr"][i + 1])
+        np.testing.assert_allclose(
+            atoms.get_forces(),
+            output["forces"][start:end].detach().cpu(),
+            atol=2e-7,
+            rtol=2e-6,
+        )
+        if atoms.pbc.any():
+            np.testing.assert_allclose(
+                atoms.get_stress(voigt=False),
+                output["stress"][i].detach().cpu(),
+                atol=2e-8,
+            )
+        else:
+            with pytest.raises(PropertyNotImplementedError):
+                atoms.get_stress()
+
+
 def test_torchsim(calculator, atoms):
     ts = pytest.importorskip("torch_sim")
     from torch_sim.integrators.nve import nve_init, nve_step

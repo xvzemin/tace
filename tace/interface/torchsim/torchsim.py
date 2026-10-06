@@ -269,7 +269,7 @@ class TACETorchSimCalc(ModelInterface):
             ptr=self.ptr,
             node_attrs=self.node_attrs,
             batch=self.system_idx,
-            pbc=pbc,
+            pbc=pbc.reshape(1, 3).expand(self.n_systems, 3),
             lattice=lattice,
             positions=positions,
             edge_index=edge_index,

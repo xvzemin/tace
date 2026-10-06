@@ -56,6 +56,7 @@ TACE_AOTI_INPUT_KEYS = (
     "edge_index",
     "edge_shifts",
     "lattice",
+    "pbc",
     "batch",
     "ptr",
     "fidelity_idx",
@@ -462,6 +463,7 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
         ),
         "edge_shifts": torch.zeros((4, 3), dtype=dtype, device=device),
         "lattice": lattice,
+        "pbc": torch.ones((2, 3), dtype=torch.bool, device=device),
         "batch": torch.tensor([0, 0, 1, 1], dtype=torch.int64, device=device),
         "ptr": torch.tensor([0, 2, 4], dtype=torch.int64, device=device),
         "fidelity_idx": torch.full(
@@ -568,6 +570,7 @@ def _graph_dynamic_shapes(
         "edge_index": {1: num_edges},
         "edge_shifts": {0: num_edges},
         "lattice": {} if num_graphs_dim is None else {0: num_graphs_dim},
+        "pbc": {} if num_graphs_dim is None else {0: num_graphs_dim},
         "batch": {0: num_nodes},
         "ptr": {} if num_graphs_dim is None else {0: num_graphs_dim + 1},
         "fidelity_idx": {} if num_graphs_dim is None else {0: num_graphs_dim},

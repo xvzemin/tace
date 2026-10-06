@@ -46,6 +46,30 @@ transformations would change the physical exchange interactions.
    - The priority order is:  ``no_valid_set`` > ``valid_file`` > ``valid_from_index`` > ``valid_ratio``.
 
 
+Periodic and non-periodic structures
+------------------------------------
+
+Molecules and crystals can share a dataset and a batch. The physical cell and
+``pbc`` are preserved, including zero cells for isolated atoms and molecules.
+Neighbor-list construction does not assign a physical volume to those systems.
+
+Missing properties (absent keys or ``None``) receive zero weight. Missing
+stress or virial entries can also be marked with ``NaN``; they are replaced
+by finite placeholders and excluded by a component mask.
+
+Stress requires at least one periodic direction and a non-singular cell.
+Non-periodic structures contribute to energy and force training, but not
+stress training. Omit their stress labels, or set ``stress_weight: 0`` in
+the structure metadata.
+
+Internally, undefined stresses are zero placeholders, not physical predictions.
+The ASE calculator raises ``PropertyNotImplementedError`` when stress is
+requested for a non-periodic or zero-volume structure.
+
+TorchSim 0.6.2 requires identical boundary conditions within a ``SimState``;
+run periodic and non-periodic inference batches separately through that interface.
+This restriction does not apply to TACE training batches.
+
 Example
 -------
 

@@ -49,6 +49,12 @@ def from_atoms(
     atomic_numbers = atoms.get_atomic_numbers()
     pbc = tuple(atoms.get_pbc())
     lattice = np.array(atoms.get_cell())
+    if not np.isfinite(lattice).all():
+        raise ValueError("The cell must contain finite values.")
+    volume = abs(np.linalg.det(lattice))
+    if all(pbc) and volume == 0:
+        raise ValueError("A fully periodic structure requires a non-singular cell.")
+    stress_defined = any(pbc) and volume > 0
     positions = atoms.get_positions()
     edge_index, edge_shifts, pbc, lattice = get_neighborhood(
         positions=positions,
@@ -71,12 +77,12 @@ def from_atoms(
 
     for name, atoms_key in keyspec.info_keys.items():
         properties[name] = atoms.info.get(atoms_key, None)
-        if atoms_key not in atoms.info:
+        if properties[name] is None:
             property_weights[name] = 0.0
 
     for name, atoms_key in keyspec.arrays_keys.items():
         properties[name] = atoms.arrays.get(atoms_key, None)
-        if atoms_key not in atoms.arrays:
+        if properties[name] is None:
             property_weights[name] = 0.0
 
     lattice = (
@@ -89,6 +95,7 @@ def from_atoms(
 
     pDict = {}
     wDict = {}
+    masks = {}
     need_property = get_need_property(target_property, embedding_property, training)
     for name in need_property:
         in_data = PROPERTY[name]["shape"]["in_data"]
@@ -122,7 +129,26 @@ def from_atoms(
                         p,
                         num_atoms=num_atoms,
                     )
-            pDict.update({name: p.view(*in_data)})
+            p = p.view(*in_data)
+            if type_ == "float":
+                if torch.isinf(p).any():
+                    raise ValueError(f"{name} contains infinite values.")
+                valid = torch.isfinite(p) & (properties.get(name) is not None)
+                if name in {"stress", "direct_stress", "virials", "direct_virials"}:
+                    if name in {"stress", "direct_stress"} and not stress_defined:
+                        if valid.any() and property_weights.get(name, 1.0) > 0:
+                            raise ValueError(
+                                "Stress labels require a periodic direction and "
+                                "a non-singular cell; use stress_weight=0 to ignore them."
+                            )
+                        valid = torch.zeros_like(valid)
+                    masks[f"{name}_mask"] = valid
+                    if not valid.any():
+                        property_weights[name] = 0.0
+                elif not valid.all():
+                    property_weights[name] = 0.0
+                p = torch.where(valid, p, torch.zeros_like(p))
+            pDict.update({name: p})
         except Exception as e:
             raise RuntimeError(f"Failed to read property {name}") from e
 
@@ -142,6 +168,7 @@ def from_atoms(
         "entropy": to_tensor(atoms.info.get("entropy", 1.0)),
         "atomic_numbers": atomic_numbers,
         "lattice": lattice,
+        "pbc": torch.tensor([pbc], dtype=torch.bool),
         "positions": to_tensor(positions),
         "node_attrs": onehot,
         "edge_index": torch.tensor(edge_index, dtype=torch.int64),
@@ -150,6 +177,7 @@ def from_atoms(
             atoms.info.get(keyspec.info_keys["fidelity_idx"], 0), dtype=torch.int64
         ),
     }
+    data_dict.update(masks)
 
     for name in need_property:
         data_dict.update(

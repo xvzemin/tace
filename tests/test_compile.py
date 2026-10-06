@@ -607,6 +607,7 @@ class _ChargeReadout(torch.nn.Module):
 
 def _magnetic_embedding_sample() -> dict[str, torch.Tensor]:
     return {
+        "pbc": torch.ones(1, 3, dtype=torch.bool),
         "positions": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
         "node_attrs": torch.ones(3, 1),
         "edge_index": torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),

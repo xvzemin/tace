@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from .common import apply_element_weights, polarization_error_per_atom, voigt6_stress
+from .common import apply_element_weights, polarization_error_per_atom, tensor_loss
 from .mse_fn import register_loss
 
 
@@ -82,16 +82,7 @@ def huber_stress(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    total_weight = (
-        (label["entropy"] * label["stress_weight"]).unsqueeze(-1).unsqueeze(-1)
-    )
-    key = "stress"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
-    )
+    return tensor_loss(pred, label, "stress", "huber", huber_delta=huber_delta)
 
 
 @register_loss
@@ -100,13 +91,8 @@ def huber_voigt_stress(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    key = "stress"
-    total_weight = (label["entropy"] * label["stress_weight"]).unsqueeze(-1)
-    return torch.nn.functional.huber_loss(
-        total_weight * voigt6_stress(label[key]),
-        total_weight * voigt6_stress(pred[key]),
-        reduction="mean",
-        delta=huber_delta,
+    return tensor_loss(
+        pred, label, "stress", "huber", voigt=True, huber_delta=huber_delta
     )
 
 
@@ -116,16 +102,7 @@ def huber_virials(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    total_weight = (
-        (label["entropy"] * label["virials_weight"]).unsqueeze(-1).unsqueeze(-1)
-    )
-    key = "virials"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
-    )
+    return tensor_loss(pred, label, "virials", "huber", huber_delta=huber_delta)
 
 
 @register_loss
@@ -134,16 +111,8 @@ def huber_virials_per_atom(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    total_weight = (
-        (label["entropy"] * label["virials_weight"]).unsqueeze(-1).unsqueeze(-1)
-    )
-    num_atoms = (label["ptr"][1:] - label["ptr"][:-1]).view(-1, 1, 1)
-    key = "virials"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key] / num_atoms,
-        total_weight * pred[key] / num_atoms,
-        reduction="mean",
-        delta=huber_delta,
+    return tensor_loss(
+        pred, label, "virials", "huber", per_atom=True, huber_delta=huber_delta
     )
 
 
@@ -170,16 +139,7 @@ def huber_direct_stress(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    total_weight = (
-        (label["entropy"] * label["direct_stress_weight"]).unsqueeze(-1).unsqueeze(-1)
-    )
-    key = "direct_stress"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key],
-        total_weight * pred[key],
-        reduction="mean",
-        delta=huber_delta,
-    )
+    return tensor_loss(pred, label, "direct_stress", "huber", huber_delta=huber_delta)
 
 
 @register_loss
@@ -188,13 +148,8 @@ def huber_voigt_direct_stress(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    key = "direct_stress"
-    total_weight = (label["entropy"] * label["direct_stress_weight"]).unsqueeze(-1)
-    return torch.nn.functional.huber_loss(
-        total_weight * voigt6_stress(label[key]),
-        total_weight * voigt6_stress(pred[key]),
-        reduction="mean",
-        delta=huber_delta,
+    return tensor_loss(
+        pred, label, "direct_stress", "huber", voigt=True, huber_delta=huber_delta
     )
 
 
@@ -204,16 +159,8 @@ def huber_direct_virials_per_atom(
     label: Dict[str, torch.Tensor],
     huber_delta: float = 0.01,
 ) -> torch.Tensor:
-    total_weight = (
-        (label["entropy"] * label["direct_virials_weight"]).unsqueeze(-1).unsqueeze(-1)
-    )
-    num_atoms = (label["ptr"][1:] - label["ptr"][:-1]).view(-1, 1, 1)
-    key = "direct_virials"
-    return torch.nn.functional.huber_loss(
-        total_weight * label[key] / num_atoms,
-        total_weight * pred[key] / num_atoms,
-        reduction="mean",
-        delta=huber_delta,
+    return tensor_loss(
+        pred, label, "direct_virials", "huber", per_atom=True, huber_delta=huber_delta
     )
 
 

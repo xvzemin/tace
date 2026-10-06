@@ -57,6 +57,11 @@ def filter_error_by_property_weight(
     property_name: str,
 ) -> Tensor:
     mask = _property_weight_mask(label, property_name, error)
+    if f"{property_name}_mask" in label:
+        mask = expand_dims_to(mask, error.ndim)
+        mask = mask & label[f"{property_name}_mask"]
+    if property_name in label:
+        mask = expand_dims_to(mask, error.ndim) & torch.isfinite(label[property_name])
     return error[mask]
 
 
@@ -78,9 +83,8 @@ class MaskMAE(Metric):
         self.count += error.numel()
 
     def compute(self):
-        if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device)
-        return (self.sum_abs_error / self.count) * self.scale
+        value = self.sum_abs_error / self.count.clamp_min(1) * self.scale
+        return torch.where(self.count > 0, value, torch.full_like(value, float("nan")))
 
 
 class MaskRMSE(Metric):
@@ -103,9 +107,10 @@ class MaskRMSE(Metric):
         self.count += error.numel()
 
     def compute(self):
-        if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device)
-        return torch.sqrt(self.sum_squared_error / self.count) * self.scale
+        value = (
+            torch.sqrt(self.sum_squared_error / self.count.clamp_min(1)) * self.scale
+        )
+        return torch.where(self.count > 0, value, torch.full_like(value, float("nan")))
 
 
 class MaskPerAtomMAE(MaskMAE):

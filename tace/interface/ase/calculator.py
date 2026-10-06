@@ -5,9 +5,14 @@
 
 from typing import Union
 
+import numpy as np
 import torch
 from ase import units
-from ase.calculators.calculator import Calculator, all_changes
+from ase.calculators.calculator import (
+    Calculator,
+    PropertyNotImplementedError,
+    all_changes,
+)
 from ase.calculators.mixing import SumCalculator
 from torch_geometric.loader import DataLoader
 
@@ -128,6 +133,11 @@ class TACEAseCalc(Calculator):
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         Calculator.calculate(self, atoms)
+        # stress_defined = bool(atoms.pbc.any()) and abs(np.linalg.det(atoms.cell)) > 0
+        # if not stress_defined and set(properties or ()) & {"stress", "stresses"}:
+        #     raise PropertyNotImplementedError(
+        #         "Stress requires a periodic direction and a non-singular cell."
+        #     )
         atoms.info["fidelity_idx"] = self.fidelity_idx  # fidelity fidelity_idx
         # === dataloader ===
         data = [
@@ -157,6 +167,12 @@ class TACEAseCalc(Calculator):
         # === update ===
         self.results = {}
         for p in self.target_property:
+            # if not stress_defined and p in {
+            #     "stress",
+            #     "direct_stress",
+            #     "atomic_stresses",
+            # }:
+            #     continue
             p_rank = PROPERTY[p]["rank"]
             p_scope = PROPERTY[p]["scope"]
             ase_name = PROPERTY[p]["ase_name"]

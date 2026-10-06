@@ -11,7 +11,7 @@ from .common import (
     apply_element_weights,
     num_atoms_per_graph,
     polarization_error_per_atom,
-    voigt6_stress,
+    tensor_loss,
 )
 from .mse_fn import register_loss
 
@@ -57,12 +57,7 @@ def l2mae_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "stress"
-    total_weight = label["entropy"] * label["stress_weight"]
-    return torch.mean(
-        torch.linalg.vector_norm(pred[key] - label[key], ord=2, dim=(1, 2))
-        * total_weight
-    )
+    return tensor_loss(pred, label, "stress", "l2mae")
 
 
 @register_loss
@@ -70,10 +65,7 @@ def l2mae_voigt_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "stress"
-    total_weight = label["entropy"] * label["stress_weight"]
-    error = voigt6_stress(pred[key] - label[key])
-    return torch.mean(torch.linalg.vector_norm(error, ord=2, dim=-1) * total_weight)
+    return tensor_loss(pred, label, "stress", "l2mae", voigt=True)
 
 
 @register_loss
@@ -81,12 +73,7 @@ def l2mae_virials(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "virials"
-    total_weight = label["entropy"] * label["virials_weight"]
-    return torch.mean(
-        torch.linalg.vector_norm(pred[key] - label[key], ord=2, dim=(1, 2))
-        * total_weight
-    )
+    return tensor_loss(pred, label, "virials", "l2mae")
 
 
 @register_loss
@@ -94,15 +81,7 @@ def l2mae_virials_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "virials"
-    total_weight = label["entropy"] * label["virials_weight"]
-    num_atoms = (label["ptr"][1:] - label["ptr"][:-1]).view(-1, 1, 1)
-    return torch.mean(
-        torch.linalg.vector_norm(
-            (pred[key] - label[key]) / num_atoms, ord=2, dim=(1, 2)
-        )
-        * total_weight
-    )
+    return tensor_loss(pred, label, "virials", "l2mae", per_atom=True)
 
 
 @register_loss
@@ -125,12 +104,7 @@ def l2mae_direct_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "direct_stress"
-    total_weight = label["entropy"] * label["direct_stress_weight"]
-    return torch.mean(
-        torch.linalg.vector_norm(pred[key] - label[key], ord=2, dim=(1, 2))
-        * total_weight
-    )
+    return tensor_loss(pred, label, "direct_stress", "l2mae")
 
 
 @register_loss
@@ -138,10 +112,7 @@ def l2mae_voigt_direct_stress(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "direct_stress"
-    total_weight = label["entropy"] * label["direct_stress_weight"]
-    error = voigt6_stress(pred[key] - label[key])
-    return torch.mean(torch.linalg.vector_norm(error, ord=2, dim=-1) * total_weight)
+    return tensor_loss(pred, label, "direct_stress", "l2mae", voigt=True)
 
 
 @register_loss
@@ -149,17 +120,7 @@ def l2mae_direct_virials_per_atom(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    key = "direct_virials"
-    total_weight = label["entropy"] * label["direct_virials_weight"]
-    num_atoms = (label["ptr"][1:] - label["ptr"][:-1]).view(-1, 1, 1)
-    return torch.mean(
-        torch.linalg.vector_norm(
-            (pred[key] - label[key]) / num_atoms,
-            ord=2,
-            dim=(1, 2),
-        )
-        * total_weight
-    )
+    return tensor_loss(pred, label, "direct_virials", "l2mae", per_atom=True)
 
 
 @register_loss

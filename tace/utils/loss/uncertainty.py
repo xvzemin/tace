@@ -7,6 +7,7 @@ import math
 from typing import Any, Optional
 
 import torch
+import torch.distributed as dist
 from omegaconf import ListConfig
 from torch import nn
 
@@ -58,11 +59,19 @@ class UncertaintyLoss(nn.Module):
         for i, (p, fn_name) in enumerate(
             zip(self.loss_property, self.loss_function_name)
         ):
-            p_loss = LOSS_FN[fn_name](
-                pred, label, **self.loss_function_kwargs[i]
-            )
+            p_loss = LOSS_FN[fn_name](pred, label, **self.loss_function_kwargs[i])
             log_sigma = self.log_sigmas[p]
-            total_loss += 0.5 * torch.exp(-log_sigma) * p_loss + log_sigma
+            regularizer = log_sigma
+            if p in {"stress", "direct_stress", "virials", "direct_virials"}:
+                valid = torch.isfinite(label[p])
+                if f"{p}_mask" in label:
+                    valid = valid & label[f"{p}_mask"]
+                weight = label["entropy"] * label[f"{p}_weight"]
+                present = (valid & (weight.reshape(-1, 1, 1) > 0)).any().long()
+                if dist.is_available() and dist.is_initialized():
+                    dist.all_reduce(present, op=dist.ReduceOp.MAX)
+                regularizer = log_sigma * present
+            total_loss += 0.5 * torch.exp(-log_sigma) * p_loss + regularizer
         return total_loss
 
     def __repr__(self):

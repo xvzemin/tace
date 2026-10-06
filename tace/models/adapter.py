@@ -7,16 +7,15 @@ from typing import Dict, Union
 
 import torch
 from torch import Tensor
-from torch.utils.checkpoint import checkpoint
 
 from tace.dataset.element import TorchElement
-
 from ..dataset.quantity import PROPERTY, ComputeFlag
 from .lammps import Graph
 from .utils import (
     compute_atomic_virials_stresses,
     compute_hessians_vmap,
     compute_symmetric_displacement,
+    stress_from_virials,
 )
 
 
@@ -110,9 +109,8 @@ class TensorModel(torch.nn.Module):
         if self.flags.compute_stress or self.flags.compute_virials:
             grad = grads[idx]
             V = torch.zeros_like(data["lattice"]) if grad is None else -grad
-            VOLUME = torch.linalg.det(data["lattice"]).abs().unsqueeze(-1)
-            S = -V / VOLUME.view(-1, 1, 1)
-            S = torch.where(torch.abs(S) < 1e10, S, torch.zeros_like(S))
+            if self.flags.compute_stress:
+                S = stress_from_virials(V, data["lattice"], data.get("pbc"))
             idx += 1
         if self.flags.compute_polarization or self.flags.compute_conservative_dipole:
             grad = grads[idx]
@@ -155,8 +153,9 @@ class TensorModel(torch.nn.Module):
                     graph.lattice,
                     data["batch"],
                     data["node_attrs"].size(0),
-                    True,
-                    True,
+                    self.flags.compute_atomic_virials,
+                    self.flags.compute_atomic_stresses,
+                    data.get("pbc"),
                 )
 
         return {

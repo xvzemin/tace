@@ -32,7 +32,7 @@ except ImportError as e:
 from tace.foundations import resolve_model_path
 from tace.lightning import export_tace, load_tace
 from tace.models.adapter import TensorModel
-from tace.models.utils import compute_symmetric_displacement
+from tace.models.utils import compute_symmetric_displacement, stress_from_virials
 from tace.utils.env import select_acceleration
 
 
@@ -220,12 +220,12 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             if cell_raw is None
             else cell_raw.to(device=device, dtype=dtype)
         )
-        if need_stress:
-            if cell_raw is None:
-                raise ValueError("Stress requires a periodic system with a cell.")
-            volumes = torch.linalg.det(cell).abs()
-            if (volumes <= 1.0e-12).any():
-                raise ValueError("Stress requires a non-singular cell.")
+        pbc_raw = getattr(data, "pbc", None)
+        pbc = (
+            torch.zeros(num_graphs, 3, dtype=torch.bool, device=device)
+            if pbc_raw is None
+            else pbc_raw.to(device=device, dtype=torch.bool).reshape(num_graphs, 3)
+        )
 
         fidelity_raw = getattr(data, "fidelity_idx", None)
         if fidelity_raw is None:
@@ -257,6 +257,7 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             "edge_index": edge_index,
             "edge_shifts": edge_shifts,
             "lattice": cell,
+            "pbc": pbc,
             "batch": data.batch_idx.long(),
             "ptr": data.batch_ptr.long(),
             "fidelity_idx": fidelity,
@@ -329,8 +330,9 @@ class TACEWrapper(nn.Module, BaseModelMixin):
                 mapped["forces"] = -gradients[index]
                 index += 1
             if need_stress:
-                volumes = torch.linalg.det(model_input["lattice"].detach()).abs()
-                mapped["stress"] = gradients[index] / volumes[:, None, None]
+                mapped["stress"] = stress_from_virials(
+                    -gradients[index], model_input["lattice"], model_input["pbc"]
+                )
 
         return self.adapt_output(mapped, data)
 
