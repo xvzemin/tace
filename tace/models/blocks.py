@@ -66,6 +66,45 @@ class OneHotToAtomicEnergy(torch.nn.Module):
 
 
 class ScaleShift(torch.nn.Module):
+    """Apply element- and fidelity-dependent scales and shifts to atomic energies.
+
+    Parameters
+    ----------
+    atomic_numbers : list of int
+        Atomic numbers in the order used by the node attributes.
+    scale_dicts : list of dict, optional
+        Atomic-number-to-scale mappings, one per fidelity. Missing elements
+        use a scale of one. If omitted, scaling is disabled.
+    shift_dicts : list of dict, optional
+        Atomic-number-to-shift mappings, one per fidelity. Missing elements
+        use a shift of zero. If omitted, shifting is disabled.
+    scale_trainable : bool, default False
+        Whether the scales are trainable parameters.
+    shift_trainable : bool, default False
+        Whether the shifts are trainable parameters.
+    all_atoms : bool, default False
+        Apply the same scale-and-shift rule to every atom when True.
+        False retains the legacy single-atom special case described below.
+
+    Notes
+    -----
+    Always prefer ``all_atoms=True`` for new training and include isolated-atom
+    DFT energy labels in the training set, consistent with each fidelity's
+    energy convention and DFT settings. These samples must contribute to the
+    energy loss.
+    
+    Warnings
+    --------
+    ``all_atoms=False`` is retained for historical model compatibility. It
+    sets enabled scales and shifts to zero only for structures containing
+    exactly one atom and no edges. Single-atom periodic cells with neighbor
+    edges are not affected. This special case can violate energy additivity:
+    disconnected atoms evaluated together can have a different total energy
+    from the same atoms evaluated separately. It does not enforce a consistent
+    dissociation limit. Changing this option on an existing model requires
+    validation or finetuning.
+    """
+
     def __init__(
         self,
         atomic_numbers: List[int],
