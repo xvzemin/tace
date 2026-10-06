@@ -70,6 +70,37 @@ TorchSim 0.6.2 requires identical boundary conditions within a ``SimState``;
 run periodic and non-periodic inference batches separately through that interface.
 This restriction does not apply to TACE training batches.
 
+Fidelity per data source
+-----------------------
+
+``train_file``, ``valid_file``, and each entry in ``test_files`` accept a
+path or a mapping with ``path`` and ``fidelity_idx``. Paths may refer to
+files or directories. Fidelity indices follow the order of
+``model.config.fidelity``.
+
+.. code-block:: yaml
+
+   dataset:
+     train_file:
+       - {path: mad-1.6-r2scan-train.xyz, fidelity_idx: 0}
+       - {path: mad-1.6-pbe.xyz, fidelity_idx: 1}
+     valid_file:
+       - {path: r2scan-valid.xyz, fidelity_idx: 0}
+       - {path: pbe-valid.xyz, fidelity_idx: 1}
+     test_files:
+       - {path: r2scan-test.xyz, fidelity_idx: 0}
+       - {path: pbe-test.xyz, fidelity_idx: 1}
+
+When a source specifies a fidelity, missing structure metadata is filled with
+that value. Existing metadata must match, otherwise reading fails with the
+file path, zero-based structure index, and conflicting values. The metadata
+key is selected by ``dataset.keys.fidelity_idx_key`` (default: ``fidelity_idx``).
+Without a source fidelity, existing metadata is preserved; unmarked structures
+still use head 0. These assignments do not modify the source files.
+
+Source checks run when raw data is read. If changing source fidelities with
+LMDB storage, use a new ``shard_dirs`` directory to rebuild the cached graphs.
+
 Example
 -------
 

@@ -7,6 +7,7 @@ import copy
 import importlib
 import logging
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -92,7 +93,7 @@ class LightningWrapperModel(L.LightningModule):
         test_sets = cfg.get("dataset", {}).get("test_files", [])
         if test_sets is None:
             self.num_test_sets = 0
-        elif isinstance(test_sets, str):
+        elif isinstance(test_sets, (str, Path, Mapping)):
             self.num_test_sets = 1
             self._create_metrics("test_0")
         else:

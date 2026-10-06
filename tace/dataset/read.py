@@ -5,7 +5,9 @@
 
 import logging
 import multiprocessing
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
+from numbers import Integral
 from pathlib import Path
 from typing import Dict, List, Union
 
@@ -110,6 +112,8 @@ def ase_db_connect(filename: str):
         with connect(filename) as db:
             for row in db.select():
                 atoms = row.toatoms()
+                atoms.info.update(row.key_value_pairs)
+                atoms.info.update(row.data)
                 atoms_list.append(atoms)
         if not atoms_list:
             logging.warning(f"Database {filename} is empty")
@@ -128,6 +132,7 @@ def fair_aselmdb(filename: str):  # [only test energy, forces, stress]
         with connect(filename) as db:
             for row in db.select():
                 atoms = row.toatoms()
+                atoms.info.update(row.key_value_pairs)
                 if hasattr(row, "data"):
                     for k, v in row.data.items():
                         if not k.startswith("_"):
@@ -165,9 +170,33 @@ HOW_TO_READ = {
 
 
 def read_single_file(
-    fpath: str, target_property, keyspec, embedding_property, backend="ase"
+    fpath: str,
+    target_property,
+    keyspec,
+    embedding_property,
+    backend="ase",
+    fidelity_idx: int = None,
 ):
+    """Read structures and check an optional source fidelity against their metadata."""
+    if fidelity_idx is not None and (
+        not isinstance(fidelity_idx, Integral) or fidelity_idx < 0
+    ):
+        raise ValueError(f"{fpath}: fidelity_idx must be a non-negative integer")
     atomsList = HOW_TO_READ[backend](fpath)
+    if fidelity_idx is not None:
+        key = keyspec.info_keys["fidelity_idx"]
+        for index, atoms in enumerate(atomsList):
+            if key in atoms.info:
+                value = atoms.info[key]
+                if not isinstance(value, Integral) or value != fidelity_idx:
+                    if isinstance(value, Integral):
+                        value = int(value)
+                    raise ValueError(
+                        f"{fpath}: structure {index} (zero-based) has "
+                        f"atoms.info[{key!r}]={value!r}, but the data source "
+                        f"specifies fidelity_idx={fidelity_idx}"
+                    )
+            atoms.info[key] = int(fidelity_idx)
     try:
         return check_keys(atomsList, target_property, keyspec, embedding_property)
     except Exception as e:
@@ -176,27 +205,23 @@ def read_single_file(
 
 
 def read_all_files(
-    filename: Union[str, List[str]],
+    filename: Union[str, Path, Mapping, List[Union[str, Path, Mapping]]],
     target_property: List[str],
     keyspec,
     embedding_property: List[str],
     num_workers: int = None,
     backend="ase",
 ):
-    """
-    Behavior
-    --------
-    - filename can be:
-        * a single file path
-        * a single directory path
-        * a list of files and/or directories (mixed)
-    - Directories are searched recursively for possible files.
-    - All discovered files are read and aggregated.
+    """Read dataset files and assign optional source fidelities.
+
+    Directories are searched recursively. Each discovered file is read once.
 
     Parameters
     ----------
-    filename : str or List[str]
-        File path(s) or directory path(s).
+    filename : str, pathlib.Path, mapping, or list
+        File or directory paths, or entries with ``path`` and an optional
+        ``fidelity_idx``. The specified fidelity is applied to every structure
+        in that source; conflicting structure metadata raises ``ValueError``.
     target_property : List[str]
         List of target properties to check.
     keyspec :
@@ -213,28 +238,39 @@ def read_all_files(
     if num_workers is None:
         num_workers = max(1, multiprocessing.cpu_count() // 4)
 
-    if isinstance(filename, (str, Path)):
-        paths = [Path(filename)]
-    else:
-        paths = [Path(f) for f in filename]
-
-    all_files: List[Path] = []
-
-    for path in paths:
+    sources = [filename] if isinstance(filename, (str, Path, Mapping)) else filename
+    all_files = {}
+    for source in sources:
+        if isinstance(source, Mapping):
+            if "path" not in source or source.keys() - {"path", "fidelity_idx"}:
+                raise ValueError(
+                    "Dataset entries require 'path' and optionally 'fidelity_idx'"
+                )
+            path = Path(source["path"]).resolve()
+            fidelity_idx = source.get("fidelity_idx")
+        else:
+            path = Path(source).resolve()
+            fidelity_idx = None
         if not path.exists():
             raise FileNotFoundError(f"Path does not exist: {path}")
 
         if path.is_file():
-            all_files.append(path)
-
+            files = [path]
         elif path.is_dir():
-            all_files.extend(
-                f for pattern in RGLOB[backend] for f in path.rglob(pattern)
-            )
+            files = (f for pattern in RGLOB[backend] for f in path.rglob(pattern))
         else:
             raise ValueError(f"Unsupported path type: {path}")
-
-    all_files = sorted(set(all_files))
+        for file in files:
+            file = file.resolve()
+            previous = all_files.get(file)
+            if previous is not None and fidelity_idx is not None:
+                if previous != fidelity_idx:
+                    raise ValueError(
+                        f"{file}: conflicting source fidelity_idx values "
+                        f"{previous} and {fidelity_idx}"
+                    )
+            if file not in all_files or fidelity_idx is not None:
+                all_files[file] = fidelity_idx
 
     if not all_files:
         raise FileNotFoundError("No dataset files found in the provided paths")
@@ -253,8 +289,9 @@ def read_all_files(
                 keyspec,
                 embedding_property,
                 backend,
+                all_files[f],
             )
-            for f in all_files
+            for f in sorted(all_files)
         ]
         for future in futures:
             structures = future.result()
@@ -324,7 +361,7 @@ def tace_read_all_files(
         )
     try:
         if test_files is not None:
-            if isinstance(test_files, str):
+            if isinstance(test_files, (str, Path, Mapping)):
                 test_atoms_list = [
                     read_all_files(
                         test_files,
