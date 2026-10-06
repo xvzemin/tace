@@ -117,27 +117,25 @@ def test_energy_only(state, calculator):
 
 
 @pytest.mark.parametrize("periodic", [False, True])
-def test_mad_boundary_conditions(double_precision, periodic):
-    from ase.io import read
-    from test_stress import DATA, mad_graphs, make_model
-    from torch_geometric.data import Batch
-
-    graphs = mad_graphs()
-    model = make_model(graphs).eval()
-    indices = [2, 3, 4] if periodic else [0, 1]
-    expected = model(
-        Batch.from_data_list([graphs[i] for i in indices]).to(DEVICE).to_dict()
+def test_boundary_conditions(state, calculator, periodic):
+    state.pbc.fill_(periodic)
+    if periodic:
+        state.positions[1, 0] = 7.0
+    actual = calculator()(state)
+    energy = torch.tensor([4.0, 6.5], dtype=DTYPE, device=DEVICE)
+    forces = torch.tensor(
+        [[4.0, 0.0, 0.0], [-4.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, -6.0, 0.0]],
+        dtype=DTYPE,
+        device=DEVICE,
     )
-    calc = TACETorchSimCalc(model, device=DEVICE, dtype=DTYPE)
-    atoms = read(DATA, ":")
-    state = ts.io.atoms_to_state(
-        [atoms[i] for i in indices], device=DEVICE, dtype=DTYPE
-    )
-    actual = calc(state)
-    for key in ("energy", "forces", "stress"):
-        torch.testing.assert_close(actual[key], expected[key], atol=1e-10, rtol=1e-10)
-    if not periodic:
-        assert not actual["stress"].any()
+    stress = torch.zeros(2, 3, 3, dtype=DTYPE, device=DEVICE)
+    if periodic:
+        forces[:2] *= -1
+        stress[0, 0, 0] = 4.0 / 8**3
+        stress[1, 1, 1] = 9.0 / 8**3
+    torch.testing.assert_close(actual["energy"], energy, atol=1e-10, rtol=1e-10)
+    torch.testing.assert_close(actual["forces"], forces, atol=1e-10, rtol=1e-10)
+    torch.testing.assert_close(actual["stress"], stress, atol=1e-10, rtol=1e-10)
 
 
 def test_derivative_dependencies_are_retained(state, calculator):
