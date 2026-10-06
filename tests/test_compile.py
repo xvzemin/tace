@@ -178,6 +178,40 @@ def test_constant_construction_precision():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("num_fidelities", [1, 2])
+def test_atomic_energy_lookup(dtype, num_fidelities):
+    from tace.models.blocks import OneHotToAtomicEnergy
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    elements = list(range(1, 103))
+    energies = [
+        {z: -100_000.123456789 * z - fidelity for z in elements}
+        for fidelity in range(num_fidelities)
+    ]
+    module = OneHotToAtomicEnergy(energies, elements).to(device=device, dtype=dtype)
+    node_type = torch.arange(8192, device=device) % len(elements)
+    features = torch.nn.functional.one_hot(node_type, len(elements)).to(dtype)
+    expected = module.atomic_energy.T[node_type]
+    allow_tf32 = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        for n in (0, 1, 128, 3072, 8192):
+            for indices in (None, node_type[:n]):
+                torch.testing.assert_close(
+                    module(features[:n], node_type=indices),
+                    expected[:n],
+                    atol=0,
+                    rtol=0,
+                )
+        compiled = torch.compile(module, fullgraph=True)
+        torch.testing.assert_close(
+            compiled(features, node_type), expected, atol=0, rtol=0
+        )
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("interaction", ["cgtp", "o2"])
 def test_lightning_model_training_precision(dtype, interaction):
     import lightning as L

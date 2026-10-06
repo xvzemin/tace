@@ -310,7 +310,9 @@ class e3nnTACE(torch.nn.Module):
         e_node = None
         e_base_graph = None
         if "energy" in self.target_property:
-            e_base_node = self.atomic_energy_layer(data["node_attrs"])[
+            e_base_node = self.atomic_energy_layer(
+                data["node_attrs"], node_type=graph.node_type
+            )[
                 num_atoms_arange, node_fidelity
             ]
             e_base_graph = scatter_sum(e_base_node, batch, dim=-1, dim_size=num_graphs)

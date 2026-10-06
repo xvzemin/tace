@@ -43,8 +43,13 @@ class OneHotToAtomicEnergy(torch.nn.Module):
             ),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.matmul(x, self.atomic_energy.T)
+    def forward(
+        self, x: torch.Tensor, node_type: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if node_type is None:
+            node_type = x.argmax(dim=-1)
+        # Indexing preserves reference energies regardless of matmul precision.
+        return self.atomic_energy.T[node_type]
 
     def __repr__(self):
         s = f"{self.__class__.__name__}(\n"
