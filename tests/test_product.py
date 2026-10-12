@@ -2,21 +2,76 @@
 
 import itertools
 from functools import partial
+from unittest.mock import Mock
 
 import pytest
 import torch
 from e3nn import o3
 
-import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
-import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
 from tace.models._e3nn.fused import UuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
-from tace.models.eqt.equitorch.nn import TensorProduct
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize(
+    "setting,correlation,cuda_available,kernel_enabled,expected",
+    [
+        (None, 2, True, True, False),
+        (None, 3, True, True, True),
+        (None, 4, True, True, True),
+        (None, 3, False, True, False),
+        (None, 3, True, False, False),
+        ("0", 3, True, True, False),
+        ("1", 2, True, True, True),
+        ("1", 4, True, False, False),
+    ],
+)
+def test_product_eqx_selection(
+    monkeypatch, setting, correlation, cuda_available, kernel_enabled, expected
+):
+    from eqx.kernels import cuda
+
+    if setting is not None:
+        monkeypatch.setenv("TACE_USE_EQX", setting)
+    monkeypatch.setitem(EQX_KERNELS, "product", kernel_enabled)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
+    runtime = Mock()
+    monkeypatch.setattr(cuda, "runtime", runtime)
+    product = make_product("2x0e+2x1o", correlation, nonlinear=None)
+
+    assert product.use_eqx is expected
+    assert hasattr(product, "eqx_ace") is expected
+    assert runtime.call_count == int(
+        setting is None and correlation >= 3 and cuda_available and kernel_enabled
+    )
+    # Automatic product selection must not enable other EQX operators globally.
+    assert acceleration_enabled("eqx", kernel="conv") is (
+        None if setting is None else setting == "1"
+    )
+
+
+@pytest.mark.parametrize("error", [ImportError, OSError, RuntimeError])
+def test_product_without_eqx_runtime(monkeypatch, error):
+    from eqx.kernels import cuda
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cuda, "runtime", Mock(side_effect=error("Backend unavailable")))
+    product = make_product("2x0e+2x1o", 3, nonlinear=None)
+    assert not product.use_eqx
+    assert not hasattr(product, "eqx_ace")
+    features = torch.randn(3, product.irreps_in.dim, requires_grad=True)
+    output = product(features, torch.ones(3, 1), None, torch.zeros(3, dtype=torch.long))
+    gradients = torch.autograd.grad(output.square().sum(), features, create_graph=True)[
+        0
+    ]
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(
+        torch.autograd.grad(gradients.square().sum(), features)[0]
+    ).all()
 
 
 @pytest.mark.parametrize(
@@ -42,21 +97,14 @@ def test_internal_eqx_selection(monkeypatch, master, conv, product, expected):
     ) == expected
 
 
-def test_standard_ace_eqx_precedes_eqt(monkeypatch):
-    monkeypatch.setenv("TACE_USE_EQX", "1")
-    monkeypatch.setenv("TACE_USE_EQT", "1")
-    product = make_product("2x0e+2x1o", 3, nonlinear=None)
-    assert hasattr(product, "eqx_ace")
-    assert all(not ace.use_eqt for ace in product.aces)
-
-
-@pytest.mark.parametrize("correlation", [2, 3, 4])
+@pytest.mark.parametrize(
+    "correlation,setting", [(2, "1"), (3, "1"), (4, "1"), (3, None), (4, None)]
+)
 @pytest.mark.parametrize("agnostic", [False, True])
 @pytest.mark.parametrize("matrix_weight", ["0", "1"])
-def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
+def test_fused_ace_cuda(monkeypatch, correlation, setting, agnostic, matrix_weight):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     import tace.models._e3nn.prod as prod
 
     for name in ("e3nnLinear", "e3nnElementLinear"):
@@ -83,8 +131,12 @@ def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
     )
     monkeypatch.setenv("TACE_USE_EQX", "0")
     reference = CgtpACE(**kwargs).to(device="cuda", dtype=torch.float64)
-    monkeypatch.setenv("TACE_USE_EQX", "1")
+    if setting is None:
+        monkeypatch.delenv("TACE_USE_EQX")
+    else:
+        monkeypatch.setenv("TACE_USE_EQX", setting)
     actual = CgtpACE(**kwargs).to(device="cuda", dtype=torch.float64)
+    assert actual.use_eqx and hasattr(actual, "eqx_ace")
     actual.load_state_dict(reference.state_dict(), strict=True)
     assert actual.state_dict().keys() == reference.state_dict().keys()
     x = torch.randn(3, 8, device="cuda", dtype=torch.float64, requires_grad=True)
@@ -114,6 +166,27 @@ def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
             assert b is None
         else:
             torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-9)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_automatic_product_unsupported_dtype(monkeypatch, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    product = make_product("2x0e+2x1o", 4, nonlinear=None).to("cuda", dtype=dtype)
+    assert product.use_eqx
+    fused = Mock(side_effect=AssertionError("Unsupported dtype reached CUDA kernel"))
+    monkeypatch.setattr(product.eqx_ace, "forward", fused)
+    features = torch.randn(3, product.irreps_in.dim, device="cuda", dtype=dtype)
+    features.requires_grad_()
+    output = product(
+        features,
+        features.new_ones(3, 1),
+        None,
+        torch.zeros(3, device="cuda", dtype=torch.long),
+    )
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(torch.autograd.grad(output.square().sum(), features)[0]).all()
+    fused.assert_not_called()
 
 
 @pytest.mark.parametrize("moe", [False, True])
@@ -225,9 +298,7 @@ def test_zero_paths_match_symmetrized_cg(irreps, correlation, lmax):
             assert {ir.l for _, ir in irreps_in} == {0, 2, 3, 4, 6}
 
 
-@pytest.mark.parametrize("use_eqt", [False, True])
-def test_filtered_products_preserve_values_and_derivatives(monkeypatch, use_eqt):
-    monkeypatch.setenv("TACE_USE_EQT", str(int(use_eqt)))
+def test_filtered_products_preserve_values_and_derivatives():
     torch.manual_seed(0)
     base = o3.Irreps("2x0e+2x1o+2x1o")
     symmetric_paths = SymmetricProductPaths(base)
@@ -309,7 +380,7 @@ def make_product(irreps, correlation, **kwargs):
 def test_standard_product_matches_extended_path(
     monkeypatch, correlation, agnostic, hidden, num_nodes
 ):
-    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     kwargs = dict(
         layer=0,
         num_layers=1,
@@ -363,7 +434,7 @@ def test_standard_product_matches_extended_path(
 
 @pytest.mark.parametrize("correlation", [2, 3, 4, 6, 8])
 def test_product_supports_higher_correlation(monkeypatch, correlation):
-    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     model = make_product("2x1o", correlation, nonlinear=None)
     features = torch.randn(3, 6, dtype=torch.float64, requires_grad=True)
     out = model(
@@ -386,8 +457,7 @@ def test_product_supports_higher_correlation(monkeypatch, correlation):
 
 
 @pytest.mark.parametrize("irreps", ["2x0e", "2x1e"])
-def test_eqt_without_polar_vectors_and_with_empty_paths(monkeypatch, irreps):
-    monkeypatch.setenv("TACE_USE_EQT", "1")
+def test_product_without_polar_vectors_and_with_empty_paths(irreps):
     model = make_product(irreps, 3, nonlinear=None)
     features = torch.randn(3, model.irreps_in.dim, dtype=torch.float64)
     out = model(
@@ -400,11 +470,10 @@ def test_eqt_without_polar_vectors_and_with_empty_paths(monkeypatch, irreps):
     assert torch.isfinite(out).all()
     if irreps == "2x1e":
         assert not model.aces[-1].instructions
-        assert not model.aces[-1].use_eqt
 
 
 def test_independent_glu_inputs_keep_antisymmetric_paths(monkeypatch):
-    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     # An axial vector output can contain the cross product of two independent
     # vector fields. Do not use the self-product mask for a bilinear gate.
     model = BilinearMoEACE(
@@ -434,7 +503,7 @@ def test_independent_glu_inputs_keep_antisymmetric_paths(monkeypatch):
 def test_time_reversal_labels_preserved(monkeypatch):
     if not hasattr(o3.Irrep("0e"), "t"):
         pytest.skip("Time-reversal e3nn is not installed")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     base = o3.Irreps("1eo+1ee+0ee")
     symmetric_paths = SymmetricProductPaths(base)
     irreps_in = base
@@ -463,127 +532,3 @@ def test_time_reversal_labels_preserved(monkeypatch):
     features = torch.randn(3, model.irreps_in.dim, requires_grad=True)
     out = model(features, torch.ones(3, 1), None, torch.zeros(3, dtype=torch.long))
     assert torch.isfinite(torch.autograd.grad(out.square().sum(), features)[0]).all()
-
-
-@pytest.mark.parametrize(
-    ("setting", "correlation", "expected_setting", "expected_product"),
-    [
-        (None, 2, None, False),
-        (None, 3, None, True),
-        ("0", 3, False, False),
-        ("1", 2, True, True),
-    ],
-)
-def test_product_eqt_selection(
-    monkeypatch: pytest.MonkeyPatch,
-    setting: str | None,
-    correlation: int,
-    expected_setting: bool | None,
-    expected_product: bool,
-) -> None:
-    if setting is None:
-        monkeypatch.delenv("TACE_USE_EQT", raising=False)
-    else:
-        monkeypatch.setenv("TACE_USE_EQT", setting)
-
-    product = make_product("2x0e+2x1o", correlation, nonlinear=None)
-    assert acceleration_enabled("eqt") is expected_setting
-    assert all(ace.use_eqt is expected_product for ace in product.aces)
-    assert all(hasattr(ace, "fused_tp") is expected_product for ace in product.aces)
-
-
-def _reference_segment(
-    source: torch.Tensor,
-    indptr: torch.Tensor,
-    *,
-    reduce: str,
-) -> torch.Tensor:
-    assert reduce == "sum"
-    indptr = indptr.squeeze(0)
-    return torch.stack(
-        [
-            source[:, start:end].sum(dim=1)
-            for start, end in zip(indptr[:-1].tolist(), indptr[1:].tolist())
-        ],
-        dim=1,
-    )
-
-
-def test_eqt_first_derivative_skips_unused_intermediate_gradient(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tensor_product = TensorProduct(
-        "0e+1o",
-        "0e+1o",
-        "0e+1o",
-        channels_in1=2,
-        channels_in2=2,
-        channels_out=2,
-        internal_weights=True,
-    ).to(device="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.float64)
-    tensor_product.weight.requires_grad_(False)
-    input1 = torch.randn(
-        2,
-        tensor_product.irreps_in1_dim,
-        2,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        dtype=torch.float64,
-        requires_grad=True,
-    )
-    input2 = torch.randn_like(input1, requires_grad=True)
-
-    sparse_mul_calls = 0
-    sparse_mul = tensor_products.sparse_mul
-
-    def tracked_sparse_mul(*args, **kwargs):
-        nonlocal sparse_mul_calls
-        sparse_mul_calls += 1
-        return sparse_mul(*args, **kwargs)
-
-    monkeypatch.setattr(tensor_products, "sparse_mul", tracked_sparse_mul)
-    output = tensor_product(input1, input2)
-    torch.autograd.grad(output.sum(), (input1, input2))
-
-    assert sparse_mul_calls == 6
-
-
-@pytest.mark.parametrize("channels", [4, 64])
-def test_eqt_scatter_values_and_derivatives(monkeypatch, channels):
-    tensor_product = TensorProduct(
-        "0e+1o+2e",
-        "0e+1o+2e",
-        "0e+1o+2e",
-        channels_in1=channels,
-        channels_in2=channels,
-        channels_out=channels,
-        internal_weights=True,
-    ).to(device="cuda" if torch.cuda.is_available() else "cpu", dtype=torch.float64)
-    input1 = torch.randn(
-        3,
-        tensor_product.irreps_in1_dim,
-        channels,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        dtype=torch.float64,
-        requires_grad=True,
-    )
-    input2 = torch.randn_like(input1, requires_grad=True)
-    inputs = (input1, input2, tensor_product.weight)
-    installed_segment = sparse_product.segment_csr
-
-    def derivatives(segment):
-        monkeypatch.setattr(sparse_product, "segment_csr", segment)
-        value = tensor_product(input1, input2)
-        result = [value.detach()]
-        for _ in range(3):
-            gradients = torch.autograd.grad(
-                value.sin().sum(), inputs, create_graph=True
-            )
-            result.extend(g.detach() for g in gradients)
-            value = torch.cat([g.flatten() for g in gradients]) / channels
-        return result
-
-    expected = derivatives(_reference_segment)
-    segments = [None] if installed_segment is None else [None, installed_segment]
-    for segment in segments:
-        for actual, reference in zip(derivatives(segment), expected):
-            torch.testing.assert_close(actual, reference, atol=1e-10, rtol=1e-10)

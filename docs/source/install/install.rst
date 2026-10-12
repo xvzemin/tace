@@ -91,31 +91,6 @@ enable the backend with:
    python -c "import torch; print(torch.version.cuda)"
    export TACE_USE_CUE=1
 
-EquiTorch (EQT)
----------------
-
-The EQT implementation used by TACE is bundled with TACE, so ordinary EQT
-usage does not require installing a separate EquiTorch package:
-
-.. code-block:: bash
-
-   export TACE_USE_EQT=1
-
-The sparse higher-order product path uses ``torch-scatter`` when available
-and otherwise falls back to native PyTorch reductions. To install the optional
-extension, select a wheel matching the PyTorch and CUDA versions in the
-environment. For example, for PyTorch 2.11 and CUDA 13.0:
-
-.. code-block:: bash
-
-   pip install torch-scatter \
-     -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
-
-Use the `PyTorch Geometric installation guide
-<https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html>`_
-to select a different PyTorch or CUDA wheel.
-
-
 Latent Ewald Summation (LES)
 ----------------------------
 
@@ -210,7 +185,7 @@ fields, and their tensor-product paths automatically.
 
 Time-reversal models use the time-reversal e3nn implementation for global
 representation metadata and coupling rules. Native EQX O(2) operators and
-compatible fused kernels preserve these labels. EQT, CUEQ, and OEQ operators
+compatible fused kernels preserve these labels. CUEQ and OEQ operators
 that do not support time-odd irreps reject them when selected; support is
 checked per operator rather than by removing time-odd coupling paths.
 
@@ -241,8 +216,11 @@ Acceleration Selection
 ----------------------
 
 Enabled backends are selected per supported operator in the order
-EQX, OEQ, EQT, CUEQ. Multiple backends may be enabled together, for example
-OEQ convolutions with EQT product-basis operations.
+EQX, OEQ, CUEQ. With ``TACE_USE_EQX`` unset, standard CGTP ACE products with
+``correlation >= 3`` automatically use EQX when CUDA and its CUDA runtime are
+available; otherwise they keep their reference implementation.
+``TACE_USE_EQX=0`` disables this automatic selection. Multiple backends may
+be enabled together.
 AOTI is a separate compilation and deployment layer. See the
 :ref:`acceleration-tutorial` for backend selection, Python interfaces,
 compilation, and AOTI export.

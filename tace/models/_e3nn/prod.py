@@ -11,7 +11,7 @@ from e3nn import o3
 
 from eqx.ace import TACE
 from eqx.models.tace.tece_oam_rra import BilinearACE
-from tace.utils.env import select_acceleration
+from tace.utils.env import EQX_KERNELS, acceleration_enabled, select_acceleration
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
 from ..mlp import ACTIVATION
@@ -21,11 +21,31 @@ from .fused import UuuTensorProduct
 from .paths import SymmetricProductPaths
 
 
+def _use_eqx_product(correlation: int) -> bool:
+    enabled = acceleration_enabled("eqx", kernel="product")
+    if enabled is not None:
+        return enabled
+    if (
+        correlation < 3
+        or not EQX_KERNELS["product"]
+        or not torch.cuda.is_available()
+    ):
+        return False
+    try:
+        from eqx.kernels.cuda import runtime
+
+        runtime()
+    except (ImportError, OSError, RuntimeError):
+        # Automatic selection must also work without CUDA build dependencies.
+        return False
+    return True
+
+
 class CgtpACE(Product):
     """Channel-wise ACE with element-dependent or element-independent coefficients."""
 
     def _setup(self):
-        self.use_eqx = select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+        self.use_eqx = _use_eqx_product(self.correlation)
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
             "bias": self.use_bias,
@@ -57,12 +77,7 @@ class CgtpACE(Product):
                 l1l2=self.l1l2,
                 trainable=False,
                 identical_inputs=nu == 2,
-                warning=self.correlation > 2 and self.layer == 0 and not self.use_eqx,
-                use_fused=self.correlation > 2
-                and not self.use_time_reversal
-                and not self.use_eqx,
                 symmetric_paths=symmetric_paths,
-                use_eqt=False if self.use_eqx else None,
             )
             self.aces.append(ace)
             self.coefs.append(
@@ -118,6 +133,7 @@ class CgtpACE(Product):
         if (
             hasattr(self, "eqx_ace")
             and node_feats.is_cuda
+            and node_feats.dtype in (torch.float32, torch.float64)
             and not any(has_lora(coef) for coef in self.coefs)
         ):
             weights = []
@@ -172,7 +188,7 @@ class BilinearMoEACE(Product):
         self.scale = 1.0 / math.sqrt(2.0)
         self.use_eqx = bool(
             self.use_bilinear_gate
-            and select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+            and select_acceleration("eqx", kernel="product") == "eqx"
         )
 
         for_coefs = {
@@ -234,10 +250,7 @@ class BilinearMoEACE(Product):
                 l1l2=self.l1l2,
                 trainable=self.use_bilinear_gate,
                 identical_inputs=nu == 2 and not self.use_bilinear_gate,
-                warning=self.correlation > 2 and self.layer == 0,
-                use_fused=self.correlation > 2 and not self.use_time_reversal,
                 symmetric_paths=symmetric_paths,
-                use_eqt=False if self.use_eqx else None,
             )
             self.aces.append(this_ace)
             self.coefs.append(

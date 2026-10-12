@@ -57,8 +57,6 @@ class TACEAseCalc(Calculator):
         Whether to enable OpenEquivariance acceleration.
     enable_cue : bool, optional
         Whether to enable CuEquivariance acceleration.
-    enable_eqt : bool, optional
-        Whether to enable EquiTriton acceleration.
     enable_compile : bool, optional
         Whether to enable the torch.compile model path.
     enable_eqx : bool, optional
@@ -78,7 +76,6 @@ class TACEAseCalc(Calculator):
         neighborlist_backend: str = "matscipy",
         enable_oeq: bool = False,
         enable_cue: bool = False,
-        enable_eqt: bool = False,
         enable_compile: bool = False,
         enable_eqx: bool = False,
         **kwargs,
@@ -87,7 +84,6 @@ class TACEAseCalc(Calculator):
         enable_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
         )

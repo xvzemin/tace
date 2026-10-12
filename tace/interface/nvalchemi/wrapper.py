@@ -40,14 +40,13 @@ def _enable_tace_acceleration(
     *,
     enable_oeq: bool,
     enable_cue: bool,
-    enable_eqt: bool,
     enable_compile: bool,
     enable_eqx: bool,
     force: bool = False,
 ) -> None:
     """Configure the supported TACE acceleration flags before model loading.
 
-    Operators select enabled backends in EQX, OEQ, EQT, CUEQ order.
+    Operators select enabled backends in EQX, OEQ, CUEQ order.
     AOTInductor is used for compiled deployment; CUE currently conflicts
     with AOTI.
     """
@@ -62,7 +61,6 @@ def _enable_tace_acceleration(
     flags = {
         "TACE_USE_OEQ": enable_oeq,
         "TACE_USE_CUE": enable_cue,
-        "TACE_USE_EQT": enable_eqt,
         "TACE_USE_COMPILE": False,
         "TACE_USE_EQX": enable_eqx,
     }
@@ -76,7 +74,6 @@ def _enable_tace_acceleration(
         enable_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
             enable_compile=False,
             enable_eqx=enable_eqx,
             force=force,
@@ -351,7 +348,6 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         *,
         enable_oeq: bool = False,
         enable_cue: bool = False,
-        enable_eqt: bool = False,
         enable_compile: bool = False,
         enable_eqx: bool = False,
     ) -> "TACEWrapper":
@@ -365,7 +361,6 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         _enable_tace_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
         )

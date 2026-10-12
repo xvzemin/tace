@@ -31,7 +31,7 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.fused import O2ScatterTensorProduct, O3ScatterTensorProduct
 
-    for backend in ("EQX", "OEQ", "EQT", "CUEQ"):
+    for backend in ("EQX", "OEQ", "CUEQ"):
         monkeypatch.setenv(f"TACE_USE_{backend}", "0")
     irreps_in, irreps_sh, irreps_out = "2x1o", "0e+1o", "2x0e+2x1o+2x1e+2x2e"
     module = O2ScatterTensorProduct(irreps_in, irreps_sh, irreps_out).cuda()
@@ -543,19 +543,19 @@ def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed)
                 torch.testing.assert_close(x, y, atol=1e-8, rtol=1e-8)
 
 
-@pytest.mark.parametrize("mask", range(16))
+@pytest.mark.parametrize("mask", range(8))
 @pytest.mark.parametrize("compile_enabled", [False, True])
 def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
     from tace.models._e3nn.fused import O3ScatterTensorProduct
     from tace.utils.env import ACCELERATION_ENV
 
     enabled = [
-        name for i, name in enumerate(("eqx", "oeq", "eqt", "cue")) if mask & (1 << i)
+        name for i, name in enumerate(("eqx", "oeq", "cue")) if mask & (1 << i)
     ]
-    for name in ("eqx", "oeq", "eqt", "cue"):
+    for name in ("eqx", "oeq", "cue"):
         monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
     monkeypatch.setenv("TACE_USE_COMPILE", "1" if compile_enabled else "0")
-    expected = next((name for name in enabled if name != "eqt"), None)
+    expected = next(iter(enabled), None)
     if expected == "cue" and compile_enabled:
         expected = None
     constructed = []
@@ -1311,7 +1311,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
-    for name in ("TACE_USE_EQX", "TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
+    for name in ("TACE_USE_EQX", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
         monkeypatch.setenv(name, "0")
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -1479,7 +1479,7 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
-    for name in ("EQX", "OEQ", "CUE", "EQT"):
+    for name in ("EQX", "OEQ", "CUE"):
         monkeypatch.setenv(f"TACE_USE_{name}", "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(

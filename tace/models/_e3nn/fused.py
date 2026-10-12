@@ -32,10 +32,7 @@ class UuuTensorProduct(torch.nn.Module):
         l3l1: Union[str, None] = None,
         trainable: bool = False,
         identical_inputs: bool = False,
-        warning: bool = False,
-        use_fused: bool = False,
         symmetric_paths: Union[SymmetricProductPaths, None] = None,
-        use_eqt: Union[bool, None] = None,
     ) -> None:
         super().__init__()
 
@@ -70,56 +67,9 @@ class UuuTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        if use_eqt is None:
-            use_eqt = acceleration_enabled("eqt")
-        self.use_eqt = use_fused if use_eqt is None else use_eqt
-        self.use_eqt = self.use_eqt and bool(instructions)
-
-        # self.use_cue = acceleration_enabled("cue")
-
-        if self.use_eqt:
-            if contains_time_odd_irreps(
-                irreps_in1,
-                irreps_in2,
-                actual_irreps_out,
-            ):
-                raise ValueError(
-                    "EQT does not support time-reversal irreps. Disable EQT and "
-                    "use the native e3nn tensor product."
-                )
-            from ..eqt import e3nnEqtTensorProduct
-
-            self.fused_tp = e3nnEqtTensorProduct(
-                irreps_in1=irreps_in1,
-                irreps_in2=irreps_in2,
-                irreps_out=actual_irreps_out,
-                num_channel=irreps_in2[0].mul,
-                path=instructions,
-                trainable=trainable,
-            )
-        # elif self.use_cue and not trainable:
-        #     from ..cue import e3nnCueTensorProduct
-        #     self.fused_tp = e3nnCueTensorProduct(
-        #         irreps_in1=irreps_in1,
-        #         irreps_in2=irreps_in2,
-        #         irreps_out=irreps_out,
-        #         l1l2=l1l2,
-        #         l2l3=l2l3,
-        #         l3l1=l3l1,
-        #         trainable=trainable,
-        #     )
-        elif warning and instructions:
-            logging.warning(
-                "Correlation >= 3 is running without Equitorch. "
-                "For acceleration options, see "
-                "https://tace.readthedocs.io/en/latest/guide/acceleration.html"
-            )
-
     def forward(
         self, x: torch.Tensor, y: torch.Tensor, ws: Union[torch.Tensor, None] = None
     ) -> torch.Tensor:
-        if hasattr(self, "fused_tp"):
-            return self.fused_tp(x, y, ws)
         return self.tp(x, y, ws)
 
 

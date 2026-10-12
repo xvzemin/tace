@@ -21,7 +21,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def test_cartesian_conversion(
     double_precision, monkeypatch, tmp_path, parity, node_embedding, fused
 ):
-    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
+    for name in ("TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(

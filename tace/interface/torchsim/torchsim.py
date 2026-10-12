@@ -65,7 +65,6 @@ class TACETorchSimCalc(ModelInterface):
         target_property: Union[list[str], None] = None,
         enable_oeq: bool = False,
         enable_cue: bool = False,
-        enable_eqt: bool = False,
         enable_compile: bool = False,
         enable_eqx: bool = False,
     ) -> None:
@@ -98,7 +97,6 @@ class TACETorchSimCalc(ModelInterface):
                 compute_forces and compute_stress; required derivatives are retained.
             enable_oeq (bool): Whether to enable Oeq acceleration. Defaults to False.
             enable_cue (bool): Whether to enable CuE acceleration. Defaults to False.
-            enable_eqt (bool): Whether to enable Eqt acceleration. Defaults to False.
             enable_compile (bool): Whether to enable the torch.compile model path.
                 Defaults to False.
             enable_eqx (bool): Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
@@ -108,7 +106,6 @@ class TACETorchSimCalc(ModelInterface):
         enable_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
         )

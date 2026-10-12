@@ -74,17 +74,19 @@ training or export steps. Keep ``TACE_USE_COMPILE=1`` for training and
    * - 2. OpenEquivariance
      - ``TACE_USE_OEQ=1``
      - Convolution
-   * - 3. EquiTorch
-     - ``TACE_USE_EQT=1``
-     - ACE
-   * - 4. cuEquivariance
+   * - 3. cuEquivariance
      - ``TACE_USE_CUE=1``
      - Convolution
 
 If several flags are enabled, each operator selects the highest-priority
-backend it supports: **EQX > OEQ > EQT > CUEQ**. Different operators may therefore
-use different backends. Without an enabled, supported backend, an operator
-uses its reference PyTorch implementation.
+backend it supports: **EQX > OEQ > CUEQ**. Different operators may therefore
+use different backends.
+
+When ``TACE_USE_EQX`` is unset, standard CGTP ACE products with
+``correlation >= 3`` automatically use EQX if CUDA and the EQX CUDA runtime
+are available. This only selects the ACE backend; other operators keep their
+existing settings. Missing CUDA build dependencies leave ACE on its reference
+PyTorch implementation. Set ``TACE_USE_EQX=0`` to disable automatic selection.
 
 For example, replace EQX with OEQ while keeping the same workflow:
 
@@ -97,7 +99,7 @@ For example, replace EQX with OEQ while keeping the same workflow:
 
 Explicitly disabling EQX prevents an inherited ``TACE_USE_EQX=1`` from taking
 priority. Backend flags do not replace ``TACE_USE_COMPILE`` or control TF32.
-Install the dependencies for each selected backend; a missing dependency
+Install the dependencies for each explicitly selected backend; a missing dependency
 raises an error rather than silently selecting another backend.
 See :ref:`installation` for installation commands.
 

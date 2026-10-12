@@ -281,6 +281,83 @@ def test_lightning_model_training_precision(dtype, interaction):
     assert trainer.global_step == 2
 
 
+@pytest.mark.parametrize("automatic_eqx,correlation", [(False, 3), (True, 3), (True, 4)])
+def test_jn_compiled_training(monkeypatch, double_precision, automatic_eqx, correlation):
+    from tace.lightning import create_model
+    from tace.models import TensorModel
+    from tace.models._e3nn.prod import CgtpACE
+
+    if automatic_eqx and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    device = "cuda" if automatic_eqx else "cpu"
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    for name in ("OEQ", "CUE"):
+        monkeypatch.setenv(f"TACE_USE_{name}", "0")
+    if automatic_eqx:
+        monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    else:
+        monkeypatch.setenv("TACE_USE_EQX", "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=2,
+        num_channel=2,
+        Lmax=1,
+        lmax=2,
+        cutoff=4.0,
+        max_neighbors=None,
+        compile_backend="aot_eager",
+    )
+    config["radial_basis"].update(
+        radial_basis="jn", jn_max_eigenvalue=16.0, hidden=[4], apply_cutoff=False
+    )
+    config["product_basis"]["correlation"] = correlation
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    statistics = [
+        {"atomic_numbers": [1], "atomic_energy": {1: 0.0}, "avg_num_neighbors": 2.0}
+    ]
+    model = create_model(config, statistics, ["energy", "forces"], []).to(device).train()
+    assert isinstance(model, CompileTensorModel)
+    products = [module for module in model.modules() if isinstance(module, CgtpACE)]
+    assert products
+    assert all(product.use_eqx is automatic_eqx for product in products)
+    eager = TensorModel(deepcopy(model.readout_fn)).train()
+    for module in eager.modules():
+        if isinstance(module, CgtpACE) and hasattr(module, "eqx_ace"):
+            del module.eqx_ace
+            module.use_eqx = False
+
+    for num_graphs in (2, 3):
+        data = _magnetic_embedding_sample()
+        data.pop("initial_noncollinear_magmoms")
+        data["edge_index"] = torch.cat(
+            [data["edge_index"] + 3 * i for i in range(num_graphs)], dim=1
+        )
+        for key in ("positions", "node_attrs", "edge_shifts", "lattice", "pbc"):
+            data[key] = data[key].repeat(num_graphs, *([1] * (data[key].ndim - 1)))
+        data["batch"] = torch.arange(num_graphs).repeat_interleave(3)
+        data["ptr"] = torch.arange(num_graphs + 1) * 3
+        data["fidelity_idx"] = torch.zeros(num_graphs, dtype=torch.int64)
+        data = {key: value.to(device) for key, value in data.items()}
+        assert model._should_compile(data)
+
+        actual = model({key: value.clone() for key, value in data.items()})
+        expected = eager({key: value.clone() for key, value in data.items()})
+        for key in ("energy", "forces"):
+            torch.testing.assert_close(
+                actual[key], expected[key], atol=1e-10, rtol=1e-9
+            )
+        for module, output in ((model, actual), (eager, expected)):
+            module.zero_grad(set_to_none=True)
+            loss = output["energy"].square().sum() + output["forces"].square().sum()
+            loss.backward()
+        for actual_param, expected_param in zip(model.parameters(), eager.parameters()):
+            torch.testing.assert_close(
+                actual_param.grad, expected_param.grad, atol=1e-10, rtol=1e-9
+            )
+    assert len(model._compiled_cache) == 1
+
+
 @pytest.fixture
 def foundation_model(tmp_path, monkeypatch, double_precision):
     import tace.foundations.download_link as downloads
@@ -490,15 +567,15 @@ def test_tf32_environment(monkeypatch, value, training):
         )
 
 
-@pytest.mark.parametrize("mask", range(16))
+@pytest.mark.parametrize("mask", range(8))
 @pytest.mark.parametrize(
     "supported",
-    [("cue", "eqt", "oeq", "eqx"), ("cue", "oeq", "eqx"), ("eqt", "eqx"), ("eqt",)],
+    [("cue", "oeq", "eqx"), ("oeq", "eqx"), ("eqx",), ("cue",)],
 )
 def test_acceleration_priority(monkeypatch, mask, supported):
     from tace.utils.env import ACCELERATION_ENV, select_acceleration
 
-    priority = ("eqx", "oeq", "eqt", "cue")
+    priority = ("eqx", "oeq", "cue")
     enabled = [name for i, name in enumerate(priority) if mask & (1 << i)]
     for name in priority:
         monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
@@ -514,7 +591,7 @@ def test_acceleration_priority_respects_eqx_kernel_switch(monkeypatch):
     monkeypatch.setenv("TACE_USE_OEQ", "1")
     monkeypatch.setitem(EQX_KERNELS, "conv", False)
     assert select_acceleration("eqx", "oeq", kernel="conv") == "oeq"
-    assert select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+    assert select_acceleration("eqx", kernel="product") == "eqx"
 
 
 def test_model_input_properties_include_required_embeddings():

@@ -1405,7 +1405,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
-    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
+    for name in ("TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
