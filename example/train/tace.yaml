@@ -334,15 +334,16 @@ model:
     parity: false # false: O(3) natural parity only, when pesduo occur -> SO(3), true: complete O(3) parity
 
     radial_basis:
-      radial_basis: j0   # [j0, j1, j2, ..., gaussian]
-      num_radial_basis: 8 # (int) 8-10 for spherical Bessel bases, 8-64 for gaussian
+      radial_basis: j0   # [j0, j1, j2, ..., jn, gaussian]; jn: separate bases/MLPs for l2=0..lmax
+      num_radial_basis: 8 # (int) unused for jn; 8-10 for fixed-degree Bessel bases, 8-64 for gaussian
       num_mag_radial_basis: 10 # magnetic Chebyshev basis excluding the constant term
       distance_transform: null # [null, Agnesi, Soft], this plug-in from mace, if you do not know what it means, never use
       cutoff_fn: c2poly # [c2poly, c3poly, mollifier, cosine]
       polynomial_cutoff: 5 # (int)
       gaussian_width: 2.0
+      jn_max_eigenvalue: null # jn only: eigenvalue cutoff (distance^-2) or positive basis counts [n_0, ..., n_lmax]
       trainable: false # (bool)
-      apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
+      apply_cutoff: false # (bool) true: before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
       bias: true  # (bool)
 
@@ -398,7 +399,7 @@ model:
       shift_type: null # [null, mean_delta_energy_per_atom]
       scale_trainable: false # (bool)
       shift_trainable: false # (bool)
-      all_atoms: false
+      all_atoms: true
       scale_zbl: false
 
     short_range:

@@ -91,6 +91,8 @@ class Representation(torch.nn.Module):
             trainable=radial_basis["trainable"],
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],
+            lmax=lmax,
+            jn_max_eigenvalue=radial_basis.get("jn_max_eigenvalue"),
         )
 
         # === module classes ===
@@ -292,10 +294,11 @@ class Representation(torch.nn.Module):
             "lmax": lmax,
             "num_channel": num_channel,
             "target_irreps": target_irreps,
-            "num_radial_basis": radial_basis["num_radial_basis"],
+            "num_radial_basis": self.radial_basis.num_basis,
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
+            "jn_num_basis_by_l": self.radial_basis.num_basis_by_l,
             "l1l2": atomic_basis["l1l2"],
             "scatter_norm": atomic_basis["scatter_norm"],
             "correlation": product_basis["correlation"],

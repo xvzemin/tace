@@ -87,6 +87,64 @@ def compute_jn_zeros(n: int, k: int) -> np.ndarray:
     return np.array(zeros, dtype=np.float64)
 
 
+def compute_jn_num_basis(
+    cutoff: float, lmax: int, max_eigenvalue: float | list[int]
+) -> tuple[int, ...]:
+    """Resolve per-degree counts from a spectral threshold or an explicit list.
+
+    A scalar retains Dirichlet modes with ``(z_lk / cutoff)**2 <= max_eigenvalue``
+    using actual positive Bessel zeros. A list supplies the number of modes for
+    degrees zero through ``lmax`` directly. Every degree retains at least one
+    mode, so no CGTP paths are removed.
+    """
+    if type(lmax) is not int or lmax < 0:
+        raise ValueError("lmax must be a nonnegative integer for radial_basis='jn'.")
+    if (
+        isinstance(cutoff, bool)
+        or not isinstance(cutoff, (int, float))
+        or not math.isfinite(cutoff)
+        or cutoff <= 0
+    ):
+        raise ValueError("cutoff must be a finite positive number for radial_basis='jn'.")
+    if isinstance(max_eigenvalue, list):
+        if len(max_eigenvalue) != lmax + 1:
+            raise ValueError(
+                f"jn_max_eigenvalue must contain lmax + 1 = {lmax + 1} basis counts; "
+                f"got {len(max_eigenvalue)}."
+            )
+        if any(type(count) is not int or count < 1 for count in max_eigenvalue):
+            raise ValueError("jn_max_eigenvalue basis counts must be positive integers.")
+        return tuple(max_eigenvalue)
+    if (
+        isinstance(max_eigenvalue, bool)
+        or not isinstance(max_eigenvalue, (int, float))
+        or not math.isfinite(max_eigenvalue)
+        or max_eigenvalue <= 0
+    ):
+        raise ValueError(
+            "jn_max_eigenvalue must be a finite positive eigenvalue or a list "
+            "of positive integer basis counts."
+        )
+
+    # z_lk >= z_0k = k*pi, so this bounds the count for every degree.
+    # One ulp includes a mode whose threshold was computed from its own root.
+    root_limit = np.nextafter(cutoff * math.sqrt(max_eigenvalue), math.inf)
+    upper_count = math.floor(root_limit / math.pi)
+    counts = tuple(
+        int(np.count_nonzero(compute_jn_zeros(l, upper_count) <= root_limit))
+        if upper_count
+        else 0
+        for l in range(lmax + 1)
+    )
+    if not all(counts):
+        minimum = (compute_jn_zeros(lmax, 1)[0] / cutoff) ** 2
+        raise ValueError(
+            f"jn_max_eigenvalue={max_eigenvalue} leaves an empty radial basis "
+            f"through lmax={lmax}; use at least {minimum:.16g} at cutoff={cutoff}."
+        )
+    return counts
+
+
 @lru_cache(maxsize=None)
 def spherical_bessel_parameters(n: int, derivative: int):
     """Construct the power series and neighboring-order derivative coefficients."""
@@ -875,13 +933,27 @@ class RadialBasis(torch.nn.Module):
         apply_cutoff: bool = True,
         cutoff_fn: str = "mollifier",  # ['cosine', 'mollifier', 'polynomial']
         gaussian_width: float = 2.0,
+        lmax: int = 0,
+        jn_max_eigenvalue: float | list[int] | None = None,
     ):
         super().__init__()
 
         assert isinstance(trainable, bool)
         assert isinstance(apply_cutoff, bool)
-        if not isinstance(num_basis, int) or num_basis <= 0:
+        if radial_basis != "jn" and (
+            not isinstance(num_basis, int) or num_basis <= 0
+        ):
             raise ValueError("num_basis must be a positive integer.")
+
+        self.num_basis_by_l = None
+        if radial_basis == "jn":
+            if trainable or distance_transform is not None:
+                raise ValueError(
+                    "radial_basis='jn' requires trainable=false and "
+                    "distance_transform=null to preserve its Laplacian spectrum."
+                )
+            self.num_basis_by_l = compute_jn_num_basis(cutoff, lmax, jn_max_eigenvalue)
+            num_basis = sum(self.num_basis_by_l)
 
         if cutoff_fn == "mollifier":
             self.cutoff_fn = MollifierCutoff(cutoff=cutoff)
@@ -892,7 +964,14 @@ class RadialBasis(torch.nn.Module):
         else:
             self.cutoff_fn = C2PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
 
-        if radial_basis == "bessel" or radial_basis == "j0":
+        if radial_basis == "jn":
+            self.radial_fn = jnSphericalBesselBasis(
+                cutoff=cutoff,
+                order=list(range(lmax + 1)),
+                num_basis=list(self.num_basis_by_l),
+                trainable=False,
+            )
+        elif radial_basis == "bessel" or radial_basis == "j0":
             self.radial_fn = j0SphericalBesselBasis(
                 cutoff=cutoff,
                 num_basis=num_basis,

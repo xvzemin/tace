@@ -13,7 +13,7 @@ from tace.utils.env import acceleration_enabled
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
-from ..mlp import ACTIVATION, MLP, get_scaled_activation
+from ..mlp import ACTIVATION, MLP, JnRadialMLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
     O2ScatterTensorProduct,
@@ -53,6 +53,7 @@ class O3CgtpInteraction(Interaction):
             self.irreps_sh,
             self.irreps_out,
             l1l2=self.l1l2,
+            allow_eqx=self.jn_num_basis_by_l is None,
         )
 
     def _linear_down_irreps_in(self) -> o3.Irreps:
@@ -91,14 +92,22 @@ class O3CgtpInteraction(Interaction):
             bias=self.use_bias,
         )
 
-        self.edge_info = MLP(
-            [self.edge_feats_channel]
-            + self.radial_mlp
-            + [self.rejector.weight_numel],
-            bias=self.radial_bias,
-            layer_norm=self.radial_layer_norm,
-            act="silu",
-        )
+        if self.jn_num_basis_by_l is not None:
+            self.edge_info = JnRadialMLP(
+                self.rejector.tp,
+                self.jn_num_basis_by_l,
+                hidden=self.radial_mlp,
+                bias=self.radial_bias,
+            )
+        else:
+            self.edge_info = MLP(
+                [self.edge_feats_channel]
+                + self.radial_mlp
+                + [self.rejector.weight_numel],
+                bias=self.radial_bias,
+                layer_norm=self.radial_layer_norm,
+                act="silu",
+            )
         self._setup_additional_modules()
 
         self.scatter_norm = get_scatter_norm_layer(
@@ -182,7 +191,9 @@ class O3CgtpInteraction(Interaction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
-        if self.use_eqx:
+        if isinstance(self.edge_info, JnRadialMLP):
+            conv_weights = self.edge_info(edge_radial_basis)
+        elif self.use_eqx:
             radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
             projection = last.get_weight()
@@ -194,7 +205,8 @@ class O3CgtpInteraction(Interaction):
                 if graph is not None else None,
                 radial_network=self.edge_info.mlp[:-1],
             )
-        conv_weights = self.edge_info(edge_feats)
+        else:
+            conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
         return self.rejector(node_feats, edge_attrs, conv_weights, edge_index)

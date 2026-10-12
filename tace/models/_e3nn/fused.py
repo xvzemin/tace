@@ -302,6 +302,8 @@ class O3ScatterTensorProduct(torch.nn.Module):
         l2l3: Union[str, None] = None,
         l3l1: Union[str, None] = None,
         instructions: Union[list[tuple], None] = None,
+        *,
+        allow_eqx: bool = True,
     ) -> None:
         super().__init__()
 
@@ -338,7 +340,9 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = eqx_conv.O3TensorProductConv(self.tp, normalize=False)
+        self.allow_eqx = allow_eqx
+        if allow_eqx:
+            self.eqx_tp = eqx_conv.O3TensorProductConv(self.tp, normalize=False)
         self.reshape_in = LayoutTransform(
             self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
         )
@@ -348,7 +352,8 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.reshape_out = LayoutTransform(
             self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
         )
-        backend = select_acceleration("eqx", "oeq", "cue", kernel="conv")
+        backends = ("eqx", "oeq", "cue") if allow_eqx else ("oeq", "cue")
+        backend = select_acceleration(*backends, kernel="conv")
         self.use_oeq = backend == "oeq"
         self.use_cue = backend == "cue"
         self.use_aoti = acceleration_enabled("compile")
@@ -407,7 +412,9 @@ class O3ScatterTensorProduct(torch.nn.Module):
 
     @property
     def use_eqx(self) -> bool:
-        return bool(acceleration_enabled("eqx", kernel="conv"))
+        return getattr(self, "allow_eqx", True) and bool(
+            acceleration_enabled("eqx", kernel="conv")
+        )
 
     def forward(
         self,

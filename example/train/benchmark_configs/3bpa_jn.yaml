@@ -1,0 +1,18 @@
+# @package _global_
+# Change only the radial basis and its degree-specific conv-weight generator.
+defaults:
+  - 3bpa_cgtp@_global_
+  - _self_
+
+model:
+  config:
+    radial_basis:
+      radial_basis: jn
+      # Inverse squared distance units (angstrom^-2 for angstrom coordinates).
+      # cutoff=5, lmax=3 gives n_l=[7, 7, 6, 6]; num_radial_basis is unused.
+      jn_max_eigenvalue: 25.0
+      # Alternatively: [7, 7, 6, 6] manually sets the counts for l=0,1,2,3.
+      # A manual list must contain exactly lmax+1 positive integers.
+      # hidden, bias and the C2 polynomial envelope are inherited.
+      # apply_cutoff=false is inherited: the envelope multiplies MLP outputs.
+      # Set apply_cutoff=true to multiply basis inputs instead; no cutoff_width.

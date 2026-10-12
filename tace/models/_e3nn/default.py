@@ -40,6 +40,7 @@ DEFAULT_MODEL_CONFIG = {
         "bias": False,
         "radial_basis": "j0",
         "num_radial_basis": 8,
+        "jn_max_eigenvalue": None,
         "num_mag_radial_basis": 10,
         "distance_transform": None,
         "cutoff_fn": "c2poly",
@@ -219,6 +220,17 @@ def check_model_config(cfg: dict[str, Any]):
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
+    if cfg["radial_basis"]["radial_basis"] == "jn":
+        if any(kind != "cgtp" for kind in atomic_basis_type):
+            raise ValueError(
+                "radial_basis='jn' currently requires atomic_basis.type: cgtp."
+            )
+        for key in ("edge_embedding", "edge_update"):
+            if cfg[key]["type"] != "identity":
+                raise ValueError(
+                    f"radial_basis='jn' takes each degree's Bessel functions directly; "
+                    f"set {key}.type: identity."
+                )
     uses_magnetic_interaction = "o2_mag" in atomic_basis_type
     if (
         not isinstance(magnetic_lmax, int)

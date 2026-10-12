@@ -222,7 +222,7 @@ def test_spherical_bessel_differentiation(n):
     )
 
 
-@pytest.mark.parametrize("name", ["jn", "j-1", "j1.5", "jx"])
+@pytest.mark.parametrize("name", ["j-1", "j1.5", "jx"])
 def test_spherical_bessel_invalid_name(name):
     with pytest.raises(ValueError, match="Unknown radial_basis"):
         RadialBasis(radial_basis=name)

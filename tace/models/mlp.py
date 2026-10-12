@@ -4,11 +4,12 @@
 ################################################################################
 
 from functools import lru_cache
-from math import sqrt
+from math import prod, sqrt
 from typing import Callable, List, Union
 
 import torch
 import torch.nn.functional as F
+from e3nn import o3
 
 from .linear import mlpLinear
 
@@ -190,3 +191,69 @@ class MLP(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+
+
+class JnRadialMLP(torch.nn.Module):
+    """Independent radial networks per edge degree, in the original TP order.
+
+    Every network uses TACE's standard MLP with widths
+    ``[num_basis_by_l[l2], *hidden, weight_numel_by_l[l2]]``. Cutoff placement
+    follows ``radial_basis.apply_cutoff`` in the radial basis and interaction.
+    """
+
+    def __init__(
+        self,
+        tensor_product: o3.TensorProduct,
+        num_basis_by_l: tuple[int, ...],
+        hidden: list[int],
+        bias: bool = False,
+    ) -> None:
+        super().__init__()
+        if not num_basis_by_l or any(
+            type(count) is not int or count < 1 for count in num_basis_by_l
+        ):
+            raise ValueError("jn requires at least one radial function per l2.")
+
+        self.num_basis_by_l = tuple(num_basis_by_l)
+        self.hidden_widths = tuple(hidden)
+        self.use_bias = bias
+        self.num_layers = len(hidden) + 1
+        self.weight_numel = tensor_product.weight_numel
+        indices = [[] for _ in num_basis_by_l]
+        offset = 0
+        for instruction in tensor_product.instructions:
+            if not instruction.has_weight:
+                continue
+            l2 = tensor_product.irreps_in2[instruction.i_in2].ir.l
+            if l2 >= len(num_basis_by_l):
+                raise ValueError(f"No jn radial basis supplied for l2={l2}.")
+            count = prod(instruction.path_shape)
+            indices[l2].extend(range(offset, offset + count))
+            offset += count
+        if offset != self.weight_numel:
+            raise ValueError("jn weight layout does not match the tensor product.")
+
+        self.weight_numel_by_l = tuple(len(group) for group in indices)
+        self.radial_mlps = torch.nn.ModuleDict(
+            {
+                str(l2): MLP([num_basis_by_l[l2], *hidden, width], bias=bias, act="silu")
+                for l2, width in enumerate(self.weight_numel_by_l)
+                if width
+            }
+        )
+        self.register_buffer(
+            "_weight_index",
+            torch.tensor(
+                [i for group in indices for i in group], dtype=torch.long
+            ).argsort(),
+            persistent=False,
+        )
+
+    def forward(self, radial_basis: torch.Tensor) -> torch.Tensor:
+        if self.weight_numel == 0:
+            return radial_basis[..., :0]
+        basis_by_l = radial_basis.split(self.num_basis_by_l, dim=-1)
+        grouped = torch.cat(
+            [mlp(basis_by_l[int(l)]) for l, mlp in self.radial_mlps.items()], dim=-1
+        )
+        return grouped.index_select(-1, self._weight_index)
