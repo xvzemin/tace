@@ -14,6 +14,7 @@ from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
+from ..space import SpaceRadialMLP
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
     O2ScatterTensorProduct,
@@ -91,14 +92,27 @@ class O3CgtpInteraction(Interaction):
             bias=self.use_bias,
         )
 
-        self.edge_info = MLP(
-            [self.edge_feats_channel]
-            + self.radial_mlp
-            + [self.rejector.weight_numel],
-            bias=self.radial_bias,
-            layer_norm=self.radial_layer_norm,
-            act="silu",
-        )
+        if self.space_radial_mlp is not None:
+            if self.use_eqx:
+                raise ValueError(
+                    "SPACE radial MLP currently supports OEQ or native e3nn; "
+                    "set TACE_USE_EQX=0 and TACE_USE_OEQ=1 for OEQ."
+                )
+            self.edge_info = SpaceRadialMLP(
+                self.rejector.tp,
+                hidden=self.radial_mlp,
+                bias=self.radial_bias,
+                **self.space_radial_mlp,
+            )
+        else:
+            self.edge_info = MLP(
+                [self.edge_feats_channel]
+                + self.radial_mlp
+                + [self.rejector.weight_numel],
+                bias=self.radial_bias,
+                layer_norm=self.radial_layer_norm,
+                act="silu",
+            )
         self._setup_additional_modules()
 
         self.scatter_norm = get_scatter_norm_layer(
@@ -169,7 +183,9 @@ class O3CgtpInteraction(Interaction):
         self,
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
-        edge_radial_basis: torch.Tensor,
+        edge_radial_basis: Union[
+            torch.Tensor, tuple[tuple[torch.Tensor, ...], torch.Tensor]
+        ],
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,
@@ -182,6 +198,13 @@ class O3CgtpInteraction(Interaction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
+        if isinstance(self.edge_info, SpaceRadialMLP):
+            if self.use_eqx:
+                raise ValueError("SPACE radial MLP requires TACE_USE_EQX=0.")
+            # The SPACE envelope also gates biased outputs at the neighbor cutoff.
+            radial_functions, radial_cutoff = edge_radial_basis
+            conv_weights = self.edge_info(radial_functions, radial_cutoff)
+            return self.rejector(node_feats, edge_attrs, conv_weights, edge_index)
         if self.use_eqx:
             radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
@@ -204,7 +227,9 @@ class O3CgtpInteraction(Interaction):
         node_feats: torch.Tensor,
         node_attrs_total: torch.Tensor,
         node_attrs_slice: torch.Tensor,
-        edge_radial_basis: torch.Tensor,
+        edge_radial_basis: Union[
+            torch.Tensor, tuple[tuple[torch.Tensor, ...], torch.Tensor]
+        ],
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
         edge_index: torch.Tensor,

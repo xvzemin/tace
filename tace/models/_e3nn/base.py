@@ -186,6 +186,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         num_mag_radial_basis: int = 8,
         magnetic_node_info_channel: int = 0,
         magnetic_edge_irreps: o3.Irreps = None,
+        space_radial_mlp: Union[dict, None] = None,
     ) -> None:
         super().__init__()
 
@@ -204,6 +205,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.target_irreps = target_irreps
         self.radial_mlp = radial_mlp
         self.radial_bias = radial_bias
+        self.space_radial_mlp = space_radial_mlp
         self.use_bias = bias
         self.scatter_norm_type = scatter_norm
         self.scalar_act = scalar_act

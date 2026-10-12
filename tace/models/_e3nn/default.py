@@ -48,6 +48,13 @@ DEFAULT_MODEL_CONFIG = {
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
         "gaussian_width": 2.0,
+        "mlp_type": "dense",
+        "space": {
+            "max_eigenvalue": 100.0,
+            "element_scale": 0.7,
+            "cutoff_width": 1.0,
+            "spline_accuracy": 1e-8,
+        },
     },
     "angular_basis": {
         "magnetic_Lmax": 2,
@@ -219,6 +226,28 @@ def check_model_config(cfg: dict[str, Any]):
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
+    radial_mlp_type = cfg["radial_basis"]["mlp_type"]
+    if radial_mlp_type not in ("dense", "space"):
+        raise ValueError("radial_basis.mlp_type must be 'dense' or 'space'.")
+    if radial_mlp_type == "space":
+        if any(kind != "cgtp" for kind in atomic_basis_type):
+            raise ValueError(
+                "SPACE radial MLP currently requires atomic_basis.type: cgtp."
+            )
+        for key in ("edge_embedding", "edge_update"):
+            if cfg[key]["type"] != "identity":
+                raise ValueError(
+                    f"SPACE radial MLP takes physical radial functions directly; "
+                    f"set {key}.type: identity."
+                )
+        if any(
+            key in cfg["radial_basis"]["space"]
+            for key in ("mlp_depth", "mlp_expansion_ratio")
+        ):
+            raise ValueError(
+                "Remove space.mlp_depth and space.mlp_expansion_ratio; "
+                "SPACE MLP layers are controlled by radial_basis.hidden and bias."
+            )
     uses_magnetic_interaction = "o2_mag" in atomic_basis_type
     if (
         not isinstance(magnetic_lmax, int)

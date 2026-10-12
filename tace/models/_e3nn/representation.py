@@ -16,6 +16,7 @@ from ...utils.env import get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
+from ..space import SpaceRadialBasis
 from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import (
@@ -92,6 +93,22 @@ class Representation(torch.nn.Module):
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],
         )
+        self.space_radial_basis = None
+        space_radial_mlp = None
+        if radial_basis.get("mlp_type", "dense") == "space":
+            space = radial_basis["space"]
+            self.space_radial_basis = SpaceRadialBasis(
+                lmax=lmax,
+                atomic_numbers=atomic_numbers,
+                cutoff=cutoff,
+                max_eigenvalue=space["max_eigenvalue"],
+                element_scale=space["element_scale"],
+                cutoff_width=space["cutoff_width"],
+                spline_accuracy=space["spline_accuracy"],
+            )
+            space_radial_mlp = {
+                "n_max_l": self.space_radial_basis.n_max_l,
+            }
 
         # === module classes ===
         node_embedding_cls = NODE_EMBEDDING[node_embedding["type"]]
@@ -296,6 +313,7 @@ class Representation(torch.nn.Module):
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
+            "space_radial_mlp": space_radial_mlp,
             "l1l2": atomic_basis["l1l2"],
             "scatter_norm": atomic_basis["scatter_norm"],
             "correlation": product_basis["correlation"],
@@ -456,6 +474,13 @@ class Representation(torch.nn.Module):
             self.atomic_numbers,
             node_type=node_type,
         )
+        # Fixed physical functions are evaluated once and reused by each layer's
+        # independent per-l2 weight networks. Other radial consumers keep their basis.
+        conv_radial_basis = edge_radial_basis
+        if getattr(self, "space_radial_basis", None) is not None:
+            conv_radial_basis = self.space_radial_basis.forward_with_cutoff(
+                graph.edge_length, node_type, data["edge_index"]
+            )
 
         # === angular basis ===
         edge_wigner = None
@@ -582,7 +607,7 @@ class Representation(torch.nn.Module):
                 node_feats,
                 node_attrs_total,
                 node_attrs_slice,
-                edge_radial_basis,
+                conv_radial_basis,
                 this_edge_feats,
                 cartesian_edge_attrs
                 if isinstance(inter, O3CartesianIctpIctcInteraction)

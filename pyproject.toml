@@ -39,6 +39,10 @@ oeq = [
     "openequivariance>=0.5.4",
 ]
 
+space = [
+    "physical-basis==1.0.0",
+]
+
 eqx = [
     "ninja",
     "filelock",

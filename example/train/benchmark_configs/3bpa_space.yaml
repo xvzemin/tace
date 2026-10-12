@@ -1,0 +1,18 @@
+# @package _global_
+# Inherit 3BPA CGTP; override only its radial weight generator.
+# Install the optional dependency first: pip install -e '.[space,oeq]'.
+defaults:
+  - 3bpa_cgtp@_global_
+  - _self_
+
+model:
+  config:
+    radial_basis:
+      mlp_type: space
+      # hidden=[64, 64, 64, 1024] and bias=false are inherited from 3bpa_cgtp.
+      space:
+        # Covers lmax=3 with n_l=[3, 3, 2, 1]. For lmax=5 use 100.0.
+        max_eigenvalue: 50.0
+        element_scale: 0.7
+        cutoff_width: 1.0
+        spline_accuracy: 1.0e-8

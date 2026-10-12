@@ -17,6 +17,115 @@ O(3) Cgtp
    :no-members:
    :show-inheritance:
 
+SPACE radial weight MLP
+~~~~~~~~~~~~~~~~~~~~~~~
+
+``radial_basis.mlp_type: space`` selects a separate radial network for each
+edge angular degree :math:`l_2` in each O(3) CGTP interaction. Install its
+optional dependency with ``pip install -e '.[space,oeq]'``. The implementation
+uses the eigenfunctions from ``physical-basis==1.0.0``, following
+`SPACE <https://arxiv.org/html/2610.10830v1>`_ and
+`metatrain's radial implementation <https://github.com/metatensor/metatrain/tree/911683a32eaccc1d99af9a3683b1bd016facc544/src/metatrain/experimental/space/modules>`_.
+
+For each degree, :math:`n_l` is the number of physical eigenfunctions with
+:math:`E_{nl}\leq E_{\max}`. Distances are transformed using the fixed ASE
+covalent radii :math:`R_Z`:
+
+.. math::
+
+   x_{ij} = \frac{r_{ij}}{0.1 + s(R_{Z_i}+R_{Z_j})}, \qquad
+   b^{(l)}_{ij,n} = \sqrt{r_{\mathrm{cut}}^3/3}\,
+                   R_{nl}(x_{ij})\,f_{\mathrm{SPACE}}(r_{ij}).
+
+The basis is zero for :math:`x\geq10`. As in SPACE, values and first
+derivatives of the original numerical eigenfunctions are tabulated on an
+adaptively refined grid and evaluated with cubic Hermite interpolation.
+``spline_accuracy`` is a mean absolute-or-relative midpoint criterion, not
+a maximum value or derivative error bound. The fixed tables are model
+buffers; forward evaluation and autograd use only PyTorch. Tables are
+evaluated once per graph and reused across interaction layers.
+
+Each independent SiLU MLP uses the hidden-layer widths in
+``radial_basis.hidden`` and the bias setting in ``radial_basis.bias``:
+
+.. math::
+
+   n_l \longrightarrow h_1 \longrightarrow \cdots \longrightarrow h_k
+       \longrightarrow W_l.
+
+All degrees use the same list :math:`[h_1,\ldots,h_k]`, with independent
+parameters. Only input and output widths depend on the degree. For example,
+``hidden: [64, 64, 64, 1024]`` gives exactly those four hidden layers for every
+:math:`l_2`; neither ``num_channel`` nor the number of radial functions rescales
+them. ``hidden: []`` gives a single linear map. Bias is enabled or disabled on
+every linear layer, including the output layer. The old
+``space.mlp_depth`` and ``space.mlp_expansion_ratio`` options are no longer used
+and must be removed from configurations.
+
+Linear layers use SPACE's normal initialization and :math:`1/\sqrt{d_{in}}`
+scaling. The final layer emits
+:math:`W_l=\sum_{p:\,l_2(p)=l}\lvert w_p\rvert` values. Outputs are reordered
+into the original e3nn instruction order. Thus the CGTP paths, per-path
+channel weights, normalization, and total ``weight_numel`` are retained;
+the number of trainable MLP parameters can change. This is a new training
+architecture, not an exact conversion of pretrained radial weights.
+
+.. code-block:: yaml
+
+   misc:
+     env:
+       TACE_USE_EQX: "0"
+       TACE_USE_OEQ: "1"
+       TACE_USE_CUE: "0"
+   model:
+     config:
+       lmax: 5
+       edge_embedding:
+         type: identity
+       edge_update:
+         type: identity
+       atomic_basis:
+         type: cgtp
+       radial_basis:
+         mlp_type: space
+         hidden: [64, 64, 64, 1024]
+         bias: false
+         space:
+           max_eigenvalue: 100.0
+           element_scale: 0.7
+           cutoff_width: 1.0
+           spline_accuracy: 1.0e-8
+
+At ``max_eigenvalue: 100``, degrees 0 through 5 have
+``n_max_l = [5, 5, 4, 3, 2, 2]``. ``lmax`` continues to specify the TACE
+edge degrees; too small an eigenvalue threshold raises an error instead of
+removing any CGTP paths. Degrees above ``lmax`` are not used. For example,
+``lmax: 3`` with ``max_eigenvalue: 50`` uses ``[3, 3, 2, 1]``.
+
+SPACE weights consume these physical functions directly. This version
+requires identity edge embedding/update and spherical ``cgtp`` interactions.
+It supports OEQ and native e3nn; EQX streaming has not been adapted.
+The SPACE bump envelope is applied to the physical basis before the MLP.
+With ``bias: false``, this retains the original SPACE cutoff behavior. With
+``bias: true``, the same envelope also multiplies the MLP output so that bias
+cannot leave a nonzero message at the neighbor cutoff. No additional TACE
+envelope multiplies these convolution weights. The neighbor list keeps TACE's
+fixed cutoff; SPACE's adaptive neighbor selection is not enabled.
+
+The existing ``num_radial_basis`` and radial-function options continue to
+serve other modules, such as spherical node embeddings and density
+normalization. SPACE's input counts are set by ``space.max_eigenvalue``;
+its MLP hidden layers and bias are set by the shared ``radial_basis`` options.
+Existing models keep ``mlp_type: dense`` by default.
+A training example is available in
+``example/train/benchmark_configs/3bpa_space.yaml``.
+
+.. autoclass:: tace.models.space.SpaceRadialBasis
+   :no-members:
+
+.. autoclass:: tace.models.space.SpaceRadialMLP
+   :no-members:
+
 O(2) CGTP
 ---------
 

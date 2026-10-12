@@ -334,6 +334,7 @@ model:
     parity: false # false: O(3) natural parity only, when pesduo occur -> SO(3), true: complete O(3) parity
 
     radial_basis:
+      mlp_type: dense # [dense, space]; SPACE settings: benchmark_configs/3bpa_space.yaml
       radial_basis: j0   # [j0, j1, j2, ..., gaussian]
       num_radial_basis: 8 # (int) 8-10 for spherical Bessel bases, 8-64 for gaussian
       num_mag_radial_basis: 10 # magnetic Chebyshev basis excluding the constant term
