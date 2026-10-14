@@ -48,6 +48,8 @@ DEFAULT_MODEL_CONFIG = {
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
         "gaussian_width": 2.0,
+        "max_eigenvalue": 323.0,
+        "length_scale": 1.0,
     },
     "angular_basis": {
         "magnetic_Lmax": 2,

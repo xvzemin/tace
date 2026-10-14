@@ -4,7 +4,7 @@
 ################################################################################
 
 from functools import lru_cache
-from math import sqrt
+from math import prod, sqrt
 from typing import Callable, List, Union
 
 import torch
@@ -132,6 +132,58 @@ def get_scaled_activation(name: str) -> torch.nn.Module:
         ACTIVATION[name](),
         _activation_scale_factor_from_name(name),
     )
+
+
+class PathRadialMLP(torch.nn.Module):
+    """Generate tensor-product weights from degree-specific radial functions.
+
+    Parameters
+    ----------
+    tensor_product : e3nn.o3.TensorProduct
+        Tensor product whose second input contains spherical harmonics.
+    num_basis : tuple of int
+        Number of radial functions at each spherical-harmonic degree.
+    hidden : list of int
+        Hidden widths of each degree-specific MLP.
+
+    Notes
+    -----
+    Each degree uses a bias-free TACE MLP with SiLU.
+    Every weighted instruction retains independent outputs in e3nn's order.
+    """
+
+    def __init__(self, tensor_product, num_basis: tuple[int, ...], hidden: list[int]):
+        super().__init__()
+        self.num_basis = tuple(num_basis)
+        self.num_layers = len(hidden) + 1
+        self.weight_numel = tensor_product.weight_numel
+        indices = [[] for _ in num_basis]
+        offset = 0
+        for instruction in tensor_product.instructions:
+            if instruction.has_weight:
+                size = prod(instruction.path_shape)
+                ell = tensor_product.irreps_in2[instruction.i_in2].ir.l
+                indices[ell].extend(range(offset, offset + size))
+                offset += size
+        self.degrees = tuple(ell for ell, index in enumerate(indices) if index)
+        self.radial_mlps = torch.nn.ModuleList()
+        for ell in self.degrees:
+            widths = [num_basis[ell], *hidden, len(indices[ell])]
+            self.radial_mlps.append(MLP(widths, bias=False, act="silu").mlp)
+        grouped = torch.tensor(
+            [index for block in indices for index in block], dtype=torch.long
+        )
+        self.register_buffer("weight_order", grouped.argsort())
+
+    def forward(self, radial: torch.Tensor) -> torch.Tensor:
+        blocks = radial.split(self.num_basis, dim=-1)
+        weights = [mlp(blocks[ell]) for ell, mlp in zip(self.degrees, self.radial_mlps)]
+        if not weights:
+            return radial[..., :0]
+        return torch.cat(weights, dim=-1).index_select(-1, self.weight_order)
+
+    def extra_repr(self) -> str:
+        return f"num_basis={self.num_basis}, weight_numel={self.weight_numel}"
 
 
 class MLP(torch.nn.Module):

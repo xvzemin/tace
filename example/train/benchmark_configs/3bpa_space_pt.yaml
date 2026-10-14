@@ -1,0 +1,17 @@
+defaults:
+  - 3bpa_cgtp@_global_
+  - _self_
+
+misc:
+  project_name: 3BPA-SPACE-PT
+
+model:
+  config:
+    radial_basis:
+      radial_basis: space_pt
+      # Selects 8, 7, 6, 5 functions for ell = 0, 1, 2, 3.
+      # num_radial_basis is unused for this basis.
+      max_eigenvalue: 323.0
+      length_scale: 1.0 # Angstrom; experimental, not fitted to 3BPA.
+      apply_cutoff: false
+      bias: false

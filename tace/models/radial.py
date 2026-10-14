@@ -863,6 +863,130 @@ class ZBLBasis(torch.nn.Module):
         return f"{self.__class__.__name__}(c={[float(f'{c:.4f}') for c in self.c.tolist()]})"
 
 
+class PoschlTellerBasis(torch.nn.Module):
+    r"""Radial eigenfunctions of :math:`-\nabla\cdot(1+x^2)^2\nabla`.
+
+    Parameters
+    ----------
+    lmax : int
+        Maximum spherical-harmonic degree.
+    max_eigenvalue : float
+        Dimensionless eigenvalue cutoff, shared by all degrees.
+    length_scale : float
+        Length scale defining ``x = r / length_scale``.
+    cutoff : float
+        Interaction cutoff used in SPACE's volume normalization.
+
+    Notes
+    -----
+    Functions are ordered by degree, then radial index. They have unit norm
+    in ``x**2 dx`` before multiplication by ``sqrt(cutoff**3 / 3)``.
+    The finite Jacobi polynomials are evaluated by a three-term recurrence.
+    The interaction cutoff is applied separately after the radial MLP.
+    """
+
+    def __init__(
+        self,
+        lmax: int,
+        max_eigenvalue: float = 323.0,
+        length_scale: float = 1.0,
+        cutoff: float = 5.0,
+    ) -> None:
+        super().__init__()
+        if not isinstance(lmax, int) or lmax < 0:
+            raise ValueError("lmax must be a non-negative integer.")
+        if not all(
+            math.isfinite(v) and v > 0 for v in (max_eigenvalue, length_scale, cutoff)
+        ):
+            raise ValueError(
+                "max_eigenvalue, length_scale and cutoff must be positive and finite."
+            )
+        self.lmax = lmax
+        self.max_eigenvalue = float(max_eigenvalue)
+        counts, eigenvalues, normalizers, coefficients, exponents = [], [], [], [], []
+        for ell in range(lmax + 1):
+            b = (1 + math.sqrt(4 * ell * (ell + 1) + 25)) / 2
+            alpha, beta = ell + 0.5, b - 0.5
+            upper = max(0, int(math.sqrt(max_eigenvalue + 1) / 2) + 1)
+            spectrum = [(2 * n + ell + b + 1) ** 2 - 1 for n in range(upper)]
+            spectrum = [value for value in spectrum if value <= max_eigenvalue]
+            if not spectrum:
+                raise ValueError(
+                    f"max_eigenvalue retains no radial function for ell={ell}."
+                )
+            counts.append(len(spectrum))
+            eigenvalues.extend(spectrum)
+            exponents.append((b + 2) / 2)
+            # P_0 = 1, P_1 = A z + B, P_{n+1} = (A z + B) P_n - C P_{n-1}.
+            recurrence = [[(alpha + beta + 2) / 2, (alpha - beta) / 2, 0.0]]
+            for n in range(1, len(spectrum) - 1):
+                total = 2 * n + alpha + beta
+                denominator = 2 * (n + 1) * (n + alpha + beta + 1) * total
+                recurrence.append(
+                    [
+                        (total + 1) * total * (total + 2) / denominator,
+                        (total + 1) * (alpha**2 - beta**2) / denominator,
+                        2 * (n + alpha) * (n + beta) * (total + 2) / denominator,
+                    ]
+                )
+            coefficients.append(recurrence)
+            for n in range(len(spectrum)):
+                log_norm = (
+                    math.lgamma(n + alpha + 1)
+                    + math.lgamma(n + beta + 1)
+                    - math.log(2 * (2 * n + alpha + beta + 1))
+                    - math.lgamma(n + 1)
+                    - math.lgamma(n + alpha + beta + 1)
+                )
+                normalizers.append(math.exp(-0.5 * log_norm) * math.sqrt(cutoff**3 / 3))
+        self.num_basis_by_degree = tuple(counts)
+        self.num_basis = sum(counts)
+        recurrence = torch.zeros(lmax + 1, max(counts), 3, dtype=torch.float64)
+        for ell, values in enumerate(coefficients):
+            recurrence[ell, : len(values)] = torch.tensor(values, dtype=torch.float64)
+        self.register_buffer("recurrence", recurrence)
+        self.register_buffer("exponents", torch.tensor(exponents, dtype=torch.float64))
+        self.register_buffer(
+            "normalizer", torch.tensor(normalizers, dtype=torch.float64)
+        )
+        self.register_buffer(
+            "eigenvalues", torch.tensor(eigenvalues, dtype=torch.float64)
+        )
+        self.register_buffer(
+            "length_scale", torch.tensor(length_scale, dtype=torch.float64)
+        )
+
+    def forward(
+        self, r: torch.Tensor, node_attrs=None, edge_index=None
+    ) -> torch.Tensor:
+        """Map distances of shape ``(..., 1)`` to ``(..., num_basis)``."""
+        x = r / self.length_scale.to(r)
+        inverse = (1 + x.square()).reciprocal()
+        z = 2 * inverse - 1
+        sine = x * inverse.sqrt()
+        coefficients = self.recurrence.to(r)
+        exponents = self.exponents.to(r)
+        outputs = []
+        for ell, count in enumerate(self.num_basis_by_degree):
+            prefactor = sine.pow(ell) * inverse.pow(exponents[ell])
+            previous = torch.ones_like(r)
+            polynomials = [previous]
+            if count > 1:
+                current = coefficients[ell, 0, 0] * z + coefficients[ell, 0, 1]
+                polynomials.append(current)
+                for n in range(1, count - 1):
+                    following = (
+                        coefficients[ell, n, 0] * z + coefficients[ell, n, 1]
+                    ) * current - coefficients[ell, n, 2] * previous
+                    polynomials.append(following)
+                    previous, current = current, following
+            outputs.append(prefactor * torch.cat(polynomials, dim=-1))
+        return torch.cat(outputs, dim=-1) * self.normalizer.to(r)
+
+    def extra_repr(self) -> str:
+        return f"lmax={self.lmax}, max_eigenvalue={self.max_eigenvalue}, num_basis={self.num_basis_by_degree}"
+
+
 class RadialBasis(torch.nn.Module):
     def __init__(
         self,
@@ -875,12 +999,17 @@ class RadialBasis(torch.nn.Module):
         apply_cutoff: bool = True,
         cutoff_fn: str = "mollifier",  # ['cosine', 'mollifier', 'polynomial']
         gaussian_width: float = 2.0,
+        lmax: int = 0,
+        max_eigenvalue: float = 323.0,
+        length_scale: float = 1.0,
     ):
         super().__init__()
 
         assert isinstance(trainable, bool)
         assert isinstance(apply_cutoff, bool)
-        if not isinstance(num_basis, int) or num_basis <= 0:
+        if radial_basis != "space_pt" and (
+            not isinstance(num_basis, int) or num_basis <= 0
+        ):
             raise ValueError("num_basis must be a positive integer.")
 
         if cutoff_fn == "mollifier":
@@ -892,7 +1021,17 @@ class RadialBasis(torch.nn.Module):
         else:
             self.cutoff_fn = C2PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
 
-        if radial_basis == "bessel" or radial_basis == "j0":
+        self.num_basis_by_degree = None
+        if radial_basis == "space_pt":
+            if trainable or distance_transform is not None or apply_cutoff:
+                raise ValueError(
+                    "space_pt requires trainable=False, distance_transform=None and "
+                    "apply_cutoff=False; the cutoff must follow the radial MLP."
+                )
+            self.radial_fn = PoschlTellerBasis(lmax, max_eigenvalue, length_scale, cutoff)
+            self.num_basis_by_degree = self.radial_fn.num_basis_by_degree
+            num_basis = self.radial_fn.num_basis
+        elif radial_basis == "bessel" or radial_basis == "j0":
             self.radial_fn = j0SphericalBesselBasis(
                 cutoff=cutoff,
                 num_basis=num_basis,

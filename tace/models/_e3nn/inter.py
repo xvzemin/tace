@@ -13,7 +13,7 @@ from tace.utils.env import acceleration_enabled
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
-from ..mlp import ACTIVATION, MLP, get_scaled_activation
+from ..mlp import ACTIVATION, MLP, PathRadialMLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
     O2ScatterTensorProduct,
@@ -42,7 +42,11 @@ class O3CgtpInteraction(Interaction):
 
     @property
     def use_eqx(self) -> bool:
-        return hasattr(self.rejector, "eqx_tp") and bool(acceleration_enabled("eqx", kernel="conv"))
+        return (
+            self.radial_basis_sizes is None
+            and hasattr(self.rejector, "eqx_tp")
+            and bool(acceleration_enabled("eqx", kernel="conv"))
+        )
 
     def _prepare_setup(self) -> None:
         pass
@@ -91,13 +95,17 @@ class O3CgtpInteraction(Interaction):
             bias=self.use_bias,
         )
 
-        self.edge_info = MLP(
-            [self.edge_feats_channel]
-            + self.radial_mlp
-            + [self.rejector.weight_numel],
-            bias=self.radial_bias,
-            layer_norm=self.radial_layer_norm,
-            act="silu",
+        self.edge_info = (
+            PathRadialMLP(self.rejector.tp, self.radial_basis_sizes, self.radial_mlp)
+            if self.radial_basis_sizes is not None
+            else MLP(
+                [self.edge_feats_channel]
+                + self.radial_mlp
+                + [self.rejector.weight_numel],
+                bias=self.radial_bias,
+                layer_norm=self.radial_layer_norm,
+                act="silu",
+            )
         )
         self._setup_additional_modules()
 

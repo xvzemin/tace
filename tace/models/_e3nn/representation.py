@@ -91,7 +91,17 @@ class Representation(torch.nn.Module):
             trainable=radial_basis["trainable"],
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],
+            lmax=lmax,
+            max_eigenvalue=radial_basis.get("max_eigenvalue", 323.0),
+            length_scale=radial_basis.get("length_scale", 1.0),
         )
+        if self.radial_basis.num_basis_by_degree is not None:
+            if any(kind != "cgtp" for kind in atomic_basis["type"]):
+                raise ValueError("space_pt currently supports the cgtp interaction only.")
+            if edge_embedding["type"] != "identity" or edge_update["type"] != "identity":
+                raise ValueError("space_pt requires identity edge embedding and edge update.")
+            if radial_basis["bias"]:
+                raise ValueError("space_pt requires a bias-free radial MLP; set bias=False.")
 
         # === module classes ===
         node_embedding_cls = NODE_EMBEDDING[node_embedding["type"]]
@@ -292,7 +302,8 @@ class Representation(torch.nn.Module):
             "lmax": lmax,
             "num_channel": num_channel,
             "target_irreps": target_irreps,
-            "num_radial_basis": radial_basis["num_radial_basis"],
+            "num_radial_basis": self.radial_basis.num_basis,
+            "radial_basis_sizes": self.radial_basis.num_basis_by_degree,
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
