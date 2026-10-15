@@ -9,6 +9,7 @@ import torch
 from torch import Tensor
 
 from tace.dataset.element import TorchElement
+
 from ..dataset.quantity import PROPERTY, ComputeFlag
 from .lammps import Graph
 from .utils import (
@@ -342,11 +343,7 @@ class TensorModel(torch.nn.Module):
                 - data["positions"][source]
                 + torch.einsum("ni,nij->nj", data["edge_shifts"], edge_lattice)
             )
-            if set(self.get_target_property()) & {
-                "edge_vector",
-                "atomic_stresses",
-                "atomic_virials",
-            }:
+            if "edge_vector" in requires_grad_p_list:
                 edge_vector.requires_grad_(True)
             edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
             lattice = data["lattice"]
