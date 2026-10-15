@@ -17,10 +17,6 @@ from tace.models._e3nn.fused import (
     UvuTensorProduct,
 )
 from tace.models._e3nn.layer_norm import get_normalization_layer
-from tace.models._e3nn.node import (
-    LinearSpinNodeEmbedding,
-    NonLinearSpinNodeEmbedding,
-)
 from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
 from tace.models._e3nn.readout import TensorReadOut
@@ -346,31 +342,6 @@ def test_magnetic_representation_uses_node_fidelity(num_fidelities):
             output["magnetic_radial_basis"],
             expected[2 - 2 * fidelity_idx].expand(4, -1),
         )
-
-
-@pytest.mark.parametrize(
-    ("embedding_name", "embedding_type"),
-    [
-        ("linear_spin", LinearSpinNodeEmbedding),
-        ("nonlinear_spin", NonLinearSpinNodeEmbedding),
-    ],
-)
-def test_spin_node_embedding_registers_magnetic_input(
-    embedding_name,
-    embedding_type,
-):
-    config = _model_config()
-    config["node_embedding"]["type"] = embedding_name
-    config["fidelity"][0]["magnetic_scale"] = {1: 2.0}
-    config["mmax"] = 1
-    config["parity"] = True
-    config["angular_basis"]["magnetic_Lmax"] = 1
-    config["atomic_basis"]["type"] = ["o2_mag"]
-    config["atomic_basis"]["edge_nonlinear"] = ["silu"]
-    model = e3nnTACE(**config)
-
-    assert isinstance(model.representation.node_embedding, embedding_type)
-    assert "initial_noncollinear_magmoms" in model.embedding_property
 
 
 @pytest.mark.skipif(

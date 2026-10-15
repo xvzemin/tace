@@ -145,7 +145,6 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
             parent = modules[parent_name]
             if isinstance(parent, (NodeEmbedding, Element2EdgeUpdate)) and field in {
                 "elem_emb1",
-                "element_embedding",
                 "node_embedding",
                 "source_embedding",
                 "target_embedding",

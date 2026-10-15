@@ -19,14 +19,6 @@ with unit variance, independent of the number of elements.
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.LinearSpinNodeEmbedding
-   :no-members:
-   :show-inheritance:
-
-.. autoclass:: tace.models._e3nn.node.NonLinearSpinNodeEmbedding
-   :no-members:
-   :show-inheritance:
-
 Tensor embeddings aggregate element scalars multiplied by radial weights and
 component-normalized spherical harmonics. The following four types share the
 same output layout:

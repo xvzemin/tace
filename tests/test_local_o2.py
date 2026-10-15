@@ -17,12 +17,7 @@ from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
 from tace.models._e3nn.fused import UuO2ScatterTensorProduct
 from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models._e3nn.magnetic import MagneticBasis
-from tace.models._e3nn.node import (
-    NODE_EMBEDDING,
-    NODE_UPDATE,
-    LinearSpinNodeEmbedding,
-    NonLinearSpinNodeEmbedding,
-)
+from tace.models._e3nn.node import NODE_EMBEDDING, NODE_UPDATE
 from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
     UvO2ScatterTensorProduct,
@@ -335,50 +330,6 @@ def test_magnetic_basis_loads_scale_fidelity_axis(num_fidelities, legacy, nested
 
 
 @pytest.mark.parametrize(
-    "name,embedding_type",
-    [
-        ("linear_spin", LinearSpinNodeEmbedding),
-        ("nonlinear_spin", NonLinearSpinNodeEmbedding),
-    ],
-)
-def test_spin_node_embedding(name, embedding_type):
-    embedding = embedding_type(
-        num_elements=2,
-        num_radial_basis=4,
-        num_mag_radial_basis=3,
-        num_channel=5,
-        Lmax=1,
-        lmax=1,
-        avg_num_neighbors=2.0,
-        bias=False,
-    )
-
-    node_attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-    magnetic_radial_basis = torch.tensor([[0.2, -0.1, 0.4], [0.3, 0.5, -0.2]])
-
-    output = embedding(
-        node_attrs,
-        torch.empty(0),
-        torch.empty(0, dtype=torch.long),
-        torch.empty(0),
-        None,
-        None,
-        None,
-        magnetic_radial_basis,
-    )
-    expected = (
-        embedding.element_embedding(node_attrs)
-        + embedding.spin_embedding(magnetic_radial_basis)
-    ) / (2.0**0.5)
-
-    assert NODE_EMBEDDING[name] is embedding_type
-    assert embedding.spin_embedding.irreps_in == o3.Irreps("3x0e")
-    if name == "nonlinear_spin":
-        expected = embedding.activation(expected)
-    torch.testing.assert_close(output, expected)
-
-
-@pytest.mark.parametrize(
     "name",
     [
         "spherical_tensor",
@@ -392,7 +343,6 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
     embedding = NODE_EMBEDDING[name](
         num_elements=2,
         num_radial_basis=4,
-        num_mag_radial_basis=3,
         num_channel=3,
         Lmax=2,
         lmax=2,
@@ -471,10 +421,10 @@ def test_tensor_embedding_constructions(
 ):
     suffix = "_element2" if element_dependent else ""
     spherical = NODE_EMBEDDING[f"spherical_tensor{suffix}"](
-        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
+        2, 4, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
     ).to(DEVICE)
     wigner = NODE_EMBEDDING[f"wigner_tensor{suffix}"](
-        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
+        2, 4, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
     ).to(DEVICE)
     wigner.load_state_dict(spherical.state_dict(), strict=True)
     positions = torch.randn(edges, 3, device=DEVICE, requires_grad=True)

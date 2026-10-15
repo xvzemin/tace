@@ -45,7 +45,6 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
         config["product_basis"].update(num_expert=2, num_channel_per_expert=2)
     elif interaction == "o2_mag":
         config["parity"] = True
-        config["node_embedding"]["type"] = "linear_spin"
         config["node_update"]["magnetic_type"] = "element2"
         config["angular_basis"]["magnetic_Lmax"] = 1
         config["fidelity"][0]["magnetic_scale"] = {1: 2.0, 6: 3.0, 8: 4.0}

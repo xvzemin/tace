@@ -121,7 +121,6 @@ def test_embedding_v2_second_moment(num_elements):
     model = LinearNodeEmbeddingV2(
         num_elements=num_elements,
         num_radial_basis=4,
-        num_mag_radial_basis=0,
         num_channel=1024,
         Lmax=0,
         lmax=0,

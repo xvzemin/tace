@@ -223,7 +223,6 @@ class Representation(torch.nn.Module):
         self.node_embedding = node_embedding_cls(
             num_elements=self.num_elements,
             num_radial_basis=self.radial_basis.num_basis,
-            num_mag_radial_basis=radial_basis["num_mag_radial_basis"],
             num_channel=num_channel,
             Lmax=Lmax,
             lmax=lmax,
@@ -533,7 +532,6 @@ class Representation(torch.nn.Module):
             edge_cutoff,
             edge_wigner,
             edge_wigner_inv,
-            magnetic_radial_basis,
             node_type=node_type,
         )
         if hasattr(self, "uie_embedding"):

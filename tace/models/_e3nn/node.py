@@ -15,7 +15,7 @@ from eqx import o2
 from ...utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
 from ..linear import e3nnElementLinear, e3nnLinear
-from ..mlp import MLP_TYPES, get_scaled_activation
+from ..mlp import MLP_TYPES
 from .base import NodeEmbedding, NodeUpdate
 
 
@@ -47,7 +47,6 @@ class LinearNodeEmbedding(NodeEmbedding):
         cutoff: Union[torch.Tensor, None],
         wigner,
         wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
         node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
@@ -76,82 +75,11 @@ class LinearNodeEmbeddingV2(NodeEmbedding):
         cutoff: Union[torch.Tensor, None],
         wigner,
         wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
         node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if node_type is None:
             node_type = node_attrs.argmax(dim=-1)
         return self.embedding(node_type)
-
-
-class LinearSpinNodeEmbedding(NodeEmbedding):
-    """Linear embed element types + magnetic-moment radial bases."""
-
-    def _setup(self) -> None:
-        self.irreps_out = o3.Irreps(f"{self.num_channel}x0e")
-        self.element_embedding = e3nnLinear(
-            f"{self.num_elements}x0e",
-            self.irreps_out,
-            bias=self.bias,
-        )
-        self.spin_embedding = e3nnLinear(
-            f"{self.num_mag_radial_basis}x0e",
-            self.irreps_out,
-            bias=self.bias,
-        )
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        wigner,
-        wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        node_type: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if magnetic_radial_basis is None:
-            raise ValueError("LinearSpinNodeEmbedding requires magnetic radial bases.")
-        return (
-            self.element_embedding(node_attrs)
-            + self.spin_embedding(magnetic_radial_basis)
-        ) / math.sqrt(2.0)
-
-
-class NonLinearSpinNodeEmbedding(LinearSpinNodeEmbedding):
-    """Embed element and spin inputs, followed by a scaled SiLU."""
-
-    def _setup(self) -> None:
-        super()._setup()
-        self.activation = get_scaled_activation("silu")
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        wigner,
-        wigner_inv: Union[torch.Tensor, None],
-        magnetic_radial_basis: Union[torch.Tensor, None] = None,
-        node_type: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.activation(
-            super().forward(
-                node_attrs,
-                edge_feats,
-                edge_index,
-                edge_attrs,
-                cutoff,
-                wigner,
-                wigner_inv,
-                magnetic_radial_basis,
-                node_type=node_type,
-            )
-        )
 
 
 class SphericalTensorNodeEmbedding(NodeEmbedding):
@@ -234,7 +162,6 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         cutoff,
         wigner,
         wigner_inv,
-        magnetic_radial_basis=None,
         node_type=None,
     ):
         """Return aggregated node features in flattened ``mul_ir`` layout."""
@@ -364,8 +291,6 @@ class Element2NodeUpdate(NodeUpdate):
 NODE_EMBEDDING = {
     "linear": LinearNodeEmbedding,
     "linear_v2": LinearNodeEmbeddingV2,
-    "linear_spin": LinearSpinNodeEmbedding,
-    "nonlinear_spin": NonLinearSpinNodeEmbedding,
     "spherical_tensor": SphericalTensorNodeEmbedding,
     "spherical_tensor_element2": Element2SphericalTensorNodeEmbedding,
     "wigner_tensor": WignerTensorNodeEmbedding,
