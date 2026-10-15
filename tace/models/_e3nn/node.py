@@ -56,6 +56,33 @@ class LinearNodeEmbedding(NodeEmbedding):
         return repr(self.elem_emb1)
 
 
+class LinearNodeEmbeddingV2(NodeEmbedding):
+    """
+    Embed element indices as scalars with unit-variance initialization.
+
+    """
+
+    def _setup(self) -> None:
+        self.embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
+        self.irreps_out = o3.Irreps(f"{self.num_channel}x0e")
+
+    def forward(
+        self,
+        node_attrs: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attrs: torch.Tensor,
+        cutoff: Union[torch.Tensor, None],
+        wigner,
+        wigner_inv: Union[torch.Tensor, None],
+        magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        node_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        return self.embedding(node_type)
+
+
 class LinearSpinNodeEmbedding(NodeEmbedding):
     """Linear embed element types + magnetic-moment radial bases."""
 

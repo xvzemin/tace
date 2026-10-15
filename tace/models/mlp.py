@@ -10,7 +10,7 @@ from typing import Callable, List, Union
 import torch
 import torch.nn.functional as F
 
-from .linear import mlpLinear
+from .linear import IndexedFeatures, mlpLinear
 
 
 def get_activation_scale_factor(
@@ -189,4 +189,59 @@ class MLP(torch.nn.Module):
         self.mlp = torch.nn.Sequential(*mlp)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
+
+class MLPV2(torch.nn.Module):
+    """Fully connected network with unit-second-moment initialization.
+
+    Linear maps use fan-in scaling. Hidden activations are normalized once
+    for standard normal inputs; the output layer has no activation.
+
+    Parameters
+    ----------
+    channels : list of int
+        Input, hidden and output widths.
+    bias : bool, optional
+        Include zero-initialized biases.
+    act : str or None, optional
+        Hidden activation. ``None`` disables activations.
+    layer_norm : bool, optional
+        Normalize hidden preactivations with LayerNorm.
+    rms_norm : bool, optional
+        Normalize hidden preactivations with RMSNorm instead of LayerNorm.
+    """
+
+    def __init__(
+        self,
+        channels: list[int],
+        bias: bool = False,
+        act: str | None = "silu",
+        layer_norm: bool = False,
+        rms_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        if len(channels) < 2:
+            raise ValueError("channels must contain input and output widths")
+        if layer_norm and rms_norm:
+            raise ValueError("layer_norm and rms_norm are mutually exclusive")
+
+        self.dims = list(channels)
+        self.num_layers = len(channels) - 1
+        self.is_nonlinear = act is not None and self.num_layers > 1
+        layers = []
+        for index, (h_in, h_out) in enumerate(zip(channels, channels[1:])):
+            layers.append(mlpLinear(h_in, h_out, alpha=1.0 / sqrt(h_in), bias=bias))
+            if index == self.num_layers - 1:
+                continue
+            if layer_norm:
+                layers.append(torch.nn.LayerNorm(h_out))
+            elif rms_norm:
+                layers.append(torch.nn.RMSNorm(h_out))
+            if act is not None:
+                layers.append(get_scaled_activation(act))
+        self.mlp = torch.nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor | IndexedFeatures) -> torch.Tensor:
+        """Evaluate dense inputs or indexed input partitions."""
         return self.mlp(x)

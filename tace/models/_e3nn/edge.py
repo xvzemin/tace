@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from math import sqrt
 from typing import Union
 
 import torch
@@ -170,6 +171,45 @@ class Element2EdgeUpdate(EdgeUpdate):
             (edge_feats, None),
             (self.target_embedding(node_attrs), edge_index[1]),
             (self.source_embedding(node_attrs), edge_index[0]),
+        )
+
+
+class Element2EdgeUpdateV2(EdgeUpdate):
+    r"""Prepare radial and endpoint features with branch-wise scaling.
+
+    A branch of width :math:`d` is scaled by :math:`\sqrt{D/d}`, where
+    :math:`D` is ``out_dim``. A randomly initialized unit-fan-in linear map
+    preserves the radial second moment in expectation for zero embeddings.
+    Element embeddings are initialized independently with ``ELEMENT_STD``.
+    """
+
+    ELEMENT_STD = 1e-3
+
+    def _setup(self) -> None:
+        self.out_dim = self.edge_embedding_channel + 2 * self.num_channel
+        self.radial_scale = sqrt(self.out_dim / self.edge_embedding_channel)
+        self.element_scale = sqrt(self.out_dim / self.num_channel)
+        self.source_embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
+        self.target_embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
+        torch.nn.init.normal_(self.source_embedding.weight, std=self.ELEMENT_STD)
+        torch.nn.init.normal_(self.target_embedding.weight, std=self.ELEMENT_STD)
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_index: torch.Tensor,
+        cutoff: Union[torch.Tensor, None],
+        node_type: torch.Tensor | None = None,
+    ) -> IndexedFeatures:
+
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        return (
+            (edge_feats * self.radial_scale, None),
+            (self.target_embedding(node_type) * self.element_scale, edge_index[1]),
+            (self.source_embedding(node_type) * self.element_scale, edge_index[0]),
         )
 
 

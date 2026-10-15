@@ -68,7 +68,7 @@ model:
       type: identity
 
     mmax: 3
-    Lmax: 3
+    Lmax: 2
     lmax: 3
     num_layers: 2
     num_channel: 64

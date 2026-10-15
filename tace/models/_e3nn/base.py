@@ -469,6 +469,16 @@ class ReadOut(torch.nn.Module):
         assert len(set(self.irreps_out.ls)) == 1
 
         self._setup()
+        if self.layer == self.num_layers - 1 and self.num_fidelities > 1:
+            # After masking, only one head contributes to each linear map.
+            # Adjust initialization only, preserving saved weights and outputs.
+            with torch.no_grad():
+                for linear in self.linear2[1:]:
+                    weights = linear.weight
+                    if isinstance(weights, torch.Tensor):
+                        weights = (weights,)
+                    for weight in weights:
+                        weight.mul_(self.num_fidelities**0.5)
 
     @abc.abstractmethod
     def _setup(self) -> None:
