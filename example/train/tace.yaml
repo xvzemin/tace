@@ -315,13 +315,13 @@ model:
       }
 
     node_embedding:
-      type: linear # [linear, linear_spin, nonlinear_spin, spherical_tensor, spherical_tensor_element2, wigner_tensor, wigner_tensor_element2]
+      type: linear # [linear, linear_v2, linear_spin, nonlinear_spin, spherical_tensor, spherical_tensor_element2, wigner_tensor, wigner_tensor_element2]
 
     edge_embedding:
       type: identity # identity  # [identity, linear, nonlinear, element2], identity is safer
 
     edge_update:
-      type: element2  # [identity, element2], identity is safer
+      type: element2  # [identity, element2, element2_v2]; element2_v2 requires apply_cutoff: false
 
     node_update:
       magnetic_type: identity # [identity, element, element2]
@@ -344,6 +344,8 @@ model:
       trainable: false # (bool)
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
+      mlp_type: mlp # [mlp, mlp_v2]
+      mlp_norm: null # [null, layer_norm, rms_norm]; null keeps the selected MLP's default
       bias: true  # (bool)
 
     angular_basis:

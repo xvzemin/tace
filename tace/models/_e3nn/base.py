@@ -43,6 +43,8 @@ class NodeEmbedding(torch.nn.Module):
         avg_num_neighbors: float,
         bias: bool = False,
         radial_mlp: Union[list[int], None] = None,
+        radial_mlp_type: str = "mlp",
+        radial_mlp_norm: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -57,6 +59,8 @@ class NodeEmbedding(torch.nn.Module):
         self.radial_mlp = (
             [num_channel, num_channel] if radial_mlp is None else list(radial_mlp)
         )
+        self.radial_mlp_type = radial_mlp_type
+        self.radial_mlp_norm = radial_mlp_norm
 
         self._setup()
 
@@ -186,6 +190,8 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         num_mag_radial_basis: int = 8,
         magnetic_node_info_channel: int = 0,
         magnetic_edge_irreps: o3.Irreps = None,
+        radial_mlp_type: str = "mlp",
+        radial_mlp_norm: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -204,6 +210,8 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.target_irreps = target_irreps
         self.radial_mlp = radial_mlp
         self.radial_bias = radial_bias
+        self.radial_mlp_type = radial_mlp_type
+        self.radial_mlp_norm = radial_mlp_norm
         self.use_bias = bias
         self.scatter_norm_type = scatter_norm
         self.scalar_act = scalar_act

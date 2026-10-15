@@ -658,9 +658,7 @@ def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
         compiled = torch.compile(
             lambda *args: stream(module, *args), backend="aot_eager", fullgraph=True
         )
-        output = compiled(
-            x, radial, weight, None, index, cutoff, packed, packed, basis
-        )
+        output = compiled(x, radial, weight, None, index, cutoff, packed, packed, basis)
         torch.testing.assert_close(output, expected, atol=1e-11, rtol=1e-10)
         gradients = [
             torch.autograd.grad(result.sum(), packed, retain_graph=True)[0]
@@ -1426,19 +1424,20 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
 def test_tace_radial_bias_cutoff_and_force_training(
-    monkeypatch, device, double_precision
+    monkeypatch, device, mlp_type, double_precision
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.fused import O3ScatterTensorProduct
-    from tace.models.mlp import MLP
+    from tace.models.mlp import MLP_TYPES
 
     monkeypatch.setenv("TACE_USE_OEQ", "0")
     monkeypatch.setenv("TACE_USE_CUEQ", "0")
     monkeypatch.setenv("TACE_USE_EQX", "0")
     module = O3ScatterTensorProduct("3x0e+3x1o", "0e+1o", "3x0e+3x1o+3x2e").to(device)
-    mlp = MLP([4, 5, module.weight_numel], bias=True).to(device)
+    mlp = MLP_TYPES[mlp_type]([4, 5, module.weight_numel], bias=True).to(device)
     positions = torch.randn(5, 3, device=device, requires_grad=True)
     x = torch.randn(5, module.irreps_in1.dim, device=device, requires_grad=True)
     edges = torch.tensor([[0, 1, 2, 3, 4, 1], [1, 2, 3, 4, 0, 0]], device=device)
@@ -1470,8 +1469,16 @@ def test_tace_radial_bias_cutoff_and_force_training(
         torch.testing.assert_close(a, b, atol=2e-6, rtol=2e-9)
 
 
-@pytest.mark.parametrize("interaction", ["cgtp", "uu_o2", "o2", ["uu_o2", "o2"]])
-def test_tace_model_force_training(monkeypatch, double_precision, interaction):
+@pytest.mark.parametrize(
+    "interaction", ["cgtp", "o2_cgtp", "uu_o2", "o2", ["uu_o2", "o2"]]
+)
+@pytest.mark.parametrize(
+    "mlp_type,mlp_norm",
+    [("mlp", None), ("mlp_v2", None), ("mlp_v2", "layer_norm"), ("mlp_v2", "rms_norm")],
+)
+def test_tace_model_force_training(
+    monkeypatch, double_precision, interaction, mlp_type, mlp_norm
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
@@ -1491,7 +1498,11 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
         lmax=2,
         mmax=1,
         statistics=[
-            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+            dict(
+                atomic_numbers=[1, 8],
+                avg_num_neighbors=2.0,
+                atomic_energy={1: 0.0, 8: 0.0},
+            )
         ],
         target_property=["energy", "forces", "stress", "virials"],
     )
@@ -1502,6 +1513,10 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["bias"] = True
     config["radial_basis"]["apply_cutoff"] = False
+    config["radial_basis"].update(mlp_type=mlp_type, mlp_norm=mlp_norm)
+    if mlp_type == "mlp_v2":
+        config["node_embedding"]["type"] = "linear_v2"
+        config["edge_update"]["type"] = "element2_v2"
     config["readout_emlp"]["hidden"] = [3]
     config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
@@ -1514,7 +1529,7 @@ def test_tace_model_force_training(monkeypatch, double_precision, interaction):
         positions=torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]], device="cuda"
         ),
-        node_attrs=torch.ones(3, 1, device="cuda"),
+        node_attrs=torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], device="cuda"),
         edge_index=torch.tensor(
             [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device="cuda"
         ),

@@ -125,6 +125,7 @@ class IdentityEdgeUpdate(EdgeUpdate):
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         return edge_feats
@@ -166,6 +167,7 @@ class Element2EdgeUpdate(EdgeUpdate):
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
+        node_type: torch.Tensor | None = None,
     ) -> IndexedFeatures:
         return (
             (edge_feats, None),
@@ -222,4 +224,5 @@ EDGE_EMBEDDING = {
 EDGE_UPDATE = {
     "identity": IdentityEdgeUpdate,
     "element2": Element2EdgeUpdate,
+    "element2_v2": Element2EdgeUpdateV2,
 }

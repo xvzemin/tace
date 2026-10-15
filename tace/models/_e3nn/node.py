@@ -15,7 +15,7 @@ from eqx import o2
 from ...utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
 from ..linear import e3nnElementLinear, e3nnLinear
-from ..mlp import MLP, get_scaled_activation
+from ..mlp import MLP_TYPES, get_scaled_activation
 from .base import NodeEmbedding, NodeUpdate
 
 
@@ -48,6 +48,7 @@ class LinearNodeEmbedding(NodeEmbedding):
         wigner,
         wigner_inv: Union[torch.Tensor, None],
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         return self.elem_emb1(node_attrs)
@@ -109,6 +110,7 @@ class LinearSpinNodeEmbedding(NodeEmbedding):
         wigner,
         wigner_inv: Union[torch.Tensor, None],
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if magnetic_radial_basis is None:
             raise ValueError("LinearSpinNodeEmbedding requires magnetic radial bases.")
@@ -135,6 +137,7 @@ class NonLinearSpinNodeEmbedding(LinearSpinNodeEmbedding):
         wigner,
         wigner_inv: Union[torch.Tensor, None],
         magnetic_radial_basis: Union[torch.Tensor, None] = None,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.activation(
             super().forward(
@@ -146,6 +149,7 @@ class NonLinearSpinNodeEmbedding(LinearSpinNodeEmbedding):
                 wigner,
                 wigner_inv,
                 magnetic_radial_basis,
+                node_type=node_type,
             )
         )
 
@@ -172,6 +176,11 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         Include biases in scalar embedding and radial projections.
     radial_mlp : list of int, optional
         Radial MLP hidden widths. Defaults to two layers of ``num_channel``.
+    radial_mlp_type : {"mlp", "mlp_v2"}, optional
+        Radial network initialization and activation convention.
+    radial_mlp_norm : {"layer_norm", "rms_norm"} or None, optional
+        Hidden normalization. ``None`` preserves the width-dependent LayerNorm
+        for ``mlp`` and disables normalization for ``mlp_v2``.
     """
 
     use_wigner = False
@@ -190,14 +199,22 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         input_dim = self.num_radial_basis + (
             2 * self.num_channel if self.element_dependent else 0
         )
-        self.edge_info = MLP(
+        radial_norm = self.radial_mlp_norm
+        if radial_norm is None:
+            radial_norm = (
+                "layer_norm"
+                if self.radial_mlp_type == "mlp" and input_dim != self.num_radial_basis
+                else None
+            )
+        self.edge_info = MLP_TYPES[self.radial_mlp_type](
             [
                 input_dim,
                 *self.radial_mlp,
                 len(self.irreps_out) * self.num_channel,
             ],
             bias=self.bias,
-            layer_norm=input_dim != self.num_radial_basis,
+            layer_norm=radial_norm == "layer_norm",
+            rms_norm=radial_norm == "rms_norm",
         )
         self.normalization = math.sqrt(self.avg_num_neighbors)
         self.reshape = LayoutTransform(
@@ -218,6 +235,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         wigner,
         wigner_inv,
         magnetic_radial_basis=None,
+        node_type=None,
     ):
         """Return aggregated node features in flattened ``mul_ir`` layout."""
         source, target = edge_index
@@ -345,6 +363,7 @@ class Element2NodeUpdate(NodeUpdate):
 
 NODE_EMBEDDING = {
     "linear": LinearNodeEmbedding,
+    "linear_v2": LinearNodeEmbeddingV2,
     "linear_spin": LinearSpinNodeEmbedding,
     "nonlinear_spin": NonLinearSpinNodeEmbedding,
     "spherical_tensor": SphericalTensorNodeEmbedding,

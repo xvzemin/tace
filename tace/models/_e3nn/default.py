@@ -9,6 +9,7 @@ from numbers import Real
 from typing import Any
 
 from ...dataset.quantity import PROPERTY
+from ..mlp import MLP_TYPES
 
 DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
@@ -47,6 +48,8 @@ DEFAULT_MODEL_CONFIG = {
         "trainable": False,
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
+        "mlp_type": "mlp",
+        "mlp_norm": None,
         "gaussian_width": 2.0,
     },
     "angular_basis": {
@@ -205,6 +208,19 @@ def check_model_config(cfg: dict[str, Any]):
 
     # Update default config with user config
     cfg = recursive_update(cfg)
+
+    radial = cfg["radial_basis"]
+    if radial["mlp_type"] not in MLP_TYPES:
+        raise ValueError("radial_basis.mlp_type must be 'mlp' or 'mlp_v2'.")
+    if radial["mlp_norm"] not in (None, "layer_norm", "rms_norm"):
+        raise ValueError(
+            "radial_basis.mlp_norm must be null, 'layer_norm' or 'rms_norm'."
+        )
+    if cfg["edge_update"]["type"] == "element2_v2" and radial["apply_cutoff"]:
+        raise ValueError(
+            "edge_update.type='element2_v2' requires radial_basis.apply_cutoff=false "
+            "to apply the cutoff after the radial MLP."
+        )
 
     universal_embedding = cfg.get("universal_embedding")
     if isinstance(universal_embedding, Mapping):

@@ -1,5 +1,6 @@
 """Second-moment initialization and indexed feature projections."""
 
+from copy import deepcopy
 from functools import partial
 
 import pytest
@@ -10,10 +11,85 @@ from tace.models._e3nn.base import EdgeUpdate, NodeEmbedding
 from tace.models._e3nn.edge import Element2EdgeUpdateV2
 from tace.models._e3nn.node import LinearNodeEmbeddingV2
 from tace.models.linear import mlpLinear
-from tace.models.mlp import MLPV2
+from tace.models.mlp import MLP, MLPV2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
+@pytest.mark.parametrize("norm", [None, "layer_norm", "rms_norm"])
+@pytest.mark.parametrize(
+    "embedding", ["linear_v2", "spherical_tensor_element2", "wigner_tensor_element2"]
+)
+def test_radial_mlp_configuration(mlp_type, norm, embedding):
+    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+    from tace.models._e3nn.tace import e3nnTACE
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=1,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        cutoff=4.0,
+        max_neighbors=None,
+        statistics=[
+            dict(
+                atomic_numbers=[1, 8],
+                avg_num_neighbors=2.0,
+                atomic_energy={1: 0.0, 8: 0.0},
+            )
+        ],
+    )
+    config["node_embedding"]["type"] = embedding
+    config["edge_update"]["type"] = "element2_v2"
+    config["radial_basis"].update(
+        mlp_type=mlp_type,
+        mlp_norm=norm,
+        hidden=[4],
+        apply_cutoff=False,
+    )
+    config["atomic_basis"]["scatter_norm"] = "density"
+    config["scale_shift"]["enable"] = False
+    representation = e3nnTACE(**config).to(DEVICE).representation
+    networks = [representation.interactions[0].edge_info]
+    if hasattr(representation.node_embedding, "edge_info"):
+        networks.append(representation.node_embedding.edge_info)
+    expected_norm = norm or ("layer_norm" if mlp_type == "mlp" else None)
+    for network in networks:
+        assert type(network) is (MLP if mlp_type == "mlp" else MLPV2)
+        assert any(isinstance(m, torch.nn.LayerNorm) for m in network.mlp) == (
+            expected_norm == "layer_norm"
+        )
+        assert any(isinstance(m, torch.nn.RMSNorm) for m in network.mlp) == (
+            expected_norm == "rms_norm"
+        )
+    density = representation.interactions[0].scatter_norm.edge_density
+    assert type(density) is MLP
+    assert any(isinstance(m, torch.nn.LayerNorm) for m in density.mlp)
+
+
+@pytest.mark.parametrize(
+    "options,match",
+    [
+        ({"apply_cutoff": True}, "apply_cutoff=false"),
+        ({"mlp_type": "unknown"}, "mlp_type"),
+        ({"mlp_norm": "unknown"}, "mlp_norm"),
+        ({"mlp_norm": "none"}, "mlp_norm"),
+    ],
+)
+def test_v2_configuration_errors(options, match):
+    from tace.models._e3nn.default import check_model_config
+
+    with pytest.raises(ValueError, match=match):
+        check_model_config(
+            {
+                "edge_update": {"type": "element2_v2"},
+                "radial_basis": {"apply_cutoff": False, **options},
+            }
+        )
 
 
 @pytest.mark.parametrize(

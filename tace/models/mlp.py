@@ -245,3 +245,9 @@ class MLPV2(torch.nn.Module):
     def forward(self, x: torch.Tensor | IndexedFeatures) -> torch.Tensor:
         """Evaluate dense inputs or indexed input partitions."""
         return self.mlp(x)
+
+
+MLP_TYPES = {
+    "mlp": MLP,
+    "mlp_v2": MLPV2,
+}

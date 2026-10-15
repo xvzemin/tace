@@ -230,6 +230,8 @@ class Representation(torch.nn.Module):
             avg_num_neighbors=avg_num_neighbors,
             bias=False,
             radial_mlp=radial_basis["hidden"],
+            radial_mlp_type=radial_basis["mlp_type"],
+            radial_mlp_norm=radial_basis["mlp_norm"],
         )
         self.edge_embedding = EDGE_EMBEDDING[edge_embedding["type"]](
             num_elements=self.num_elements,
@@ -296,6 +298,8 @@ class Representation(torch.nn.Module):
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
+            "radial_mlp_type": radial_basis["mlp_type"],
+            "radial_mlp_norm": radial_basis["mlp_norm"],
             "l1l2": atomic_basis["l1l2"],
             "scatter_norm": atomic_basis["scatter_norm"],
             "correlation": product_basis["correlation"],
@@ -530,6 +534,7 @@ class Representation(torch.nn.Module):
             edge_wigner,
             edge_wigner_inv,
             magnetic_radial_basis,
+            node_type=node_type,
         )
         if hasattr(self, "uie_embedding"):
             uie_feats = self.uie_embedding(data)
@@ -566,6 +571,7 @@ class Representation(torch.nn.Module):
                 edge_feats,
                 data["edge_index"],
                 edge_cutoff,
+                node_type=node_type,
             )
             magnetic_node_info = (
                 self.node_updates[idx](

@@ -465,15 +465,16 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
 @pytest.mark.parametrize("mmax", [0, 2])
 @pytest.mark.parametrize("edges", [0, 5])
 @pytest.mark.parametrize("hidden", [None, [], [7, 5]])
+@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
 def test_tensor_embedding_constructions(
-    element_dependent, mmax, edges, hidden, double_precision
+    element_dependent, mmax, edges, hidden, mlp_type, double_precision
 ):
     suffix = "_element2" if element_dependent else ""
     spherical = NODE_EMBEDDING[f"spherical_tensor{suffix}"](
-        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden
+        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
     ).to(DEVICE)
     wigner = NODE_EMBEDDING[f"wigner_tensor{suffix}"](
-        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden
+        2, 4, 0, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
     ).to(DEVICE)
     wigner.load_state_dict(spherical.state_dict(), strict=True)
     positions = torch.randn(edges, 3, device=DEVICE, requires_grad=True)
@@ -494,7 +495,11 @@ def test_tensor_embedding_constructions(
             for layer in embedding.edge_info.mlp
             if isinstance(layer, torch.nn.LayerNorm)
         ]
-        assert norms == ([(width,) for width in widths] if element_dependent else [])
+        assert norms == (
+            [(width,) for width in widths]
+            if element_dependent and mlp_type == "mlp"
+            else []
+        )
     for order in range(3):
         torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
         if order < 2:

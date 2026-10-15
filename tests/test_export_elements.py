@@ -13,7 +13,7 @@ from tace.scripts.export_elements import select_elements
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def make_model(interaction="cgtp", matrix=False):
+def make_model(interaction="cgtp", matrix=False, v2=False):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
         num_layers=2,
@@ -23,11 +23,16 @@ def make_model(interaction="cgtp", matrix=False):
         mmax=1,
         cutoff=4.0,
         max_neighbors=None,
+        target_property=["energy", "forces", "stress"],
     )
     config["atomic_basis"].update(type=["cgtp", interaction], num_head=1)
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
+    if v2:
+        config["node_embedding"]["type"] = "linear_v2"
+        config["edge_update"]["type"] = "element2_v2"
+        config["radial_basis"]["mlp_type"] = "mlp_v2"
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"].update(
         scale_type="rms_forces",
@@ -109,8 +114,9 @@ def test_select_elements(interaction, elements, tmp_path, double_precision):
         torch.testing.assert_close(value, original[name], atol=0, rtol=0)
 
 
-def test_new_element_initialization(double_precision):
-    model = make_model()
+@pytest.mark.parametrize("v2", [False, True])
+def test_new_element_initialization(double_precision, v2):
+    model = make_model(v2=v2)
     torch.manual_seed(12)
     selected = select_elements(model, [8, 14])
     torch.manual_seed(12)
@@ -124,6 +130,7 @@ def test_new_element_initialization(double_precision):
         original = dict(initialized.named_modules())[name]
         if (
             name.endswith("elem_emb1")
+            or name.endswith("node_embedding.embedding")
             or name.endswith("source_embedding")
             or name.endswith("target_embedding")
         ):
@@ -150,6 +157,39 @@ def test_new_element_initialization(double_precision):
     for value in evaluate(selected, numbers=(8, 14, 8)).values():
         if isinstance(value, torch.Tensor):
             assert torch.isfinite(value).all()
+
+
+@pytest.mark.parametrize("elements", [[1, 8], [1, 6, 8, 14]])
+def test_v2_element_export_roundtrip(elements, tmp_path, double_precision):
+    model = make_model(v2=True)
+    selected = select_elements(model, elements)
+    path = tmp_path / "selected.pt"
+    export_tace(selected, str(path))
+    restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()
+    for fidelity in range(2):
+        expected = evaluate(model, fidelity)
+        actual = evaluate(restored, fidelity)
+        for key in ("energy", "forces", "stress"):
+            torch.testing.assert_close(
+                actual[key], expected[key], atol=1e-10, rtol=1e-10
+            )
+
+
+def test_legacy_radial_defaults(tmp_path, double_precision):
+    model = make_model()
+    path = tmp_path / "legacy.pt"
+    export_tace(model, str(path))
+    checkpoint = torch.load(path, weights_only=False)
+    del checkpoint["cfg"]["radial_basis"]["mlp_type"]
+    del checkpoint["cfg"]["radial_basis"]["mlp_norm"]
+    torch.save(checkpoint, path)
+    restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], value, atol=0, rtol=0)
+    for fidelity in range(2):
+        actual, expected = evaluate(restored, fidelity), evaluate(model, fidelity)
+        for key in ("energy", "forces", "stress"):
+            torch.testing.assert_close(actual[key], expected[key], atol=0, rtol=0)
 
 
 def test_matrix_weights(double_precision):

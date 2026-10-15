@@ -13,7 +13,7 @@ from tace.utils.env import acceleration_enabled
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
-from ..mlp import ACTIVATION, MLP, get_scaled_activation
+from ..mlp import ACTIVATION, MLP, MLP_TYPES, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
     O2ScatterTensorProduct,
@@ -91,12 +91,20 @@ class O3CgtpInteraction(Interaction):
             bias=self.use_bias,
         )
 
-        self.edge_info = MLP(
+        radial_norm = self.radial_mlp_norm
+        if radial_norm is None:
+            radial_norm = (
+                "layer_norm"
+                if self.radial_mlp_type == "mlp" and self.radial_layer_norm
+                else None
+            )
+        self.edge_info = MLP_TYPES[self.radial_mlp_type](
             [self.edge_feats_channel]
             + self.radial_mlp
             + [self.rejector.weight_numel],
             bias=self.radial_bias,
-            layer_norm=self.radial_layer_norm,
+            layer_norm=radial_norm == "layer_norm",
+            rms_norm=radial_norm == "rms_norm",
             act="silu",
         )
         self._setup_additional_modules()
