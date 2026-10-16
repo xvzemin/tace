@@ -27,44 +27,42 @@ class LinearNodeEmbedding(NodeEmbedding):
     into a continuous feature space using a single linear layer,
     without introducing nonlinearity or structural information.
     """
-
-    def _setup(self) -> None:
-
-        self.irreps_out = o3.Irreps(f"{self.num_channel}x0e")
-
-        self.elem_emb1 = e3nnLinear(
-            f"{self.num_elements}x0e",
-            f"{self.num_channel}x0e",
-            bias=self.bias,
-        )
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        cutoff: Union[torch.Tensor, None],
-        wigner,
-        wigner_inv: Union[torch.Tensor, None],
-        node_type: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-
-        return self.elem_emb1(node_attrs)
-
-    def __repr__(self) -> str:
-        return repr(self.elem_emb1)
-
-
-class LinearNodeEmbeddingV2(NodeEmbedding):
-    """
-    Embed element indices as scalars with unit-variance initialization.
-
-    """
-
     def _setup(self) -> None:
         self.embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
         self.irreps_out = o3.Irreps(f"{self.num_channel}x0e")
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        key = prefix + "embedding.weight"
+        legacy = prefix + "elem_emb1."
+        weight_key = legacy + "weight"
+        if weight_key not in state_dict:
+            weight_key += ".0"
+        if key not in state_dict and weight_key in state_dict:
+            # Preserve the one-hot linear normalization in the lookup table.
+            weight = state_dict.pop(weight_key).to(self.embedding.weight)
+            weight = weight.reshape(self.num_elements, self.num_channel)
+            weight = weight * self.num_elements**-0.5
+            state_dict[key] = weight
+            for name in ("linear.weight", "linear.bias", "linear.output_mask"):
+                state_dict.pop(legacy + name, None)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(
         self,
@@ -290,7 +288,6 @@ class Element2NodeUpdate(NodeUpdate):
 
 NODE_EMBEDDING = {
     "linear": LinearNodeEmbedding,
-    "linear_v2": LinearNodeEmbeddingV2,
     "spherical_tensor": SphericalTensorNodeEmbedding,
     "spherical_tensor_element2": Element2SphericalTensorNodeEmbedding,
     "wigner_tensor": WignerTensorNodeEmbedding,

@@ -342,7 +342,10 @@ def test_load_foundation_matches_file(foundation_model, dtype):
     for name, value in reference.state_dict().items():
         torch.testing.assert_close(module.state_dict()[name], value, atol=0, rtol=0)
     data = {
-        key: value.to(device) for key, value in _magnetic_embedding_sample().items()
+        key: value.to(
+            device=device, dtype=dtype if value.is_floating_point() else value.dtype
+        )
+        for key, value in _magnetic_embedding_sample().items()
     }
     results = [
         model({key: value.clone() for key, value in data.items()})

@@ -137,6 +137,7 @@ def _build_sample_data(
             embedding_property=embedding_property,
             training=False,
             neighborlist_backend=nl_backend,
+            dtype=model.get_model_dtype(),
         )
         for atoms in atoms_list[: max(1, batch_size)]
     ]

@@ -9,8 +9,8 @@ import torch
 from tace.models._e3nn import readout
 from tace.models._e3nn.base import EdgeUpdate, NodeEmbedding
 from tace.models._e3nn.edge import Element2EdgeUpdateV2
-from tace.models._e3nn.node import LinearNodeEmbeddingV2
-from tace.models.linear import mlpLinear
+from tace.models._e3nn.node import LinearNodeEmbedding
+from tace.models.linear import e3nnLinear, mlpLinear
 from tace.models.mlp import MLP, MLPV2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.usefixtures("double_precision")
 @pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
 @pytest.mark.parametrize("norm", [None, "layer_norm", "rms_norm"])
 @pytest.mark.parametrize(
-    "embedding", ["linear_v2", "spherical_tensor_element2", "wigner_tensor_element2"]
+    "embedding", ["linear", "spherical_tensor_element2", "wigner_tensor_element2"]
 )
 def test_radial_mlp_configuration(mlp_type, norm, embedding):
     from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
@@ -117,8 +117,8 @@ def test_mlp_v2_activation_scaled_once():
 
 
 @pytest.mark.parametrize("num_elements", [4, 80])
-def test_embedding_v2_second_moment(num_elements):
-    model = LinearNodeEmbeddingV2(
+def test_embedding_second_moment(num_elements):
+    model = LinearNodeEmbedding(
         num_elements=num_elements,
         num_radial_basis=4,
         num_channel=1024,
@@ -143,6 +143,35 @@ def test_embedding_v2_second_moment(num_elements):
     torch.testing.assert_close(
         model.embedding.weight.grad, torch.ones_like(model.embedding.weight)
     )
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_embedding_legacy_state_dict(matrix, dtype):
+    model = LinearNodeEmbedding(
+        num_elements=7,
+        num_radial_basis=4,
+        num_channel=5,
+        Lmax=0,
+        lmax=0,
+        avg_num_neighbors=1.0,
+    ).to(device=DEVICE, dtype=dtype)
+    legacy = e3nnLinear(
+        "7x0e", "5x0e", bias=False, use_matrix_weight="1" if matrix else "0"
+    ).to(device=DEVICE, dtype=torch.float32)
+    state = {"elem_emb1." + k: v.clone() for k, v in legacy.state_dict().items()}
+    original = {k: v.clone() for k, v in state.items()}
+    model.load_state_dict(state, strict=True)
+    indices = torch.tensor([6, 0, 2, 2, 4], device=DEVICE)
+    attrs = torch.nn.functional.one_hot(indices, 7).to(dtype=dtype)
+    expected = legacy.to(dtype=dtype)(attrs)
+    actual = model(attrs, None, None, None, None, None, None, node_type=indices)
+    torch.testing.assert_close(actual, expected)
+    assert state.keys() == original.keys()
+    for key in state:
+        torch.testing.assert_close(state[key], original[key], atol=0, rtol=0)
+    model.load_state_dict(model.state_dict(), strict=True)
+    torch.testing.assert_close(model.embedding(indices), actual, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("zero_elements", [False, True])

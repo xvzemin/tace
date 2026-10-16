@@ -131,6 +131,7 @@ def main():
             target_property=target_property,
             embedding_property=embedding_property,
             neighborlist_backend=args.nl_backend,
+            dtype=model.get_model_dtype(),
         )
         for atoms in check_keys(
             atomsList, target_property, key_spec, embedding_property, training

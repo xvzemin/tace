@@ -151,6 +151,7 @@ class TACEAseCalc(Calculator):
                 keyspec=self.keySpecification,
                 training=False,
                 neighborlist_backend=self.neighborlist_backend,
+                dtype=self.dtype,
             )
         ]
         dataloader = DataLoader(

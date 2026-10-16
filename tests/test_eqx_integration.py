@@ -1515,7 +1515,6 @@ def test_tace_model_force_training(
     config["radial_basis"]["apply_cutoff"] = False
     config["radial_basis"].update(mlp_type=mlp_type, mlp_norm=mlp_norm)
     if mlp_type == "mlp_v2":
-        config["node_embedding"]["type"] = "linear_v2"
         config["edge_update"]["type"] = "element2_v2"
     config["readout_emlp"]["hidden"] = [3]
     config["readout_emlp"]["use_one_body_magmoms"] = False

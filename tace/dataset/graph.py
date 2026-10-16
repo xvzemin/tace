@@ -20,10 +20,10 @@ from .quantity import (
 )
 
 
-def to_tensor(data):
+def to_tensor(data, dtype=None):
     if data is None:
         raise ValueError(f"{data} must not be None")
-    return torch.tensor(data, dtype=torch.get_default_dtype())
+    return torch.tensor(data, dtype=dtype or torch.get_default_dtype())
 
 
 def build_adjacency_matrix_from_edge(edge_src, edge_dst, num_atoms):
@@ -43,8 +43,10 @@ def from_atoms(
     embedding_property: List[str],
     training: bool = True,
     neighborlist_backend: str = "matscipy",
+    dtype: Optional[torch.dtype] = None,
     **kwargs,
 ):
+    dtype = dtype or torch.get_default_dtype()
     # === The basic structure of chemical substances ===
     atomic_numbers = atoms.get_atomic_numbers()
     pbc = tuple(atoms.get_pbc())
@@ -65,7 +67,7 @@ def from_atoms(
         backend=neighborlist_backend,
     )
     atomic_numbers = torch.tensor(atomic_numbers, dtype=torch.int64)
-    onehot = element.z2onehot(atomic_numbers).to(dtype=torch.get_default_dtype())
+    onehot = element.z2onehot(atomic_numbers).to(dtype=dtype)
     num_atoms = len(atomic_numbers)
 
     # === Physical property to predict ===
@@ -86,9 +88,9 @@ def from_atoms(
             property_weights[name] = 0.0
 
     lattice = (
-        torch.tensor(lattice.reshape((1, 3, 3)), dtype=torch.get_default_dtype())
+        torch.tensor(lattice.reshape((1, 3, 3)), dtype=dtype)
         if lattice is not None
-        else torch.tensor(3 * [0.0, 0.0, 0.0], dtype=torch.get_default_dtype()).view(
+        else torch.tensor(3 * [0.0, 0.0, 0.0], dtype=dtype).view(
             1, 3, 3
         )
     )
@@ -108,7 +110,7 @@ def from_atoms(
                 if type_ == "float":
                     p = torch.tensor(
                         default_value_fn(num_atoms, type_),
-                        dtype=torch.get_default_dtype(),
+                        dtype=dtype,
                     )
                 elif type_ == "int":
                     p = torch.tensor(
@@ -119,7 +121,7 @@ def from_atoms(
                     raise TypeError(f"Bug: Check {p}'s type in tace.dataset.quantity")
             else:
                 if type_ == "float":
-                    p = torch.tensor(p, dtype=torch.get_default_dtype())
+                    p = torch.tensor(p, dtype=dtype)
                 elif type_ == "int":
                     p = torch.tensor(np.round(p), dtype=torch.int64)
                 else:
@@ -155,24 +157,24 @@ def from_atoms(
         try:
             w = (
                 torch.tensor(
-                    property_weights.get(name), dtype=torch.get_default_dtype()
+                    property_weights.get(name), dtype=dtype
                 ).view(1)  # (1,)
                 if property_weights.get(name) is not None
-                else torch.tensor(1.0, dtype=torch.get_default_dtype())  # ()
+                else torch.tensor(1.0, dtype=dtype)  # ()
             )
             wDict.update({name: w})
         except Exception as e:
             raise RuntimeError(f"Failed to read property {name}") from e
 
     data_dict = {
-        "entropy": to_tensor(atoms.info.get("entropy", 1.0)),
+        "entropy": to_tensor(atoms.info.get("entropy", 1.0), dtype),
         "atomic_numbers": atomic_numbers,
         "lattice": lattice,
         "pbc": torch.tensor([pbc], dtype=torch.bool),
-        "positions": to_tensor(positions),
+        "positions": to_tensor(positions, dtype),
         "node_attrs": onehot,
         "edge_index": torch.tensor(edge_index, dtype=torch.int64),
-        "edge_shifts": to_tensor(edge_shifts),
+        "edge_shifts": to_tensor(edge_shifts, dtype),
         "fidelity_idx": torch.tensor(
             atoms.info.get(keyspec.info_keys["fidelity_idx"], 0), dtype=torch.int64
         ),

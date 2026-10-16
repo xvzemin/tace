@@ -30,7 +30,6 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
     if v2:
-        config["node_embedding"]["type"] = "linear_v2"
         config["edge_update"]["type"] = "element2_v2"
         config["radial_basis"]["mlp_type"] = "mlp_v2"
     config["readout_emlp"]["hidden"] = [4]
@@ -128,8 +127,7 @@ def test_new_element_initialization(double_precision, v2):
     for name, module in selected.named_modules():
         original = dict(initialized.named_modules())[name]
         if (
-            name.endswith("elem_emb1")
-            or name.endswith("node_embedding.embedding")
+            name.endswith("node_embedding.embedding")
             or name.endswith("source_embedding")
             or name.endswith("target_embedding")
         ):

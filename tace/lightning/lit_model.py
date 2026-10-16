@@ -540,10 +540,10 @@ class LightningWrapperModel(L.LightningModule):
             model,
             state_dict,
             strict=strict,
-            keep_constructed_buffers=model_dtype != checkpoint_dtype,
+            rebuild_constants=model_dtype != checkpoint_dtype,
         )
 
-        return model.to(map_location)
+        return model.to(device=map_location, dtype=model_dtype)
 
 
 def _dominant_floating_dtype(values) -> torch.dtype:
@@ -561,19 +561,18 @@ def _load_model_state_dict(
     model: torch.nn.Module,
     state_dict: Dict[str, torch.Tensor],
     strict: bool,
-    keep_constructed_buffers: bool,
+    rebuild_constants: bool,
 ) -> None:
-    if not keep_constructed_buffers:
-        model.load_state_dict(state_dict, strict=strict)
-        return
-
-    state_dict = copy.copy(state_dict)
-    parameter_names = {
-        name for name, _ in model.named_parameters(remove_duplicate=False)
-    }
-    for name, value in model.state_dict().items():
-        if name not in parameter_names:
-            state_dict[name] = value
+    """Load model state, rebuilding angular coupling constants when changing dtype."""
+    if rebuild_constants:
+        state_dict = copy.copy(state_dict)
+        for name, value in model.named_buffers(remove_duplicate=False):
+            # Only angular constants are independent of the saved model state.
+            # Reference energies, scales and other persistent buffers must be loaded.
+            if name in state_dict and name.rsplit(".", 1)[-1].startswith(
+                ("_w3j_", "U_matrix_")
+            ):
+                state_dict[name] = value
     model.load_state_dict(state_dict, strict=strict)
 
 
@@ -590,6 +589,7 @@ def load_tace(
 
     Foundation model names are downloaded and cached automatically. File paths
     support ``.pt``, ``.pth``, ``.ckpt``, and ``.pt2`` packages.
+    Loading does not change the default PyTorch dtype.
     """
     set_tf32()
     device = DEVICE[device]
@@ -682,12 +682,11 @@ def load_tace(
             model,
             state_dict,
             strict=strict,
-            keep_constructed_buffers=target_dtype != model_dtype,
+            rebuild_constants=target_dtype != model_dtype,
         )
         if training is not None:
             model.train(training)
 
-    torch.set_default_dtype(target_dtype)
     if is_aoti:
         model = model.to(device=device)
     else:

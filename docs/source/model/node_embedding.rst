@@ -12,12 +12,10 @@ However, based on our current experiments, the linear approach remains the most 
    :no-members:
    :show-inheritance:
 
-``node_embedding.type: linear_v2`` uses an element lookup table initialized
+``node_embedding.type: linear`` uses an element lookup table initialized
 with unit variance, independent of the number of elements.
-
-.. autoclass:: tace.models._e3nn.node.LinearNodeEmbeddingV2
-   :no-members:
-   :show-inheritance:
+Legacy linear weights are converted when loading a state dictionary, preserving
+their original normalization and predictions.
 
 Tensor embeddings aggregate element scalars multiplied by radial weights and
 component-normalized spherical harmonics. The following four types share the

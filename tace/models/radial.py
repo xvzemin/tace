@@ -837,6 +837,9 @@ class ZBLBasis(torch.nn.Module):
         node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
+        r_max = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
+        Z_u = Z_u.to(dtype=x.dtype)
+        Z_v = Z_v.to(dtype=x.dtype)
         a = (
             self.a_prefactor
             * 0.529
@@ -850,7 +853,6 @@ class ZBLBasis(torch.nn.Module):
             + self.c[3] * torch.exp(-0.2016 * r_over_a)
         )
         v_edges = (14.3996 * Z_u * Z_v) / x * phi
-        r_max = self.covalent_radii[Z_u] + self.covalent_radii[Z_v]
         if self.is_polynomial_cutoff:
             envelope = self.cutoff_fn(x, r_max, self.p)
         else:

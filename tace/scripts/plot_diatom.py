@@ -141,6 +141,7 @@ def build_dataset(model, atoms_list, key_spec):
                 embedding_property=embedding_property,
                 training=False,
                 neighborlist_backend="matscipy",
+                dtype=model.get_model_dtype(),
             )
         )
     return dataset
