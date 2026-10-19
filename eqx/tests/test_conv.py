@@ -1164,7 +1164,8 @@ def test_cartesian_input_components(degree, symmetric_inputs, double_precision):
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_cartesian_compact_linear(backend, double_precision):
+@pytest.mark.parametrize("output_basis", ["cartesian", "spherical"])
+def test_cartesian_compact_linear(backend, output_basis, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx import co3
@@ -1199,6 +1200,7 @@ def test_cartesian_compact_linear(backend, double_precision):
         compact.harmonic_output_index,
         internal_weights=False,
         backend=backend,
+        output_basis=output_basis,
     )
     # Reconstruct constants when changing model precision.
     compact, linear = [m.float().cuda().double() for m in (compact, linear)]
@@ -1211,6 +1213,7 @@ def test_cartesian_compact_linear(backend, double_precision):
         linear.irreps_out,
         internal_weights=False,
         project=True,
+        output_basis=output_basis,
     ).cuda()
     edges = torch.randint(4, (2, 11), device="cuda")
     inputs = [
@@ -1240,6 +1243,59 @@ def test_cartesian_compact_linear(backend, double_precision):
             torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
         tangents = [torch.randn_like(x) for x in inputs]
         losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+
+
+@pytest.mark.parametrize("num_nodes", [0, 3])
+def test_cartesian_projection(num_nodes, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.co3.basis import stf_projection
+    from eqx.conv.co3.projection import project
+
+    matrix = stf_projection(4)
+    coefficients = tuple(
+        (a, b, float(matrix[a, b])) for a, b in matrix.nonzero().tolist()
+    )
+    metadata = repr(
+        (
+            165,
+            (
+                (0, 2, 81, 81, coefficients),
+                (0, 2, 81, 81, coefficients),
+                (162, 3, 1, 1, ((0, 0, 1.0),)),
+            ),
+        )
+    )
+    inputs = [
+        torch.randn(num_nodes, 2 * width, channels, device="cuda")[
+            :, ::2
+        ].requires_grad_()
+        for width, channels in ((81, 2), (81, 2), (1, 3))
+    ]
+    actual = project(metadata, inputs, False)[0]
+    expected = torch.cat(
+        (
+            ((inputs[0] + inputs[1]).transpose(-1, -2) @ matrix.cuda()).flatten(1),
+            inputs[2].flatten(1),
+        ),
+        dim=-1,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    losses = [y.sin().sum() for y in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=2e-11, rtol=2e-11)
+        losses = [sum(x.square().sum() for x in gs) for gs in gradients]
+    compiled = torch.compile(
+        lambda *xs: project(metadata, list(xs), False)[0],
+        backend="aot_eager",
+        fullgraph=True,
+        dynamic=True,
+    )
+    torch.testing.assert_close(compiled(*inputs), expected, atol=2e-12, rtol=2e-12)
 
 
 @pytest.mark.parametrize(

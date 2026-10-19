@@ -173,6 +173,7 @@ class Linear(torch.nn.Module):
         else:
             self.projection = torch.nn.Identity()
         connected = {ins.i_out for ins in self.instructions if all(ins.path_shape)}
+        self.has_weighted_paths = any(all(ins.path_shape) for ins in paths)
         self.register_buffer(
             "output_mask",
             (
@@ -215,7 +216,11 @@ class Linear(torch.nn.Module):
         shape = torch.broadcast_shapes(
             features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
         )
-        zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
+        zero = None
+        if not self.has_weighted_paths:
+            zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
+        elif not self.bias_numel and bias.requires_grad:
+            zero = bias.sum()
         outputs = []
         blocks = features.split(self.group_widths, -1) if self.partition else ()
         weight_blocks = weight.split(self.weight_widths, -1)
@@ -254,16 +259,17 @@ class Linear(torch.nn.Module):
                 value = w.transpose(-1, -2) @ x
                 value = value.expand(*shape, mul, ir.dim)
             else:
-                value = features.new_zeros((*shape, mul, ir.dim)) + zero
+                value = features.new_zeros((*shape, mul, ir.dim))
             for b in biases:
                 value = value + b
             outputs.append(value)
         output = (
             torch.cat([x.flatten(-2) for x in outputs], -1)
             if outputs
-            else features.new_zeros((*shape, 0)) + zero
+            else features.new_zeros((*shape, 0))
         )
-        return self.projection(output) + zero
+        output = self.projection(output)
+        return output if zero is None else output + zero
 
     def weight_view_for_instruction(self, instruction, weight=None):
         """Return the channel-weight view for a weighted instruction."""

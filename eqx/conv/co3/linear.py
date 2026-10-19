@@ -19,8 +19,8 @@ class Linear(CartesianLinear):
     input_indices : sequence of int
         Expansion from compact storage to flattened Cartesian ``mul_ir``.
     backend : {"cuda", "torch"}, optional
-        CUDA packs contiguous group matrices in one permutation. CPU inputs
-        use ordinary PyTorch operations.
+        CUDA packs group matrices and fuses their final projections and sum.
+        CPU inputs use ordinary PyTorch operations.
     **kwargs
         Weight, bias and normalization arguments of ``co3.Linear``.
     """
@@ -59,6 +59,7 @@ class Linear(CartesianLinear):
         self.weight_identity = []
         self.uniform_scales = []
         input_indices = []
+        projections = []
         for i, ((dest, expansion), entries) in enumerate(groups.items()):
             mul, ir = self.cartesian_out[dest]
             width = len(entries[0][0])
@@ -107,6 +108,18 @@ class Linear(CartesianLinear):
             )
             if self.uniform_scales[-1]:
                 packed = packed * self.scales[-1][0]
+            projections.append(
+                (
+                    self.cartesian_out.slices()[dest].start,
+                    mul,
+                    width,
+                    ir.dim,
+                    tuple(
+                        (a, b, float(packed[a, b]))
+                        for a, b in packed.nonzero().tolist()
+                    ),
+                )
+            )
             self.register_buffer(
                 f"projection_{i}",
                 packed.to(torch.get_default_dtype()),
@@ -118,6 +131,7 @@ class Linear(CartesianLinear):
         self.register_buffer("input_index", index, persistent=False)
         self.register_buffer("input_inverse", index.argsort(), persistent=False)
         self.group_widths = repr(tuple(s.stop - s.start for s in self.input_sections))
+        self.projection_metadata = repr((self.cartesian_out.dim, tuple(projections)))
 
     def forward(self, features, weight=None, bias=None):
         """Apply channel weights to compact coordinates and then project."""
@@ -134,7 +148,6 @@ class Linear(CartesianLinear):
         shape = torch.broadcast_shapes(
             features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
         )
-        zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
         grouped = (
             self.backend == "cuda"
             and features.is_cuda
@@ -154,6 +167,13 @@ class Linear(CartesianLinear):
                 else features.index_select(-1, self.input_index)
             )
         outputs = [None] * len(self.cartesian_out)
+        fused_projection = (
+            grouped
+            and weight.ndim == 1
+            and not self.bias_numel
+            and not bias.requires_grad
+        )
+        mixed_blocks = []
         widths = tuple(s.stop - s.start for s in self.input_sections)
         blocks = (
             features.flatten().split(tuple(features.size(0) * w for w in widths))
@@ -177,20 +197,38 @@ class Linear(CartesianLinear):
             if not self.uniform_scales[i]:
                 w = w * getattr(self, f"weight_scale_{i}")
             mixed = x @ w
+            if fused_projection:
+                mixed_blocks.append(mixed)
+                continue
             # Project only after reducing the input channel multiplicity.
             value = mixed.transpose(-1, -2) @ getattr(self, f"projection_{i}")
             outputs[dest] = value if outputs[dest] is None else outputs[dest] + value
-        for i, ((mul, ir), group) in enumerate(zip(self.irreps_out, self.groups)):
+        if fused_projection and mixed_blocks:
+            from .projection import project
+
+            output = project(self.projection_metadata, mixed_blocks, False)[0]
+            return (
+                self.projection(output) if self.output_basis == "spherical" else output
+            )
+        zero = None
+        if not self.has_weighted_paths:
+            zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
+        elif not self.bias_numel and bias.requires_grad:
+            zero = bias.sum()
+        for i, ((mul, ir), group) in enumerate(zip(self.cartesian_out, self.groups)):
             if outputs[i] is None:
-                outputs[i] = features.new_zeros((*shape, mul, ir.dim)) + zero
+                outputs[i] = features.new_zeros((*shape, mul, ir.dim))
             for ins, section in group:
                 if ins.i_in < 0:
                     outputs[i] = outputs[i] + bias[..., section].unsqueeze(-1)
-        return (
-            torch.cat([value.flatten(-2) for value in outputs], -1) + zero
+        output = (
+            torch.cat([value.flatten(-2) for value in outputs], -1)
             if outputs
-            else features[..., :0] + zero
+            else features.new_zeros((*shape, 0))
         )
+        if self.output_basis == "spherical":
+            output = self.projection(output)
+        return output if zero is None else output + zero
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

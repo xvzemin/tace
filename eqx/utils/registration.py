@@ -5,6 +5,7 @@ from importlib import import_module
 for module in (
     "eqx.ace.contraction",
     "eqx.conv.attention",
+    "eqx.conv.co3.projection",
     "eqx.conv.edge",
     "eqx.conv.o2_o3.convolution",
     "eqx.conv.o2_o3.geometry",
