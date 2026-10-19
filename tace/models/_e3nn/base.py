@@ -190,6 +190,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         magnetic_edge_irreps: o3.Irreps = None,
         radial_mlp_type: str = "mlp",
         radial_mlp_norm: str | None = None,
+        weights_0o_act: str | None = "tanh",
     ) -> None:
         super().__init__()
 
@@ -210,6 +211,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.radial_bias = radial_bias
         self.radial_mlp_type = radial_mlp_type
         self.radial_mlp_norm = radial_mlp_norm
+        self.weights_0o_act = weights_0o_act
         self.use_bias = bias
         self.scatter_norm_type = scatter_norm
         self.scalar_act = scalar_act

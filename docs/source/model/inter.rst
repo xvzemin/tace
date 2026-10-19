@@ -168,6 +168,54 @@ training, recursive higher derivatives and ``torch.compile``.
    :no-members:
    :show-inheritance:
 
+O(2) Conditional Linear
+-----------------------
+
+``atomic_basis.type: conditional_o2`` rotates both endpoint features into
+the same edge frame. Three independent ``eqx.o2.Linear`` maps form source
+queries and values and target keys, all in the output local representation.
+They mix channels and copies of the same local irrep, including copies from
+different angular degrees. ``ConditionalO2Weights`` constructs time-even
+``weights_0e``, ``weights_0o``, and ``weights_2m`` outside the convolution.
+Each projected value receives its own ``eqx.o2.ConditionalLinear`` matrix,
+without further mixing between copies or channels, followed by inverse
+rotation, cutoff, and scatter. There is no edge Gate or attention.
+
+The radial MLP uses the existing ``radial_basis.hidden``, ``mlp_type``,
+``mlp_norm``, and ``bias`` settings. Each projected irrep copy and channel forms
+its own query-key product: ``0e`` from the dot product, ``0o`` from the
+antisymmetric contraction, and ``2m`` from the symmetric traceless product.
+There is no pooling over copies or channels. Independent radial coefficients
+modulate each copy and channel. Scalar paths preserve reflection parity and
+use only ``0e`` weights; positive-order paths use all three weight types.
+``weights_0o_act`` applies an odd activation after radial modulation: ``tanh``
+(default), ``softsign``, or ``identity``. Set it to ``null`` to disable it.
+Node linear maps, nonlinearities, residuals, and the product basis are unchanged.
+
+.. code-block:: yaml
+
+   atomic_basis:
+     type: conditional_o2
+     weights_0o_act: tanh
+     edge_nonlinear: null
+     use_radial_rotary_attention: false
+   radial_basis:
+     apply_cutoff: false
+
+The implementation uses PyTorch autograd on CPU and CUDA; it has no dedicated
+fused CUDA kernel. A training configuration is provided in
+``example/train/benchmark_configs/3bpa_conditional_o2.yaml``.
+
+.. autoclass:: tace.models._e3nn.inter.ConditionalO2Interaction
+   :no-members:
+   :show-inheritance:
+
+.. autoclass:: tace.models._e3nn.conditional_o2.ConditionalO2Weights
+   :members: forward
+
+.. autoclass:: tace.models._e3nn.conditional_o2.ConditionalO2ScatterTensorProduct
+   :members: forward
+
 SO(2) Linear
 ------------
 

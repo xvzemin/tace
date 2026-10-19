@@ -29,6 +29,278 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
+def test_conditional_o2_cutoff_config():
+    with pytest.raises(ValueError, match="apply_cutoff=false"):
+        check_model_config(
+            {
+                "atomic_basis": {"type": "conditional_o2"},
+                "radial_basis": {"apply_cutoff": True},
+            }
+        )
+
+
+@pytest.mark.parametrize("parity", [False, True])
+@pytest.mark.parametrize("weights_0o_act", [None, "tanh"])
+def test_conditional_o2_model(double_precision, parity, weights_0o_act):
+    from tace.models._e3nn.inter import ConditionalO2Interaction
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        num_layers=2,
+        num_channel=2,
+        Lmax=1,
+        lmax=2,
+        mmax=2,
+        parity=parity,
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["atomic_basis"].update(
+        type="conditional_o2",
+        weights_0o_act=weights_0o_act,
+        edge_nonlinear=None,
+        use_radial_rotary_attention=False,
+    )
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    config["readout_emlp"]["hidden"] = [2]
+    config["radial_basis"]["hidden"] = [4]
+    config["radial_basis"]["apply_cutoff"] = False
+    config["scale_shift"]["enable"] = False
+    model = TensorModel(e3nnTACE(**config)).to(DEVICE, DTYPE).train()
+    representation = model.readout_fn.representation
+    assert representation.use_local_frame and not representation._can_skip_wigner
+    assert all(
+        isinstance(layer, ConditionalO2Interaction)
+        for layer in representation.interactions
+    )
+    assert all(
+        isinstance(
+            layer.edge_info.weights_0o_act,
+            torch.nn.Tanh if weights_0o_act == "tanh" else torch.nn.Identity,
+        )
+        for layer in representation.interactions
+    )
+    data = dict(
+        positions=torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]], device=DEVICE
+        ),
+        node_attrs=torch.ones(3, 1, device=DEVICE),
+        edge_index=torch.tensor(
+            [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device=DEVICE
+        ),
+        edge_shifts=torch.zeros(6, 3, device=DEVICE),
+        lattice=torch.eye(3, device=DEVICE).unsqueeze(0) * 8,
+        batch=torch.zeros(3, dtype=torch.long, device=DEVICE),
+        ptr=torch.tensor([0, 3], device=DEVICE),
+        fidelity_idx=torch.zeros(1, dtype=torch.long, device=DEVICE),
+    )
+    output = model(data)
+    for value in output.values():
+        if isinstance(value, torch.Tensor):
+            assert torch.isfinite(value).all()
+    output["forces"].square().sum().backward()
+    for layer in representation.interactions:
+        assert any(
+            p.grad is not None and p.grad.abs().sum() > 0
+            for p in layer.edge_info.parameters()
+        )
+        assert all(
+            p.grad is None or torch.isfinite(p.grad).all() for p in layer.parameters()
+        )
+        for projection in (
+            layer.rejector.q_proj,
+            layer.rejector.k_proj,
+            layer.rejector.v_proj,
+        ):
+            assert any(
+                p.grad is not None and p.grad.abs().sum() > 0
+                for p in projection.parameters()
+            )
+    for sign in (1, -1):
+        rotation = sign * o3.rand_matrix(dtype=DTYPE, device=DEVICE)
+        rotated = {
+            **data,
+            "positions": data["positions"] @ rotation.T,
+            "lattice": data["lattice"] @ rotation.T,
+        }
+        actual = model(rotated)
+        torch.testing.assert_close(
+            actual["energy"], output["energy"], atol=1e-8, rtol=1e-8
+        )
+        torch.testing.assert_close(
+            actual["forces"], output["forces"] @ rotation.T, atol=1e-8, rtol=1e-8
+        )
+    restored = TensorModel(e3nnTACE(**config)).to(DEVICE, DTYPE).train()
+    restored.load_state_dict(model.state_dict())
+    torch.testing.assert_close(restored(data)["energy"], output["energy"])
+
+
+@pytest.mark.parametrize("num_edges", [0, 5])
+def test_conditional_o2_weights_and_convolution(num_edges, double_precision):
+    from tace.models._e3nn.conditional_o2 import (
+        ConditionalO2ScatterTensorProduct,
+        ConditionalO2Weights,
+    )
+
+    conv = ConditionalO2ScatterTensorProduct(
+        "2x0e+2x1o+2x1e+2x2e",
+        "2x0e+2x1o+2x2e",
+        mmax=2,
+    ).to(DEVICE, DTYPE)
+    weights = ConditionalO2Weights(conv.linear, 4, [8], True, "mlp", None).to(
+        DEVICE, DTYPE
+    )
+    wigner = o2.WignerD(lmax=2, mmax=2, method="recursive").to(DEVICE, DTYPE)
+    nodes = torch.randn(4, conv.irreps_in.dim, device=DEVICE, requires_grad=True)
+    edges = torch.randint(4, (2, num_edges), device=DEVICE)
+    vectors = torch.randn(num_edges, 3, device=DEVICE, requires_grad=True)
+    radial = torch.randn(num_edges, 4, device=DEVICE, requires_grad=True)
+    cutoff = torch.rand(num_edges, 1, device=DEVICE)
+    rotation, inverse = wigner(vectors)
+    source, target = conv.to_local(nodes, edges, rotation)
+    query, key, value = conv.q_proj(source), conv.k_proj(target), conv.v_proj(source)
+    coefficients = weights(query, key, radial)
+    expected = conv(nodes, *coefficients, edges, rotation, inverse, cutoff)
+    actual = conv.forward_local(value, *coefficients, edges, inverse, 4, cutoff)
+    torch.testing.assert_close(actual, expected)
+    compiled = torch.compile(weights, backend="aot_eager", fullgraph=True)
+    for output, reference in zip(compiled(query, key, radial), coefficients):
+        torch.testing.assert_close(output, reference)
+    if num_edges:
+        changed = weights(query, key + torch.randn_like(key), radial)
+        assert any(not torch.allclose(a, b) for a, b in zip(coefficients, changed))
+        # Each projection mixes local copies originating from different degrees.
+        input_index = next(
+            i for i, (ir, _) in enumerate(conv.local_frame_in.irreps_out) if ir.m == 1
+        )
+        output_index = next(
+            i for i, (ir, _) in enumerate(conv.local_frame_out.irreps_out) if ir.m == 1
+        )
+        modified = source.clone()
+        modified[:, conv.local_frame_in.irreps_out.slices()[input_index].start + 2] += 1
+        output_start = conv.local_frame_out.irreps_out.slices()[output_index].start
+        for projection in (conv.q_proj, conv.k_proj, conv.v_proj):
+            assert not torch.allclose(
+                projection(source)[:, output_start : output_start + 2],
+                projection(modified)[:, output_start : output_start + 2],
+            )
+        derivatives = torch.autograd.grad(
+            actual.square().sum(), (nodes, vectors, radial), create_graph=True
+        )
+        sum(g.square().sum() for g in derivatives).backward()
+        assert all(
+            p.grad is None or torch.isfinite(p.grad).all() for p in weights.parameters()
+        )
+
+
+@pytest.mark.parametrize("weights_0o_act", [None, "tanh", "softsign", "identity"])
+def test_conditional_o2_channelwise_weights(double_precision, weights_0o_act):
+    from tace.models._e3nn.conditional_o2 import ConditionalO2Weights
+
+    linear = o2.ConditionalLinear("2x0e+2x0o+4x1m+2x1m+2x2m+2x1mo").to(DEVICE, DTYPE)
+    module = ConditionalO2Weights(
+        linear, 4, [8], True, "mlp_v2", None, weights_0o_act=weights_0o_act
+    ).to(DEVICE, DTYPE)
+    source = linear.irreps_in.randn(3, -1, device=DEVICE, dtype=DTYPE)
+    target = torch.randn_like(source)
+    radial = torch.randn(3, 4, device=DEVICE, dtype=DTYPE)
+    reference = module(source, target, radial)
+    indexed = module(source, target, ((radial[:, :2], None), (radial[:, 2:], None)))
+    for actual, expected in zip(indexed, reference):
+        torch.testing.assert_close(actual, expected)
+
+    coefficients = module.mlp(radial).split(
+        (linear.weight_numel_0e, linear.weight_numel_0o, module.coefficient_numel_2m),
+        -1,
+    )
+    products = ([], [], [])
+    for (ir, mul), section in zip(linear.irreps_in, linear.irreps_in.slices()):
+        u = source[:, section].reshape(3, ir.dim, mul)
+        v = target[:, section].reshape(3, ir.dim, mul)
+        products[0].append((u * v).sum(1) / ir.dim**0.5)
+        if ir.m:
+            products[1].append((u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0]) / 2**0.5)
+            products[2].append(
+                torch.stack(
+                    (
+                        u[:, 0] * v[:, 0] - u[:, 1] * v[:, 1],
+                        u[:, 0] * v[:, 1] + u[:, 1] * v[:, 0],
+                    ),
+                    dim=1,
+                )
+                / 2**0.5
+            )
+    for group, values in enumerate(reference):
+        product = torch.cat(products[group], -1)
+        expected = (
+            (coefficients[group].unsqueeze(1) * product).flatten(1)
+            if group == 2
+            else coefficients[group] * product
+        )
+        if group == 1:
+            if weights_0o_act == "tanh":
+                expected = expected.tanh()
+            elif weights_0o_act == "softsign":
+                expected = expected / (1 + expected.abs())
+        torch.testing.assert_close(values, expected)
+
+    # Change only the second copy, first channel, of the first order-one block.
+    changed = target.clone()
+    changed[:, linear.irreps_in.slices()[2].start + 2] += 1
+    for group, (actual, original) in enumerate(
+        zip(module(source, changed, radial), reference)
+    ):
+        masks = []
+        for index, (ir, mul) in enumerate(linear.irreps_in):
+            if group and ir.m == 0:
+                continue
+            mask = torch.zeros(mul, dtype=torch.bool, device=DEVICE)
+            if index == 2:
+                mask[2] = True
+            masks.append(mask)
+        mask = torch.cat(masks).repeat(2 if group == 2 else 1)
+        torch.testing.assert_close(actual[:, ~mask], original[:, ~mask], atol=0, rtol=0)
+        assert not torch.allclose(actual[:, mask], original[:, mask])
+
+    angle = torch.tensor(0.73, dtype=DTYPE, device=DEVICE)
+    for reflected in (False, True):
+        for time_reversal in (False, True):
+            rotation = linear.irreps_in.D_from_angle(
+                angle, reflected=reflected, time_reversal=time_reversal
+            )
+            actual = module(source @ rotation.T, target @ rotation.T, radial)
+            torch.testing.assert_close(actual[0], reference[0])
+            torch.testing.assert_close(
+                actual[1], -reference[1] if reflected else reference[1]
+            )
+            tensor = reference[2].reshape(3, 2, -1).split(linear.positive_sizes, -1)
+            expected = []
+            positive_irreps = [ir for ir, _ in linear.irreps_in if ir.m > 0]
+            for ir, value in zip(positive_irreps, tensor):
+                rotation = o2.Irrep(2 * ir.m, 0).D_from_angle(
+                    angle, reflected=reflected
+                )
+                expected.append(rotation @ value)
+            torch.testing.assert_close(actual[2], torch.cat(expected, -1).flatten(1))
+
+
+@pytest.mark.parametrize("activation", ["silu", "sigmoid", "relu"])
+def test_conditional_o2_rejects_nonodd_activation(activation):
+    from tace.models._e3nn.conditional_o2 import ConditionalO2Weights
+
+    linear = o2.ConditionalLinear("1m")
+    with pytest.raises(ValueError, match="preserve odd parity"):
+        ConditionalO2Weights(
+            linear, 4, [8], False, "mlp", None, weights_0o_act=activation
+        )
+
+
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("lora", [False, True])
 @pytest.mark.parametrize("hidden", [[], [7]])

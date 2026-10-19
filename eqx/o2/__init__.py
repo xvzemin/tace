@@ -5,7 +5,7 @@ from .contraction import AsymmetricContraction, SymmetricContraction
 from .gate import Activation, Gate
 from .ictd import ICTD, path_matrices
 from .irreps import Irrep, Irreps
-from .linear import Linear, UuLinear
+from .linear import ConditionalLinear, Linear, UuLinear
 from .local_frame import LocalFrame
 from .o2grid import O2Grid
 from .o3_tensor_product import O3TensorProduct
@@ -24,6 +24,7 @@ __all__ = [
     "Irreps",
     "Linear",
     "UuLinear",
+    "ConditionalLinear",
     "Activation",
     "Gate",
     "AsymmetricContraction",

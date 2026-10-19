@@ -32,6 +32,9 @@ Linear maps
 .. autoclass:: eqx.o2.UuLinear
    :members: forward
 
+.. autoclass:: eqx.o2.ConditionalLinear
+   :members: forward
+
 Activations
 -----------
 

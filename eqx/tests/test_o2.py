@@ -13,6 +13,87 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
+@pytest.mark.parametrize("reflected", [False, True])
+@pytest.mark.parametrize("time_reversal", [False, True])
+def test_conditional_linear_equivariance(reflected, time_reversal):
+    module = o2.ConditionalLinear("4x0e+2x0o+4x1m+2x2m+2x0oo+2x1mo").to(DEVICE, DTYPE)
+    x = module.irreps_in.randn(3, -1, dtype=DTYPE, device=DEVICE)
+    even = torch.randn(3, module.weight_numel_0e, device=DEVICE, dtype=DTYPE)
+    odd = torch.randn(3, module.weight_numel_0o, device=DEVICE, dtype=DTYPE)
+    tensor = torch.randn(3, module.weight_numel_2m, device=DEVICE, dtype=DTYPE)
+    angle = torch.tensor(0.73, device=DEVICE, dtype=DTYPE)
+    transformed = []
+    offset = 0
+    tensor_pairs = tensor.reshape(3, 2, -1)
+    for ir, size in module.irreps_in:
+        if ir.m == 0:
+            continue
+        matrix = o2.Irrep(2 * ir.m, 0).D_from_angle(
+            angle, reflected=reflected, dtype=DTYPE, device=DEVICE
+        )
+        transformed.append(matrix @ tensor_pairs[..., offset : offset + size])
+        offset += size
+    actual = module(
+        _transform(x, module.irreps_in, angle, reflected, time_reversal),
+        even,
+        -odd if reflected else odd,
+        torch.cat(transformed, -1).flatten(1),
+    )
+    expected = _transform(
+        module(x, even, odd, tensor),
+        module.irreps_out,
+        angle,
+        reflected,
+        time_reversal,
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+
+
+@pytest.mark.parametrize("num_edges", [0, 3])
+def test_conditional_linear_matrix_and_broadcast(num_edges):
+    module = o2.ConditionalLinear("2x1m").to(DEVICE, DTYPE)
+    features = torch.randn(num_edges, 4, device=DEVICE, dtype=DTYPE)
+    a, b, c, d = torch.randn(4, 2, device=DEVICE, dtype=DTYPE)
+    x, y = features.reshape(num_edges, 2, 2).unbind(1)
+    expected = torch.stack(
+        ((a + c) * x + (d - b) * y, (d + b) * x + (a - c) * y), dim=1
+    ).flatten(1)
+    torch.testing.assert_close(module(features, a, b, torch.cat((c, d))), expected)
+
+
+def test_conditional_linear_preserves_scalar_parity():
+    module = o2.ConditionalLinear("2x0e+2x0o").to(DEVICE, DTYPE)
+    assert module.weight_numel_0e == 4
+    assert module.weight_numel_0o == module.weight_numel_2m == 0
+    features = torch.randn(3, 4, device=DEVICE, dtype=DTYPE)
+    even = torch.randn_like(features)
+    empty = features[:, :0]
+    torch.testing.assert_close(module(features, even, empty, empty), features * even)
+
+
+def test_conditional_linear_derivatives_and_compile():
+    module = o2.ConditionalLinear("1x0e+1x0o+1x1m")
+    module = module.to(DEVICE, DTYPE)
+    inputs = tuple(
+        torch.randn(2, size, device=DEVICE, dtype=DTYPE, requires_grad=True)
+        for size in (
+            module.irreps_in.dim,
+            module.weight_numel_0e,
+            module.weight_numel_0o,
+            module.weight_numel_2m,
+        )
+    )
+    assert torch.autograd.gradcheck(module, inputs)
+    assert torch.autograd.gradgradcheck(module, inputs)
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(compiled(*inputs), module(*inputs))
+    zero_odd, zero_tensor = torch.zeros_like(inputs[2]), torch.zeros_like(inputs[3])
+    torch.testing.assert_close(
+        module(inputs[0], inputs[1], zero_odd, zero_tensor),
+        inputs[0] * inputs[1][:, [0, 1, 2, 2]],
+    )
+
+
 @pytest.mark.parametrize("allow_slice", [False, True])
 def test_native_o2_import_is_independent(allow_slice):
     script = f"""

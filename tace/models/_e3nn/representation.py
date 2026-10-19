@@ -20,6 +20,7 @@ from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
 from .inter import (
     INTERACTION,
+    ConditionalO2Interaction,
     O2CgtpInteraction,
     O2MagneticInteraction,
     O3CartesianIctpIctcInteraction,
@@ -103,7 +104,9 @@ class Representation(torch.nn.Module):
             for interaction_cls in interaction_classes
         )
         uses_o2_interaction = any(
-            issubclass(interaction_cls, (UvO2Interaction, UuO2Interaction))
+            issubclass(
+                interaction_cls, (UvO2Interaction, UuO2Interaction, ConditionalO2Interaction)
+            )
             for interaction_cls in interaction_classes
         )
         uses_o2_cgtp_interaction = any(
@@ -140,7 +143,10 @@ class Representation(torch.nn.Module):
         self._can_skip_wigner = (
             self._can_pack_wigner
             and not uses_so2_interaction
-            and not any(issubclass(cls, UvO2Interaction) for cls in interaction_classes)
+            and not any(
+                issubclass(cls, (UvO2Interaction, ConditionalO2Interaction))
+                for cls in interaction_classes
+            )
         )
         uses_magnetic_interaction = any(
             issubclass(interaction_cls, O2MagneticInteraction)
@@ -316,6 +322,7 @@ class Representation(torch.nn.Module):
             "gate_m0": atomic_basis["gate_m0"],
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],
+            "weights_0o_act": atomic_basis["weights_0o_act"],
             "edge_ace_hidden": atomic_basis["edge_ace_hidden"],
             "magnetic_edge_irreps": self.magnetic_edge_irreps_out,
         }

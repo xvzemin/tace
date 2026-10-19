@@ -69,6 +69,7 @@ DEFAULT_MODEL_CONFIG = {
         "gate_m0": True,
         "scalar_act": None,
         "tensor_act": None,
+        "weights_0o_act": "tanh",
     },
     "resnet": {
         "type": "BB",
@@ -235,6 +236,11 @@ def check_model_config(cfg: dict[str, Any]):
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
+    if "conditional_o2" in atomic_basis_type and radial["apply_cutoff"]:
+        raise ValueError(
+            "conditional_o2 requires radial_basis.apply_cutoff=false "
+            "to apply the cutoff after the conditional kernel."
+        )
     uses_magnetic_interaction = "o2_mag" in atomic_basis_type
     if (
         not isinstance(magnetic_lmax, int)

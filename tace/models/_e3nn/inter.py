@@ -15,6 +15,7 @@ from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
 from ..mlp import ACTIVATION, MLP, MLP_TYPES, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
+from .conditional_o2 import ConditionalO2ScatterTensorProduct, ConditionalO2Weights
 from .fused import (
     O2ScatterTensorProduct,
     O3CartesianScatterTensorProduct,
@@ -61,6 +62,15 @@ class O3CgtpInteraction(Interaction):
     def _setup_additional_modules(self) -> None:
         pass
 
+    def _build_edge_info(self, normalization) -> torch.nn.Module:
+        return MLP_TYPES[self.radial_mlp_type](
+            [self.edge_feats_channel] + self.radial_mlp + [self.rejector.weight_numel],
+            bias=self.radial_bias,
+            layer_norm=normalization == "layer_norm",
+            rms_norm=normalization == "rms_norm",
+            act="silu",
+        )
+
     def _setup(self) -> None:
         self._prepare_setup()
 
@@ -98,15 +108,7 @@ class O3CgtpInteraction(Interaction):
                 if self.radial_mlp_type == "mlp" and self.radial_layer_norm
                 else None
             )
-        self.edge_info = MLP_TYPES[self.radial_mlp_type](
-            [self.edge_feats_channel]
-            + self.radial_mlp
-            + [self.rejector.weight_numel],
-            bias=self.radial_bias,
-            layer_norm=radial_norm == "layer_norm",
-            rms_norm=radial_norm == "rms_norm",
-            act="silu",
-        )
+        self.edge_info = self._build_edge_info(radial_norm)
         self._setup_additional_modules()
 
         self.scatter_norm = get_scatter_norm_layer(
@@ -715,6 +717,73 @@ class UuO2Interaction(O3CgtpInteraction):
         )
 
 
+class ConditionalO2Interaction(O3CgtpInteraction):
+    """O(2) interaction conditioned on source and target node features.
+
+    Local O(2) linear maps project source queries and values and target keys.
+    Query-key products provide ``0e``, ``0o``, and ``2m`` weights for a
+    channelwise conditional map. Node operations and residual connections
+    use the standard interaction configuration.
+    """
+
+    def _prepare_setup(self) -> None:
+        if self.use_radial_rotary_attention or self.edge_nonlinear is not None:
+            raise ValueError(
+                "conditional_o2 does not use edge nonlinearities or attention."
+            )
+        if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
+            raise ValueError("conditional_o2 requires 0 <= mmax <= max(Lmax, lmax).")
+
+    def _build_rejector(self) -> torch.nn.Module:
+        return ConditionalO2ScatterTensorProduct(
+            self.irreps_in,
+            self.irreps_out,
+            mmax=self.mmax,
+        )
+
+    def _build_edge_info(self, normalization) -> torch.nn.Module:
+        return ConditionalO2Weights(
+            self.rejector.linear,
+            self.edge_feats_channel,
+            self.radial_mlp,
+            self.radial_bias,
+            self.radial_mlp_type,
+            normalization,
+            weights_0o_act=self.weights_0o_act,
+        )
+
+    def _compute_messages(
+        self,
+        node_feats,
+        node_attrs_total,
+        edge_radial_basis,
+        edge_feats,
+        edge_attrs,
+        edge_index,
+        edge_cutoff,
+        edge_wigner=None,
+        edge_wigner_inv=None,
+        magnetic_node_info=None,
+        magnetic_edge_attrs=None,
+        graph=None,
+    ) -> torch.Tensor:
+        source, target = self.rejector.to_local(node_feats, edge_index, edge_wigner)
+        query = self.rejector.q_proj(source)
+        key = self.rejector.k_proj(target)
+        value = self.rejector.v_proj(source)
+        weights_0e, weights_0o, weights_2m = self.edge_info(query, key, edge_feats)
+        return self.rejector.forward_local(
+            value,
+            weights_0e,
+            weights_0o,
+            weights_2m,
+            edge_index,
+            edge_wigner_inv,
+            node_feats.shape[0],
+            edge_cutoff,
+        )
+
+
 class O2MagneticInteraction(UvO2Interaction):
     """Magnetic interaction evaluated by local O(2) frame."""
 
@@ -882,6 +951,7 @@ INTERACTION: Dict[str, type[Interaction]] = {
     "so2": UvSO2Interaction,
     "o2": UvO2Interaction,
     "uu_o2": UuO2Interaction,
+    "conditional_o2": ConditionalO2Interaction,
     "o2_mag": O2MagneticInteraction,
 }
 

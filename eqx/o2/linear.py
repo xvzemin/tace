@@ -603,3 +603,115 @@ class UuLinear(torch.nn.Module):
             f"{self.__class__.__name__}({self.irreps_in} -> {self.irreps_out} | "
             f"{self.num_channel} channels, {self.weight_numel} weights)"
         )
+
+
+class ConditionalLinear(torch.nn.Module):
+    """Apply a separate conditional O(2) matrix to each feature channel.
+
+    Parameters
+    ----------
+    irreps : Irreps, str, or sequence
+        Input and output representation in flattened ``ir_mul`` layout.
+
+    Notes
+    -----
+    At positive order, each channel applies ``a I + b J + [[c, d], [d, -c]]``.
+    The coefficients transform as ``0e``, ``0o``, and ``2m``, respectively,
+    and are time-even. Scalar paths preserve reflection parity and use only
+    ``0e`` weights. No representation copies or channels are mixed.
+    There are no internal parameters.
+    """
+
+    def __init__(self, irreps: IrrepsLike) -> None:
+        super().__init__()
+        self.irreps_in = Irreps(irreps)
+        self.irreps_out = self.irreps_in
+        self.input_sizes = tuple(entry.dim for entry in self.irreps_in)
+        self.scalar_sizes = tuple(mul for _, mul in self.irreps_in)
+        self.positive_sizes = tuple(mul for ir, mul in self.irreps_in if ir.m > 0)
+        self.weight_numel_0e = sum(self.scalar_sizes)
+        self.weight_numel_0o = sum(self.positive_sizes)
+        self.weight_numel_2m = 2 * self.weight_numel_0o
+        self.weight_numel = (
+            self.weight_numel_0e + self.weight_numel_0o + self.weight_numel_2m
+        )
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        weights_0e: torch.Tensor,
+        weights_0o: torch.Tensor,
+        weights_2m: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the conditional map.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Features with shape ``(..., irreps_in.dim)``.
+        weights_0e, weights_0o : torch.Tensor
+            Reflection-even and reflection-odd weights with trailing sizes
+            ``weight_numel_0e`` and ``weight_numel_0o``. Weights follow the
+            input irrep and channel order; ``weights_0o`` skips scalars.
+        weights_2m : torch.Tensor
+            Weights with trailing size ``weight_numel_2m``: all positive
+            components followed by all negative components, each following
+            the positive-order input irreps and their channels. An order
+            ``m`` feature uses an order ``2m`` weight. Leading dimensions
+            must broadcast.
+
+        Returns
+        -------
+        torch.Tensor
+            Features with shape ``(..., irreps_out.dim)``.
+        """
+        for name, value, size in (
+            ("features", features, self.irreps_in.dim),
+            ("weights_0e", weights_0e, self.weight_numel_0e),
+            ("weights_0o", weights_0o, self.weight_numel_0o),
+            ("weights_2m", weights_2m, self.weight_numel_2m),
+        ):
+            if value.ndim < 1 or value.shape[-1] != size:
+                raise ValueError(f"{name} must end in {size}.")
+        leading_shape = torch.broadcast_shapes(
+            features.shape[:-1],
+            weights_0e.shape[:-1],
+            weights_0o.shape[:-1],
+            weights_2m.shape[:-1],
+        )
+        features = features.expand(*leading_shape, self.irreps_in.dim)
+        inputs = features.split(self.input_sizes, -1)
+        even = weights_0e.split(self.scalar_sizes, -1)
+        odd = weights_0o.split(self.positive_sizes, -1)
+        width = self.weight_numel_0o
+        positive = weights_2m[..., :width].split(self.positive_sizes, -1)
+        negative = weights_2m[..., width:].split(self.positive_sizes, -1)
+        outputs = []
+        index = 0
+        for (ir, mul), value, a in zip(self.irreps_in, inputs, even):
+            if ir.m == 0:
+                outputs.append(a * value)
+                continue
+            x, y = value.reshape(*leading_shape, 2, mul).unbind(-2)
+            b, c, d = odd[index], positive[index], negative[index]
+            output = torch.stack(
+                (
+                    (a + c) * x + (d - b) * y,
+                    (b + d) * x + (a - c) * y,
+                ),
+                dim=-2,
+            )
+            outputs.append(output.flatten(-2))
+            index += 1
+        if outputs:
+            return torch.cat(outputs, dim=-1)
+        return (
+            features[..., :0]
+            + (weights_0e.sum() + weights_0o.sum() + weights_2m.sum()) * 0
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}({self.irreps_in} -> {self.irreps_out} | "
+            f"{self.weight_numel} weights)"
+        )

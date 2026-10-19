@@ -370,6 +370,7 @@ model:
       edge_nonlinear: gate # [gate]
       scalar_act: null # (str or list[str]), name for 0e, or [0e, 0o]
       tensor_act: null # name for tensor-irrep 0e gates
+      weights_0o_act: tanh # conditional_o2: [tanh, softsign, identity, null]
       use_asymmetric_contraction: false
       use_radial_rotary_attention: true
       num_head: 2 # recommended 2~8, avoid using 1, ensure that each head has >= 16 channels.
