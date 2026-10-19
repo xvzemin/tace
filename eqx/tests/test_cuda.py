@@ -12,6 +12,157 @@ import torch
 from eqx.kernels import cuda
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize(
+    "mmax,basis_change,packed", [(0, True, True), (1, False, False), (3, True, True)]
+)
+def test_indexed_frame(dtype, mmax, basis_change, packed):
+    from eqx import o2
+
+    frame = o2.LocalFrame(
+        "2x0e+3x1o+2x1e+1x3o+2x1o", mmax, basis_change=basis_change
+    ).to("cuda", dtype)
+    rotation = o2.WignerD(4, 4, method="recursive").to("cuda", dtype)
+    for edges in (9, 0):
+        nodes = torch.randn(
+            6, frame.input_dim, device="cuda", dtype=dtype, requires_grad=True
+        )
+        vectors = torch.randn(edges, 3, device="cuda", dtype=dtype, requires_grad=True)
+        index = torch.arange(edges, device="cuda") % 5
+        wigner, inverse = rotation(vectors)
+        if packed:
+            wigner = inverse = rotation.forward_packed(vectors)
+        for inverse_map in (False, True):
+            values = (
+                torch.randn(
+                    edges,
+                    frame.output_dim,
+                    device="cuda",
+                    dtype=dtype,
+                    requires_grad=True,
+                )
+                if inverse_map
+                else nodes
+            )
+            outputs = [
+                frame.scatter(values, inverse, index, 6, backend=backend)
+                if inverse_map
+                else frame.gather(values, wigner, index, backend=backend)
+                for backend in ("cuda", "torch")
+            ]
+            for _ in range(3):
+                torch.testing.assert_close(
+                    *outputs,
+                    rtol=3e-4 if dtype == torch.float32 else 1e-9,
+                    atol=3e-5 if dtype == torch.float32 else 1e-9,
+                )
+                gradients = [
+                    torch.autograd.grad(
+                        value.sin().sum(),
+                        (values, vectors),
+                        create_graph=True,
+                        retain_graph=True,
+                    )
+                    for value in outputs
+                ]
+                outputs = [
+                    torch.cat([g.flatten() for g in grads]) / 10 for grads in gradients
+                ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fused_o2_gate(dtype):
+    from eqx import o2
+
+    args = (
+        "2x0ee+1x0oe",
+        [torch.nn.SiLU(), torch.tanh],
+        "2x0ee+3x0oo",
+        [torch.sigmoid, torch.tanh],
+        "1x0oe+2x1mo+2x2me",
+    )
+    reference = o2.Gate(*args).to("cuda", dtype)
+    fused = o2.Gate(*args, backend="cuda").to("cuda", dtype)
+    for batch in ((), (2, 3), (0,)):
+        features = torch.randn(
+            *batch, fused.irreps_in.dim, device="cuda", dtype=dtype, requires_grad=True
+        )
+        outputs = [module(features) for module in (fused, reference)]
+        for _ in range(3):
+            torch.testing.assert_close(*outputs)
+            outputs = [
+                torch.autograd.grad(value.sin().sum(), features, create_graph=True)[0]
+                for value in outputs
+            ]
+        for reflected, time_reversal in ((True, False), (False, True), (True, True)):
+            angle = features.new_tensor(0.37)
+
+            def transform(irreps):
+                return irreps.D_from_angle(
+                    angle, reflected=reflected, time_reversal=time_reversal
+                )
+
+            torch.testing.assert_close(
+                fused(features @ transform(fused.irreps_in).T),
+                fused(features) @ transform(fused.irreps_out).T,
+            )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_indexed_o2_pipeline_compile(double_precision):
+    from eqx import o2
+
+    frame = o2.LocalFrame("2x0e+2x1o+2x1e", mmax=1).cuda()
+    args = ("2x0e+2x0o", [torch.nn.SiLU(), torch.tanh], "4x0e", [torch.sigmoid], "4x1m")
+    gates = [o2.Gate(*args, backend=backend).cuda() for backend in ("torch", "cuda")]
+    up = o2.Linear(frame.irreps_out, gates[0].irreps_in).cuda()
+    down = o2.Linear(gates[0].irreps_out, frame.irreps_out).cuda()
+
+    def evaluate(nodes, wigner, index, backend):
+        local = frame.gather(nodes, wigner, index[0], backend=backend)
+        local = down(gates[backend == "cuda"](up(local)))
+        return frame.scatter(local, wigner, index[1], nodes.size(0), backend=backend)
+
+    torch.compiler.reset()
+    compiled = torch.compile(
+        evaluate, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for edges in (7, 11, 0):
+        nodes = torch.randn(5, frame.input_dim, device="cuda", requires_grad=True)
+        wigner = torch.randn(edges, 10, device="cuda", requires_grad=True)
+        index = torch.randint(5, (2, edges), device="cuda")
+        outputs = [
+            compiled(nodes, wigner, index, "cuda"),
+            evaluate(nodes, wigner, index, "torch"),
+        ]
+        torch.testing.assert_close(*outputs)
+        inputs = (nodes, wigner, up.weight, down.weight)
+        gradients = [
+            torch.autograd.grad(value.square().sum(), inputs) for value in outputs
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+
+    vectors = torch.randn(7, 3, device="cuda", requires_grad=True)
+    rotation = o2.WignerD(1, 1, method="recursive").cuda()
+    nodes = torch.randn(5, frame.input_dim, device="cuda", requires_grad=True)
+    index = torch.randint(5, (2, 7), device="cuda")
+    losses = []
+    for backend in ("cuda", "torch"):
+        output = evaluate(nodes, rotation.forward_packed(vectors), index, backend)
+        forces = -torch.autograd.grad(
+            output.square().mean(), vectors, create_graph=True
+        )[0]
+        losses.append(forces.square().mean())
+    gradients = [
+        torch.autograd.grad(loss, (nodes, up.weight, down.weight)) for loss in losses
+    ]
+    for a, b in zip(*gradients):
+        torch.testing.assert_close(a, b, rtol=1e-8, atol=1e-9)
+
+
 @pytest.mark.parametrize("platform", ["linux", "win32"])
 def test_runtime_linker_flags(monkeypatch, tmp_path, platform):
     import torch.utils.cpp_extension as extension

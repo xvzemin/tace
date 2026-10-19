@@ -261,6 +261,30 @@ def test_local_frame_empty_irreps():
         assert frame.to_global(local, di[:batch_size]).shape == features.shape
 
 
+@pytest.mark.parametrize("edges", [0, 7])
+def test_local_frame_indexed_torch(double_precision, edges):
+    frame = o2.LocalFrame("2x0e+3x1e+1x2o", mmax=1)
+    rotation = o2.WignerD(2, 2, method="recursive")
+    index = torch.randint(4, (edges,))
+    nodes = torch.randn(5, frame.input_dim, requires_grad=True)
+    vectors = torch.randn(edges, 3, requires_grad=True)
+    wigner = rotation.forward_packed(vectors)
+    local = frame.gather(nodes, wigner, index)
+    expected = frame.to_local(nodes[index], wigner)
+    torch.testing.assert_close(local, expected)
+    output = frame.scatter(local, wigner, index, 5)
+    expected = nodes.new_zeros(nodes.shape).index_add(
+        0, index, frame.to_global(expected, wigner)
+    )
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(output[4], torch.zeros_like(output[4]))
+    for a, b in zip(
+        torch.autograd.grad(output.square().sum(), (nodes, vectors), retain_graph=True),
+        torch.autograd.grad(expected.square().sum(), (nodes, vectors)),
+    ):
+        torch.testing.assert_close(a, b)
+
+
 @pytest.mark.parametrize("basis_change", [False, True])
 @pytest.mark.parametrize("mmax", [0, 1, 3])
 def test_local_frame_packed_derivatives(double_precision, basis_change, mmax):

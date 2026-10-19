@@ -1,6 +1,20 @@
-"""Wigner matrix indexing."""
+"""O(2) feature layouts and Wigner matrix indexing."""
 
 import math
+
+
+def irrep_layout(irreps, transverse=False):
+    """Return angular dimensions, multiplicities and offsets of O(2) entries.
+
+    Transverse storage uses ``2*m+1`` spherical components instead of the
+    one- or two-dimensional O(2) coefficients. Entries retain their order.
+    """
+    entries, offset = [], 0
+    for ir, mul in irreps:
+        dim = 2 * ir.m + 1 if transverse else ir.dim
+        entries.append((dim, mul, offset))
+        offset += dim * mul
+    return tuple(entries)
 
 
 def wigner_orders(

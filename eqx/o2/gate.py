@@ -194,6 +194,11 @@ class Gate(torch.nn.Module):
         ``None`` leaves the entry unchanged.
     irreps_gated : Irreps, str, or sequence
         Entries multiplied channel-wise by the activated gates.
+    backend : {"torch", "cuda"}, optional
+        Defaults to ``"torch"``. ``"cuda"`` fuses scalar activations, basis
+        permutations and gate multiplication for CUDA float32 and float64
+        inputs. Supported activations are SiLU, sigmoid, tanh and identity,
+        including their second-moment normalization. Requires the CUDA toolkit.
     """
 
     def __init__(
@@ -203,8 +208,13 @@ class Gate(torch.nn.Module):
         irreps_gates: IrrepsLike,
         act_gates: Sequence[Optional[Callable]],
         irreps_gated: IrrepsLike,
+        *,
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         irreps_scalars = Irreps(irreps_scalars)
         irreps_gates = Irreps(irreps_gates)
         irreps_gated = Irreps(irreps_gated)
@@ -366,6 +376,10 @@ class Gate(torch.nn.Module):
             self._output_identity,
             self._gate_identity,
         )
+        if backend == "cuda":
+            from ..kernels.gate import gate_program
+
+            self.cuda_program = gate_program(self)
 
     def _select_entries(
         self,
@@ -403,6 +417,10 @@ class Gate(torch.nn.Module):
             )
         if not self.irreps_in:
             return features
+        if self.backend == "cuda":
+            from ..kernels.gate import gate
+
+            return gate(features, self.cuda_program, self.irreps_out.dim)
         inputs = features.split(self._input_sizes, dim=-1)
         scalars = self.act_scalars(self._select_entries(inputs, self._selections[0]))
         if not self._paths:

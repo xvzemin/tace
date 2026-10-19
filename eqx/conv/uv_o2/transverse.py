@@ -6,16 +6,7 @@ import torch
 from e3nn import o3
 
 from ...co2 import SphericalCoupling
-
-
-def layout(irreps, transverse=False):
-    """Return angular widths, multiplicities and offsets for local entries."""
-    entries, offset = [], 0
-    for ir, mul in irreps:
-        dim = 2 * ir.m + 1 if transverse else ir.dim
-        entries.append((dim, mul, offset))
-        offset += dim * mul
-    return tuple(entries)
+from ...o2._layout import irrep_layout
 
 
 class TransverseFrame(torch.nn.Module):
@@ -37,7 +28,7 @@ class TransverseFrame(torch.nn.Module):
         self.irreps_in = frame.irreps_in
         self.input_dim = frame.input_dim
         self.irreps_out = frame.irreps_out
-        self.layout = layout(frame.irreps_out, True)
+        self.layout = irrep_layout(frame.irreps_out, True)
         self.output_dim = sum(dim * mul for dim, mul, _ in self.layout)
         self.couplings = torch.nn.ModuleDict()
         paths = [[], []]

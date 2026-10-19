@@ -48,6 +48,11 @@ Linear maps and activations
 .. autoclass:: eqx.o2.Gate
    :members: forward
 
+``Gate`` defaults to PyTorch. Set ``backend="cuda"`` to fuse scalar activation,
+odd-gate basis changes and channel-wise multiplication. SiLU, sigmoid, tanh and
+identity activations are supported, including second-moment normalization.
+See :ref:`equivariantx-api-tools` for an indexed-frame convolution example.
+
 Tensor products
 ---------------
 

@@ -5,11 +5,12 @@ from functools import lru_cache
 
 import torch
 
-from ...o2._layout import wigner_indices, wigner_orders
+from ...kernels.gate import gate_program
+from ...o2._layout import irrep_layout, wigner_indices, wigner_orders
 from ..attention import graph_softmax
 from ..edge import evaluate, evaluate_torch
-from ..program import Program, activate
-from .transverse import TransverseFrame, layout
+from ..program import Program
+from .transverse import TransverseFrame
 
 
 def frame_description(frame):
@@ -141,8 +142,10 @@ def linear_description(linear, transverse=False):
         for ins, (offset, _) in zip(linear._weight_instructions, linear._weight_offsets)
     )
     return (
-        layout(linear.irreps_in, transverse),
-        tuple((dim, mul) for dim, mul, _ in layout(linear.irreps_out, transverse)),
+        irrep_layout(linear.irreps_in, transverse),
+        tuple(
+            (dim, mul) for dim, mul, _ in irrep_layout(linear.irreps_out, transverse)
+        ),
         paths,
         tuple(linear._bias_offsets.items()),
     )
@@ -178,68 +181,6 @@ def linear(features, weight, bias, description):
                 value = value + bias[start : start + size]
         result.append(value.reshape(features.shape[0], dim * mul))
     return torch.cat(result, dim=-1)
-
-
-def gate_program(gate, transverse=False):
-    program = Program()
-    inputs = layout(gate.irreps_in, transverse)
-    features = program.input(0, "edge", sum(dim * mul for dim, mul, _ in inputs))
-    direction = program.input(1, "edge", 3) if transverse else None
-    scalars, gates = [], []
-    for locations, activation, outputs in (
-        (gate._scalar_locations, gate.act_scalars, scalars),
-        (gate._gate_locations, gate.act_gates, gates),
-    ):
-        for i, act in zip(locations, activation.acts):
-            dim, mul, start = inputs[i]
-            outputs.append(
-                activate(program, program.slice(features, start, dim * mul), act)
-            )
-    outputs = list(scalars)
-    for path in gate._paths:
-        dim, _, start = inputs[gate._gated_locations[path.i_gated]]
-        width = gate.irreps_gated[path.i_gated].mul
-        scalar = program.slice(gates[path.i_gate], path.gate_start, path.mul)
-        if transverse and path.ir_gate.is_odd_scalar() and path.ir_gated.m > 0:
-            from ...o3 import so3_generators
-
-            value = program.concatenate(
-                [
-                    program.slice(
-                        features, start + a * width + path.gated_start, path.mul
-                    )
-                    for a in range(dim)
-                ]
-            )
-            vector = program.gather(
-                direction, tuple(a for a in range(3) for _ in range(path.mul))
-            )
-            generator = so3_generators(path.ir_gated.m) / path.ir_gated.m
-            paths = tuple(
-                ((i, a, j), float(generator[a, j, i]))
-                for a, j, i in generator.nonzero().tolist()
-            )
-            value = program.product(
-                (value, vector, program.constant(dim * path.mul, 0)),
-                (path.mul, (dim, 3, dim), paths),
-                2,
-            )
-            outputs.append(
-                program.binary(
-                    "mul", value, program.gather(scalar, tuple(range(path.mul)) * dim)
-                )
-            )
-            continue
-        for a in range(dim):
-            odd = path.ir_gate.is_odd_scalar() and path.ir_gated.m > 0
-            b = 1 - a if odd else a
-            value = program.slice(
-                features, start + b * width + path.gated_start, path.mul
-            )
-            value = program.scale(value, -1 if odd and a == 0 else 1)
-            outputs.append(program.binary("mul", value, scalar))
-    output = program.concatenate(outputs)
-    return repr((tuple(program.nodes), ((output, 0, "edge"),)))
 
 
 class UvO2TensorProductConv(torch.nn.Module):
@@ -365,13 +306,15 @@ class UvO2TensorProductConv(torch.nn.Module):
     def prepare_program(self, local_dim, global_dim, packed=False, transverse=False):
         program = Program()
         if transverse:
-            width = sum(dim * mul for dim, mul, _ in layout(self.node_irreps, True))
+            width = sum(
+                dim * mul for dim, mul, _ in irrep_layout(self.node_irreps, True)
+            )
             source = program.input(0, "edge", width)
             target = program.input(1, "edge", width)
             magnetic = program.input(
                 2,
                 "edge",
-                sum(dim * mul for dim, mul, _ in layout(self.edge_irreps, True)),
+                sum(dim * mul for dim, mul, _ in irrep_layout(self.edge_irreps, True)),
             )
             weight = program.input(3, "edge", self.weight_numel)
         else:
@@ -424,7 +367,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                     if feature is None:
                         continue
                     for (ir_in, width), (_, _, start) in zip(
-                        irreps, layout(irreps, transverse)
+                        irreps, irrep_layout(irreps, transverse)
                     ):
                         if ir_in == ir:
                             values.append(
@@ -443,12 +386,14 @@ class UvO2TensorProductConv(torch.nn.Module):
 
     def score_program(self, transverse=False):
         program = Program()
-        width = sum(dim * mul for dim, mul, _ in layout(self.node_irreps, transverse))
+        width = sum(
+            dim * mul for dim, mul, _ in irrep_layout(self.node_irreps, transverse)
+        )
         query, key = [program.input(i, "edge", width) for i in (0, 1)]
         radial = program.input(2, "edge", 2 * self.num_heads)
         heads = tuple(
             c // (mul // self.num_heads)
-            for dim, mul, _ in layout(self.node_irreps, transverse)
+            for dim, mul, _ in irrep_layout(self.node_irreps, transverse)
             for _ in range(dim)
             for c in range(mul)
         )
@@ -470,13 +415,15 @@ class UvO2TensorProductConv(torch.nn.Module):
     @torch.compiler.assume_constant_result
     def output_program(self, local_dim, global_dim, packed=False, transverse=False):
         program = Program()
-        width = sum(dim * mul for dim, mul, _ in layout(self.irreps_out, transverse))
+        width = sum(
+            dim * mul for dim, mul, _ in irrep_layout(self.irreps_out, transverse)
+        )
         message = program.input(0, "edge", width)
         wigner = program.input(1, "edge", local_dim * global_dim)
         scale = program.input(2, "edge", self.num_heads if self.attention else 1)
         heads = tuple(
             c // (mul // self.num_heads) if self.attention else 0
-            for dim, mul, _ in layout(self.irreps_out, transverse)
+            for dim, mul, _ in irrep_layout(self.irreps_out, transverse)
             for _ in range(dim)
             for c in range(mul)
         )

@@ -237,6 +237,44 @@ class LocalFrame(torch.nn.Module):
             )
         self.register_buffer("_local_sign", torch.tensor(local_sign), persistent=False)
 
+        rotation_entries, matrix_offset = [], 0
+        for degree in self._degrees:
+            for entry in entries:
+                if entry.degree != degree or entry.mul == 0:
+                    continue
+                rows = []
+                for m, (index, section) in enumerate(
+                    zip(entry.local_indices, entry.local_slices)
+                ):
+                    for component in range(1 if m == 0 else 2):
+                        swapped = self.basis_change and entry.odd and m > 0
+                        row = (
+                            0
+                            if m == 0
+                            else 2 * m - 1 + (1 - component if swapped else component)
+                        )
+                        start = (
+                            local_slices[index].start
+                            + component * self.irreps_out[index].mul
+                            + section.start
+                        )
+                        rows.append(
+                            (start, row, -1 if swapped and component == 0 else 1)
+                        )
+                rotation_entries.append(
+                    (
+                        entry.global_slice.start,
+                        entry.mul,
+                        2 * degree + 1,
+                        matrix_offset,
+                        tuple(rows),
+                    )
+                )
+            matrix_offset += (2 * degree + 1) * (2 * min(degree, self.mmax) + 1)
+        self.rotation_layout = repr(
+            (self.input_dim, self.output_dim, matrix_offset, tuple(rotation_entries))
+        )
+
     def _rotation_matrices(self, wigner: torch.Tensor, inverse: bool = False):
         """Extract degree matrices from dense or packed Wigner storage."""
         if wigner.ndim == 2:
@@ -414,3 +452,84 @@ class LocalFrame(torch.nn.Module):
             if self._global_identity
             else _Permute.apply(features, self._global_inverse, self._global_index)
         )
+
+    def gather(
+        self,
+        features: torch.Tensor,
+        wigner: torch.Tensor,
+        index: torch.Tensor,
+        *,
+        backend: str = "torch",
+    ) -> torch.Tensor:
+        """Gather node features and rotate them into edge frames.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Node features of shape ``(num_nodes, irreps_in.dim)``.
+        wigner : torch.Tensor
+            Edge rotation matrices in the layout accepted by :meth:`to_local`.
+        index : torch.Tensor
+            Node indices of shape ``(num_edges,)``, with dtype ``int64``.
+        backend : {"torch", "cuda"}, optional
+            ``"cuda"`` combines gathering, rotation and the local basis change
+            without storing gathered global features. Requires CUDA float32
+            or float64 tensors and the CUDA toolkit.
+
+        Returns
+        -------
+        torch.Tensor
+            Edge features of shape ``(num_edges, irreps_out.dim)``.
+        """
+        if backend == "torch":
+            return self.to_local(features.index_select(0, index), wigner)
+        if backend != "cuda":
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        from ..kernels.frame import transform
+
+        return transform(self, features, wigner, index, features.size(0), False)
+
+    def scatter(
+        self,
+        features: torch.Tensor,
+        wigner_inv: torch.Tensor,
+        index: torch.Tensor,
+        num_nodes: int,
+        *,
+        backend: str = "torch",
+    ) -> torch.Tensor:
+        """Inverse-rotate edge features and sum them at nodes.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Edge features of shape ``(num_edges, irreps_out.dim)``.
+        wigner_inv : torch.Tensor
+            Edge rotation matrices in the layout accepted by :meth:`to_global`.
+            Packed matrices may be shared with :meth:`gather`.
+        index : torch.Tensor
+            Receiving node indices of shape ``(num_edges,)``, with dtype
+            ``int64``. The input edge order need not be sorted.
+        num_nodes : int
+            Number of output nodes, including nodes with no incident edges.
+        backend : {"torch", "cuda"}, optional
+            ``"cuda"`` accumulates inverse rotations at each node without
+            storing global edge messages. Requires CUDA float32 or float64
+            tensors and the CUDA toolkit.
+
+        Returns
+        -------
+        torch.Tensor
+            Node features of shape ``(num_nodes, irreps_in.dim)``. Truncated
+            local orders follow the inverse scaling of :meth:`to_global`.
+        """
+        if backend == "torch":
+            messages = self.to_global(features, wigner_inv)
+            return messages.new_zeros((num_nodes, self.input_dim)).index_add(
+                0, index, messages
+            )
+        if backend != "cuda":
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        from ..kernels.frame import transform
+
+        return transform(self, features, wigner_inv, index, num_nodes, True)
