@@ -6,6 +6,65 @@ from functools import lru_cache
 import torch
 
 from ..kernels.cuda import kernels, runtime
+from ..utils.metadata import parse_metadata
+
+
+def bilinear_terms(terms):
+    """Reuse input products across angular output components."""
+    products = defaultdict(list)
+    for destination, coefficient, left, right in terms:
+        products[left, right].append((destination, coefficient))
+    lines = []
+    for (left, right), outputs in products.items():
+        lines.append(f"{{ scalar product={left}*{right};")
+        for destination, coefficient in outputs:
+            lines.append(f"{destination}+=scalar({coefficient:.17g})*product;")
+        lines.append("}")
+    return lines
+
+
+@lru_cache(maxsize=128)
+def component_source(dtype, dims, role, groups):
+    """Evaluate all independent components of a Cartesian output together."""
+    blocks = defaultdict(list)
+    for _, entries in groups:
+        for r, coefficient in entries:
+            if len(r) != 12:
+                return None
+            blocks[r[9 + role], r[4], r[6 + role]].append((r, coefficient))
+    if not blocks:
+        return None
+    scalar = "double" if dtype == torch.float64 else "float"
+    cases = []
+    for index, ((offset, channels, stride), entries) in enumerate(blocks.items()):
+        lines = [
+            f"case {index}: {{ if(index>=nodes*{channels}) return;",
+            f"long long n=index/{channels}; int c=index%{channels};",
+            f"scalar values[{stride}]={{}};",
+        ]
+        terms = []
+        for r, coefficient in entries:
+            operands = [
+                f"p{i}[n*{dims[i]}+{r[i]}+c*{r[6 + i]}]" for i in range(3) if i != role
+            ]
+            terms.append((f"values[{r[role] - offset}]", coefficient, *operands))
+        lines.extend(bilinear_terms(terms))
+        lines.append(
+            f"for(int m=0;m<{stride};++m) "
+            f"out[n*{dims[role]}+{offset}+c*{stride}+m]+=values[m]; return; }}"
+        )
+        cases.append("\n".join(lines))
+    return (
+        f"""using scalar={scalar};
+        extern "C" __global__ void run(const scalar* p0, const scalar* p1,
+            const scalar* p2, const scalar* p3, const long long* types,
+            scalar* out, long long nodes) {{
+            long long index=(long long)blockIdx.x*blockDim.x+threadIdx.x;
+            switch(blockIdx.y) {{ {"".join(cases)} }}
+        }}""",
+        max(key[1] for key in blocks),
+        len(blocks),
+    )
 
 
 @lru_cache(maxsize=128)
@@ -36,12 +95,19 @@ def weighted_source(dtype, dims, schedules, roles):
                 f"int u=q%{ci}; long long n=n0+q/{ci}; scalar a[{nz}]={{}};",
                 "if(n<nodes) {",
             ]
-            for r, coefficient in entries:
-                parts.append(
-                    f"a[{r[3] - so}]+=scalar({coefficient:.17g})*"
-                    f"p0[n*{dims[0]}+{r[0]}+u*{dx}]*"
-                    f"p1[n*{dims[1]}+{r[1]}+u*{dy}];"
+            parts.extend(
+                bilinear_terms(
+                    [
+                        (
+                            f"a[{r[3] - so}]",
+                            coefficient,
+                            f"p0[n*{dims[0]}+{r[0]}+u*{dx}]",
+                            f"p1[n*{dims[1]}+{r[1]}+u*{dy}]",
+                        )
+                        for r, coefficient in entries
+                    ]
                 )
+            )
             parts += [
                 "}",
                 f"for(int m=0;m<{nz};++m) tile[q*{nz}+m]=a[m]; }}",
@@ -200,8 +266,56 @@ def source(dtype, dims, weighted, role, groups):
     """
 
 
+@lru_cache(maxsize=256)
+def execution_plan(metadata, program, dtype, device):
+    """Compile fixed contraction schedules independently of the node count."""
+    dims, weighted, schedules = parse_metadata(metadata)
+    grouped = defaultdict(list)
+    for mapping, role, slot in parse_metadata(program):
+        grouped[mapping, 0 if role in (0, 1) else role].append((role, slot))
+    jobs = []
+    for (mapping, _), terms in grouped.items():
+        roles = tuple(sorted(role for role, _ in terms))
+        # Mixed higher derivatives can contribute more than once to a role.
+        tiled = (
+            weighted_source(dtype, dims, schedules, roles)
+            if weighted
+            and len(set(roles)) == len(roles)
+            and (all(role in (0, 1) for role in roles) or len(roles) == 1)
+            else None
+        )
+        if tiled is not None:
+            code, count, rows = tiled
+            destinations = dict(terms)
+            jobs.append(
+                (
+                    code,
+                    mapping,
+                    tuple(destinations[role] for role in roles),
+                    rows,
+                    1,
+                    count,
+                )
+            )
+            continue
+        for role, slot in terms:
+            groups = schedules[role]
+            if not groups:
+                continue
+            compact = (
+                component_source(dtype, dims, role, groups) if not weighted else None
+            )
+            if compact is None:
+                code = source(dtype, dims, weighted, role, groups)
+                width, count = max(key[1] for key, _ in groups), len(groups)
+            else:
+                code, width, count = compact
+            jobs.append((code, mapping, (slot,), 128, width, count))
+    compiled = kernels([job[0] for job in jobs], device)
+    return tuple((compiled[code], *job) for code, *job in jobs)
+
+
 def launch(metadata, program, node_type, operands, outputs):
-    dims, weighted, schedules = metadata
     if operands[0].dtype not in (torch.float32, torch.float64):
         raise TypeError("ACE CUDA kernels support float32 and float64.")
     operands = [value.contiguous() for value in operands]
@@ -211,41 +325,24 @@ def launch(metadata, program, node_type, operands, outputs):
     if not node_type.numel():
         return
     device = operands[0].device
-    grouped = defaultdict(list)
-    for mapping, role, slot in program:
-        grouped[mapping, 0 if role in (0, 1) else role].append((role, slot))
-    jobs = []
-    for (mapping, _), terms in grouped.items():
-        roles = tuple(sorted(role for role, _ in terms))
-        # Mixed higher derivatives can contribute more than once to a role.
-        tiled = (
-            weighted_source(operands[0].dtype, dims, schedules, roles)
-            if weighted
-            and len(set(roles)) == len(roles)
-            and (all(role in (0, 1) for role in roles) or len(roles) == 1)
-            else None
-        )
-        if tiled is not None:
-            code, count, rows = tiled
-            destinations = dict(terms)
-            args = [operands[i].data_ptr() for i in mapping]
-            args += [node_type.data_ptr()]
-            args += [outputs[destinations[role]].data_ptr() for role in roles]
-            args += [node_type.numel()]
-            jobs.append((code, args, (node_type.numel() + rows - 1) // rows, count))
-            continue
-        for role, slot in terms:
-            groups = schedules[role]
-            if not groups:
-                continue
-            code = source(operands[0].dtype, dims, weighted, role, groups)
-            width = max(key[1] for key, _ in groups)
-            args = [operands[i].data_ptr() for i in mapping]
-            args += [0] * (4 - len(args))
-            args += [node_type.data_ptr(), outputs[slot].data_ptr(), node_type.numel()]
-            jobs.append(
-                (code, args, (node_type.numel() * width + 127) // 128, len(groups))
+    plan = execution_plan(metadata, program, operands[0].dtype, device)
+    launches = []
+    for kernel, mapping, slots, rows, width, count in plan:
+        args = [operands[i].data_ptr() for i in mapping]
+        args += [0] * (4 - len(args))
+        args += [
+            node_type.data_ptr(),
+            *(outputs[slot].data_ptr() for slot in slots),
+            node_type.numel(),
+        ]
+        launches.append(
+            (
+                kernel,
+                args,
+                (node_type.numel() * width + rows - 1) // rows,
+                count,
+                128,
+                0,
             )
-    compiled = kernels([job[0] for job in jobs], device)
-    launches = [(compiled[code], args, nx, ny, 128, 0) for code, args, nx, ny in jobs]
+        )
     runtime().launch(launches, torch.cuda.current_stream(device).cuda_stream)

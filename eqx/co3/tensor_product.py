@@ -10,7 +10,9 @@ from e3nn import o3
 
 from .basis import Projector, path_matrix
 from .basis import path_normalization as coupling_scale
+from .compact import Contraction
 from .irreps import Irreps
+from .trace_free import TraceFreeBasis
 
 
 def cartesian_product(x, y, l1, l2, l3):
@@ -87,6 +89,7 @@ class TensorProduct(torch.nn.Module):
     Inputs must be symmetric traceless. Each path includes the analytic
     Cartesian-to-CG scale. Repeated output irreps are not regrouped or merged.
     Compatible unweighted channel-wise paths are evaluated in batches.
+    Projected channel-wise paths use independent Cartesian intermediates.
     Unprojected outputs must be projected before another tensor product or
     a nonlinear operation.
     """
@@ -272,6 +275,20 @@ class TensorProduct(torch.nn.Module):
             ),
             persistent=False,
         )
+        self.compact = (
+            self.grouped
+            and self.project
+            and any(
+                ir.l >= 2
+                for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+                for _, ir in irreps
+            )
+        )
+        if self.compact:
+            self.input_basis1 = TraceFreeBasis(self.irreps_in1)
+            self.input_basis2 = TraceFreeBasis(self.irreps_in2)
+            self.output_basis = TraceFreeBasis(self.irreps_out)
+            self.contraction = Contraction(self)
 
     def forward(self, x, y, weight=None):
         """Evaluate the Cartesian tensor product.
@@ -300,6 +317,14 @@ class TensorProduct(torch.nn.Module):
             raise ValueError("Shared weights must be one-dimensional.")
         shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
         zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
+        if self.compact:
+            values = self.contraction(
+                self.input_basis1.pack(x), self.input_basis2.pack(y)
+            )
+            return (
+                self.output_basis.unpack(values).expand(*shape, self.irreps_out.dim)
+                + zero
+            )
         outputs = [None] * len(self.irreps_out)
         inputs = [
             [

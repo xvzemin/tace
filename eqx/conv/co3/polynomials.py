@@ -2,11 +2,11 @@
 
 import math
 from collections import defaultdict
-from fractions import Fraction
 from functools import lru_cache
 from itertools import product
 
 from ...co3.symmetric import symmetric_powers
+from ...co3.trace_free import trace_free_polynomial
 
 ANGULAR_TILE_SIZE = 27
 FUSED_TILE_LIMIT = 16
@@ -314,27 +314,9 @@ def harmonic_polynomial(counts, normalization):
         scale *= math.sqrt((2 * degree + 1) / (4 * math.pi))
     elif normalization != "norm":
         raise ValueError("normalization must be integral, component or norm.")
-    terms = defaultdict(Fraction)
-    for pairs in product(*(range(n // 2 + 1) for n in counts)):
-        k = sum(pairs)
-        coefficient = Fraction(
-            (-1) ** k, math.prod(range(2 * degree - 2 * k + 1, 2 * degree, 2))
-        )
-        for n, t in zip(counts, pairs):
-            coefficient *= math.factorial(n) // (
-                math.factorial(n - 2 * t) * 2**t * math.factorial(t)
-            )
-        for a in range(k + 1):
-            for b in range(k - a + 1):
-                powers = tuple(
-                    n - 2 * t + 2 * p
-                    for n, t, p in zip(counts, pairs, (a, b, k - a - b))
-                )
-                terms[powers] += coefficient * math.comb(k, a) * math.comb(k - a, b)
     return tuple(
         (powers, float(value) * scale)
-        for powers, value in sorted(terms.items())
-        if value
+        for powers, value in trace_free_polynomial(counts)
     )
 
 

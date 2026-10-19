@@ -16,6 +16,9 @@ Representations
 .. autoclass:: eqx.co3.Irreps
    :members:
 
+.. autoclass:: eqx.co3.TraceFreeBasis
+   :members: pack, unpack
+
 Harmonics
 ---------
 

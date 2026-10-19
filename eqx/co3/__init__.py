@@ -10,12 +10,14 @@ from .tensor_product import (
     FullyConnectedTensorProduct,
     TensorProduct,
 )
+from .trace_free import TraceFreeBasis
 
 __all__ = [
     "Irrep",
     "Irreps",
     "ChangeOfBasis",
     "Projector",
+    "TraceFreeBasis",
     "path_matrix",
     "path_normalization",
     "CartesianHarmonics",

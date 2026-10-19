@@ -4,7 +4,68 @@ import pytest
 import torch
 from e3nn import o3
 
+from eqx import co3
 from eqx.ace import TACE
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_cartesian_compact_ace(backend, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.manual_seed(42)
+    torch.set_default_dtype(dtype)
+    irreps = co3.Irreps("2x0e+2x1o+2x1e+2x2e")
+    instructions = [
+        (i, j, k, "uuu", False)
+        for i, (_, a) in enumerate(irreps)
+        for j, (_, b) in enumerate(irreps)
+        for k, (_, c) in enumerate(irreps)
+        if c in a * b
+    ]
+    tp = co3.TensorProduct(irreps, irreps, irreps, instructions).cuda()
+    linears = [
+        co3.Linear(
+            irreps, "3x0e+3x1o+3x1e+3x2e", internal_weights=False, shared_weights=False
+        ).cuda()
+        for _ in range(3)
+    ]
+    module = TACE([tp, tp], linears, backend=backend).cuda()
+    x = torch.randn(4, irreps.spherical().dim, device="cuda", requires_grad=True)
+    features = co3.ChangeOfBasis(irreps).cuda()(x)
+    types = torch.tensor([0, 1, 1, 0], device="cuda")
+    weights = [
+        torch.randn(2, lin.weight_numel, device="cuda", requires_grad=True)
+        for lin in linears
+    ]
+    actual = module(features, weights, types)
+    # Keep an independent full-coordinate Cartesian reference.
+    tp.compact = False
+    expected = linears[0](features, weights[0][types])
+    corr = features
+    for linear, weight in zip(linears[1:], weights[1:]):
+        corr = tp(corr, features)
+        expected = expected + linear(corr, weight[types])
+    atol, rtol = (2e-11, 2e-11) if dtype == torch.float64 else (3e-5, 3e-5)
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+    losses = [value.sin().sum() for value in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, *weights), create_graph=True)
+            for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=atol * 10, rtol=rtol * 10)
+        losses = [sum(g.square().sum() for g in values) / 100 for values in gradients]
+    assert module(features[:0], weights, types[:0]).shape == (
+        0,
+        linears[0].irreps_out.dim,
+    )
+    assert not module.state_dict()
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(
+        compiled(features, weights, types), expected, atol=atol, rtol=rtol
+    )
 
 
 def test_native_cuda_graph_ace(monkeypatch):

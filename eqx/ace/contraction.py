@@ -20,7 +20,7 @@ def contract(
     terms = parse_metadata(program)
 
     def run(inputs, outputs):
-        launch(parse_metadata(metadata), terms, inputs[0], inputs[1:], outputs)
+        launch(metadata, program, inputs[0], inputs[1:], outputs)
 
     read = {0}
     for mapping, output, _ in terms:

@@ -35,6 +35,56 @@ def test_irreps_and_basis(double_precision):
     assert irreps.randn(0, -1, device=DEVICE).shape == (0, irreps.dim)
 
 
+@pytest.mark.parametrize("degree", [0, 2, 4, 6])
+def test_trace_free_basis(double_precision, degree):
+    irreps = co3.Irreps(
+        [(2, (degree, (-1) ** degree)), (1, (degree, -((-1) ** degree)))]
+    )
+    basis = co3.TraceFreeBasis(irreps).float().to(device=DEVICE, dtype=torch.float64)
+    x = torch.randn(3, irreps.spherical().dim, device=DEVICE, requires_grad=True)
+    full = co3.ChangeOfBasis(irreps).to(DEVICE)(x)
+    compact = basis.pack(full)
+    assert compact.shape == (3, 3 * (2 * degree + 1))
+    actual = basis.unpack(compact)
+    torch.testing.assert_close(actual, full, atol=2e-13, rtol=2e-13)
+    seed = torch.randn_like(full)
+    gradients = [
+        torch.autograd.grad((value * seed).sum(), x, retain_graph=True)[0]
+        for value in (actual, full)
+    ]
+    torch.testing.assert_close(*gradients, atol=3e-13, rtol=3e-13)
+    assert basis.unpack(basis.pack(full[:0])).shape == full[:0].shape
+    assert not basis.state_dict()
+
+
+@pytest.mark.parametrize("degrees", [(4, 3, 4), (5, 4, 3), (5, 5, 5)])
+def test_trace_free_tensor_product(double_precision, degrees):
+    l1, l2, l3 = degrees
+    a, b, c = f"2x{l1}e", f"2x{l2}e", f"2x{l3}e"
+    instructions = [(0, 0, 0, "uuu", False)]
+    module = (
+        co3.TensorProduct(a, b, c, instructions)
+        .float()
+        .to(device=DEVICE, dtype=torch.float64)
+    )
+    reference = o3.TensorProduct(a, b, c, instructions).to(DEVICE)
+    x = torch.randn(2, 2 * (2 * l1 + 1), device=DEVICE, requires_grad=True) / 10
+    y = torch.randn(2, 2 * (2 * l2 + 1), device=DEVICE, requires_grad=True) / 10
+    actual = co3.ChangeOfBasis(c, inverse=True).to(DEVICE)(
+        module(co3.ChangeOfBasis(a).to(DEVICE)(x), co3.ChangeOfBasis(b).to(DEVICE)(y))
+    )
+    expected = reference(x, y)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-11)
+    losses = [value.square().sum() for value in (actual, expected)]
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(loss, (x, y), create_graph=True) for loss in losses
+        ]
+        for left, right in zip(*gradients):
+            torch.testing.assert_close(left, right, atol=1e-11, rtol=1e-10)
+        losses = [sum(g.square().sum() for g in values) for values in gradients]
+
+
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
 @pytest.mark.parametrize("normalize", [False, True])
 def test_harmonics(double_precision, normalization, normalize):
