@@ -136,9 +136,38 @@ def evaluate(
             output.zero_()
     if source.numel() and outputs:
         if uses_matrix_products(metadata):
-            launch = launch_tiled
-        launch(metadata, inputs, source.contiguous(), target.contiguous(), outputs)
+            launch_tiled(
+                metadata, inputs, source.contiguous(), target.contiguous(), outputs
+            )
+        else:
+            launch(
+                metadata,
+                inputs,
+                source.contiguous(),
+                target.contiguous(),
+                outputs,
+                mode=execution_mode(metadata),
+            )
     return outputs
+
+
+@lru_cache(maxsize=256)
+def execution_mode(metadata):
+    """Select element-wise execution or a narrow node reduction."""
+    nodes, outputs = parse_metadata(metadata)
+    if any(
+        op in ("product", "matmul", "normalize", "inv_norm", "mean", "rsqrt")
+        or op == "scatter"
+        and nodes[args[0]][1] > 32
+        for op, _, args, _ in nodes
+    ):
+        return "edge"
+    if all(kind == "edge" for _, _, kind in outputs):
+        return "pointwise"
+    if len(outputs) == 1 and outputs[0][2] in ("source", "target"):
+        if nodes[outputs[0][0]][1] <= 32:
+            return "node"
+    return "edge"
 
 
 @lru_cache(maxsize=256)

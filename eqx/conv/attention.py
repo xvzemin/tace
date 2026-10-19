@@ -252,8 +252,192 @@ def setup_context(ctx, inputs, output):
     ctx.save_for_backward(output, weight, target)
 
 
+@lru_cache(maxsize=32)
+def adjoint_program(heads, weight_heads):
+    """Build the grouped dot product and normalized-exponential adjoints."""
+    from .program import Program
+
+    program = Program()
+    exp = program.input(0, "edge", heads)
+    grad = program.input(1, "edge", heads)
+    dot = program.binary("mul", exp, grad)
+    reduction = repr((tuple(program.nodes), ((dot, 0, "target"),)))
+
+    weight = program.input(2, "edge", weight_heads)
+    total = program.input(3, "target", heads)
+    broadcast = program.gather(weight, (0,) * heads) if weight_heads == 1 else weight
+    grad_scores = program.binary(
+        "mul",
+        exp,
+        program.binary(
+            "add", grad, program.scale(program.binary("mul", broadcast, total), -1)
+        ),
+    )
+    grad_weight = program.scale(program.binary("mul", exp, total), -1)
+    if weight_heads == 1 and heads != 1:
+        grad_weight = program.scatter(grad_weight, (0,) * heads, 1)
+    pointwise = repr(
+        (
+            tuple(program.nodes),
+            (
+                (grad_scores, 0, "edge"),
+                (grad_weight, 1, "edge"),
+            ),
+        )
+    )
+    return reduction, pointwise
+
+
+@lru_cache(maxsize=32)
+def adjoint_source(dtype, heads, weight_heads):
+    """Generate a node-wise kernel for score and weight adjoints."""
+    scalar = "double" if dtype == torch.float64 else "float"
+    columns = 1 << (heads - 1).bit_length()
+    reduce_weight = (
+        f"for(int step={columns // 2};step;step/=2) "
+        f"dw+=__shfl_down_sync(0xffffffffu,dw,step,{columns});"
+        if weight_heads == 1
+        else ""
+    )
+    return f"""
+using T={scalar};
+extern "C" __global__ void run(const T* values,const T* grad,const T* weight,
+    const long long* order,const long long* ptr,T* grad_scores,T* grad_weight,
+    T* totals,long long nodes) {{
+  const long long node=(long long)blockIdx.x*4+threadIdx.x/32;
+  if(node>=nodes) return;
+  const int lane=threadIdx.x%32, head=lane%{columns};
+  const long long begin=ptr[node], end=ptr[node+1];
+  T total=0;
+  if(head<{heads}) {{
+    for(long long k=begin+lane/{columns};k<end;k+={32 // columns}) {{
+      const long long index=order[k]*{heads}+head;
+      total+=values[index]*grad[index];
+    }}
+  }}
+  for(int step={columns};step<32;step*=2)
+    total+=__shfl_xor_sync(0xffffffffu,total,step);
+  if(lane<{heads}) totals[node*{heads}+head]=total;
+  for(long long k=begin;k<end;k+={32 // columns}) {{
+    const long long offset=k+lane/{columns};
+    const long long edge=offset<end ? order[offset] : 0;
+    T dw=0;
+    if(offset<end && head<{heads}) {{
+      const long long index=edge*{heads}+head;
+      grad_scores[index]=values[index]*(grad[index]-weight[edge*{weight_heads}+{0 if weight_heads == 1 else "head"}]*total);
+      dw=-values[index]*total;
+    }}
+    {reduce_weight}
+    if(offset<end && head<{weight_heads}) grad_weight[edge*{weight_heads}+head]=dw;
+  }}
+}}
+"""
+
+
+@torch.library.custom_op(
+    "eqx::graph_normalized_exp_adjoint", mutates_args=(), device_types="cuda"
+)
+def evaluate_adjoint(
+    values: torch.Tensor,
+    grad: torch.Tensor,
+    weight: torch.Tensor,
+    target: torch.Tensor,
+    num_nodes: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from ..kernels.cuda import kernels, runtime
+
+    if not 1 <= values.shape[1] <= 32:
+        raise ValueError("The fused attention adjoint supports 1 to 32 heads.")
+    outputs = adjoint_fake(values, grad, weight, target, num_nodes)
+    if not num_nodes:
+        return outputs
+    values, grad, weight = (x.contiguous() for x in (values, grad, weight))
+    order, ptr = prepare_graph(target, target, 1, num_nodes)
+    code = adjoint_source(values.dtype, values.shape[1], weight.shape[1])
+    kernel = kernels([code], values.device)[code]
+    runtime().launch(
+        [
+            (
+                kernel,
+                [x.data_ptr() for x in (values, grad, weight, order, ptr, *outputs)]
+                + [num_nodes],
+                (num_nodes + 3) // 4,
+                1,
+                128,
+                0,
+            )
+        ],
+        torch.cuda.current_stream(values.device).cuda_stream,
+    )
+    return outputs
+
+
+@evaluate_adjoint.register_fake
+def adjoint_fake(values, grad, weight, target, num_nodes):
+    return (
+        torch.empty_like(values, memory_format=torch.contiguous_format),
+        torch.empty_like(weight, memory_format=torch.contiguous_format),
+        values.new_empty((num_nodes, values.shape[1])),
+    )
+
+
+def adjoint_setup_context(ctx, inputs, output):
+    values, grad, weight, target, ctx.num_nodes = inputs
+    ctx.save_for_backward(values, grad, weight, target, output[2])
+    ctx.set_materialize_grads(False)
+
+
+def adjoint_backward(ctx, grad_scores, grad_weight, grad_total):
+    from ..utils.metadata import parse_metadata
+    from .edge import evaluate
+    from .program import next_adjoint
+
+    values, grad, weight, target, total = ctx.saved_tensors
+    reduction, pointwise = adjoint_program(int(values.shape[1]), int(weight.shape[1]))
+    seeds = tuple(i for i, x in enumerate((grad_scores, grad_weight)) if x is not None)
+    active = tuple(i for i in range(3) if ctx.needs_input_grad[i])
+    dot_active = tuple(i for i in active if i < 2)
+    results = [None] * 3
+    if seeds:
+        metadata = next_adjoint(
+            pointwise, active + ((3,) if dot_active else ()), seeds, 4
+        )
+        operands = [values, grad, weight, total]
+        operands.extend(x for x in (grad_scores, grad_weight) if x is not None)
+        adjoints = evaluate(metadata, operands, target, target, ctx.num_nodes)
+        slots = sorted({slot for _, slot, _ in parse_metadata(metadata)[1]})
+        for slot, value in zip(slots, adjoints):
+            if slot == 3:
+                grad_total = value if grad_total is None else grad_total + value
+            else:
+                results[slot] = value
+    if grad_total is not None and dot_active:
+        metadata = next_adjoint(reduction, dot_active, (0,), 2)
+        dot_results = evaluate(
+            metadata, [values, grad, grad_total], target, target, ctx.num_nodes
+        )
+        for i, value in zip(dot_active, dot_results):
+            results[i] = value if results[i] is None else results[i] + value
+    return *results, None, None
+
+
+evaluate_adjoint.register_autograd(
+    adjoint_backward, setup_context=adjoint_setup_context
+)
+
+
 def backward(ctx, grad):
     exp, weight, target = ctx.saved_tensors
+    # Keep small reductions and compiler-fused pointwise operations native.
+    if (
+        not torch.compiler.is_compiling()
+        and 8 <= exp.shape[1] <= 32
+        and exp.numel() >= 8_000_000
+    ):
+        grad_scores, grad_weight, _ = evaluate_adjoint(
+            exp, grad, weight, target, ctx.num_nodes
+        )
+        return grad_scores, grad_weight, None, None, None
     reduction = grad.new_zeros((ctx.num_nodes, grad.shape[1])).index_add(
         0, target, grad * exp
     )

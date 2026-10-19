@@ -63,7 +63,7 @@ def source(
         # them into each edge's workspace dominates wide derivative programs.
         and (dependent[i] or nodes[i][1] <= 256)
     }
-    if mode in ("pointwise", "row"):
+    if mode in ("pointwise", "row", "node"):
         stored = set()
     order = sorted(stored)
     position = {i: k for k, i in enumerate(order)}
@@ -370,16 +370,50 @@ def source(
         }}"""
         count_outputs = 1
     elif mode == "pointwise":
-        root, slot, kind = outputs[0]
-        if len(outputs) != 1 or kind != "edge":
-            raise ValueError("Pointwise programs require one edge output.")
-        width = nodes[root][1]
+        destinations = sorted(set(slot for _, slot, _ in outputs))
+        if any(kind != "edge" for _, _, kind in outputs):
+            raise ValueError("Pointwise programs require edge outputs.")
+        width = max(nodes[root][1] for root, _, _ in outputs)
+        writes = []
+        for root, slot, _ in outputs:
+            size = nodes[root][1]
+            assign = "=" if sum(s == slot for _, s, _ in outputs) == 1 else "+="
+            writes.append(
+                f"if(i<{size}) out{destinations.index(slot)}[edge*{size}+i]"
+                f"{assign}state.v{root}(i);"
+            )
         body = f"""
         for(long long k=(long long)blockIdx.x*blockDim.x+threadIdx.x;k<count*{width};k+=(long long)blockDim.x*gridDim.x) {{
           long long edge=k/{width}; int i=k%{width};
           State state{{{initializer}, nullptr, edge, source[edge], target[edge]}};
-          out0[k]=state.v{root}(i);
+          {"".join(writes)}
         }}"""
+        count_outputs = len(destinations)
+    elif mode == "node":
+        root, _, kind = outputs[0]
+        if len(outputs) != 1 or kind not in ("source", "target"):
+            raise ValueError("Node reductions require one source or target output.")
+        width = nodes[root][1]
+        if width > 32:
+            raise ValueError("Node reductions support at most 32 channels.")
+        columns = 1 << (max(1, width) - 1).bit_length()
+        body = f"""
+        const long long node=(long long)blockIdx.x*4+threadIdx.x/32;
+        const int lane=threadIdx.x%32;
+        if(node>=count) return;
+        const int i=lane%{columns};
+        scalar value=0;
+        if(i<{width}) {{
+          for(long long j=ptr[node]+lane/{columns};j<ptr[node+1];j+={32 // columns}) {{
+            const long long edge=order[j];
+            State state{{{initializer}, nullptr, edge, source[edge], target[edge]}};
+            value+=state.v{root}(i);
+          }}
+        }}
+        for(int stride=16;stride>={columns};stride/=2)
+          value+=__shfl_down_sync(0xffffffffu,value,stride);
+        if(lane<{width}) out0[node*{width}+i]+=value;
+        """
         count_outputs = 1
     else:
         destinations = sorted(set(slot for _, slot, _ in outputs))
@@ -459,8 +493,15 @@ def launch(
     ):
         raise ValueError("Edge indices and features must be on the same device.")
     online = mode == "online"
-    count = inputs[0].shape[0] if online else source_index.numel()
-    if not count:
+    node_reduction = mode == "node"
+    count = (
+        outputs[0].shape[0]
+        if node_reduction
+        else inputs[0].shape[0]
+        if online
+        else source_index.numel()
+    )
+    if not count or not any(output.numel() for output in outputs):
         return
     processors = torch.cuda.get_device_properties(
         inputs[0].device
@@ -486,14 +527,19 @@ def launch(
     # Overflow storage remains bounded by the device, not the edge count.
     # Give every SM work instead of serializing wide programs onto 32 blocks.
     blocks = tasks if shared else min(tasks, 2 * processors)
+    if mode == "pointwise":
+        nodes, descriptions = parse_metadata(metadata)
+        width = max(nodes[root][1] for root, _, _ in descriptions)
+        threads = 256
+        blocks = max(1, min((count * width + threads - 1) // threads, 16 * processors))
+    elif node_reduction:
+        threads = 128
+        blocks = (count + 3) // 4
     workspace = None if shared else inputs[0].new_empty((blocks, storage))
     order = ptr = None
-    if online:
-        order = prepare_graph(source_index, target_index, 1)
-        counts = target_index.new_zeros(count).index_add(
-            0, target_index, torch.ones_like(target_index)
-        )
-        ptr = torch.cat((target_index.new_zeros(1), counts.cumsum(0)))
+    if online or node_reduction:
+        owner = 1 if online else int(parse_metadata(metadata)[1][0][2] == "target")
+        order, ptr = prepare_graph(source_index, target_index, owner, count)
     partials = outputs
     if splits > 1:
         partials = [

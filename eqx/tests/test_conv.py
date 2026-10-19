@@ -3146,20 +3146,22 @@ def test_graph_reduction(heads, weighted, double_precision):
 
 
 @pytest.mark.parametrize("heads,weight_heads", [(1, 1), (3, 1), (3, 3), (8, 8)])
-def test_graph_softmax_derivatives(heads, weight_heads, double_precision):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_graph_softmax_derivatives(heads, weight_heads, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx.conv.attention import graph_softmax, normalized_exp_forward
 
-    target = torch.randint(4, (73,), device="cuda")
-    scores = torch.randn(73, heads, device="cuda", requires_grad=True)
-    weight = torch.rand(73, weight_heads, device="cuda")
+    target = torch.randint(4, (146,), device="cuda")[::2]
+    scores = torch.randn(73, heads, device="cuda", dtype=dtype, requires_grad=True)
+    weight = torch.rand(73, weight_heads, device="cuda", dtype=dtype)
     weight[::7] = 0
     weight.requires_grad_()
     actual = graph_softmax(scores, target, 6, weight, eps=1e-8)
     expected = graph_softmax(scores, target, 6, weight, eps=1e-8, fused=False)
+    tolerance = 3e-5 if dtype == torch.float32 else 2e-10
     for _ in range(3):
-        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
         seed = torch.randn_like(actual)
         a = torch.autograd.grad(
             (actual.sin() * seed).sum(), (scores, weight), create_graph=True
@@ -3170,7 +3172,7 @@ def test_graph_softmax_derivatives(heads, weight_heads, double_precision):
         actual, expected = (
             torch.cat([x.flatten() for x in values]) for values in (a, b)
         )
-    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
     denominator = scores.new_empty(6, heads)
     maximum = torch.empty_like(denominator)
     with torch.no_grad():
@@ -3179,6 +3181,69 @@ def test_graph_softmax_derivatives(heads, weight_heads, double_precision):
         )
     torch.testing.assert_close(denominator, torch.full_like(denominator, 1e-8))
     torch.testing.assert_close(maximum, torch.zeros_like(maximum))
+
+
+@pytest.mark.parametrize("heads,weight_heads", [(3, 1), (8, 8), (32, 1)])
+@pytest.mark.parametrize("output", [0, 1, 2])
+def test_graph_softmax_adjoint(heads, weight_heads, output, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.attention import evaluate_adjoint
+
+    target = torch.randint(4, (73,), device="cuda")
+    inputs = [
+        (0.1 * torch.randn(73, width, device="cuda")).requires_grad_()
+        for width in (heads, heads, weight_heads)
+    ]
+    values, grad, weight = inputs
+    total = values.new_zeros(6, heads).index_add(0, target, values * grad)
+    expected = (
+        values * (grad - weight * total[target]),
+        (-values * total[target]).sum_to_size(weight.shape),
+        total,
+    )[output]
+    actual = evaluate_adjoint(*inputs, target, 6)[output]
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        seed = torch.randn_like(actual)
+        results = [
+            torch.autograd.grad(
+                (x.sin() * seed).sum(), inputs, create_graph=True, allow_unused=True
+            )
+            for x in (actual, expected)
+        ]
+        actual, expected = (
+            torch.cat(
+                [
+                    (torch.zeros_like(x) if value is None else value).flatten()
+                    for x, value in zip(inputs, result)
+                ]
+            )
+            for result in results
+        )
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+
+
+def test_graph_softmax_compile(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.attention import graph_softmax
+
+    function = torch.compile(
+        graph_softmax, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for edges in (7, 13, 0):
+        scores = torch.randn(edges, 3, device="cuda", requires_grad=True)
+        weights = torch.rand(edges, 1, device="cuda", requires_grad=True)
+        target = torch.randint(4, (edges,), device="cuda")
+        actual = function(scores, target, 6, weights)
+        expected = graph_softmax(scores, target, 6, weights, fused=False)
+        torch.testing.assert_close(actual, expected)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), (scores, weights)),
+            torch.autograd.grad(expected.square().sum(), (scores, weights)),
+        ):
+            torch.testing.assert_close(a, b)
 
 
 @pytest.mark.parametrize("degree", [0, 1, 3, 6])
