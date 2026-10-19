@@ -27,29 +27,6 @@ TACE_AOTI_FORMAT = "tace_graph_v1"
 ASE_AOTI_FORMAT = "tace_ase_v1"
 LAMMPS_AOTI_FORMAT = "tace_lammps_v1"
 TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY = "tace_custom_ops_libs.txt"
-EQX_CUSTOM_OPS_MODULES = {
-    "eqx::ace_contract": "eqx.ace.contraction",
-    "eqx::alignment_cuda": "eqx.kernels.wigner",
-    "eqx::bilinear_ace": "eqx.models.tace.tece_oam_rra.bilinear_contraction",
-    "eqx::contraction": "eqx.conv.o2_o3.convolution",
-    "eqx::direction_contraction": "eqx.conv.o2_o3.geometry",
-    "eqx::edge_program": "eqx.conv.edge",
-    "eqx::element_linear": "eqx.o3.contraction",
-    "eqx::frame_rotation": "eqx.kernels.rotation",
-    "eqx::gather_sum": "eqx.kernels.layout",
-    "eqx::graph_normalized_exp": "eqx.conv.attention",
-    "eqx::grouped_permute": "eqx.kernels.layout",
-    "eqx::indexed_sum": "eqx.kernels.layout",
-    "eqx::local_channel_product": "eqx.kernels.channel_product",
-    "eqx::o3_contraction": "eqx.conv.o3.convolution",
-    "eqx::packed_wigner": "eqx.kernels.wigner",
-    "eqx::quaternion_polynomial": "eqx.kernels.quaternion",
-    "eqx::replay": "eqx.kernels.recompute",
-    "eqx::rotary_product": "eqx.kernels.rotary",
-    "eqx::rotation": "eqx.kernels.wigner",
-    "eqx::tece_contraction": "eqx.models.tace.tece_oam_rra.interaction",
-    "eqx::tece_interaction": "eqx.models.tace.tece_oam_rra.interaction",
-}
 TACE_AOTI_INPUT_KEYS = (
     "positions",
     "node_attrs",
@@ -721,9 +698,8 @@ def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
         if isinstance(module, torch.fx.GraphModule):
             for node in module.graph.nodes:
                 if isinstance(node.target, torch._ops.OpOverload):
-                    lib = EQX_CUSTOM_OPS_MODULES.get(node.target._schema.name)
-                    if lib is not None:
-                        libs.add(lib)
+                    if node.target.namespace == "eqx":
+                        libs.add("eqx")
     return libs
 
 
@@ -750,13 +726,6 @@ def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
             if entry in archive.namelist()
             else set()
         )
-        # Earlier packages did not record EQX registration modules.
-        for name in archive.namelist():
-            if name.endswith(".wrapper.json"):
-                for item in json.loads(archive.read(name)).get("nodes", []):
-                    lib = EQX_CUSTOM_OPS_MODULES.get(item["node"]["target"])
-                    if lib is not None:
-                        libs.add(lib)
     for lib in sorted(libs):
         importlib.import_module(lib)
 

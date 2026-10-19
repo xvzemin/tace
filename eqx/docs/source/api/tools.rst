@@ -101,3 +101,10 @@ Module utilities
 .. autofunction:: eqx.utils.copy_model
 
 .. autofunction:: eqx.utils.convert_modules
+
+Operator registration
+---------------------
+
+``import eqx`` registers operators, fake implementations, and autograd formulas
+without initializing CUDA or compiling kernels. No additional imports are needed
+before loading an AOTInductor package containing EQX operators.

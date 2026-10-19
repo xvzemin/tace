@@ -3,6 +3,7 @@
 import logging
 import os
 import runpy
+import subprocess
 import sys
 from unittest.mock import MagicMock, Mock
 
@@ -10,6 +11,51 @@ import pytest
 import torch
 
 from eqx.kernels import cuda
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_aoti_reload(tmp_path):
+    from eqx.kernels.layout import gather_sum
+
+    class Model(torch.nn.Module):
+        def forward(self, features, indices):
+            return gather_sum([features, features], [indices, indices])
+
+    inputs = (
+        torch.randn(4, 3, device="cuda", dtype=torch.float64),
+        torch.tensor([2, 0, 3, 1, 0], device="cuda"),
+    )
+    model = Model().eval()
+    torch.testing.assert_close(model(*inputs), 2 * inputs[0][inputs[1]])
+    exported = torch.export.export(
+        model,
+        inputs,
+        dynamic_shapes={
+            "features": {0: torch.export.Dim("nodes", min=2)},
+            "indices": {0: torch.export.Dim("edges", min=1)},
+        },
+    )
+    path = tmp_path / "model.pt2"
+    torch._inductor.aoti_compile_and_package(exported, package_path=str(path))
+    script = """
+import sys
+import torch
+import eqx
+
+assert "tace" not in sys.modules
+model = torch._inductor.aoti_load_package(sys.argv[1])
+for nodes, edges in ((4, 5), (7, 11)):
+    features = torch.randn(nodes, 3, device="cuda", dtype=torch.float64)
+    indices = torch.arange(edges, device="cuda") % nodes
+    torch.testing.assert_close(model(features, indices), 2 * features[indices])
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script, str(path)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

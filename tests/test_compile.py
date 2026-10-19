@@ -1,4 +1,3 @@
-import importlib
 import json
 import os
 import subprocess
@@ -25,7 +24,6 @@ from tace.lightning.torch_model import (
 )
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models.compile.aot import (
-    EQX_CUSTOM_OPS_MODULES,
     TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY,
     _custom_ops_libs_from_model,
     _embed_custom_ops_libs,
@@ -39,73 +37,41 @@ from tace.models.compile.compile import trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
 
 
-def test_aoti_eqx_function_dependencies():
-    importlib.import_module("eqx.kernels.layout")
+@pytest.mark.parametrize("use_eqx", [False, True])
+def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
+    model = torch.nn.Linear(2, 2)
+    if use_eqx:
+        import eqx  # noqa: F401
 
-    graph = torch.fx.Graph()
-    features = graph.placeholder("features")
-    indices = graph.placeholder("indices")
-    output = graph.call_function(
-        torch.ops.eqx.gather_sum.default,
-        ([features, features], [None, indices]),
-    )
-    graph.output(graph.call_function(torch.ops.aten.neg.default, (output,)))
-    model = torch.fx.GraphModule(torch.nn.Module(), graph)
-    assert _custom_ops_libs_from_model(model) == {"eqx.kernels.layout"}
-    assert _custom_ops_libs_from_model(torch.nn.Linear(2, 2)) == set()
+        graph = torch.fx.Graph()
+        operator = torch.ops.eqx.gather_sum.default
+        inputs = tuple(
+            graph.placeholder(arg.name) for arg in operator._schema.arguments
+        )
+        graph.output(graph.call_function(operator, inputs))
+        model = torch.fx.GraphModule(torch.nn.Module(), graph)
+    libs = _custom_ops_libs_from_model(model)
+    assert libs == ({"eqx"} if use_eqx else set())
 
-
-@pytest.mark.parametrize("libs", [set(), {"openequivariance"}, {"eqx.kernels.layout"}])
-def test_aoti_import_eqx_dependencies(tmp_path, monkeypatch, libs):
     path = tmp_path / "model.pt2"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("model/archive_format", "pt2")
-        archive.writestr(
-            "model/data/aotinductor/model/test.wrapper.json",
-            json.dumps(
-                {
-                    "nodes": [
-                        {"node": {"target": target}}
-                        for target in (
-                            "eqx::gather_sum",
-                            "eqx::gather_sum",
-                            "eqx::element_linear",
-                            "aten::sin",
-                        )
-                    ]
-                }
-            ),
-        )
     _embed_custom_ops_libs(path, libs)
     if libs:
         with zipfile.ZipFile(path) as archive:
-            assert set(
-                archive.read(f"model/{TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY}").decode().split()
-            ) == libs
+            assert (
+                set(
+                    archive.read(f"model/{TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY}")
+                    .decode()
+                    .split()
+                )
+                == libs
+            )
 
     importer = Mock()
     monkeypatch.setattr("tace.models.compile.aot.importlib.import_module", importer)
     _import_custom_ops_libs(path)
-    assert [call.args[0] for call in importer.call_args_list] == sorted(
-        libs | {"eqx.kernels.layout", "eqx.o3.contraction"}
-    )
-
-
-def test_aoti_without_custom_ops(tmp_path, monkeypatch):
-    path = tmp_path / "model.pt2"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("model/archive_format", "pt2")
-    importer = Mock()
-    monkeypatch.setattr("tace.models.compile.aot.importlib.import_module", importer)
-    _import_custom_ops_libs(path)
-    importer.assert_not_called()
-
-
-def test_aoti_eqx_registration_modules():
-    for lib in sorted(set(EQX_CUSTOM_OPS_MODULES.values())):
-        importlib.import_module(lib)
-    for name in EQX_CUSTOM_OPS_MODULES:
-        assert torch._C._dispatch_find_schema_or_throw(name, "").schema().name == name
+    assert [call.args[0] for call in importer.call_args_list] == sorted(libs)
 
 
 def test_constant_construction_precision():

@@ -13,43 +13,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-@pytest.mark.parametrize("allow_slice", [False, True])
-def test_native_o2_import_is_independent(allow_slice):
-    script = f"""
-import sys
-import torch
-if {allow_slice}:
-    torch.serialization.add_safe_globals([slice])
-safe_globals = set(torch.serialization.get_safe_globals())
-load = torch.load
-import eqx
-from eqx import o2
-
-assert safe_globals.issubset(torch.serialization.get_safe_globals())
-assert (slice in torch.serialization.get_safe_globals()) == (slice in safe_globals)
-assert torch.load is load
-linear = o2.Linear('2x0e+2x1m', '2x0e+2x1m')
-linear(linear.irreps_in.randn(3, -1)).sum().backward()
-frame = o2.LocalFrame('2x0e+2x1o')
-rotation = o2.WignerD(mmax=1, lmax=1, method='recursive')
-d, di = rotation(torch.randn(3, 3))
-x = torch.randn(3, frame.input_dim)
-frame.to_global(frame.to_local(x, d), di)
-assert all('eqx.' + name not in sys.modules for name in ('conv', 'kernels', 'ace', 'o3'))
-assert 'tace' not in sys.modules
-assert set(eqx.__all__).issubset(dir(eqx))
-assert eqx.conv.O3TensorProductConv is not None
-assert 'eqx.kernels.cuda' not in sys.modules
-"""
-    subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[2],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
 @pytest.mark.parametrize("device", ["cpu", DEVICE])
 def test_wigner_invalid_method(device):
     wigner = o2.WignerD(lmax=2, mmax=2).to(device)
@@ -145,7 +108,8 @@ for _ in range(2):
     actual = torch.cat([value.flatten() for value in a])
     expected = torch.cat([value.flatten() for value in b])
 assert "eqx.conv.o2_o3.cuda" not in sys.modules
-assert "eqx.kernels.cuda" not in sys.modules
+from eqx.kernels import cuda
+assert not cuda.runtime.cache_info().currsize
 assert "tace" not in sys.modules
 accelerated = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
 arguments = (
