@@ -1191,7 +1191,6 @@ def test_cartesian_compact_linear(backend, double_precision):
         backend=backend,
         normalize=False,
         symmetric_inputs=True,
-        input_basis="spherical",
         compact_output=True,
     )
     linear = Linear(
@@ -1211,7 +1210,7 @@ def test_cartesian_compact_linear(backend, double_precision):
         linear.irreps_in,
         linear.irreps_out,
         internal_weights=False,
-        output_basis="spherical",
+        project=True,
     ).cuda()
     edges = torch.randint(4, (2, 11), device="cuda")
     inputs = [
@@ -1225,7 +1224,7 @@ def test_cartesian_compact_linear(backend, double_precision):
     inputs = [x.requires_grad_() for x in inputs]
     x, vectors, radial, projection, weight = inputs
     full = reference(basis(x), None, radial, projection, edges, vectors=vectors)
-    packed = compact(x, None, radial, projection, edges, vectors=vectors)
+    packed = compact(basis(x), None, radial, projection, edges, vectors=vectors)
     assert packed.shape[-1] < full.shape[-1]
     torch.testing.assert_close(
         packed[:, compact.harmonic_output_index], full, atol=2e-12, rtol=2e-12
@@ -2220,7 +2219,7 @@ def test_o3_cartesian_compile_and_empty_graph(
     ).cuda()
     kwargs = {"symmetric_inputs": symmetric_inputs} if cartesian else {}
     if implementation == "compact":
-        kwargs.update(input_basis="spherical", compact_output=True)
+        kwargs.update(compact_output=True)
     conv = conv_cls(tp, normalize=False, **kwargs).cuda()
     reference = conv_cls(tp, normalize=False, backend="torch", **kwargs).cuda()
     if implementation == "compact":
@@ -2248,11 +2247,7 @@ def test_o3_cartesian_compile_and_empty_graph(
     )
     for nodes, edges_count in ((3, 1), (3, 7), (3, 0), (0, 0)):
         edges = torch.randint(max(1, nodes), (2, edges_count), device="cuda")
-        input_dim = (
-            tp.irreps_in1.spherical().dim
-            if implementation == "compact"
-            else tp.irreps_in1.dim
-        )
+        input_dim = tp.irreps_in1.dim
         x = torch.randn(nodes, input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edges_count, 3, device="cuda", requires_grad=True)
         radial = torch.randn(edges_count, 2, device="cuda", requires_grad=True)

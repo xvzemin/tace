@@ -13,24 +13,6 @@ FUSED_TILE_LIMIT = 16
 
 
 @lru_cache(maxsize=None)
-def symmetric_path_matrix(degree):
-    """Return spherical-to-unique-Cartesian coefficients in CPU float64."""
-    import torch
-
-    from ...co3.basis import path_matrix
-
-    matrix = path_matrix(degree)
-    lookup = {p: i for i, p in enumerate(symmetric_powers(degree))}
-    indices = torch.tensor(
-        [lookup[component_powers(i, degree)] for i in range(3**degree)],
-        dtype=torch.long,
-        device="cpu",
-    )
-    packed = matrix.new_zeros(len(lookup), 2 * degree + 1)
-    return packed.index_add(0, indices, matrix) / indices.bincount()[:, None]
-
-
-@lru_cache(maxsize=None)
 def component_powers(index, degree):
     """Count x, y and z indices in a Cartesian component."""
     counts = [0, 0, 0]

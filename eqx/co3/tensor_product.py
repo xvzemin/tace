@@ -1,6 +1,7 @@
 """Delta and Levi-Civita couplings with independent channel paths."""
 
 import math
+from collections import defaultdict
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -25,7 +26,9 @@ def cartesian_product(x, y, l1, l2, l3):
     if not odd:
         x = x.reshape(*x.shape[:-1], 3 ** (l1 - k), 3**k)
         y = y.reshape(*y.shape[:-1], 3**k, 3 ** (l2 - k))
-        return (x @ y).flatten(-2) / math.sqrt(3**k)
+        value = x * y if k == 0 else x @ y
+        value = value.flatten(-2)
+        return value if k == 0 else value / math.sqrt(3**k)
     x = x.reshape(*x.shape[:-1], 3 ** (l1 - k - 1), 3, 3**k)
     y = y.reshape(*y.shape[:-1], 3**k, 3, 3 ** (l2 - k - 1))
     values = [
@@ -83,6 +86,7 @@ class TensorProduct(torch.nn.Module):
     -----
     Inputs must be symmetric traceless. Each path includes the analytic
     Cartesian-to-CG scale. Repeated output irreps are not regrouped or merged.
+    Compatible unweighted channel-wise paths are evaluated in batches.
     Unprojected outputs must be projected before another tensor product or
     a nonlinear operation.
     """
@@ -220,12 +224,35 @@ class TensorProduct(torch.nn.Module):
         else:
             self.register_buffer("weight", torch.empty(0))
         self.path_factors = tuple(scales)
-        self.register_buffer("path_scales", torch.tensor(scales), persistent=False)
         self.projection = Projector(self.irreps_out) if project else torch.nn.Identity()
         self.slices_in1, self.slices_in2 = (
             self.irreps_in1.slices(),
             self.irreps_in2.slices(),
         )
+        self.input_widths = (
+            tuple(item.dim for item in self.irreps_in1),
+            tuple(item.dim for item in self.irreps_in2),
+        )
+        self.weight_widths = tuple(
+            math.prod(ins.path_shape) if ins.has_weight else 0
+            for ins in self.instructions
+        )
+        groups = defaultdict(list)
+        self.grouped = all(
+            ins.connection_mode == "uuu" and not ins.has_weight
+            for ins in self.instructions
+        )
+        if self.grouped:
+            for i, ins in enumerate(self.instructions):
+                mul, ir = self.irreps_in1[ins.i_in1]
+                groups[mul, ir.l, ins.i_in2, self.irreps_out[ins.i_out].ir.l].append(i)
+        self.path_groups = tuple(tuple(indices) for indices in groups.values())
+        for i, indices in enumerate(self.path_groups):
+            self.register_buffer(
+                f"group_scale_{i}",
+                torch.tensor([self.path_factors[j] for j in indices]).reshape(-1, 1, 1),
+                persistent=False,
+            )
         connected = {
             ins.i_out
             for ins in self.instructions
@@ -273,21 +300,38 @@ class TensorProduct(torch.nn.Module):
             raise ValueError("Shared weights must be one-dimensional.")
         shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
         zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
-        outputs = [
-            x.new_zeros((*shape, mul, ir.dim)) + zero for mul, ir in self.irreps_out
-        ]
+        outputs = [None] * len(self.irreps_out)
         inputs = [
             [
-                value[..., section].reshape(*value.shape[:-1], mul, ir.dim)
-                for (mul, ir), section in zip(irreps, sections)
+                block.reshape(*value.shape[:-1], mul, ir.dim)
+                for (mul, ir), block in zip(irreps, value.split(widths, -1))
             ]
-            for value, irreps, sections in (
-                (x, self.irreps_in1, self.slices_in1),
-                (y, self.irreps_in2, self.slices_in2),
+            for value, irreps, widths in (
+                (x, self.irreps_in1, self.input_widths[0]),
+                (y, self.irreps_in2, self.input_widths[1]),
             )
         ]
-        offset = 0
-        for index, ins in enumerate(self.instructions):
+        weights = weight.split(self.weight_widths, -1)
+        if self.grouped:
+            for group, indices in enumerate(self.path_groups):
+                ins = self.instructions[indices[0]]
+                a, b, c = (
+                    self.irreps_in1[ins.i_in1].ir,
+                    self.irreps_in2[ins.i_in2].ir,
+                    self.irreps_out[ins.i_out].ir,
+                )
+                left = [inputs[0][self.instructions[i].i_in1] for i in indices]
+                left = (
+                    left[0].unsqueeze(-3) if len(left) == 1 else torch.stack(left, -3)
+                )
+                right = inputs[1][ins.i_in2].unsqueeze(-3)
+                values = cartesian_product(left, right, a.l, b.l, c.l)
+                values = values * getattr(self, f"group_scale_{group}")
+                for index, value in zip(indices, values.unbind(-3)):
+                    dest = self.instructions[index].i_out
+                    previous = outputs[dest]
+                    outputs[dest] = value if previous is None else previous + value
+        for index, ins in enumerate(() if self.grouped else self.instructions):
             a, b, c = (
                 self.irreps_in1[ins.i_in1].ir,
                 self.irreps_in2[ins.i_in2].ir,
@@ -299,11 +343,10 @@ class TensorProduct(torch.nn.Module):
                 left, right = left.unsqueeze(-2), right.unsqueeze(-3)
             value = cartesian_product(left, right, a.l, b.l, c.l)
             if ins.has_weight:
-                size = math.prod(ins.path_shape)
-                w = weight[..., offset : offset + size].reshape(
-                    *weight.shape[:-1], *ins.path_shape
+                w = (
+                    weights[index].reshape(*weight.shape[:-1], *ins.path_shape)
+                    * self.path_factors[index]
                 )
-                offset += size
                 if mode == "uvw":
                     value = torch.einsum("...uvd,...uvw->...wd", value, w)
                 elif mode == "uuw":
@@ -312,13 +355,26 @@ class TensorProduct(torch.nn.Module):
                     value = value * w.unsqueeze(-1)
             elif mode == "uuw":
                 value = value.sum(-2, keepdim=True)
-            if mode == "uvu":
+            if mode == "uvu" and self.irreps_in2[ins.i_in2].mul == 1:
+                value = value.squeeze(-2)
+            elif mode == "uvu":
                 value = value.sum(-2)
+            elif mode == "uvv" and self.irreps_in1[ins.i_in1].mul == 1:
+                value = value.squeeze(-3)
             elif mode == "uvv":
                 value = value.sum(-3)
             elif mode == "uvuv":
                 value = value.flatten(-3, -2)
-            outputs[ins.i_out] = outputs[ins.i_out] + value * self.path_scales[index]
+            if not ins.has_weight:
+                value = value * self.path_factors[index]
+            previous = outputs[ins.i_out]
+            outputs[ins.i_out] = value if previous is None else previous + value
+        for i, (mul, ir) in enumerate(self.irreps_out):
+            outputs[i] = (
+                x.new_zeros((*shape, mul, ir.dim)) + zero
+                if outputs[i] is None
+                else outputs[i].expand(*shape, mul, ir.dim)
+            )
         result = (
             torch.cat([v.flatten(-2) for v in outputs], -1)
             if outputs
@@ -328,9 +384,17 @@ class TensorProduct(torch.nn.Module):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
-        self.path_scales = torch.tensor(
-            self.path_factors, dtype=torch.float64, device="cpu"
-        ).to(self.path_scales)
+        for i, indices in enumerate(self.path_groups):
+            name = f"group_scale_{i}"
+            self._buffers[name] = (
+                torch.tensor(
+                    [self.path_factors[j] for j in indices],
+                    dtype=torch.float64,
+                    device="cpu",
+                )
+                .reshape(-1, 1, 1)
+                .to(self._buffers[name])
+            )
         return self
 
     def weight_view_for_instruction(self, instruction, weight=None):

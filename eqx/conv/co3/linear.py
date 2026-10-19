@@ -5,12 +5,12 @@ from collections import defaultdict
 import torch
 
 from ...co3 import Linear as CartesianLinear
-from ...co3.basis import path_matrix
+from ...co3.basis import stf_projection
 from ...utils.layout import _Permute
 
 
 class Linear(CartesianLinear):
-    """Mix compact Cartesian channels before projection to spherical features.
+    """Mix compact Cartesian channels before symmetric traceless projection.
 
     Parameters
     ----------
@@ -28,7 +28,7 @@ class Linear(CartesianLinear):
     def __init__(
         self, irreps_in, irreps_out, input_indices, *, backend="cuda", **kwargs
     ):
-        super().__init__(irreps_in, irreps_out, output_basis="spherical", **kwargs)
+        super().__init__(irreps_in, irreps_out, **kwargs)
         if backend not in ("cuda", "torch"):
             raise ValueError("backend must be cuda or torch.")
         self.backend = backend
@@ -101,14 +101,16 @@ class Linear(CartesianLinear):
                 torch.tensor([scale for _, _, scale in entries]).unsqueeze(-1),
                 persistent=False,
             )
-            matrix = path_matrix(ir.l)
-            packed = matrix.new_zeros(width, 2 * ir.l + 1).index_add(
+            matrix = stf_projection(ir.l)
+            packed = matrix.new_zeros(width, ir.dim).index_add(
                 0, torch.tensor(expansion, dtype=torch.long), matrix
             )
             if self.uniform_scales[-1]:
                 packed = packed * self.scales[-1][0]
             self.register_buffer(
-                f"basis_{i}", packed.to(torch.get_default_dtype()), persistent=False
+                f"projection_{i}",
+                packed.to(torch.get_default_dtype()),
+                persistent=False,
             )
         self.input_identity = input_indices == list(range(self.input_dim))
         self.input_permutation = sorted(input_indices) == list(range(self.input_dim))
@@ -152,16 +154,14 @@ class Linear(CartesianLinear):
                 else features.index_select(-1, self.input_index)
             )
         outputs = [None] * len(self.cartesian_out)
+        widths = tuple(s.stop - s.start for s in self.input_sections)
+        blocks = (
+            features.flatten().split(tuple(features.size(0) * w for w in widths))
+            if grouped
+            else features.split(widths, dim=-1)
+        )
         for i, (dest, dim, mul_in, mul_out) in enumerate(self.compact_groups):
-            section = self.input_sections[i]
-            x = (
-                features.flatten()[
-                    features.size(0) * section.start : features.size(0) * section.stop
-                ]
-                if grouped
-                else features[..., section]
-            )
-            x = x.reshape(*features.shape[:-1], dim, mul_in)
+            x = blocks[i].reshape(*features.shape[:-1], dim, mul_in)
             w = weight[..., self.weight_sections[i]]
             if self.weight_rows[i]:
                 rows = (
@@ -178,7 +178,7 @@ class Linear(CartesianLinear):
                 w = w * getattr(self, f"weight_scale_{i}")
             mixed = x @ w
             # Project only after reducing the input channel multiplicity.
-            value = mixed.transpose(-1, -2) @ getattr(self, f"basis_{i}")
+            value = mixed.transpose(-1, -2) @ getattr(self, f"projection_{i}")
             outputs[dest] = value if outputs[dest] is None else outputs[dest] + value
         for i, ((mul, ir), group) in enumerate(zip(self.irreps_out, self.groups)):
             if outputs[i] is None:
@@ -195,14 +195,14 @@ class Linear(CartesianLinear):
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for i, (degree, expansion) in enumerate(self.expansions):
-            matrix = path_matrix(degree)
+            matrix = stf_projection(degree)
             indices = torch.tensor(expansion, dtype=torch.long, device="cpu")
             packed = matrix.new_zeros(int(indices.max()) + 1, matrix.size(1)).index_add(
                 0, indices, matrix
             )
             if self.uniform_scales[i]:
                 packed = packed * self.scales[i][0]
-            name = f"basis_{i}"
+            name = f"projection_{i}"
             self._buffers[name] = packed.to(self._buffers[name]).clone()
             name = f"weight_scale_{i}"
             self._buffers[name] = (

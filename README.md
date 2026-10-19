@@ -5,6 +5,8 @@
 
 # Tensor Atomic/Edge Cluster Expansion (TACE/TECE)
 
+> The Cartesian implementation is still being refactored.
+
 TACE is designed with physical priors and strong inductive biases to enhance extrapolation capability. 
 It performs Atomic Cluster Expansion and Edge Cluster Expansion based on spherical tensors 
 or irreducible Cartesian tensors, with an optional attention architecture.

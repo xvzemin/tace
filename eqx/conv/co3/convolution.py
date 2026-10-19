@@ -17,7 +17,6 @@ from .polynomials import (
     output_components,
     symmetric_components,
     symmetric_indices,
-    symmetric_path_matrix,
 )
 
 
@@ -38,8 +37,6 @@ class CartesianTensorProductConv(O3TensorProductConv):
     symmetric_inputs : bool, optional
         Average input index permutations before coupling. Enables shared
         symmetric storage across paths when vectors are supplied.
-    input_basis : {"cartesian", "spherical"}, optional
-        Spherical inputs are converted directly to unique Cartesian entries.
     compact_output : bool, optional
         Return partially symmetric raw tensors in ``ir_mul`` order. Requires
         symmetric inputs and ``tensor_product.project=False``. The expansion
@@ -61,7 +58,6 @@ class CartesianTensorProductConv(O3TensorProductConv):
         normalization="component",
         normalize=True,
         symmetric_inputs=False,
-        input_basis="cartesian",
         compact_output=False,
     ):
         torch.nn.Module.__init__(self)
@@ -79,15 +75,10 @@ class CartesianTensorProductConv(O3TensorProductConv):
             normalize,
         )
         self.symmetric_inputs = symmetric_inputs
-        if input_basis not in ("cartesian", "spherical"):
-            raise ValueError("input_basis must be cartesian or spherical.")
-        if input_basis == "spherical" and not symmetric_inputs:
-            raise ValueError("Spherical input requires symmetric_inputs=True.")
         if compact_output and (not symmetric_inputs or tensor_product.project):
             raise ValueError(
                 "Compact output requires symmetric inputs and raw outputs."
             )
-        self.input_basis = input_basis
         self.compact_output = compact_output
         self.irreps_in1 = tensor_product.irreps_in1
         self.irreps_in2 = tensor_product.irreps_in2
@@ -98,14 +89,6 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self.instructions = tuple(tensor_product.instructions)
         self.weight_numel = tensor_product.weight_numel
         self.tp = tensor_product
-        if input_basis == "spherical":
-            self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1)
-            for _, ir in self.irreps_in1:
-                self.register_buffer(
-                    f"input_basis_{ir.l}",
-                    symmetric_path_matrix(ir.l).to(torch.get_default_dtype()).clone(),
-                    persistent=False,
-                )
         self.projector = (
             co3.Projector(self.irreps_out)
             if tensor_product.project
@@ -297,21 +280,6 @@ class CartesianTensorProductConv(O3TensorProductConv):
         features in flattened ``mul_ir`` layout and Cartesian dimensions.
         """
         fused = self.backend == "cuda" and features.is_cuda
-        packed_input = self.input_basis == "spherical" and vectors is not None and fused
-        if self.input_basis == "spherical":
-            if packed_input:
-                if features.size(-1) != self.to_cartesian.input_dim:
-                    raise ValueError(
-                        "The spherical feature dimension does not match irreps_in1."
-                    )
-                values = []
-                for mul, l, dim, section in self.to_cartesian.paths:
-                    value = features[:, section].reshape(features.size(0), mul, dim)
-                    value = value @ getattr(self, f"input_basis_{l}").T
-                    values.append(value.transpose(-1, -2).flatten(1))
-                features = torch.cat(values, -1) if values else features[:, :0]
-            else:
-                features = self.to_cartesian(features)
         if self.symmetric_inputs and (vectors is None or not fused):
             values = features.new_zeros(
                 (features.size(0), self.symmetric_dim)
@@ -342,7 +310,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
             edge_attrs = torch.cat(attrs, dim=-1) if attrs else vectors[:, :0]
             edge_attrs = edge_attrs + vectors.sum() * 0
             vectors = None
-        if vectors is not None and self.pack_inputs and not packed_input:
+        if vectors is not None and self.pack_inputs:
             from ...kernels.layout import indexed_sum
 
             if features.size(-1) != self.input_dim:
@@ -357,7 +325,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 self.harmonic_input_transpose_ptr,
                 self.harmonic_input_count,
             )
-        elif not packed_input and not self.input_identity:
+        elif not self.input_identity:
             features = (
                 _Permute.apply(features, self.input_index, self.input_inverse)
                 if fused
@@ -393,16 +361,6 @@ class CartesianTensorProductConv(O3TensorProductConv):
         if self.compact_output:
             return output.index_select(-1, self.output_pack_index)
         return self.projector(output) if fused else output
-
-    def _apply(self, fn, recurse=True):
-        super()._apply(fn, recurse)
-        if self.input_basis == "spherical":
-            for _, ir in self.irreps_in1:
-                name = f"input_basis_{ir.l}"
-                self._buffers[name] = (
-                    symmetric_path_matrix(ir.l).to(self._buffers[name]).clone()
-                )
-        return self
 
     def reference(
         self, features, edge_attrs, radial, projection, edge_index, num_nodes

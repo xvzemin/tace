@@ -19,10 +19,11 @@ def mh_mask(
     node_fidelity: torch.Tensor,
     num_fidelities: int,
     l: int,
+    ir_dim: int | None = None,
 ) -> torch.Tensor:
     B = x.size(0)
     fid_mul_ir = x.size(-1)
-    ir = 2 * l + 1
+    ir = 2 * l + 1 if ir_dim is None else ir_dim
     fid_mul = fid_mul_ir // ir
     mul = fid_mul // num_fidelities
     mask = torch.zeros(B, num_fidelities, mul, device=x.device, dtype=x.dtype)
@@ -150,7 +151,10 @@ class TensorReadOut(ReadOut):
         for idx, linear in enumerate(self.linear2[:-1]):
             x = self.acts[idx](self._apply_linear(linear, x, node_attrs, node_type))
             if self.num_fidelities > 1:
-                x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
+                x = mh_mask(
+                    x, node_fidelity, self.num_fidelities, self.l,
+                    self.acts[idx].irreps_out[0].ir.dim,
+                )
         return self._apply_linear(self.linear2[-1], x, node_attrs, node_type)
 
 

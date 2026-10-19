@@ -699,18 +699,17 @@ def load_tace(
 
 
 def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorModel:
-    """Copy a model with an equivalent spherical, aligned-frame, or Cartesian CGTP.
+    """Copy a model with an equivalent spherical or aligned-frame CGTP.
 
     Parameters
     ----------
     model : TensorModel
         Eager TACE model, for example returned by ``load_tace``.
-    implementation : {"auto", "o2", "o3", "co3"}, optional
+    implementation : {"auto", "o2", "o3"}, optional
         By default, switch spherical interactions to aligned-frame ones and
         other CGTP implementations to spherical ones. Select ``"o2"`` or
         ``"o3"`` to convert all CGTP
-        interactions to aligned-frame or spherical tensor products. Select
-        ``"co3"`` for Cartesian ICTP/ICTC contractions with spherical products.
+        interactions to aligned-frame or spherical tensor products.
 
     Returns
     -------
@@ -720,22 +719,28 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
 
     Notes
     -----
-    Only ``cgtp``, ``o2_cgtp``, and ``co3`` interactions are converted. Their paths,
+    Only ``cgtp`` and ``o2_cgtp`` interactions are converted. Their paths,
     weights, and normalization are identical; outputs and derivatives agree
     up to floating-point roundoff. Other interaction types are unchanged.
     Recreate any optimizer for the returned model before further training.
     """
     from tace.models._e3nn.inter import (
         O2CgtpInteraction,
-        O3CartesianIctpIctcInteraction,
         O3CgtpInteraction,
     )
 
-    if implementation not in ("auto", "o2", "o3", "co3"):
-        raise ValueError("implementation must be 'auto', 'o2', 'o3' or 'co3'.")
+    if implementation not in ("auto", "o2", "o3"):
+        raise ValueError("implementation must be 'auto', 'o2' or 'o3'.")
     if not isinstance(model, TensorModel):
         raise TypeError(
             "Conversion requires an eager TensorModel; use load_tace first."
+        )
+    from tace.models import cartTACE
+
+    if isinstance(model.readout_fn, cartTACE):
+        raise NotImplementedError(
+            "CGTP frame conversion is defined for spherical features; "
+            "Cartesian local O(2) interactions are not implemented."
         )
     config = copy.deepcopy(model.readout_fn.model_config)
     interactions = model.readout_fn.representation.interactions
@@ -745,20 +750,18 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
         index
         for index, interaction in enumerate(interactions)
         if type(interaction) in (
-            O3CgtpInteraction, O2CgtpInteraction, O3CartesianIctpIctcInteraction
+            O3CgtpInteraction, O2CgtpInteraction
         )
     ]
     if not selected:
-        raise ValueError("The model has no cgtp, o2_cgtp or co3 interactions to convert.")
+        raise ValueError("The model has no cgtp or o2_cgtp interactions to convert.")
     for index in selected:
         to_o2 = (
             type(interactions[index]) is O3CgtpInteraction
             if implementation == "auto"
             else implementation == "o2"
         )
-        types[index] = (
-            "co3" if implementation == "co3" else "o2_cgtp" if to_o2 else "cgtp"
-        )
+        types[index] = "o2_cgtp" if to_o2 else "cgtp"
     config["atomic_basis"]["type"] = types
     config["target_property"] = model.get_target_property()
     config["embedding_property"] = model.get_embedding_property()

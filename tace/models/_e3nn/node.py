@@ -143,6 +143,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
             rms_norm=radial_norm == "rms_norm",
         )
         self.normalization = math.sqrt(self.avg_num_neighbors)
+        self.angular_sections = [slice(ir.l**2, (ir.l + 1)**2) for _, ir in self.irreps_out]
         self.reshape = LayoutTransform(
             self.irreps_out,
             layout_in="flatten_ir_mul",
@@ -179,7 +180,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
             message = torch.cat(
                 [
                     (
-                        edge_attrs[:, ir.l**2 : (ir.l + 1) ** 2, None]
+                        edge_attrs[:, self.angular_sections[i], None]
                         * features[:, i, None, :]
                     ).flatten(1)
                     for i, (_, ir) in enumerate(self.irreps_out)

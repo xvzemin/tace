@@ -7,6 +7,7 @@ import torch
 from e3nn import o3
 
 from .irreps import Irreps
+from .symmetric import SymmetricBasis
 
 
 @lru_cache(maxsize=None)
@@ -138,18 +139,78 @@ class Projector(torch.nn.Module):
     def __init__(self, irreps):
         super().__init__()
         self.irreps_in = self.irreps_out = Irreps(irreps)
-        self.basis = ChangeOfBasis(irreps, inverse=True)
+        self.identity = all(ir.l < 2 for _, ir in self.irreps_in)
+        groups = []
+        for mul, ir in self.irreps_in:
+            if groups and groups[-1][1] == ir.l:
+                groups[-1] = (groups[-1][0] + mul, ir.l, ir.dim)
+            else:
+                groups.append((mul, ir.l, ir.dim))
+        self.groups = tuple(groups)
+        self.widths = tuple(mul * dim for mul, _, dim in groups)
+        for l in sorted({ir.l for _, ir in self.irreps_in}):
+            self.register_buffer(
+                f"projection_{l}",
+                stf_projection(l).to(torch.get_default_dtype()).clone(),
+                persistent=False,
+            )
 
     def forward(self, features):
-        """Apply C C.T without constructing a square Cartesian projector."""
-        if features.shape[-1] != self.basis.input_dim:
+        """Symmetrize and remove traces in Cartesian storage."""
+        if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
+        if self.identity:
+            return features
         values = []
-        for mul, l, dim, section in self.basis.paths:
-            matrix = getattr(self.basis, f"basis_{l}")
-            x = features[..., section].reshape(*features.shape[:-1], mul, dim)
-            values.append(((x @ matrix) @ matrix.T).flatten(-2))
+        for block, (mul, l, dim) in zip(features.split(self.widths, -1), self.groups):
+            x = block.reshape(*features.shape[:-1], mul, dim)
+            values.append(
+                (x if l < 2 else x @ getattr(self, f"projection_{l}")).flatten(-2)
+            )
         return torch.cat(values, dim=-1) if values else features[..., :0]
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        for l in {l for _, l, _ in self.groups}:
+            name = f"projection_{l}"
+            self._buffers[name] = stf_projection(l).to(self._buffers[name]).clone()
+        return self
 
     def extra_repr(self):
         return str(self.irreps_in)
+
+
+@lru_cache(maxsize=None)
+def stf_projection(l):
+    """Return the Cartesian symmetrization and detracing matrix in CPU float64.
+
+    Parameters
+    ----------
+    l : int
+        Non-negative tensor rank.
+
+    Returns
+    -------
+    torch.Tensor
+        Orthogonal projector of shape (3**l, 3**l).
+    """
+    if l < 0:
+        raise ValueError("The tensor rank must be non-negative.")
+    bases = [SymmetricBasis(l - 2 * k).double() for k in range(l // 2 + 1)]
+    traces = [bases[0].pack(torch.eye(3**l, dtype=torch.float64, device="cpu"))]
+    coefficients = [1.0]
+    for k, basis in enumerate(bases[:-1], 1):
+        traces.append(basis.trace(traces[-1]))
+        coefficients.append(
+            -coefficients[-1]
+            * (l - 2 * k + 2)
+            * (l - 2 * k + 1)
+            / (2 * k * (2 * l - 2 * k + 1))
+        )
+    identity = torch.tensor(
+        [1.0, 0.0, 0.0, 1.0, 0.0, 1.0], dtype=torch.float64, device="cpu"
+    )
+    result = coefficients[-1] * traces[-1]
+    for k in range(len(traces) - 2, -1, -1):
+        result = coefficients[k] * traces[k] + bases[k].multiply(result, identity)
+    return bases[0].unpack(result)

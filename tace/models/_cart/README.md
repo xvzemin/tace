@@ -2,6 +2,9 @@
 
 The Cartesian version of TACE is currently being refactored for better future compatibility.
 
-If you need to use the Cartesian version at this time, please refer to version v0.1.0:
+Select `model.config._target_: tace.models.cartTACE` with the ordinary TACE
+configuration. Node features, convolutions and ACE products use EQX Cartesian
+operators with the same paths, parameters and normalization as the spherical
+model. `TACE_USE_EQX=1` enables fused convolution and ACE evaluation.
 
-https://github.com/xvzemin/tace/tree/v0.1.0
+Local O(2) and SO(2) interactions are reserved interfaces, not implementations.

@@ -127,6 +127,8 @@ class Linear(torch.nn.Module):
         self.slices_in = self.irreps_in.slices()
         groups = [[] for _ in cartesian_out]
         offset, bias_offset = 0, 0
+        self.weight_widths = []
+        self.weight_offsets = {}
         for ins in self.instructions:
             size = math.prod(ins.path_shape)
             section = (
@@ -138,7 +140,12 @@ class Linear(torch.nn.Module):
             if ins.i_in < 0:
                 bias_offset += size
             else:
+                self.weight_offsets[section.start, section.stop] = len(
+                    self.weight_widths
+                )
+                self.weight_widths.append(size)
                 offset += size
+        self.weight_widths = tuple(self.weight_widths)
         self.groups = tuple(tuple(group) for group in groups)
         self.group_sections = []
         for group in self.groups:
@@ -149,6 +156,15 @@ class Linear(torch.nn.Module):
                 and all(a.stop == b.start for a, b in zip(sections, sections[1:]))
                 else None
             )
+        sections = [s for s in self.group_sections if s is not None]
+        self.partition = (
+            len(sections) == len(self.groups)
+            and bool(sections)
+            and sections[0].start == 0
+            and sections[-1].stop == self.irreps_in.dim
+            and all(a.stop == b.start for a, b in zip(sections, sections[1:]))
+        )
+        self.group_widths = tuple(s.stop - s.start for s in sections)
         self.cartesian_out = cartesian_out
         if output_basis == "spherical":
             self.projection = ChangeOfBasis(cartesian_out, inverse=True)
@@ -201,8 +217,10 @@ class Linear(torch.nn.Module):
         )
         zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
         outputs = []
-        for (mul, ir), group, input_section in zip(
-            self.cartesian_out, self.groups, self.group_sections
+        blocks = features.split(self.group_widths, -1) if self.partition else ()
+        weight_blocks = weight.split(self.weight_widths, -1)
+        for index, ((mul, ir), group, input_section) in enumerate(
+            zip(self.cartesian_out, self.groups, self.group_sections)
         ):
             inputs, weights, biases = [], [], []
             for ins, section in group:
@@ -216,19 +234,24 @@ class Linear(torch.nn.Module):
                         )
                     )
                 weights.append(
-                    weight[..., section].reshape(*weight.shape[:-1], *ins.path_shape)
+                    weight_blocks[
+                        self.weight_offsets[section.start, section.stop]
+                    ].reshape(*weight.shape[:-1], *ins.path_shape)
                     * ins.path_weight
                 )
             if weights:
                 if input_section is not None:
                     width = (input_section.stop - input_section.start) // ir.dim
-                    x = features[..., input_section].reshape(
-                        *features.shape[:-1], width, ir.dim
+                    block = (
+                        blocks[index]
+                        if self.partition
+                        else features[..., input_section]
                     )
+                    x = block.reshape(*features.shape[:-1], width, ir.dim)
                 else:
                     x = inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
                 w = weights[0] if len(weights) == 1 else torch.cat(weights, dim=-2)
-                value = torch.einsum("...ui,...uv->...vi", x, w)
+                value = w.transpose(-1, -2) @ x
                 value = value.expand(*shape, mul, ir.dim)
             else:
                 value = features.new_zeros((*shape, mul, ir.dim)) + zero

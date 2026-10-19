@@ -9,7 +9,7 @@ from typing import Dict, List, Union
 import torch
 from e3nn import o3
 
-from eqx import co3, o2
+from eqx import o2
 
 from ...dataset.quantity import PROPERTY
 from ...utils.env import get_tace_use_dens
@@ -22,7 +22,6 @@ from .inter import (
     INTERACTION,
     O2CgtpInteraction,
     O2MagneticInteraction,
-    O3CartesianIctpIctcInteraction,
     UuO2Interaction,
     UvO2Interaction,
     UvSO2Interaction,
@@ -115,13 +114,9 @@ class Representation(torch.nn.Module):
             and not node_embedding_cls.use_wigner
         ) or any(
             not issubclass(
-                interaction_cls, (O2CgtpInteraction, O3CartesianIctpIctcInteraction)
+                interaction_cls, O2CgtpInteraction
             )
             for interaction_cls in interaction_classes
-        )
-        uses_co3_interaction = any(
-            issubclass(cls, O3CartesianIctpIctcInteraction)
-            for cls in interaction_classes
         )
         self.use_so2 = uses_so2_interaction
         self.use_o2 = (
@@ -209,14 +204,6 @@ class Representation(torch.nn.Module):
             o3.Irreps.spherical_harmonics(lmax, p=-1),
             normalize=False,
             normalization="component",
-        )
-        self.co3_angular_basis = (
-            co3.CartesianHarmonics(
-                o3.Irreps.spherical_harmonics(lmax, p=-1),
-                normalize=False,
-                normalization="component",
-            )
-            if uses_co3_interaction else None
         )
 
         # === node/edge embedding ===
@@ -414,6 +401,9 @@ class Representation(torch.nn.Module):
 
         if self.use_dens:
             self.irreps_forces_sh = o3.Irreps.spherical_harmonics(lmax=Lmax)
+            self.forces_angular_basis = o3.SphericalHarmonics(
+                self.irreps_forces_sh, normalize=True, normalization="component"
+            )
             self.forces_embedding = e3nnLinear(
                 self.irreps_forces_sh,
                 self.interactions[0].irreps_out,
@@ -487,18 +477,6 @@ class Representation(torch.nn.Module):
             )
             if getattr(self, "use_o3_angular_basis", True)
             else graph.edge_vector.new_empty((graph.edge_vector.size(0), 0))
-        )
-        cartesian_edge_attrs = (
-            self.co3_angular_basis(
-                graph.edge_vector / graph.edge_length.clamp_min(1e-12)
-            )
-            if getattr(self, "co3_angular_basis", None) is not None
-            and not all(
-                interaction.use_eqx
-                for interaction in self.interactions
-                if isinstance(interaction, O3CartesianIctpIctcInteraction)
-            )
-            else None
         )
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
@@ -588,9 +566,7 @@ class Representation(torch.nn.Module):
                 node_attrs_slice,
                 edge_radial_basis,
                 this_edge_feats,
-                cartesian_edge_attrs
-                if isinstance(inter, O3CartesianIctpIctcInteraction)
-                else edge_attrs,
+                edge_attrs,
                 data["edge_index"],
                 edge_cutoff,
                 edge_wigner,
@@ -651,12 +627,7 @@ class Representation(torch.nn.Module):
                 (num_graphs, 1), dtype=torch.bool, device=device
             )
 
-        forces_sh = o3.spherical_harmonics(
-            l=self.irreps_forces_sh,
-            x=forces_data,
-            normalize=True,
-            normalization="component",
-        )
+        forces_sh = self.forces_angular_basis(forces_data)
 
         return forces_data, forces_sh, noise_mask, dens_batch_mask
 

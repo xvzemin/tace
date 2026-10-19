@@ -4,5 +4,4 @@ defaults:
 
 model:
   config:
-    atomic_basis:
-      type: co3
+    _target_: tace.models.cartTACE

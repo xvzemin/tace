@@ -97,8 +97,18 @@ class Gate(torch.nn.Module):
         if not self.irreps_gates.dim:
             return scalars
         gates = self.act_gates(features.index_select(-1, self.indices_gates))
-        gated = self.mul(features.index_select(-1, self.indices_gated), gates)
-        return torch.cat((scalars, gated), dim=-1)
+        tensors = features.index_select(-1, self.indices_gated)
+        tensor_blocks = tensors.split(self.mul.input_widths[0], dim=-1)
+        gate_blocks = gates.split(self.mul.input_widths[1], dim=-1)
+        outputs = [scalars]
+        for ins, factor in zip(self.mul.instructions, self.mul.path_factors):
+            mul, ir = self.mul.irreps_in1[ins.i_in1]
+            tensor = tensor_blocks[ins.i_in1].reshape(*features.shape[:-1], mul, ir.dim)
+            gate = gate_blocks[ins.i_in2]
+            if factor != 1:
+                gate = gate * factor
+            outputs.append((tensor * gate.unsqueeze(-1)).flatten(-2))
+        return torch.cat(outputs, dim=-1)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"

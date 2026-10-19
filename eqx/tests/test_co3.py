@@ -180,6 +180,75 @@ def test_tensor_product(
     )
 
 
+def test_grouped_tensor_product(double_precision):
+    irreps_in1 = "2x2e+2x2e+2x1o"
+    irreps_in2 = "2x2e+2x0e"
+    irreps_out = "2x0e+2x0e+2x2e+2x2e+2x2o+2x0o"
+    instructions = [
+        (0, 0, 0, "uuu", False),
+        (1, 0, 1, "uuu", False),
+        (0, 0, 1, "uuu", False, 0.3),
+        (0, 1, 2, "uuu", False),
+        (1, 1, 3, "uuu", False),
+        (2, 0, 4, "uuu", False),
+    ]
+    reference = o3.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        internal_weights=False,
+        shared_weights=False,
+    ).to(DEVICE)
+    module = co3.TensorProduct(
+        irreps_in1,
+        irreps_in2,
+        irreps_out,
+        instructions,
+        internal_weights=False,
+        shared_weights=False,
+    ).to(DEVICE)
+    transforms = [
+        co3.ChangeOfBasis(ir, inverse=inverse).to(DEVICE)
+        for ir, inverse in (
+            (irreps_in1, False),
+            (irreps_in2, False),
+            (irreps_out, True),
+        )
+    ]
+    for batch in (3, 0):
+        x = torch.randn(
+            2, 1, reference.irreps_in1.dim, device=DEVICE, requires_grad=True
+        )
+        y = torch.randn(
+            1, batch, reference.irreps_in2.dim, device=DEVICE, requires_grad=True
+        )
+        outputs = [
+            transforms[2](module(transforms[0](x), transforms[1](y))),
+            reference(x, y),
+        ]
+        for _ in range(3):
+            torch.testing.assert_close(*outputs, atol=2e-11, rtol=2e-11)
+            outputs = [
+                torch.cat(
+                    [
+                        grad.flatten()
+                        for grad in torch.autograd.grad(
+                            output.sin().sum(),
+                            (x, y),
+                            create_graph=True,
+                        )
+                    ]
+                )
+                for output in outputs
+            ]
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(
+        compiled(transforms[0](x), transforms[1](y)),
+        module(transforms[0](x), transforms[1](y)),
+    )
+
+
 def test_gate_and_elementwise(double_precision):
     args = (
         "2x0e+1x0o",

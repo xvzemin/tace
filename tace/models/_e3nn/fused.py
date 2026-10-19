@@ -10,8 +10,8 @@ from typing import Union
 import torch
 from e3nn import o3
 
-from eqx import co3, o2
 from eqx import conv as eqx_conv
+from eqx import o2
 from tace.utils.env import acceleration_enabled, select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
@@ -202,94 +202,6 @@ class UvuTensorProduct(torch.nn.Module):
         if hasattr(self, "fused_tp"):
             return self.fused_tp(x, y, weights)
         return self.tp(x, y, weights)
-
-
-class O3CartesianScatterTensorProduct(torch.nn.Module):
-    """Aggregate unprojected Cartesian tensor products at target nodes.
-
-    Parameters
-    ----------
-    irreps_in1, irreps_in2, irreps_out : o3.Irreps
-        Spherical representation labels used to construct coupling paths.
-    l1l2 : str, optional
-        Selection rule for the two input angular degrees.
-
-    Notes
-    -----
-    Node inputs are spherical and edge attributes are Cartesian. The output
-    is Cartesian and must be projected after the subsequent channel linear.
-    """
-
-    def __init__(self, irreps_in1, irreps_in2, irreps_out, l1l2=None):
-        super().__init__()
-        self.irreps_in1 = o3.Irreps(irreps_in1)
-        self.irreps_in2 = o3.Irreps(irreps_in2)
-        self.instructions, self.irreps_out = generate_paths(
-            irreps_in1=self.irreps_in1,
-            irreps_in2=self.irreps_in2,
-            irreps_out=o3.Irreps(irreps_out),
-            l1l2=l1l2,
-            e3nn_mode="uvu",
-        )
-        self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1)
-        self.tp = co3.TensorProduct(
-            self.irreps_in1,
-            self.irreps_in2,
-            self.irreps_out,
-            self.instructions,
-            internal_weights=False,
-            shared_weights=False,
-            project=False,
-        )
-        self.weight_numel = self.tp.weight_numel
-
-        self.eqx_tp = eqx_conv.CartesianTensorProductConv(
-            self.tp,
-            normalize=False,
-            symmetric_inputs=True,
-            input_basis="spherical",
-            compact_output=True,
-        )
-
-    def forward(self, x, y, w, edge_index):
-        """Convert nodes, contract gathered features, and sum raw edge tensors."""
-        if acceleration_enabled("eqx", kernel="conv"):
-            return self.forward_stream(
-                x, y, w, w.new_empty((0, self.weight_numel)), edge_index, None
-            )
-        x = self.to_cartesian(x)
-        output = scatter_sum(
-            self.tp(x[edge_index[0]], y, w),
-            edge_index[1],
-            dim=0,
-            dim_size=x.size(0),
-        )
-        return output.index_select(-1, self.eqx_tp.output_pack_index)
-
-    def forward_stream(
-        self,
-        node_feats,
-        edge_attrs,
-        radial,
-        projection,
-        edge_index,
-        edge_cutoff,
-        edge_vector=None,
-        radial_network=None,
-    ):
-        """Contract Cartesian edge tensors and reduce directly to nodes."""
-        if edge_cutoff is not None and edge_vector is None:
-            edge_attrs = edge_attrs * edge_cutoff
-        return self.eqx_tp(
-            node_feats,
-            edge_attrs,
-            radial,
-            projection,
-            edge_index,
-            vectors=edge_vector,
-            amplitudes=edge_cutoff,
-            radial_network=radial_network,
-        )
 
 
 class O3ScatterTensorProduct(torch.nn.Module):

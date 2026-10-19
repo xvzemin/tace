@@ -5,6 +5,8 @@ from collections import defaultdict
 import torch
 from e3nn import o3
 
+from .. import co3
+from ..co3.tensor_product import cartesian_product
 from .contraction import contract
 
 
@@ -39,15 +41,15 @@ class TACE(torch.nn.Module):
 
     Parameters
     ----------
-    tensor_products : sequence of o3.TensorProduct
+    tensor_products : sequence of o3.TensorProduct or co3.TensorProduct
         Unweighted ``uuu`` products for correlation orders two and higher.
         All supplied paths and their normalization are retained.
-    linears : sequence of o3.Linear
+    linears : sequence of o3.Linear or co3.Linear
         External-weight coefficient maps for orders one through the maximum
         correlation, including the linear contribution of the original input.
         All maps must have the same output layout. Biases are applied by the caller.
     backend : {"cuda", "torch"}, optional
-        CUDA contracts sparse CG entries without expanded product tensors and
+        CUDA contracts sparse coupling coefficients across all paths and
         fuses the final product with its coefficient map. CPU inputs use torch.
 
     Notes
@@ -77,6 +79,16 @@ class TACE(torch.nn.Module):
         self.weight_numels = tuple(linear.weight_numel for linear in linears)
         self.metadata = []
         self.linear_metadata = []
+        self.cartesian = isinstance(tensor_products[0], co3.TensorProduct)
+        self.projections = torch.nn.ModuleList(
+            co3.Projector(tp.irreps_out) if self.cartesian else torch.nn.Identity()
+            for tp in tensor_products
+        )
+        self.output_projection = (
+            co3.Projector(linears[0].irreps_out)
+            if self.cartesian
+            else torch.nn.Identity()
+        )
         for linear in linears:
             if linear.internal_weights:
                 raise ValueError("ACE coefficient maps require external weights.")
@@ -125,17 +137,33 @@ class TACE(torch.nn.Module):
                     raise ValueError("Pass coefficient biases separately.")
                 linear_paths.append((ins.i_in, ins.i_out, offset, ins.path_weight))
                 offset += ins.path_shape[0] * ins.path_shape[1]
-            for ins in tp.instructions:
+            for path_index, ins in enumerate(tp.instructions):
                 i, j, k = ins.i_in1, ins.i_in2, ins.i_out
                 mul, ir1 = tp.irreps_in1[i]
                 mul2, ir2 = tp.irreps_in2[j]
                 mul3, ir3 = tp.irreps_out[k]
                 if mul != mul2 or mul != mul3:
                     raise ValueError("uuu paths require equal channel counts.")
-                cg = (
-                    o3.wigner_3j(ir1.l, ir2.l, ir3.l, dtype=torch.float64)
-                    * ins.path_weight
-                )
+                if self.cartesian:
+                    cg = (
+                        cartesian_product(
+                            torch.eye(ir1.dim, dtype=torch.float64, device="cpu")[
+                                :, None, :
+                            ],
+                            torch.eye(ir2.dim, dtype=torch.float64, device="cpu")[
+                                None, :, :
+                            ],
+                            ir1.l,
+                            ir2.l,
+                            ir3.l,
+                        )
+                        * tp.path_factors[path_index]
+                    )
+                else:
+                    cg = (
+                        o3.wigner_3j(ir1.l, ir2.l, ir3.l, dtype=torch.float64)
+                        * ins.path_weight
+                    )
                 sx, sy, sz = (
                     tp.irreps_in1.slices()[i].start,
                     tp.irreps_in2.slices()[j].start,
@@ -247,9 +275,9 @@ class TACE(torch.nn.Module):
                     operands,
                 )[0]
                 if stage == len(self.product_dims) - 1:
-                    output = output + result
+                    output = output + self.output_projection(result)
                     continue
-                corr = result
+                corr = self.projections[stage](result)
             else:
                 corr = self.tensor_products[stage](corr, features)
             output = output + self.linear(corr, weight, node_type, stage + 1)

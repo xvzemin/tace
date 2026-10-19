@@ -5,7 +5,7 @@ import math
 import torch
 from e3nn import o3
 
-from .basis import path_matrix
+from .basis import stf_projection
 from .irreps import Irrep, Irreps
 
 
@@ -66,7 +66,7 @@ class CartesianHarmonics(torch.nn.Module):
         self.normalization = normalization
         self.lmax = max(degrees, default=0)
         for l in sorted(set(degrees)):
-            matrix = path_matrix(l)
+            matrix = stf_projection(l)
             # ||STF(n**l)||^2 = l! / (2l-1)!! on the unit sphere.
             scale = math.sqrt(math.comb(2 * l, l) / 2**l)
             if normalization == "component":
@@ -74,13 +74,8 @@ class CartesianHarmonics(torch.nn.Module):
             elif normalization == "integral":
                 scale *= math.sqrt((2 * l + 1) / (4 * math.pi))
             self.register_buffer(
-                f"basis_{l}",
-                matrix.to(torch.get_default_dtype()).clone(),
-                persistent=False,
-            )
-            self.register_buffer(
-                f"scaled_basis_{l}",
-                (scale * matrix.T).to(torch.get_default_dtype()),
+                f"projection_{l}",
+                (scale * matrix).to(torch.get_default_dtype()),
                 persistent=False,
             )
 
@@ -97,9 +92,7 @@ class CartesianHarmonics(torch.nn.Module):
             )
         values = []
         for mul, ir in self.irreps_out:
-            x = (powers[ir.l] @ getattr(self, f"basis_{ir.l}")) @ getattr(
-                self, f"scaled_basis_{ir.l}"
-            )
+            x = powers[ir.l] @ getattr(self, f"projection_{ir.l}")
             values.extend([x] * mul)
         return torch.cat(values, dim=-1) if values else vectors[..., :0]
 
@@ -109,15 +102,12 @@ class CartesianHarmonics(torch.nn.Module):
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for l in {ir.l for _, ir in self.irreps_out}:
-            matrix = path_matrix(l)
+            matrix = stf_projection(l)
             scale = math.sqrt(math.comb(2 * l, l) / 2**l)
             if self.normalization == "component":
                 scale *= math.sqrt(2 * l + 1)
             elif self.normalization == "integral":
                 scale *= math.sqrt((2 * l + 1) / (4 * math.pi))
-            for name, value in (
-                (f"basis_{l}", matrix),
-                (f"scaled_basis_{l}", scale * matrix.T),
-            ):
-                self._buffers[name] = value.to(self._buffers[name]).clone()
+            name = f"projection_{l}"
+            self._buffers[name] = (scale * matrix).to(self._buffers[name]).clone()
         return self
