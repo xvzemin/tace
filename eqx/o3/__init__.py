@@ -5,6 +5,7 @@ from .gate import Gate
 from .ictd import ICTD, path_matrices
 from .linear import ElementLinear, MoEElementLinear
 from .s2grid import S2Grid
+from .tensor_product import GauntTensorProduct, MatrixTensorProduct
 
 __all__ = [
     "so3_generators",
@@ -14,4 +15,6 @@ __all__ = [
     "ElementLinear",
     "MoEElementLinear",
     "S2Grid",
+    "GauntTensorProduct",
+    "MatrixTensorProduct",
 ]

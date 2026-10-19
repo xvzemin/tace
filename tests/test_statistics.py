@@ -174,7 +174,7 @@ def test_energy_statistics_use_canonical_names(monkeypatch):
     )[0]
 
     assert stats["mean_energy"] == 6.0
-    assert stats["std_energy"] == math.sqrt(8.0)
+    assert stats["std_energy"] == pytest.approx(math.sqrt(8.0), rel=1e-14, abs=0.0)
     assert stats["atomic_energy"] == {1: 1.0, 2: 2.0}
     assert stats["mean_energy_per_atom"] == {1: 5.0, 2: 5.0}
     assert stats["mean_delta_energy_per_atom"] == {1: 3.5, 2: 3.5}
@@ -241,7 +241,9 @@ def test_forces_statistics_use_canonical_names(monkeypatch):
         ),
     )
     assert stats["mean_forces_norm"] == 3.0
-    assert stats["std_forces_norm"] == math.sqrt(8.0 / 3.0)
+    assert stats["std_forces_norm"] == pytest.approx(
+        math.sqrt(8.0 / 3.0), rel=1e-14, abs=0.0
+    )
     assert stats["mean_forces_xyz_by_element"] == {
         1: [0.0, 1.0, 1.0],
         2: [0.0, 3.0, 4.0],
@@ -348,7 +350,9 @@ def test_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch):
         torch.full((2,), math.sqrt(35.0 / 3.0)),
     )
     assert stats["mean_noncollinear_magmoms_norm"] == 3.0
-    assert stats["std_noncollinear_magmoms_norm"] == math.sqrt(8.0 / 3.0)
+    assert stats["std_noncollinear_magmoms_norm"] == pytest.approx(
+        math.sqrt(8.0 / 3.0), rel=1e-14, abs=0.0
+    )
     assert stats["max_noncollinear_magmoms_norm"] == 5.0
     assert stats["mean_noncollinear_magmoms_xyz_by_element"] == {
         1: [0.0, 1.0, 1.0],

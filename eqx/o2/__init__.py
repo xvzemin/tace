@@ -1,7 +1,7 @@
 """Spherical O(2) operators and O(3)/O(2) frame conversions."""
 
-from .asymmetric_contraction import AsymmetricContraction
 from .circular_harmonics import CircularHarmonics, circular_harmonics
+from .contraction import AsymmetricContraction, SymmetricContraction
 from .gate import Activation, Gate
 from .ictd import ICTD, path_matrices
 from .irreps import Irrep, Irreps
@@ -14,7 +14,6 @@ from .rotation_matrix import (
     rotation_matrix_to_y_axis,
     rotation_matrix_to_z_axis,
 )
-from .symmetric_contraction import SymmetricContraction
 from .tensor_product import TensorProduct
 from .wigner import WignerD
 

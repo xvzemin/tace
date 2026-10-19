@@ -3,10 +3,7 @@
 Spherical O(3)
 ==============
 
-These operators use ``e3nn.o3.Irreps`` and flattened ``mul_ir`` features:
-``(..., mul, 2 * l + 1)`` within each entry. Linear weights are supplied
-externally; biases are applied by the caller. Grid transforms instead
-keep channel dimensions before the harmonic coefficient axis.
+Representations use ``e3nn.o3.Irreps``; features use flattened ``mul_ir`` layout.
 
 Linear maps
 -----------
@@ -17,10 +14,19 @@ Linear maps
 .. autoclass:: eqx.o3.MoEElementLinear
    :members: forward
 
-Gated activations
------------------
+Activations
+-----------
 
 .. autoclass:: eqx.o3.Gate
+   :members: forward
+
+Tensor products
+---------------
+
+.. autoclass:: eqx.o3.GauntTensorProduct
+   :members: forward
+
+.. autoclass:: eqx.o3.MatrixTensorProduct
    :members: forward
 
 Grid transforms

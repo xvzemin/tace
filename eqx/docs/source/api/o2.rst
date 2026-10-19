@@ -3,11 +3,7 @@
 Spherical O(2)
 ==============
 
-Features use a flattened ``ir_mul`` axis with trailing size ``irreps.dim``.
-Iteration over ``Irreps`` yields ``(ir, mul)`` entries. Each irrep has
-dimension one at order zero and two at positive orders. ``O2Grid`` requires
-``C`` copies of both scalars and ``2C`` copies of each positive order,
-supplied as a combined tensor or two coefficient sets.
+Features use flattened ``ir_mul`` layout. ``Irreps`` entries are ``(ir, mul)``.
 
 Representations
 ---------------
@@ -27,14 +23,8 @@ Harmonics
 .. autoclass:: eqx.o2.CircularHarmonics
    :members: forward
 
-Grid transforms
----------------
-
-.. autoclass:: eqx.o2.O2Grid
-   :members: forward, to_grid, from_grid
-
-Linear maps and activations
----------------------------
+Linear maps
+-----------
 
 .. autoclass:: eqx.o2.Linear
    :members: forward, weight_view_for_instruction, weight_views
@@ -42,36 +32,29 @@ Linear maps and activations
 .. autoclass:: eqx.o2.UuLinear
    :members: forward
 
+Activations
+-----------
+
 .. autoclass:: eqx.o2.Activation
    :members: forward
 
 .. autoclass:: eqx.o2.Gate
    :members: forward
 
-``Gate`` defaults to PyTorch. Set ``backend="cuda"`` to fuse scalar activation,
-odd-gate basis changes and channel-wise multiplication. SiLU, sigmoid, tanh and
-identity activations are supported, including second-moment normalization.
-See :ref:`equivariantx-api-tools` for an indexed-frame convolution example.
-
 Tensor products
 ---------------
 
-.. code-block:: python
-
-   import torch
-   from eqx import o2
-
-   tp = o2.TensorProduct(
-       "4x1m", "1x1m", "4x0e + 4x0o + 4x2m",
-       [(0, 0, i, "u1u", True) for i in range(3)],
-       internal_weights=False, shared_weights=False,
-   )
-   x = tp.irreps_in1.randn(8, -1)
-   y = tp.irreps_in2.randn(8, -1)
-   output = tp(x, y, torch.randn(8, tp.weight_numel))
-
 .. autoclass:: eqx.o2.TensorProduct
    :members: forward, weight_view_for_instruction, weight_views
+
+Harmonic O(3) coupling
+----------------------
+
+.. autoclass:: eqx.o2.O3TensorProduct
+   :members: forward, forward_local, forward_scatter
+
+Many-body contractions
+----------------------
 
 .. autoclass:: eqx.o2.AsymmetricContraction
    :members: forward, set_algorithm
@@ -79,8 +62,8 @@ Tensor products
 .. autoclass:: eqx.o2.SymmetricContraction
    :members: forward, set_algorithm
 
-Harmonic O(3) coupling
-----------------------
+Grid transforms
+---------------
 
-.. autoclass:: eqx.o2.O3TensorProduct
-   :members: forward, forward_local, forward_scatter
+.. autoclass:: eqx.o2.O2Grid
+   :members: forward, to_grid, from_grid

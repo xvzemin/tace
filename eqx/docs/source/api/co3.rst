@@ -22,11 +22,14 @@ Harmonics
 .. autoclass:: eqx.co3.CartesianHarmonics
    :members: forward
 
-Linear maps and activations
----------------------------
+Linear maps
+-----------
 
 .. autoclass:: eqx.co3.Linear
    :members: forward, weight_view_for_instruction, weight_views
+
+Activations
+-----------
 
 .. autoclass:: eqx.co3.Activation
    :members: forward

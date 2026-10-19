@@ -6,6 +6,7 @@ from e3nn import o3
 
 from eqx import conv as eqx_conv
 from eqx import o2
+from eqx import o3 as eqx_o3
 
 
 @pytest.mark.parametrize("kind", ["o3", "o2", "wigner", "uu", "cartesian"])
@@ -4189,3 +4190,64 @@ def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
         b = torch.autograd.grad(expected.sin().sum(), values, create_graph=True)
         actual, expected = (torch.cat([v.flatten() for v in g]) for g in (a, b))
     torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
+
+
+@pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))
+@pytest.mark.parametrize("num_edges", [0, 7])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_convolution_radial_network(cls, num_edges, device, double_precision):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = cls("2x0e+2x1o", "0e+1o", "2x0e+2x1o+2x2e", shared_weights=False)
+    convolution = getattr(eqx_conv, cls.__name__ + "Conv")(tp).to(device)
+    network = torch.nn.Sequential(
+        torch.nn.Linear(3, 8), torch.nn.SiLU(), torch.nn.Linear(8, tp.weight_numel)
+    ).to(device)
+    features = torch.randn(4, tp.irreps_in1.dim, device=device, requires_grad=True)
+    vectors = torch.randn(num_edges, 3, device=device, requires_grad=True)
+    radial = torch.randn(num_edges, 3, device=device, requires_grad=True)
+    index = torch.randint(4, (2, num_edges), device=device)
+    attrs = o3.spherical_harmonics([0, 1], vectors, normalize=False)
+    actual = convolution(
+        features, attrs, index, num_nodes=6, radial=radial, radial_network=network
+    )
+    messages = tp(features[index[0]], attrs, network(radial))
+    expected = messages.new_zeros(6, tp.irreps_out.dim).index_add(0, index[1], messages)
+    inputs = (features, vectors, radial, *network.parameters())
+    torch.testing.assert_close(actual, expected)
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(value.sin().sum(), inputs, create_graph=True)
+            for value in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        ]
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_product_and_convolution_compile(cls, device, double_precision):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = cls("0e+1o", "0e+1o", "0e+1o+2e", shared_weights=False)
+    convolution = getattr(eqx_conv, cls.__name__ + "Conv")(tp).to(device)
+    compiled = torch.compile(
+        convolution, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for edges in (3, 6, 0):
+        x = torch.randn(4, 4, device=device, requires_grad=True)
+        y = torch.randn(edges, 4, device=device, requires_grad=True)
+        weight = torch.randn(edges, tp.weight_numel, device=device, requires_grad=True)
+        index = torch.randint(4, (2, edges), device=device)
+        actual, expected = (
+            compiled(x, y, index, weight),
+            convolution(x, y, index, weight),
+        )
+        torch.testing.assert_close(actual, expected)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), (x, y, weight)),
+            torch.autograd.grad(expected.square().sum(), (x, y, weight)),
+        ):
+            torch.testing.assert_close(a, b)
