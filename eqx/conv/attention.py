@@ -95,10 +95,8 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=Tr
 
     Notes
     -----
-    Maxima are computed from scores alone and detached. Edge weights multiply
-    the shifted exponential before normalization. Empty neighborhoods require
-    no special values. Derivatives include edge weights, including weights
-    equal to zero, and support higher orders.
+    Maxima are detached. Derivatives through scores and weights support
+    higher orders, including weights equal to zero.
     """
     if weight is None:
         weight = scores.new_ones((scores.shape[0], 1))
@@ -140,42 +138,95 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=Tr
 def source(dtype, heads, weight_heads):
     scalar = "double" if dtype == torch.float64 else "float"
     return f"""
-    using scalar={scalar};
-    extern "C" __global__ void run(const scalar* scores, const scalar* weight,
-        const long long* order, const long long* ptr, scalar* out, double epsilon) {{
-        int h=blockIdx.y, t=threadIdx.x;
-        long long begin=ptr[blockIdx.x], end=ptr[blockIdx.x+1];
-        if(begin==end) return;
-        __shared__ scalar values[128];
-        scalar maximum=-scalar(1.0/0.0);
-        for(long long k=begin+t;k<end;k+=128)
-            maximum=fmax(maximum,scores[order[k]*{heads}+h]);
-        values[t]=maximum; __syncthreads();
-        for(int stride=64;stride;stride>>=1) {{
-            if(t<stride) values[t]=fmax(values[t],values[t+stride]);
-            __syncthreads();
+using T = {scalar};
+using int64_t = long long;
+extern "C" __global__ void run(const T* scores, const T* weight,
+    const int64_t* order, const int64_t* ptr, T* output,
+    T* denominators, T* maxima, int64_t num_nodes, double epsilon) {{
+    const int64_t task = int64_t(blockIdx.x) * 4 + threadIdx.x / 32;
+    if (task >= num_nodes * {heads}) return;
+    const int head = task % {heads}, lane = threadIdx.x % 32;
+    const int64_t node = task / {heads}, begin = ptr[node], end = ptr[node + 1];
+    T maximum = -T(1.0 / 0.0);
+    for (int64_t k = begin + lane; k < end; k += 32) {{
+        maximum = fmax(maximum, scores[order[k] * {heads} + head]);
+    }}
+    for (int stride = 16; stride; stride >>= 1) {{
+        maximum = fmax(maximum, __shfl_xor_sync(0xffffffff, maximum, stride));
+    }}
+    if (maximum == -T(1.0 / 0.0)) {{
+        for (int64_t k = begin + lane; k < end; k += 32) {{
+            output[order[k] * {heads} + head] = 0;
         }}
-        maximum=values[0]; __syncthreads();
-        if(maximum==-scalar(1.0/0.0)) {{
-            for(long long k=begin+t;k<end;k+=128) out[order[k]*{heads}+h]=0;
-            return;
+        if (lane == 0 && denominators) {{
+            denominators[task] = T(epsilon);
+            maxima[task] = 0;
         }}
-        scalar total=0;
-        for(long long k=begin+t;k<end;k+=128) {{
-            long long edge=order[k];
-            total+=exp(scores[edge*{heads}+h]-maximum)*weight[edge*{weight_heads}+{0 if weight_heads == 1 else "h"}];
-        }}
-        values[t]=total; __syncthreads();
-        for(int stride=64;stride;stride>>=1) {{
-            if(t<stride) values[t]+=values[t+stride];
-            __syncthreads();
-        }}
-        scalar denominator=values[0]+scalar(epsilon);
-        for(long long k=begin+t;k<end;k+=128) {{
-            long long edge=order[k];
-            out[edge*{heads}+h]=exp(scores[edge*{heads}+h]-maximum)/denominator;
-        }}
-    }}"""
+        return;
+    }}
+    T total = 0;
+    for (int64_t k = begin + lane; k < end; k += 32) {{
+        const int64_t edge = order[k];
+        total += exp(scores[edge * {heads} + head] - maximum)
+            * weight[edge * {weight_heads} + {0 if weight_heads == 1 else "head"}];
+    }}
+    for (int stride = 16; stride; stride >>= 1) {{
+        total += __shfl_xor_sync(0xffffffff, total, stride);
+    }}
+    const T denominator = total + T(epsilon);
+    if (lane == 0 && denominators) {{
+        denominators[task] = denominator;
+        maxima[task] = maximum;
+    }}
+    for (int64_t k = begin + lane; k < end; k += 32) {{
+        const int64_t edge = order[k];
+        output[edge * {heads} + head] =
+            exp(scores[edge * {heads} + head] - maximum) / denominator;
+    }}
+}}
+"""
+
+
+def normalized_exp_forward(
+    scores, weight, target, num_nodes, eps, denominator=None, maximum=None
+):
+    """Divide shifted exponentials by weighted sums over incoming edges.
+
+    Optional ``denominator`` and ``maximum`` buffers are filled in place.
+    """
+    from ..kernels.cuda import kernels, runtime
+
+    result = torch.empty_like(scores)
+    if not num_nodes or not scores.shape[1]:
+        return result
+    order, ptr = prepare_graph(target, target, 1, num_nodes)
+    code = source(scores.dtype, scores.shape[1], weight.shape[1])
+    compiled = kernels([code], scores.device)
+    epsilon = struct.unpack("Q", struct.pack("d", eps))[0]
+    runtime().launch(
+        [
+            (
+                compiled[code],
+                [
+                    scores.data_ptr(),
+                    weight.data_ptr(),
+                    order.data_ptr(),
+                    ptr.data_ptr(),
+                    result.data_ptr(),
+                    0 if denominator is None else denominator.data_ptr(),
+                    0 if maximum is None else maximum.data_ptr(),
+                    num_nodes,
+                    epsilon,
+                ],
+                (num_nodes * scores.shape[1] + 3) // 4,
+                1,
+                128,
+                0,
+            )
+        ],
+        torch.cuda.current_stream(scores.device).cuda_stream,
+    )
+    return result
 
 
 @torch.library.custom_op(
@@ -188,39 +239,7 @@ def normalized_exp(
     num_nodes: int,
     eps: float,
 ) -> torch.Tensor:
-    from ..kernels.cuda import kernels, runtime
-
-    result = torch.empty_like(scores)
-    if scores.numel():
-        order = prepare_graph(target, target, 1)
-        counts = target.new_zeros(num_nodes).index_add(
-            0, target, torch.ones_like(target)
-        )
-        ptr = torch.cat((target.new_zeros(1), counts.cumsum(0)))
-        code = source(scores.dtype, scores.shape[1], weight.shape[1])
-        compiled = kernels([code], scores.device)
-        epsilon = struct.unpack("Q", struct.pack("d", eps))[0]
-        runtime().launch(
-            [
-                (
-                    compiled[code],
-                    [
-                        scores.data_ptr(),
-                        weight.data_ptr(),
-                        order.data_ptr(),
-                        ptr.data_ptr(),
-                        result.data_ptr(),
-                        epsilon,
-                    ],
-                    ptr.numel() - 1,
-                    scores.shape[1],
-                    128,
-                    0,
-                )
-            ],
-            torch.cuda.current_stream(scores.device).cuda_stream,
-        )
-    return result
+    return normalized_exp_forward(scores, weight, target, num_nodes, eps)
 
 
 @normalized_exp.register_fake
@@ -254,7 +273,8 @@ class StreamingGraphAttention(Replay):
     ----------
     function : callable
         Takes a list of tile inputs and returns scores ``(edges, heads)``
-        and values ``(edges, angular, channels)``.
+        and values ``(edges, angular, channels)``. Must be deterministic and
+        stateless, with all differentiable tensors passed as inputs.
     fake_function : callable
         Returns empty node-output, denominator and maximum tensors from input
         shapes. The first input determines the number of nodes.
@@ -262,7 +282,7 @@ class StreamingGraphAttention(Replay):
         Maps edge-dependent input slots to their edge axis. Other inputs are
         shared across tiles.
     target_slot : int
-        Slot holding receiver indices, or a two-row edge index.
+        Slot holding target indices, or a two-row edge index.
     normalizer_slot, value_weight_slot : int
         Slots holding nonnegative softmax weights and multiplicative value
         weights. They may identify the same tensor.
@@ -271,19 +291,10 @@ class StreamingGraphAttention(Replay):
     tile_size : int
         Maximum number of edges evaluated together.
     eps : float
-        Added to the denominator after shifting by the receiver maximum.
+        Added to the denominator after shifting by the target-node maximum.
     backend : {"cuda", "torch"}, optional
         ``"cuda"`` replays tiles during differentiation. ``"torch"`` retains
         the PyTorch online-softmax graph and uses automatic differentiation.
-
-    Notes
-    -----
-    The replay backend saves node outputs, shifted denominators and detached
-    maxima. Its adjoint recomputes each score/value tile once. The tensor expression
-    is itself replayable, including derivatives through the saved outputs
-    and denominators, so force training and higher derivatives are supported.
-    The callback must be deterministic and state-free. All differentiable
-    tensors used by it must be supplied as inputs, rather than captured values.
     """
 
     def __init__(

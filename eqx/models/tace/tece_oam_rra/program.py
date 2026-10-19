@@ -3,6 +3,7 @@
 from functools import lru_cache
 
 from ....conv.program import Program
+from ....conv.uv_o2.convolution import rotate
 from ....utils.metadata import parse_metadata
 
 
@@ -145,45 +146,44 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
         ),
     )
     rotation, inverse = values[5:7]
-    if packed:
-        # Expand only the current tile. Full-graph frames and their adjoints
-        # retain degree blocks, rather than storing the off-degree zeros.
-        local_indices = [
-            (l, l + signed_m)
-            for m in range(mmax + 1)
-            for signed_m in ((0,) if m == 0 else (m, -m))
-            for l in range(m, n)
-        ]
-        indices = [
-            l * (4 * l * l - 1) // 3 + row * (2 * l + 1) + column - l * l
-            if l * l <= column < (l + 1) ** 2
-            else rotation_width
-            for l, row in local_indices
-            for column in range(angular_in)
-        ]
-        rotation = program.gather(
-            program.concatenate((rotation, program.constant(1, 0))), indices
-        )
-        indices = [
-            l * (4 * l * l - 1) // 3 + row * (2 * l + 1) + column - l * l
-            if l * l <= column < (l + 1) ** 2
-            else rotation_width
-            for column in range(angular_out)
-            for l, row in local_indices
-        ]
-        inverse = program.gather(
-            program.concatenate((inverse, program.constant(1, 0))), indices
-        )
-        if mmax < ell:
-            scale = program.concatenate(
-                [
-                    program.constant(1, ((2 * l + 1) / (2 * min(l, mmax) + 1)) ** 0.5)
-                    for _ in range(angular_out)
-                    for l, _ in local_indices
-                ]
+
+    def rotate_features(features, matrix, global_dim, width, inverse=False):
+        if not packed:
+            return program.matmul(
+                matrix,
+                features,
+                global_dim if inverse else angular,
+                angular if inverse else global_dim,
+                width,
             )
-            inverse = program.binary("mul", inverse, scale)
-    local = program.matmul(rotation, paired, angular, angular_in, 2 * channels)
+        description = (
+            mmax,
+            False,
+            tuple((1 if m == 0 else 2, (n - m) * width) for m in range(mmax + 1)),
+            tuple(
+                (
+                    l * l * width,
+                    width,
+                    l,
+                    False,
+                    tuple(range(min(l, mmax) + 1)),
+                    tuple((l - m) * width for m in range(min(l, mmax) + 1)),
+                )
+                for l in range(n)
+            ),
+        )
+        return rotate(
+            program,
+            description,
+            features,
+            matrix,
+            angular,
+            global_dim,
+            inverse=inverse,
+            packed=True,
+        )
+
+    local = rotate_features(paired, rotation, angular_in, 2 * channels)
     descriptions = {entry[0]: entry[1:] for entry in linears}
 
     def linear(name, features):
@@ -275,22 +275,26 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
     )
     empty = program.constant(1, 0)
     message = program.product((local, weight, empty), radial_product, 2)
-    packed = linear("linear_up", message)
+    hidden_features = linear("linear_up", message)
     width = hidden if ece else channels
     gates = sum((n if ece else n - m) for m in range(mmax + 1) if gate_m0 or m)
-    gate = activate(program.slice(packed, 0, gates * width), tensor_act)
-    scalar = activate(program.slice(packed, gates * width, n * width), scalar_act)
+    gate = activate(program.slice(hidden_features, 0, gates * width), tensor_act)
+    scalar = activate(
+        program.slice(hidden_features, gates * width, n * width), scalar_act
+    )
     if ece:
         coefs = activate(
             linear("linear_coefs", program.slice(message, 0, n * 2 * channels)),
             scalar_act,
         )
         message = program.product(
-            (packed, packed, gate, coefs, scalar, empty), update, 5
+            (hidden_features, hidden_features, gate, coefs, scalar, empty), update, 5
         )
     else:
         features = program.slice(
-            packed, gates * width, program.size(packed) - gates * width
+            hidden_features,
+            gates * width,
+            program.size(hidden_features) - gates * width,
         )
         # Order-zero gates are optional; positive orders share one scalar gate
         # between their two real coordinates.
@@ -310,7 +314,7 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
         tensors = program.binary("mul", tensors, program.gather(gate, mapped))
         message = tensors if gate_m0 else program.concatenate((scalar, tensors))
     message = linear("linear_down", message)
-    value = program.matmul(inverse, message, angular_out, angular, channels)
+    value = rotate_features(message, inverse, angular_out, channels, inverse=True)
     return tuple(program.nodes), score, value, tuple(specs), heads, channels, eps
 
 

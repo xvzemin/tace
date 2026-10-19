@@ -1,10 +1,10 @@
-"""Receiver-normalized rotary attention with bounded edge tiles."""
+"""Tiled rotary attention and target-node aggregation."""
 
 from functools import lru_cache
 
-import torch
-
+from ....conv.attention import normalized_exp_forward
 from ....conv.execution import TiledProgram, execution_plan
+from ....conv.graph import reduce_messages
 
 BACKWARD_TILE_SIZE = 4096
 
@@ -15,7 +15,7 @@ def forward_plan(nodes, output):
 
 
 def forward(base, inputs, source, target, outputs, tile_size=8192):
-    """Retain only edge scores between the score and message passes."""
+    """Compute attention-weighted node updates in edge tiles."""
     nodes, score, value, _, heads, channels, eps = base
     score_plan = forward_plan(nodes, score)
     value_plan = forward_plan(nodes, value)
@@ -27,17 +27,16 @@ def forward(base, inputs, source, target, outputs, tile_size=8192):
         tile = TiledProgram(score_plan, inputs, source, target, begin, end, shared)
         scores[begin:end] = tile.value(score)
         del tile
-    maximum.fill_(-torch.inf)
-    maximum.scatter_reduce_(0, target[:, None].expand_as(scores), scores, reduce="amax")
-    maximum.masked_fill_(maximum.isneginf(), 0)
-    exponential = (scores - maximum[target]).exp()
-    denominator.zero_().index_add_(0, target, exponential * inputs[4]).add_(eps)
-    scale = exponential * inputs[4].square() / denominator[target]
+    scale = normalized_exp_forward(
+        scores, inputs[4], target, result.shape[0], eps, denominator, maximum
+    )
+    scale.mul_(inputs[4].square())
     result.zero_()
     for begin in range(0, source.numel(), tile_size):
         end = min(begin + tile_size, source.numel())
         tile = TiledProgram(value_plan, inputs, source, target, begin, end, shared)
-        message = tile.value(value).reshape(end - begin, -1, heads, channels // heads)
-        message = (message * scale[begin:end, None, :, None]).flatten(1)
-        result.flatten(1).index_add_(0, tile.target, message)
+        message = tile.value(value)
+        reduce_messages(
+            message, tile.target, result.flatten(1), scale[begin:end], channels
+        )
         del message, tile

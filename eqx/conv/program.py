@@ -124,7 +124,16 @@ class Program:
         )
 
     def matmul(self, x, weight, rows, inputs, outputs):
-        if rows == 1 and self.nodes[x][0] == "concat":
+        if (
+            rows == 1
+            and self.nodes[x][0] == "concat"
+            and any(
+                self.nodes[i][0] == "input"
+                and self.nodes[i][3][1] in ("source", "target")
+                for i in self.nodes[x][2]
+            )
+        ):
+            # Project node inputs before gathering their edge rows.
             parts, offset = [], 0
             for value in self.nodes[x][2]:
                 width = self.size(value)

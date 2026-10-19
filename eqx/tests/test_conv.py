@@ -3111,6 +3111,73 @@ def test_convolution_graph_order(owner):
     assert updated is not order
     torch.testing.assert_close(updated, edges[owner].argsort(stable=True))
     assert prepare_graph(edges[0, :0], edges[1, :0], owner).shape == (0,)
+    permutation, pointers = prepare_graph(edges[0], edges[1], owner, 7)
+    assert prepare_graph(edges[0], edges[1], owner, 7)[1] is pointers
+    expected = torch.cat(
+        (torch.zeros(1, dtype=torch.long), edges[owner].bincount(minlength=7).cumsum(0))
+    )
+    torch.testing.assert_close(pointers, expected)
+    torch.testing.assert_close(permutation, updated)
+    edges[owner, 0] = 6
+    assert prepare_graph(edges[0], edges[1], owner, 7)[1] is not pointers
+
+
+@pytest.mark.parametrize("heads", [1, 3, 8])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_graph_reduction(heads, weighted, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.graph import reduce_messages
+
+    target = torch.randint(5, (73,), device="cuda")
+    channels = heads * 5
+    values = torch.randn(73, channels * 3, device="cuda")
+    weights = torch.rand(73, heads, device="cuda") if weighted else None
+    actual = torch.randn(7, values.shape[1], device="cuda")
+    message = (
+        values
+        if weights is None
+        else (values.reshape(73, 3, heads, 5) * weights[:, None, :, None]).flatten(1)
+    )
+    expected = actual.clone().index_add_(0, target, message)
+    reduce_messages(values, target, actual, weights, channels)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("heads,weight_heads", [(1, 1), (3, 1), (3, 3), (8, 8)])
+def test_graph_softmax_derivatives(heads, weight_heads, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.attention import graph_softmax, normalized_exp_forward
+
+    target = torch.randint(4, (73,), device="cuda")
+    scores = torch.randn(73, heads, device="cuda", requires_grad=True)
+    weight = torch.rand(73, weight_heads, device="cuda")
+    weight[::7] = 0
+    weight.requires_grad_()
+    actual = graph_softmax(scores, target, 6, weight, eps=1e-8)
+    expected = graph_softmax(scores, target, 6, weight, eps=1e-8, fused=False)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        seed = torch.randn_like(actual)
+        a = torch.autograd.grad(
+            (actual.sin() * seed).sum(), (scores, weight), create_graph=True
+        )
+        b = torch.autograd.grad(
+            (expected.sin() * seed).sum(), (scores, weight), create_graph=True
+        )
+        actual, expected = (
+            torch.cat([x.flatten() for x in values]) for values in (a, b)
+        )
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+    denominator = scores.new_empty(6, heads)
+    maximum = torch.empty_like(denominator)
+    with torch.no_grad():
+        normalized_exp_forward(
+            scores[:0], weight[:0], target[:0], 6, 1e-8, denominator, maximum
+        )
+    torch.testing.assert_close(denominator, torch.full_like(denominator, 1e-8))
+    torch.testing.assert_close(maximum, torch.zeros_like(maximum))
 
 
 @pytest.mark.parametrize("degree", [0, 1, 3, 6])

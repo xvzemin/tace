@@ -24,6 +24,17 @@ def node_projection(nodes, i):
     )
 
 
+def can_inline_matmul(nodes, i, dependent):
+    """Whether an edge-wise matrix product can be inlined."""
+    op, _, args, data = nodes[i]
+    return (
+        op == "matmul"
+        and data[0] > 1
+        and data[1] <= 11
+        and all(dependent[j] for j in args)
+    )
+
+
 @lru_cache(maxsize=128)
 def execution_plan(metadata):
     nodes, outputs = parse_metadata(metadata)
@@ -32,8 +43,7 @@ def execution_plan(metadata):
         result.append(
             data[1] != "shared" if op == "input" else any(result[i] for i in args)
         )
-    # Keep shared subexpressions within a tile. Inlining them into every
-    # channel slice repeats tensor products and attention reductions.
+    # Cache tile intermediates with multiple consumers.
     consumers, live = Counter(root for root, _, _ in outputs), set()
 
     def visit(i):
@@ -50,8 +60,11 @@ def execution_plan(metadata):
         for i in live
         if result[i]
         and consumers[i] > 1
-        and nodes[i][0]
-        in ("product", "scatter", "add", "mul", "silu", "sigmoid", "tanh", "exp")
+        and (
+            nodes[i][0]
+            in ("product", "scatter", "add", "mul", "silu", "sigmoid", "tanh", "exp")
+            or can_inline_matmul(nodes, i, result)
+        )
     )
     expressions, dependencies, uses = {}, {}, Counter()
 
@@ -79,6 +92,7 @@ def execution_plan(metadata):
                 )
             elif (
                 op == "matmul"
+                and not can_inline_matmul(nodes, i, result)
                 or not result[i]
                 or op == "slice"
                 and (args[0] in boundaries or nodes[args[0]][0] == "matmul")
@@ -151,12 +165,9 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
         if i not in translated:
             op, size, args, data = nodes[i]
             if (
-                op
-                in (
-                    "input",
-                    "matmul",
-                    "convolution",
-                )
+                op in ("input", "convolution")
+                or op == "matmul"
+                and not can_inline_matmul(nodes, i, dependent)
                 or not dependent[i]
                 or i != root
                 and i in boundaries
@@ -315,6 +326,7 @@ class TiledProgram:
                 x = self.values[key][op == "inv_norm"]
             elif (
                 op == "matmul"
+                and not can_inline_matmul(self.nodes, i, self.dependent)
                 or not self.dependent[i]
                 or op == "slice"
                 and i not in self.expressions
