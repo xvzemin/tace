@@ -66,6 +66,26 @@ def trace_free_coupling(l1, l2, l3):
     bases = [tuple(p for p in symmetric_powers(l) if p[2] < 2) for l in (l1, l2, l3)]
     lookup1, lookup2 = ({p: i for i, p in enumerate(basis)} for basis in bases[:2])
     k, odd = divmod(l1 + l2 - l3, 2)
+    if not odd and k == min(l1, l2):
+        # All free indices belong to one STF input. Their symmetry and zero
+        # traces are inherited, so output projection is the identity.
+        result = []
+        for c, powers in enumerate(bases[2]):
+            row = defaultdict(int)
+            for gamma in symmetric_powers(k):
+                count = math.comb(k, gamma[0]) * math.comb(k - gamma[0], gamma[1])
+                a = tuple(x + y for x, y in zip(gamma, powers)) if l1 >= l2 else gamma
+                b = tuple(x + y for x, y in zip(gamma, powers)) if l2 > l1 else gamma
+                for (x, sx), (y, sy) in product(
+                    trace_free_components(a), trace_free_components(b)
+                ):
+                    row[lookup1[x], lookup2[y]] += count * sx * sy
+            result.extend(
+                (a, b, c, Fraction(value))
+                for (a, b), value in sorted(row.items())
+                if value
+            )
+        return tuple(result)
     left, right = l1 - k - odd, l2 - k - odd
     raw = defaultdict(lambda: defaultdict(Fraction))
     epsilon = (

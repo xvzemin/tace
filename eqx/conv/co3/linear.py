@@ -22,12 +22,22 @@ class Linear(CartesianLinear):
     backend : {"cuda", "torch"}, optional
         CUDA packs group matrices and fuses their final projections and sum.
         CPU inputs use ordinary PyTorch operations.
+    projected_inputs : sequence of bool, optional
+        Channels already in an STF subspace. These need extraction, not
+        projection. Defaults to False for every input channel.
     **kwargs
         Weight, bias and normalization arguments of ``co3.Linear``.
     """
 
     def __init__(
-        self, irreps_in, irreps_out, input_indices, *, backend="cuda", **kwargs
+        self,
+        irreps_in,
+        irreps_out,
+        input_indices,
+        *,
+        backend="cuda",
+        projected_inputs=None,
+        **kwargs,
     ):
         super().__init__(irreps_in, irreps_out, **kwargs)
         if backend not in ("cuda", "torch"):
@@ -37,6 +47,16 @@ class Linear(CartesianLinear):
         if indices.numel() != self.irreps_in.dim or (indices < 0).any():
             raise ValueError("input_indices must expand to irreps_in.dim entries.")
         self.input_dim = int(indices.max()) + 1 if indices.numel() else 0
+        channels = sum(mul for mul, _ in self.irreps_in)
+        projected_inputs = (
+            (False,) * channels if projected_inputs is None else tuple(projected_inputs)
+        )
+        if len(projected_inputs) != channels:
+            raise ValueError("projected_inputs must contain one value per channel.")
+        offsets, offset = [], 0
+        for mul, _ in self.irreps_in:
+            offsets.append(offset)
+            offset += mul
         groups = defaultdict(list)
         for group in self.groups:
             for ins, section in group:
@@ -48,7 +68,8 @@ class Linear(CartesianLinear):
                     unique = tuple(dict.fromkeys(row))
                     lookup = {index: i for i, index in enumerate(unique)}
                     expansion = tuple(lookup[index] for index in row)
-                    groups[ins.i_out, expansion].append(
+                    stf = projected_inputs[offsets[ins.i_in] + u]
+                    groups[ins.i_out, expansion, stf].append(
                         (unique, section.start + u * ins.path_shape[1], ins.path_weight)
                     )
         self.compact_groups = []
@@ -60,14 +81,15 @@ class Linear(CartesianLinear):
         self.weight_identity = []
         self.uniform_scales = []
         self.reduce_input = []
+        self.select_input = []
         input_indices = []
         destinations = defaultdict(list)
-        for i, ((dest, expansion), entries) in enumerate(groups.items()):
+        for i, ((dest, expansion, stf), entries) in enumerate(groups.items()):
             mul, ir = self.cartesian_out[dest]
             width = len(entries[0][0])
             self.compact_groups.append((dest, width, len(entries), mul))
             destinations[dest].append((i, entries))
-            self.expansions.append((ir.l, expansion))
+            self.expansions.append((ir.l, expansion, stf))
             self.scales.append(tuple(scale for _, _, scale in entries))
             self.uniform_scales.append(len(set(self.scales[-1])) == 1)
             gathered = (
@@ -105,11 +127,18 @@ class Linear(CartesianLinear):
                 torch.tensor([scale for _, _, scale in entries]).unsqueeze(-1),
                 persistent=False,
             )
-            packed, _ = self.matrices(ir.l, expansion)
+            packed, _ = self.matrices(ir.l, expansion, stf)
             dim = packed.shape[1]
             ci = len(entries)
+            selection = stf and self.output_basis == "cartesian" and ir.l <= 4
+            self.select_input.append(selection)
+            if selection:
+                self.register_buffer(
+                    f"selection_{i}", packed.argmax(0), persistent=False
+                )
             self.reduce_input.append(
-                dim < width and ci * dim * (width + mul) < mul * width * (ci + dim)
+                selection
+                or (dim < width and ci * dim * (width + mul) < mul * width * (ci + dim))
             )
             if self.uniform_scales[-1]:
                 packed = packed * self.scales[-1][0]
@@ -208,7 +237,7 @@ class Linear(CartesianLinear):
         self.packing_metadata = repr((self.input_dim, tuple(extractions)))
         self.projection_metadata = repr((self.irreps_out.dim, tuple(projections)))
 
-    def matrices(self, l, expansion):
+    def matrices(self, l, expansion, stf=False):
         """Return extraction and reconstruction matrices in CPU float64."""
         if self.output_basis == "spherical" or l > 4:
             matrix = path_matrix(l)
@@ -219,7 +248,11 @@ class Linear(CartesianLinear):
             )
         else:
             indices, reconstruction = trace_free_basis(l)
-            matrix = stf_projection(l).index_select(1, indices)
+            if stf:
+                matrix = torch.zeros(3**l, 2 * l + 1, dtype=torch.float64, device="cpu")
+                matrix[indices, torch.arange(2 * l + 1, device="cpu")] = 1
+            else:
+                matrix = stf_projection(l).index_select(1, indices)
         index = torch.tensor(expansion, dtype=torch.long, device="cpu")
         return matrix.new_zeros(int(index.max()) + 1, matrix.shape[1]).index_add(
             0, index, matrix
@@ -278,7 +311,11 @@ class Linear(CartesianLinear):
             if not self.uniform_scales[i]:
                 w = w * getattr(self, f"weight_scale_{i}")
             projection = getattr(self, f"projection_{i}")
-            if self.reduce_input[i]:
+            if self.select_input[i]:
+                x = x.index_select(-2, getattr(self, f"selection_{i}"))
+                if self.uniform_scales[i]:
+                    w = w * self.scales[i][0]
+            elif self.reduce_input[i]:
                 x = projection.T @ x
             mixed = x @ w
             value = mixed.transpose(-1, -2)
@@ -330,8 +367,8 @@ class Linear(CartesianLinear):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
-        for i, (degree, expansion) in enumerate(self.expansions):
-            packed, matrix = self.matrices(degree, expansion)
+        for i, (degree, expansion, stf) in enumerate(self.expansions):
+            packed, matrix = self.matrices(degree, expansion, stf)
             if self.uniform_scales[i]:
                 packed = packed * self.scales[i][0]
             name = f"projection_{i}"

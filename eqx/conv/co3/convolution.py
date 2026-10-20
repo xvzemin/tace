@@ -90,7 +90,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self.weight_numel = tensor_product.weight_numel
         self.tp = tensor_product
         self.projector = (
-            co3.Projector(self.irreps_out)
+            co3.Projector(
+                self.irreps_out, mask=[not stf for stf in tensor_product.output_stf]
+            )
             if tensor_product.project
             else torch.nn.Identity()
         )

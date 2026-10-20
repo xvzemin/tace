@@ -57,7 +57,10 @@ def test_trace_free_basis(double_precision, degree):
     assert not basis.state_dict()
 
 
-@pytest.mark.parametrize("degrees", [(4, 3, 4), (5, 4, 3), (5, 5, 5)])
+@pytest.mark.parametrize(
+    "degrees",
+    [(4, 3, 4), (5, 4, 3), (5, 5, 5), (4, 2, 2), (2, 4, 2), (6, 4, 2), (5, 5, 0)],
+)
 def test_trace_free_tensor_product(double_precision, degrees):
     l1, l2, l3 = degrees
     a, b, c = f"2x{l1}e", f"2x{l2}e", f"2x{l3}e"
@@ -83,6 +86,47 @@ def test_trace_free_tensor_product(double_precision, degrees):
         for left, right in zip(*gradients):
             torch.testing.assert_close(left, right, atol=1e-11, rtol=1e-10)
         losses = [sum(g.square().sum() for g in values) for values in gradients]
+
+
+@pytest.mark.parametrize(
+    "degrees", [(0, 3, 3), (3, 0, 3), (4, 2, 2), (2, 4, 2), (3, 3, 0)]
+)
+def test_full_contraction(double_precision, degrees):
+    from eqx.co3.tensor_product import cartesian_product
+
+    a, b, c = [f"1x{l}e" for l in degrees]
+    module = co3.TensorProduct(a, b, c, [(0, 0, 0, "uuu", False)]).to(DEVICE)
+    assert module.output_stf == (True,)
+    assert module.projection.identity
+    basis = [co3.ChangeOfBasis(ir).to(DEVICE) for ir in (a, b)]
+    inputs = [
+        torch.randn(3, 2 * l + 1, device=DEVICE, requires_grad=True)
+        for l in degrees[:2]
+    ]
+    x, y = [f(value) for f, value in zip(basis, inputs)]
+    actual = cartesian_product(x, y, *degrees)
+    expected = co3.Projector(c).to(DEVICE)(actual)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    for _ in range(3):
+        cotangent = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad(
+                (value.sin() * cotangent).sum(), inputs, create_graph=True
+            )
+            for value in (actual, expected)
+        ]
+        for left, right in zip(*gradients):
+            torch.testing.assert_close(left, right, atol=2e-11, rtol=2e-11)
+        actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+    mixed = co3.TensorProduct(
+        "1x0e+1x2e",
+        "1x2e",
+        "1x2e",
+        [(0, 0, 0, "uuu", False), (1, 0, 0, "uuu", False)],
+    )
+    assert mixed.output_stf == (False,)
+    assert not mixed.projection.identity
 
 
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])

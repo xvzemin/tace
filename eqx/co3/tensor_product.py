@@ -227,7 +227,22 @@ class TensorProduct(torch.nn.Module):
         else:
             self.register_buffer("weight", torch.empty(0))
         self.path_factors = tuple(scales)
-        self.projection = Projector(self.irreps_out) if project else torch.nn.Identity()
+        self.output_stf = tuple(
+            all(
+                ir.l
+                == abs(
+                    self.irreps_in1[ins.i_in1].ir.l - self.irreps_in2[ins.i_in2].ir.l
+                )
+                for ins in self.instructions
+                if ins.i_out == i
+            )
+            for i, (_, ir) in enumerate(self.irreps_out)
+        )
+        self.projection = (
+            Projector(self.irreps_out, mask=[not stf for stf in self.output_stf])
+            if project
+            else torch.nn.Identity()
+        )
         self.slices_in1, self.slices_in2 = (
             self.irreps_in1.slices(),
             self.irreps_in2.slices(),

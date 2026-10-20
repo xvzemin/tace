@@ -229,6 +229,10 @@ class Linear(torch.nn.Module):
         for index, ((mul, ir), group, input_section) in enumerate(
             zip(self.cartesian_out, self.groups, self.group_sections)
         ):
+            project = projected and (
+                not isinstance(self.projection, Projector)
+                or self.projection.mask[index]
+            )
             inputs, weights, biases = [], [], []
             for ins, section in group:
                 if ins.i_in < 0:
@@ -259,7 +263,7 @@ class Linear(torch.nn.Module):
                     x = inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
                 w = weights[0] if len(weights) == 1 else torch.cat(weights, dim=-2)
                 reduced = False
-                if projected and ir.l >= 2:
+                if project and ir.l >= 2:
                     basis = getattr(self.projection, f"basis_{ir.l}")
                     cin, cout, dim = x.shape[-2], mul, 2 * ir.l + 1
                     reduced = cin * dim * (ir.dim + cout) < cout * ir.dim * (cin + dim)
@@ -270,7 +274,7 @@ class Linear(torch.nn.Module):
                     if reduced:
                         x = x @ basis
                 value = w.transpose(-1, -2) @ x
-                if projected and (ir.l >= 2 or self.output_basis == "spherical"):
+                if project and (ir.l >= 2 or self.output_basis == "spherical"):
                     basis = getattr(self.projection, f"basis_{ir.l}")
                     if not reduced and self.output_basis == "cartesian" and ir.l == 2:
                         value = value @ self.projection.projection_2

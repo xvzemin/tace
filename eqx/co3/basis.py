@@ -134,18 +134,27 @@ class Projector(torch.nn.Module):
     ----------
     irreps : Irreps or str
         Representation labels and Cartesian storage layout.
+    mask : sequence of bool, optional
+        Entries requiring projection. False entries must already be STF.
     """
 
-    def __init__(self, irreps):
+    def __init__(self, irreps, *, mask=None):
         super().__init__()
         self.irreps_in = self.irreps_out = Irreps(irreps)
-        self.identity = all(ir.l < 2 for _, ir in self.irreps_in)
+        mask = (True,) * len(self.irreps_in) if mask is None else tuple(mask)
+        if len(mask) != len(self.irreps_in):
+            raise ValueError("mask must contain one value per irrep entry.")
+        self.mask = mask
         groups = []
-        for mul, ir in self.irreps_in:
-            if groups and groups[-1][1] == ir.l:
+        self.active = []
+        for (mul, ir), project in zip(self.irreps_in, mask):
+            project = project and ir.l >= 2
+            if groups and groups[-1][1] == ir.l and self.active[-1] == project:
                 groups[-1] = (groups[-1][0] + mul, ir.l, ir.dim)
             else:
                 groups.append((mul, ir.l, ir.dim))
+                self.active.append(project)
+        self.identity = not any(self.active)
         self.groups = tuple(groups)
         self.widths = tuple(mul * dim for mul, _, dim in groups)
         for l in sorted({ir.l for _, ir in self.irreps_in}):
@@ -168,11 +177,13 @@ class Projector(torch.nn.Module):
         if self.identity:
             return features
         values = []
-        for block, (mul, l, dim) in zip(features.split(self.widths, -1), self.groups):
+        for block, (mul, l, dim), project in zip(
+            features.split(self.widths, -1), self.groups, self.active
+        ):
             x = block.reshape(*features.shape[:-1], mul, dim)
-            if l == 2:
+            if project and l == 2:
                 x = x @ self.projection_2
-            elif l > 2:
+            elif project and l > 2:
                 basis = getattr(self, f"basis_{l}")
                 x = (x @ basis) @ basis.T
             values.append(x.flatten(-2))

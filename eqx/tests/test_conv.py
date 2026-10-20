@@ -1165,7 +1165,8 @@ def test_cartesian_input_components(degree, symmetric_inputs, double_precision):
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("output_basis", ["cartesian", "spherical"])
-def test_cartesian_compact_linear(backend, output_basis, double_precision):
+@pytest.mark.parametrize("projected", [False, True])
+def test_cartesian_compact_linear(backend, output_basis, projected, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx import co3
@@ -1201,6 +1202,15 @@ def test_cartesian_compact_linear(backend, output_basis, double_precision):
         internal_weights=False,
         backend=backend,
         output_basis=output_basis,
+        projected_inputs=(
+            [
+                stf
+                for (mul, _), stf in zip(tp.irreps_out, tp.output_stf)
+                for _ in range(mul)
+            ]
+            if projected
+            else None
+        ),
     )
     # Reconstruct constants when changing model precision.
     compact, linear = [m.float().cuda().double() for m in (compact, linear)]

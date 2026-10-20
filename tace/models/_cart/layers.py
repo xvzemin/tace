@@ -255,6 +255,14 @@ def cartesian_modules(module):
     if hasattr(module, "rejector") and isinstance(
         module.rejector, CartesianScatterTensorProduct
     ):
+        projected_inputs = [
+            stf
+            for (mul, _), stf in zip(
+                module.rejector.eqx_tp.irreps_out,
+                module.rejector.eqx_tp.tp.output_stf,
+            )
+            for _ in range(mul)
+        ]
         if module.rejector.compact_output:
             module.linear_down.linear = Linear(
                 module.linear_down.irreps_in,
@@ -262,10 +270,20 @@ def cartesian_modules(module):
                 module.rejector.eqx_tp.harmonic_output_index,
                 internal_weights=False,
                 shared_weights=True,
+                projected_inputs=projected_inputs,
             )
         else:
+            linear = module.linear_down.linear
+            stf, offset = [], 0
+            for mul, _ in linear.irreps_in:
+                stf.append(all(projected_inputs[offset : offset + mul]))
+                offset += mul
+            mask = [False] * len(linear.irreps_out)
+            for ins in linear.instructions:
+                if ins.i_in >= 0 and not stf[ins.i_in]:
+                    mask[ins.i_out] = True
             module.linear_down.linear.projection = co3.Projector(
-                module.linear_down.irreps_out
+                module.linear_down.irreps_out, mask=mask
             )
     for name, value in list(vars(module).items()):
         if isinstance(value, o3.Irreps):

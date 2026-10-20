@@ -5,12 +5,22 @@ from functools import lru_cache
 
 import torch
 
+from ..kernels.codegen import contraction_source
 from ..kernels.cuda import kernels, runtime
 from ..utils.metadata import parse_metadata
 
 
-def bilinear_terms(terms):
+def bilinear_terms(terms, factor=False):
     """Reuse input products across angular output components."""
+    if factor:
+        outputs = defaultdict(list)
+        for destination, coefficient, left, right in terms:
+            outputs[destination].append((coefficient, (left, right)))
+        lines, cache = [], {}
+        for destination, entries in outputs.items():
+            value = contraction_source(entries, cache, lines)
+            lines.append(f"{destination}+={value};")
+        return lines
     products = defaultdict(list)
     for destination, coefficient, left, right in terms:
         products[left, right].append((destination, coefficient))
@@ -48,14 +58,14 @@ def component_source(dtype, dims, role, groups):
                 f"p{i}[n*{dims[i]}+{r[i]}+c*{r[6 + i]}]" for i in range(3) if i != role
             ]
             terms.append((f"values[{r[role] - offset}]", coefficient, *operands))
-        lines.extend(bilinear_terms(terms))
+        lines.extend(bilinear_terms(terms, factor=True))
         lines.append(
             f"for(int m=0;m<{stride};++m) "
             f"out[n*{dims[role]}+{offset}+c*{stride}+m]+=values[m]; return; }}"
         )
         cases.append("\n".join(lines))
     return (
-        f"""using scalar={scalar};
+        f"""using scalar={scalar}; using T=scalar;
         extern "C" __global__ void run(const scalar* p0, const scalar* p1,
             const scalar* p2, const scalar* p3, const long long* types,
             scalar* out, long long nodes) {{
