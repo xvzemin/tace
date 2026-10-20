@@ -128,3 +128,123 @@ def backward(ctx, gradients):
 
 
 project.register_autograd(backward, setup_context=setup_context)
+
+
+@lru_cache(maxsize=128)
+def packing_source(metadata, dtype, transpose):
+    """Combine an input permutation with blockwise angular extraction."""
+    input_dim, groups = parse_metadata(metadata)
+    scalar = "double" if dtype == torch.float64 else "float"
+    total = sum(g[1] * g[3] for g in groups)
+    cases = []
+    for (
+        offset,
+        channels,
+        dim_in,
+        dim_out,
+        coefficients,
+        channel,
+        width,
+        start,
+    ) in groups:
+        rows = [[] for _ in range(dim_in if transpose else dim_out)]
+        for a, b, value in coefficients:
+            if transpose:
+                address = f"rows*{start}+(n*{dim_out}+{b})*{width}+{channel}+u"
+                term = f"input[({address})/{max(total, 1)}*s0+({address})%{max(total, 1)}*s1]"
+                rows[a].append(f"scalar({value:.17g})*{term}")
+            else:
+                rows[b].append(
+                    f"scalar({value:.17g})*input[n*s0+indices[{offset + a * channels}+u]*s1]"
+                )
+        for a, terms in enumerate(rows):
+            address = (
+                f"n*{input_dim}+indices[{offset + a * channels}+u]"
+                if transpose
+                else f"rows*{start}+(n*{dim_out}+{a})*{width}+{channel}+u"
+            )
+            value = "+".join(terms) if terms else "scalar(0)"
+            cases.append(
+                f"case {len(cases)}: {{ if(index>=rows*{channels}) return; "
+                f"long long n=index/{channels}; int u=index%{channels}; "
+                f"output[{address}]={value}; return; }}"
+            )
+    return (
+        f"""
+        using scalar={scalar};
+        extern "C" __global__ void run(const scalar* input, const long long* indices,
+            scalar* output, long long rows, long long s0, long long s1) {{
+            long long index=(long long)blockIdx.x*blockDim.x+threadIdx.x;
+            switch(blockIdx.y) {{ {"".join(cases)} }}
+        }}
+    """,
+        max((g[1] for g in groups), default=0),
+        len(cases),
+    )
+
+
+@torch.library.custom_op("eqx::cartesian_pack", mutates_args=(), device_types="cuda")
+def pack(
+    metadata: str,
+    features: torch.Tensor,
+    indices: torch.Tensor,
+    transpose: bool = False,
+) -> torch.Tensor:
+    """Extract angular coordinates into contiguous channel-last blocks.
+
+    ``indices`` must be a permutation of the input columns. The transpose
+    restores their original layout without atomic reductions.
+    """
+    if features.dtype not in (torch.float32, torch.float64):
+        raise TypeError("Cartesian packing requires float32 or float64 features.")
+    indices = indices.contiguous()
+    output = pack_fake(metadata, features, indices, transpose)
+    if output.numel():
+        code, channels, count = packing_source(metadata, features.dtype, transpose)
+        if count:
+            kernel = kernels([code], features.device)[code]
+            runtime().launch(
+                [
+                    (
+                        kernel,
+                        [
+                            features.data_ptr(),
+                            indices.data_ptr(),
+                            output.data_ptr(),
+                            features.size(0),
+                            *features.stride(),
+                        ],
+                        (features.size(0) * channels + 127) // 128,
+                        count,
+                        128,
+                        0,
+                    )
+                ],
+                torch.cuda.current_stream(features.device).cuda_stream,
+            )
+    return output
+
+
+@pack.register_fake
+def pack_fake(metadata, features, indices, transpose=False):
+    input_dim, groups = parse_metadata(metadata)
+    width = input_dim if transpose else sum(g[1] * g[3] for g in groups)
+    return features.new_empty((features.size(0), width))
+
+
+def packing_setup_context(ctx, inputs, output):
+    ctx.kernel_metadata, _, indices, ctx.transpose = inputs
+    ctx.save_for_backward(indices)
+
+
+def packing_backward(ctx, gradient):
+    (indices,) = ctx.saved_tensors
+    return (
+        None,
+        pack(ctx.kernel_metadata, gradient, indices, not ctx.transpose),
+        None,
+        None,
+    )
+
+
+pack.register_autograd(packing_backward, setup_context=packing_setup_context)

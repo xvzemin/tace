@@ -20,18 +20,19 @@ class Linear(torch.nn.Module):
         super().__init__()
         self.irreps_in = linear.irreps_in.spherical()
         self.irreps_out = linear.irreps_out.spherical()
-        self.output_widths = tuple(item.dim for item in self.irreps_out)
-        self.paths = []
+        self.output_layout = tuple((mul, ir.dim) for mul, ir in self.irreps_out)
+        groups = [[] for _ in self.irreps_out]
         offset = 0
         for ins in linear.instructions:
             if ins.i_in < 0:
                 raise ValueError("Pass coefficient biases separately.")
             mul, ir = self.irreps_in[ins.i_in]
             cout = self.irreps_out[ins.i_out].mul
-            self.paths.append(
+            if not mul or not cout:
+                continue
+            groups[ins.i_out].append(
                 (
                     self.irreps_in.slices()[ins.i_in],
-                    ins.i_out,
                     slice(offset, offset + mul * cout),
                     mul,
                     cout,
@@ -40,24 +41,94 @@ class Linear(torch.nn.Module):
                 )
             )
             offset += mul * cout
+        self.groups = tuple(tuple(group) for group in groups)
+        self.input_sections = []
+        self.weight_sections = []
+        self.scales = []
+        for group in self.groups:
+            for sections, position in (
+                (self.input_sections, 0),
+                (self.weight_sections, 1),
+            ):
+                slices = [path[position] for path in group]
+                sections.append(
+                    slice(slices[0].start, slices[-1].stop)
+                    if slices
+                    and all(a.stop == b.start for a, b in zip(slices, slices[1:]))
+                    else None
+                )
+            scales = {path[-1] for path in group}
+            self.scales.append(next(iter(scales)) if len(scales) == 1 else None)
 
-    def forward(self, features, weights):
-        """Mix channels with externally supplied weights."""
-        outputs = [None] * len(self.output_widths)
-        for section, dest, sw, ci, co, dim, scale in self.paths:
-            x = features[..., section].reshape(*features.shape[:-1], ci, dim)
-            w = weights[..., sw].reshape(*weights.shape[:-1], ci, co)
-            value = (w.transpose(-1, -2) @ x) * scale
-            outputs[dest] = value if outputs[dest] is None else outputs[dest] + value
+    def forward(self, features, weights, node_type=None):
+        """Mix channels with external weights.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Independent Cartesian components in flattened ``mul_ir`` order.
+        weights : torch.Tensor
+            Shared or batched path weights. With ``node_type``, the shape is
+            ``(elements, weight_numel)``.
+        node_type : torch.Tensor, optional
+            Element indices of shape ``(nodes,)`` for two-dimensional features.
+        """
+        outputs = []
+        shape = (
+            features.shape[:-1]
+            if node_type is not None
+            else torch.broadcast_shapes(features.shape[:-1], weights.shape[:-1])
+        )
         zero = features[..., :0].sum() + weights[..., :0].sum()
-        return torch.cat(
-            [
-                features.new_zeros((*features.shape[:-1], width)) + zero
-                if value is None
-                else value.flatten(-2)
-                for width, value in zip(self.output_widths, outputs)
-            ],
-            dim=-1,
+        for i, ((co, dim), group) in enumerate(zip(self.output_layout, self.groups)):
+            if not group:
+                outputs.append(features.new_zeros((*shape, co * dim)) + zero)
+                continue
+            ci = sum(path[2] for path in group)
+            section = self.input_sections[i]
+            x = (
+                features[..., section].reshape(*features.shape[:-1], ci, dim)
+                if section is not None
+                else torch.cat(
+                    [
+                        features[..., sx].reshape(*features.shape[:-1], c, dim)
+                        for sx, _, c, _, _, _ in group
+                    ],
+                    dim=-2,
+                )
+            )
+            section, scale = self.weight_sections[i], self.scales[i]
+            w = (
+                weights[..., section].reshape(*weights.shape[:-1], ci, co)
+                if section is not None and scale is not None
+                else torch.cat(
+                    [
+                        weights[..., sw].reshape(*weights.shape[:-1], c, co) * s
+                        for _, sw, c, _, _, s in group
+                    ],
+                    dim=-2,
+                )
+            )
+            if node_type is not None and weights.shape[0] * dim <= min(ci, co):
+                # Contract shared element matrices before selecting nodes,
+                # rather than expanding each matrix over the whole batch.
+                value = x.transpose(-1, -2).reshape(-1, ci) @ w.permute(
+                    1, 0, 2
+                ).reshape(ci, -1)
+                value = value.reshape(features.shape[0], dim, weights.shape[0], co)
+                index = node_type[:, None, None, None].expand(-1, dim, 1, co)
+                value = value.gather(2, index).squeeze(2).transpose(-1, -2)
+            else:
+                if node_type is not None:
+                    w = w[node_type]
+                value = w.transpose(-1, -2) @ x
+            if section is not None and scale is not None:
+                value = value * scale
+            outputs.append(value.flatten(-2))
+        return (
+            torch.cat(outputs, -1)
+            if outputs
+            else features.new_zeros((*shape, 0)) + zero
         )
 
 

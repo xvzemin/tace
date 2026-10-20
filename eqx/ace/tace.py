@@ -338,10 +338,10 @@ class TACE(torch.nn.Module):
         return output
 
     def linear(self, features, weight, node_type, stage):
-        """Apply element coefficients without gathering per-node matrices."""
+        """Apply element-dependent channel coefficients."""
         if not features.is_cuda or self.backend == "torch":
             if self.cartesian:
-                return self.compact_linears[stage](features, weight[node_type])
+                return self.compact_linears[stage](features, weight, node_type)
             return self.linears[stage](features, weight[node_type])
         operands = [
             features,

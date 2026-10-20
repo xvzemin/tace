@@ -246,9 +246,11 @@ def cartesian_modules(module):
                 delattr(module, name)
     for name, child in list(module.named_children()):
         setattr(module, name, cartesian_modules(child))
-    if isinstance(module, CgtpACE) and module.aces and module.use_eqx:
+    if isinstance(module, CgtpACE) and module.aces:
         module.eqx_ace = TACE(
-            [ace.tp for ace in module.aces], [coef.linear for coef in module.coefs]
+            [ace.tp for ace in module.aces],
+            [coef.linear for coef in module.coefs],
+            backend="cuda" if module.use_eqx else "torch",
         )
     if hasattr(module, "rejector") and isinstance(
         module.rejector, CartesianScatterTensorProduct

@@ -36,8 +36,8 @@ class Linear(torch.nn.Module):
     project : bool, optional
         Project outputs onto their symmetric traceless subspaces.
     output_basis : {"cartesian", "spherical"}, optional
-        Output storage. Spherical output applies the transposed path matrix
-        after channel mixing, including projection of raw Cartesian inputs.
+        Output storage. Spherical output extracts irreducible coordinates,
+        including projection of raw Cartesian inputs.
     """
 
     def __init__(
@@ -64,6 +64,7 @@ class Linear(torch.nn.Module):
             cartesian_out.spherical() if output_basis == "spherical" else cartesian_out
         )
         self.output_basis = output_basis
+        self.output_dims = tuple(ir.dim for _, ir in self.irreps_out)
         self.path_normalization = path_normalization
         self.shared_weights = True if shared_weights is None else shared_weights
         self.internal_weights = (
@@ -222,6 +223,7 @@ class Linear(torch.nn.Module):
         elif not self.bias_numel and bias.requires_grad:
             zero = bias.sum()
         outputs = []
+        projected = isinstance(self.projection, (Projector, ChangeOfBasis))
         blocks = features.split(self.group_widths, -1) if self.partition else ()
         weight_blocks = weight.split(self.weight_widths, -1)
         for index, ((mul, ir), group, input_section) in enumerate(
@@ -256,10 +258,30 @@ class Linear(torch.nn.Module):
                 else:
                     x = inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
                 w = weights[0] if len(weights) == 1 else torch.cat(weights, dim=-2)
+                reduced = False
+                if projected and ir.l >= 2:
+                    basis = getattr(self.projection, f"basis_{ir.l}")
+                    cin, cout, dim = x.shape[-2], mul, 2 * ir.l + 1
+                    reduced = cin * dim * (ir.dim + cout) < cout * ir.dim * (cin + dim)
+                    if self.output_basis == "cartesian" and ir.l == 2:
+                        reduced = cin * dim * (
+                            ir.dim + cout
+                        ) + cout * ir.dim * dim < cout * ir.dim * (cin + ir.dim)
+                    if reduced:
+                        x = x @ basis
                 value = w.transpose(-1, -2) @ x
-                value = value.expand(*shape, mul, ir.dim)
+                if projected and (ir.l >= 2 or self.output_basis == "spherical"):
+                    basis = getattr(self.projection, f"basis_{ir.l}")
+                    if not reduced and self.output_basis == "cartesian" and ir.l == 2:
+                        value = value @ self.projection.projection_2
+                    else:
+                        if not reduced:
+                            value = value @ basis
+                        if self.output_basis == "cartesian":
+                            value = value @ basis.T
+                value = value.expand(*shape, mul, self.output_dims[index])
             else:
-                value = features.new_zeros((*shape, mul, ir.dim))
+                value = features.new_zeros((*shape, mul, self.output_dims[index]))
             for b in biases:
                 value = value + b
             outputs.append(value)
@@ -268,7 +290,8 @@ class Linear(torch.nn.Module):
             if outputs
             else features.new_zeros((*shape, 0))
         )
-        output = self.projection(output)
+        if not projected:
+            output = self.projection(output)
         return output if zero is None else output + zero
 
     def weight_view_for_instruction(self, instruction, weight=None):

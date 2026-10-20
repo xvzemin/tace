@@ -223,7 +223,7 @@ def test_tensor_product(
             )
             for val in (actual, expected)
         ]
-        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
     assert module(transforms[0](x[:0]), transforms[1](y[:0]), weights[:0]).shape == (
         0,
         module.irreps_out.dim,
@@ -403,3 +403,72 @@ def test_time_reversal_labels(double_precision):
         gate(co3.ChangeOfBasis(gate.irreps_in).to(DEVICE)(h))
     )
     torch.testing.assert_close(actual, ref(h))
+
+
+@pytest.mark.parametrize("degree", [2, 3, 5])
+@pytest.mark.parametrize("output_basis", ["cartesian", "spherical"])
+def test_projected_linear(double_precision, degree, output_basis):
+    a, b = f"4x{degree}e+2x{degree}e", f"3x{degree}e"
+    module = (
+        co3.Linear(a, b, project=True, output_basis=output_basis)
+        .float()
+        .to(device=DEVICE, dtype=torch.float64)
+    )
+    reference = o3.Linear(a, b).to(DEVICE)
+    x = torch.randn(3, module.irreps_in.dim, device=DEVICE, requires_grad=True)
+    weight = torch.randn(module.weight_numel, device=DEVICE, requires_grad=True)
+    expected = reference(co3.ChangeOfBasis(a, inverse=True).to(DEVICE)(x), weight)
+    if output_basis == "cartesian":
+        expected = co3.ChangeOfBasis(b).to(DEVICE)(expected)
+    actual = module(x, weight)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    losses = [y.sin().sum() for y in (actual, expected)]
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(loss, (x, weight), create_graph=True) for loss in losses
+        ]
+        for left, right in zip(*gradients):
+            torch.testing.assert_close(left, right, atol=2e-10, rtol=2e-10)
+        losses = [sum(g.square().mean() for g in gs) for gs in gradients]
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x, weight), expected, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("normalization", ["element", "path"])
+@pytest.mark.parametrize("elements", [1, 2, 9])
+def test_compact_linear(double_precision, normalization, elements):
+    from eqx.co3.compact import Linear
+
+    reference = co3.Linear(
+        "16x2e+8x2e+4x1o",
+        "16x2e+4x1o+1x0o",
+        internal_weights=False,
+        shared_weights=False,
+        path_normalization=normalization,
+        instructions=[(0, 0), (1, 0), (0, 0), (2, 1)],
+    ).to(DEVICE)
+    module = Linear(reference).to(DEVICE)
+    x = torch.randn(4, module.irreps_in.dim, device=DEVICE, requires_grad=True)
+    weights = torch.randn(
+        elements, reference.weight_numel, device=DEVICE, requires_grad=True
+    )
+    types = torch.arange(4, device=DEVICE) % elements
+    inputs = co3.TraceFreeBasis(reference.irreps_in).to(DEVICE)
+    outputs = co3.TraceFreeBasis(reference.irreps_out).to(DEVICE)
+    expected = outputs.pack(reference(inputs.unpack(x), weights[types]))
+    actual = module(x, weights, types)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    losses = [y.sin().mean() for y in (actual, expected)]
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(loss, (x, weights), create_graph=True)
+            for loss in losses
+        ]
+        for left, right in zip(*gradients):
+            torch.testing.assert_close(left, right, atol=2e-11, rtol=2e-11)
+        losses = [sum(g.square().sum() for g in gs) for gs in gradients]
+    assert module(x[:0], weights, types[:0]).shape == (0, module.irreps_out.dim)
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(
+        compiled(x, weights, types), expected, atol=2e-12, rtol=2e-12
+    )

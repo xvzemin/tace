@@ -1298,6 +1298,37 @@ def test_cartesian_projection(num_nodes, double_precision):
     torch.testing.assert_close(compiled(*inputs), expected, atol=2e-12, rtol=2e-12)
 
 
+@pytest.mark.parametrize("num_nodes", [0, 3])
+def test_cartesian_packing(num_nodes, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv.co3.projection import pack
+
+    matrix = torch.tensor([[1.0, 0.0], [0.0, 0.0], [-0.5, 0.25], [0.0, 1.0]])
+    coefficients = tuple(
+        (a, b, float(matrix[a, b])) for a, b in matrix.nonzero().tolist()
+    )
+    metadata = repr((12, ((0, 3, 4, 2, coefficients, 0, 3, 0),)))
+    indices = torch.randperm(12, device="cuda")
+    x = torch.randn(num_nodes, 24, device="cuda")[:, ::2].requires_grad_()
+    actual = pack(metadata, x, indices)
+    expected = (matrix.T.cuda() @ x[:, indices].reshape(num_nodes, 4, 3)).reshape(
+        num_nodes, 6
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    losses = [y.sin().sum() for y in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, x, create_graph=True)[0] for loss in losses
+        ]
+        torch.testing.assert_close(*gradients, atol=2e-11, rtol=2e-11)
+        losses = [g.square().sum() for g in gradients]
+    compiled = torch.compile(
+        lambda v: pack(metadata, v, indices), backend="aot_eager", fullgraph=True
+    )
+    torch.testing.assert_close(compiled(x), expected, atol=2e-12, rtol=2e-12)
+
+
 @pytest.mark.parametrize(
     "degrees",
     [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],

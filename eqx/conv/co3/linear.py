@@ -5,12 +5,13 @@ from collections import defaultdict
 import torch
 
 from ...co3 import Linear as CartesianLinear
-from ...co3.basis import stf_projection
+from ...co3.basis import path_matrix, stf_projection
+from ...co3.trace_free import trace_free_basis
 from ...utils.layout import _Permute
 
 
 class Linear(CartesianLinear):
-    """Mix compact Cartesian channels before symmetric traceless projection.
+    """Mix channels through compact irreducible coordinates.
 
     Parameters
     ----------
@@ -58,12 +59,14 @@ class Linear(CartesianLinear):
         self.weight_rows = []
         self.weight_identity = []
         self.uniform_scales = []
+        self.reduce_input = []
         input_indices = []
-        projections = []
+        destinations = defaultdict(list)
         for i, ((dest, expansion), entries) in enumerate(groups.items()):
             mul, ir = self.cartesian_out[dest]
             width = len(entries[0][0])
             self.compact_groups.append((dest, width, len(entries), mul))
+            destinations[dest].append((i, entries))
             self.expansions.append((ir.l, expansion))
             self.scales.append(tuple(scale for _, _, scale in entries))
             self.uniform_scales.append(len(set(self.scales[-1])) == 1)
@@ -102,27 +105,24 @@ class Linear(CartesianLinear):
                 torch.tensor([scale for _, _, scale in entries]).unsqueeze(-1),
                 persistent=False,
             )
-            matrix = stf_projection(ir.l)
-            packed = matrix.new_zeros(width, ir.dim).index_add(
-                0, torch.tensor(expansion, dtype=torch.long), matrix
+            packed, _ = self.matrices(ir.l, expansion)
+            dim = packed.shape[1]
+            ci = len(entries)
+            self.reduce_input.append(
+                dim < width and ci * dim * (width + mul) < mul * width * (ci + dim)
             )
             if self.uniform_scales[-1]:
                 packed = packed * self.scales[-1][0]
-            projections.append(
-                (
-                    self.cartesian_out.slices()[dest].start,
-                    mul,
-                    width,
-                    ir.dim,
-                    tuple(
-                        (a, b, float(packed[a, b]))
-                        for a, b in packed.nonzero().tolist()
-                    ),
-                )
-            )
             self.register_buffer(
                 f"projection_{i}",
                 packed.to(torch.get_default_dtype()),
+                persistent=False,
+            )
+        for l in {ir.l for _, ir in self.cartesian_out}:
+            _, matrix = self.matrices(l, tuple(range(3**l)))
+            self.register_buffer(
+                f"expansion_{l}",
+                matrix.to(torch.get_default_dtype()).clone(),
                 persistent=False,
             )
         self.input_identity = input_indices == list(range(self.input_dim))
@@ -130,11 +130,103 @@ class Linear(CartesianLinear):
         index = torch.tensor(input_indices, dtype=torch.long)
         self.register_buffer("input_index", index, persistent=False)
         self.register_buffer("input_inverse", index.argsort(), persistent=False)
-        self.group_widths = repr(tuple(s.stop - s.start for s in self.input_sections))
-        self.projection_metadata = repr((self.cartesian_out.dim, tuple(projections)))
+        self.cuda_groups = []
+        self.cuda_scales = []
+        self.cuda_scaled = []
+        self.cuda_weight_rows = []
+        projections, extractions, start = [], [], 0
+        for dest, entries in destinations.items():
+            cout, ir = self.cartesian_out[dest]
+            cin = sum(len(rows) for _, rows in entries)
+            dim = 2 * ir.l + 1
+            offsets, scales, channel = [], [], 0
+            for i, rows in entries:
+                # Kernel constants are built directly in float64, including
+                # normalization, rather than from dtype-converted buffers.
+                matrix, _ = self.matrices(*self.expansions[i])
+                if self.uniform_scales[i]:
+                    matrix = matrix * self.scales[i][0]
+                extractions.append(
+                    (
+                        self.input_sections[i].start,
+                        len(rows),
+                        matrix.shape[0],
+                        dim,
+                        tuple(
+                            (a, b, float(matrix[a, b]))
+                            for a, b in matrix.nonzero().tolist()
+                        ),
+                        channel,
+                        cin,
+                        start,
+                    )
+                )
+                channel += len(rows)
+                offsets.extend(offset for _, offset, _ in rows)
+                scales.extend(
+                    1.0 if self.uniform_scales[i] else scale for _, _, scale in rows
+                )
+            lower, upper = min(offsets), max(offsets) + cout
+            rows = all((offset - lower) % cout == 0 for offset in offsets)
+            indices = (
+                [(offset - lower) // cout for offset in offsets]
+                if rows
+                else [offset - lower + v for offset in offsets for v in range(cout)]
+            )
+            i = len(self.cuda_groups)
+            identity = indices == list(
+                range((upper - lower) // cout if rows else upper - lower)
+            )
+            self.cuda_groups.append((dest, dim, cin, cout, lower, upper, identity))
+            self.cuda_weight_rows.append(rows)
+            self.cuda_scales.append(tuple(scales))
+            self.cuda_scaled.append(any(scale != 1.0 for scale in scales))
+            self.register_buffer(
+                f"cuda_weight_index_{i}",
+                torch.tensor([] if identity else indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                f"cuda_weight_scale_{i}",
+                torch.tensor(scales).unsqueeze(-1),
+                persistent=False,
+            )
+            matrix = self.matrices(ir.l, tuple(range(ir.dim)))[1]
+            projections.append(
+                (
+                    self.irreps_out.slices()[dest].start,
+                    cout,
+                    dim,
+                    self.irreps_out[dest].ir.dim,
+                    tuple(
+                        (a, b, float(matrix[a, b]))
+                        for a, b in matrix.nonzero().tolist()
+                    ),
+                )
+            )
+            start += cin * dim
+        self.packing_metadata = repr((self.input_dim, tuple(extractions)))
+        self.projection_metadata = repr((self.irreps_out.dim, tuple(projections)))
+
+    def matrices(self, l, expansion):
+        """Return extraction and reconstruction matrices in CPU float64."""
+        if self.output_basis == "spherical" or l > 4:
+            matrix = path_matrix(l)
+            reconstruction = (
+                torch.eye(2 * l + 1, dtype=torch.float64, device="cpu")
+                if self.output_basis == "spherical"
+                else matrix.T
+            )
+        else:
+            indices, reconstruction = trace_free_basis(l)
+            matrix = stf_projection(l).index_select(1, indices)
+        index = torch.tensor(expansion, dtype=torch.long, device="cpu")
+        return matrix.new_zeros(int(index.max()) + 1, matrix.shape[1]).index_add(
+            0, index, matrix
+        ), reconstruction
 
     def forward(self, features, weight=None, bias=None):
-        """Apply channel weights to compact coordinates and then project."""
+        """Extract irreducible coordinates, mix channels and reconstruct."""
         if features.shape[-1] != self.input_dim:
             raise ValueError(
                 "The compact feature dimension does not match input_indices."
@@ -148,38 +240,27 @@ class Linear(CartesianLinear):
         shape = torch.broadcast_shapes(
             features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
         )
-        grouped = (
+        fused = (
             self.backend == "cuda"
             and features.is_cuda
             and features.ndim == 2
             and self.input_permutation
+            and weight.ndim == 1
+            and not self.bias_numel
+            and not bias.requires_grad
+            and bool(self.cuda_groups)
         )
-        if grouped:
-            from ...kernels.layout import grouped_permute
-
-            features = grouped_permute(
-                features, self.input_index, self.input_inverse, self.group_widths
-            )
-        elif not self.input_identity:
+        if fused:
+            return self.forward_cuda(features, weight)
+        if not self.input_identity:
             features = (
                 _Permute.apply(features, self.input_index, self.input_inverse)
                 if self.input_permutation
                 else features.index_select(-1, self.input_index)
             )
         outputs = [None] * len(self.cartesian_out)
-        fused_projection = (
-            grouped
-            and weight.ndim == 1
-            and not self.bias_numel
-            and not bias.requires_grad
-        )
-        mixed_blocks = []
         widths = tuple(s.stop - s.start for s in self.input_sections)
-        blocks = (
-            features.flatten().split(tuple(features.size(0) * w for w in widths))
-            if grouped
-            else features.split(widths, dim=-1)
-        )
+        blocks = features.split(widths, dim=-1)
         for i, (dest, dim, mul_in, mul_out) in enumerate(self.compact_groups):
             x = blocks[i].reshape(*features.shape[:-1], dim, mul_in)
             w = weight[..., self.weight_sections[i]]
@@ -196,20 +277,14 @@ class Linear(CartesianLinear):
             w = w.reshape(*weight.shape[:-1], mul_in, mul_out)
             if not self.uniform_scales[i]:
                 w = w * getattr(self, f"weight_scale_{i}")
+            projection = getattr(self, f"projection_{i}")
+            if self.reduce_input[i]:
+                x = projection.T @ x
             mixed = x @ w
-            if fused_projection:
-                mixed_blocks.append(mixed)
-                continue
-            # Project only after reducing the input channel multiplicity.
-            value = mixed.transpose(-1, -2) @ getattr(self, f"projection_{i}")
+            value = mixed.transpose(-1, -2)
+            if not self.reduce_input[i]:
+                value = value @ projection
             outputs[dest] = value if outputs[dest] is None else outputs[dest] + value
-        if fused_projection and mixed_blocks:
-            from .projection import project
-
-            output = project(self.projection_metadata, mixed_blocks, False)[0]
-            return (
-                self.projection(output) if self.output_basis == "spherical" else output
-            )
         zero = None
         if not self.has_weighted_paths:
             zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
@@ -217,7 +292,9 @@ class Linear(CartesianLinear):
             zero = bias.sum()
         for i, ((mul, ir), group) in enumerate(zip(self.cartesian_out, self.groups)):
             if outputs[i] is None:
-                outputs[i] = features.new_zeros((*shape, mul, ir.dim))
+                outputs[i] = features.new_zeros((*shape, mul, 2 * ir.l + 1))
+            if self.output_basis == "cartesian" and ir.l >= 2:
+                outputs[i] = outputs[i] @ getattr(self, f"expansion_{ir.l}")
             for ins, section in group:
                 if ins.i_in < 0:
                     outputs[i] = outputs[i] + bias[..., section].unsqueeze(-1)
@@ -226,18 +303,35 @@ class Linear(CartesianLinear):
             if outputs
             else features.new_zeros((*shape, 0))
         )
-        if self.output_basis == "spherical":
-            output = self.projection(output)
         return output if zero is None else output + zero
+
+    def forward_cuda(self, features, weight):
+        """Pack all paths of each output irrep for one channel contraction."""
+        from .projection import pack, project
+
+        packed = pack(self.packing_metadata, features, self.input_index)
+        widths = tuple(
+            features.size(0) * dim * cin for _, dim, cin, _, _, _, _ in self.cuda_groups
+        )
+        outputs = []
+        for i, (block, (_, dim, cin, cout, start, stop, identity)) in enumerate(
+            zip(packed.flatten().split(widths), self.cuda_groups)
+        ):
+            w = weight[start:stop]
+            if self.cuda_weight_rows[i]:
+                w = w.reshape(-1, cout)
+            if not identity:
+                w = w.index_select(0, getattr(self, f"cuda_weight_index_{i}"))
+            w = w.reshape(cin, cout)
+            if self.cuda_scaled[i]:
+                w = w * getattr(self, f"cuda_weight_scale_{i}")
+            outputs.append(block.reshape(features.size(0), dim, cin) @ w)
+        return project(self.projection_metadata, outputs, False)[0]
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for i, (degree, expansion) in enumerate(self.expansions):
-            matrix = stf_projection(degree)
-            indices = torch.tensor(expansion, dtype=torch.long, device="cpu")
-            packed = matrix.new_zeros(int(indices.max()) + 1, matrix.size(1)).index_add(
-                0, indices, matrix
-            )
+            packed, matrix = self.matrices(degree, expansion)
             if self.uniform_scales[i]:
                 packed = packed * self.scales[i][0]
             name = f"projection_{i}"
@@ -245,6 +339,17 @@ class Linear(CartesianLinear):
             name = f"weight_scale_{i}"
             self._buffers[name] = (
                 torch.tensor(self.scales[i], dtype=torch.float64, device="cpu")
+                .unsqueeze(-1)
+                .to(self._buffers[name])
+            )
+        for l in {ir.l for _, ir in self.cartesian_out}:
+            name = f"expansion_{l}"
+            matrix = self.matrices(l, tuple(range(3**l)))[1]
+            self._buffers[name] = matrix.to(self._buffers[name]).clone()
+        for i, scales in enumerate(self.cuda_scales):
+            name = f"cuda_weight_scale_{i}"
+            self._buffers[name] = (
+                torch.tensor(scales, dtype=torch.float64, device="cpu")
                 .unsqueeze(-1)
                 .to(self._buffers[name])
             )

@@ -150,10 +150,16 @@ class Projector(torch.nn.Module):
         self.widths = tuple(mul * dim for mul, _, dim in groups)
         for l in sorted({ir.l for _, ir in self.irreps_in}):
             self.register_buffer(
-                f"projection_{l}",
-                stf_projection(l).to(torch.get_default_dtype()).clone(),
+                f"basis_{l}",
+                path_matrix(l).to(torch.get_default_dtype()).clone(),
                 persistent=False,
             )
+            if l == 2:
+                self.register_buffer(
+                    f"projection_{l}",
+                    stf_projection(l).to(torch.get_default_dtype()).clone(),
+                    persistent=False,
+                )
 
     def forward(self, features):
         """Symmetrize and remove traces in Cartesian storage."""
@@ -164,16 +170,21 @@ class Projector(torch.nn.Module):
         values = []
         for block, (mul, l, dim) in zip(features.split(self.widths, -1), self.groups):
             x = block.reshape(*features.shape[:-1], mul, dim)
-            values.append(
-                (x if l < 2 else x @ getattr(self, f"projection_{l}")).flatten(-2)
-            )
+            if l == 2:
+                x = x @ self.projection_2
+            elif l > 2:
+                basis = getattr(self, f"basis_{l}")
+                x = (x @ basis) @ basis.T
+            values.append(x.flatten(-2))
         return torch.cat(values, dim=-1) if values else features[..., :0]
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for l in {l for _, l, _ in self.groups}:
-            name = f"projection_{l}"
-            self._buffers[name] = stf_projection(l).to(self._buffers[name]).clone()
+            name = f"basis_{l}"
+            self._buffers[name] = path_matrix(l).to(self._buffers[name]).clone()
+            if l == 2:
+                self.projection_2 = stf_projection(l).to(self.projection_2).clone()
         return self
 
     def extra_repr(self):
