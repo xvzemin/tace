@@ -31,7 +31,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 )
 @pytest.mark.parametrize("shape", [(4, 4, 7), (2, 4, 7), (4, 4, 0), (0, 0, 0)])
 @pytest.mark.parametrize("use_cutoff", [False, True])
-def test_scatter_norm_values_and_derivatives(double_precision, key, shape, use_cutoff):
+def test_scatter_norm_values_and_derivatives(
+    double_precision, caplog, key, shape, use_cutoff
+):
     nlocal, num_nodes, num_edges = shape
     module = get_scatter_norm_layer(
         key, 9.0, 4, radial_bias=True, radial_layer_norm=True
@@ -78,6 +80,12 @@ def test_scatter_norm_values_and_derivatives(double_precision, key, shape, use_c
         values = [
             sum(g.square().sum() for g in grads if g is not None) for grads in gradients
         ]
+    messages = [
+        record.message
+        for record in caplog.records
+        if "scatter_norm='no_cutoff_density' is a legacy option" in record.message
+    ]
+    assert len(messages) == int(key == "no_cutoff_density")
 
 
 @pytest.mark.parametrize("key", ["density", "no_cutoff_density"])

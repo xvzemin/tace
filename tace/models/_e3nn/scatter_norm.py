@@ -4,6 +4,7 @@
 ################################################################################
 
 import abc
+import logging
 
 import torch
 
@@ -118,6 +119,13 @@ class DensityScatterNorm(ScatterNorm):
         super().__init__(
             avg_num_neighbors, edge_feats_channel, radial_bias, radial_layer_norm
         )
+        if not self.apply_cutoff:
+            logging.warning(
+                "scatter_norm='no_cutoff_density' is a legacy option that can "
+                "cause energy jumps when neighbors cross the cutoff and break "
+                "force/stress consistency. Do not use it for new models; use "
+                "scatter_norm='density' instead."
+            )
         self.edge_density = MLP(
             [edge_feats_channel, 64, 1],
             bias=radial_bias,

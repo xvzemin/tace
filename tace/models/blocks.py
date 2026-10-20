@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import logging
 from typing import Dict, List, Optional
 
 import torch
@@ -121,6 +122,13 @@ class ScaleShift(torch.nn.Module):
         self.all_atoms = all_atoms
         self.has_scale = len(scale_dicts) > 0
         self.has_shift = len(shift_dicts) > 0
+        if not all_atoms and (self.has_scale or self.has_shift):
+            logging.warning(
+                "scale_shift.all_atoms=False is a legacy option that can violate "
+                "energy additivity and the dissociation limit by treating isolated "
+                "atoms differently when evaluated alone. Do not use it for new "
+                "models; set all_atoms=True."
+            )
         self.num_fidelities = max(len(scale_dicts), len(shift_dicts))
         atomic_numbers = [int(z) for z in atomic_numbers]
         self.register_buffer(

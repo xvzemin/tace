@@ -365,7 +365,7 @@ model:
     atomic_basis:
       type: cgtp # (str or list[str]) stable: [cgtp, so2], dev: [o2, uu_o2, o2_mag, o2_cgtp]
       l1l2: null # [null, <=], restriction for each layer
-      scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density, no_cutoff_density]
+      scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density]
       nonlinear: gate # [null, gate]
       edge_nonlinear: gate # [gate]
       scalar_act: null # (str or list[str]), name for 0e, or [0e, 0o]
@@ -400,7 +400,7 @@ model:
       shift_type: null # [null, mean_delta_energy_per_atom]
       scale_trainable: false # (bool)
       shift_trainable: false # (bool)
-      all_atoms: false
+      all_atoms: true # false is a legacy option; do not use for new models.
       scale_zbl: false
 
     short_range:

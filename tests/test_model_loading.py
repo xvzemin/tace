@@ -14,6 +14,7 @@ from tace.interface.ase import TACEAseCalc
 from tace.lightning import create_model, export_tace, load_tace
 from tace.lightning.lit_model import LightningWrapperModel, _load_model_state_dict
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+from tace.models.blocks import ScaleShift
 from tace.utils.utils import torch_default_dtype
 
 
@@ -100,6 +101,70 @@ def save_checkpoint(model, path):
         },
         path,
     )
+
+
+@pytest.mark.parametrize("all_atoms", [None, False, True])
+def test_scale_shift_additivity_and_warning(caplog, all_atoms):
+    assert DEFAULT_MODEL_CONFIG["scale_shift"]["all_atoms"] is False
+    options = {} if all_atoms is None else {"all_atoms": all_atoms}
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    layer = ScaleShift([1], [{1: 2.0}], [{1: 0.5}], **options).to(device)
+    energy = torch.full((2,), 3.0, device=device, dtype=torch.float64)
+    attrs = torch.ones(2, 1, device=device, dtype=torch.float64)
+    edges = torch.empty(2, 0, dtype=torch.long, device=device)
+    fidelity = torch.zeros(2, dtype=torch.long, device=device)
+    together = layer(
+        energy,
+        attrs,
+        torch.tensor([0, 2], device=device),
+        edges,
+        torch.tensor([0, 0], device=device),
+        fidelity,
+    )
+    separate = layer(
+        energy,
+        attrs,
+        torch.tensor([0, 1, 2], device=device),
+        edges,
+        torch.tensor([0, 1], device=device),
+        fidelity,
+    )
+    torch.testing.assert_close(together, torch.full_like(energy, 6.5))
+    torch.testing.assert_close(
+        separate, together if all_atoms is True else torch.zeros_like(energy)
+    )
+    messages = [
+        record.message
+        for record in caplog.records
+        if "scale_shift.all_atoms=False is a legacy option" in record.message
+    ]
+    assert len(messages) == int(all_atoms is not True)
+
+
+@pytest.mark.parametrize("format", ["pt", "ckpt"])
+@pytest.mark.parametrize("all_atoms", [None, False, True])
+def test_saved_scale_shift_default(
+    precision_model, tmp_path, caplog, format, all_atoms
+):
+    config = precision_model.readout_fn.model_config["scale_shift"]
+    if all_atoms is None:
+        config.pop("all_atoms")
+    else:
+        config["all_atoms"] = all_atoms
+    path = tmp_path / f"model.{format}"
+    if format == "ckpt":
+        save_checkpoint(precision_model, path)
+    else:
+        export_tace(precision_model, str(path))
+    caplog.clear()
+    model = load_tace(path, device=next(precision_model.parameters()).device)
+    assert model.readout_fn.scale_shift.all_atoms is (all_atoms is True)
+    messages = [
+        record.message
+        for record in caplog.records
+        if "scale_shift.all_atoms=False is a legacy option" in record.message
+    ]
+    assert len(messages) == int(all_atoms is not True)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
