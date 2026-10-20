@@ -77,13 +77,15 @@ def weighted_source(dtype, dims, schedules, roles):
             ]
         else:
             parts += [
-                f"for(int q=t/32;q<{ci * nz};q+=blockDim.x/32) {{",
-                f"int u=q/{nz}, m=q%{nz}; scalar sum=0;",
-                f"for(int v=t%32;v<{co};v+=32) sum+="
-                f"p2[types[n0]*{dims[2]}+{sw}+u*{co}+v]*"
-                f"p3[n0*{dims[3]}+{so}+v*{dz}+m];",
-                "for(int s=16;s>0;s/=2) sum+=__shfl_down_sync(0xffffffff,sum,s);",
-                "if(t%32==0) tile[q]=sum; }",
+                f"for(int u=t/32;u<{ci};u+=blockDim.x/32) {{",
+                f"scalar sum[{nz}]={{}};",
+                f"for(int v=t%32;v<{co};v+=32) {{",
+                f"scalar w=p2[types[n0]*{dims[2]}+{sw}+u*{co}+v];",
+                f"#pragma unroll\nfor(int m=0;m<{nz};++m) "
+                f"sum[m]+=w*p3[n0*{dims[3]}+{so}+v*{dz}+m]; }}",
+                f"#pragma unroll\nfor(int m=0;m<{nz};++m) {{",
+                "for(int s=16;s>0;s/=2) sum[m]+=__shfl_down_sync(0xffffffff,sum[m],s);",
+                f"if(t%32==0) tile[u*{nz}+m]=sum[m]; }} }}",
                 "__syncthreads();",
                 f"for(int u=t;u<{ci};u+=blockDim.x) {{",
             ]

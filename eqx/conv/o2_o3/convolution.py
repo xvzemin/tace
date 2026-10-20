@@ -7,8 +7,9 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
+from ...utils.autograd import gradient_mask
 from ...utils.metadata import parse_metadata
-from ..contraction import adjoint_program, gradient_mask
+from ..contraction import adjoint_program
 
 
 @dataclass(eq=False)

@@ -168,18 +168,23 @@ def inputs_source(dtype, metadata, branches, roles):
         shared_size = max(shared_size, width * dz)
         parts = [
             f"case {index}: {{",
-            f"for(int q=t/32;q<{width * dz};q+=blockDim.x/32) {{ int u=q/{dz}, m=q%{dz}; scalar sum=0;",
+            f"for(int u=t/32;u<{width};u+=blockDim.x/32) {{ scalar sum[{dz}]={{}};",
         ]
         for (plan, indices, sw, so, shift, ci, co, _), scale in maps.items():
             z = "0" if plan else "types[n]"
             parts += [
-                f"if(u>={shift} && u<{shift + ci}) {{ scalar part=0;",
-                f"for(int v=t%32;v<{co};v+=32) part+=p{indices[2]}[{z}*{plans[plan][0][2]}+{sw}+(u-{shift})*{co}+v]*p{indices[3]}[n*{dims[3]}+{so}+v*{dz}+m];",
-                f"sum+=scalar({scale:.17g})*part; }}",
+                f"if(u>={shift} && u<{shift + ci}) {{ scalar part[{dz}]={{}};",
+                f"for(int v=t%32;v<{co};v+=32) {{",
+                f"scalar w=p{indices[2]}[{z}*{plans[plan][0][2]}+{sw}+(u-{shift})*{co}+v];",
+                f"#pragma unroll\nfor(int m=0;m<{dz};++m) "
+                f"part[m]+=w*p{indices[3]}[n*{dims[3]}+{so}+v*{dz}+m]; }}",
+                f"#pragma unroll\nfor(int m=0;m<{dz};++m) "
+                f"sum[m]+=scalar({scale:.17g})*part[m]; }}",
             ]
         parts += [
-            "for(int s=16;s>0;s/=2) sum+=__shfl_down_sync(0xffffffff,sum,s);",
-            "if(t%32==0) adj[q]=sum; }",
+            f"#pragma unroll\nfor(int m=0;m<{dz};++m) {{",
+            "for(int s=16;s>0;s/=2) sum[m]+=__shfl_down_sync(0xffffffff,sum[m],s);",
+            f"if(t%32==0) adj[u*{dz}+m]=sum[m]; }} }}",
             "__syncthreads();",
             f"for(int u=t;u<{width};u+=blockDim.x) {{",
             f"scalar gx[{dx}]={{}}, gy[{dy}]={{}}, gg=0;",

@@ -2,8 +2,8 @@
 
 import torch
 
-from ....conv.contraction import gradient_mask
 from ....conv.program import next_adjoint
+from ....utils.autograd import gradient_mask
 from ....utils.metadata import parse_metadata
 from .program import build, first_adjoint
 

@@ -7,8 +7,8 @@ import torch
 from e3nn import o3
 
 from ...o3 import so3_generators
+from ...utils.autograd import gradient_mask
 from ...utils.metadata import parse_metadata
-from ..contraction import gradient_mask
 from .convolution import kernel_plan
 
 

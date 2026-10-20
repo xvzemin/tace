@@ -4,8 +4,8 @@ from functools import lru_cache
 
 import torch
 
+from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
-from .contraction import gradient_mask
 from .program import next_adjoint
 
 

@@ -2,6 +2,7 @@
 
 import torch
 
+from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
 
 
@@ -62,13 +63,14 @@ def backward(ctx, grad_outputs):
             cotangents[slot] = len(values)
             values.append(grad)
     terms, destinations = [], {}
+    required = gradient_mask(operands, ctx.needs_input_grad[3], offset=1)
     for mapping, output, slot in ctx.program:
         if slot not in cotangents:
             continue
         replacement = list(mapping)
         replacement[output] = cotangents[slot]
         for role, index in enumerate(mapping):
-            if role != output and ctx.needs_input_grad[3][index]:
+            if role != output and required[index]:
                 destination = destinations.setdefault(index, len(destinations))
                 terms.append((tuple(replacement), role, destination))
     gradients = [None] * len(operands)

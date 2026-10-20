@@ -6,8 +6,9 @@ import torch
 from e3nn import o3
 
 from ...o3 import GauntTensorProduct, MatrixTensorProduct
+from ...utils.autograd import gradient_mask
 from ...utils.metadata import parse_metadata
-from ..contraction import adjoint_program, gradient_mask
+from ..contraction import adjoint_program
 from ..network import materialize
 
 

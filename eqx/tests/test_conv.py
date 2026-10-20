@@ -3099,13 +3099,24 @@ def test_direction_derivatives_on_axes(device):
 
 
 @pytest.mark.parametrize("owner", [0, 1])
-def test_convolution_graph_order(owner):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_convolution_graph_order(owner, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     from eqx.conv.graph import prepare_graph
 
-    edges = torch.tensor([[0, 0, 1, 0, 3, 0, 2, 0, 0], [2, 1, 2, 0, 2, 2, 1, 2, 2]])
+    edges = torch.tensor(
+        [[0, 0, 1, 0, 3, 0, 2, 0, 0], [2, 1, 2, 0, 2, 2, 1, 2, 2]],
+        device=device,
+    )
     order = prepare_graph(edges[0], edges[1], owner)
     assert prepare_graph(edges[0], edges[1], owner) is order
     assert prepare_graph(edges[0].detach(), edges[1].detach(), owner) is order
+    indices = [edges[0], edges[1]]
+    indices[1 - owner] = indices[1 - owner].clone()
+    indices[1 - owner][0] = 5
+    assert prepare_graph(*indices, owner) is order
+    assert prepare_graph(indices[owner], indices[owner], 1 - owner) is order
     torch.testing.assert_close(order, edges[owner].argsort(stable=True))
     edges[owner, 0] = 4
     updated = prepare_graph(edges[0].detach(), edges[1].detach(), owner)
@@ -3115,7 +3126,10 @@ def test_convolution_graph_order(owner):
     permutation, pointers = prepare_graph(edges[0], edges[1], owner, 7)
     assert prepare_graph(edges[0], edges[1], owner, 7)[1] is pointers
     expected = torch.cat(
-        (torch.zeros(1, dtype=torch.long), edges[owner].bincount(minlength=7).cumsum(0))
+        (
+            torch.zeros(1, dtype=torch.long, device=device),
+            edges[owner].bincount(minlength=7).cumsum(0),
+        )
     )
     torch.testing.assert_close(pointers, expected)
     torch.testing.assert_close(permutation, updated)

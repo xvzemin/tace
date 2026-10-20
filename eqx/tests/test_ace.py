@@ -107,6 +107,20 @@ def test_ace_external_coefficients(
         tp(x, x), weights[1][types]
     )
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    # Requesting only feature gradients must retain their parameter dependence.
+    gradients = [
+        torch.autograd.grad(
+            value.sin().sum(), x, create_graph=True, retain_graph=True
+        )[0]
+        for value in (actual, expected)
+    ]
+    torch.testing.assert_close(*gradients, atol=1e-10, rtol=1e-10)
+    mixed = [
+        torch.autograd.grad(value.square().sum(), weights, retain_graph=True)
+        for value in gradients
+    ]
+    for a, b in zip(*mixed):
+        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
     losses = [y.square().sum() for y in (actual, expected)]
     for _ in range(3):
         gradients = [

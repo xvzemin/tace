@@ -28,38 +28,29 @@ def prepare_graph(source, target, owner, num_nodes=None):
     pointers : torch.Tensor
         CSR offsets of shape ``(num_nodes + 1,)``, when requested.
     """
-    roots = tuple(
-        value._base if value._base is not None else value for value in (source, target)
-    )
-    capturing = source.is_cuda and torch.cuda.is_current_stream_capturing()
-    cacheable = not capturing and not any(
-        value.is_inference() for value in (source, target)
-    )
+    index = source if owner == 0 else target
+    root = index._base if index._base is not None else index
+    capturing = index.is_cuda and torch.cuda.is_current_stream_capturing()
+    cacheable = not capturing and not index.is_inference()
     key = (
         (
-            tuple(
-                (
-                    root.untyped_storage().data_ptr(),
-                    value.device,
-                    value.dtype,
-                    value.storage_offset(),
-                    value.numel(),
-                    value.stride(),
-                    value._version,
-                )
-                for root, value in zip(roots, (source, target))
-            ),
-            owner,
+            root.untyped_storage().data_ptr(),
+            index.device,
+            index.dtype,
+            index.storage_offset(),
+            index.numel(),
+            index.stride(),
+            index._version,
             num_nodes,
         )
         if cacheable
         else None
     )
     cached = _GRAPHS.get(key)
-    if cached is not None and all(saved() is not None for saved in cached[0]):
+    if cached is not None and cached[0]() is not None:
         _GRAPHS.move_to_end(key)
-        if source.is_cuda:
-            stream = torch.cuda.current_stream(source.device)
+        if index.is_cuda:
+            stream = torch.cuda.current_stream(index.device)
             if stream.cuda_stream != cached[3]:
                 stream.wait_event(cached[2])
                 for value in (
@@ -68,7 +59,6 @@ def prepare_graph(source, target, owner, num_nodes=None):
                     value.record_stream(stream)
         return cached[1]
 
-    index = source if owner == 0 else target
     if num_nodes is None:
         result = torch.argsort(index, stable=True)
     else:
@@ -78,15 +68,13 @@ def prepare_graph(source, target, owner, num_nodes=None):
         result = order, pointers
     if cacheable:
         ready, stream_id = None, None
-        if source.is_cuda:
-            stream = torch.cuda.current_stream(source.device)
+        if index.is_cuda:
+            stream = torch.cuda.current_stream(index.device)
             ready = torch.cuda.Event()
             ready.record(stream)
             stream_id = stream.cuda_stream
         _GRAPHS[key] = (
-            tuple(
-                ref(root, lambda _, key=key: _GRAPHS.pop(key, None)) for root in roots
-            ),
+            ref(root, lambda _, key=key: _GRAPHS.pop(key, None)),
             result,
             ready,
             stream_id,
