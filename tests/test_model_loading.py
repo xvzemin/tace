@@ -104,7 +104,7 @@ def save_checkpoint(model, path):
 
 
 @pytest.mark.parametrize("all_atoms", [None, False, True])
-def test_scale_shift_additivity_and_warning(caplog, all_atoms):
+def test_scale_shift_additivity(caplog, all_atoms):
     assert DEFAULT_MODEL_CONFIG["scale_shift"]["all_atoms"] is False
     options = {} if all_atoms is None else {"all_atoms": all_atoms}
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -138,7 +138,7 @@ def test_scale_shift_additivity_and_warning(caplog, all_atoms):
         for record in caplog.records
         if "scale_shift.all_atoms=False is a legacy option" in record.message
     ]
-    assert len(messages) == int(all_atoms is not True)
+    assert not messages
 
 
 @pytest.mark.parametrize("format", ["pt", "ckpt"])

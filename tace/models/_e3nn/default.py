@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import logging
 import math
 from collections.abc import Mapping
 from numbers import Real
@@ -346,5 +347,24 @@ def check_model_config(cfg: dict[str, Any]):
     else:
         assert components is None
     cfg["product_basis"]["return_components"] = components
+
+    if (
+        cfg["scale_shift"]["enable"]
+        and not cfg["scale_shift"]["all_atoms"]
+        and "energy" in cfg["target_property"]
+    ):
+        logging.warning(
+            "scale_shift.all_atoms=False is a legacy option that can violate "
+            "energy additivity and the dissociation limit by treating isolated "
+            "atoms differently when evaluated alone. Do not use it for new "
+            "models; set all_atoms=True."
+        )
+    if cfg["atomic_basis"]["scatter_norm"] == "no_cutoff_density":
+        logging.warning(
+            "scatter_norm='no_cutoff_density' is a legacy option that can "
+            "cause energy jumps when neighbors cross the cutoff and break "
+            "force/stress consistency. Do not use it for new models; use "
+            "scatter_norm='density' instead."
+        )
 
     return cfg

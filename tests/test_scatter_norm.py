@@ -85,7 +85,7 @@ def test_scatter_norm_values_and_derivatives(
         for record in caplog.records
         if "scatter_norm='no_cutoff_density' is a legacy option" in record.message
     ]
-    assert len(messages) == int(key == "no_cutoff_density")
+    assert not messages
 
 
 @pytest.mark.parametrize("key", ["density", "no_cutoff_density"])
@@ -151,9 +151,17 @@ def small_model():
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_legacy_scatter_norm_loading(tmp_path, small_model, key, norm_class, dtype):
+def test_legacy_scatter_norm_loading(
+    tmp_path, caplog, small_model, key, norm_class, dtype
+):
     torch.set_default_dtype(dtype)
     reference = small_model(key).eval()
+    messages = [
+        record.message
+        for record in caplog.records
+        if "is a legacy option" in record.message
+    ]
+    assert len(messages) == int(key == "no_cutoff_density")
     for layer in reference.readout_fn.representation.interactions:
         if isinstance(layer.scatter_norm, DensityScatterNorm):
             with torch.no_grad():
@@ -168,7 +176,14 @@ def test_legacy_scatter_norm_loading(tmp_path, small_model, key, norm_class, dty
     }
     torch.save(checkpoint, path)
 
+    caplog.clear()
     loaded = load_tace(path, device=DEVICE, dtype=dtype, strict=True).eval()
+    messages = [
+        record.message
+        for record in caplog.records
+        if "is a legacy option" in record.message
+    ]
+    assert len(messages) == int(key == "no_cutoff_density")
     expected = reference.state_dict()
     assert loaded.state_dict().keys() == expected.keys()
     for name, value in loaded.state_dict().items():
