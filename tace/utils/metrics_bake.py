@@ -188,56 +188,6 @@ class AbsFinalCollinearMagmomsMetric(Metric):
             return torch.sqrt(self.sum_squared_error / self.count) * self.scale
 
 
-class DirectDiagonalHessianMetric(Metric):
-    def __init__(self, metric_type: str = "mae", scale: float = SCALE):
-        """
-        Args:
-            metric_type: "mae" or "rmse"
-            scale: scaling factor
-        """
-        super().__init__()
-        assert metric_type in ["mae", "rmse"], "metric_type must be 'mae' or 'rmse'"
-        self.metric_type = metric_type
-        self.scale = scale
-
-        if self.metric_type == "mae":
-            self.add_state(
-                "sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
-            )
-        else:  # rmse
-            self.add_state(
-                "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
-            )
-
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-    def update(self, pred: Tensor, label: Tensor):
-        batch = label["batch"]
-        key = "direct_diagonal_hessian"
-        total_weight = (label["entropy"] * label[key + "_weight"])[batch]
-        mask = total_weight != 0
-        error = pred[key] - label[key]
-        error = error * total_weight.unsqueeze(-1).unsqueeze(-1)
-        error = error[mask]
-
-        if self.metric_type == "mae":
-            abs_error = torch.abs(error)
-            self.sum_abs_error += abs_error.sum()
-        else:  # rmse
-            squared_error = error**2
-            self.sum_squared_error += squared_error.sum()
-        self.count += error.numel()
-
-    def compute(self):
-        if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device)
-
-        if self.metric_type == "mae":
-            return self.sum_abs_error / self.count * self.scale
-        else:  # rmse
-            return torch.sqrt(self.sum_squared_error / self.count) * self.scale
-
-
 class DirectForcesMetric(Metric):
     def __init__(self, metric_type: str = "mae", scale: float = SCALE):
         """
@@ -343,77 +293,6 @@ class ForcesMetric(Metric):
             return torch.sqrt(self.sum_squared_error / self.count) * self.scale
 
 
-# class PartialHessiansMetric(Metric):
-#     def __init__(self, metric_type: str = "mae", scale: float = SCALE):
-#         """
-#         Args:
-#             metric_type: "mae" or "rmse"
-#             scale: scaling factor
-#         """
-#         super().__init__()
-#         assert metric_type in ["mae", "rmse"], "metric_type must be 'mae' or 'rmse'"
-#         self.metric_type = metric_type
-#         self.scale = scale
-
-#         if self.metric_type == "mae":
-#             self.add_state(
-#                 "sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
-#             )
-#         else:  # rmse
-#             self.add_state(
-#                 "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
-#             )
-
-#         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
-
-
-#     def update(self, preds: Tensor, targets: Tensor):
-#         error = abs(preds) - abs(targets)
-#         if self.metric_type == "mae":
-#             abs_error = torch.abs(error)
-#             self.sum_abs_error += abs_error.sum()
-#         else:  # rmse
-#             squared_error = error**2
-#             self.sum_squared_error += squared_error.sum()
-#         self.count += targets.numel()
-
-#     def update(self, pred: Dict[str, torch.Tensor | List[torch.Tensor]], label: Dict[str, torch.Tensor]):
-
-#         true_hessian_flat = label["hessian"]
-#         num_atoms_per_graph = label["ptr"][1:] - label["ptr"][:-1]
-#         jacs_per_graph = pred["jacs_per_graph"]
-#         samples_per_graph = pred["samples_per_graph"]
-
-#         offset = 0
-#         error_list = []
-#         for jac_pred, samples, n_g in zip(jacs_per_graph, samples_per_graph, num_atoms_per_graph):
-#             hess_size = n_g * 3 * n_g * 3
-#             hess_flat_g = true_hessian_flat[offset : offset + hess_size]
-#             hess_true = hess_flat_g.reshape(n_g, 3, n_g, 3)
-#             offset += hess_size
-
-#             atom_idx = samples[:, 0]
-#             xyz_idx = samples[:, 1]
-#             jac_true = hess_true[atom_idx, xyz_idx]
-#             error = torch.square((jac_pred - jac_true)).view(-1)
-#             error_list.append(error)
-#         errors = torch.cat(error_list, dim=-1)
-
-#         if self.metric_type == "mae":
-#             abs_error = torch.abs(errors)
-#             self.sum_abs_error += abs_error.sum()
-#         else:  # rmse
-#             squared_error = errors**2
-#             self.sum_squared_error += squared_error.sum()
-#         self.count += errors.numel()
-
-#     def compute(self):
-#         if self.metric_type == "mae":
-#             return self.sum_abs_error / self.count * self.scale
-#         else:  # rmse
-#             return torch.sqrt(self.sum_squared_error / self.count) * self.scale
-
-
 def build_metrics(prefix: str, loss_property: List[str]) -> Dict[str, Metric]:
     metrics = {}
 
@@ -442,13 +321,6 @@ def build_metrics(prefix: str, loss_property: List[str]) -> Dict[str, Metric]:
                 "mae"
             )
             metrics[f"{prefix}/{property_name}_rmse"] = AbsFinalCollinearMagmomsMetric(
-                "rmse"
-            )
-        if property_name == "direct_diagonal_hessian":
-            metrics[f"{prefix}/{property_name}_mae"] = DirectDiagonalHessianMetric(
-                "mae"
-            )
-            metrics[f"{prefix}/{property_name}_rmse"] = DirectDiagonalHessianMetric(
                 "rmse"
             )
         if property_name == "direct_forces":
@@ -486,9 +358,6 @@ def update_metrics(metrics, prefix, pred, label, loss_property):
             metrics[f"{prefix}/{p}_per_atom_mae"](output_value, batch_value, label)
             metrics[f"{prefix}/{p}_per_atom_rmse"](output_value, batch_value, label)
         if p == "abs_final_collinear_magmoms":
-            metrics[f"{prefix}/{p}_mae"](pred, label)
-            metrics[f"{prefix}/{p}_rmse"](pred, label)
-        if p == "direct_diagonal_hessian":
             metrics[f"{prefix}/{p}_mae"](pred, label)
             metrics[f"{prefix}/{p}_rmse"](pred, label)
         if p == "direct_forces":

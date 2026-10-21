@@ -22,13 +22,113 @@ from .fused import (
     O3CartesianScatterTensorProduct,
     O3ScatterTensorProduct,
     UuO2ScatterTensorProduct,
+    UvuTensorProduct,
 )
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
+from .paths import generate_paths
 from .residual import get_resnet_layer
 from .scatter_norm import get_scatter_norm_layer
 from .tece_oam_rra import Convolution
+
+
+class O3CgtpEdgeInteraction(torch.nn.Module):
+    """Compute gated atom-pair messages without node aggregation.
+
+    Parameters
+    ----------
+    irreps_in, irreps_sh, irreps_out : e3nn.o3.Irreps
+        Node, spherical-harmonic and output representations.
+    num_channel : int
+        Hidden multiplicity per representation.
+    num_elements : int
+        Number of atomic species.
+    radial_basis : dict
+        Radial MLP configuration.
+    gate_m0 : bool, optional
+        Gate scalars instead of applying scalar activations directly.
+    scalar_act, tensor_act : str or None, optional
+        Scalar and tensor-gate activations.
+    """
+
+    def __init__(
+        self,
+        irreps_in,
+        irreps_sh,
+        irreps_out,
+        num_channel,
+        num_elements,
+        radial_basis,
+        *,
+        gate_m0=False,
+        scalar_act=None,
+        tensor_act=None,
+    ):
+        super().__init__()
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.irreps_sh = o3.Irreps(irreps_sh)
+        self.irreps_out = o3.Irreps(irreps_out)
+        irreps_hidden = o3.Irreps(
+            [(num_channel, ir) for _, ir in self.irreps_in.regroup()]
+        )
+        self.linear_up = e3nnLinear(
+            self.irreps_in + self.irreps_in, irreps_hidden, bias=False
+        )
+        irreps_gated = o3.Irreps(
+            [(num_channel, ir) for _, ir in self.irreps_out.regroup()]
+        )
+        instructions, irreps_tp = generate_paths(
+            irreps_gated, irreps_hidden, self.irreps_sh
+        )
+        self.rejector = UvuTensorProduct(
+            irreps_hidden,
+            self.irreps_sh,
+            irreps_tp,
+            instructions,
+            shared_weights=False,
+        )
+        (
+            self.nonlinearity,
+            self.linear_nonlinearity,
+            irreps_gate,
+        ) = get_nonlinear_layer(
+            "gate",
+            irreps_gated,
+            self.irreps_out,
+            gate_m0=gate_m0,
+            scalar_act=scalar_act,
+            tensor_act=tensor_act,
+            bias=False,
+        )
+        self.linear_down = e3nnLinear(irreps_tp, irreps_gate, bias=False)
+
+        radial_norm = radial_basis["mlp_norm"]
+        if radial_norm is None and radial_basis["mlp_type"] == "mlp":
+            radial_norm = "layer_norm"
+        self.edge_info = MLP_TYPES[radial_basis["mlp_type"]](
+            [radial_basis["num_radial_basis"] + 2 * num_elements]
+            + list(radial_basis["hidden"])
+            + [self.rejector.weight_numel],
+            bias=radial_basis["bias"],
+            layer_norm=radial_norm == "layer_norm",
+            rms_norm=radial_norm == "rms_norm",
+            act="silu",
+        )
+
+    def forward(
+        self, node_feats, node_attrs, edge_feats, edge_attrs, edge_index, edge_cutoff
+    ):
+        source, target = edge_index.unbind(0)
+        pair_feats = self.linear_up(
+            torch.cat((node_feats[source], node_feats[target]), dim=-1)
+        )
+        weights = self.edge_info(
+            torch.cat((edge_feats, node_attrs[source], node_attrs[target]), dim=-1)
+        )
+        messages = self.rejector(pair_feats, edge_attrs, weights * edge_cutoff)
+        messages = self.linear_down(messages)
+        return self.linear_nonlinearity(self.nonlinearity(messages))
 
 
 class O3CgtpInteraction(Interaction):

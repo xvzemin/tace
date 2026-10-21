@@ -99,6 +99,9 @@ DEFAULT_MODEL_CONFIG = {
         "use_alllayer": False,
         "use_one_body_magmoms": True,
     },
+    "direct_hessian": {
+        "cutoff": 16.0,
+    },
     "scale_shift": {
         "enable": True,
         "scale_type": "rms_forces",

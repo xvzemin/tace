@@ -12,6 +12,7 @@ import torch
 from torch_geometric.data import Data
 
 from .element import TorchElement
+from .hessian import hessian_pair_indices
 from .neighbour_list import get_neighborhood
 from .quantity import (
     PROPERTY,
@@ -127,16 +128,19 @@ def from_atoms(
                 else:
                     raise
                 if shape_fn is not None:
-                    p = shape_fn(
-                        p,
-                        num_atoms=num_atoms,
-                    )
+                    p = shape_fn(p, num_atoms=num_atoms)
             p = p.view(*in_data)
             if type_ == "float":
                 if torch.isinf(p).any():
                     raise ValueError(f"{name} contains infinite values.")
                 valid = torch.isfinite(p) & (properties.get(name) is not None)
-                if name in {"stress", "direct_stress", "virials", "direct_virials"}:
+                if name in {
+                    "stress",
+                    "direct_stress",
+                    "virials",
+                    "direct_virials",
+                    "direct_hessian",
+                }:
                     if name in {"stress", "direct_stress"} and not stress_defined:
                         if valid.any() and property_weights.get(name, 1.0) > 0:
                             raise ValueError(
@@ -180,6 +184,11 @@ def from_atoms(
         ),
     }
     data_dict.update(masks)
+
+    if "direct_hessian" in target_property:
+        data_dict["hessian_pair_index"] = hessian_pair_indices(
+            torch.tensor([0, num_atoms], dtype=torch.long)
+        )
 
     for name in need_property:
         data_dict.update(

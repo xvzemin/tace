@@ -19,7 +19,7 @@ to_irrep = {
     "direct_virials": ["0e", "2e"],
     "direct_dipole": ["1o"],
     "direct_polarizability": ["0e", "2e"],
-    "direct_diagonal_hessian": ["0e", "2e"],
+    "direct_hessian": ["0e", "1o", "2e"],
     "abs_final_collinear_magmoms": ["0e"],  # TODO, check
 }
 

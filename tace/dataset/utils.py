@@ -62,36 +62,6 @@ def shape_fn_for_hessian(t: Tensor, num_atoms: int, **kwargs):
     return t.view(-1)
 
 
-def shape_fn_for_direct_diagonal_hessian(t: Tensor, num_atoms: int, **kwargs):
-    shape1 = (num_atoms * 3, num_atoms * 3)  # [3N, 3N]
-    shape2 = (num_atoms * 3 * num_atoms * 3,)  # [flat]
-    shape3 = (num_atoms, num_atoms, 3, 3)  # [N, N, 3, 3]
-    shape4 = (num_atoms, 3, num_atoms, 3)  # [N, 3, N, 3]
-    shape5 = (num_atoms, 9)  # already diagonal
-
-    # to (N,3,N,3)
-    if t.shape == shape1:
-        H = t.view(num_atoms, 3, num_atoms, 3)
-    elif t.shape == shape2:
-        H = t.view(num_atoms * 3, num_atoms * 3)
-        H = H.view(num_atoms, 3, num_atoms, 3)
-    elif t.shape == shape3:
-        H = t.permute(0, 2, 1, 3)
-    elif t.shape == shape4:
-        H = t
-    elif t.shape == shape5:
-        return t.view(-1, 3, 3)
-    else:
-        raise ValueError(
-            f"hessian shape mismatch: got {tuple(t.shape)}, "
-            f"expected one of {shape1}, {shape2}, {shape3}, {shape4}, {shape5}"
-        )
-    idx = torch.arange(num_atoms, device=t.device)
-    H_diag = H[idx, :, idx, :]
-
-    return H_diag
-
-
 def shape_fn_for_abs_fc_mag(t: Tensor, num_atoms: int, **kwargs):
     return torch.abs(t)
 

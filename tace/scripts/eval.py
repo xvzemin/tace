@@ -6,6 +6,7 @@
 import argparse
 import copy
 import time
+from pathlib import Path
 from typing import Dict
 
 import ase.io
@@ -15,7 +16,7 @@ from tqdm import tqdm
 
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import PROPERTY, KeySpecification, update_keyspec_from_kwargs
-from tace.dataset.read import check_keys
+from tace.dataset.read import ase_db_connect, check_keys
 from tace.lightning import load_tace
 from tace.utils.metrics import build_metrics, update_metrics
 from tace.utils.utils import num_params
@@ -90,7 +91,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    atomsList = ase.io.read(args.input, index=":")
+    atomsList = (
+        ase_db_connect(args.input)
+        if Path(args.input).suffix == ".db"
+        else ase.io.read(args.input, index=":")
+    )
     atoms_list_copy = copy.deepcopy(atomsList)
     key_spec = KeySpecification()
     update_keyspec_from_kwargs(key_spec, vars(args))
@@ -204,6 +209,12 @@ def main():
                     atoms_i.info[f"TACE_{p}"] = (
                         pred[p][i].detach().cpu().numpy().reshape(-1)
                     )
+                elif p_scope == "per-pair":
+                    pair_counts = (ptr[1:] - ptr[:-1]).square()
+                    pair_start = int(pair_counts[:i].sum())
+                    pair_end = pair_start + int(pair_counts[i])
+                    blocks = pred[p][pair_start:pair_end].detach().cpu()
+                    atoms_i.info[f"TACE_{p}"] = blocks.numpy()
                 else:
                     atoms_i.info[f"TACE_{p}"] = (
                         pred[p][i].detach().cpu().numpy().reshape(-1)

@@ -1,0 +1,70 @@
+defaults:
+  - tace@_global_
+  - _self_
+
+misc:
+  project_name: Hessian
+  log_level: info
+  env:
+    TACE_USE_COMPILE: "0"
+    TACE_USE_TF32: "0"
+
+trainer:
+  devices: 1
+  max_epochs: 1000
+  precision: 32
+  log_every_n_steps: 20
+
+dataset:
+  type: ase_db
+  train_file: ${oc.env:HOME}/dataset/HORM/train.db
+  valid_file: ${oc.env:HOME}/dataset/HORM/valid.db
+  test_files:
+    - ${oc.env:HOME}/dataset/HORM/test.db
+  keys:
+    direct_hessian_key: direct_hessian
+  train_dataloader:
+    batch_size: 8
+  valid_dataloader:
+    batch_size: 8
+
+synth_metric: null
+callbacks:
+  early_stopping:
+    monitor: val/direct_hessian_mae
+  checkpoint_epoch:
+    filename: Hessian-{epoch}-{step}
+scheduler:
+  extra:
+    monitor: val/direct_hessian_mae
+
+loss:
+  loss_property: [direct_hessian]
+  loss_function_name: [huber_direct_hessian]
+  loss_property_weights: [1.0]
+  loss_function_kwargs: [{reduction: structure, huber_delta: 0.01}]
+
+model:
+  config:
+    cutoff: 5.0
+    num_layers: 2
+    num_channel: 32
+    Lmax: 2
+    lmax: 2
+    fidelity: [{name: wB97X}]
+    direct_hessian:
+      cutoff: 16.0
+    atomic_basis:
+      type: cgtp
+      gate_m0: false
+    product_basis:
+      type: cgtp
+      correlation: 2
+    radial_basis:
+      hidden: [64, 64]
+      apply_cutoff: false
+    readout_emlp:
+      hidden: [16]
+      use_alllayer: false
+    scale_shift:
+      enable: false

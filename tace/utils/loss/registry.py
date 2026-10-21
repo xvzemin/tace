@@ -21,6 +21,7 @@ LOSS_MODULES = (
     "l2mae_fn",
     "dens",
     "special_fn",
+    "hessian",
 )
 LOSS_NAME_PREFIXES = (
     "l2mae_",

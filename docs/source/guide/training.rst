@@ -124,6 +124,7 @@ For detailed parameters in every field, see below:
    details/trainer.rst
    details/callbacks.rst
    details/dataset.rst
+   details/direct_hessian.rst
    details/optimizer.rst
    details/scheduler.rst
    details/metric.rst

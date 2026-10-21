@@ -1,0 +1,22 @@
+defaults:
+  - hessian@_global_
+  - _self_
+
+misc:
+  project_name: TACE-Hessian
+
+dataset:
+  storage_mode: lmdb
+  shard_dirs: [graphCache_hessian]
+  shard_size: 10000
+  avg_graph_size_in_KB: 64
+  train_dataloader:
+    batch_size: 32
+  valid_dataloader:
+    batch_size: 32
+
+model:
+  config:
+    num_channel: 64
+    product_basis:
+      correlation: 3

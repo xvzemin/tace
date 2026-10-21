@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
+from .hessian import default_value_for_direct_hessian, hessian_blocks
 from .utils import (
     default_value_for_hessian,
     default_value_for_rank0_atom,
@@ -20,7 +21,6 @@ from .utils import (
     default_value_for_rank4_atom,
     default_value_for_rank4_graph,
     shape_fn_for_abs_fc_mag,
-    shape_fn_for_direct_diagonal_hessian,
     shape_fn_for_hessian,
     voigt_to_matrix,
 )
@@ -146,25 +146,23 @@ PROPERTY = {
         "second_derivative": True,
         "requires_grad_with": ["positions"],
     },
-    # "direct_diagonal_hessian": {
-    #     "ase_name": None,
-    #     'type': 'float',
-    #     "scope": "per-atom",
-    #     "rank": 2,
-    #     "irreps": '1x0e+1x2e',
-    #     "abbreviation": "D_DIAG_H",
-    #     "shape": {
-    #         "in_data": (-1, 3, 3),
-    #         "shape_fn": shape_fn_for_direct_diagonal_hessian,
-    #     },
-    #     "default_value_fn": default_value_for_rank2_atom,
-    #     "must_be_with": [],
-    #     "enable_prediction": True,
-    #     "enable_embedding": False,
-    #     "first_derivative": False,
-    #     "second_derivative": False,
-    #     "requires_grad_with": [],
-    # },
+    "direct_hessian": {
+        "ase_name": None,
+        "type": "float",
+        "scope": "per-pair",
+        "rank": 2,
+        "irreps": "1x0e+1x1e+1x2e",
+        "time_reversal": 1,
+        "abbreviation": "D_H",
+        "shape": {"in_data": (-1, 3, 3), "shape_fn": hessian_blocks},
+        "default_value_fn": default_value_for_direct_hessian,
+        "must_be_with": [],
+        "enable_prediction": True,
+        "enable_embedding": False,
+        "first_derivative": False,
+        "second_derivative": False,
+        "requires_grad_with": [],
+    },
     "stress": {
         "ase_name": "stress",
         "type": "float",
@@ -791,7 +789,7 @@ class DefaultKeys(Enum):
     DIRECT_VIRIALS = "direct_virials"
     DIRECT_DIPOLE = "direct_dipole"
     DIRECT_POLARIZABILITY = "direct_polarizability"
-    # DIRECT_DIAGONAL_HESSIAN = "direct_hessian"
+    DIRECT_HESSIAN = "direct_hessian"
 
     # charges
     CHARGES = "charges"

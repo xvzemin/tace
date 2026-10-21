@@ -19,7 +19,7 @@ def expand_dims_to(T: Tensor, n_dim: int, dim: int = -1) -> Tensor:
 
 
 def supports_weight_filter(property_name: str) -> bool:
-    return PROPERTY[property_name]["scope"] in {"per-system", "per-atom"}
+    return PROPERTY[property_name]["scope"] in {"per-system", "per-atom", "per-pair"}
 
 
 def _property_weight_mask(
@@ -34,9 +34,12 @@ def _property_weight_mask(
         mask = graph_mask
     elif scope == "per-atom":
         mask = graph_mask[label["batch"]]
+    elif scope == "per-pair":
+        counts = label["ptr"][1:] - label["ptr"][:-1]
+        mask = torch.repeat_interleave(graph_mask, counts.square())
     else:
         raise ValueError(
-            f"{property_name} has scope {scope}, only per-system and per-atom "
+            f"{property_name} has scope {scope}; only per-system, per-atom and per-pair "
             "metrics support weight filtering"
         )
 

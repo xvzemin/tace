@@ -16,6 +16,7 @@ from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps, stress_from_virials
 from .basis_change import DirectPolarizability, DirectVirials
 from .default import check_model_config
+from .hessian import DirectHessianReadout
 from .les import TACELES, required_les_irreps
 from .readout import (
     build_element_scalar_readout,
@@ -58,6 +59,7 @@ class e3nnTACE(torch.nn.Module):
         dropout: Dict = {},
         embedding_property=[],
         atomic_numbers=None,
+        direct_hessian: Dict = {},
         **kwargs,
     ):
         cfg = {
@@ -165,6 +167,20 @@ class e3nnTACE(torch.nn.Module):
             "parity": cfg["parity"],
             "irreps_in": self.representation.irreps_outs,
         }
+
+        if "direct_hessian" in self.target_property:
+            self.direct_hessian_readout = DirectHessianReadout(
+                self.representation.irreps_outs[-1],
+                self.num_channel,
+                self.num_fidelities,
+                cfg["atomic_numbers"],
+                cfg["direct_hessian"]["cutoff"],
+                cfg["radial_basis"],
+                gate_m0=cfg["atomic_basis"]["gate_m0"],
+                scalar_act=cfg["atomic_basis"]["scalar_act"],
+                tensor_act=cfg["atomic_basis"]["tensor_act"],
+                bias=cfg["readout_emlp"]["bias"],
+            )
 
         # === Energy ===
         if "energy" in self.target_property:
@@ -304,6 +320,26 @@ class e3nnTACE(torch.nn.Module):
         num_atoms_arange = graph.num_atoms_arange
         dtype = data["node_attrs"].dtype
         device = data["node_attrs"].device
+
+        D_H = None
+        if "direct_hessian" in self.target_property:
+            if graph.lmp:
+                raise ValueError(
+                    "Direct Hessian readout requires complete structures, not ghost atoms."
+                )
+            if "pbc" in data and torch.any(data["pbc"]):
+                raise ValueError(
+                    "Direct Hessian readout currently supports nonperiodic structures only."
+                )
+            D_H = self.direct_hessian_readout(
+                descriptors[-1],
+                graph.positions,
+                data["ptr"],
+                batch,
+                data["node_attrs"],
+                node_fidelity,
+                data.get("hessian_pair_index"),
+            )
 
         # === Energy ===
         E = None
@@ -601,6 +637,7 @@ class e3nnTACE(torch.nn.Module):
             "direct_dipole": D,
             "direct_polarizability": ALPHA,
             "direct_forces": D_F,
+            "direct_hessian": D_H,
             "direct_virials": D_V,
             "direct_stress": D_S,
             "charges": CHARGES,
