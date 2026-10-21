@@ -150,7 +150,6 @@ def uses_matrix_products(metadata):
         for op, _, _, _ in nodes
     ) or any(
         op == "matmul"
-        and data[0] == 1
         and nodes[args[1]][0] == "input"
         and nodes[args[1]][3][1] == "shared"
         for op, _, args, data in nodes

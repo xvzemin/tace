@@ -11,12 +11,141 @@ import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
 import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
 from tace.models._e3nn.fused import UuuTensorProduct
 from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
-from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
+from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE, MtpACE
 from tace.models.eqt.equitorch.nn import TensorProduct
 from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize("agnostic", [False, True])
+@pytest.mark.parametrize("correlation", [1, 2, 3])
+@pytest.mark.parametrize("hidden_channels", [2, 3])
+def test_mtp_product(monkeypatch, agnostic, correlation, hidden_channels):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=2,
+        lmax=2,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=hidden_channels,
+        target_irreps=o3.Irreps("0e+1o+1e+2e"),
+        irreps_in=o3.Irreps("2x0e+2x1o+2x1e+2x2e"),
+        correlation=[correlation],
+        l1l2=None,
+        bias=True,
+        nonlinear=None,
+        agnostic=agnostic,
+        parity=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    reference = MtpACE(**kwargs).cuda()
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    module = MtpACE(**kwargs).cuda()
+    module.load_state_dict(reference.state_dict(), strict=True)
+    assert isinstance(module.linear_up, torch.nn.Identity) == (hidden_channels == 2)
+    assert all(tp.num_channels == hidden_channels for tp in module.aces)
+    x = (torch.randn(3, module.irreps_in.dim, device="cuda") * 0.2).requires_grad_()
+    attrs = x.new_tensor([[1, 0], [0, 1], [1, 0]])
+    residual = torch.randn(3, module.irreps_out.dim, device="cuda", requires_grad=True)
+    batch = torch.zeros(3, device="cuda", dtype=torch.long)
+    results, derivatives = [], []
+    for product, enabled in ((reference, "0"), (module, "1")):
+        monkeypatch.setenv("TACE_USE_EQX", enabled)
+        value = product(x, attrs, residual, batch)
+        first = torch.autograd.grad(value.sin().sum(), x, create_graph=True)[0]
+        derivatives.append(
+            torch.autograd.grad(
+                first.square().sum(), (x, *product.parameters()), allow_unused=True
+            )
+        )
+        results.append(value)
+    torch.testing.assert_close(*results, atol=1e-10, rtol=1e-10)
+    for actual, expected in zip(*derivatives):
+        if actual is None or expected is None:
+            assert actual is expected
+        else:
+            torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
+
+
+@pytest.mark.parametrize("hidden_channels", [2, 3])
+@pytest.mark.parametrize("layer", [0, 1])
+@pytest.mark.parametrize("agnostic", [False, True])
+def test_mtp_ace_architecture(monkeypatch, hidden_channels, layer, agnostic):
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    kwargs = dict(
+        layer=layer,
+        num_layers=2,
+        num_elements=2,
+        Lmax=1,
+        lmax=2,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=hidden_channels,
+        target_irreps=o3.Irreps("0e"),
+        irreps_in=o3.Irreps("2x0e+2x1o+2x2e"),
+        correlation=[3, 3],
+        l1l2=None,
+        bias=True,
+        nonlinear=None,
+        agnostic=agnostic,
+        parity=False,
+        stochastic_depth=0.1,
+        use_first_dropout=True,
+    )
+    cgtp, mtp = CgtpACE(**kwargs).eval(), MtpACE(**kwargs).eval()
+    for name in (
+        "irreps_in", "irreps_hidden", "irreps_base", "irreps_coefs_out", "irreps_out"
+    ):
+        assert getattr(mtp, name) == getattr(cgtp, name)
+    assert len(mtp.coefs) == len(cgtp.coefs) == 3
+    assert len(mtp.aces) == len(cgtp.aces) == 2
+    assert isinstance(mtp.linear_up, torch.nn.Identity) == isinstance(
+        cgtp.linear_up, torch.nn.Identity
+    )
+    for name in ("linear_up", "linear"):
+        a, b = getattr(mtp, name), getattr(cgtp, name)
+        assert sum(p.numel() for p in a.parameters()) == sum(
+            p.numel() for p in b.parameters()
+        )
+    for a, b in zip(mtp.coefs, cgtp.coefs):
+        assert a.irreps_out == b.irreps_out
+        assert a.bias.numel() == b.bias.numel()
+
+    features = torch.randn(3, mtp.irreps_in.dim)
+    attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+    residual = torch.randn(3, mtp.irreps_out.dim)
+    expected_order = [
+        "linear_up",
+        "coefs.0",
+        "aces.0",
+        "coefs.1",
+        "aces.1",
+        "coefs.2",
+        "linear",
+        "stochastic_depth",
+    ]
+    for module in (cgtp, mtp):
+        order = []
+        handles = [
+            child.register_forward_hook(
+                lambda child, args, output, name=name: order.append(name)
+            )
+            for name, child in module.named_modules()
+            if name in expected_order
+        ]
+        value = module(features, attrs, residual, batch)
+        assert order == expected_order
+        for handle in handles:
+            handle.remove()
+        torch.testing.assert_close(value, module(features, attrs, None, batch) + residual)
 
 
 @pytest.mark.parametrize(

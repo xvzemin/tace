@@ -17,6 +17,30 @@ O(3) Cgtp
    :no-members:
    :show-inheritance:
 
+Matrix tensor product
+---------------------
+
+``atomic_basis.type: mtp`` uses ``eqx.conv.MatrixTensorProductConv`` and
+``eqx.o3.Linear`` within the CGTP interaction pipeline. Linear up/down,
+scatter normalization, gates and residual connections are unchanged.
+The radial MLP supplies input and output irrep factors.
+Matrix multiplication fixes their relative angular couplings; these are
+not independent CG path weights. Both spatial parities are supported.
+
+The cutoff follows the standard radial-basis configuration. When applied
+after the radial MLP, it multiplies the complete message once, not each
+factor separately. ``TACE_USE_EQX=1`` enables tiled CUDA execution of
+the full radial MLP, matrix products and destination reduction, including
+the derivatives required for force training. CPU uses PyTorch.
+
+The configuration ``example/train/benchmark_configs/3bpa_mtp.yaml`` selects
+MTP in both the interaction and product. Either component can be selected
+independently. Existing CGTP checkpoints are not interchangeable with MTP.
+
+.. autoclass:: tace.models._e3nn.inter.MtpInteraction
+   :no-members:
+   :show-inheritance:
+
 O(2) CGTP
 ---------
 

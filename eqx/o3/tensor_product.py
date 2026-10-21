@@ -228,25 +228,10 @@ class FactorizedTensorProduct(torch.nn.Module):
         torch.Tensor
             Features of shape ``(..., irreps_out.dim)`` in ``mul_ir`` layout.
         """
-        if x.ndim < 1 or x.shape[-1] != self.input_dim1:
-            raise ValueError("The first input must end with irreps_in1.dim.")
-        if y.ndim < 1 or y.shape[-1] != self.input_dim2:
-            raise ValueError("The second input must end with irreps_in2.dim.")
-        if weight is None:
-            if not self.internal_weights:
-                raise ValueError("External weights are required.")
-            weight = self.weight
-        if weight.ndim < 1 or weight.shape[-1] != self.weight_numel:
-            raise ValueError("Weights must end with weight_numel.")
-        if self.shared_weights and weight.ndim != 1:
-            raise ValueError("Shared weights must be one-dimensional.")
-        shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        x, y, weight = (
-            value.expand(shape + (value.shape[-1],)) for value in (x, y, weight)
-        )
+        x, y, weight = self.prepare_inputs(x, y, weight)
+        shape = x.shape[:-1]
         result = x.new_zeros(shape + (self.output_dim,))
         if not self.routes:
-            # Keep zero outputs differentiable when no requested coupling exists.
             return result + (x.sum(-1) + y.sum(-1) + weight.sum(-1)).unsqueeze(-1) * 0
         inputs = []
         for value, entries in zip((x, y), self.inputs):
@@ -270,6 +255,26 @@ class FactorizedTensorProduct(torch.nn.Module):
                 -1, getattr(self, f"{name}_index"), value.reshape(shape + (mul * dim,))
             )
         return result
+
+    def prepare_inputs(self, x, y, weight):
+        """Validate features and broadcast leading dimensions."""
+        if x.ndim < 1 or x.shape[-1] != self.input_dim1:
+            raise ValueError("The first input must end with irreps_in1.dim.")
+        if y.ndim < 1 or y.shape[-1] != self.input_dim2:
+            raise ValueError("The second input must end with irreps_in2.dim.")
+        if weight is None:
+            if not self.internal_weights:
+                raise ValueError("External weights are required.")
+            weight = self.weight
+        if weight.ndim < 1 or weight.shape[-1] != self.weight_numel:
+            raise ValueError("Weights must end with weight_numel.")
+        if self.shared_weights and weight.ndim != 1:
+            raise ValueError("Shared weights must be one-dimensional.")
+        shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
+        x, y, weight = (
+            value.expand(shape + (value.shape[-1],)) for value in (x, y, weight)
+        )
+        return x, y, weight
 
     def extra_repr(self):
         return (
@@ -432,6 +437,8 @@ class MatrixTensorProduct(FactorizedTensorProduct):
     matrix_degree : int, optional
         Auxiliary angular degree. Matrices have size ``2 * matrix_degree + 1``.
         Defaults to half the largest requested degree, rounded up.
+    backend : {"cuda", "torch"}, optional
+        Fused CUDA execution or PyTorch operations. CPU inputs use PyTorch.
 
     Notes
     -----
@@ -453,6 +460,7 @@ class MatrixTensorProduct(FactorizedTensorProduct):
         internal_weights=None,
         shared_weights=None,
         matrix_degree=None,
+        backend="cuda",
     ):
         super().__init__(
             irreps_in1,
@@ -482,6 +490,46 @@ class MatrixTensorProduct(FactorizedTensorProduct):
         }
         self.build()
         del self.matrix_basis
+        if backend not in ("cuda", "torch"):
+            raise ValueError("backend must be 'cuda' or 'torch'.")
+        self.backend = backend
+        for entries in self.inputs:
+            for name, _, _ in entries:
+                self.add_constant(
+                    f"{name}_scaled_basis",
+                    self.constants[f"{name}_scale"][:, None]
+                    * self.constants[f"{name}_basis"],
+                )
+        for _, _, name, _ in self.routes:
+            self.add_constant(
+                f"{name}_scaled_basis",
+                self.constants[f"{name}_basis"] * self.constants[f"{name}_scale"],
+            )
+        from ..conv.o3.matrix import matrix_program
+
+        self.metadata, self.matrix_buffers = matrix_program(
+            self, weight_storage="shared" if self.shared_weights else "edge"
+        )
+
+    def forward(self, x, y, weight=None):
+        """Evaluate the product with shared or per-sample factor weights."""
+        if not x.is_cuda or self.backend == "torch":
+            return super().forward(x, y, weight)
+        from ..conv.edge import evaluate
+
+        shared_weight = self.weight if weight is None else weight
+        x, y, weight = self.prepare_inputs(x, y, weight)
+        shape = x.shape[:-1]
+        if self.shared_weights:
+            weight = shared_weight
+        inputs = [value.reshape(-1, value.shape[-1]) for value in (x, y, weight)]
+        inputs.extend(
+            getattr(self, name).reshape(1, -1) for name in self.matrix_buffers
+        )
+        index = torch.arange(inputs[0].shape[0], dtype=torch.long, device=x.device)
+        return evaluate(self.metadata, inputs, index, index, index.numel())[0].reshape(
+            shape + (self.output_dim,)
+        )
 
     @staticmethod
     def sector(ir):

@@ -4305,6 +4305,82 @@ def test_convolution_radial_network(cls, num_edges, device, double_precision):
         torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("num_edges", [0, 7])
+def test_matrix_convolution_fused(num_edges, monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx.conv import execution
+
+    launch = execution.launch
+    monkeypatch.setattr(execution, "launch", lambda *args: launch(*args, tile_size=3))
+    tp = eqx_o3.MatrixTensorProduct(
+        "2x0e+2x1o", "0e+1o", "2x0e+2x1o+2x2e", shared_weights=False, backend="torch"
+    )
+    module = eqx_conv.MatrixTensorProductConv(tp).cuda()
+    reference = eqx_conv.MatrixTensorProductConv(tp, backend="torch").cuda()
+    network = torch.nn.Sequential(
+        torch.nn.Linear(3, 4), torch.nn.SiLU(), torch.nn.Linear(4, tp.weight_numel)
+    ).cuda()
+    x = torch.randn(4, tp.input_dim1, device="cuda", requires_grad=True)
+    vectors = torch.randn(num_edges, 3, device="cuda", requires_grad=True)
+    radial = torch.randn(num_edges, 3, device="cuda", requires_grad=True)
+    cutoff = torch.rand(num_edges, 1, device="cuda", requires_grad=True)
+    index = torch.randint(4, (2, num_edges), device="cuda")
+    attrs = o3.spherical_harmonics([0, 1], vectors, normalize=False)
+    actual, expected = [
+        conv(x, attrs, index, radial=radial, radial_network=network, cutoff=cutoff)
+        for conv in (module, reference)
+    ]
+    inputs = (x, vectors, radial, cutoff, *network.parameters())
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
+        gradients = [
+            torch.autograd.grad(y.sin().sum(), inputs, create_graph=True)
+            for y in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        ]
+
+
+def test_matrix_radial_linear_compile(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = eqx_o3.MatrixTensorProduct(
+        "2x0e+2x1o", "0e+1o", "2x0e+2x1o+2x2e", shared_weights=False, backend="torch"
+    )
+    conv = eqx_conv.MatrixTensorProductConv(tp).cuda()
+    network = torch.nn.Sequential(
+        torch.nn.Linear(3, 4), torch.nn.SiLU(), torch.nn.Linear(4, tp.weight_numel)
+    ).cuda()
+    linear = eqx_o3.Linear(tp.irreps_out, "3x0e+3x1o", biases=True).cuda()
+
+    def forward(x, y, radial, cutoff, index):
+        return linear(
+            conv(x, y, index, radial=radial, radial_network=network, cutoff=cutoff)
+        )
+
+    compiled = torch.compile(forward, backend="aot_eager", fullgraph=True, dynamic=True)
+    for edges in (5, 8, 0):
+        x = torch.randn(3, tp.input_dim1, device="cuda", requires_grad=True)
+        y = torch.randn(edges, tp.input_dim2, device="cuda", requires_grad=True)
+        radial = torch.randn(edges, 3, device="cuda", requires_grad=True)
+        cutoff = torch.rand(edges, 1, device="cuda", requires_grad=True)
+        index = torch.randint(3, (2, edges), device="cuda")
+        actual, expected = (
+            compiled(x, y, radial, cutoff, index),
+            forward(x, y, radial, cutoff, index),
+        )
+        torch.testing.assert_close(actual, expected)
+        inputs = (x, y, radial, cutoff, *network.parameters(), *linear.parameters())
+        a, b = [
+            torch.autograd.grad(value.sin().sum(), inputs)
+            for value in (actual, expected)
+        ]
+        for value, target in zip(a, b):
+            torch.testing.assert_close(value, target)
+
+
 @pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_product_and_convolution_compile(cls, device, double_precision):

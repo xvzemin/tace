@@ -1,6 +1,7 @@
 """Radial networks evaluated inside tiled convolution programs."""
 
 import math
+import operator
 
 import torch
 
@@ -27,7 +28,7 @@ def radial_program(network, inputs, program, value):
     def parameter(tensor):
         slot = len(inputs)
         inputs.append(tensor.reshape(1, -1))
-        return program.input(slot, "shared", int(tensor.numel()))
+        return program.input(slot, "shared", operator.index(tensor.numel()))
 
     layers = network.mlp if hasattr(network, "mlp") else network
     for layer in layers:
@@ -69,7 +70,10 @@ def radial_program(network, inputs, program, value):
             if weight.ndim != 2 or weight.shape[0] != program.size(value):
                 raise ValueError("Radial linear weight has an incompatible shape.")
             value = program.matmul(
-                value, parameter(weight), 1, *(int(dim) for dim in weight.shape)
+                value,
+                parameter(weight),
+                1,
+                *(operator.index(dim) for dim in weight.shape),
             )
             if getattr(layer, "bias", None) is not None:
                 value = program.binary("add", value, parameter(layer.bias))
@@ -96,10 +100,12 @@ def compose_radial(metadata, inputs, slot, network):
                 inputs[slot] = feature
             else:
                 inputs.append(feature)
-            parts.append(program.input(index, storage, int(feature.shape[-1])))
+            parts.append(
+                program.input(index, storage, operator.index(feature.shape[-1]))
+            )
         value = program.concatenate(parts)
     else:
-        value = program.input(slot, "edge", int(radial.shape[-1]))
+        value = program.input(slot, "edge", operator.index(radial.shape[-1]))
     value = radial_program(network, inputs, program, value)
     translated = {}
     for i, (op, size, args, data) in enumerate(nodes):

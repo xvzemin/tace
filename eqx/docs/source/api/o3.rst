@@ -8,6 +8,9 @@ Representations use ``e3nn.o3.Irreps``; features use flattened ``mul_ir`` layout
 Linear maps
 -----------
 
+.. autoclass:: eqx.o3.Linear
+   :members: forward
+
 .. autoclass:: eqx.o3.ElementLinear
    :members: forward
 

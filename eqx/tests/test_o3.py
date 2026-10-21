@@ -11,6 +11,74 @@ from eqx import o3 as eqx_o3
 IRREPS = "0e+0o+1e+1o+2e+2o"
 
 
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("count", [0, 4])
+def test_linear_cuda(shared, count, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = eqx_o3.Linear(
+        "2x0e+2x0o+2x1o",
+        "3x0e+3x0o+3x1o",
+        biases=True,
+        internal_weights=False,
+        shared_weights=shared,
+    ).cuda()
+    reference = o3.Linear(
+        module.irreps_in,
+        module.irreps_out,
+        internal_weights=False,
+        shared_weights=shared,
+    ).cuda()
+    x = torch.randn(count, module.irreps_in.dim, device="cuda", requires_grad=True)
+    shape = () if shared else (count,)
+    weight = torch.randn(
+        shape + (module.weight_numel,), device="cuda", requires_grad=True
+    )
+    bias = torch.randn(shape + (module.bias_numel,), device="cuda", requires_grad=True)
+    expected = reference(x, weight) + bias[..., module.bias_index] * module.bias_scale
+    actual = module(x, weight, bias)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+        gradients = [
+            torch.autograd.grad(y.sin().sum(), (x, weight, bias), create_graph=True)
+            for y in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        ]
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("count", [0, 4])
+def test_matrix_cuda(shared, count, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    args = ("2x0e+2x0o+2x1o+2x1e", "0e+0o+1o+1e", "2x0e+2x0o+2x1e+2x1o+2x2e+2x2o")
+    module = eqx_o3.MatrixTensorProduct(
+        *args, shared_weights=shared, internal_weights=False
+    ).cuda()
+    reference = eqx_o3.MatrixTensorProduct(
+        *args, shared_weights=shared, internal_weights=False, backend="torch"
+    ).cuda()
+    x = (torch.randn(count, module.input_dim1, device="cuda") * 0.2).requires_grad_()
+    y = (torch.randn(count, module.input_dim2, device="cuda") * 0.2).requires_grad_()
+    weight = torch.randn(
+        (module.weight_numel,) if shared else (count, module.weight_numel),
+        device="cuda",
+        requires_grad=True,
+    )
+    actual, expected = module(x, y, weight), reference(x, y, weight)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
+        gradients = [
+            torch.autograd.grad(z.sin().sum(), (x, y, weight), create_graph=True)
+            for z in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in gradients
+        ]
+
+
 @pytest.mark.parametrize("degree", range(6))
 def test_rotation_generators_match_wigner(degree, double_precision):
     angle = torch.zeros((), dtype=torch.float64)

@@ -9,9 +9,10 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
+from eqx import o3 as eqx_o3
 from eqx.ace import TACE
 from eqx.models.tace.tece_oam_rra import BilinearACE
-from tace.utils.env import select_acceleration
+from tace.utils.env import acceleration_enabled, select_acceleration
 
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
 from ..mlp import ACTIVATION
@@ -162,6 +163,98 @@ class CgtpACE(Product):
         if sc is not None:
             outs = outs + sc
         return outs
+
+
+class MtpACE(Product):
+    """ACE with matrix tensor products and the same channel layout as CgtpACE."""
+
+    def _setup(self):
+        if self.correlation < 1:
+            raise ValueError("MTP correlation must be positive.")
+        if self.l1l2 is not None:
+            raise ValueError("MTP does not support independent CG path selection.")
+        backend = "cuda" if acceleration_enabled("eqx", kernel="product") else "torch"
+        linear_backend = (
+            "cuda" if acceleration_enabled("eqx", kernel="linear") else "torch"
+        )
+        self.aces = torch.nn.ModuleList()
+        self.coefs = torch.nn.ModuleList()
+        self.irreps_base = self.irreps_hidden
+        irreps = self.irreps_hidden
+        matrix_degree = (max(self.irreps_hidden.lmax, self.lmax, self.Lmax) + 1) // 2
+        for order in range(self.correlation):
+            if order:
+                output = o3.Irreps(
+                    [
+                        (self.num_hidden_channel, ir)
+                        for _, ir in self.irreps_tp_out_list[order - 1]
+                    ]
+                )
+                product = eqx_o3.MatrixTensorProduct(
+                    irreps,
+                    self.irreps_base,
+                    output,
+                    internal_weights=False,
+                    shared_weights=True,
+                    matrix_degree=matrix_degree,
+                    backend=backend,
+                )
+                self.aces.append(product)
+                self.register_buffer(
+                    f"factors_{order}",
+                    torch.ones(product.weight_numel, dtype=torch.float64),
+                    persistent=False,
+                )
+                irreps = output
+            if self.agnostic:
+                coef = eqx_o3.Linear(
+                    irreps,
+                    self.irreps_coefs_out,
+                    biases=self.use_bias,
+                    backend=linear_backend,
+                )
+            else:
+                coef = e3nnElementLinear(
+                    irreps,
+                    self.irreps_coefs_out,
+                    num_elements=self.num_elements,
+                    bias=self.use_bias,
+                )
+            self.coefs.append(coef)
+        self.linear_up = (
+            eqx_o3.Linear(
+                self.irreps_in,
+                self.irreps_hidden,
+                biases=self.use_bias,
+                backend=linear_backend,
+            )
+            if self.num_channel != self.num_hidden_channel
+            else torch.nn.Identity()
+        )
+        self.linear = eqx_o3.Linear(
+            self.irreps_coefs_out,
+            self.irreps_out,
+            biases=self.use_bias,
+            backend=linear_backend,
+        )
+        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0:
+            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
+
+    def forward(self, node_feats, node_attrs, sc, batch, node_type=None):
+        """Expand node features and add the interaction residual."""
+        kwargs = {} if self.agnostic else {"attrs": node_attrs, "node_type": node_type}
+        node_feats = self.linear_up(node_feats)
+        features = node_feats
+        output = self.coefs[0](features, **kwargs)
+        for order, product in enumerate(self.aces, 1):
+            features = product(
+                features, node_feats, getattr(self, f"factors_{order}").to(node_feats)
+            )
+            output = output + self.coefs[order](features, **kwargs)
+        output = self.linear(output)
+        if hasattr(self, "stochastic_depth"):
+            output = self.stochastic_depth(output, batch)
+        return output if sc is None else output + sc
 
 
 class BilinearMoEACE(Product):
@@ -484,6 +577,7 @@ class BilinearMoEACE(Product):
 
 PRODUCT: Dict[str, torch.nn.Module] = {
     "cgtp": CgtpACE,
+    "mtp": MtpACE,
 }
 
 product_aliases = {

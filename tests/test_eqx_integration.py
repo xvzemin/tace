@@ -1470,7 +1470,7 @@ def test_tace_radial_bias_cutoff_and_force_training(
 
 
 @pytest.mark.parametrize(
-    "interaction", ["cgtp", "o2_cgtp", "uu_o2", "o2", ["uu_o2", "o2"]]
+    "interaction", ["cgtp", "o2_cgtp", "uu_o2", "o2", "mtp", ["uu_o2", "o2"]]
 )
 @pytest.mark.parametrize(
     "mlp_type,mlp_norm",
@@ -1508,6 +1508,9 @@ def test_tace_model_force_training(
     )
     config["atomic_basis"]["type"] = interaction
     config["atomic_basis"]["use_radial_rotary_attention"] = False
+    if interaction == "mtp":
+        config["product_basis"]["type"] = "mtp"
+        config["product_basis"]["num_channel_per_expert"] = 4
     config["atomic_basis"]["num_head"] = 1
     config["node_embedding"]["type"] = "linear"
     config["radial_basis"]["hidden"] = [4]
@@ -1570,6 +1573,9 @@ def test_tace_model_force_training(
         if isinstance(
             layer.rejector, (O3ScatterTensorProduct, UuO2ScatterTensorProduct)
         ):
+            monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
+        if isinstance(layer.rejector, eqx_conv.MatrixTensorProductConv):
+            monkeypatch.setattr(layer.rejector.tensor_product, "forward", no_edge_message)
             monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
     results = []
     for network, enabled in ((reference_model, "0"), (model, "1")):

@@ -6,6 +6,7 @@ import torch
 from e3nn import o3
 
 from ...o3 import GauntTensorProduct, MatrixTensorProduct
+from ...o3.tensor_product import FactorizedTensorProduct
 from ...utils.autograd import gradient_mask
 from ...utils.metadata import parse_metadata
 from ..contraction import adjoint_program
@@ -438,6 +439,7 @@ class TensorProductConv(torch.nn.Module):
         *,
         radial=None,
         radial_network=None,
+        cutoff=None,
     ):
         """Evaluate messages and sum them at destination nodes.
 
@@ -461,6 +463,8 @@ class TensorProductConv(torch.nn.Module):
             Network producing edge factors from radial inputs. Requires an
             externally weighted tensor product with shared_weights=False.
             Cannot be combined with weight.
+        cutoff : torch.Tensor, optional
+            Envelope of shape ``(edges, 1)``, applied once to each message.
 
         Returns
         -------
@@ -496,7 +500,13 @@ class TensorProductConv(torch.nn.Module):
             and weight.shape != (edge_index.shape[1], self.weight_numel)
         ):
             raise ValueError("Edge weights must have shape (edges, weight_numel).")
-        messages = self.tensor_product(features[edge_index[0]], edge_attrs, weight)
+        messages = FactorizedTensorProduct.forward(
+            self.tensor_product, features[edge_index[0]], edge_attrs, weight
+        )
+        if cutoff is not None:
+            if cutoff.shape != (edge_index.shape[1], 1):
+                raise ValueError("cutoff must have shape (edges, 1).")
+            messages = messages * cutoff
         num_nodes = features.shape[0] if num_nodes is None else num_nodes
         return messages.new_zeros((num_nodes, self.output_dim)).index_add(
             0, edge_index[1], messages
@@ -533,14 +543,107 @@ class MatrixTensorProductConv(TensorProductConv):
     ----------
     tensor_product : eqx.o3.MatrixTensorProduct
         Defines the irreps, factors, matrix degree and normalization.
+    backend : {"cuda", "torch"}, optional
+        Fused CUDA execution or PyTorch operations. CPU inputs use PyTorch.
 
     Notes
     -----
-    Features use ``mul_ir`` layout. PyTorch operations support CPU, CUDA and
-    automatic differentiation. Edge factors and messages are materialized.
+    CUDA evaluates radial networks and matrix products in bounded edge tiles
+    and sums their outputs at destination nodes. Repeated derivatives use
+    the same expression operations.
     """
 
-    def __init__(self, tensor_product):
+    def __init__(self, tensor_product, backend="cuda"):
         if not isinstance(tensor_product, MatrixTensorProduct):
             raise TypeError("tensor_product must be a MatrixTensorProduct.")
         super().__init__(tensor_product)
+        if backend not in ("cuda", "torch"):
+            raise ValueError("backend must be 'cuda' or 'torch'.")
+        self.backend = backend
+        from .matrix import matrix_program
+
+        storage = "shared" if tensor_product.shared_weights else "edge"
+        self.programs = tuple(
+            matrix_program(tensor_product, "source", storage, "target", cutoff)
+            for cutoff in (False, True)
+        )
+
+    def forward(
+        self,
+        features,
+        edge_attrs,
+        edge_index,
+        weight=None,
+        num_nodes=None,
+        *,
+        radial=None,
+        radial_network=None,
+        cutoff=None,
+    ):
+        """Evaluate messages and sum them at destination nodes."""
+        if (
+            not features.is_cuda
+            or self.backend == "torch"
+            or (num_nodes is not None and num_nodes != features.shape[0])
+        ):
+            return super().forward(
+                features,
+                edge_attrs,
+                edge_index,
+                weight,
+                num_nodes,
+                radial=radial,
+                radial_network=radial_network,
+                cutoff=cutoff,
+            )
+        from ..edge import evaluate
+        from ..network import compose_radial
+
+        tp = self.tensor_product
+        if features.ndim != 2 or features.shape[-1] != self.input_dim:
+            raise ValueError("features must have shape (nodes, irreps_in1.dim).")
+        if (
+            edge_index.ndim != 2
+            or edge_index.shape[0] != 2
+            or edge_index.dtype != torch.long
+        ):
+            raise ValueError("edge_index must be an int64 tensor of shape (2, edges).")
+        if edge_attrs.shape != (edge_index.shape[1], self.edge_dim):
+            raise ValueError("edge_attrs must have shape (edges, irreps_in2.dim).")
+        if cutoff is not None and cutoff.shape != (edge_index.shape[1], 1):
+            raise ValueError("cutoff must have shape (edges, 1).")
+        num_nodes = features.shape[0] if num_nodes is None else num_nodes
+        if radial_network is not None:
+            if (
+                weight is not None
+                or radial is None
+                or tp.internal_weights
+                or tp.shared_weights
+            ):
+                raise ValueError(
+                    "radial_network requires radial inputs and external, unshared weights."
+                )
+            factors = radial
+        else:
+            if radial is not None:
+                raise ValueError("radial inputs require radial_network.")
+            if weight is None:
+                if not tp.internal_weights:
+                    raise ValueError("External weights are required.")
+                weight = tp.weight
+            expected = (
+                (tp.weight_numel,)
+                if tp.shared_weights
+                else (edge_index.shape[1], tp.weight_numel)
+            )
+            if weight.shape != expected:
+                raise ValueError("Weights do not match the tensor product layout.")
+            factors = weight.reshape(-1, tp.weight_numel)
+        metadata, buffers = self.programs[cutoff is not None]
+        inputs = [features, edge_attrs, factors]
+        inputs.extend(getattr(tp, name).reshape(1, -1) for name in buffers)
+        if cutoff is not None:
+            inputs.append(cutoff)
+        if radial_network is not None:
+            metadata, inputs = compose_radial(metadata, inputs, 2, radial_network)
+        return evaluate(metadata, inputs, edge_index[0], edge_index[1], num_nodes)[0]

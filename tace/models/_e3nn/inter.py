@@ -8,6 +8,8 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
+from eqx import o3 as eqx_o3
+from eqx.conv import MatrixTensorProductConv
 from tace.utils.env import acceleration_enabled
 
 from ..lammps import Graph
@@ -61,13 +63,15 @@ class O3CgtpInteraction(Interaction):
     def _setup_additional_modules(self) -> None:
         pass
 
+    def build_linear(self, irreps_in, irreps_out):
+        return e3nnLinear(irreps_in, irreps_out, bias=self.use_bias)
+
     def _setup(self) -> None:
         self._prepare_setup()
 
-        self.linear_up = e3nnLinear(
+        self.linear_up = self.build_linear(
             self.irreps_in,
             self.irreps_in,
-            bias=self.use_bias,
         )
 
         self.rejector = self._build_rejector()
@@ -85,10 +89,9 @@ class O3CgtpInteraction(Interaction):
             tensor_act=self.tensor_act,
         )
 
-        self.linear_down = e3nnLinear(
+        self.linear_down = self.build_linear(
             self._linear_down_irreps_in(),
             linear_down_irreps_out,
-            bias=self.use_bias,
         )
 
         radial_norm = self.radial_mlp_norm
@@ -316,6 +319,61 @@ class O3CgtpInteraction(Interaction):
             sc = None
 
         return m_i, self.truncate_ghosts(sc, nlocal)
+
+
+class MtpInteraction(O3CgtpInteraction):
+    """Matrix tensor-product convolution with radial factor weights."""
+
+    @property
+    def use_eqx(self):
+        return bool(acceleration_enabled("eqx", kernel="conv"))
+
+    def build_linear(self, irreps_in, irreps_out):
+        return eqx_o3.Linear(
+            irreps_in,
+            irreps_out,
+            biases=self.use_bias,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        )
+
+    def _build_rejector(self):
+        if self.l1l2 is not None:
+            raise ValueError("MTP does not support independent CG path selection.")
+        return MatrixTensorProductConv(
+            eqx_o3.MatrixTensorProduct(
+                self.irreps_in,
+                self.irreps_sh,
+                self.irreps_out,
+                internal_weights=False,
+                shared_weights=False,
+                backend="torch",
+            ),
+            backend="cuda" if self.use_eqx else "torch",
+        )
+
+    def _compute_messages(
+        self,
+        node_feats,
+        node_attrs_total,
+        edge_radial_basis,
+        edge_feats,
+        edge_attrs,
+        edge_index,
+        edge_cutoff,
+        edge_wigner=None,
+        edge_wigner_inv=None,
+        magnetic_node_info=None,
+        magnetic_edge_attrs=None,
+        graph=None,
+    ):
+        return self.rejector(
+            node_feats,
+            edge_attrs,
+            edge_index,
+            radial=radial_features(edge_feats),
+            radial_network=self.edge_info,
+            cutoff=edge_cutoff,
+        )
 
 
 class O3CartesianIctpIctcInteraction(O3CgtpInteraction):
@@ -877,6 +935,7 @@ class O2MagneticInteraction(UvO2Interaction):
 
 INTERACTION: Dict[str, type[Interaction]] = {
     "cgtp": O3CgtpInteraction,
+    "mtp": MtpInteraction,
     "co3": O3CartesianIctpIctcInteraction,
     "o2_cgtp": O2CgtpInteraction,
     "so2": UvSO2Interaction,
