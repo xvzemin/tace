@@ -68,6 +68,7 @@ class TACETorchSimCalc(ModelInterface):
         enable_eqt: bool = False,
         enable_compile: bool = False,
         enable_eqx: bool = False,
+        enable_luna: bool = False,
     ) -> None:
         """Initialize the TACE model for energy, force, and stress calculations within
         the TorchSim framework. The model can be initialized with atomic numbers
@@ -103,6 +104,8 @@ class TACETorchSimCalc(ModelInterface):
                 Defaults to False.
             enable_eqx (bool): Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
                 Defaults to False.
+            enable_luna (bool): Whether to enable LunaEquivariance convolutions.
+                Defaults to False.
         """
         super().__init__()
         enable_acceleration(
@@ -111,6 +114,7 @@ class TACETorchSimCalc(ModelInterface):
             enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
+            enable_luna=enable_luna,
         )
 
         self._device = DEVICE[device] or torch.device(

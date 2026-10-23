@@ -137,6 +137,8 @@ def _inductor_options() -> Dict[str, object]:
         "max_autotune": False,
         "shape_padding": True,
         "epilogue_fusion": False,
+        # In-place buffer reuse can corrupt parameter gradients through forces.
+        "inplace_buffers": False,
         "triton.cudagraphs": False,
         "max_fusion_size": 8,
         "triton.persistent_reductions": False,

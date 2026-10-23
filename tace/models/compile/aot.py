@@ -17,7 +17,7 @@ import torch
 from tace.dataset.element import TorchElement
 
 from ..utils import prepare_direct_hessian_inputs
-from .compile import trace_to_fx
+from .compile import _inductor_options, trace_to_fx
 from .wrapper import (
     CompileTensorModel,
     _FlatE3nnCompileModel,
@@ -25,9 +25,9 @@ from .wrapper import (
 )
 
 TACE_AOTI_FORMAT = "tace_graph_v1"
-ASE_AOTI_FORMAT = "tace_ase_v1"
 LAMMPS_AOTI_FORMAT = "tace_lammps_v1"
 TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY = "tace_custom_ops_libs.txt"
+TACE_AOTI_LUNA_OPS_ENTRY = "tace_luna_ops.json"
 TACE_AOTI_INPUT_KEYS = (
     "positions",
     "node_attrs",
@@ -39,7 +39,6 @@ TACE_AOTI_INPUT_KEYS = (
     "ptr",
     "fidelity_idx",
 )
-ASE_AOTI_INPUT_KEYS = TACE_AOTI_INPUT_KEYS
 LAMMPS_AOTI_INPUT_KEYS = (
     "edge_vector",
     "node_attrs",
@@ -276,18 +275,7 @@ def export_aotinductor(
         output_keys,
         export_num_graphs=sample_data["ptr"].numel() - 1,
     )
-    inductor_configs = _valid_inductor_configs(
-        {
-            "aot_inductor.metadata": metadata,
-            "max_autotune": False,
-            "shape_padding": True,
-            "epilogue_fusion": False,
-            "triton.cudagraphs": False,
-            "max_fusion_size": 8,
-            "triton.persistent_reductions": False,
-            "triton.max_tiles": 1,
-        }
-    )
+    inductor_configs = {**_inductor_options(), "aot_inductor.metadata": metadata}
     _ensure_cxx_compiler()
     logging.info(
         "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
@@ -298,7 +286,7 @@ def export_aotinductor(
         inductor_configs=inductor_configs,
     )
     logging.info("[AOTI 5/5] Finalizing the package...")
-    _embed_custom_ops_libs(out_path, custom_ops_libs)
+    _embed_custom_ops_libs(out_path, custom_ops_libs, flat_model)
     return str(out_path)
 
 
@@ -309,7 +297,7 @@ def load_aotinductor(
     _import_custom_ops_libs(str(model_path))
     compiled_model = torch._inductor.aoti_load_package(str(model_path))
     metadata = dict(compiled_model.get_metadata())
-    if metadata.get("tace_format") not in {TACE_AOTI_FORMAT, ASE_AOTI_FORMAT}:
+    if metadata.get("tace_format") != TACE_AOTI_FORMAT:
         raise ValueError(
             f"{model_path} is not a TACE graph .pt2 package "
             f"({metadata.get('tace_format')!r})."
@@ -359,18 +347,7 @@ def export_lammps_aotinductor(
         aoti_format=LAMMPS_AOTI_FORMAT,
         target="lammps",
     )
-    inductor_configs = _valid_inductor_configs(
-        {
-            "aot_inductor.metadata": metadata,
-            "max_autotune": False,
-            "shape_padding": True,
-            "epilogue_fusion": False,
-            "triton.cudagraphs": False,
-            "max_fusion_size": 8,
-            "triton.persistent_reductions": False,
-            "triton.max_tiles": 1,
-        }
-    )
+    inductor_configs = {**_inductor_options(), "aot_inductor.metadata": metadata}
     _ensure_cxx_compiler()
     logging.info(
         "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
@@ -382,7 +359,7 @@ def export_lammps_aotinductor(
             inductor_configs=inductor_configs,
         )
     logging.info("[AOTI 5/5] Finalizing the package...")
-    _embed_custom_ops_libs(out_path, custom_ops_libs)
+    _embed_custom_ops_libs(out_path, custom_ops_libs, flat_model)
     return str(out_path)
 
 
@@ -655,20 +632,6 @@ def _export_metadata(
     return metadata
 
 
-def _valid_inductor_configs(configs: Dict[str, object]) -> Dict[str, object]:
-    try:
-        from torch._inductor import config
-
-        valid = config.get_config_copy()
-        return {
-            key: value
-            for key, value in configs.items()
-            if key.replace("-", "_") in valid
-        }
-    except Exception:
-        return configs
-
-
 def _ensure_cxx_compiler() -> None:
     from torch._inductor import config
 
@@ -740,6 +703,8 @@ def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
             libs.add("openequivariance")
         if module_name.startswith("cuequivariance") or ".models.cue" in module_name:
             libs.update({"cuequivariance", "cuequivariance_torch"})
+        if module_name.startswith("tace.models.luna."):
+            libs.add("tace.models.luna")
         if isinstance(module, torch.fx.GraphModule):
             for node in module.graph.nodes:
                 if isinstance(node.target, torch._ops.OpOverload):
@@ -749,7 +714,9 @@ def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
 
 
 def _embed_custom_ops_libs(
-    pt2_path: Union[str, Path], custom_ops_libs: Set[str]
+    pt2_path: Union[str, Path],
+    custom_ops_libs: Set[str],
+    model: Union[torch.nn.Module, None] = None,
 ) -> None:
     if not custom_ops_libs:
         return
@@ -759,6 +726,16 @@ def _embed_custom_ops_libs(
             f"{archive_root}/{TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY}",
             " ".join(sorted(custom_ops_libs)),
         )
+        if model is not None and "tace.models.luna" in custom_ops_libs:
+            configs = {
+                json.dumps(module.aoti_config): module.aoti_config
+                for module in model.modules()
+                if type(module).__module__.startswith("tace.models.luna.")
+            }
+            archive.writestr(
+                f"{archive_root}/{TACE_AOTI_LUNA_OPS_ENTRY}",
+                json.dumps(list(configs.values())),
+            )
 
 
 def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
@@ -771,8 +748,19 @@ def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
             if entry in archive.namelist()
             else set()
         )
+        luna_entry = f"{archive_root}/{TACE_AOTI_LUNA_OPS_ENTRY}"
+        luna_configs = (
+            json.loads(archive.read(luna_entry))
+            if luna_entry in archive.namelist()
+            else []
+        )
     for lib in sorted(libs):
         importlib.import_module(lib)
+    if luna_configs:
+        from ..luna import register_luna_ops
+
+        for config in luna_configs:
+            register_luna_ops(config)
 
 
 def _metadata_json(metadata: Dict[str, str], key: str):

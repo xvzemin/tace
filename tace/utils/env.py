@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 ACCELERATION_ENV = {
     "eqx": "TACE_USE_EQX",
+    "luna": "TACE_USE_LUNA",
     "oeq": "TACE_USE_OEQ",
     "eqt": "TACE_USE_EQT",
     "cue": "TACE_USE_CUE",
@@ -45,6 +46,7 @@ def enable_acceleration(
     enable_eqt: bool = False,
     enable_compile: bool = False,
     enable_eqx: bool = False,
+    enable_luna: bool = False,
     force: bool = False,
 ) -> None:
     """
@@ -56,6 +58,7 @@ def enable_acceleration(
         "eqt": enable_eqt,
         "compile": enable_compile,
         "eqx": enable_eqx,
+        "luna": enable_luna,
     }
     for name, enabled in enabled_accelerations.items():
         if enabled or force:
@@ -79,7 +82,7 @@ def acceleration_enabled(name: str, *, kernel: Optional[str] = None) -> Optional
 
 
 def select_acceleration(*backends: str, kernel: Optional[str] = None) -> Optional[str]:
-    """Select an enabled, supported backend in EQX, OEQ, EQT, CUEQ order."""
+    """Select an enabled, supported backend in EQX, Luna, OEQ, EQT, CUEQ order."""
     return next(
         (
             name

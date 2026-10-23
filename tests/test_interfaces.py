@@ -4,8 +4,10 @@ Set TACE_TEST_MODEL_DIR to a directory containing the three .pt checkpoints.
 No models are downloaded during the test run.
 """
 
+import importlib
 import os
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -18,6 +20,40 @@ from ase.md.verlet import VelocityVerlet
 
 from tace.interface.ase import MagneticFIRE, TACEAseCalc
 from tace.models.adapter import TensorModel
+
+
+@pytest.mark.parametrize("interface", ["ase", "general_ase", "torchsim", "nvalchemi"])
+@pytest.mark.parametrize(
+    "enabled, previous", [(False, None), (False, "1"), (True, "0")]
+)
+def test_luna_acceleration_option(monkeypatch, interface, enabled, previous):
+    if interface == "nvalchemi":
+        pytest.importorskip("nvalchemi")
+        module = importlib.import_module("tace.interface.nvalchemi.wrapper")
+        factory = module.TACEWrapper.from_checkpoint
+        monkeypatch.setattr(module, "resolve_model_path", Path)
+        if enabled:
+            monkeypatch.setenv("TACE_USE_CUE", "1")
+    elif interface == "torchsim":
+        pytest.importorskip("torch_sim")
+        module = importlib.import_module("tace.interface.torchsim.torchsim")
+        factory = module.TACETorchSimCalc
+    else:
+        module = importlib.import_module("tace.interface.ase.calculator")
+        factory = module.TACEAseCalc
+        if interface == "general_ase":
+            from tace.interface.ase import GeneralTACEAseCalc
+
+            factory = GeneralTACEAseCalc
+    if previous is not None:
+        monkeypatch.setenv("TACE_USE_LUNA", previous)
+    loader = Mock(side_effect=RuntimeError("model loading reached"))
+    monkeypatch.setattr(module, "load_tace", loader)
+    options = {"enable_luna": True} if enabled else {}
+    with pytest.raises(RuntimeError, match="model loading reached"):
+        factory("model.pt2", device="cpu", **options)
+    loader.assert_called_once()
+    assert os.environ.get("TACE_USE_LUNA") == ("1" if enabled else previous)
 
 
 @pytest.fixture(params=["TACE-OAM-7M", "TACE-OAM-L", "TECE-OAM-RRA-1.0"])

@@ -1,4 +1,4 @@
-"""Integration of EQX operators with TACE models."""
+"""Integration of accelerated operators with TACE models."""
 
 import sys
 import types
@@ -366,22 +366,28 @@ def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed)
                 torch.testing.assert_close(x, y, atol=1e-8, rtol=1e-8)
 
 
-@pytest.mark.parametrize("mask", range(16))
+@pytest.mark.parametrize("mask", range(32))
 @pytest.mark.parametrize("compile_enabled", [False, True])
 def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
     from tace.models._e3nn.fused import O3ScatterTensorProduct
     from tace.utils.env import ACCELERATION_ENV
 
     enabled = [
-        name for i, name in enumerate(("eqx", "oeq", "eqt", "cue")) if mask & (1 << i)
+        name
+        for i, name in enumerate(("eqx", "luna", "oeq", "eqt", "cue"))
+        if mask & (1 << i)
     ]
-    for name in ("eqx", "oeq", "eqt", "cue"):
+    for name in ("eqx", "luna", "oeq", "eqt", "cue"):
         monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
     monkeypatch.setenv("TACE_USE_COMPILE", "1" if compile_enabled else "0")
     expected = next((name for name in enabled if name != "eqt"), None)
     if expected == "cue" and compile_enabled:
         expected = None
     constructed = []
+
+    def luna(**kwargs):
+        constructed.append("luna")
+        return torch.nn.Identity()
 
     def oeq(**kwargs):
         constructed.append("oeq")
@@ -391,6 +397,11 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
         constructed.append("cue")
         return torch.nn.Identity()
 
+    monkeypatch.setitem(
+        sys.modules,
+        "tace.models.luna",
+        types.SimpleNamespace(e3nnLunaScatterTensorProduct=luna),
+    )
     monkeypatch.setitem(
         sys.modules,
         "tace.models.oeq",
@@ -403,9 +414,86 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
     )
     module = O3ScatterTensorProduct("2x0e", "0e", "2x0e")
     assert module.use_eqx == (expected == "eqx")
+    assert module.use_luna == (expected == "luna")
     assert module.use_oeq == (expected == "oeq")
     assert module.use_cue == (expected == "cue")
-    assert constructed == ([expected] if expected in ("oeq", "cue") else [])
+    assert constructed == ([expected] if expected in ("luna", "oeq", "cue") else [])
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_luna_scatter(dtype):
+    if sys.platform != "linux" or not torch.cuda.is_available():
+        pytest.skip("LunaEquivariance requires Linux and CUDA")
+    if torch.cuda.get_device_capability()[0] < 8:
+        pytest.skip("LunaEquivariance requires compute capability >= 8.0")
+    pytest.importorskip("LunaEquivariance")
+    from tace.models._e3nn.fused import O3ScatterTensorProduct
+    from tace.utils.env import enable_acceleration
+
+    torch.set_default_dtype(dtype)
+    enable_acceleration(force=True)
+    irreps = "2x0e+2x1o", "0e+1o", "2x0e+2x1o+2x1e+2x2e"
+    reference = O3ScatterTensorProduct(*irreps).to(device="cuda", dtype=dtype)
+    enable_acceleration(enable_luna=True, force=True)
+    actual = O3ScatterTensorProduct(*irreps).to(device="cuda", dtype=dtype)
+    assert actual.use_luna
+    assert actual.state_dict().keys() == reference.state_dict().keys()
+    actual.load_state_dict(reference.state_dict(), strict=True)
+    reference.load_state_dict(actual.state_dict(), strict=True)
+    with pytest.raises(RuntimeError, match="CUDA tensors"):
+        actual(
+            torch.zeros(4, actual.irreps_in1.dim),
+            torch.zeros(0, actual.irreps_in2.dim),
+            torch.zeros(0, actual.weight_numel),
+            torch.empty(2, 0, dtype=torch.long),
+        )
+
+    for edges in (
+        [[1, 0, 2, 1, 0], [2, 0, 1, 0, 2]],
+        [[0, 2, 1, 0, 2], [1, 0, 2, 2, 0]],
+        [[], []],
+    ):
+        edge_index = torch.tensor(edges, dtype=torch.long, device="cuda")
+        inputs = tuple(
+            torch.randn(shape, device="cuda", dtype=dtype, requires_grad=True)
+            for shape in (
+                (4, actual.irreps_in1.dim),
+                (edge_index.size(1), actual.irreps_in2.dim),
+                (edge_index.size(1), actual.weight_numel),
+            )
+        )
+        outputs = [module(*inputs, edge_index) for module in (actual, reference)]
+        atol, rtol = (2e-5, 2e-5) if dtype == torch.float32 else (2e-10, 2e-10)
+        torch.testing.assert_close(*outputs, atol=atol, rtol=rtol)
+        for output in outputs:
+            assert not output[3].any()  # Isolated node.
+        gradients = [
+            torch.autograd.grad(output.square().sum(), inputs, create_graph=True)
+            for output in outputs
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=atol * 10, rtol=rtol * 10)
+        second = [
+            torch.autograd.grad(sum(g.square().sum() for g in grad), inputs)
+            for grad in gradients
+        ]
+        for a, b in zip(*second):
+            torch.testing.assert_close(a, b, atol=atol * 100, rtol=rtol * 100)
+
+    dtype = torch.float64 if dtype == torch.float32 else torch.float32
+    torch.set_default_dtype(dtype)
+    actual.to(dtype=dtype)
+    rebuilt = O3ScatterTensorProduct(*irreps).cuda()
+    assert actual.fused_tp.aoti_config["dtype"] == str(dtype).removeprefix("torch.")
+    edge_index = torch.tensor([[0, 1, 2], [2, 0, 1]], device="cuda")
+    inputs = (
+        torch.randn(4, actual.irreps_in1.dim, device="cuda"),
+        torch.randn(3, actual.irreps_in2.dim, device="cuda"),
+        torch.randn(3, actual.weight_numel, device="cuda"),
+    )
+    torch.testing.assert_close(
+        actual(*inputs, edge_index), rebuilt(*inputs, edge_index)
+    )
 
 
 @pytest.mark.parametrize("mmax", [0, 1, 2])

@@ -63,6 +63,8 @@ class TACEAseCalc(Calculator):
         Whether to enable the torch.compile model path.
     enable_eqx : bool, optional
         Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
+    enable_luna : bool, optional
+        Whether to enable LunaEquivariance convolutions.
     **kwargs
         Additional keyword arguments passed to the ASE Calculator base class.
     """
@@ -81,6 +83,7 @@ class TACEAseCalc(Calculator):
         enable_eqt: bool = False,
         enable_compile: bool = False,
         enable_eqx: bool = False,
+        enable_luna: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -90,6 +93,7 @@ class TACEAseCalc(Calculator):
             enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
+            enable_luna=enable_luna,
         )
         self.device = DEVICE[
             device or torch.device("cuda" if torch.cuda.is_available() else "cpu")

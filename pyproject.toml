@@ -39,6 +39,10 @@ oeq = [
     "openequivariance>=0.5.4",
 ]
 
+luna = [
+    "LunaEquivariance>=0.1.0",
+]
+
 eqx = [
     "ninja",
     "filelock",

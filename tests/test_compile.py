@@ -77,6 +77,112 @@ def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
     assert [call.args[0] for call in importer.call_args_list] == sorted(libs)
 
 
+@pytest.mark.parametrize("use_luna", [False, True], ids=["native", "luna"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_compiled_training_and_export(tmp_path, dtype, use_luna):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    if use_luna:
+        if sys.platform != "linux" or torch.cuda.get_device_capability()[0] < 8:
+            pytest.skip("LunaEquivariance requires Linux and compute capability >= 8.0")
+        pytest.importorskip("LunaEquivariance")
+    from tace.models.compile.aot import export_aotinductor, load_aotinductor
+    from tace.utils.env import enable_acceleration
+
+    torch.set_default_dtype(dtype)
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=2, num_channel=2, Lmax=1, lmax=1, cutoff=4.0, max_neighbors=None
+    )
+    config["atomic_basis"]["type"] = "cgtp"
+    config["radial_basis"].update(hidden=[4], apply_cutoff=False)
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    targets = ["energy", "forces", "stress"]
+    config["target_property"] = targets
+    statistics = [
+        dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)
+    ]
+    enable_acceleration(force=True)
+    reference = create_model(config, statistics, targets, []).cuda()
+    enable_acceleration(enable_luna=use_luna, enable_compile=True, force=True)
+    model = create_model(config, statistics, targets, []).cuda()
+    model.load_state_dict(reference.state_dict())
+    sample = _synthetic_graph_sample(model)
+    tolerance = 2e-4 if dtype == torch.float32 else 2e-9
+    for step in range(2):
+        data = {key: value.clone() for key, value in sample.items()}
+        data["positions"] *= 1 + 0.05 * step
+        if step:
+            data["edge_index"] = data["edge_index"].flip(1)[:, :3]
+            data["edge_shifts"] = data["edge_shifts"].flip(0)[:3]
+        expected = reference(dict(data))
+        actual = model(dict(data))
+        for key in targets:
+            assert actual[key] is not None and expected[key] is not None
+            torch.testing.assert_close(
+                actual[key], expected[key], atol=tolerance, rtol=tolerance
+            )
+        gradients = [
+            torch.autograd.grad(
+                sum(out[key].square().sum() for key in targets),
+                tuple(module.parameters()),
+                allow_unused=True,
+            )
+            for out, module in ((actual, model), (expected, reference))
+        ]
+        for got, wanted in zip(*gradients):
+            assert (got is None) == (wanted is None)
+            if got is not None:
+                torch.testing.assert_close(got, wanted, atol=tolerance, rtol=tolerance)
+        with torch.no_grad():
+            for module, grads in zip((model, reference), gradients):
+                for parameter, grad in zip(module.parameters(), grads):
+                    if grad is not None:
+                        parameter.add_(grad, alpha=-1e-4)
+    assert model._compiled_cache
+
+    path = export_aotinductor(model, tmp_path / "model.pt2", sample)
+    loaded = load_aotinductor(path, "cuda")
+    sample = data  # Use a different edge count from the export example.
+    expected = reference.eval()(dict(sample))
+    actual = loaded(dict(sample))
+    for key in targets:
+        torch.testing.assert_close(
+            actual[key], expected[key], atol=tolerance, rtol=tolerance
+        )
+    # Loading must restore registrations without constructing the original model.
+    case = tmp_path / "case.pt"
+    torch.save(
+        {
+            "sample": sample,
+            "expected": {key: expected[key].detach() for key in targets},
+        },
+        case,
+    )
+    script = """
+import sys
+import torch
+from tace.models.compile.aot import load_aotinductor
+torch.set_num_threads(4)
+case = torch.load(sys.argv[2], weights_only=True)
+model = load_aotinductor(sys.argv[1], "cuda")
+actual = model(case["sample"])
+for key, expected in case["expected"].items():
+    torch.testing.assert_close(actual[key], expected,
+                               atol=float(sys.argv[3]), rtol=float(sys.argv[3]))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(path), str(case), str(tolerance)],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "TACE_USE_LUNA": "0", "TACE_USE_COMPILE": "0"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_constant_construction_precision():
     from e3nn import o3
 

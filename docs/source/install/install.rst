@@ -91,6 +91,25 @@ enable the backend with:
    python -c "import torch; print(torch.version.cuda)"
    export TACE_USE_CUE=1
 
+LunaEquivariance
+----------------
+
+.. important::
+
+   LunaEquivariance requires Linux, an NVIDIA GPU with compute capability
+   **8.0 or newer**, a CUDA toolkit with ``nvcc``, and a compatible C++ compiler.
+   Set ``CUDA_HOME`` to a toolkit matching your PyTorch CUDA build before
+   starting Python.
+
+See the `upstream installation requirements
+<https://github.com/HPC-AI-Team/LunaEquivariance/blob/main/docs/installation.md>`_
+for more details.
+
+.. code-block:: bash
+
+   pip install "tace[luna]"
+   export TACE_USE_LUNA=1
+
 EquiTorch (EQT)
 ---------------
 
@@ -241,7 +260,7 @@ Acceleration Selection
 ----------------------
 
 Enabled backends are selected per supported operator in the order
-EQX, OEQ, EQT, CUEQ. Multiple backends may be enabled together, for example
+EQX, Luna, OEQ, EQT, CUEQ. Multiple backends may be enabled together, for example
 OEQ convolutions with EQT product-basis operations.
 AOTI is a separate compilation and deployment layer. See the
 :ref:`acceleration-tutorial` for backend selection, Python interfaces,

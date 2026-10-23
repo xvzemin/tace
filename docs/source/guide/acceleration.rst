@@ -58,8 +58,9 @@ Alternative backends
 
 In either workflow, ``TACE_USE_EQX=1`` can be replaced by the backend flags
 below for supported operators. This changes operator implementations, not the
-training or export steps. Keep ``TACE_USE_COMPILE=1`` for training and
-``--backend aoti`` for compiled inference.
+training or export steps for compilation-compatible backends. Keep
+``TACE_USE_COMPILE=1`` for compiled training and ``--backend aoti`` for compiled
+inference.
 
 .. list-table::
    :header-rows: 1
@@ -71,18 +72,21 @@ training or export steps. Keep ``TACE_USE_COMPILE=1`` for training and
    * - 1. EquivariantX
      - ``TACE_USE_EQX=1``
      - Convolution, ACE, element-dependent Linear, and gates
-   * - 2. OpenEquivariance
+   * - 2. LunaEquivariance
+     - ``TACE_USE_LUNA=1``
+     - Spherical CGTP convolution
+   * - 3. OpenEquivariance
      - ``TACE_USE_OEQ=1``
      - Convolution
-   * - 3. EquiTorch
+   * - 4. EquiTorch
      - ``TACE_USE_EQT=1``
      - ACE
-   * - 4. cuEquivariance
+   * - 5. cuEquivariance
      - ``TACE_USE_CUE=1``
      - Convolution
 
 If several flags are enabled, each operator selects the highest-priority
-backend it supports: **EQX > OEQ > EQT > CUEQ**. Different operators may therefore
+backend it supports: **EQX > Luna > OEQ > EQT > CUEQ**. Different operators may therefore
 use different backends. Without an enabled, supported backend, an operator
 uses its reference PyTorch implementation.
 
@@ -110,8 +114,17 @@ For the standard EQX workflow, the equivalent Python setup is:
    enable_acceleration(enable_eqx=True, enable_compile=True)
 
 This preserves existing settings. ``force=True`` also disables unselected
-backends. ASE and TorchSim calculators expose backend options, but an exported
-AOTI package already contains its chosen operator graph.
+backends. ASE, TorchSim and ``TACEWrapper.from_checkpoint`` for NValCHEMI
+accept ``enable_luna=True`` alongside the other backend options. For example:
+
+.. code-block:: python
+
+   from tace.interface.ase import TACEAseCalc
+
+   calc = TACEAseCalc("TACE-OAM-L", device="cuda", enable_luna=True)
+
+An exported AOTI package already contains its chosen operator graph; these
+options do not change its backend.
 
 .. _eqx-streaming:
 

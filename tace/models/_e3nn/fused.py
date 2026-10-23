@@ -348,7 +348,8 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.reshape_out = LayoutTransform(
             self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
         )
-        backend = select_acceleration("eqx", "oeq", "cue", kernel="conv")
+        backend = select_acceleration("eqx", "luna", "oeq", "cue", kernel="conv")
+        self.use_luna = backend == "luna" and bool(instructions)
         self.use_oeq = backend == "oeq"
         self.use_cue = backend == "cue"
         self.use_aoti = acceleration_enabled("compile")
@@ -360,7 +361,16 @@ class O3ScatterTensorProduct(torch.nn.Module):
             )
             self.use_cue = False
 
-        if self.use_oeq:
+        if self.use_luna:
+            from ..luna import e3nnLunaScatterTensorProduct
+
+            self.fused_tp = e3nnLunaScatterTensorProduct(
+                irreps_in1=self.irreps_in1,
+                irreps_in2=self.irreps_in2,
+                irreps_out=self.irreps_out,
+                instructions=self.instructions,
+            )
+        elif self.use_oeq:
             if contains_time_odd_irreps(
                 self.irreps_in1,
                 self.irreps_in2,

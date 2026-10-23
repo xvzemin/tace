@@ -43,11 +43,12 @@ def _enable_tace_acceleration(
     enable_eqt: bool,
     enable_compile: bool,
     enable_eqx: bool,
+    enable_luna: bool,
     force: bool = False,
 ) -> None:
     """Configure the supported TACE acceleration flags before model loading.
 
-    Operators select enabled backends in EQX, OEQ, EQT, CUEQ order.
+    Operators select enabled backends in EQX, Luna, OEQ, EQT, CUEQ order.
     AOTInductor is used for compiled deployment; CUE currently conflicts
     with AOTI.
     """
@@ -65,6 +66,7 @@ def _enable_tace_acceleration(
         "TACE_USE_EQT": enable_eqt,
         "TACE_USE_COMPILE": False,
         "TACE_USE_EQX": enable_eqx,
+        "TACE_USE_LUNA": enable_luna,
     }
     try:
         from tace.utils.env import enable_acceleration
@@ -79,6 +81,7 @@ def _enable_tace_acceleration(
             enable_eqt=enable_eqt,
             enable_compile=False,
             enable_eqx=enable_eqx,
+            enable_luna=enable_luna,
             force=force,
         )
 
@@ -354,6 +357,7 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         enable_eqt: bool = False,
         enable_compile: bool = False,
         enable_eqx: bool = False,
+        enable_luna: bool = False,
     ) -> "TACEWrapper":
         """Load TACE and expose it through the NValCHEMI model contract.
 
@@ -368,9 +372,10 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
+            enable_luna=enable_luna,
         )
         if (
-            select_acceleration("eqx", "oeq", "cue", kernel="conv") == "cue"
+            select_acceleration("eqx", "luna", "oeq", "cue", kernel="conv") == "cue"
             and checkpoint_path.suffix.lower() == ".pt2"
         ):
             raise ValueError(
