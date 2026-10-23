@@ -700,7 +700,8 @@ def _tensor_product_case(mode):
 
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
 @pytest.mark.parametrize("reflected", [False, True])
-def test_o2_tensor_product_is_equivariant(mode, reflected):
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_o2_tensor_product_is_equivariant(mode, reflected, backend):
     irreps_in1, irreps_in2, irreps_out = _tensor_product_case(mode)
     module = o2.TensorProduct(
         irreps_in1,
@@ -709,6 +710,7 @@ def test_o2_tensor_product_is_equivariant(mode, reflected):
         [(0, 0, 0, mode, True)],
         internal_weights=False,
         shared_weights=False,
+        backend=backend,
     ).to(DEVICE, DTYPE)
     input1 = module.irreps_in1.randn(5, -1, dtype=DTYPE, device=DEVICE)
     input2 = module.irreps_in2.randn(5, -1, dtype=DTYPE, device=DEVICE)
@@ -737,7 +739,8 @@ def test_o2_tensor_product_zero_pads_missing_outputs():
 
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
 @pytest.mark.parametrize("order", [1, 2])
-def test_o2_shared_couplings(mode, order, double_precision):
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_o2_shared_couplings(mode, order, backend, double_precision):
     from eqx.o2._clebsch_gordan import clebsch_gordan_product
 
     torch._dynamo.reset()
@@ -752,6 +755,7 @@ def test_o2_shared_couplings(mode, order, double_precision):
         internal_weights=False,
         shared_weights=False,
         path_normalization="none",
+        backend=backend,
     )
     compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
     for batch in (4, 0):
@@ -1629,3 +1633,83 @@ def test_o3_tensor_product_time_reversal(double_precision):
     x = torch.randn(4, irreps_in.dim)
     d, di = o2.WignerD(2, 2)(torch.randn(4, 3))
     torch.testing.assert_close(module(-x, d, di), -module(x, d, di))
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_o2_tensor_product_cuda_derivatives(shared, dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    irreps = o2.Irreps("3x0e+3x0o+3x1m+3x2m")
+    instructions = [
+        (i, j, k, "uuu", (i + j + k) % 3 != 0)
+        for i, (a, _) in enumerate(irreps)
+        for j, (b, _) in enumerate(irreps)
+        for k, (c, _) in enumerate(irreps)
+        if c in a * b
+    ]
+    reference = o2.TensorProduct(
+        irreps, irreps, irreps, instructions, internal_weights=False
+    ).to("cuda", dtype)
+    module = o2.TensorProduct(
+        irreps, irreps, irreps, instructions, internal_weights=False, backend="cuda"
+    ).to("cuda", dtype)
+    x, y = [
+        torch.randn(37, 2 * irreps.dim, device="cuda", dtype=dtype)[
+            :, ::2
+        ].requires_grad_()
+        for _ in range(2)
+    ]
+    weight = torch.randn(
+        1 if shared else 37,
+        module.weight_numel,
+        device="cuda",
+        dtype=dtype,
+        requires_grad=True,
+    )
+    values = [f(x, y, weight) for f in (reference, module)]
+    tolerance = 3e-5 if dtype == torch.float32 else 2e-12
+    torch.testing.assert_close(*values, atol=tolerance, rtol=tolerance)
+    # Nonlinear losses keep mixed derivatives of all three operands live.
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(
+                value.square().sum() / value.numel(), (x, y, weight), create_graph=True
+            )
+            for value in values
+        ]
+        for expected, actual in zip(*gradients):
+            torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        values = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+
+def test_o2_tensor_product_cuda_compile_and_empty():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = (
+        o2.TensorProduct(
+            "5x1m",
+            "5x1m",
+            "5x0e+5x0o+5x2m+5x3m",
+            [(0, 0, 0, "uuu", True), (0, 0, 1, "uuu", False), (0, 0, 2, "uuu", True)],
+            backend="cuda",
+        )
+        .cuda()
+        .double()
+    )
+    reference = deepcopy(module)
+    reference.backend = "torch"
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for nodes in (9, 1, 0):
+        x = torch.randn(
+            nodes, 10, device="cuda", dtype=torch.float64, requires_grad=True
+        )
+        for function in (module, compiled):
+            actual, expected = function(x, x), reference(x, x)
+            torch.testing.assert_close(actual, expected)
+            gradients = [
+                torch.autograd.grad(y.square().sum(), (x, f.weight))
+                for y, f in ((actual, module), (expected, reference))
+            ]
+            for a, b in zip(*gradients):
+                torch.testing.assert_close(a, b)

@@ -53,6 +53,14 @@ class TensorProduct(torch.nn.Module):
         is inferred from ``shared_weights`` and the weighted instructions.
     shared_weights : bool, optional
         Whether one weight vector is shared over all leading dimensions.
+    backend : {"torch", "cuda"}, optional
+        CUDA fuses channel-wise paths of equal multiplicity for matrix inputs.
+        Other shapes and connection modes use torch operations.
+
+    Notes
+    -----
+    CUDA supports repeated differentiation. Shared-weight gradients use atomic
+    reductions and are not bitwise deterministic.
     """
 
     def __init__(
@@ -68,8 +76,12 @@ class TensorProduct(torch.nn.Module):
         path_normalization: str = "element",
         internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         if irrep_normalization not in ("component", "norm", "none"):
             raise ValueError(
                 "irrep_normalization must be 'component', 'norm', or 'none'."
@@ -274,6 +286,57 @@ class TensorProduct(torch.nn.Module):
             torch.cat(output_mask) if output_mask else torch.ones(0),
             persistent=False,
         )
+        self.kernel_metadata = None
+        multiplicities = {
+            mul
+            for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+            for _, mul in irreps
+        }
+        if (
+            backend == "cuda"
+            and len(multiplicities) == 1
+            and next(iter(multiplicities)) > 0
+            and all(ins.connection_mode != "uvw" for ins in self.instructions)
+        ):
+            channels = multiplicities.pop()
+            slices1 = self.irreps_in1.slices()
+            slices2 = self.irreps_in2.slices()
+            slices_out = self.irreps_out.slices()
+            rows = []
+            for ins, weight_slice in zip(self.instructions, self._weight_offsets):
+                ir1 = self.irreps_in1[ins.i_in1].ir
+                ir2 = self.irreps_in2[ins.i_in2].ir
+                ir_out = self.irreps_out[ins.i_out].ir
+                x = torch.eye(ir1.dim, dtype=torch.float64, device="cpu")
+                y = torch.eye(ir2.dim, dtype=torch.float64, device="cpu")
+                coupling = clebsch_gordan_products(
+                    x[:, None, :, None],
+                    ir1,
+                    y[None, :, :, None],
+                    ir2,
+                    (ir_out,),
+                    elementwise=True,
+                )[0].squeeze(-1)
+                for i, j, k in coupling.nonzero().tolist():
+                    indices = (
+                        slices1[ins.i_in1].start // channels + i,
+                        slices2[ins.i_in2].start // channels + j,
+                        weight_slice[0] // channels if weight_slice else -1,
+                        slices_out[ins.i_out].start // channels + k,
+                    )
+                    rows.append((indices, float(coupling[i, j, k]) * ins.path_weight))
+            self.kernel_metadata = repr(
+                (
+                    channels,
+                    (
+                        self.irreps_in1.dim // channels,
+                        self.irreps_in2.dim // channels,
+                        self.weight_numel // channels,
+                        self.irreps_out.dim // channels,
+                    ),
+                    tuple(rows),
+                )
+            )
 
     def _get_weights(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
         if weight is None:
@@ -340,6 +403,30 @@ class TensorProduct(torch.nn.Module):
             raise ValueError(
                 "TensorProduct input and weight batch dimensions do not broadcast."
             ) from error
+
+        if (
+            getattr(self, "backend", "torch") == "cuda"
+            and self.kernel_metadata is not None
+            and input1.is_cuda
+            and input1.dtype in (torch.float32, torch.float64)
+            and input1.ndim == input2.ndim == 2
+            and input1.shape[0] == input2.shape[0]
+            and weight.ndim in (1, 2)
+            and (weight.ndim == 1 or weight.shape[0] in (1, input1.shape[0]))
+            and input1.dtype == input2.dtype == weight.dtype
+            and input1.device == input2.device == weight.device
+        ):
+            from ..kernels.channel_product import channel_product
+
+            operands = [
+                input1,
+                input2,
+                weight.unsqueeze(0) if weight.ndim == 1 else weight,
+            ]
+            operands.append(input1.new_empty((0, self.irreps_out.dim)))
+            return channel_product(
+                self.kernel_metadata, repr((((0, 1, 2, 3), 3, 0, 0),)), operands
+            )[0]
 
         values1 = [
             values.reshape(*input1.shape[:-1], ir.dim, mul)

@@ -42,6 +42,28 @@ C++ compiler (MSVC on Windows). They are not available on macOS.
 The LAMMPS interface additionally requires a CUDA Kokkos ML-IAP build; the
 host-only LAMMPS backend is not supported. See :doc:`../guide/lammps`.
 
+EquivariantX (EQX)
+------------------
+
+EquivariantX is currently bundled with TACE and does not require a separate
+installation for TACE users. Independent installation currently supports
+source builds only and does not require installing TACE. A standalone package
+release is planned once the library is fully mature. To install from source:
+
+.. code-block:: bash
+
+   git clone https://github.com/xvzemin/tace.git
+   pip install ./tace/eqx
+
+The library imports as ``eqx`` and depends on PyTorch >= 2.4 and e3nn >= 0.4.4,
+but not on TACE or PyG. Its scope covers native O(2)
+operators, e3nn-compatible O(3)/O(2) frame conversion, and fused CUDA
+convolutions. Install ``'./tace/eqx[cuda]'`` and provide a CUDA toolkit to
+use the fused backend. See :ref:`equivariantx-installation` and
+:ref:`equivariantx-api-convolutions` for installation and operator parameters.
+When using e3nn 0.4.x with recent PyTorch, import ``eqx`` before ``e3nn.o3``
+so its packaged constants are loaded in the scoped compatibility context.
+
 
 OpenEquivariance (OEQ)
 ----------------------
@@ -91,8 +113,8 @@ enable the backend with:
    python -c "import torch; print(torch.version.cuda)"
    export TACE_USE_CUE=1
 
-LunaEquivariance
-----------------
+LunaEquivariance (LUNA)
+-----------------------
 
 .. important::
 
@@ -232,29 +254,6 @@ representation metadata and coupling rules. Native EQX O(2) operators and
 compatible fused kernels preserve these labels. EQT, CUEQ, and OEQ operators
 that do not support time-odd irreps reject them when selected; support is
 checked per operator rather than by removing time-odd coupling paths.
-
-EquivariantX
-------------
-
-EquivariantX is currently bundled with TACE and does not require a separate
-installation for TACE users. Independent installation currently supports
-source builds only and does not require installing TACE. A standalone package
-release is planned once the library is fully mature. To install from source:
-
-.. code-block:: bash
-
-   git clone https://github.com/xvzemin/tace.git
-   pip install ./tace/eqx
-
-The library imports as ``eqx`` and depends on PyTorch >= 2.4 and e3nn >= 0.4.4,
-but not on TACE or PyG. Its scope covers native O(2)
-operators, e3nn-compatible O(3)/O(2) frame conversion, and fused CUDA
-convolutions. Install ``'./tace/eqx[cuda]'`` and provide a CUDA toolkit to
-use the fused backend. See :ref:`equivariantx-installation` and
-:ref:`equivariantx-api-convolutions` for installation and operator parameters.
-When using e3nn 0.4.x with recent PyTorch, import ``eqx`` before ``e3nn.o3``
-so its packaged constants are loaded in the scoped compatibility context.
-
 
 Acceleration Selection
 ----------------------
