@@ -14,7 +14,7 @@ from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
-from .base import Interaction, _to_possible_tp_irreps
+from .base import Interaction
 from .fused import (
     O2ScatterTensorProduct,
     O3CartesianScatterTensorProduct,
@@ -24,6 +24,7 @@ from .fused import (
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
+from .paths import to_possible_tp_irreps
 from .residual import get_resnet_layer
 from .scatter_norm import get_scatter_norm_layer
 from .tece_oam_rra import Convolution
@@ -419,7 +420,11 @@ class UvSO2Interaction(O3CgtpInteraction):
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
-        if self.parity:
+        if self.parity is True or any(
+            ir.p != (-1) ** ir.l
+            for irreps in (self.irreps_in, self.irreps_out)
+            for _, ir in irreps
+        ):
             raise ValueError("UvSO2Interaction does not support O(3).")
         if self.irreps_in.lmax <= 0:
             raise ValueError(
@@ -733,18 +738,20 @@ class O2MagneticInteraction(UvO2Interaction):
         # magnetic source-target tensor product.  We do not truncate their
         # intermediate product: higher intermediate l can couple with the
         # node field back into the retained output range.
-        edge_irreps = _to_possible_tp_irreps(
+        edge_irreps = to_possible_tp_irreps(
             self.magnetic_edge_irreps,
             self.irreps_sh,
             parity=self.parity,
             lmax=self.magnetic_edge_irreps.lmax + self.irreps_sh.lmax,
+            target_irreps=self.path_irreps,
         )
         output_lmax = self.Lmax if self.correlation == 1 else self.lmax
-        self.irrreps_tp_out = _to_possible_tp_irreps(
+        self.irrreps_tp_out = to_possible_tp_irreps(
             self.irreps_in,
             edge_irreps,
             parity=self.parity,
             lmax=output_lmax,
+            target_irreps=self.path_irreps,
         )
         self.irreps_out = (
             self.irrreps_tp_out * self.num_channel
@@ -759,11 +766,12 @@ class O2MagneticInteraction(UvO2Interaction):
                 [(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax]
             ).sort().irreps.simplify()
         else:
-            irreps_sc = _to_possible_tp_irreps(
+            irreps_sc = to_possible_tp_irreps(
                 self.irreps_out,
                 self.irreps_out,
                 parity=self.parity,
                 lmax=self.Lmax,
+                target_irreps=self.path_irreps,
             )
         self.irreps_sc = (irreps_sc * self.num_channel).sort().irreps.simplify()
         super()._prepare_setup()

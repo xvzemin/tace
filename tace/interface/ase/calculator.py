@@ -19,7 +19,7 @@ from torch_geometric.loader import DataLoader
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import (
     KEYS,
-    PROPERTY,
+    PROPERTIES,
     KeySpecification,
     update_keyspec_from_kwargs,
 )
@@ -120,7 +120,7 @@ class TACEAseCalc(Calculator):
         self.neighborlist_backend = neighborlist_backend
         self.implemented_properties = []
         for p in self.target_property:
-            ase_name = PROPERTY[p]["ase_name"]
+            ase_name = PROPERTIES[p]["ase_name"]
             save_name = ase_name if ase_name else p
             if save_name == "energy":
                 self.implemented_properties.extend(["energy", "free_energy"])
@@ -178,9 +178,9 @@ class TACEAseCalc(Calculator):
             #     "atomic_stresses",
             # }:
             #     continue
-            p_rank = PROPERTY[p]["rank"]
-            p_scope = PROPERTY[p]["scope"]
-            ase_name = PROPERTY[p]["ase_name"]
+            p_rank = PROPERTIES[p]["rank"]
+            p_scope = PROPERTIES[p]["scope"]
+            ase_name = PROPERTIES[p]["ase_name"]
             save_name = ase_name if ase_name else p
             if p_scope == "per-system":
                 if p_rank == 0:

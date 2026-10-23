@@ -8,16 +8,17 @@ from typing import Any, Dict, List, Union
 import torch
 from e3nn import o3
 
+from tace.dataset.quantity import PROPERTIES
 from tace.utils.torch_scatter import scatter_sum
 
 from ..blocks import OneHotToAtomicEnergy, ScaleShift
 from ..radial import ZBLBasis
 from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps, stress_from_virials
-from .base import _to_possible_tp_irreps
 from .basis_change import DirectPolarizability, DirectVirials
 from .default import check_model_config
 from .les import TACELES, required_les_irreps
+from .paths import to_possible_tp_irreps
 from .readout import (
     DirectHessianReadout,
     build_element_scalar_readout,
@@ -55,7 +56,7 @@ class e3nnTACE(torch.nn.Module):
         special: Dict = {},
         resnet: Dict = {},
         layer_norm: Dict = {},
-        parity: bool = False,
+        parity: bool | None = None,
         mmax: int = 2,
         dropout: Dict = {},
         embedding_property=[],
@@ -98,7 +99,7 @@ class e3nnTACE(torch.nn.Module):
         self.scale_zbl = cfg["scale_shift"]["scale_zbl"]
 
         # === Will be used in __init__ ===
-        target_irreps = get_target_irreps(self.target_property)
+        target_irreps = get_target_irreps(self.target_property, parity=cfg["parity"])
         les_cfg = cfg["long_range"]["les"]
         if les_cfg["enable"]:
             if "energy" not in self.target_property:
@@ -107,10 +108,17 @@ class e3nnTACE(torch.nn.Module):
             target_irreps.extend(required_les_irreps(les_arguments))
         if cfg["product_basis"]["return_components"] is not None:
             target_irreps.extend(cfg["product_basis"]["return_components"])
-        target_irreps = list(set(target_irreps))
-        self.target_irreps = o3.Irreps(target_irreps).sort().irreps.simplify()
-        if not cfg["parity"]:
+        target_irreps = {o3.Irrep(ir) for ir in target_irreps}
+        self.target_irreps = o3.Irreps(target_irreps).sort().irreps
+        if cfg["parity"] is False:
             self.target_irreps = with_natural_parity(self.target_irreps)
+        path_irreps = self.target_irreps
+        path_properties = cfg["embedding_property"] + self.embedding_property
+        if "o2_mag" in cfg["atomic_basis"]["type"]:
+            path_properties.append("initial_noncollinear_magmoms")
+        for name in path_properties:
+            path_irreps += o3.Irreps(PROPERTIES[name]["irreps"])
+        self.path_irreps = o3.Irreps({ir for _, ir in path_irreps}).sort().irreps
 
         # === Representation/Descriptor ===
         self.representation = NodeRepresentation(
@@ -132,6 +140,7 @@ class e3nnTACE(torch.nn.Module):
             atomic_basis=cfg["atomic_basis"],
             product_basis=cfg["product_basis"],
             target_irreps=self.target_irreps,
+            path_irreps=self.path_irreps,
             invariant_property=cfg["invariant_property"],
             equivariant_property=cfg["equivariant_property"],
             universal_embedding=cfg["universal_embedding"],
@@ -147,8 +156,12 @@ class e3nnTACE(torch.nn.Module):
         if "direct_hessian" in self.target_property:
             irreps_in = self.representation.irreps_outs[-1]
             irreps_sh = o3.Irreps.spherical_harmonics(cfg["lmax"])
-            irreps_hidden = _to_possible_tp_irreps(
-                irreps_in, irreps_sh, parity=cfg["parity"], lmax=cfg["Lmax"]
+            irreps_hidden = to_possible_tp_irreps(
+                irreps_in,
+                irreps_sh,
+                parity=cfg["parity"],
+                lmax=cfg["Lmax"],
+                target_irreps=self.path_irreps,
             )
             self.pair_representation = PairRepresentation(
                 irreps_in,

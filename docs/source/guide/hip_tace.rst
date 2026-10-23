@@ -23,7 +23,7 @@ The main model options are:
 
    model:
      config:
-       parity: true
+       parity: null # null or true
        Lmax: 2
        lmax: 3
        special:

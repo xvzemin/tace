@@ -14,6 +14,7 @@ from ..blocks import format_list
 from ..radial import MagneticChebyshevBasis
 from ..time_reversal import make_irrep, spherical_harmonics_irreps
 from .fused import UuuTensorProduct
+from .paths import to_possible_tp_irreps
 
 
 class MagneticBasis(torch.nn.Module):
@@ -33,7 +34,8 @@ class MagneticBasis(torch.nn.Module):
         angular_normalization: str = "integral",
         radial_normalization: str = "clamp",
         use_spin_orbit_coupling: bool = True,
-        parity: bool = True,
+        parity: bool | None = None,
+        path_irreps: o3.Irreps | None = None,
     ) -> None:
         super().__init__()
 
@@ -62,7 +64,7 @@ class MagneticBasis(torch.nn.Module):
         )
         self.magnetic_node_irreps_out = spherical_harmonics_irreps(
             Lmax,
-            p=1 if parity else -1,
+            p=-1 if parity is False else 1,
             time_reversal=-1 if time_reversal else 1,
         ).sort().irreps.simplify()
         self.angular_basis = SolidHarmonics(
@@ -71,19 +73,13 @@ class MagneticBasis(torch.nn.Module):
         )
 
         if use_spin_orbit_coupling:
-            magnetic_edge_irrep_list = []
-            for _, ir1 in self.magnetic_node_irreps_out:
-                for _, ir2 in self.magnetic_node_irreps_out:
-                    for ir_out in ir1 * ir2:
-                        if (
-                            ir_out.l <= Lmax
-                            and (parity or ir_out.p == (-1) ** ir_out.l)
-                            and ir_out not in magnetic_edge_irrep_list
-                        ):
-                            magnetic_edge_irrep_list.append(ir_out)
-            magnetic_edge_irreps = o3.Irreps(
-                [(1, ir) for ir in magnetic_edge_irrep_list]
-            ).sort().irreps.simplify()
+            magnetic_edge_irreps = to_possible_tp_irreps(
+                self.magnetic_node_irreps_out,
+                self.magnetic_node_irreps_out,
+                parity,
+                Lmax,
+                target_irreps=path_irreps,
+            )
         else:
             magnetic_edge_irreps = o3.Irreps(
                 [(1, make_irrep(0, 1, 1))]

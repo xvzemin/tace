@@ -12,7 +12,7 @@ from torch_geometric.data import Data
 
 from .element import TorchElement
 from .neighbour_list import get_neighborhood
-from .quantity import PROPERTY, KeySpecification, get_need_property
+from .quantity import PROPERTIES, KeySpecification, get_need_property
 
 
 def read_properties(
@@ -38,7 +38,7 @@ def read_properties(
 
     data = {}
     for name in property_names:
-        config = PROPERTY[name]
+        config = PROPERTIES[name]
         kind = config["type"]
         value = values.get(name)
         present = value is not None

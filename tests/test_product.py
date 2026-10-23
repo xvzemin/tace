@@ -9,9 +9,13 @@ from e3nn import o3
 
 import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
 import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
-from tace.models._e3nn.base import _to_possible_tp_irreps
 from tace.models._e3nn.fused import UuuTensorProduct, UvuTensorProduct
-from tace.models._e3nn.paths import SymmetricProductPaths, generate_paths
+from tace.models._e3nn.paths import (
+    SymmetricProductPaths,
+    generate_paths,
+    satisfy,
+    to_possible_tp_irreps,
+)
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jScatterTensorProduct,
@@ -23,6 +27,99 @@ from tace.models.time_reversal import spherical_harmonics_irreps, supports_time_
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize(
+    "parity,expected",
+    [
+        (False, "0e + 1o + 2e + 3o"),
+        (True, "0e + 1o + 1e + 2o + 2e + 3o"),
+        (None, "0e + 1o + 1e + 2e + 3o"),
+    ],
+)
+def test_possible_tp_irreps(parity, expected):
+    irreps_in1 = o3.Irreps("2x2e + 3x1o + 0e + 1o")
+    irreps_in2 = o3.Irreps("1o + 2x0e")
+    target = o3.Irreps("4x1e + 0o + 3e + 4e")
+    actual = to_possible_tp_irreps(
+        irreps_in1, irreps_in2, parity, lmax=3, target_irreps=target
+    )
+    assert actual == o3.Irreps(expected)
+    assert all(mul == 1 for mul, _ in actual)
+    assert all(
+        any(ir in ir1 * ir2 for _, ir1 in irreps_in1 for _, ir2 in irreps_in2)
+        for _, ir in actual
+    )
+    truncated = to_possible_tp_irreps(
+        irreps_in1, irreps_in2, parity, lmax=0, target_irreps=target
+    )
+    assert truncated == o3.Irreps("0e")
+    default_degree = to_possible_tp_irreps(
+        irreps_in1, irreps_in2, parity, target_irreps=target
+    )
+    assert default_degree == o3.Irreps([(mul, ir) for mul, ir in actual if ir.l <= 1])
+    assert to_possible_tp_irreps(irreps_in1, irreps_in2) == o3.Irreps("0e + 1o")
+    assert to_possible_tp_irreps(
+        o3.Irreps("0e"), o3.Irreps("0e"), parity, target_irreps=target
+    ) == o3.Irreps("0e")
+
+
+@pytest.mark.skipif(
+    not supports_time_reversal(),
+    reason="the installed e3nn does not represent time-reversal parity",
+)
+def test_possible_tp_irreps_time_reversal():
+    actual = to_possible_tp_irreps(
+        o3.Irreps("1oo + 1oe"),
+        o3.Irreps("1oe"),
+        lmax=2,
+        target_irreps=o3.Irreps("1ee"),
+    )
+    assert {(ir.l, ir.p, ir.t) for _, ir in actual} == {
+        (ell, 1, time_reversal)
+        for ell in range(3)
+        for time_reversal in (-1, 1)
+    }
+
+
+@pytest.mark.parametrize("mode", ["uuu", "uvu"])
+@pytest.mark.parametrize("identical_inputs", [False, True])
+@pytest.mark.parametrize("trainable", [False, True])
+def test_generate_paths_order(mode, identical_inputs, trainable):
+    irreps_in1 = o3.Irreps("2x0e + 3x1o + 1o + 2x2e")
+    irreps_in2 = irreps_in1 if identical_inputs else o3.Irreps("1o + 0e + 2e + 1o")
+    irreps_out = o3.Irreps("2e + 0e + 1e + 1o + 0e + 3o")
+    for restriction in (None, "<", "<=", ">", ">=", "==", "!="):
+        paths, outputs = [], []
+        for _, ir_out in irreps_out:
+            for i, (mul, ir1) in enumerate(irreps_in1):
+                for j, (_, ir2) in enumerate(irreps_in2):
+                    if (
+                        ir_out not in ir1 * ir2
+                        or not satisfy(ir1.l, ir2.l, restriction)
+                        or not satisfy(ir2.l, ir_out.l, "<=")
+                        or not satisfy(ir_out.l, ir1.l, ">=")
+                        or (
+                            identical_inputs
+                            and i == j
+                            and (ir1.l + ir2.l - ir_out.l) % 2 == 1
+                        )
+                    ):
+                        continue
+                    paths.append((i, j, len(outputs), mode, mode == "uvu" or trainable))
+                    outputs.append((mul, ir_out))
+        actual = generate_paths(
+            irreps_out,
+            irreps_in1,
+            irreps_in2,
+            l1l2=restriction,
+            l2l3="<=",
+            l3l1=">=",
+            e3nn_mode=mode,
+            trainable=trainable,
+            identical_inputs=identical_inputs,
+        )
+        assert actual == (paths, o3.Irreps(outputs))
 
 
 @pytest.mark.parametrize(
@@ -978,14 +1075,14 @@ def test_wigner6j_matches_reference_and_time_reversal():
         p=1,
         time_reversal=-1,
     )
-    intermediate_irreps = _to_possible_tp_irreps(
+    intermediate_irreps = to_possible_tp_irreps(
         node_irreps,
         edge_irreps,
         parity=True,
         lmax=2,
     )
     output_irreps = (
-        _to_possible_tp_irreps(
+        to_possible_tp_irreps(
             intermediate_irreps,
             magnetic_irreps,
             parity=True,

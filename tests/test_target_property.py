@@ -12,9 +12,10 @@ from ase.io import write
 from e3nn import o3
 from torch_geometric.data import Batch
 
+from tace.dataset import quantity
 from tace.dataset.element import build_element_lookup
 from tace.dataset.graph import from_atoms, read_properties
-from tace.dataset.quantity import PROPERTY, KeySpecification
+from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, KeySpecification
 from tace.dataset.read import ase_db_connect, ase_io_read
 from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
 from tace.lightning import create_model, export_tace, load_tace
@@ -22,7 +23,7 @@ from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.les import TACELES, required_les_irreps
 from tace.models._e3nn.readout import DirectHessianReadout
 from tace.models._e3nn.representation import PairRepresentation
-from tace.models.utils import prepare_direct_hessian_inputs
+from tace.models.utils import get_target_irreps, prepare_direct_hessian_inputs
 from tace.utils.loss.common import hessian_loss
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
@@ -36,6 +37,10 @@ def device():
 
 
 def test_property_definitions():
+    for name, value in vars(quantity).items():
+        if name.endswith("_PROPERTIES"):
+            assert isinstance(value, tuple), name
+            assert all(property_name in PROPERTIES for property_name in value), name
     fields = (
         "ase_name",
         "type",
@@ -55,8 +60,11 @@ def test_property_definitions():
         "requires_grad_with",
     )
     periodic = {"stress", "direct_stress", "atomic_stresses", "polarization"}
-    for name, config in PROPERTY.items():
+    for name, config in PROPERTIES.items():
         assert tuple(config) == fields, name
+        assert (name in DIRECT_PROPERTIES) == (
+            not (config["first_derivative"] or config["second_derivative"])
+        ), name
         assert tuple(config["shape"]) == ("in_data", "shape_fn"), name
         assert config["requires_periodic_cell"] is (name in periodic), name
         for field in (
@@ -66,6 +74,21 @@ def test_property_definitions():
             "second_derivative",
         ):
             assert isinstance(config[field], bool), (name, field)
+
+
+@pytest.mark.parametrize("parity", [None, False, True])
+@pytest.mark.parametrize("hessian", ["hessian", "direct_hessian"])
+def test_target_irreps(parity, hessian):
+    actual = {
+        o3.Irrep(ir)
+        for ir in get_target_irreps(["energy", "forces", hessian], parity=parity)
+    }
+    expected = {o3.Irrep("0e")}
+    if hessian == "direct_hessian":
+        expected.update((o3.Irrep("1o"), o3.Irrep("2e")))
+        if parity is None:
+            expected.add(o3.Irrep("1e"))
+    assert actual == expected
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -100,7 +123,7 @@ def test_graph_properties(dtype):
         ("atomic_stresses", np.ones((2, 3, 3))),
         ("polarization", np.ones(3)),
     ):
-        if PROPERTY[key]["scope"] == "per-atom":
+        if PROPERTIES[key]["scope"] == "per-atom":
             atoms.arrays[keys.arrays_keys[key]] = value
         else:
             atoms.info[keys.info_keys[key]] = value
@@ -155,8 +178,8 @@ def test_graph_properties(dtype):
 def test_property_scopes(dtype, device):
     keys = KeySpecification.from_defaults()
     targets = ["edge_forces", "hessian", "direct_hessian"]
-    assert PROPERTY["edge_forces"]["scope"] == "per-edge"
-    assert all(PROPERTY[key]["scope"] == "per-pair" for key in targets[1:])
+    assert PROPERTIES["edge_forces"]["scope"] == "per-edge"
+    assert all(PROPERTIES[key]["scope"] == "per-pair" for key in targets[1:])
     assert keys.info_keys["edge_forces"] == "edge_forces"
     structures = [
         Atoms("H3", positions=[[0, 0, 0], [0, 0, 1], [0, 0, 2]]),
@@ -652,7 +675,7 @@ def small_model(
     interaction_type="cgtp",
     Lmax=2,
     lmax=2,
-    parity=False,
+    parity=None,
 ):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     targets = ["energy", "forces", "direct_hessian"] if joint else ["direct_hessian"]
@@ -731,6 +754,9 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
         parity=parity,
     ).eval()
     data = Batch.from_data_list([make_graph(2), make_graph(4)]).to(device).to_dict()
+    data["positions"][2:] = data["positions"].new_tensor(
+        [[0, 0, 0], [1.2, 0.1, 0.2], [0.2, 1.1, 0.1], [0.3, 0.2, 1.4]]
+    )
     prepared = model.prepare_property_data(data)
     assert prepared is not data
     torch.testing.assert_close(
@@ -752,7 +778,12 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
         for _, ir_in in node_irreps
         for _, ir_sh in o3.Irreps.spherical_harmonics(1)
         for ir_out in ir_in * ir_sh
-        if ir_out.l <= 3 and (parity or ir_out.p == (-1) ** ir_out.l)
+        if ir_out.l <= 3
+        and (
+            parity is True
+            or ir_out.p == (-1) ** ir_out.l
+            or (parity is None and ir_out == o3.Irrep("1e"))
+        )
     }
     assert {ir for _, ir in core.pair_representation.irreps_out} == expected
     assert {
@@ -762,7 +793,12 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
     assert o3.Irrep("3e") not in expected
     for interaction in core.pair_representation.interactions:
         assert interaction.irreps_sh == o3.Irreps.spherical_harmonics(1)
-    assert (core.pair_representation.irreps_out.count(o3.Irrep("1e")) > 0) == parity
+    assert (core.pair_representation.irreps_out.count(o3.Irrep("1e")) > 0) == (
+        parity is not False
+    )
+    if parity is None:
+        assert o3.Irrep("1e") in {ir for _, ir in node_irreps}
+        assert {ir for ir in expected if ir.p != (-1) ** ir.l} == {o3.Irrep("1e")}
     assert not any(
         isinstance(module, PairRepresentation)
         for module in core.direct_hessian_readout.modules()
@@ -783,6 +819,17 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
     for hook in hooks:
         hook.remove()
     assert calls == ["node", "edge", "readout"]
+    antisymmetric = reference - reference.transpose(-1, -2)
+    if parity is False:
+        torch.testing.assert_close(antisymmetric, torch.zeros_like(antisymmetric))
+    else:
+        assert antisymmetric.abs().max() > 1e-10
+    if parity is None:
+        prediction = model(data)["direct_hessian"]
+        prediction.square().sum().backward()
+        gradients = [p.grad for p in model.parameters() if p.grad is not None]
+        assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients)
+        assert any(gradient.abs().max() > 0 for gradient in gradients)
     assert "direct_hessian_pair_index" not in data
     assert "direct_hessian_edge_pairs" not in data
     path = tmp_path / "direct_hessian.pt"
@@ -999,10 +1046,10 @@ def test_eval_property_scopes(device, dtype, tmp_path, monkeypatch):
 
 
 def test_hessian(device, tmp_path):
-    assert PROPERTY["hessian"]["shape"] == PROPERTY["direct_hessian"]["shape"]
+    assert PROPERTIES["hessian"]["shape"] == PROPERTIES["direct_hessian"]["shape"]
     assert (
-        PROPERTY["hessian"]["default_value_fn"]
-        is PROPERTY["direct_hessian"]["default_value_fn"]
+        PROPERTIES["hessian"]["default_value_fn"]
+        is PROPERTIES["direct_hessian"]["default_value_fn"]
     )
     for dtype in (torch.float32, torch.float64):
         for n in (1, 2, 3, 4):
@@ -1073,7 +1120,7 @@ def test_direct_hessian(device, tmp_path, interaction_type):
                     check_direct_hessian_training(
                         device, dtype, joint, loss, interaction_type
                     )
-    for parity in (False, True):
+    for parity in (False, True, None):
         check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
 
 
@@ -1119,6 +1166,30 @@ def small_system(double_precision):
         pbc=torch.ones(1, 3, dtype=torch.bool),
     )
     return config, {key: value.to(device) for key, value in data.items()}
+
+
+def test_embedding_parity_paths(small_system):
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    config, data = small_system
+    assert DEFAULT_MODEL_CONFIG["parity"] is None
+    config["parity"] = None
+    config["target_property"] = ["energy"]
+    config["universal_embedding"]["magnetic_field"]["enable"] = True
+    data["magnetic_field"] = data["positions"].new_tensor([[0.2, 0.1, -0.1]])
+    model = TensorModel(e3nnTACE(**config)).to(data["positions"].device)
+    core = model.readout_fn
+    assert {(ir.l, ir.p) for _, ir in core.target_irreps} == {(0, 1)}
+    assert {(ir.l, ir.p) for _, ir in core.representation.irreps_outs[-1]} == {(0, 1)}
+    intermediate = core.representation.products[0].irreps_out
+    assert (1, 1) in {(ir.l, ir.p) for _, ir in intermediate}
+    assert {(ir.l, ir.p) for _, ir in intermediate if ir.p != (-1) ** ir.l} == {(1, 1)}
+    output = model(data)
+    assert torch.isfinite(output["energy"]).all()
+    output["energy"].sum().backward()
+    gradients = [p.grad for p in model.parameters() if p.grad is not None]
+    assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients)
 
 
 @pytest.mark.parametrize(

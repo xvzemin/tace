@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 
 from tace.dataset.element import TorchElement
-from tace.dataset.quantity import PROPERTY, ComputeFlag
+from tace.dataset.quantity import PROPERTIES, ComputeFlag
 from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
 
 from .lammps import Graph
@@ -304,7 +304,7 @@ class TensorModel(torch.nn.Module):
 
         if self.lmp:
             for p in self.get_target_property():
-                for requires_grad_p in PROPERTY[p]["requires_grad_with"]:
+                for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                     if p != "forces":
                         data[requires_grad_p].requires_grad_(True)
             dtype = data["node_attrs"].dtype
@@ -336,7 +336,7 @@ class TensorModel(torch.nn.Module):
                 data["positions"].requires_grad_(True)
             requires_grad_p_list = []
             for p in self.get_target_property():
-                for requires_grad_p in PROPERTY[p]["requires_grad_with"]:
+                for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                     requires_grad_p_list.append(requires_grad_p)
                     if requires_grad_p != "edge_vector":
                         data[requires_grad_p].requires_grad_(True)
@@ -398,11 +398,11 @@ class TensorModel(torch.nn.Module):
         embedding_property = set(self.readout_fn.embedding_property)
         for target in self.get_target_property():
             required = (
-                PROPERTY[target]["must_be_with"]
-                + PROPERTY[target]["requires_grad_with"]
+                PROPERTIES[target]["must_be_with"]
+                + PROPERTIES[target]["requires_grad_with"]
             )
             embedding_property.update(
-                p for p in required if p in PROPERTY and PROPERTY[p]["enable_embedding"]
+                p for p in required if p in PROPERTIES and PROPERTIES[p]["enable_embedding"]
             )
         atomic_basis = getattr(self.readout_fn, "model_config", {}).get(
             "atomic_basis", {}
@@ -429,12 +429,12 @@ class TensorModel(torch.nn.Module):
 
         self.compute_first_derivative = False
         for p in target_property:
-            if PROPERTY[p]["first_derivative"]:
+            if PROPERTIES[p]["first_derivative"]:
                 self.compute_first_derivative = True
 
         self.compute_second_derivative = False
         for p in target_property:
-            if PROPERTY[p]["second_derivative"]:
+            if PROPERTIES[p]["second_derivative"]:
                 self.compute_second_derivative = True
 
         self.retain_graph = self.compute_second_derivative

@@ -9,7 +9,7 @@ import torch
 from e3nn import o3
 from e3nn.nn import Activation
 
-from ...dataset.quantity import PROPERTY
+from ...dataset.quantity import PROPERTIES
 from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import ACTIVATION, MLP
 from ..time_reversal import with_natural_parity, with_time_reversal
@@ -18,15 +18,15 @@ from ..time_reversal import with_natural_parity, with_time_reversal
 def _property_irreps(
     name: str,
     time_reversal: bool,
-    parity: bool = True,
+    parity: bool | None = None,
 ) -> o3.Irreps:
-    irreps = o3.Irreps(PROPERTY[name]["irreps"])
+    irreps = o3.Irreps(PROPERTIES[name]["irreps"])
     if time_reversal:
         irreps = with_time_reversal(
             irreps,
-            PROPERTY[name].get("time_reversal", 1),
+            PROPERTIES[name].get("time_reversal", 1),
         )
-    if not parity:
+    if parity is False:
         irreps = with_natural_parity(irreps)
     return irreps
 
@@ -45,7 +45,7 @@ class UniversalInvariantEmbedding(torch.nn.Module):
 
         total_dim = 0
         for k, v in invariant_embedding.items():
-            p_type = PROPERTY[k]["type"]
+            p_type = PROPERTIES[k]["type"]
             if p_type == "int":
                 self.uie[k] = torch.nn.Embedding(v["num_embeddings"], out_dim)
             elif p_type == "float":
@@ -67,8 +67,8 @@ class UniversalInvariantEmbedding(torch.nn.Module):
         embeddings = []
 
         for p, module in self.uie.items():
-            p_type = PROPERTY[p]["type"]
-            p_scope = PROPERTY[p]["scope"]
+            p_type = PROPERTIES[p]["type"]
+            p_scope = PROPERTIES[p]["scope"]
 
             attr = data[p]
             if p_scope == "per-system":
@@ -89,7 +89,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
         num_elements: int,
         config: dict[str, Union[bool, str, int]],
         time_reversal: bool = True,
-        parity: bool = True,
+        parity: bool | None = None,
     ):
         super().__init__()
 
@@ -118,7 +118,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
                 bias=True,
                 num_elements=num_elements,
             )
-            self.config[k]["scope"] = PROPERTY[k]["scope"]
+            self.config[k]["scope"] = PROPERTIES[k]["scope"]
 
     def forward(
         self,
@@ -137,7 +137,7 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
             attr = data[p] * normalizer
             if scope == "per-system":
                 attr = attr[batch]
-            if PROPERTY[p]["rank"] == 0:
+            if PROPERTIES[p]["rank"] == 0:
                 attr = attr.unsqueeze(-1)
             uee_feats = e_linear(attr, node_attrs, node_type)
             node_feats = node_feats + uee_feats

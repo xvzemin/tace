@@ -9,7 +9,7 @@ from e3nn.nn import Gate
 from torch_geometric.data import Data
 
 from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
-from tace.dataset.quantity import PROPERTY, TIME_ODD_PROPERTIES
+from tace.dataset.quantity import PROPERTIES, TIME_ODD_PROPERTIES
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.fused import (
     O3ScatterTensorProduct,
@@ -79,12 +79,12 @@ def _time_reversal_matrix(irreps: o3.Irreps) -> torch.Tensor:
 
 
 def test_magnetic_property_metadata_is_separate_from_spatial_irreps():
-    assert all("time_reversal" in quantity for quantity in PROPERTY.values())
-    assert PROPERTY["initial_collinear_magmoms"]["irreps"] == "1x0e"
-    assert PROPERTY["initial_collinear_magmoms"]["time_reversal"] == -1
-    assert PROPERTY["initial_noncollinear_magmoms"]["irreps"] == "1x1e"
-    assert PROPERTY["initial_noncollinear_magmoms"]["time_reversal"] == -1
-    assert PROPERTY["abs_final_collinear_magmoms"]["time_reversal"] == 1
+    assert all("time_reversal" in quantity for quantity in PROPERTIES.values())
+    assert PROPERTIES["initial_collinear_magmoms"]["irreps"] == "1x0e"
+    assert PROPERTIES["initial_collinear_magmoms"]["time_reversal"] == -1
+    assert PROPERTIES["initial_noncollinear_magmoms"]["irreps"] == "1x1e"
+    assert PROPERTIES["initial_noncollinear_magmoms"]["time_reversal"] == -1
+    assert PROPERTIES["abs_final_collinear_magmoms"]["time_reversal"] == 1
 
     assert set(TIME_ODD_PROPERTIES) == {
         "initial_collinear_magmoms",
@@ -234,6 +234,7 @@ def test_universal_embedding_uses_property_time_reversal_metadata():
 )
 def test_magnetic_field_uses_time_odd_equivariant_embedding():
     config = _model_config()
+    config["parity"] = False
     config["universal_embedding"]["magnetic_field"]["enable"] = True
     model = e3nnTACE(**config)
     representation = model.representation
@@ -256,6 +257,7 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
 
 def test_parity_selects_natural_or_complete_magnetic_paths():
     config = _model_config()
+    config["parity"] = False
     config["atomic_basis"]["type"] = "o2_mag"
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["fidelity"][0]["magnetic_scale"] = 2.0

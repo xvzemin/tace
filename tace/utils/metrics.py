@@ -13,12 +13,12 @@ from torch import Tensor
 from torchmetrics import Metric
 
 from ..dataset.quantity import (
-    MAE_PER_ATOM_PROPERTY,
-    MAE_PROPERTY,
-    PROPERTY,
-    RMSE_PER_ATOM_PROPERTY,
-    RMSE_PROPERTY,
-    SPECIAL_METRIC_PROPERTY,
+    MAE_PER_ATOM_PROPERTIES,
+    MAE_PROPERTIES,
+    PROPERTIES,
+    RMSE_PER_ATOM_PROPERTIES,
+    RMSE_PROPERTIES,
+    SPECIAL_METRIC_PROPERTIES,
 )
 from .mask_metrics import (
     MaskMAE,
@@ -305,14 +305,14 @@ class ForcesMetric(Metric):
 
 def use_weight_filter(property_name: str) -> bool:
     return (
-        property_name in PROPERTY
+        property_name in PROPERTIES
         and supports_weight_filter(property_name)
-        and property_name not in SPECIAL_METRIC_PROPERTY  # TODO
+        and property_name not in SPECIAL_METRIC_PROPERTIES  # TODO
     )
 
 
 def log_metric_choice(metric_name: str, property_name: str, use_mask: bool):
-    if property_name in SPECIAL_METRIC_PROPERTY:
+    if property_name in SPECIAL_METRIC_PROPERTIES:
         logging.debug(
             "Build metric %s: special metric, see code.",
             metric_name,
@@ -339,23 +339,23 @@ def build_metrics(prefix: str, loss_property: List[str]) -> Dict[str, Metric]:
         use_mask = use_weight_filter(property_name)
 
         # === General ===
-        if property_name in MAE_PROPERTY:
+        if property_name in MAE_PROPERTIES:
             metric_name = f"{prefix}/{property_name}_mae"
             metrics[metric_name] = MaskMAE(property_name, SCALE) if use_mask else MAE()
             log_metric_choice(metric_name, property_name, use_mask)
-        if property_name in RMSE_PROPERTY:
+        if property_name in RMSE_PROPERTIES:
             metric_name = f"{prefix}/{property_name}_rmse"
             metrics[metric_name] = (
                 MaskRMSE(property_name, SCALE) if use_mask else RMSE()
             )
             log_metric_choice(metric_name, property_name, use_mask)
-        if property_name in MAE_PER_ATOM_PROPERTY:
+        if property_name in MAE_PER_ATOM_PROPERTIES:
             metric_name = f"{prefix}/{property_name}_per_atom_mae"
             metrics[metric_name] = (
                 MaskPerAtomMAE(property_name, SCALE) if use_mask else PerAtomMAE()
             )
             log_metric_choice(metric_name, property_name, use_mask)
-        if property_name in RMSE_PER_ATOM_PROPERTY:
+        if property_name in RMSE_PER_ATOM_PROPERTIES:
             metric_name = f"{prefix}/{property_name}_per_atom_rmse"
             metrics[metric_name] = (
                 MaskPerAtomRMSE(property_name, SCALE) if use_mask else PerAtomRMSE()
@@ -413,24 +413,24 @@ def update_metrics(metrics, prefix, pred, label, loss_property):
         output_value = pred[p]
         batch_value = label[p]
         weighted = use_weight_filter(p)
-        if p in MAE_PROPERTY:
+        if p in MAE_PROPERTIES:
             if weighted:
                 metrics[f"{prefix}/{p}_mae"](output_value, batch_value, label)
             else:
                 metrics[f"{prefix}/{p}_mae"](output_value, batch_value)
-        if p in RMSE_PROPERTY:
+        if p in RMSE_PROPERTIES:
             if weighted:
                 metrics[f"{prefix}/{p}_rmse"](output_value, batch_value, label)
             else:
                 metrics[f"{prefix}/{p}_rmse"](output_value, batch_value)
-        if p in MAE_PER_ATOM_PROPERTY:
+        if p in MAE_PER_ATOM_PROPERTIES:
             if weighted:
                 metrics[f"{prefix}/{p}_per_atom_mae"](
                     output_value, batch_value, ptr, label
                 )
             else:
                 metrics[f"{prefix}/{p}_per_atom_mae"](output_value, batch_value, ptr)
-        if p in RMSE_PER_ATOM_PROPERTY:
+        if p in RMSE_PER_ATOM_PROPERTIES:
             if weighted:
                 metrics[f"{prefix}/{p}_per_atom_rmse"](
                     output_value, batch_value, ptr, label

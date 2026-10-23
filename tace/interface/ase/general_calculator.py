@@ -9,7 +9,7 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from tace.dataset.quantity import PROPERTY, SUPPORT_EMBEDDING_PROPERTY
+from tace.dataset.quantity import PROPERTIES, SUPPORTED_EMBEDDING_PROPERTIES
 
 from .calculator import TACEAseCalc
 
@@ -46,10 +46,10 @@ class GeneralTACEAseCalc(TACEAseCalc):
     ):
         keys = {} if keys is None else dict(keys)
         for name, atoms_key in keys.items():
-            if name not in SUPPORT_EMBEDDING_PROPERTY:
+            if name not in SUPPORTED_EMBEDDING_PROPERTIES:
                 raise ValueError(
                     f"{name!r} is not an embedding property; allowed properties are "
-                    f"{SUPPORT_EMBEDDING_PROPERTY}"
+                    f"{SUPPORTED_EMBEDDING_PROPERTIES}"
                 )
             if not isinstance(atoms_key, str) or not atoms_key:
                 raise ValueError(
@@ -62,7 +62,7 @@ class GeneralTACEAseCalc(TACEAseCalc):
         for name, atoms_key in keys.items():
             if name not in self.embedding_property:
                 self.embedding_property.append(name)
-            if PROPERTY[name]["scope"] == "per-atom":
+            if PROPERTIES[name]["scope"] == "per-atom":
                 self.keySpecification.arrays_keys[name] = atoms_key
             else:
                 self.keySpecification.info_keys[name] = atoms_key
@@ -73,7 +73,7 @@ class GeneralTACEAseCalc(TACEAseCalc):
             return changes
 
         for name, atoms_key in self.keys.items():
-            storage = "arrays" if PROPERTY[name]["scope"] == "per-atom" else "info"
+            storage = "arrays" if PROPERTIES[name]["scope"] == "per-atom" else "info"
             previous = getattr(self.atoms, storage).get(atoms_key)
             current = getattr(atoms, storage).get(atoms_key)
             if atoms_key not in changes and not _same_value(previous, current, tol):

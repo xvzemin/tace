@@ -45,7 +45,7 @@ class TACELES(torch.nn.Module):
         num_elements: int,
         num_fidelities: int,
         use_alllayer: bool,
-        parity: bool,
+        parity: bool | None,
         irreps_in: List[Any],
     ) -> None:
         super().__init__()

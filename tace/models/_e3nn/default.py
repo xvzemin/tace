@@ -9,14 +9,14 @@ from collections.abc import Mapping
 from numbers import Real
 from typing import Any
 
-from ...dataset.quantity import PROPERTY
+from ...dataset.quantity import PROPERTIES
 from ..mlp import MLP
 
 DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
     "Lmax": 2,
     "lmax": 3,
-    "parity": False,
+    "parity": None,
     "num_channel": 64,
     "num_layers": 2,
     "target_property": ["energy", "forces"],
@@ -196,7 +196,7 @@ def recursive_update(
 def get_invariant_property(ue: dict) -> list[str]:
     invariant_property = []
     for p, v in ue.items():
-        if v["enable"] and PROPERTY[p]["rank"] == 0:
+        if v["enable"] and PROPERTIES[p]["rank"] == 0:
             invariant_property.append(p)
     return invariant_property
 
@@ -204,7 +204,7 @@ def get_invariant_property(ue: dict) -> list[str]:
 def get_equivariant_property(ue: dict) -> list[str]:
     equivariant_property = []
     for p, v in ue.items():
-        if v["enable"] and PROPERTY[p]["rank"] > 0:
+        if v["enable"] and PROPERTIES[p]["rank"] > 0:
             equivariant_property.append(p)
     return equivariant_property
 

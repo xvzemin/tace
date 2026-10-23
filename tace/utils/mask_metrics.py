@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 from torchmetrics import Metric
 
-from ..dataset.quantity import PROPERTY
+from ..dataset.quantity import PROPERTIES
 
 
 def expand_dims_to(T: Tensor, n_dim: int, dim: int = -1) -> Tensor:
@@ -19,7 +19,7 @@ def expand_dims_to(T: Tensor, n_dim: int, dim: int = -1) -> Tensor:
 
 
 def supports_weight_filter(property_name: str) -> bool:
-    return PROPERTY[property_name]["scope"] in {
+    return PROPERTIES[property_name]["scope"] in {
         "per-system",
         "per-atom",
         "per-edge",
@@ -32,7 +32,7 @@ def _property_weight_mask(
     property_name: str,
     value: Tensor,
 ) -> Tensor:
-    scope = PROPERTY[property_name]["scope"]
+    scope = PROPERTIES[property_name]["scope"]
     graph_mask = label[f"{property_name}_weight"].reshape(-1) != 0
 
     if scope == "per-system":

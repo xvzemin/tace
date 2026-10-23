@@ -12,23 +12,7 @@ from e3nn import o3
 
 from ..lammps import e3nnGhostExchangeMixin
 from ..time_reversal import with_natural_parity
-
-
-def _to_possible_tp_irreps(
-    irreps_in1: o3.Irreps,
-    irreps_in2: o3.Irreps,
-    parity: bool,
-    lmax: Union[int, None] = None,
-) -> o3.Irreps:
-    lmax = irreps_in2.lmax if lmax is None else lmax
-    irrep_set = set(
-        ir3
-        for _, ir1 in irreps_in1
-        for _, ir2 in irreps_in2
-        for ir3 in ir1 * ir2
-        if ir3.l <= lmax and (parity or ir3.p == (-1) ** ir3.l)
-    )
-    return o3.Irreps(irrep_set).sort().irreps.simplify()
+from .paths import to_possible_tp_irreps
 
 
 class NodeEmbedding(torch.nn.Module):
@@ -215,7 +199,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         use_first_pre_norm: bool = False,
         stochastic_depth: float = 0.0,
         use_first_dropout: bool = False,
-        parity: bool = False,
+        parity: bool | None = None,
         num_head: Union[int, None] = None,
         gate_m0: bool = True,
         use_asymmetric_contraction: bool = True,
@@ -225,6 +209,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         magnetic_edge_irreps: o3.Irreps = None,
         radial_mlp_type: str = "mlp",
         radial_mlp_norm: str | None = None,
+        path_irreps: o3.Irreps | None = None,
     ) -> None:
         super().__init__()
 
@@ -241,6 +226,9 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.num_elements = num_elements
         self.num_channel = num_channel
         self.target_irreps = target_irreps
+        self.path_irreps = o3.Irreps(
+            target_irreps if path_irreps is None else path_irreps
+        )
         self.radial_mlp = radial_mlp
         self.radial_bias = radial_bias
         self.radial_mlp_type = radial_mlp_type
@@ -291,14 +279,13 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
 
         self.irreps_in = irreps_in
         self.irreps_sh = o3.Irreps.spherical_harmonics(lmax=self.lmax, p=-1)
-        if self.correlation == 1:
-            self.irrreps_tp_out = _to_possible_tp_irreps(
-                self.irreps_in, self.irreps_sh, parity, lmax=Lmax
-            )
-        else:
-            self.irrreps_tp_out = _to_possible_tp_irreps(
-                self.irreps_in, self.irreps_sh, parity, lmax=lmax
-            )
+        self.irrreps_tp_out = to_possible_tp_irreps(
+            self.irreps_in,
+            self.irreps_sh,
+            parity,
+            lmax=Lmax if self.correlation == 1 else lmax,
+            target_irreps=self.path_irreps,
+        )
         self.irreps_out = (self.irrreps_tp_out * num_channel).sort().irreps.simplify()
 
         if self.layer == num_layers - 1:
@@ -306,8 +293,12 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
                 (o3.Irreps(target_irreps) * num_channel).sort().irreps.simplify()
             )
         else:
-            self.irreps_sc = _to_possible_tp_irreps(
-                self.irreps_in, self.irreps_sh, parity, lmax=Lmax
+            self.irreps_sc = to_possible_tp_irreps(
+                self.irreps_in,
+                self.irreps_sh,
+                parity,
+                lmax=Lmax,
+                target_irreps=self.path_irreps,
             )
             self.irreps_sc = (self.irreps_sc * num_channel).sort().irreps.simplify()
 
@@ -369,10 +360,11 @@ class Product(torch.nn.Module):
         scalar_act: Union[str, None] = None,
         stochastic_depth: float = 0.0,
         use_first_dropout: bool = False,
-        parity: bool = False,
+        parity: bool | None = None,
         use_shared_expert: bool = False,
         agnostic: bool = False,
         use_time_reversal: bool = False,
+        path_irreps: o3.Irreps | None = None,
     ) -> None:
         super().__init__()
 
@@ -391,6 +383,9 @@ class Product(torch.nn.Module):
             assert self.num_expert == 1
         self.num_hidden_channel = self.num_expert * self.num_channel_per_expert
         self.target_irreps = target_irreps
+        self.path_irreps = o3.Irreps(
+            target_irreps if path_irreps is None else path_irreps
+        )
         self.num_elements = num_elements
         self.l1l2 = l1l2
         self.use_bias = bias
@@ -420,16 +415,24 @@ class Product(torch.nn.Module):
                 else:
                     self.irreps_tp_out_list.append(
                         (
-                            _to_possible_tp_irreps(
-                                self.irreps_hidden, self.irreps_hidden, parity, Lmax
+                            to_possible_tp_irreps(
+                                self.irreps_hidden,
+                                self.irreps_hidden,
+                                parity,
+                                Lmax,
+                                target_irreps=self.path_irreps,
                             )
                             * self.num_hidden_channel
                         ).sort().irreps.simplify()
                     )
             else:
                 self.irreps_tp_out_list.append(
-                    _to_possible_tp_irreps(
-                        product_in, self.irreps_hidden, parity, lmax
+                    to_possible_tp_irreps(
+                        product_in,
+                        self.irreps_hidden,
+                        parity,
+                        lmax,
+                        target_irreps=self.path_irreps,
                     )
                 )
             product_in = self.irreps_tp_out_list[-1]
@@ -444,7 +447,13 @@ class Product(torch.nn.Module):
             )
         else:
             self.irreps_coefs_out = (
-                _to_possible_tp_irreps(self.irreps_in, self.irreps_in, parity, Lmax)
+                to_possible_tp_irreps(
+                    self.irreps_in,
+                    self.irreps_in,
+                    parity,
+                    Lmax,
+                    target_irreps=self.path_irreps,
+                )
                 * self.num_hidden_channel
             ).sort().irreps.simplify()
 
@@ -475,7 +484,7 @@ class ReadOut(torch.nn.Module):
         bias: bool,
         num_elements: int,
         num_fidelities: int,
-        parity: bool,
+        parity: bool | None,
         irreps_in: o3.Irreps,
         irreps_out: o3.Irreps,
     ) -> None:
@@ -489,7 +498,7 @@ class ReadOut(torch.nn.Module):
         self.parity = parity
         self.irreps_in = o3.Irreps(irreps_in)
         irreps_out = o3.Irreps(irreps_out)
-        if not parity:
+        if parity is False:
             irreps_out = with_natural_parity(irreps_out)
         self.irreps_out = (irreps_out * num_fidelities).sort().irreps.simplify()
         self.scalar_act = (

@@ -11,7 +11,7 @@ from e3nn import o3
 
 from eqx import co3, o2
 
-from ...dataset.quantity import PROPERTY
+from ...dataset.quantity import PROPERTIES
 from ...utils.env import acceleration_enabled, get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
@@ -67,9 +67,11 @@ class NodeRepresentation(torch.nn.Module):
         universal_embedding: Dict,
         layer_norm: Dict,
         dropout: Dict,
-        parity: bool,
+        parity: bool | None,
+        path_irreps: o3.Irreps | None = None,
     ):
         super().__init__()
+        path_irreps = target_irreps if path_irreps is None else path_irreps
 
         self.num_elements = len(atomic_numbers)
         self.num_channel = num_channel
@@ -148,7 +150,7 @@ class NodeRepresentation(torch.nn.Module):
             for interaction_cls in interaction_classes
         )
         uses_time_odd_property = any(
-            PROPERTY[name].get("time_reversal", 1) == -1
+            PROPERTIES[name].get("time_reversal", 1) == -1
             for name in self.invariant_property + self.equivariant_property
         )
         self.use_time_reversal = (
@@ -162,7 +164,7 @@ class NodeRepresentation(torch.nn.Module):
             time_odd_scalars = [
                 name
                 for name in self.invariant_property
-                if PROPERTY[name].get("time_reversal", 1) == -1
+                if PROPERTIES[name].get("time_reversal", 1) == -1
             ]
             self.invariant_property = [
                 name
@@ -182,6 +184,7 @@ class NodeRepresentation(torch.nn.Module):
                 time_reversal=self.use_time_reversal,
                 use_spin_orbit_coupling=angular_basis["use_spin_orbit_coupling"],
                 parity=parity,
+                path_irreps=path_irreps,
             )
             self.magnetic_node_irreps_out = (
                 self.magnetic_basis.magnetic_node_irreps_out
@@ -294,6 +297,7 @@ class NodeRepresentation(torch.nn.Module):
             "lmax": lmax,
             "num_channel": num_channel,
             "target_irreps": target_irreps,
+            "path_irreps": path_irreps,
             "num_radial_basis": radial_basis["num_radial_basis"],
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
@@ -389,6 +393,7 @@ class NodeRepresentation(torch.nn.Module):
                     nonlinear=product_basis["nonlinear"],
                     scalar_act=product_basis["scalar_act"],
                     target_irreps=target_irreps,
+                    path_irreps=path_irreps,
                     correlation=product_basis["correlation"],
                     l1l2=product_basis["l1l2"],
                     bias=True,

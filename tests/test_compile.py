@@ -13,7 +13,7 @@ import torch
 
 import tace.models.compile.wrapper as compile_wrapper
 from tace.dataset.quantity import (
-    SUPPORT_EMBEDDING_PROPERTY,
+    SUPPORTED_EMBEDDING_PROPERTIES,
     get_embedding_property,
     get_need_property,
 )
@@ -434,7 +434,7 @@ def test_model_input_properties_include_required_embeddings():
         "total_charge",
         "initial_collinear_magmoms",
         "initial_noncollinear_magmoms",
-    }.issubset(SUPPORT_EMBEDDING_PROPERTY)
+    }.issubset(SUPPORTED_EMBEDDING_PROPERTIES)
     cfg = {
         "loss": {
             "loss_property": [

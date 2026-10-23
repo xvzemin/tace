@@ -15,7 +15,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 from tace.dataset.graph import from_atoms
-from tace.dataset.quantity import PROPERTY, KeySpecification, update_keyspec_from_kwargs
+from tace.dataset.quantity import PROPERTIES, KeySpecification, update_keyspec_from_kwargs
 from tace.dataset.read import ase_db_connect, check_keys
 from tace.lightning import load_tace
 from tace.utils.metrics import build_metrics, update_metrics
@@ -83,7 +83,7 @@ def parse_args():
     )
 
     # Keys for properties, if need print test metrics
-    for k, v in PROPERTY.items():
+    for k, v in PROPERTIES.items():
         if v["enable_prediction"] or v["enable_embedding"]:
             parser.add_argument(f"--{k}_key", type=str, default=f"{k}")
     return parser.parse_args()
@@ -145,14 +145,14 @@ def main():
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     preds, ptrs, edge_batches = [], [], []
-    has_edge_property = any(PROPERTY[p]["scope"] == "per-edge" for p in target_property)
+    has_edge_property = any(PROPERTIES[p]["scope"] == "per-edge" for p in target_property)
     start_time = time.time()
 
     # Run inference
     for batch in tqdm(dataloader):
         batch.to(args.device)
         for p in target_property:
-            for requires_grad_p in PROPERTY[p]["requires_grad_with"]:
+            for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                 if requires_grad_p in batch:
                     batch[requires_grad_p].requires_grad_(True)
 
@@ -197,8 +197,8 @@ def main():
             start, end = ptr[i], ptr[i + 1]
             atoms_i = atoms_list_copy[structure_index]
             for p in target_property:
-                p_scope = PROPERTY[p]["scope"]
-                p_rank = PROPERTY[p]["rank"]
+                p_scope = PROPERTIES[p]["scope"]
+                p_rank = PROPERTIES[p]["rank"]
                 if p_scope == "per-system":
                     if p_rank == 0:
                         atoms_i.info[f"TACE_{p}"] = pred[p][i].item()

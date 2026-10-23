@@ -10,6 +10,7 @@ import torch
 from e3nn import o3
 
 from tace.dataset.neighbour_list import get_neighborhood
+from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES
 from tace.dataset.utils import hessian_pair_indices
 from tace.utils.torch_scatter import scatter_sum
 
@@ -26,11 +27,17 @@ to_irrep = {
 }
 
 
-def get_target_irreps(target_property: List[str]) -> o3.Irreps:
+def get_target_irreps(
+    target_property: List[str], parity: bool | None = None
+) -> List[str]:
+    """Return node targets, including physical output irreps for automatic parity."""
     target_irreps: List[str] = ["0e"]
     for p in target_property:
         target_irreps.extend(to_irrep.get(p, []))
-    # return o3.Irreps(list(set(target_irreps)))
+        if parity is None and p in DIRECT_PROPERTIES:
+            target_irreps.extend(
+                str(ir) for _, ir in o3.Irreps(PROPERTIES[p]["irreps"])
+            )
     return list(set(target_irreps))
 
 

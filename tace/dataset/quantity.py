@@ -26,7 +26,7 @@ from .utils import (
 )
 
 # per-edge follows edge_index; per-pair contains all ordered (i, j), including i=j.
-PROPERTY = {
+PROPERTIES = {
     "fidelity_idx": {
         "ase_name": None,
         "type": "int",
@@ -798,12 +798,21 @@ PROPERTY = {
     # },
 }
 
-SUPPORT_PREDICT_PROPERTY = [k for k, v in PROPERTY.items() if v["enable_prediction"]]
-SUPPORT_EMBEDDING_PROPERTY = [k for k, v in PROPERTY.items() if v["enable_embedding"]]
-TIME_ODD_PROPERTIES = tuple(
-    name for name, config in PROPERTY.items() if config["time_reversal"] == -1
+SUPPORTED_PREDICTION_PROPERTIES = tuple(
+    name for name, config in PROPERTIES.items() if config["enable_prediction"]
 )
-KEYS = {f"{k}_key": k for k in PROPERTY}
+SUPPORTED_EMBEDDING_PROPERTIES = tuple(
+    name for name, config in PROPERTIES.items() if config["enable_embedding"]
+)
+DIRECT_PROPERTIES = tuple(
+    name
+    for name, config in PROPERTIES.items()
+    if not (config["first_derivative"] or config["second_derivative"])
+)
+TIME_ODD_PROPERTIES = tuple(
+    name for name, config in PROPERTIES.items() if config["time_reversal"] == -1
+)
+KEYS = {f"{k}_key": k for k in PROPERTIES}
 
 
 # should be delete in future versions TODO
@@ -895,8 +904,8 @@ class KeySpecification:
 def update_keyspec_from_kwargs(
     keyspec: KeySpecification, keydict: Dict[str, str]
 ) -> KeySpecification:
-    infos = [f"{k}_key" for k, v in PROPERTY.items() if (v["scope"] != "per-atom")]
-    arrays = [f"{k}_key" for k, v in PROPERTY.items() if (v["scope"] == "per-atom")]
+    infos = [f"{k}_key" for k, v in PROPERTIES.items() if (v["scope"] != "per-atom")]
+    arrays = [f"{k}_key" for k, v in PROPERTIES.items() if (v["scope"] == "per-atom")]
     info_keys = {}
     arrays_keys = {}
     for key in infos:
@@ -912,7 +921,7 @@ def update_keyspec_from_kwargs(
 def get_target_property(cfg: Dict) -> List[str]:
     loss_property = cfg["loss"].get("loss_property", None)
     assert isinstance(loss_property, list)
-    assert set(loss_property).issubset(list(PROPERTY))
+    assert set(loss_property).issubset(list(PROPERTIES))
     return loss_property
 
 
@@ -923,12 +932,12 @@ def get_embedding_property(cfg: Dict) -> List[str]:
             embedding_property.append(p)
     for target in get_target_property(cfg):
         required = (
-            PROPERTY[target]["must_be_with"] + PROPERTY[target]["requires_grad_with"]
+            PROPERTIES[target]["must_be_with"] + PROPERTIES[target]["requires_grad_with"]
         )
         for p in required:
             if (
-                p in PROPERTY
-                and PROPERTY[p]["enable_embedding"]
+                p in PROPERTIES
+                and PROPERTIES[p]["enable_embedding"]
                 and p not in embedding_property
             ):
                 embedding_property.append(p)
@@ -953,42 +962,44 @@ def get_need_property(
         we_should_read = we_should_read + target_property
     joint_property = []
     for name in we_should_read:
-        joint_property += PROPERTY[name]["must_be_with"]
+        joint_property += PROPERTIES[name]["must_be_with"]
     return list(set(joint_property + we_should_read))
 
 
 # For Metrics
 
-SPECIAL_METRIC_PROPERTY = [
+SPECIAL_METRIC_PROPERTIES = (
     "polarization",  # for definition
     "abs_final_collinear_magmoms",  # for absolute value
     "direct_forces",  # for DeNS
     "forces",  # for DeNS
-]
+)
 
 # INTENSIVE
-EXTENSIVE_PROPERTY = ["stress", "direct_stress"]
-MAE_PROPERTY = [p for p in SUPPORT_PREDICT_PROPERTY if p not in SPECIAL_METRIC_PROPERTY]
-RMSE_PROPERTY = [
-    p for p in SUPPORT_PREDICT_PROPERTY if p not in SPECIAL_METRIC_PROPERTY
-]
-MAE_PER_ATOM_PROPERTY = [
+EXTENSIVE_PROPERTIES = ("stress", "direct_stress")
+MAE_PROPERTIES = tuple(
+    p for p in SUPPORTED_PREDICTION_PROPERTIES if p not in SPECIAL_METRIC_PROPERTIES
+)
+RMSE_PROPERTIES = tuple(
+    p for p in SUPPORTED_PREDICTION_PROPERTIES if p not in SPECIAL_METRIC_PROPERTIES
+)
+MAE_PER_ATOM_PROPERTIES = tuple(
     p
-    for p, v in PROPERTY.items()
-    if p not in SPECIAL_METRIC_PROPERTY
+    for p, v in PROPERTIES.items()
+    if p not in SPECIAL_METRIC_PROPERTIES
     and v["scope"] == "per-system"
-    and p not in EXTENSIVE_PROPERTY
-]
-RMSE_PER_ATOM_PROPERTY = [
+    and p not in EXTENSIVE_PROPERTIES
+)
+RMSE_PER_ATOM_PROPERTIES = tuple(
     p
-    for p, v in PROPERTY.items()
-    if p not in SPECIAL_METRIC_PROPERTY
+    for p, v in PROPERTIES.items()
+    if p not in SPECIAL_METRIC_PROPERTIES
     and v["scope"] == "per-system"
-    and p not in EXTENSIVE_PROPERTY
-]
+    and p not in EXTENSIVE_PROPERTIES
+)
 
 
-fields = {f"compute_{k}": False for k, v in PROPERTY.items()}
+fields = {f"compute_{k}": False for k, v in PROPERTIES.items()}
 
 
 @dataclass

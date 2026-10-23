@@ -20,7 +20,7 @@ except ImportError as e:
     ) from e
 
 
-from tace.dataset.quantity import PROPERTY
+from tace.dataset.quantity import PROPERTIES
 from tace.lightning import load_tace
 from tace.utils._global import DEVICE
 from tace.utils.env import enable_acceleration
@@ -142,7 +142,7 @@ class TACETorchSimCalc(ModelInterface):
             ("forces", self._compute_forces),
             ("stress", self._compute_stress),
         ):
-            required = any(name in PROPERTY[p]["must_be_with"] for p in target_property)
+            required = any(name in PROPERTIES[p]["must_be_with"] for p in target_property)
             if enabled or required:
                 if name not in target_property:
                     target_property.append(name)

@@ -13,7 +13,7 @@ from typing import Dict, List, Union
 
 from ase import Atoms
 
-from .quantity import PROPERTY, KeySpecification, get_need_property
+from .quantity import PROPERTIES, KeySpecification, get_need_property
 from .split import random_split
 
 
@@ -73,8 +73,8 @@ def check_keys(
         if not results:
             continue
         for p in need_property:
-            if PROPERTY[p]["ase_name"]:
-                ase_name = PROPERTY[p]["ase_name"]
+            if PROPERTIES[p]["ase_name"]:
+                ase_name = PROPERTIES[p]["ase_name"]
             else:
                 ase_name = p
             if ase_name not in results:
