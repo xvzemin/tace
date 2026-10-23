@@ -188,12 +188,10 @@ class TACEAseCalc(Calculator):
                         self.results[save_name] = outs[p].detach().cpu().item()
                 else:
                     self.results[save_name] = outs[p].detach().cpu().numpy().squeeze(0)
-            elif p_scope == "per-atom":
-                self.results[save_name] = outs[p].detach().cpu().numpy()
-            elif p_scope == "per-edge":
+            elif p_scope in {"per-atom", "per-edge", "per-pair"}:
                 self.results[save_name] = outs[p].detach().cpu().numpy()
             else:
-                self.results[save_name] = outs[p].detach().cpu().numpy()
+                raise ValueError(f"Unsupported property scope: {p_scope}")
 
 
 def add_dispersion(

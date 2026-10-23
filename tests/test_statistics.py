@@ -1,8 +1,11 @@
 import math
+import pickle
 
+import lmdb
 import pytest
 import torch
 from ase import Atoms
+from omegaconf import OmegaConf
 from torch.utils.data import SequentialSampler
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
@@ -23,7 +26,7 @@ def test_missing_model_statistics_only_checks_requested_inputs():
             "shift_type": None,
         },
     }
-    cached_statistics = [{"rms_forces": {26: 1.0}}]
+    cached_statistics = [{"rms_forces": {26: 1.0}, "atomic_energy": {26: 0.0}}]
 
     assert not statistics_module.missing_model_statistics(
         cached_statistics,
@@ -53,6 +56,116 @@ def test_missing_model_statistics_only_checks_requested_inputs():
         target_property=["energy"],
         embedding_property=["initial_noncollinear_magmoms"],
     )
+
+    del cached_statistics[0]["atomic_energy"]
+    assert statistics_module.missing_model_statistics(
+        cached_statistics, model_config, ["energy"], []
+    ) == {"atomic_energy"}
+
+
+@pytest.mark.parametrize("targets", [["energy", "forces"], ["direct_hessian"]])
+def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
+    import tace.dataset.dataloader as dataloader_module
+    import tace.dataset.datamodule as datamodule_module
+    import tace.scripts.train as train_module
+
+    monkeypatch.chdir(tmp_path)
+    element = build_element_lookup([1, 8])
+    records = [([1, 1], 2.0, 0), ([8], 3.0, 0), ([1, 8], 4.0, 0), ([8], 5.0, 1)]
+    graphs = []
+    for numbers, energy, fidelity in records:
+        numbers = torch.tensor(numbers)
+        graphs.append(
+            Data(
+                atomic_numbers=numbers,
+                node_attrs=element.z2onehot(numbers).double(),
+                num_nodes=len(numbers),
+                edge_index=torch.empty((2, 0), dtype=torch.long),
+                fidelity_idx=torch.tensor(fidelity),
+                energy=torch.tensor([energy], dtype=torch.float64),
+                energy_weight=torch.ones(1),
+                forces=torch.ones(len(numbers), 3, dtype=torch.float64),
+                forces_weight=torch.ones(1),
+                direct_hessian=torch.ones(len(numbers) ** 2, 3, 3),
+            )
+        )
+    cache = tmp_path / "graphs"
+    cache.mkdir()
+    for stage, data in (("train", graphs), ("valid", [graphs[-1]])):
+        env = lmdb.open(str(cache / f"{stage}_shard0000.lmdb"), map_size=1 << 20)
+        with env.begin(write=True) as txn:
+            for idx, graph in enumerate(data):
+                txn.put(f"{idx:09d}".encode(), pickle.dumps(graph))
+        env.close()
+    contents = {p: p.read_bytes() for p in cache.rglob("*") if p.is_file()}
+
+    def no_source_read(*args, **kwargs):
+        raise AssertionError("Existing LMDB graphs must not read source files")
+
+    monkeypatch.setattr(dataloader_module, "tace_read_all_files", no_source_read)
+    monkeypatch.setattr(datamodule_module, "tace_read_all_files", no_source_read)
+    monkeypatch.setattr(datamodule_module, "from_atoms", no_source_read)
+    monkeypatch.setattr(train_module, "initialize", lambda cfg: cfg)
+    monkeypatch.setattr(train_module, "create_model", lambda *args: None)
+    cfg = OmegaConf.create(
+        {
+            "misc": {"device": "cuda" if torch.cuda.is_available() else "cpu"},
+            "loss": {"loss_property": targets},
+            "model": {
+                "config": {
+                    "cutoff": 3.0,
+                    "fidelity": [
+                        {"name": "fitted"},
+                        {"name": "fixed", "atomic_energy": {1: 4.0, 8: 5.0}},
+                    ],
+                }
+            },
+            "dataset": {
+                "storage_mode": "lmdb",
+                "shard_dirs": [str(cache)],
+                "train_file": "does-not-exist.db",
+                "valid_file": "does-not-exist.db",
+                "train_dataloader": {
+                    "_target_": "torch_geometric.loader.DataLoader",
+                    "batch_size": 2,
+                    "num_workers": 0,
+                },
+                "statistics_dataloader": {"batch_size": 3},
+            },
+        }
+    )
+    _, statistics, _, _, _, datamodule = train_module.build(cfg)
+    assert datamodule.threeAtomsList is None
+    assert statistics[0]["atomic_numbers"] == [1, 8]
+    assert statistics[0]["num_graphs"] == 3
+    assert statistics[1]["num_graphs"] == 1
+    if "energy" in targets:
+        assert statistics[0]["atomic_energy"] == pytest.approx({1: 1.0, 8: 3.0})
+        assert statistics[1]["atomic_energy"] == {1: 4.0, 8: 5.0}
+        with monkeypatch.context() as patch:
+            patch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
+            reference = statistics_module._compute_statistics(
+                DataLoader(graphs, batch_size=3, exclude_keys=["direct_hessian"]),
+                [1, 8],
+                [{1: 1.0, 8: 3.0}, {1: 4.0, 8: 5.0}],
+                targets,
+                device=cfg.misc.device,
+                num_fidelities=2,
+            )
+        for actual, expected in zip(statistics, reference):
+            assert actual["mean_energy"] == pytest.approx(expected["mean_energy"])
+            assert actual["rms_forces"] == pytest.approx(expected["rms_forces"])
+    datamodule.train_dataset.close()
+    datamodule.val_dataset.close()
+
+    monkeypatch.setattr(train_module, "load_cached_datamodule", no_source_read)
+    monkeypatch.setattr(train_module, "build_atomsList", no_source_read)
+    monkeypatch.setattr(train_module, "compute_statistics", no_source_read)
+    _, reused, _, _, _, datamodule = train_module.build(cfg)
+    assert reused == statistics
+    datamodule.prepare_data()
+    assert datamodule.threeAtomsList is None
+    assert all(p.read_bytes() == value for p, value in contents.items())
 
 
 def test_statistics_dataloader_overrides_training_batch_size():

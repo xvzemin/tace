@@ -14,15 +14,17 @@ from ..blocks import OneHotToAtomicEnergy, ScaleShift
 from ..radial import ZBLBasis
 from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps, stress_from_virials
+from .base import _to_possible_tp_irreps
 from .basis_change import DirectPolarizability, DirectVirials
 from .default import check_model_config
 from .les import TACELES, required_les_irreps
 from .readout import (
+    DirectHessianReadout,
     build_element_scalar_readout,
     build_scalar_readout,
     build_tensor_readout,
 )
-from .representation import Representation
+from .representation import NodeRepresentation, PairRepresentation
 
 
 class e3nnTACE(torch.nn.Module):
@@ -111,7 +113,7 @@ class e3nnTACE(torch.nn.Module):
             self.target_irreps = with_natural_parity(self.target_irreps)
 
         # === Representation/Descriptor ===
-        self.representation = Representation(
+        self.representation = NodeRepresentation(
             num_layers=cfg["num_layers"],
             atomic_numbers=cfg["atomic_numbers"],
             cutoff=cfg["cutoff"],
@@ -142,6 +144,23 @@ class e3nnTACE(torch.nn.Module):
         if self.representation.use_magnetic_interaction:
             self.embedding_property.append("initial_noncollinear_magmoms")
 
+        if "direct_hessian" in self.target_property:
+            irreps_in = self.representation.irreps_outs[-1]
+            irreps_sh = o3.Irreps.spherical_harmonics(cfg["lmax"])
+            irreps_hidden = _to_possible_tp_irreps(
+                irreps_in, irreps_sh, parity=cfg["parity"], lmax=cfg["Lmax"]
+            )
+            self.pair_representation = PairRepresentation(
+                irreps_in,
+                irreps_sh,
+                irreps_hidden,
+                self.num_channel,
+                cfg["atomic_numbers"],
+                cfg["special"]["direct_hessian"]["cutoff"],
+                cfg["radial_basis"],
+                interaction_type=cfg["special"]["direct_hessian"]["interaction_type"],
+            )
+
         # === Readout ===
         if self.representation.use_dens:
             assert self.use_alllayer == False
@@ -165,6 +184,17 @@ class e3nnTACE(torch.nn.Module):
             "parity": cfg["parity"],
             "irreps_in": self.representation.irreps_outs,
         }
+
+        if "direct_hessian" in self.target_property:
+            self.direct_hessian_readout = DirectHessianReadout(
+                self.representation.irreps_outs[-1],
+                self.pair_representation.irreps_out,
+                self.num_channel,
+                self.num_fidelities,
+                scalar_act=cfg["atomic_basis"]["scalar_act"],
+                tensor_act=cfg["atomic_basis"]["tensor_act"],
+                bias=cfg["readout_emlp"]["bias"],
+            )
 
         # === Energy ===
         if "energy" in self.target_property:
@@ -270,7 +300,7 @@ class e3nnTACE(torch.nn.Module):
         if "abs_final_collinear_magmoms" in self.target_property:
             self.abs_final_collinear_magmoms_readouts = build_scalar_readout(
                 irreps_out="0e", **for_scalar_readout
-            )  # TODO, check
+            )
 
         # === DeNs noise ===
         if self.representation.use_dens:
@@ -293,6 +323,7 @@ class e3nnTACE(torch.nn.Module):
         data: Dict[str, torch.Tensor],
         graph,
         from_representation: Dict[str, Union[torch.Tensor, None]],
+        edge_feats: torch.Tensor | None,
     ) -> Dict[str, Union[torch.Tensor, None]]:
 
         batch = data["batch"]
@@ -304,6 +335,18 @@ class e3nnTACE(torch.nn.Module):
         num_atoms_arange = graph.num_atoms_arange
         dtype = data["node_attrs"].dtype
         device = data["node_attrs"].device
+
+        D_H = None
+        if "direct_hessian" in self.target_property:
+            D_H = self.direct_hessian_readout(
+                descriptors[-1],
+                edge_feats,
+                data["ptr"],
+                batch,
+                node_fidelity,
+                data["direct_hessian_pair_index"],
+                data["direct_hessian_edge_pairs"],
+            )
 
         # === Energy ===
         E = None
@@ -601,6 +644,7 @@ class e3nnTACE(torch.nn.Module):
             "direct_dipole": D,
             "direct_polarizability": ALPHA,
             "direct_forces": D_F,
+            "direct_hessian": D_H,
             "direct_virials": D_V,
             "direct_stress": D_S,
             "charges": CHARGES,
@@ -618,4 +662,15 @@ class e3nnTACE(torch.nn.Module):
 
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, Any]:
         rep = self.representation(data, graph)
-        return self.readout_fn(data, graph, rep) | rep
+        pair_rep = None
+        if "direct_hessian" in self.target_property:
+            pair_rep = self.pair_representation(
+                rep["descriptors"][-1],
+                data["node_attrs"],
+                graph.positions,
+                data["direct_hessian_pair_index"][:, data["direct_hessian_edge_pairs"]],
+                data["direct_hessian_edge_shifts"],
+                graph.lattice,
+                data["batch"],
+            )
+        return self.readout_fn(data, graph, rep, pair_rep) | rep

@@ -694,3 +694,96 @@ def build_datamodule(
         threeAtomsList,
     )
     return datamodule
+
+
+def load_cached_datamodule(
+    cfg: Dict,
+    target_property: List[str],
+    embedding_property: List[str],
+    keyspec: KeySpecification,
+):
+    """Load existing graph shards without reading the source structures."""
+    dataset_config = cfg["dataset"]
+    if dataset_config.get("storage_mode", "memory") != "lmdb":
+        return None
+    directories = [Path(p) for p in dataset_config.get("shard_dirs", ["graphCache"])]
+    stages = ["train"]
+    if not dataset_config.get("no_valid_set", False):
+        stages.append("valid")
+    test_files = dataset_config.get("test_files")
+    if test_files:
+        num_test_sets = len(test_files) if isinstance(test_files, list) else 1
+        stages.extend(f"test{idx}" for idx in range(num_test_sets))
+    paths = {
+        stage: [
+            path
+            for directory in directories
+            for path in sorted(directory.glob(f"{stage}_shard*.lmdb"))
+        ]
+        for stage in stages
+    }
+    if not all(paths.values()):
+        return None
+
+    model_config = cfg["model"]["config"]
+    atomic_numbers = model_config.get("atomic_numbers")
+    if atomic_numbers is not None:
+        atomic_numbers = sorted(atomic_numbers)
+    else:
+        configured_elements = {
+            int(z)
+            for fidelity in model_config["fidelity"]
+            for z in (fidelity.get("atomic_energy") or {})
+        }
+        atomic_numbers = sorted(configured_elements) or None
+
+    element_mapping = None
+    for stage in ("train", "valid"):
+        if stage not in paths:
+            continue
+        dataset = GraphDatasetLMDB(paths[stage], cache_size=0)
+        try:
+            for graph in dataset:
+                num_elements = graph["node_attrs"].shape[-1]
+                if element_mapping is None:
+                    if (
+                        atomic_numbers is not None
+                        and len(atomic_numbers) == num_elements
+                    ):
+                        element_mapping = list(atomic_numbers)
+                    else:
+                        element_mapping = [None] * num_elements
+                if len(element_mapping) != num_elements:
+                    raise ValueError("LMDB shards use inconsistent element mappings")
+                indices = graph["node_attrs"].argmax(dim=-1).tolist()
+                for index, z in zip(indices, graph["atomic_numbers"].tolist()):
+                    if element_mapping[index] not in (None, z):
+                        raise ValueError(
+                            "Configured elements do not match the LMDB cache"
+                        )
+                    element_mapping[index] = z
+                if None not in element_mapping:
+                    break
+        finally:
+            dataset.close()
+        if element_mapping is not None and None not in element_mapping:
+            break
+    if element_mapping is None or None in element_mapping:
+        raise ValueError(
+            "Cannot recover all elements from the LMDB cache. Set "
+            "model.config.atomic_numbers to the element list used to build it."
+        )
+    if element_mapping != sorted(set(element_mapping)):
+        raise ValueError("LMDB element mapping must be ordered by atomic number")
+    if (
+        model_config.get("atomic_numbers") is not None
+        and atomic_numbers != element_mapping
+    ):
+        raise ValueError("Configured elements do not match the LMDB cache")
+
+    logging.info("Using existing LMDB graphs; skipping source-file reading")
+    datamodule = build_datamodule(
+        cfg, element_mapping, target_property, embedding_property, keyspec, None
+    )
+    datamodule.setup("fit")
+    return datamodule

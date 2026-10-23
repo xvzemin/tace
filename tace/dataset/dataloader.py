@@ -13,7 +13,11 @@ from .element import TorchElement, build_element_lookup
 from .graph import from_atoms
 from .quantity import KeySpecification
 from .read import tace_read_all_files
-from .statistics import _compute_statistics, compute_atomic_energies
+from .statistics import (
+    _compute_statistics,
+    compute_atomic_energies,
+    compute_atomic_energies_from_graphs,
+)
 
 
 def build_statistics_dataloader(
@@ -70,22 +74,28 @@ def build_atomsList(
     target_property: List[str],
     embedding_property: List[str],
     keyspec: KeySpecification,
+    datamodule=None,
 ):
-    threeAtomsList = tace_read_all_files(
-        cfg, target_property, embedding_property, keyspec
-    )
+    threeAtomsList = None
+    if datamodule is None:
+        threeAtomsList = tace_read_all_files(
+            cfg, target_property, embedding_property, keyspec
+        )
     # ==== read atomic_numbers and atomic_energy from dataset and cfg ===
     try:
-        atomsList = (
-            (threeAtomsList[0])
-            if threeAtomsList[1] is None
-            else threeAtomsList[0] + threeAtomsList[1]
-        )
-        atomic_numbers_from_dataset = set(
-            int(atomic_number)
-            for atoms in atomsList
-            for atomic_number in atoms.get_atomic_numbers()
-        )
+        if datamodule is not None:
+            atomic_numbers_from_dataset = set(datamodule.element.zs)
+        else:
+            atomsList = (
+                (threeAtomsList[0])
+                if threeAtomsList[1] is None
+                else threeAtomsList[0] + threeAtomsList[1]
+            )
+            atomic_numbers_from_dataset = set(
+                int(atomic_number)
+                for atoms in atomsList
+                for atomic_number in atoms.get_atomic_numbers()
+            )
     except Exception as e:
         raise RuntimeError(f"Failed to extract atomic numbers from dataset: {e}")
 
@@ -124,6 +134,10 @@ def build_atomsList(
             atomic_numbers_from_dataset | atomic_numbers_from_energy
         )
         element = build_element_lookup(atomic_numbers_from_dataset)
+        if datamodule is not None and element.zs != datamodule.element.zs:
+            raise ValueError(
+                "Configured atomic energies change the cached element mapping"
+            )
 
         missing_energy = [
             idx
@@ -135,11 +149,20 @@ def build_atomsList(
                 "Computing isolated atomic energy automatically for fidelity %s",
                 fidelity[idx]["name"],
             )
-        computed_atomic_energies = (
-            compute_atomic_energies(threeAtomsList[0], element, keyspec, missing_energy)
-            if missing_energy
-            else {}
-        )
+        computed_atomic_energies = {}
+        if missing_energy:
+            if datamodule is None:
+                computed_atomic_energies = compute_atomic_energies(
+                    threeAtomsList[0], element, keyspec, missing_energy
+                )
+            else:
+                computed_atomic_energies = compute_atomic_energies_from_graphs(
+                    build_statistics_dataloader(
+                        cfg, datamodule.train_dataset, ["energy"]
+                    ),
+                    element,
+                    missing_energy,
+                )
 
         atomic_energies = []
         for idx, atomic_energy_cfg in enumerate(atomic_energies_cfg):

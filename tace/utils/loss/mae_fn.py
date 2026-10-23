@@ -9,6 +9,7 @@ import torch
 
 from .common import (
     apply_element_weights,
+    hessian_loss,
     num_atoms_per_graph,
     polarization_error_per_atom,
     tensor_loss,
@@ -98,6 +99,11 @@ def mae_direct_forces(
     ][batch].unsqueeze(-1)
     total_weight = apply_element_weights(total_weight, label, element_weights)
     return torch.mean(torch.abs(pred[key] - label[key]) * total_weight)
+
+
+@register_loss
+def mae_direct_hessian(pred, label, reduction="structure"):
+    return hessian_loss(pred, label, "direct_hessian", "mae", reduction)
 
 
 @register_loss

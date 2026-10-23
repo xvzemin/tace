@@ -9,6 +9,8 @@ from typing import Callable, Dict, List, Tuple, Union
 import torch
 from e3nn import o3
 
+from tace.dataset.neighbour_list import get_neighborhood
+from tace.dataset.utils import hessian_pair_indices
 from tace.utils.torch_scatter import scatter_sum
 
 to_irrep = {
@@ -19,7 +21,7 @@ to_irrep = {
     "direct_virials": ["0e", "2e"],
     "direct_dipole": ["1o"],
     "direct_polarizability": ["0e", "2e"],
-    "direct_diagonal_hessian": ["0e", "2e"],
+    "direct_hessian": ["0e", "1o", "2e"],
     "abs_final_collinear_magmoms": ["0e"],  # TODO, check
 }
 
@@ -176,6 +178,48 @@ def stress_from_virials(
         volume, valid = volume[batch], valid[batch]
     stress = -virials / volume[:, None, None]
     return torch.where(valid[:, None, None], stress, torch.zeros_like(stress))
+
+
+def prepare_direct_hessian_inputs(data, cutoff):
+    """Prepare atom pairs and periodic neighbors for a Hessian readout.
+
+    Parameters
+    ----------
+    data : dict or torch_geometric.data.Batch
+        Graph inputs.
+    cutoff : float or torch.Tensor
+        Hessian interaction cutoff in angstroms.
+
+    Returns
+    -------
+    dict
+        A copy with all ordered pairs, edge-to-pair indices and lattice shifts.
+        Neighbor selection uses detached geometry. Periodic images of an atom
+        pair share one output index; diagonal blocks use the node readout.
+    """
+    data = dict(data.items())
+    positions = data["positions"].detach().cpu().numpy()
+    lattice = data["lattice"].detach().cpu().numpy()
+    ptr = data["ptr"].tolist()
+    pbc = data.get("pbc", torch.zeros((len(ptr) - 1, 3), dtype=torch.bool))
+    pbc = pbc.detach().cpu().numpy()
+    cutoff = float(cutoff)
+    pairs, shifts = [], []
+    offset = 0
+    for graph, (start, stop) in enumerate(zip(ptr[:-1], ptr[1:])):
+        edge_index, edge_shifts, _, _ = get_neighborhood(
+            positions[start:stop], cutoff, pbc[graph], lattice[graph]
+        )
+        source, target = edge_index
+        keep = source != target
+        count = stop - start
+        pairs.append(torch.as_tensor(offset + source[keep] * count + target[keep]))
+        shifts.append(torch.as_tensor(edge_shifts[keep]))
+        offset += count * count
+    data["direct_hessian_pair_index"] = hessian_pair_indices(data["ptr"])
+    data["direct_hessian_edge_pairs"] = torch.cat(pairs).to(data["ptr"])
+    data["direct_hessian_edge_shifts"] = torch.cat(shifts).to(data["positions"])
+    return data
 
 
 def compute_hessians_vmap(

@@ -46,6 +46,21 @@ transformations would change the physical exchange interactions.
    - The priority order is:  ``no_valid_set`` > ``valid_file`` > ``valid_from_index`` > ``valid_ratio``.
 
 
+Property scopes
+---------------
+
+``per-system`` stores one value per structure; ``per-atom`` stores one per atom.
+``per-edge`` follows the entries of ``edge_index`` and ``edge_shifts``, for example
+``edge_forces`` with shape ``(E, 3)``. Edges depend on the neighbor list and need
+not include all atom pairs. Periodic images can give multiple edges for the same
+atom indices.
+
+``per-pair`` contains all ordered atom pairs within each structure, including
+``i == j``, in ``i * N + j`` order. Hessians use ``(N**2, 3, 3)`` regardless of
+the cutoff. A batch concatenates ``sum(E)`` edge entries or ``sum(N**2)`` pair
+entries, without pairs between structures. Edge and pair labels belong in
+``atoms.info``, not the per-atom ``atoms.arrays``.
+
 Periodic and non-periodic structures
 ------------------------------------
 
@@ -53,9 +68,8 @@ Molecules and crystals can share a dataset and a batch. The physical cell and
 ``pbc`` are preserved, including zero cells for isolated atoms and molecules.
 Neighbor-list construction does not assign a physical volume to those systems.
 
-Missing properties (absent keys or ``None``) receive zero weight. Missing
-stress or virial entries can also be marked with ``NaN``; they are replaced
-by finite placeholders and excluded by a component mask.
+Missing properties (absent keys or ``None``) receive zero weight. Provided
+labels must contain only finite values; NaN and infinite values are rejected.
 
 Stress requires at least one periodic direction and a non-singular cell.
 Non-periodic structures contribute to energy and force training, but not

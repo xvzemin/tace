@@ -7,7 +7,12 @@ from typing import Dict, List, Optional
 
 import torch
 
-from .common import apply_element_weights, polarization_error_per_atom, tensor_loss
+from .common import (
+    apply_element_weights,
+    hessian_loss,
+    polarization_error_per_atom,
+    tensor_loss,
+)
 from .mse_fn import register_loss
 
 
@@ -130,6 +135,18 @@ def huber_direct_forces(
     key = "direct_forces"
     return _per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
+    )
+
+
+@register_loss
+def huber_direct_hessian(pred, label, huber_delta=0.01, reduction="structure"):
+    return hessian_loss(
+        pred,
+        label,
+        "direct_hessian",
+        "huber",
+        reduction=reduction,
+        huber_delta=huber_delta,
     )
 
 

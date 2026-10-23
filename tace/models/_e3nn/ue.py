@@ -49,12 +49,12 @@ class UniversalInvariantEmbedding(torch.nn.Module):
             if p_type == "int":
                 self.uie[k] = torch.nn.Embedding(v["num_embeddings"], out_dim)
             elif p_type == "float":
-                self.uie[k] = MLP([1, out_dim, out_dim], bias=bias)
+                self.uie[k] = MLP["mlp"]([1, out_dim, out_dim], bias=bias)
             else:
                 raise
             total_dim += out_dim
 
-        self.project = MLP(
+        self.project = MLP["mlp"](
             [total_dim, out_dim],
             bias=bias,
             layer_norm=False,

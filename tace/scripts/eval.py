@@ -6,6 +6,7 @@
 import argparse
 import copy
 import time
+from pathlib import Path
 from typing import Dict
 
 import ase.io
@@ -15,7 +16,7 @@ from tqdm import tqdm
 
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import PROPERTY, KeySpecification, update_keyspec_from_kwargs
-from tace.dataset.read import check_keys
+from tace.dataset.read import ase_db_connect, check_keys
 from tace.lightning import load_tace
 from tace.utils.metrics import build_metrics, update_metrics
 from tace.utils.utils import num_params
@@ -90,7 +91,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    atomsList = ase.io.read(args.input, index=":")
+    atomsList = (
+        ase_db_connect(args.input)
+        if Path(args.input).suffix == ".db"
+        else ase.io.read(args.input, index=":")
+    )
     atoms_list_copy = copy.deepcopy(atomsList)
     key_spec = KeySpecification()
     update_keyspec_from_kwargs(key_spec, vars(args))
@@ -139,7 +144,8 @@ def main():
     ]
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
-    preds, ptrs = [], []
+    preds, ptrs, edge_batches = [], [], []
+    has_edge_property = any(PROPERTY[p]["scope"] == "per-edge" for p in target_property)
     start_time = time.time()
 
     # Run inference
@@ -147,7 +153,8 @@ def main():
         batch.to(args.device)
         for p in target_property:
             for requires_grad_p in PROPERTY[p]["requires_grad_with"]:
-                batch[requires_grad_p].requires_grad_(True)
+                if requires_grad_p in batch:
+                    batch[requires_grad_p].requires_grad_(True)
 
         with torch.enable_grad():
             outputs = model(batch)
@@ -161,6 +168,9 @@ def main():
                 }
             )
             ptrs.append(batch.ptr.cpu())
+            edge_batches.append(
+                batch.batch[batch.edge_index[0]].cpu() if has_edge_property else None
+            )
 
     print(
         f"Inference finished in {time.time() - start_time:.2f} s "
@@ -181,7 +191,7 @@ def main():
     # Assign predictions back to atoms in the same order as atomsList
     pred_atoms_list = []
     structure_index = 0  # global counter across all batches
-    for pred, ptr in zip(preds, ptrs):
+    for pred, ptr, edge_batch in zip(preds, ptrs, edge_batches):
         n_structures = len(ptr) - 1
         for i in range(n_structures):
             start, end = ptr[i], ptr[i + 1]
@@ -202,8 +212,14 @@ def main():
                     )
                 elif p_scope == "per-edge":
                     atoms_i.info[f"TACE_{p}"] = (
-                        pred[p][i].detach().cpu().numpy().reshape(-1)
+                        pred[p][edge_batch == i].detach().cpu().numpy().reshape(-1)
                     )
+                elif p_scope == "per-pair":
+                    pair_counts = (ptr[1:] - ptr[:-1]).square()
+                    pair_start = int(pair_counts[:i].sum())
+                    pair_end = pair_start + int(pair_counts[i])
+                    blocks = pred[p][pair_start:pair_end].detach().cpu()
+                    atoms_i.info[f"TACE_{p}"] = blocks.numpy()
                 else:
                     atoms_i.info[f"TACE_{p}"] = (
                         pred[p][i].detach().cpu().numpy().reshape(-1)

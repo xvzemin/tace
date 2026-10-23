@@ -15,7 +15,7 @@ from eqx import o2
 from ...utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
 from ..linear import e3nnElementLinear, e3nnLinear
-from ..mlp import MLP_TYPES
+from ..mlp import MLP
 from .base import NodeEmbedding, NodeUpdate
 
 
@@ -132,7 +132,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
                 if self.radial_mlp_type == "mlp" and input_dim != self.num_radial_basis
                 else None
             )
-        self.edge_info = MLP_TYPES[self.radial_mlp_type](
+        self.edge_info = MLP[self.radial_mlp_type](
             [
                 input_dim,
                 *self.radial_mlp,

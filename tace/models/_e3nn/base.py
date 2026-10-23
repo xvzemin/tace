@@ -141,6 +141,41 @@ class EdgeUpdate(torch.nn.Module):
         raise NotImplementedError
 
 
+class EdgeInteraction(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps | str,
+        irreps_sh: o3.Irreps | str,
+        irreps_out: o3.Irreps | str,
+        num_channel: int,
+        num_elements: int,
+        radial_basis: dict,
+    ) -> None:
+        super().__init__()
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.irreps_sh = o3.Irreps(irreps_sh)
+        self.irreps_out = o3.Irreps(irreps_out).regroup()
+        self.num_channel = num_channel
+        self.num_elements = num_elements
+        self.radial_basis = radial_basis
+        self._setup()
+
+    @abc.abstractmethod
+    def _setup(self) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def forward(
+        self,
+        edge_feats: torch.Tensor,
+        edge_radial_basis: torch.Tensor,
+        edge_attrs: torch.Tensor | None,
+        edge_cutoff: torch.Tensor,
+        edge_wigner: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
 class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
     _legacy_state_dict_keys = {
         "alpha": "scatter_norm.alpha",

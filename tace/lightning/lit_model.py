@@ -158,14 +158,12 @@ class LightningWrapperModel(L.LightningModule):
             if get_tace_use_dens() == "1":
                 batch = add_gaussian_noise_to_position(batch)
 
-        if "forces" in batch:
-            batch["direct_forces"] = batch["forces"]
-            batch["direct_forces_weight"] = batch["forces_weight"]
-        if "stress" in batch:
-            batch["direct_stress"] = batch["stress"]
-            batch["direct_stress_weight"] = batch["stress_weight"]
-            if "stress_mask" in batch:
-                batch["direct_stress_mask"] = batch["stress_mask"]
+        # if "forces" in batch:
+        #     batch["direct_forces"] = batch["forces"]
+        #     batch["direct_forces_weight"] = batch["forces_weight"]
+        # if "stress" in batch:
+        #     batch["direct_stress"] = batch["stress"]
+        #     batch["direct_stress_weight"] = batch["stress_weight"]
 
         if self.force_dtype is not None:
             batch = batch.apply(

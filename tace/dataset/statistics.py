@@ -24,7 +24,7 @@ def missing_model_statistics(
 ) -> set[str]:
     """Return model-requested statistics missing from any fidelity."""
 
-    required = set()
+    required = {"atomic_energy"} if "energy" in target_property else set()
     scale_shift = model_config.get("scale_shift", {})
     if scale_shift.get("enable") and "energy" in target_property:
         required.update(
@@ -217,14 +217,19 @@ def compute_atomic_energies(
         compositions[fidelity_idx].append(composition)
         energies[fidelity_idx].append(float(atoms.info[energy_key]))
 
+    return fit_atomic_energies(compositions, energies, element.zs)
+
+
+def fit_atomic_energies(compositions, energies, atomic_numbers):
+    """Fit elemental energy offsets from composition counts and total energies."""
     results = {}
-    for fidelity_idx in fidelity_indices:
+    for fidelity_idx in compositions:
         if not compositions[fidelity_idx]:
             logging.warning(
                 "No training structures found for fidelity %s; using atomic energy 0.0",
                 fidelity_idx,
             )
-            results[fidelity_idx] = {z: 0.0 for z in element.zs}
+            results[fidelity_idx] = {z: 0.0 for z in atomic_numbers}
             continue
 
         matrix = np.stack(compositions[fidelity_idx])
@@ -237,7 +242,7 @@ def compute_atomic_energies(
                 "0.0 for every element",
                 fidelity_idx,
             )
-            results[fidelity_idx] = {z: 0.0 for z in element.zs}
+            results[fidelity_idx] = {z: 0.0 for z in atomic_numbers}
             continue
 
         if rank < min(matrix.shape):
@@ -250,9 +255,39 @@ def compute_atomic_energies(
                 min(matrix.shape),
             )
         results[fidelity_idx] = {
-            z: float(solution[idx]) for idx, z in enumerate(element.zs)
+            z: float(solution[idx]) for idx, z in enumerate(atomic_numbers)
         }
     return results
+
+
+def compute_atomic_energies_from_graphs(
+    dataloader,
+    element: TorchElement,
+    fidelity_indices: Sequence[int],
+) -> Dict[int, Dict[int, float]]:
+    """Fit elemental energy offsets from cached training graphs."""
+    fidelity_indices = tuple(dict.fromkeys(int(idx) for idx in fidelity_indices))
+    compositions = {idx: [] for idx in fidelity_indices}
+    energies = {idx: [] for idx in fidelity_indices}
+    for data in dataloader:
+        num_graphs = data.ptr.numel() - 1
+        element_idx = element.z2idx(data["atomic_numbers"])
+        counts = torch.bincount(
+            data.batch * len(element) + element_idx,
+            minlength=num_graphs * len(element),
+        ).reshape(num_graphs, len(element))
+        fidelity = data.get("fidelity_idx")
+        if fidelity is None:
+            fidelity = torch.zeros(num_graphs, dtype=torch.int64)
+        fidelity = fidelity.reshape(-1)
+        energy_weight = data.get("energy_weight")
+        for idx in fidelity_indices:
+            selected = fidelity == idx
+            if energy_weight is not None:
+                selected &= energy_weight.reshape(-1) > 0
+            compositions[idx].extend(counts[selected].numpy())
+            energies[idx].extend(data["energy"].reshape(-1)[selected].double().numpy())
+    return fit_atomic_energies(compositions, energies, element.zs)
 
 
 def _compute_statistics(

@@ -1,0 +1,83 @@
+defaults:
+  - tace@_global_
+  - _self_
+
+misc:
+  project_name: TACE-DirectHessian
+
+dataset:
+  type: ase_db
+  train_file: ${oc.env:HOME}/dataset/HORM/train.db
+  valid_file: ${oc.env:HOME}/dataset/HORM/valid.db
+  #test_files:
+  #  - ${oc.env:HOME}/dataset/HORM/test.db
+  keys:
+    direct_hessian_key: direct_hessian
+  storage_mode: lmdb
+  shard_dirs: [graphCache_energy_forces_direct_hessian]
+  shard_size: 100000
+  avg_graph_size_in_KB: 128
+
+  train_dataloader:
+    batch_size: 256
+
+  valid_dataloader:
+    batch_size: 256
+
+synth_metric: null
+
+callbacks:
+  early_stopping:
+    monitor: val/loss
+  checkpoint_epoch:
+    filename: DirectHessian-{epoch}-{step}
+
+scheduler:
+  extra:
+    monitor: val/loss
+
+loss:
+  loss_property: [energy, forces, direct_hessian]
+  loss_function_name:
+    - mae_energy
+    - mae_forces
+    - mae_direct_hessian
+  loss_property_weights: [1.0, 10.0, 25.0]
+  loss_function_kwargs:
+    - {}
+    - {}
+    - {reduction: component}
+  normalize: false
+
+model:
+  config:
+
+    cutoff: 5.0
+    num_layers: 2
+    num_channel: 64
+    Lmax: 2
+    lmax: 3
+
+    fidelity:
+      - {
+        name: wB97X,
+        atomic_energy: null,
+        magnetic_scale: null,
+      }
+
+    product_basis:
+      type: cgtp
+      correlation: 3
+
+    radial_basis:
+      hidden: [64, 64, 64]
+
+    short_range:
+      zbl: # metal units
+        enable: false    # recommended true
+        trainable: false # recommended always false
+
+    special:
+      direct_hessian:
+        cutoff: 16.0
+        interaction_type: cgtp

@@ -134,7 +134,7 @@ def get_scaled_activation(name: str) -> torch.nn.Module:
     )
 
 
-class MLP(torch.nn.Module):
+class MLPV1(torch.nn.Module):
     def __init__(
         self,
         channels: List[int],
@@ -193,25 +193,6 @@ class MLP(torch.nn.Module):
 
 
 class MLPV2(torch.nn.Module):
-    """Fully connected network with unit-second-moment initialization.
-
-    Linear maps use fan-in scaling. Hidden activations are normalized once
-    for standard normal inputs; the output layer has no activation.
-
-    Parameters
-    ----------
-    channels : list of int
-        Input, hidden and output widths.
-    bias : bool, optional
-        Include zero-initialized biases.
-    act : str or None, optional
-        Hidden activation. ``None`` disables activations.
-    layer_norm : bool, optional
-        Normalize hidden preactivations with LayerNorm.
-    rms_norm : bool, optional
-        Normalize hidden preactivations with RMSNorm instead of LayerNorm.
-    """
-
     def __init__(
         self,
         channels: list[int],
@@ -247,7 +228,7 @@ class MLPV2(torch.nn.Module):
         return self.mlp(x)
 
 
-MLP_TYPES = {
-    "mlp": MLP,
+MLP: dict[str, type[torch.nn.Module]] = {
+    "mlp": MLPV1,
     "mlp_v2": MLPV2,
 }

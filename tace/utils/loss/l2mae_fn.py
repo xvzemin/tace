@@ -9,6 +9,7 @@ import torch
 
 from .common import (
     apply_element_weights,
+    hessian_loss,
     num_atoms_per_graph,
     polarization_error_per_atom,
     tensor_loss,
@@ -97,6 +98,11 @@ def l2mae_direct_forces(
     return torch.mean(
         torch.linalg.vector_norm(pred[key] - label[key], ord=2, dim=-1) * total_weight
     )
+
+
+@register_loss
+def l2mae_direct_hessian(pred, label, reduction="structure"):
+    return hessian_loss(pred, label, "direct_hessian", "l2mae", reduction)
 
 
 @register_loss

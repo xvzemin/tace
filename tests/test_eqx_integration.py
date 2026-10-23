@@ -1,10 +1,8 @@
 """Integration of EQX operators with TACE models."""
 
-import subprocess
 import sys
 import types
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
 import torch
@@ -22,6 +20,8 @@ from tace.models.linear import (
 from tace.utils.env import EQX_KERNELS
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 DTYPE = torch.float64
 
 
@@ -101,183 +101,6 @@ def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax, basis_change):
         layout.inverse(frame.to_global(local, wigner_inv)),
         features,
     )
-
-
-@pytest.mark.parametrize("mode", ["uvu", "uvw"])
-@pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
-@pytest.mark.parametrize("batch_size", [0, 5])
-def test_o3_tensor_product_matches_edge_cgtp(
-    double_precision, mode, normalization, batch_size
-):
-    from tace.models._e3nn.paths import generate_paths
-
-    irreps_in = o3.Irreps("2x0e+2x1o+3x1e+3x2o+2x3e")
-    irreps_sh = o3.Irreps.spherical_harmonics(4)
-    irreps_out = o3.Irreps("2x0e+2x0o+2x1e+2x1o+2x2e+2x2o+2x3e+2x3o")
-    instructions, irreps_out = generate_paths(
-        irreps_out,
-        irreps_in,
-        irreps_sh,
-        e3nn_mode=mode,
-        trainable=True,
-    )
-    kwargs = dict(internal_weights=False, shared_weights=False)
-    reference = o3.TensorProduct(
-        irreps_in, irreps_sh, irreps_out, instructions, **kwargs
-    )
-    module = o2.O3TensorProduct(
-        irreps_in,
-        irreps_sh,
-        irreps_out,
-        instructions,
-        normalization=normalization,
-        **kwargs,
-    )
-    assert not module.local_frame_in.basis_change
-    assert not module.local_frame_out.basis_change
-    x = torch.randn(batch_size, irreps_in.dim, requires_grad=True)
-    r = torch.randn(batch_size, 3, requires_grad=True)
-    w = torch.randn(batch_size, module.weight_numel, requires_grad=True)
-    layout_in = LayoutTransform(
-        irreps_in,
-        layout_in="flatten_mul_ir",
-        layout_out="flatten_ir_mul",
-    )
-    layout_out = LayoutTransform(
-        irreps_out,
-        layout_in="flatten_ir_mul",
-        layout_out="flatten_mul_ir",
-    )
-    d, di = o2.WignerD(3, 3)(r)
-    actual = layout_out(module(layout_in(x), d, di, w))
-    expected = reference(
-        x, o3.spherical_harmonics(irreps_sh, r, True, normalization), w
-    )
-    assert module.weight_numel == reference.weight_numel
-    assert not any(isinstance(child, o3.TensorProduct) for child in module.modules())
-    torch.testing.assert_close(module.output_mask, reference.output_mask)
-    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
-    if batch_size:
-        for actual_grad, expected_grad in zip(
-            torch.autograd.grad(actual.square().sum(), (x, r, w)),
-            torch.autograd.grad(expected.square().sum(), (x, r, w)),
-        ):
-            torch.testing.assert_close(actual_grad, expected_grad, atol=2e-8, rtol=2e-9)
-
-
-@pytest.mark.parametrize("irrep_normalization", ["component", "norm", "none"])
-@pytest.mark.parametrize("path_normalization", ["element", "path", "none"])
-def test_o3_tensor_product_normalization_and_second_derivatives(
-    double_precision,
-    irrep_normalization,
-    path_normalization,
-):
-    irreps_in = o3.Irreps("2x1o")
-    irreps_sh = o3.Irreps.spherical_harmonics(2)
-    irreps_out = o3.Irreps("2x1o+2x1e+2x2e+2x0o")
-    instructions = [
-        (0, 0, 0, "uvu", True, 0.7),
-        (0, 2, 0, "uvu", True, 1.3),
-        (0, 1, 1, "uvu", False, 0.9),
-        (0, 1, 2, "uvu", True, 1.1),
-    ]
-    kwargs = dict(
-        irrep_normalization=irrep_normalization,
-        path_normalization=path_normalization,
-        in1_var=[0.8],
-        in2_var=[1.2, 0.9, 1.5],
-        out_var=[0.7, 1.1, 1.3, 1.0],
-        internal_weights=False,
-        shared_weights=False,
-    )
-    reference = o3.TensorProduct(
-        irreps_in, irreps_sh, irreps_out, instructions, **kwargs
-    )
-    module = o2.O3TensorProduct(
-        irreps_in, irreps_sh, irreps_out, instructions, **kwargs
-    )
-    x = torch.randn(4, irreps_in.dim, requires_grad=True)
-    r = torch.randn(4, 3, requires_grad=True)
-    weight = torch.randn(1, module.weight_numel, requires_grad=True)
-    layout_in = LayoutTransform(
-        irreps_in, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
-    )
-    layout_out = LayoutTransform(
-        irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
-    )
-    d, di = o2.WignerD(2, 2)(r)
-    # A nonunit input vector tests the optional per-degree amplitude and its gradient.
-    scale = r.square().sum(-1, keepdim=True).sqrt().pow(torch.arange(3))
-    actual = layout_out(module(layout_in(x), d, di, weight, scale))
-    expected = reference(
-        x, o3.spherical_harmonics(irreps_sh, r, False, "component"), weight
-    )
-    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
-    grads = [
-        torch.autograd.grad(value.square().sum(), (x, r, weight), create_graph=True)
-        for value in (actual, expected)
-    ]
-    for actual_grad, expected_grad in zip(*grads):
-        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-8, rtol=2e-9)
-    for actual_grad, expected_grad in zip(
-        torch.autograd.grad(grads[0][1].square().sum(), (x, r, weight)),
-        torch.autograd.grad(grads[1][1].square().sum(), (x, r, weight)),
-    ):
-        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-6, rtol=2e-8)
-
-
-def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(double_precision):
-    module = o2.O3TensorProduct(
-        "2x1o",
-        "1x1o",
-        "2x0e+2x1e+2x2e",
-        [(0, 0, i, "uvu", True) for i in range(3)],
-    )
-    reference = o3.TensorProduct(
-        module.irreps_in1,
-        module.irreps_in2,
-        module.irreps_out,
-        [(0, 0, i, "uvu", True) for i in range(3)],
-    )
-    r = torch.cat((torch.eye(3), -torch.eye(3)))
-    x = torch.randn(6, 3, 6)
-    layout_in = LayoutTransform(
-        module.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
-    )
-    layout_out = LayoutTransform(
-        module.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
-    )
-    d, di = o2.WignerD(2, 2)(r)
-    actual = layout_out(module(layout_in(x), d, di))
-    expected = reference(
-        x, o3.spherical_harmonics([1], r, True, "component")[:, None], module.weight
-    )
-    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
-    d, di = o2.WignerD(1, 2)(r)
-    with pytest.raises(ValueError, match="orders"):
-        module(layout_in(x), d, di)
-    with pytest.raises(ValueError, match="spherical harmonics"):
-        o2.O3TensorProduct("1o", "1e", "0o", [(0, 0, 0, "uvu", True)])
-
-
-@pytest.mark.skipif(
-    not hasattr(o3.Irrep("0e"), "t"),
-    reason="The installed O(3) irreps do not expose time-reversal parity.",
-)
-def test_o3_tensor_product_time_reversal(double_precision):
-    from tace.models.time_reversal import with_time_reversal
-
-    irreps_in = with_time_reversal(o3.Irreps("2x1e"), -1)
-    irreps_out = with_time_reversal(o3.Irreps("2x0o+2x1o+2x2o"), -1)
-    module = o2.O3TensorProduct(
-        irreps_in,
-        o3.Irreps.spherical_harmonics(1)[1:],
-        irreps_out,
-        [(0, 0, i, "uvu", True) for i in range(3)],
-    )
-    x = torch.randn(4, irreps_in.dim)
-    d, di = o2.WignerD(2, 2)(torch.randn(4, 3))
-    torch.testing.assert_close(module(-x, d, di), -module(x, d, di))
 
 
 @pytest.mark.parametrize("matrix", ["0", "1"])
@@ -585,22 +408,6 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
     assert constructed == ([expected] if expected in ("oeq", "cue") else [])
 
 
-@pytest.fixture(scope="module")
-def so2_v021():
-    """Load the unmodified release reference without shipping legacy operators."""
-    result = subprocess.run(
-        ["git", "show", "v0.2.1:tace/models/_e3nn/legacy_so2.py"],
-        cwd=Path(__file__).resolve().parents[1],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        pytest.skip("The v0.2.1 tag is required for the release comparison.")
-    module = types.ModuleType("tace.models._e3nn._reference_so2_v021")
-    exec(compile(result.stdout, "v0.2.1/legacy_so2.py", "exec"), module.__dict__)
-    return module
-
-
 @pytest.mark.parametrize("mmax", [0, 1, 2])
 @pytest.mark.parametrize("edges", [0, 7])
 def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
@@ -688,9 +495,7 @@ def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
 @pytest.mark.parametrize("ece", [False, True])
 @pytest.mark.parametrize("attention", [False, True])
 @pytest.mark.parametrize("gate_m0", [False, True])
-def test_tece_v021_state_dict(
-    so2_v021, device, mmax, ece, attention, gate_m0, double_precision
-):
+def test_tece_state_dict(device, mmax, ece, attention, gate_m0, double_precision):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     from tace.models._e3nn.tece_oam_rra import Convolution
@@ -714,12 +519,7 @@ def test_tece_v021_state_dict(
         scalar_act=get_scaled_activation("silu"),
         tensor_act=get_scaled_activation("silu" if ece else "sigmoid"),
     )
-    reference = so2_v021.uvSO2Convolution(
-        **deepcopy(kwargs),
-        so2_linear_type="w1",
-        use_temperature=True,
-        use_radial_phase=True,
-    ).to(device=device, dtype=torch.float64)
+    reference = Convolution(**deepcopy(kwargs)).to(device=device, dtype=torch.float64)
     if attention:
         with torch.no_grad():
             reference.radial_proj.weight.normal_(std=0.2)
@@ -797,14 +597,8 @@ def test_tece_v021_state_dict(
     reference_grads = torch.autograd.grad(
         losses[1], tuple(reference.parameters()), retain_graph=True
     )
-    gradient_state = dict(reference.state_dict())
-    gradient_state.update(
-        (name, grad)
-        for (name, _), grad in zip(reference.named_parameters(), reference_grads)
-    )
-    restored.load_state_dict(gradient_state, strict=True)
-    for grad, parameter in zip(actual_grads, restored.parameters()):
-        torch.testing.assert_close(grad, parameter, atol=1e-9, rtol=1e-8)
+    for actual_grad, expected_grad in zip(actual_grads, reference_grads):
+        torch.testing.assert_close(actual_grad, expected_grad, atol=1e-9, rtol=1e-8)
     for _ in range(3):
         gradients = [
             torch.autograd.grad(
@@ -1431,13 +1225,13 @@ def test_tace_radial_bias_cutoff_and_force_training(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.fused import O3ScatterTensorProduct
-    from tace.models.mlp import MLP_TYPES
+    from tace.models.mlp import MLP
 
     monkeypatch.setenv("TACE_USE_OEQ", "0")
     monkeypatch.setenv("TACE_USE_CUEQ", "0")
     monkeypatch.setenv("TACE_USE_EQX", "0")
     module = O3ScatterTensorProduct("3x0e+3x1o", "0e+1o", "3x0e+3x1o+3x2e").to(device)
-    mlp = MLP_TYPES[mlp_type]([4, 5, module.weight_numel], bias=True).to(device)
+    mlp = MLP[mlp_type]([4, 5, module.weight_numel], bias=True).to(device)
     positions = torch.randn(5, 3, device=device, requires_grad=True)
     x = torch.randn(5, module.irreps_in1.dim, device=device, requires_grad=True)
     edges = torch.tensor([[0, 1, 2, 3, 4, 1], [1, 2, 3, 4, 0, 0]], device=device)

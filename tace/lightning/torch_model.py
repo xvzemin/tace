@@ -24,6 +24,7 @@ def _should_warn_without_aoti(target_property: List[str]) -> bool:
         "direct_virials",
         "noncollinear_magnetic_forces",
         "charges",
+        "direct_hessian",
     }
     return bool(target_property) and set(target_property).issubset(aoti_properties)
 
@@ -77,7 +78,7 @@ def create_model(
         model_config.get("target_property") or target_property
     ):
         logging.warning(
-            "AOTI is not enabled for energy, forces, stress, virials, charges "
+            "AOTI is not enabled for energy, forces, stress, virials, charges, direct_hessian "
             "or noncollinear magnetic forces outputs. \n"
             "For acceleration options, see "
             "https://tace.readthedocs.io/en/latest/guide/acceleration.html"

@@ -17,20 +17,23 @@ from tace.dataset.quantity import (
     get_embedding_property,
     get_need_property,
 )
-from tace.foundations import resolve_model_path, tace_foundations
 from tace.lightning.torch_model import (
     _prune_removed_keys,
     _should_warn_without_aoti,
+    create_model,
 )
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models.compile.aot import (
     TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY,
+    AOTICompiledTensorModel,
     _custom_ops_libs_from_model,
     _embed_custom_ops_libs,
     _ensure_sample_inputs,
     _export_metadata,
     _graph_aoti_input_keys,
+    _graph_dynamic_shapes,
     _import_custom_ops_libs,
+    _size_oblivious_export,
     _synthetic_graph_sample,
 )
 from tace.models.compile.compile import trace_to_fx
@@ -247,147 +250,6 @@ def test_lightning_model_training_precision(dtype, interaction):
     assert trainer.global_step == 2
 
 
-@pytest.fixture
-def foundation_model(tmp_path, monkeypatch, double_precision):
-    import tace.foundations.download_link as downloads
-    from tace.lightning import create_model, export_tace
-
-    config = deepcopy(DEFAULT_MODEL_CONFIG)
-    config.update(
-        num_layers=1, num_channel=2, Lmax=1, lmax=1, cutoff=4.0, max_neighbors=None
-    )
-    config["radial_basis"]["hidden"] = [4]
-    config["readout_emlp"]["hidden"] = [4]
-    config["scale_shift"]["enable"] = False
-    statistics = [
-        {
-            "atomic_numbers": [1],
-            "atomic_energy": {1: 0.0},
-            "avg_num_neighbors": 2.0,
-        }
-    ]
-    model = create_model(config, statistics, ["energy", "forces"], [])
-    path = tmp_path / "download.pt"
-    export_tace(model, str(path))
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    download = Mock(return_value=str(path))
-    monkeypatch.setattr(downloads, "CACHE_DIR", cache)
-    monkeypatch.setattr(downloads, "hf_hub_download", download)
-    return path, download
-
-
-@pytest.mark.parametrize("name", ["TACE-OAM-7M", "TECE-OAM-RRA-1.0"])
-def test_foundation_name_resolution(foundation_model, name):
-    source, download = foundation_model
-    assert name in tace_foundations
-    assert "unknown" not in tace_foundations
-    download.assert_not_called()
-    path = resolve_model_path(name)
-    assert path.name == name + ".pt"
-    assert path.read_bytes() == source.read_bytes()
-    assert resolve_model_path(Path(name)) == path
-    assert resolve_model_path(path) == path
-    download.assert_called_once_with(
-        repo_id="xvzemin/tace-foundations",
-        filename=name + ".pt",
-        revision="main",
-        cache_dir=path.parent,
-    )
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_load_foundation_matches_file(foundation_model, dtype):
-    from tace.lightning import load_tace
-
-    source, download = foundation_model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    reference = load_tace(source, device=device, dtype=dtype).eval()
-    module = load_tace("TACE-OAM-7M", device=device, dtype=dtype).eval()
-    assert module.get_model_dtype() == dtype
-    for name, value in reference.state_dict().items():
-        torch.testing.assert_close(module.state_dict()[name], value, atol=0, rtol=0)
-    data = {
-        key: value.to(
-            device=device, dtype=dtype if value.is_floating_point() else value.dtype
-        )
-        for key, value in _magnetic_embedding_sample().items()
-    }
-    results = [
-        model({key: value.clone() for key, value in data.items()})
-        for model in (reference, module)
-    ]
-    for key in ("energy", "forces"):
-        torch.testing.assert_close(results[0][key], results[1][key])
-    assert load_tace(module, device=device, target_property=["energy"]) is module
-    assert module.get_target_property() == ["energy"]
-    download.assert_called_once()
-
-
-@pytest.mark.parametrize("suffix", [".pt", ".pth", ".PT", ".ckpt", ".pt2"])
-def test_local_model_dispatch(foundation_model, tmp_path, monkeypatch, suffix):
-    import tace.models.compile as compile_model
-    from tace.lightning import load_tace
-    from tace.lightning.lit_model import LightningWrapperModel
-
-    source, download = foundation_model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    reference = load_tace(source, device=device)
-    path = tmp_path / ("TACE-OAM-7M" + suffix)
-    checkpoint = Mock(return_value=reference)
-    aoti = Mock(return_value=reference)
-    monkeypatch.setattr(LightningWrapperModel, "load_from_checkpoint", checkpoint)
-    monkeypatch.setattr(compile_model, "load_aotinductor", aoti)
-    if suffix.lower() in (".pt", ".pth"):
-        path.write_bytes(source.read_bytes())
-    module = load_tace(path, device=device, use_ema=False)
-    assert module.get_model_dtype() == reference.get_model_dtype()
-    assert checkpoint.call_count == (suffix == ".ckpt")
-    assert aoti.call_count == (suffix == ".pt2")
-    if suffix == ".ckpt":
-        checkpoint.assert_called_once_with(
-            path, map_location=device, strict=True, use_ema=False, dtype=None
-        )
-    elif suffix == ".pt2":
-        aoti.assert_called_once_with(path, device)
-    download.assert_not_called()
-
-
-def test_unknown_model_does_not_download(foundation_model, tmp_path):
-    from tace.lightning import load_tace
-
-    _, download = foundation_model
-    for name in ("unknown", "model.bin", str(tmp_path / "TACE-OAM-7M")):
-        with pytest.raises(ValueError, match="registered foundation model"):
-            load_tace(name)
-    with pytest.raises(FileNotFoundError):
-        load_tace(tmp_path / "TACE-OAM-7M.pt")
-    download.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "script,output",
-    [
-        ("export_train", "-state.pt"),
-        ("export_eval", "-state_dict.pt"),
-        ("convert_cgtp", "-converted.pt"),
-    ],
-)
-def test_foundation_cli_exports(
-    foundation_model, monkeypatch, tmp_path, script, output
-):
-    import importlib
-
-    name = "TECE-OAM-RRA-1.0"
-    module = importlib.import_module("tace.scripts." + script)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "argv", [script, "-m", name, "--device", device])
-    module.main()
-    assert (tmp_path / (name + output)).is_file()
-    foundation_model[1].assert_called_once()
-
-
 @pytest.mark.parametrize("path_class", [PurePosixPath, PureWindowsPath])
 def test_foundation_aoti_output_keeps_version(monkeypatch, path_class):
     from tace.scripts import export_eval
@@ -400,32 +262,6 @@ def test_foundation_aoti_output_keeps_version(monkeypatch, path_class):
     assert path_class(
         export_eval._default_aoti_output_path("models/TACE-OAM-7M.pt")
     ) == path_class("models/TACE-OAM-7M.pt2")
-
-
-def test_foundation_ase_and_finetune(foundation_model):
-    from ase import Atoms
-
-    from tace.interface.ase import TACEAseCalc
-    from tace.lightning.lit_model import finetune
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    results = []
-    for model in (foundation_model[0], "TACE-OAM-7M"):
-        atoms = Atoms("H2", positions=[[0, 0, 0], [1, 0.2, 0]], cell=[6, 6, 6])
-        atoms.calc = TACEAseCalc(
-            model, device=device, dtype="float64", neighborlist_backend="ase"
-        )
-        results.append((atoms.get_potential_energy(), atoms.get_forces()))
-    for actual, expected in zip(*results):
-        torch.testing.assert_close(
-            torch.as_tensor(actual), torch.as_tensor(expected), atol=1e-12, rtol=1e-12
-        )
-    model = finetune(
-        {"finetune_from_model": "TACE-OAM-7M", "trainer": {"precision": 64}}
-    )
-    assert model.training
-    assert model.get_model_dtype() == torch.float64
-    foundation_model[1].assert_called_once()
 
 
 @pytest.mark.parametrize("value", [None, "0", "1"])
@@ -541,6 +377,7 @@ def test_model_loading_prunes_removed_architecture_keys():
         (["energy", "forces"], True),
         (["noncollinear_magnetic_forces"], True),
         (["charges"], True),
+        (["direct_hessian"], True),
         (["energy", "dipole"], False),
         (["dipole"], False),
         ([], False),
@@ -551,6 +388,131 @@ def test_should_warn_without_aoti_requires_supported_target_subset(
     expected,
 ):
     assert _should_warn_without_aoti(target_property) is expected
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("interaction_type", ["cgtp", "o2"])
+def test_compile_direct_hessian(dtype, interaction_type):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.set_default_dtype(dtype)
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    targets = ["energy", "forces", "direct_hessian"]
+    config["special"]["direct_hessian"]["interaction_type"] = interaction_type
+    config.update(
+        num_layers=2,
+        num_channel=2,
+        Lmax=2,
+        lmax=2,
+        cutoff=4.0,
+        max_neighbors=None,
+        fidelity=[{"name": "DFT"}],
+        target_property=targets,
+    )
+    config["radial_basis"].update(hidden=[4], apply_cutoff=False)
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    statistics = [
+        dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)
+    ]
+    eager = create_model(config, statistics, targets, []).to(device)
+    model = CompileTensorModel(deepcopy(eager.readout_fn)).to(device)
+    model.readout_fn.compile_backend = "aot_eager"
+    sample = _synthetic_graph_sample(model)
+    sample["pbc"].zero_()
+    expected = eager(dict(sample))
+    actual = model(dict(sample))
+    assert "direct_hessian_pair_index" not in sample
+    assert "direct_hessian_edge_pairs" not in sample
+    assert "direct_hessian_edge_shifts" not in sample
+    for key in targets:
+        torch.testing.assert_close(actual[key], expected[key])
+    expected_grads = torch.autograd.grad(
+        sum(expected[key].square().sum() for key in targets),
+        tuple(eager.parameters()),
+        allow_unused=True,
+    )
+    actual_grads = torch.autograd.grad(
+        sum(actual[key].square().sum() for key in targets),
+        tuple(model.parameters()),
+        allow_unused=True,
+    )
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        if expected_grad is None:
+            assert actual_grad is None
+        else:
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+    model.eval()
+    eager.eval()
+    keys = _graph_aoti_input_keys(model)
+    outputs = model._output_keys()
+    _ensure_sample_inputs(sample, keys, model)
+    flat_model = _FlatE3nnCompileModel(model, keys, outputs)
+    inputs = tuple(sample[key] for key in keys)
+    with _size_oblivious_export():
+        traced = trace_to_fx(flat_model, inputs)
+        exported = torch.export.export(
+            traced,
+            inputs,
+            dynamic_shapes=_graph_dynamic_shapes(keys, num_graphs=2),
+            strict=False,
+            prefer_deferred_runtime_asserts_over_guards=True,
+        )
+    metadata = _export_metadata(model, keys, outputs)
+    loaded = AOTICompiledTensorModel(exported.module(), metadata, device)
+    sample.pop("direct_hessian_pair_index")
+    sample.pop("direct_hessian_edge_pairs")
+    sample.pop("direct_hessian_edge_shifts")
+    original_positions = sample["positions"].clone()
+    for distance in (1.0, model.readout_fn.pair_representation.cutoff + 1):
+        sample["positions"] = original_positions * distance
+        expected = eager(dict(sample))
+        actual = loaded(dict(sample))
+        for key in targets:
+            torch.testing.assert_close(actual[key], expected[key])
+        assert "direct_hessian_pair_index" not in sample
+        assert "direct_hessian_edge_pairs" not in sample
+        assert actual["direct_hessian"].shape == (8, 3, 3)
+        if distance > 1:
+            assert not actual["direct_hessian"][[1, 2, 5, 6]].any()
+
+    isolated = {key: value[:2] for key, value in sample.items()}
+    isolated["ptr"] = sample["ptr"].new_tensor([0, 1, 2])
+    isolated["batch"] = sample["batch"].new_tensor([0, 1])
+    isolated["edge_index"] = sample["edge_index"][:, :0]
+    isolated["edge_shifts"] = sample["edge_shifts"][:0]
+    expected = eager(dict(isolated))
+    actual = loaded(dict(isolated))
+    for key in targets:
+        torch.testing.assert_close(actual[key], expected[key])
+    assert actual["direct_hessian"].shape == (2, 3, 3)
+    isolated = {key: value[:1] for key, value in isolated.items()}
+    isolated["ptr"] = sample["ptr"].new_tensor([0, 1])
+    isolated["edge_index"] = sample["edge_index"][:, :0]
+    with pytest.raises(ValueError, match="at least two atoms"):
+        loaded(isolated)
+
+    sample["positions"] = original_positions
+    sample["lattice"][0] = sample["lattice"].new_tensor(
+        [[12, 0, 0], [2, 14, 0], [1, 2, 16]]
+    )
+    sample["pbc"][0, 0] = True
+    expected = eager(dict(sample))
+    for module in (model, loaded):
+        actual = module(dict(sample))
+        for key in targets:
+            torch.testing.assert_close(actual[key], expected[key])
+    # Moving one atom by a lattice vector must leave all predictions unchanged.
+    sample["positions"] = original_positions.clone()
+    sample["positions"][1] += sample["lattice"][0, 0]
+    sample["edge_shifts"][:2, 0] = sample["edge_shifts"].new_tensor([-1, 1])
+    for module in (eager, model, loaded):
+        actual = module(dict(sample))
+        for key in targets:
+            torch.testing.assert_close(actual[key], expected[key])
+
+    model.reset_target_property(["direct_hessian"])
+    assert model._output_keys() == ("direct_hessian",)
 
 
 class _MagneticEmbeddingReadout(torch.nn.Module):

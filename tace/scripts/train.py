@@ -13,7 +13,7 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from tace.dataset.dataloader import build_atomsList, compute_statistics
-from tace.dataset.datamodule import build_datamodule
+from tace.dataset.datamodule import build_datamodule, load_cached_datamodule
 from tace.dataset.quantity import (
     KEYS,
     KeySpecification,
@@ -111,19 +111,23 @@ def build(cfg: DictConfig):
                 atomic_numbers = statistics[0]["atomic_numbers"]
         if statistics is None:
             logging.info("Computing statistics information from scratch")
-            element, threeAtomsList, atomic_energies = build_atomsList(
+            datamodule = load_cached_datamodule(
                 cfg, target_property, embedding_property, keyspec
             )
-            atomic_numbers = element.zs
-            datamodule = build_datamodule(
-                cfg,
-                atomic_numbers,
-                target_property,
-                embedding_property,
-                keyspec,
-                threeAtomsList,
+            element, threeAtomsList, atomic_energies = build_atomsList(
+                cfg, target_property, embedding_property, keyspec, datamodule=datamodule
             )
-            datamodule.setup("fit")
+            atomic_numbers = element.zs
+            if datamodule is None:
+                datamodule = build_datamodule(
+                    cfg,
+                    atomic_numbers,
+                    target_property,
+                    embedding_property,
+                    keyspec,
+                    threeAtomsList,
+                )
+                datamodule.setup("fit")
             statistics = compute_statistics(
                 cfg,
                 target_property,

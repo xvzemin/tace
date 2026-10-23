@@ -25,6 +25,7 @@ class CompileTensorModel(TensorModel):
             "direct_virials",
             "noncollinear_magnetic_forces",
             "charges",
+            "direct_hessian",
         }
     )
 
@@ -70,6 +71,7 @@ class CompileTensorModel(TensorModel):
     def _compiled_forward(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, Union[torch.Tensor, None]]:
+        data = self.prepare_property_data(data)
         input_keys = self._input_keys(data)
         output_keys = self._output_keys()
         cache_key = (self.training, input_keys, output_keys)
@@ -119,6 +121,7 @@ class CompileTensorModel(TensorModel):
             "direct_stress": None,
             "noncollinear_magnetic_forces": None,
             "charges": None,
+            "direct_hessian": None,
         }
         result.update(zip(output_keys, outputs))
         return result
@@ -141,6 +144,14 @@ class CompileTensorModel(TensorModel):
             required.append("initial_noncollinear_magmoms")
         if self._requires_total_charge():
             required.append("total_charge")
+        if "direct_hessian" in self.get_target_property():
+            required.extend(
+                [
+                    "direct_hessian_pair_index",
+                    "direct_hessian_edge_pairs",
+                    "direct_hessian_edge_shifts",
+                ]
+            )
         missing = [key for key in required if key not in data]
         if missing:
             raise KeyError(f"missing e3nn compile inputs: {missing}")
@@ -163,6 +174,8 @@ class CompileTensorModel(TensorModel):
             keys.append("noncollinear_magnetic_forces")
         if "charges" in target_property:
             keys.append("charges")
+        if "direct_hessian" in target_property:
+            keys.append("direct_hessian")
         return tuple(keys)
 
     def _requires_noncollinear_magmoms(self) -> bool:
@@ -191,7 +204,7 @@ class CompileTensorModel(TensorModel):
             raise ValueError(
                 "TACE_USE_COMPILE only supports energy, direct_forces, "
                 "direct_stress, direct_virials, forces, stress, virials and "
-                "noncollinear_magnetic_forces, and charges; "
+                "noncollinear_magnetic_forces, charges, and direct_hessian; "
                 f"got {sorted(invalid)}"
             )
         if {

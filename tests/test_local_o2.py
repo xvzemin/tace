@@ -22,7 +22,7 @@ from tace.models._e3nn.o2 import (
     O2ScatterMagneticTensorProduct,
     UvO2ScatterTensorProduct,
 )
-from tace.models._e3nn.representation import Representation
+from tace.models._e3nn.representation import NodeRepresentation
 from tace.models.layout import LayoutTransform
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -54,7 +54,7 @@ def test_element2_projects_nodes_before_gather(
         edge_embedding_channel=6,
         bias=bias,
     ).to(device=device, dtype=DTYPE)
-    mlp = MLP([14, *hidden, 3], bias=bias).to(device=device, dtype=DTYPE)
+    mlp = MLP["mlp"]([14, *hidden, 3], bias=bias).to(device=device, dtype=DTYPE)
     if lora:
         enable_lora(mlp.mlp[0], r=2, freeze_base=False)
         with torch.no_grad():
@@ -501,7 +501,7 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax, interaction)
     config["product_basis"]["type"] = ["cgtp"]
     config["product_basis"]["correlation"] = [2]
 
-    representation = Representation(
+    representation = NodeRepresentation(
         num_layers=1,
         atomic_numbers=[1],
         cutoff=3.0,
@@ -575,7 +575,7 @@ def test_magnetic_info_is_independent_per_interaction(
     config["product_basis"]["type"] = ["cgtp", "cgtp"]
     config["product_basis"]["correlation"] = [2, 2]
 
-    representation = Representation(
+    representation = NodeRepresentation(
         num_layers=2,
         atomic_numbers=[26],
         cutoff=3.0,

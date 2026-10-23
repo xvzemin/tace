@@ -13,7 +13,7 @@ from tace.utils.env import acceleration_enabled
 from ..lammps import Graph
 from ..layout import LayoutTransform
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
-from ..mlp import ACTIVATION, MLP, MLP_TYPES, get_scaled_activation
+from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction, _to_possible_tp_irreps
 from .fused import (
     O2ScatterTensorProduct,
@@ -98,7 +98,7 @@ class O3CgtpInteraction(Interaction):
                 if self.radial_mlp_type == "mlp" and self.radial_layer_norm
                 else None
             )
-        self.edge_info = MLP_TYPES[self.radial_mlp_type](
+        self.edge_info = MLP[self.radial_mlp_type](
             [self.edge_feats_channel]
             + self.radial_mlp
             + [self.rejector.weight_numel],
@@ -816,12 +816,12 @@ class O2MagneticInteraction(UvO2Interaction):
             + self.radial_mlp
             + [self.magnetic_linear.weight_numel]
         )
-        self.source_magnetic_info = MLP(
+        self.source_magnetic_info = MLP["mlp"](
             magnetic_info_channels,
             bias=self.radial_bias,
             act="silu",
         )
-        self.target_magnetic_info = MLP(
+        self.target_magnetic_info = MLP["mlp"](
             magnetic_info_channels,
             bias=self.radial_bias,
             act="silu",

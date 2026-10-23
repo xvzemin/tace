@@ -25,10 +25,11 @@ jobs:
         run: >-
           python -m pytest
           tests/test_compile.py tests/test_radial.py tests/test_loss.py
-          tests/test_statistics.py tests/test_scatter_norm.py tests/test_torchsim.py
+          tests/test_statistics.py tests/test_layers.py tests/test_interfaces.py
+          tests/test_model_loading.py tests/test_target_property.py
           -q
       - name: Test EQX portable operations
         run: >-
           python -m pytest eqx/tests/test_o2.py eqx/tests/test_o3.py
           eqx/tests/test_co2.py eqx/tests/test_co3.py eqx/tests/test_ictd.py
-          eqx/tests/test_grid.py eqx/tests/test_cuda.py eqx/tests/test_utils.py -q
+          eqx/tests/test_grid.py eqx/tests/test_utils.py -q

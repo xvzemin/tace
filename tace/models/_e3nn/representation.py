@@ -12,12 +12,13 @@ from e3nn import o3
 from eqx import co3, o2
 
 from ...dataset.quantity import PROPERTY
-from ...utils.env import get_tace_use_dens
+from ...utils.env import acceleration_enabled, get_tace_use_dens
 from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
 from .edge import EDGE_EMBEDDING, EDGE_UPDATE
+from .edge_inter import EDGE_INTERACTION
 from .inter import (
     INTERACTION,
     O2CgtpInteraction,
@@ -39,7 +40,7 @@ from .prod import PRODUCT, BilinearMoEACE, CgtpACE
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
 
-class Representation(torch.nn.Module):
+class NodeRepresentation(torch.nn.Module):
     def __init__(
         self,
         num_layers: int,
@@ -699,3 +700,109 @@ class Representation(torch.nn.Module):
             unexpected_keys,
             error_msgs,
         )
+
+
+class PairRepresentation(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps | str,
+        irreps_sh: o3.Irreps | str,
+        irreps_out: o3.Irreps | str,
+        num_channel: int,
+        atomic_numbers: list[int],
+        cutoff: float,
+        radial_basis: dict,
+        interaction_type: str = "cgtp",
+    ) -> None:
+        super().__init__()
+        self.num_layers = 1
+        if cutoff <= 0:
+            raise ValueError("Edge cutoff must be positive.")
+        self.cutoff = float(cutoff)
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.atomic_numbers = list(atomic_numbers)
+        self.radial_basis = RadialBasis(
+            cutoff=cutoff,
+            num_basis=radial_basis["num_radial_basis"],
+            cutoff_fn=radial_basis["cutoff_fn"],
+            polynomial_cutoff=radial_basis["polynomial_cutoff"],
+            radial_basis=radial_basis["radial_basis"],
+            distance_transform=radial_basis["distance_transform"],
+            trainable=radial_basis["trainable"],
+            apply_cutoff=False,
+            gaussian_width=radial_basis["gaussian_width"],
+        )
+        if interaction_type not in EDGE_INTERACTION:
+            raise ValueError("interaction_type must be 'cgtp' or 'o2'.")
+        self.interactions = torch.nn.ModuleList()
+        edge_irreps = self.irreps_in + self.irreps_in
+        for _ in range(self.num_layers):
+            interaction = EDGE_INTERACTION[interaction_type](
+                edge_irreps,
+                irreps_sh,
+                irreps_out,
+                num_channel,
+                len(atomic_numbers),
+                radial_basis,
+            )
+            self.interactions.append(interaction)
+            edge_irreps = interaction.irreps_out
+        self.irreps_out = edge_irreps
+        self.o3_angular_basis = None
+        self.o2_angular_basis = None
+        if interaction_type == "cgtp":
+            self.o3_angular_basis = o3.SphericalHarmonics(
+                irreps_sh, normalize=True, normalization="component"
+            )
+        else:
+            lmax = max(self.irreps_in.lmax, self.irreps_out.lmax)
+            self.o2_angular_basis = o2.WignerD(
+                lmax,
+                lmax,
+                method="auto"
+                if acceleration_enabled("eqx", kernel="conv")
+                else "recursive",
+            )
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs: torch.Tensor,
+        positions: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_shifts: torch.Tensor,
+        lattice: torch.Tensor,
+        batch: torch.Tensor,
+    ) -> torch.Tensor:
+        source, target = edge_index
+        edge_vector = (
+            positions[target]
+            - positions[source]
+            + torch.einsum("ei,eij->ej", edge_shifts, lattice[batch[source]])
+        )
+        edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
+        atomic_numbers = torch.tensor(
+            self.atomic_numbers, dtype=torch.int64, device=edge_vector.device
+        )
+        edge_radial_basis, edge_cutoff = self.radial_basis(
+            edge_length, node_attrs, edge_index, atomic_numbers
+        )
+        edge_attrs = (
+            self.o3_angular_basis(edge_vector)
+            if self.o3_angular_basis is not None
+            else None
+        )
+        edge_wigner = (
+            self.o2_angular_basis.forward_packed(edge_vector)
+            if self.o2_angular_basis is not None
+            else None
+        )
+        edge_feats = torch.cat((node_feats[source], node_feats[target]), dim=-1)
+        edge_radial_basis = torch.cat(
+            (edge_radial_basis, node_attrs[source], node_attrs[target]), dim=-1
+        )
+        for interaction in self.interactions:
+            edge_feats = interaction(
+                edge_feats, edge_radial_basis, edge_attrs, edge_cutoff, edge_wigner
+            )
+        return edge_feats

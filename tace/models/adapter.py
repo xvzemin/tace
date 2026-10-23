@@ -9,13 +9,15 @@ import torch
 from torch import Tensor
 
 from tace.dataset.element import TorchElement
+from tace.dataset.quantity import PROPERTY, ComputeFlag
+from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
 
-from ..dataset.quantity import PROPERTY, ComputeFlag
 from .lammps import Graph
 from .utils import (
     compute_atomic_virials_stresses,
     compute_hessians_vmap,
     compute_symmetric_displacement,
+    prepare_direct_hessian_inputs,
     stress_from_virials,
 )
 
@@ -32,6 +34,7 @@ class TensorModel(torch.nn.Module):
     def forward(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, Union[torch.Tensor, None]]:
+        data = self.prepare_property_data(data)
         graph = self.prepare_graph(data)
         RESULTS = self.readout_fn(data, graph)
         FIRST = self.first_derivative_fn(data, graph, RESULTS)
@@ -39,6 +42,16 @@ class TensorModel(torch.nn.Module):
         OUT = {**RESULTS, **FIRST, **SECOND}
         # return self.denorm(OUT)
         return OUT
+
+    def prepare_property_data(
+        self, data: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """Prepare additional graph inputs required by the target properties."""
+        if "direct_hessian" in self.get_target_property() and not self.lmp:
+            data = prepare_direct_hessian_inputs(
+                data, self.readout_fn.pair_representation.cutoff
+            )
+        return data
 
     def denorm(
         self, out: Dict[str, Union[torch.Tensor, None]]
@@ -266,7 +279,13 @@ class TensorModel(torch.nn.Module):
 
         # Sampled Hessian training is disabled, only allow eval.
         if self.flags.compute_hessian:
-            HESSIAN = compute_hessians_vmap(forces, graph.positions)
+            num_atoms = graph.positions.shape[0]
+            gradient = compute_hessians_vmap(forces, graph.positions)
+            blocks = shape_fn_for_hessian(
+                gradient.reshape(3 * num_atoms, 3 * num_atoms), num_atoms
+            )
+            source, target = hessian_pair_indices(data["ptr"])
+            HESSIAN = blocks.reshape(num_atoms, num_atoms, 3, 3)[source, target]
 
         return {
             "hessian": HESSIAN,
@@ -378,13 +397,12 @@ class TensorModel(torch.nn.Module):
     def get_embedding_property(self) -> list[str]:
         embedding_property = set(self.readout_fn.embedding_property)
         for target in self.get_target_property():
-            required = PROPERTY[target]["must_be_with"] + PROPERTY[target][
-                "requires_grad_with"
-            ]
+            required = (
+                PROPERTY[target]["must_be_with"]
+                + PROPERTY[target]["requires_grad_with"]
+            )
             embedding_property.update(
-                p
-                for p in required
-                if p in PROPERTY and PROPERTY[p]["enable_embedding"]
+                p for p in required if p in PROPERTY and PROPERTY[p]["enable_embedding"]
             )
         atomic_basis = getattr(self.readout_fn, "model_config", {}).get(
             "atomic_basis", {}
@@ -393,8 +411,7 @@ class TensorModel(torch.nn.Module):
         if isinstance(atomic_basis_type, str):
             atomic_basis_type = [atomic_basis_type]
         if atomic_basis_type is not None and any(
-            interaction == "o2_mag"
-            for interaction in atomic_basis_type
+            interaction == "o2_mag" for interaction in atomic_basis_type
         ):
             embedding_property.add("initial_noncollinear_magmoms")
         return list(embedding_property)

@@ -16,6 +16,7 @@ import torch
 
 from tace.dataset.element import TorchElement
 
+from ..utils import prepare_direct_hessian_inputs
 from .compile import trace_to_fx
 from .wrapper import (
     CompileTensorModel,
@@ -73,6 +74,11 @@ class AOTICompiledTensorModel(torch.nn.Module):
             int(z) for z in _metadata_json(metadata, "tace_atomic_numbers")
         ]
         self.cutoff = float(metadata["tace_cutoff"])
+        self.direct_hessian_cutoff = (
+            float(metadata["tace_direct_hessian_cutoff"])
+            if "direct_hessian" in self.exported_target_property
+            else None
+        )
         self.max_neighbors = _metadata_json(metadata, "tace_max_neighbors")
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
         self.model_dtype = _dtype_from_name(metadata["tace_dtype"])
@@ -83,7 +89,14 @@ class AOTICompiledTensorModel(torch.nn.Module):
     def forward(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, Union[torch.Tensor, None]]:
-        data = _canonicalize_inputs(data, self.input_keys, self.fidelity_idx)
+        data = _canonicalize_inputs(
+            data, self.input_keys, self.fidelity_idx, self.direct_hessian_cutoff
+        )
+        if self.direct_hessian_cutoff is not None and data["positions"].size(0) < 2:
+            raise ValueError(
+                "Direct Hessian AOTI inference requires at least two atoms per batch. "
+                "Use the PyTorch model for a single isolated atom."
+            )
         missing = [key for key in self.input_keys if key not in data]
         if missing:
             raise KeyError(f"missing TACE graph .pt2 inputs: {missing}")
@@ -101,6 +114,7 @@ class AOTICompiledTensorModel(torch.nn.Module):
             "direct_stress": None,
             "noncollinear_magnetic_forces": None,
             "charges": None,
+            "direct_hessian": None,
         }
         result.update(zip(self.output_keys, outputs))
         return result
@@ -463,6 +477,12 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
         )
     if model._requires_total_charge():
         sample["total_charge"] = torch.zeros(2, dtype=dtype, device=device)
+    if "direct_hessian" in model.get_target_property():
+        # Keep both readout and backbone edges present in the tracing sample.
+        distance = 0.5 * min(
+            model.get_cutoff(), model.readout_fn.pair_representation.cutoff
+        )
+        sample["positions"][[1, 3], 0] = distance
     return sample
 
 
@@ -508,12 +528,6 @@ def _ensure_sample_inputs(
     input_keys: Sequence[str],
     model: CompileTensorModel,
 ) -> None:
-    sample_data.update(
-        _canonicalize_inputs(sample_data, input_keys, model.get_fidelity_idx())
-    )
-    missing = [key for key in input_keys if key not in sample_data]
-    if missing:
-        raise KeyError(f"missing TACE graph .pt2 sample inputs: {missing}")
     device = next(model.parameters()).device
     dtype = model.get_model_dtype()
     for key, value in list(sample_data.items()):
@@ -523,6 +537,17 @@ def _ensure_sample_inputs(
             sample_data[key] = value.to(device=device, dtype=dtype)
         else:
             sample_data[key] = value.to(device=device)
+    cutoff = (
+        model.readout_fn.pair_representation.cutoff
+        if "direct_hessian_edge_pairs" in input_keys
+        else None
+    )
+    sample_data.update(
+        _canonicalize_inputs(sample_data, input_keys, model.get_fidelity_idx(), cutoff)
+    )
+    missing = [key for key in input_keys if key not in sample_data]
+    if missing:
+        raise KeyError(f"missing TACE graph .pt2 sample inputs: {missing}")
 
 
 def _graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
@@ -531,6 +556,14 @@ def _graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
         keys.append("initial_noncollinear_magmoms")
     if model._requires_total_charge():
         keys.append("total_charge")
+    if "direct_hessian" in model.get_target_property():
+        keys.extend(
+            [
+                "direct_hessian_pair_index",
+                "direct_hessian_edge_pairs",
+                "direct_hessian_edge_shifts",
+            ]
+        )
     return tuple(keys)
 
 
@@ -538,8 +571,10 @@ def _graph_dynamic_shapes(
     input_keys: Sequence[str],
     num_graphs: int,
 ) -> tuple[Dict[int, object], ...]:
+    direct_hessian = "direct_hessian_edge_pairs" in input_keys
     num_nodes = torch.export.Dim("num_nodes", min=2)
-    num_edges = torch.export.Dim("num_edges", min=1)
+    num_edges = torch.export.Dim("num_edges", min=0 if direct_hessian else 1)
+    num_hessian_edges = torch.export.Dim("num_hessian_edges", min=0)
     num_graphs_dim = torch.export.Dim("num_graphs", min=1) if num_graphs != 1 else None
     shapes = {
         "positions": {0: num_nodes},
@@ -553,6 +588,9 @@ def _graph_dynamic_shapes(
         "fidelity_idx": {} if num_graphs_dim is None else {0: num_graphs_dim},
         "initial_noncollinear_magmoms": {0: num_nodes},
         "total_charge": {} if num_graphs_dim is None else {0: num_graphs_dim},
+        "direct_hessian_pair_index": {1: torch.export.Dim("num_pairs", min=1)},
+        "direct_hessian_edge_pairs": {0: num_hessian_edges},
+        "direct_hessian_edge_shifts": {0: num_hessian_edges},
     }
     return tuple(shapes[key] for key in input_keys)
 
@@ -610,6 +648,10 @@ def _export_metadata(
     }
     if export_num_graphs is not None:
         metadata["tace_export_num_graphs"] = str(export_num_graphs)
+    if "direct_hessian" in model.get_target_property():
+        metadata["tace_direct_hessian_cutoff"] = str(
+            model.readout_fn.pair_representation.cutoff
+        )
     return metadata
 
 
@@ -652,8 +694,11 @@ def _canonicalize_inputs(
     data: Dict[str, torch.Tensor],
     input_keys: Sequence[str],
     fidelity_idx: int,
+    direct_hessian_cutoff=None,
 ) -> Dict[str, torch.Tensor]:
     data = _as_tensor_dict(data)
+    if direct_hessian_cutoff is not None:
+        data = prepare_direct_hessian_inputs(data, direct_hessian_cutoff)
     if "fidelity_idx" in input_keys and "fidelity_idx" not in data:
         if "ptr" not in data:
             raise KeyError("missing TACE graph .pt2 inputs: ['ptr']")

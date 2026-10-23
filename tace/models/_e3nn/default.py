@@ -10,7 +10,7 @@ from numbers import Real
 from typing import Any
 
 from ...dataset.quantity import PROPERTY
-from ..mlp import MLP_TYPES
+from ..mlp import MLP
 
 DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
@@ -143,6 +143,10 @@ DEFAULT_MODEL_CONFIG = {
         },
     },
     "special": {
+        "direct_hessian": {
+            "cutoff": 16.0,
+            "interaction_type": "cgtp",
+        },
         "charges": {
             "method": "lagrangian",
         },
@@ -211,7 +215,7 @@ def check_model_config(cfg: dict[str, Any]):
     cfg = recursive_update(cfg)
 
     radial = cfg["radial_basis"]
-    if radial["mlp_type"] not in MLP_TYPES:
+    if radial["mlp_type"] not in MLP:
         raise ValueError("radial_basis.mlp_type must be 'mlp' or 'mlp_v2'.")
     if radial["mlp_norm"] not in (None, "layer_norm", "rms_norm"):
         raise ValueError(

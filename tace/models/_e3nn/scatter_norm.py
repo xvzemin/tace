@@ -118,7 +118,7 @@ class DensityScatterNorm(ScatterNorm):
         super().__init__(
             avg_num_neighbors, edge_feats_channel, radial_bias, radial_layer_norm
         )
-        self.edge_density = MLP(
+        self.edge_density = MLP["mlp"](
             [edge_feats_channel, 64, 1],
             bias=radial_bias,
             layer_norm=radial_layer_norm,
