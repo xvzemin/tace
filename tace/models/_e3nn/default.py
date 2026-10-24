@@ -19,6 +19,7 @@ DEFAULT_MODEL_CONFIG = {
     "parity": None,
     "num_channel": 64,
     "num_layers": 2,
+    "mlp_type": "mlp_v1",
     "target_property": ["energy", "forces"],
     "embedding_property": [],
     "fidelity": {
@@ -49,7 +50,6 @@ DEFAULT_MODEL_CONFIG = {
         "trainable": False,
         "apply_cutoff": True,
         "hidden": [64, 64, 64],
-        "mlp_type": "mlp",
         "mlp_norm": None,
         "gaussian_width": 2.0,
     },
@@ -214,9 +214,11 @@ def check_model_config(cfg: dict[str, Any]):
     # Update default config with user config
     cfg = recursive_update(cfg)
 
+    if cfg["mlp_type"] not in MLP:
+        raise ValueError("mlp_type must be 'mlp_v1' or 'mlp_v2'.")
     radial = cfg["radial_basis"]
-    if radial["mlp_type"] not in MLP:
-        raise ValueError("radial_basis.mlp_type must be 'mlp' or 'mlp_v2'.")
+    if "mlp_type" in radial:
+        raise ValueError("Set model.config.mlp_type instead of radial_basis.mlp_type.")
     if radial["mlp_norm"] not in (None, "layer_norm", "rms_norm"):
         raise ValueError(
             "radial_basis.mlp_norm must be null, 'layer_norm' or 'rms_norm'."

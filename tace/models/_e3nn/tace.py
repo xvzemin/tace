@@ -61,6 +61,7 @@ class e3nnTACE(torch.nn.Module):
         dropout: Dict = {},
         embedding_property=[],
         atomic_numbers=None,
+        mlp_type: str = "mlp_v1",
         **kwargs,
     ):
         cfg = {
@@ -131,6 +132,7 @@ class e3nnTACE(torch.nn.Module):
             Lmax=cfg["Lmax"],
             lmax=cfg["lmax"],
             num_channel=cfg["num_channel"],
+            mlp_type=cfg["mlp_type"],
             node_embedding=cfg["node_embedding"],
             edge_embedding=cfg["edge_embedding"],
             edge_update=cfg["edge_update"],
@@ -172,6 +174,7 @@ class e3nnTACE(torch.nn.Module):
                 cfg["special"]["direct_hessian"]["cutoff"],
                 cfg["radial_basis"],
                 interaction_type=cfg["special"]["direct_hessian"]["interaction_type"],
+                mlp_type=cfg["mlp_type"],
             )
 
         # === Readout ===

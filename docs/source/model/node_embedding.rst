@@ -40,8 +40,9 @@ same output layout:
      - Inverse Wigner rotation of local scalars
      - Radial basis and both element embeddings
 
-The radial network uses ``radial_basis.hidden``, ``mlp_type`` and ``mlp_norm``,
-as described in :ref:`radial-mlp`. With ``mlp`` and unspecified normalization,
+The radial network uses ``radial_basis.hidden``, ``radial_basis.mlp_norm`` and
+the top-level model option ``mlp_type``, as described in :ref:`radial-mlp`.
+With ``mlp_v1`` and unspecified normalization,
 LayerNorm is applied when the input width differs from the radial basis width.
 ``mlp_v2`` does not apply normalization unless explicitly requested. An empty
 hidden list gives a linear projection without normalization or activation.

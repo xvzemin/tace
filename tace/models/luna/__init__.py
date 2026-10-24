@@ -1,6 +1,6 @@
-from ._tp_scatter import e3nnLunaScatterTensorProduct, register_luna_ops
+from ._tp_scatter import LunaTensorProductConv, register_luna_ops
 
 __all__ = [
-    "e3nnLunaScatterTensorProduct",
+    "LunaTensorProductConv",
     "register_luna_ops",
 ]

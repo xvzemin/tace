@@ -18,7 +18,7 @@ from tace.models._e3nn.paths import (
 )
 from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
 from tace.models._e3nn.wigner6j import (
-    O3Wigner6jScatterTensorProduct,
+    O3Wigner6jTensorProductConv,
     wigner_6j,
 )
 from tace.models.eqt.equitorch.nn import TensorProduct
@@ -777,7 +777,7 @@ def _build_tensor_product(*, parity=True):
         irreps_node_feats = o3.Irreps("2x0e + 2x1o + 2x2e")
         irreps_out = irreps_node_feats
         extra_irreps = irreps_edge_attrs
-    module = O3Wigner6jScatterTensorProduct(
+    module = O3Wigner6jTensorProductConv(
         irreps_node_feats,
         irreps_edge_attrs,
         irreps_out,
@@ -940,7 +940,7 @@ def test_wigner6j_matches_reference_gradients_and_o3(improper):
 def test_wigner6j_repeated_irreps_remain_independent():
     torch.manual_seed(1)
     torch.set_default_dtype(torch.float64)
-    module = O3Wigner6jScatterTensorProduct(
+    module = O3Wigner6jTensorProductConv(
         "2x1o + 3x1o",
         "0e + 1o",
         "0o + 1e + 1o + 2e + 2o",
@@ -961,7 +961,7 @@ def test_wigner6j_repeated_irreps_remain_independent():
 
 @pytest.mark.parametrize("method", ["forward", "forward_reference"])
 def test_wigner6j_requires_edge_weights(method):
-    module = O3Wigner6jScatterTensorProduct(
+    module = O3Wigner6jTensorProductConv(
         "2x0e", "0e", "0e", "0e", register_reference=True
     ).to(DEVICE)
     inputs = list(_random_inputs(module, num_nodes=3, num_edges=5))
@@ -971,7 +971,7 @@ def test_wigner6j_requires_edge_weights(method):
 
 
 def test_wigner6j_export_preserves_split_inputs():
-    module = O3Wigner6jScatterTensorProduct(
+    module = O3Wigner6jTensorProductConv(
         "2x0e + 2x1o",
         "0e + 1o",
         "0e + 1o",
@@ -990,7 +990,7 @@ def test_wigner6j_export_preserves_split_inputs():
 
 @pytest.mark.parametrize("num_nodes", [0, 3])
 def test_wigner6j_empty_edges(num_nodes):
-    module = O3Wigner6jScatterTensorProduct(
+    module = O3Wigner6jTensorProductConv(
         "2x0e + 2x1o",
         "0e + 1o",
         "0e + 1o",
@@ -1090,7 +1090,7 @@ def test_wigner6j_matches_reference_and_time_reversal():
         )
         * 2
     ).regroup()
-    tensor_product = O3Wigner6jScatterTensorProduct(
+    tensor_product = O3Wigner6jTensorProductConv(
         node_irreps,
         edge_irreps,
         output_irreps,
@@ -1168,7 +1168,7 @@ def test_time_reversal_wigner6j_rejects_scatter_acceleration(
         monkeypatch.delenv(variable, raising=False)
     monkeypatch.setenv(environment, "1")
     with pytest.raises(ValueError, match=f"{kernel} does not support"):
-        O3Wigner6jScatterTensorProduct(
+        O3Wigner6jTensorProductConv(
             o3.Irreps("2x0ee + 2x1eo"),
             spherical_harmonics_irreps(1, p=-1),
             o3.Irreps("2x0ee + 2x1eo"),

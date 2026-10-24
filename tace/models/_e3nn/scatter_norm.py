@@ -26,6 +26,8 @@ class ScatterNorm(torch.nn.Module):
         Include biases in the density network.
     radial_layer_norm : bool, optional
         Apply layer normalization in the density network.
+    mlp_type : {"mlp_v1", "mlp_v2"}, optional
+        Density network implementation.
     """
 
     def __init__(
@@ -34,12 +36,14 @@ class ScatterNorm(torch.nn.Module):
         edge_feats_channel: int,
         radial_bias: bool = False,
         radial_layer_norm: bool = False,
+        mlp_type: str = "mlp_v1",
     ) -> None:
         super().__init__()
         self.avg_num_neighbors = avg_num_neighbors
         self.edge_feats_channel = edge_feats_channel
         self.radial_bias = radial_bias
         self.radial_layer_norm = radial_layer_norm
+        self.mlp_type = mlp_type
 
     @abc.abstractmethod
     def forward(
@@ -114,11 +118,16 @@ class DensityScatterNorm(ScatterNorm):
         edge_feats_channel: int,
         radial_bias: bool = False,
         radial_layer_norm: bool = False,
+        mlp_type: str = "mlp_v1",
     ) -> None:
         super().__init__(
-            avg_num_neighbors, edge_feats_channel, radial_bias, radial_layer_norm
+            avg_num_neighbors,
+            edge_feats_channel,
+            radial_bias,
+            radial_layer_norm,
+            mlp_type,
         )
-        self.edge_density = MLP["mlp"](
+        self.edge_density = MLP[self.mlp_type](
             [edge_feats_channel, 64, 1],
             bias=radial_bias,
             layer_norm=radial_layer_norm,
@@ -156,6 +165,7 @@ def get_scatter_norm_layer(
     edge_feats_channel: int,
     radial_bias: bool = False,
     radial_layer_norm: bool = False,
+    mlp_type: str = "mlp_v1",
 ) -> ScatterNorm:
     """Construct a scatter normalization layer.
 
@@ -172,6 +182,8 @@ def get_scatter_norm_layer(
         Include biases in the density network.
     radial_layer_norm : bool, optional
         Apply layer normalization in the density network.
+    mlp_type : {"mlp_v1", "mlp_v2"}, optional
+        Density network implementation.
     """
     if norm_type is None or norm_type == "identity":
         norm_class = IdentityScatterNorm
@@ -190,4 +202,5 @@ def get_scatter_norm_layer(
         edge_feats_channel,
         radial_bias=radial_bias,
         radial_layer_norm=radial_layer_norm,
+        mlp_type=mlp_type,
     )

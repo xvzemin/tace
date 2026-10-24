@@ -12,7 +12,7 @@ from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
 from tace.dataset.quantity import PROPERTIES, TIME_ODD_PROPERTIES
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.fused import (
-    O3ScatterTensorProduct,
+    O3TensorProductConv,
     UuuTensorProduct,
     UvuTensorProduct,
 )
@@ -553,7 +553,7 @@ def test_time_odd_irreps_reject_scatter_acceleration(
 
     monkeypatch.setenv(environment, "1")
     with pytest.raises(ValueError, match=f"{kernel} does not support"):
-        O3ScatterTensorProduct(
+        O3TensorProductConv(
             node_irreps,
             edge_irreps,
             target_irreps,

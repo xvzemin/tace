@@ -11,7 +11,7 @@ import torch
 from e3nn import o3
 
 from eqx import o2
-from eqx.conv import UvO2TensorProductConv
+from eqx import conv as eqx_conv
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -140,7 +140,7 @@ def uv_kernel(module):
     """Describe the native paths; unsupported activations keep their Torch path."""
     attention = module.attention
     try:
-        return UvO2TensorProductConv(
+        return eqx_conv.UvO2TensorProductConv(
             module.local_frame_in,
             module.linear_up,
             module.nonlinearity,
@@ -157,7 +157,7 @@ def uv_kernel(module):
         return None
 
 
-class UvO2ScatterTensorProduct(torch.nn.Module):
+class UvO2TensorProductConv(torch.nn.Module):
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -388,7 +388,7 @@ class UvO2ScatterTensorProduct(torch.nn.Module):
         )
 
 
-class O2ScatterMagneticTensorProduct(torch.nn.Module):
+class MagneticUvO2TensorProductConv(torch.nn.Module):
     def __init__(
         self,
         irreps_in: o3.Irreps,

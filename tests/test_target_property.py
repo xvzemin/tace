@@ -511,7 +511,7 @@ def direct_hessian_output(
 
 def check_direct_hessian_readout_symmetries(device, interaction_type):
     radial = deepcopy(DEFAULT_MODEL_CONFIG["radial_basis"])
-    radial.update(hidden=[4], mlp_type="mlp_v2")
+    radial["hidden"] = [4]
     with torch_default_dtype(torch.float64):
         representation = PairRepresentation(
             "2x0e+2x1o+2x2e",
@@ -522,6 +522,7 @@ def check_direct_hessian_readout_symmetries(device, interaction_type):
             16.0,
             radial,
             interaction_type=interaction_type,
+            mlp_type="mlp_v2",
         ).to(device)
         head = DirectHessianReadout(
             representation.irreps_in, representation.irreps_out, 2, 2

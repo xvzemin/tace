@@ -11,7 +11,7 @@ from e3nn import o3
 from ..layout import LayoutTransform
 
 
-class e3nnEqtTensorProduct(torch.nn.Module):
+class EqtTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,

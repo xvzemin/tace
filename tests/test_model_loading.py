@@ -354,7 +354,7 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
     config["radial_basis"]["apply_cutoff"] = False
     if v2:
         config["edge_update"]["type"] = "element2_v2"
-        config["radial_basis"]["mlp_type"] = "mlp_v2"
+        config["mlp_type"] = "mlp_v2"
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"].update(
         scale_type="rms_forces",
@@ -495,12 +495,12 @@ def test_v2_element_export_roundtrip(elements, tmp_path, double_precision):
             )
 
 
-def test_legacy_radial_defaults(tmp_path, double_precision):
+def test_legacy_mlp_defaults(tmp_path, double_precision):
     model = make_model()
     path = tmp_path / "legacy.pt"
     export_tace(model, str(path))
     checkpoint = torch.load(path, weights_only=False)
-    del checkpoint["cfg"]["radial_basis"]["mlp_type"]
+    del checkpoint["cfg"]["mlp_type"]
     del checkpoint["cfg"]["radial_basis"]["mlp_norm"]
     torch.save(checkpoint, path)
     restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()

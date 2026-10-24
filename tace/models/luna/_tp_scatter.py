@@ -110,7 +110,7 @@ def register_luna_ops(config: dict) -> None:
     module.op.index64_operator.register_ops()
 
 
-class e3nnLunaScatterTensorProduct(torch.nn.Module):
+class LunaTensorProductConv(torch.nn.Module):
     """Sum externally weighted tensor products at destination nodes.
 
     Parameters

@@ -14,6 +14,7 @@ from tace.models._e3nn import readout
 from tace.models._e3nn.base import EdgeInteraction, EdgeUpdate, NodeEmbedding
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models._e3nn.edge import Element2EdgeUpdateV2
+from tace.models._e3nn.fused import UvO2TensorProduct
 from tace.models._e3nn.node import LinearNodeEmbedding
 from tace.models._e3nn.readout import EdgeReadOut
 from tace.models._e3nn.representation import PairRepresentation
@@ -32,7 +33,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pytestmark = pytest.mark.usefixtures("double_precision")
 
 
-@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
 @pytest.mark.parametrize("norm", [None, "layer_norm", "rms_norm"])
 @pytest.mark.parametrize(
     "embedding", ["linear", "spherical_tensor_element2", "wigner_tensor_element2"]
@@ -60,8 +61,8 @@ def test_radial_mlp_configuration(mlp_type, norm, embedding):
     )
     config["node_embedding"]["type"] = embedding
     config["edge_update"]["type"] = "element2_v2"
+    config["mlp_type"] = mlp_type
     config["radial_basis"].update(
-        mlp_type=mlp_type,
         mlp_norm=norm,
         hidden=[4],
         apply_cutoff=False,
@@ -72,7 +73,7 @@ def test_radial_mlp_configuration(mlp_type, norm, embedding):
     networks = [representation.interactions[0].edge_info]
     if hasattr(representation.node_embedding, "edge_info"):
         networks.append(representation.node_embedding.edge_info)
-    expected_norm = norm or ("layer_norm" if mlp_type == "mlp" else None)
+    expected_norm = norm or ("layer_norm" if mlp_type == "mlp_v1" else None)
     for network in networks:
         assert type(network) is MLP[mlp_type]
         assert any(isinstance(m, torch.nn.LayerNorm) for m in network.mlp) == (
@@ -82,15 +83,107 @@ def test_radial_mlp_configuration(mlp_type, norm, embedding):
             expected_norm == "rms_norm"
         )
     density = representation.interactions[0].scatter_norm.edge_density
-    assert type(density) is MLP["mlp"]
+    assert type(density) is MLP[mlp_type]
     assert any(isinstance(m, torch.nn.LayerNorm) for m in density.mlp)
+
+
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
+def test_magnetic_mlp_configuration(mlp_type):
+    from tace.models._e3nn.tace import e3nnTACE
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=1,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        cutoff=4.0,
+        max_neighbors=None,
+        statistics=[
+            dict(
+                atomic_numbers=[26],
+                avg_num_neighbors=2.0,
+                atomic_energy={26: 0.0},
+            )
+        ],
+    )
+    config["fidelity"]["magnetic_scale"] = 2.0
+    config["atomic_basis"].update(
+        type="o2_mag", use_radial_rotary_attention=False
+    )
+    config["angular_basis"].update(
+        magnetic_Lmax=1, use_spin_orbit_coupling=False
+    )
+    config["mlp_type"] = mlp_type
+    config["radial_basis"]["hidden"] = [4]
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    config["scale_shift"]["enable"] = False
+    interaction = e3nnTACE(**config).to(DEVICE).representation.interactions[0]
+    networks = [interaction.source_magnetic_info, interaction.target_magnetic_info]
+    for network in networks:
+        assert type(network) is MLP[mlp_type]
+        assert not any(
+            isinstance(layer, (torch.nn.LayerNorm, torch.nn.RMSNorm))
+            for layer in network.mlp
+        )
+    inputs = tuple(
+        torch.randn(3, network.dims[0], device=DEVICE, requires_grad=True)
+        for network in networks
+    )
+    edges = torch.tensor([[0, 1, 2], [1, 2, 0]], device=DEVICE)
+    weights = interaction._magnetic_weights(inputs, edges)
+    assert weights.shape == (3, interaction.magnetic_linear.weight_numel)
+    parameters = tuple(
+        parameter for network in networks for parameter in network.parameters()
+    )
+    gradients = torch.autograd.grad(
+        weights.square().sum(), (*inputs, *parameters)
+    )
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
+def test_universal_invariant_mlp_configuration(mlp_type):
+    from tace.models._e3nn.ue import UniversalInvariantEmbedding
+
+    module = UniversalInvariantEmbedding(
+        4,
+        {"energy": {}, "fidelity_idx": {"num_embeddings": 2}},
+        bias=True,
+        mlp_type=mlp_type,
+    ).to(DEVICE)
+    assert type(module.uie["energy"]) is MLP[mlp_type]
+    assert type(module.project) is MLP[mlp_type]
+    assert isinstance(module.uie["fidelity_idx"], torch.nn.Embedding)
+    energy = torch.randn(2, device=DEVICE, requires_grad=True)
+    batch = torch.tensor([0, 0, 1], device=DEVICE)
+    fidelity = torch.tensor([0, 1], device=DEVICE)
+    actual = module({"batch": batch, "energy": energy, "fidelity_idx": fidelity})
+    expected = module.act(
+        module.project(
+            torch.cat(
+                (
+                    module.uie["energy"](energy[batch].unsqueeze(-1)),
+                    module.uie["fidelity_idx"](fidelity[batch]),
+                ),
+                dim=-1,
+            )
+        )
+    ).unsqueeze(1)
+    assert actual.shape == (3, 1, 4)
+    torch.testing.assert_close(actual, expected)
+    gradients = torch.autograd.grad(
+        actual.square().sum(), (energy, *module.parameters())
+    )
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
 
 
 @pytest.mark.parametrize(
     "options,match",
     [
         ({"apply_cutoff": True}, "apply_cutoff=false"),
-        ({"mlp_type": "unknown"}, "mlp_type"),
+        ({"mlp_type": "mlp_v2"}, "model.config.mlp_type"),
         ({"mlp_norm": "unknown"}, "mlp_norm"),
         ({"mlp_norm": "none"}, "mlp_norm"),
     ],
@@ -105,6 +198,34 @@ def test_v2_configuration_errors(options, match):
                 "radial_basis": {"apply_cutoff": False, **options},
             }
         )
+
+
+@pytest.mark.parametrize("mlp_type", ["unknown", "mlp", "v1", "v2", None])
+def test_unknown_model_mlp_type(mlp_type):
+    from tace.models._e3nn.default import check_model_config
+
+    with pytest.raises(ValueError, match="mlp_type"):
+        check_model_config({"mlp_type": mlp_type})
+
+
+def test_model_mlp_type_defaults():
+    from tace.models._e3nn.default import check_model_config
+
+    assert set(MLP) == {"mlp_v1", "mlp_v2"}
+    assert DEFAULT_MODEL_CONFIG["mlp_type"] == "mlp_v1"
+    assert "mlp_type" not in DEFAULT_MODEL_CONFIG["radial_basis"]
+    config = check_model_config(
+        {
+            "statistics": [
+                dict(
+                    atomic_numbers=[1],
+                    avg_num_neighbors=2.0,
+                    atomic_energy={1: 0.0},
+                )
+            ]
+        }
+    )
+    assert config["mlp_type"] == "mlp_v1"
 
 
 @pytest.mark.parametrize(
@@ -329,13 +450,13 @@ def test_readout_head_initialization_and_loading(monkeypatch, cls, irrep, matrix
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("interaction_type", ["cgtp", "o2"])
-@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
 @pytest.mark.parametrize("norm", [None, "layer_norm", "rms_norm"])
 def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e+2x2e+2x3o")
     radial = deepcopy(DEFAULT_MODEL_CONFIG["radial_basis"])
-    radial.update(hidden=[4], mlp_type=mlp_type, mlp_norm=norm)
+    radial.update(hidden=[4], mlp_norm=norm)
     with torch_default_dtype(dtype):
         descriptor = PairRepresentation(
             irreps,
@@ -346,6 +467,7 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
             4.0,
             radial,
             interaction_type=interaction_type,
+            mlp_type=mlp_type,
         ).to(device=device, dtype=dtype)
         readouts = torch.nn.ModuleList(
             EdgeReadOut(descriptor.irreps_out, irreps, output)
@@ -358,6 +480,7 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
         assert all(ir.l > 0 for _, ir in head.nonlinearity.irreps_gated)
     interaction = descriptor.interactions[0]
     assert isinstance(interaction, EdgeInteraction)
+    assert type(interaction.edge_info) is MLP[mlp_type]
     assert not hasattr(interaction, "angular_basis")
     assert not hasattr(interaction, "wigner")
     layers = interaction.edge_info.mlp
@@ -377,7 +500,12 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
     features = descriptor(x, attrs, positions, edge_index, shifts, lattice, batch)
     assert features.shape == (4, descriptor.irreps_out.dim)
     if interaction_type == "o2":
-        linear_up, gate, linear_down = interaction.rejector
+        assert isinstance(interaction.linear_up, e3nnLinear)
+        assert interaction.linear_up.irreps_in == irreps
+        assert isinstance(interaction.rejector, UvO2TensorProduct)
+        linear_up = interaction.rejector.linear_up
+        gate = interaction.rejector.gate
+        linear_down = interaction.rejector.linear_down
         assert isinstance(linear_up, o2.Linear)
         assert isinstance(gate, o2.Gate)
         assert isinstance(linear_down, o2.Linear)
@@ -462,11 +590,34 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_uv_o2_tensor_product(dtype):
+    with torch_default_dtype(dtype):
+        product = UvO2TensorProduct(
+            "2x0e+3x0o+2x1o+1x1e+2x2e",
+            "2x0e+1x0o+3x1o+2x1e+1x3o",
+        ).to(device=DEVICE, dtype=dtype)
+        wigner = o2.WignerD(3, 3, method="recursive").to(device=DEVICE, dtype=dtype)
+    x = torch.randn(4, product.irreps_in.dim, device=DEVICE, dtype=dtype)
+    vectors = torch.randn(4, 3, device=DEVICE, dtype=dtype)
+    weights = torch.randn(4, product.weight_numel, device=DEVICE, dtype=dtype)
+    packed = wigner.forward_packed(vectors)
+    dense, _ = wigner(vectors)
+    expected = product(x, packed, weights)
+    torch.testing.assert_close(product(x, dense, weights), expected)
+    torch.testing.assert_close(
+        product(x, packed, torch.zeros_like(weights)), torch.zeros_like(expected)
+    )
+    assert product(x[:0], packed[:0], weights[:0]).shape == (0, product.irreps_out.dim)
+    with pytest.raises(ValueError, match="radial weights"):
+        product(x, packed, weights[:, :-1])
+
+
 @pytest.mark.parametrize("interaction_type", ["cgtp", "o2"])
 def test_pair_representation_bases(interaction_type):
     irreps = o3.Irreps("2x0e+2x1o+2x2e")
     radial = deepcopy(DEFAULT_MODEL_CONFIG["radial_basis"])
-    radial.update(hidden=[4], mlp_type="mlp_v2")
+    radial["hidden"] = [4]
     descriptor = PairRepresentation(
         irreps,
         o3.Irreps.spherical_harmonics(2),
@@ -476,6 +627,7 @@ def test_pair_representation_bases(interaction_type):
         4.0,
         radial,
         interaction_type=interaction_type,
+        mlp_type="mlp_v2",
     ).to(DEVICE)
     assert descriptor.num_layers == len(descriptor.interactions) == 1
     assert descriptor.atomic_numbers == [1, 8]
@@ -489,12 +641,18 @@ def test_pair_representation_bases(interaction_type):
     lattice = torch.eye(3, device=DEVICE).unsqueeze(0).requires_grad_()
     batch = torch.zeros(3, dtype=torch.long, device=DEVICE)
     calls = []
+    linear_inputs = []
     hooks = [
         layer.register_forward_hook(
             lambda module, inputs, output: calls.append((inputs, output))
         )
         for layer in descriptor.interactions
     ]
+    hooks.append(
+        descriptor.interactions[0].linear_up.register_forward_pre_hook(
+            lambda module, inputs: linear_inputs.append(inputs[0])
+        )
+    )
     angular_basis = (
         descriptor.o3_angular_basis
         if interaction_type == "cgtp"
@@ -522,8 +680,12 @@ def test_pair_representation_bases(interaction_type):
     assert atomic_numbers.dtype == torch.int64
     assert atomic_numbers.device == vectors.device
     assert len(calls) == 1
+    torch.testing.assert_close(calls[0][0][0], x)
+    torch.testing.assert_close(calls[0][0][1], edges)
+    assert len(linear_inputs) == 1
     torch.testing.assert_close(
-        calls[0][0][0], torch.cat((x[edges[0]], x[edges[1]]), -1)
+        linear_inputs[0],
+        x if interaction_type == "o2" else torch.cat((x[edges[0]], x[edges[1]]), -1),
     )
     assert output.shape == (4, descriptor.irreps_out.dim)
     first = torch.autograd.grad(

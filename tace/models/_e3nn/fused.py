@@ -87,9 +87,9 @@ class UuuTensorProduct(torch.nn.Module):
                     "EQT does not support time-reversal irreps. Disable EQT and "
                     "use the native e3nn tensor product."
                 )
-            from ..eqt import e3nnEqtTensorProduct
+            from ..eqt import EqtTensorProduct
 
-            self.fused_tp = e3nnEqtTensorProduct(
+            self.fused_tp = EqtTensorProduct(
                 irreps_in1=irreps_in1,
                 irreps_in2=irreps_in2,
                 irreps_out=actual_irreps_out,
@@ -98,8 +98,8 @@ class UuuTensorProduct(torch.nn.Module):
                 trainable=trainable,
             )
         # elif self.use_cue and not trainable:
-        #     from ..cue import e3nnCueTensorProduct
-        #     self.fused_tp = e3nnCueTensorProduct(
+        #     from ..cue import CueTensorProduct
+        #     self.fused_tp = CueTensorProduct(
         #         irreps_in1=irreps_in1,
         #         irreps_in2=irreps_in2,
         #         irreps_out=irreps_out,
@@ -178,9 +178,9 @@ class UvuTensorProduct(torch.nn.Module):
                     "OEQ does not support time-reversal irreps. Disable OEQ and "
                     "use the native e3nn tensor product."
                 )
-            from ..oeq import e3nnOeqTensorProduct
+            from ..oeq import OeqTensorProduct
 
-            self.fused_tp = e3nnOeqTensorProduct(
+            self.fused_tp = OeqTensorProduct(
                 irreps_in1=irreps_in1,
                 irreps_in2=irreps_in2,
                 irreps_out=irreps_out,
@@ -204,7 +204,89 @@ class UvuTensorProduct(torch.nn.Module):
         return self.tp(x, y, weights)
 
 
-class O3CartesianScatterTensorProduct(torch.nn.Module):
+class UvO2TensorProduct(torch.nn.Module):
+    """Apply radial weighting and Linear--Gate--Linear in a local O(2) frame.
+
+    Parameters
+    ----------
+    irreps_in, irreps_out : o3.Irreps or str
+        Input and output representations in flattened ``mul_ir`` layout.
+    """
+
+    def __init__(
+        self,
+        irreps_in: o3.Irreps | str,
+        irreps_out: o3.Irreps | str,
+    ) -> None:
+        super().__init__()
+        self.irreps_in = o3.Irreps(irreps_in)
+        self.irreps_out = o3.Irreps(irreps_out)
+        self.local_frame_in = o2.LocalFrame(self.irreps_in)
+        self.local_frame_out = o2.LocalFrame(self.irreps_out, reverse=True)
+        self.reshape_in = LayoutTransform(
+            self.irreps_in, layout_out="flatten_ir_mul"
+        )
+        self.reshape_out = LayoutTransform(
+            self.irreps_out, layout_out="flatten_ir_mul"
+        )
+        local_irreps_in = self.local_frame_in.irreps_out
+        local_irreps_out = self.local_frame_out.irreps_out
+        hidden_irreps = local_irreps_out.filter(
+            keep=lambda entry: local_irreps_in.count(entry.ir) > 0
+        )
+        irreps_scalars = hidden_irreps.filter(keep=lambda entry: entry.ir.m == 0)
+        irreps_gated = hidden_irreps.filter(keep=lambda entry: entry.ir.m > 0)
+        irreps_gates = (
+            o2.Irreps([(o2.Irrep("0ee"), irreps_gated.num_irreps)])
+            if irreps_gated.num_irreps
+            else o2.Irreps()
+        )
+        gate = o2.Gate(
+            irreps_scalars,
+            [
+                torch.nn.SiLU() if ir.is_invariant_scalar() else torch.nn.Tanh()
+                for ir, _ in irreps_scalars
+            ],
+            irreps_gates,
+            [torch.nn.Sigmoid()] if len(irreps_gates) else [],
+            irreps_gated,
+        )
+        self.linear_up = o2.Linear(local_irreps_in, gate.irreps_in)
+        self.gate = gate
+        self.linear_down = o2.Linear(gate.irreps_out, local_irreps_out)
+        indices = []
+        offset = 0
+        for ir, mul in local_irreps_in:
+            indices.append(torch.arange(offset, offset + mul).repeat(ir.dim))
+            offset += mul
+        self.weight_numel = offset
+        self.register_buffer(
+            "weight_index",
+            torch.cat(indices) if indices else torch.empty(0, dtype=torch.long),
+            persistent=False,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        wigner: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Transform edge features using packed or dense Wigner matrices."""
+        if weights.size(-1) != self.weight_numel:
+            raise ValueError(f"Expected {self.weight_numel} radial weights.")
+        local = self.local_frame_in.to_local(self.reshape_in(x), wigner)
+        local = local * weights.index_select(-1, self.weight_index)
+        local = self.linear_up(local)
+        local = self.gate(local)
+        local = self.linear_down(local)
+        wigner_inv = wigner.transpose(-1, -2) if wigner.ndim == 3 else wigner
+        return self.reshape_out.inverse(
+            self.local_frame_out.to_global(local, wigner_inv)
+        )
+
+
+class O3CartesianTensorProductConv(torch.nn.Module):
     """Aggregate unprojected Cartesian tensor products at target nodes.
 
     Parameters
@@ -292,7 +374,7 @@ class O3CartesianScatterTensorProduct(torch.nn.Module):
         )
 
 
-class O3ScatterTensorProduct(torch.nn.Module):
+class O3TensorProductConv(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -355,16 +437,16 @@ class O3ScatterTensorProduct(torch.nn.Module):
         self.use_aoti = acceleration_enabled("compile")
         if self.use_aoti and self.use_cue:
             logging.warning(
-                "CUE and AOTI cannot be used simultaneously in Scatter Tensor Product. "
+                "CUE and AOTI cannot be used simultaneously in TensorProductConv. "
                 "Falling back to the native tensor product. "
                 "Enable EQX or OEQ to use an accelerated convolution."
             )
             self.use_cue = False
 
         if self.use_luna:
-            from ..luna import e3nnLunaScatterTensorProduct
+            from ..luna import LunaTensorProductConv
 
-            self.fused_tp = e3nnLunaScatterTensorProduct(
+            self.fused_tp = LunaTensorProductConv(
                 irreps_in1=self.irreps_in1,
                 irreps_in2=self.irreps_in2,
                 irreps_out=self.irreps_out,
@@ -380,9 +462,9 @@ class O3ScatterTensorProduct(torch.nn.Module):
                     "OEQ does not support time-reversal irreps. Disable OEQ and "
                     "use the native e3nn tensor product."
                 )
-            from ..oeq import e3nnOeqScatterTensorProduct
+            from ..oeq import OeqTensorProductConv
 
-            self.fused_tp = e3nnOeqScatterTensorProduct(
+            self.fused_tp = OeqTensorProductConv(
                 irreps_in1=self.irreps_in1,
                 irreps_in2=self.irreps_in2,
                 irreps_out=self.irreps_out,
@@ -398,9 +480,9 @@ class O3ScatterTensorProduct(torch.nn.Module):
                     "CUE does not support time-reversal irreps. Disable CUE and "
                     "use the native e3nn tensor product."
                 )
-            from ..cue import e3nnCueScatterTensorProduct
+            from ..cue import CueTensorProductConv
 
-            self.fused_tp = e3nnCueScatterTensorProduct(
+            self.fused_tp = CueTensorProductConv(
                 irreps_in1=self.irreps_in1,
                 irreps_in2=self.irreps_in2,
                 irreps_out=self.irreps_out,
@@ -464,7 +546,7 @@ class O3ScatterTensorProduct(torch.nn.Module):
         return self.reshape_out(message)
 
 
-class O2ScatterTensorProduct(torch.nn.Module):
+class O2TensorProductConv(torch.nn.Module):
     """Evaluate harmonic CGTP paths and sum spherical features at target nodes."""
 
     def __init__(self, irreps_in1, irreps_in2, irreps_out, *, l1l2=None):
@@ -551,7 +633,7 @@ class O2ScatterTensorProduct(torch.nn.Module):
         return self.reshape_out(message)
 
 
-class UuO2ScatterTensorProduct(torch.nn.Module):
+class UuO2TensorProductConv(torch.nn.Module):
     """Rotate source features, apply an externally weighted UuLinear, and scatter.
 
     Parameters

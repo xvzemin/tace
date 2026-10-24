@@ -1,6 +1,6 @@
-from ._tp_scatter import e3nnOeqScatterTensorProduct, e3nnOeqTensorProduct
+from ._tp_scatter import OeqTensorProduct, OeqTensorProductConv
 
 __all__ = [
-    "e3nnOeqTensorProduct",
-    "e3nnOeqScatterTensorProduct",
+    "OeqTensorProduct",
+    "OeqTensorProductConv",
 ]

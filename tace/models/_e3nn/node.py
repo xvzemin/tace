@@ -102,11 +102,11 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         Include biases in scalar embedding and radial projections.
     radial_mlp : list of int, optional
         Radial MLP hidden widths. Defaults to two layers of ``num_channel``.
-    radial_mlp_type : {"mlp", "mlp_v2"}, optional
+    mlp_type : {"mlp_v1", "mlp_v2"}, optional
         Radial network initialization and activation convention.
     radial_mlp_norm : {"layer_norm", "rms_norm"} or None, optional
         Hidden normalization. ``None`` preserves the width-dependent LayerNorm
-        for ``mlp`` and disables normalization for ``mlp_v2``.
+        for ``mlp_v1`` and disables normalization for ``mlp_v2``.
     """
 
     use_wigner = False
@@ -129,10 +129,10 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         if radial_norm is None:
             radial_norm = (
                 "layer_norm"
-                if self.radial_mlp_type == "mlp" and input_dim != self.num_radial_basis
+                if self.mlp_type == "mlp_v1" and input_dim != self.num_radial_basis
                 else None
             )
-        self.edge_info = MLP[self.radial_mlp_type](
+        self.edge_info = MLP[self.mlp_type](
             [
                 input_dim,
                 *self.radial_mlp,

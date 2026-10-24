@@ -37,7 +37,8 @@ class UniversalInvariantEmbedding(torch.nn.Module):
         out_dim: int,
         invariant_embedding: dict[str, Union[bool, str, int]],
         bias: bool,
-        activation: str,
+        activation: str = "silu",
+        mlp_type: str = "mlp_v1",
     ):
         super().__init__()
 
@@ -49,12 +50,12 @@ class UniversalInvariantEmbedding(torch.nn.Module):
             if p_type == "int":
                 self.uie[k] = torch.nn.Embedding(v["num_embeddings"], out_dim)
             elif p_type == "float":
-                self.uie[k] = MLP["mlp"]([1, out_dim, out_dim], bias=bias)
+                self.uie[k] = MLP[mlp_type]([1, out_dim, out_dim], bias=bias)
             else:
                 raise
             total_dim += out_dim
 
-        self.project = MLP["mlp"](
+        self.project = MLP[mlp_type](
             [total_dim, out_dim],
             bias=bias,
             layer_norm=False,

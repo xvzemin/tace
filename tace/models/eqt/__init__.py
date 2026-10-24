@@ -10,8 +10,8 @@ except (ImportError, OSError, RuntimeError):
         "PyTorch and CUDA versions to accelerate large batches.",
     )
 
-from ._tp_uuu import e3nnEqtTensorProduct
+from ._tp_uuu import EqtTensorProduct
 
 __all__ = [
-    "e3nnEqtTensorProduct",
+    "EqtTensorProduct",
 ]

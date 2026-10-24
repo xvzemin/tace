@@ -332,6 +332,7 @@ model:
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
     num_channel: 48 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
     parity: null # null: natural + target/embedding irreps; false: natural only; true: all reachable O(3) parity
+    mlp_type: mlp_v2 # [mlp_v1, mlp_v2]; shared by all scalar MLPs in the model
 
     radial_basis:
       radial_basis: j0   # [j0, j1, j2, ..., gaussian]
@@ -344,7 +345,6 @@ model:
       trainable: false # (bool)
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
-      mlp_type: mlp # [mlp, mlp_v2]
       mlp_norm: null # [null, layer_norm, rms_norm]; null keeps the selected MLP's default
       bias: true  # (bool)
 

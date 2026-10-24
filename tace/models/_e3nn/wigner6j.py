@@ -15,7 +15,7 @@ from tace.utils.env import select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
 from ..time_reversal import contains_time_odd_irreps
-from .fused import O3ScatterTensorProduct, UvuTensorProduct
+from .fused import O3TensorProductConv, UvuTensorProduct
 from .paths import satisfy
 
 
@@ -126,7 +126,7 @@ def wigner_6j(
 
     It converts ``(node x edge) x extra`` to ``(node x extra) x edge``
     with component-normalized Clebsch-Gordan products. Path normalization
-    is applied separately by :class:`O3Wigner6jScatterTensorProduct`.
+    is applied separately by :class:`O3Wigner6jTensorProductConv`.
     """
     from sympy.physics.wigner import wigner_6j as _wigner_6j
 
@@ -147,7 +147,7 @@ class _CouplingPath(NamedTuple):
     weight_offset: int
 
 
-class O3Wigner6jScatterTensorProduct(torch.nn.Module):
+class O3Wigner6jTensorProductConv(torch.nn.Module):
     r"""Three-input tensor product with Wigner-6j recoupling and node aggregation.
 
     Parameters
@@ -362,7 +362,7 @@ class O3Wigner6jScatterTensorProduct(torch.nn.Module):
             instructions=recoupled_node_node_instructions,
             shared_weights=True,
         )
-        self.edge_tp = O3ScatterTensorProduct(
+        self.edge_tp = O3TensorProductConv(
             irreps_mid,
             self.irreps_edge_attrs,
             self.irreps_out,

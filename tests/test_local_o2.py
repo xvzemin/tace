@@ -14,13 +14,13 @@ from e3nn import o3
 from eqx import o2
 from tace.models._e3nn.base import NodeUpdate
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models._e3nn.fused import UuO2ScatterTensorProduct
+from tace.models._e3nn.fused import UuO2TensorProductConv
 from tace.models._e3nn.inter import O2MagneticInteraction
 from tace.models._e3nn.magnetic import MagneticBasis
 from tace.models._e3nn.node import NODE_EMBEDDING, NODE_UPDATE
 from tace.models._e3nn.o2 import (
-    O2ScatterMagneticTensorProduct,
-    UvO2ScatterTensorProduct,
+    MagneticUvO2TensorProductConv,
+    UvO2TensorProductConv,
 )
 from tace.models._e3nn.representation import NodeRepresentation
 from tace.models.layout import LayoutTransform
@@ -54,7 +54,7 @@ def test_element2_projects_nodes_before_gather(
         edge_embedding_channel=6,
         bias=bias,
     ).to(device=device, dtype=DTYPE)
-    mlp = MLP["mlp"]([14, *hidden, 3], bias=bias).to(device=device, dtype=DTYPE)
+    mlp = MLP["mlp_v1"]([14, *hidden, 3], bias=bias).to(device=device, dtype=DTYPE)
     if lora:
         enable_lora(mlp.mlp[0], r=2, freeze_base=False)
         with torch.no_grad():
@@ -415,16 +415,16 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
 @pytest.mark.parametrize("mmax", [0, 2])
 @pytest.mark.parametrize("edges", [0, 5])
 @pytest.mark.parametrize("hidden", [None, [], [7, 5]])
-@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
 def test_tensor_embedding_constructions(
     element_dependent, mmax, edges, hidden, mlp_type, double_precision
 ):
     suffix = "_element2" if element_dependent else ""
     spherical = NODE_EMBEDDING[f"spherical_tensor{suffix}"](
-        2, 4, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
+        2, 4, 3, 2, 2, 2.0, radial_mlp=hidden, mlp_type=mlp_type
     ).to(DEVICE)
     wigner = NODE_EMBEDDING[f"wigner_tensor{suffix}"](
-        2, 4, 3, 2, 2, 2.0, radial_mlp=hidden, radial_mlp_type=mlp_type
+        2, 4, 3, 2, 2, 2.0, radial_mlp=hidden, mlp_type=mlp_type
     ).to(DEVICE)
     wigner.load_state_dict(spherical.state_dict(), strict=True)
     positions = torch.randn(edges, 3, device=DEVICE, requires_grad=True)
@@ -447,7 +447,7 @@ def test_tensor_embedding_constructions(
         ]
         assert norms == (
             [(width,) for width in widths]
-            if element_dependent and mlp_type == "mlp"
+            if element_dependent and mlp_type == "mlp_v1"
             else []
         )
     for order in range(3):
@@ -721,10 +721,10 @@ def test_graph_softmax_matches_groupwise_sums_and_gradients(shape, dim, use_ptr)
 def _scatter_module(use_attention, linear_type="uv"):
     irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e")
     if linear_type == "uu":
-        return UuO2ScatterTensorProduct(irreps, irreps, num_channel=2, mmax=1).to(
+        return UuO2TensorProductConv(irreps, irreps, num_channel=2, mmax=1).to(
             DEVICE, DTYPE
         )
-    return UvO2ScatterTensorProduct(
+    return UvO2TensorProductConv(
         irreps,
         irreps,
         num_channel=2,
@@ -920,7 +920,7 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
     for interaction in model.readout_fn.representation.interactions:
         assert isinstance(interaction, UuO2Interaction)
         assert not isinstance(interaction, UvO2Interaction)
-        assert isinstance(interaction.rejector, UuO2ScatterTensorProduct)
+        assert isinstance(interaction.rejector, UuO2TensorProductConv)
         assert isinstance(interaction.rejector.linear, o2.UuLinear)
         assert not hasattr(interaction.rejector, "nonlinearity")
         assert not hasattr(interaction.rejector, "linear_up")
@@ -1199,7 +1199,7 @@ def test_node_update_returns_source_and_target_info(magnetic_type):
 def _magnetic_scatter_module(use_attention: bool):
     irreps = o3.Irreps("2x0ee+2x1oe")
     magnetic_edge_irreps = o3.Irreps("2x0ee+2x1eo+2x1ee")
-    module = O2ScatterMagneticTensorProduct(
+    module = MagneticUvO2TensorProductConv(
         irreps,
         irreps,
         magnetic_edge_irreps,
@@ -1299,14 +1299,14 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
     from types import SimpleNamespace
 
     from tace.models._e3nn.fused import (
-        O2ScatterTensorProduct,
-        O3ScatterTensorProduct,
+        O2TensorProductConv,
+        O3TensorProductConv,
     )
 
     for name in ("TACE_USE_OEQ", "TACE_USE_CUE"):
         monkeypatch.setenv(name, "0")
-    module = O2ScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
-    reference = O3ScatterTensorProduct(irreps_in, irreps_sh, irreps_out)
+    module = O2TensorProductConv(irreps_in, irreps_sh, irreps_out)
+    reference = O3TensorProductConv(irreps_in, irreps_sh, irreps_out)
     lmax = max(o3.Irreps(irreps).lmax for irreps in (irreps_in, irreps_out))
     assert module.tp.lmax == lmax
     assert module.irreps_out == reference.irreps_out

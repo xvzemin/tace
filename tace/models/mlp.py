@@ -229,6 +229,6 @@ class MLPV2(torch.nn.Module):
 
 
 MLP: dict[str, type[torch.nn.Module]] = {
-    "mlp": MLPV1,
+    "mlp_v1": MLPV1,
     "mlp_v2": MLPV2,
 }

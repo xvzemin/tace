@@ -10,6 +10,28 @@ at large angular momentum, they currently have fewer operator-fusion options and
 are therefore not the default recommendation.
 
 
+.. _radial-mlp:
+
+Scalar MLPs
+-----------
+
+The top-level model option ``mlp_type`` selects ``mlp_v1`` or ``mlp_v2`` for all
+scalar MLPs:
+radial weights, tensor node embeddings, pair interactions, density normalization,
+magnetic weights and invariant property embeddings. Equivariant readouts and
+Linear--Gate--Linear blocks retain their representation-aware operators.
+The default is ``mlp_v1``. Hidden widths and normalization remain specific to
+each module.
+
+.. code-block:: yaml
+
+   model:
+     config:
+       mlp_type: mlp_v2
+       radial_basis:
+         hidden: [64, 64]
+         mlp_norm: null
+
 O(3) Cgtp
 ---------
 

@@ -29,14 +29,14 @@ DTYPE = torch.float64
 def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.fused import O2ScatterTensorProduct, O3ScatterTensorProduct
+    from tace.models._e3nn.fused import O2TensorProductConv, O3TensorProductConv
 
     for backend in ("EQX", "OEQ", "EQT", "CUEQ"):
         monkeypatch.setenv(f"TACE_USE_{backend}", "0")
     irreps_in, irreps_sh, irreps_out = "2x1o", "0e+1o", "2x0e+2x1o+2x1e+2x2e"
-    module = O2ScatterTensorProduct(irreps_in, irreps_sh, irreps_out).cuda()
+    module = O2TensorProductConv(irreps_in, irreps_sh, irreps_out).cuda()
     module.eqx_tp.method = method
-    reference = O3ScatterTensorProduct(irreps_in, irreps_sh, irreps_out).cuda()
+    reference = O3TensorProductConv(irreps_in, irreps_sh, irreps_out).cuda()
     x = torch.randn(3, 6, device="cuda", requires_grad=True)
     vectors = torch.randn(8, 3, device="cuda", requires_grad=True)
     radial = torch.randn(8, 4, device="cuda", requires_grad=True)
@@ -218,8 +218,8 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.o2 import (
-        O2ScatterMagneticTensorProduct,
-        UvO2ScatterTensorProduct,
+        MagneticUvO2TensorProductConv,
+        UvO2TensorProductConv,
     )
 
     torch.manual_seed(401)
@@ -230,7 +230,7 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
         if time
         else "2x0e+2x0o+2x1o+2x1e+2x2e+2x2o"
     )
-    cls = O2ScatterMagneticTensorProduct if magnetic else UvO2ScatterTensorProduct
+    cls = MagneticUvO2TensorProductConv if magnetic else UvO2TensorProductConv
     args = (irreps, irreps, irreps) if magnetic else (irreps, irreps)
     module = (
         cls(
@@ -303,12 +303,12 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
 def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.o2 import O2ScatterMagneticTensorProduct
+    from tace.models._e3nn.o2 import MagneticUvO2TensorProductConv
     from tace.models.compile.compile import trace_to_fx
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
     irreps = "2x0ee+2x1eo+2x1oe" if hasattr(o3.Irrep("0e"), "t") else "2x0e+2x1e+2x1o"
-    module = O2ScatterMagneticTensorProduct(
+    module = MagneticUvO2TensorProductConv(
         irreps,
         irreps,
         irreps,
@@ -369,7 +369,7 @@ def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed)
 @pytest.mark.parametrize("mask", range(32))
 @pytest.mark.parametrize("compile_enabled", [False, True])
 def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
-    from tace.models._e3nn.fused import O3ScatterTensorProduct
+    from tace.models._e3nn.fused import O3TensorProductConv
     from tace.utils.env import ACCELERATION_ENV
 
     enabled = [
@@ -400,19 +400,19 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
     monkeypatch.setitem(
         sys.modules,
         "tace.models.luna",
-        types.SimpleNamespace(e3nnLunaScatterTensorProduct=luna),
+        types.SimpleNamespace(LunaTensorProductConv=luna),
     )
     monkeypatch.setitem(
         sys.modules,
         "tace.models.oeq",
-        types.SimpleNamespace(e3nnOeqScatterTensorProduct=oeq),
+        types.SimpleNamespace(OeqTensorProductConv=oeq),
     )
     monkeypatch.setitem(
         sys.modules,
         "tace.models.cue",
-        types.SimpleNamespace(e3nnCueScatterTensorProduct=cue),
+        types.SimpleNamespace(CueTensorProductConv=cue),
     )
-    module = O3ScatterTensorProduct("2x0e", "0e", "2x0e")
+    module = O3TensorProductConv("2x0e", "0e", "2x0e")
     assert module.use_eqx == (expected == "eqx")
     assert module.use_luna == (expected == "luna")
     assert module.use_oeq == (expected == "oeq")
@@ -427,15 +427,15 @@ def test_luna_scatter(dtype):
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("LunaEquivariance requires compute capability >= 8.0")
     pytest.importorskip("LunaEquivariance")
-    from tace.models._e3nn.fused import O3ScatterTensorProduct
+    from tace.models._e3nn.fused import O3TensorProductConv
     from tace.utils.env import enable_acceleration
 
     torch.set_default_dtype(dtype)
     enable_acceleration(force=True)
     irreps = "2x0e+2x1o", "0e+1o", "2x0e+2x1o+2x1e+2x2e"
-    reference = O3ScatterTensorProduct(*irreps).to(device="cuda", dtype=dtype)
+    reference = O3TensorProductConv(*irreps).to(device="cuda", dtype=dtype)
     enable_acceleration(enable_luna=True, force=True)
-    actual = O3ScatterTensorProduct(*irreps).to(device="cuda", dtype=dtype)
+    actual = O3TensorProductConv(*irreps).to(device="cuda", dtype=dtype)
     assert actual.use_luna
     assert actual.state_dict().keys() == reference.state_dict().keys()
     actual.load_state_dict(reference.state_dict(), strict=True)
@@ -483,7 +483,7 @@ def test_luna_scatter(dtype):
     dtype = torch.float64 if dtype == torch.float32 else torch.float32
     torch.set_default_dtype(dtype)
     actual.to(dtype=dtype)
-    rebuilt = O3ScatterTensorProduct(*irreps).cuda()
+    rebuilt = O3TensorProductConv(*irreps).cuda()
     assert actual.fused_tp.aoti_config["dtype"] == str(dtype).removeprefix("torch.")
     edge_index = torch.tensor([[0, 1, 2], [2, 0, 1]], device="cuda")
     inputs = (
@@ -1306,19 +1306,19 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("mlp_type", ["mlp", "mlp_v2"])
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
 def test_tace_radial_bias_cutoff_and_force_training(
     monkeypatch, device, mlp_type, double_precision
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.fused import O3ScatterTensorProduct
+    from tace.models._e3nn.fused import O3TensorProductConv
     from tace.models.mlp import MLP
 
     monkeypatch.setenv("TACE_USE_OEQ", "0")
     monkeypatch.setenv("TACE_USE_CUEQ", "0")
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    module = O3ScatterTensorProduct("3x0e+3x1o", "0e+1o", "3x0e+3x1o+3x2e").to(device)
+    module = O3TensorProductConv("3x0e+3x1o", "0e+1o", "3x0e+3x1o+3x2e").to(device)
     mlp = MLP[mlp_type]([4, 5, module.weight_numel], bias=True).to(device)
     positions = torch.randn(5, 3, device=device, requires_grad=True)
     x = torch.randn(5, module.irreps_in1.dim, device=device, requires_grad=True)
@@ -1356,7 +1356,12 @@ def test_tace_radial_bias_cutoff_and_force_training(
 )
 @pytest.mark.parametrize(
     "mlp_type,mlp_norm",
-    [("mlp", None), ("mlp_v2", None), ("mlp_v2", "layer_norm"), ("mlp_v2", "rms_norm")],
+    [
+        ("mlp_v1", None),
+        ("mlp_v2", None),
+        ("mlp_v2", "layer_norm"),
+        ("mlp_v2", "rms_norm"),
+    ],
 )
 def test_tace_model_force_training(
     monkeypatch, double_precision, interaction, mlp_type, mlp_norm
@@ -1364,7 +1369,7 @@ def test_tace_model_force_training(
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-    from tace.models._e3nn.fused import O3ScatterTensorProduct, UuO2ScatterTensorProduct
+    from tace.models._e3nn.fused import O3TensorProductConv, UuO2TensorProductConv
     from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
 
@@ -1395,7 +1400,8 @@ def test_tace_model_force_training(
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["bias"] = True
     config["radial_basis"]["apply_cutoff"] = False
-    config["radial_basis"].update(mlp_type=mlp_type, mlp_norm=mlp_norm)
+    config["mlp_type"] = mlp_type
+    config["radial_basis"]["mlp_norm"] = mlp_norm
     if mlp_type == "mlp_v2":
         config["edge_update"]["type"] = "element2_v2"
     config["readout_emlp"]["hidden"] = [3]
@@ -1441,7 +1447,7 @@ def test_tace_model_force_training(
     for layer in model.readout_fn.representation.interactions:
         if hasattr(layer.rejector, "tp"):
             monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
-        elif isinstance(layer.rejector, UuO2ScatterTensorProduct):
+        elif isinstance(layer.rejector, UuO2TensorProductConv):
             monkeypatch.setattr(layer.rejector.linear, "forward", no_edge_message)
             monkeypatch.setattr(
                 layer.rejector.local_frame_in, "to_local", no_edge_message
@@ -1450,7 +1456,7 @@ def test_tace_model_force_training(
                 layer.rejector.local_frame_out, "to_global", no_edge_message
             )
         if isinstance(
-            layer.rejector, (O3ScatterTensorProduct, UuO2ScatterTensorProduct)
+            layer.rejector, (O3TensorProductConv, UuO2TensorProductConv)
         ):
             monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
     results = []

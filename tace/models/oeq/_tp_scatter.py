@@ -18,7 +18,7 @@ def _to_oeq_irreps(irreps: o3.Irreps):
     return oeq.Irreps([(mul, (ir.l, ir.p)) for mul, ir in irreps])
 
 
-class e3nnOeqTensorProduct(torch.nn.Module):
+class OeqTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -54,7 +54,7 @@ class e3nnOeqTensorProduct(torch.nn.Module):
         return self.oeq_tp(x, y, w)
 
 
-class e3nnOeqScatterTensorProduct(torch.nn.Module):
+class OeqTensorProductConv(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,

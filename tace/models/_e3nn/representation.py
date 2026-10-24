@@ -69,6 +69,7 @@ class NodeRepresentation(torch.nn.Module):
         dropout: Dict,
         parity: bool | None,
         path_irreps: o3.Irreps | None = None,
+        mlp_type: str = "mlp_v1",
     ):
         super().__init__()
         path_irreps = target_irreps if path_irreps is None else path_irreps
@@ -233,7 +234,7 @@ class NodeRepresentation(torch.nn.Module):
             avg_num_neighbors=avg_num_neighbors,
             bias=False,
             radial_mlp=radial_basis["hidden"],
-            radial_mlp_type=radial_basis["mlp_type"],
+            mlp_type=mlp_type,
             radial_mlp_norm=radial_basis["mlp_norm"],
         )
         self.edge_embedding = EDGE_EMBEDDING[edge_embedding["type"]](
@@ -253,6 +254,7 @@ class NodeRepresentation(torch.nn.Module):
                     if k in self.invariant_property
                 },
                 bias=False,
+                mlp_type=mlp_type,
             )
 
         # === Edge Update ===
@@ -302,7 +304,7 @@ class NodeRepresentation(torch.nn.Module):
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
-            "radial_mlp_type": radial_basis["mlp_type"],
+            "mlp_type": mlp_type,
             "radial_mlp_norm": radial_basis["mlp_norm"],
             "l1l2": atomic_basis["l1l2"],
             "scatter_norm": atomic_basis["scatter_norm"],
@@ -718,6 +720,7 @@ class PairRepresentation(torch.nn.Module):
         cutoff: float,
         radial_basis: dict,
         interaction_type: str = "cgtp",
+        mlp_type: str = "mlp_v1",
     ) -> None:
         super().__init__()
         self.num_layers = 1
@@ -740,7 +743,7 @@ class PairRepresentation(torch.nn.Module):
         if interaction_type not in EDGE_INTERACTION:
             raise ValueError("interaction_type must be 'cgtp' or 'o2'.")
         self.interactions = torch.nn.ModuleList()
-        edge_irreps = self.irreps_in + self.irreps_in
+        edge_irreps = self.irreps_in
         for _ in range(self.num_layers):
             interaction = EDGE_INTERACTION[interaction_type](
                 edge_irreps,
@@ -749,6 +752,7 @@ class PairRepresentation(torch.nn.Module):
                 num_channel,
                 len(atomic_numbers),
                 radial_basis,
+                mlp_type=mlp_type,
             )
             self.interactions.append(interaction)
             edge_irreps = interaction.irreps_out
@@ -802,12 +806,10 @@ class PairRepresentation(torch.nn.Module):
             if self.o2_angular_basis is not None
             else None
         )
-        edge_feats = torch.cat((node_feats[source], node_feats[target]), dim=-1)
         edge_radial_basis = torch.cat(
             (edge_radial_basis, node_attrs[source], node_attrs[target]), dim=-1
         )
-        for interaction in self.interactions:
-            edge_feats = interaction(
-                edge_feats, edge_radial_basis, edge_attrs, edge_cutoff, edge_wigner
-            )
-        return edge_feats
+        return self.interactions[0](
+            node_feats, edge_index, edge_radial_basis, edge_attrs, edge_cutoff,
+            edge_wigner,
+        )

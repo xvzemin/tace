@@ -16,14 +16,14 @@ from ..linear import IndexedFeatures, e3nnLinear, radial_features
 from ..mlp import ACTIVATION, MLP, get_scaled_activation
 from .base import Interaction
 from .fused import (
-    O2ScatterTensorProduct,
-    O3CartesianScatterTensorProduct,
-    O3ScatterTensorProduct,
-    UuO2ScatterTensorProduct,
+    O2TensorProductConv,
+    O3CartesianTensorProductConv,
+    O3TensorProductConv,
+    UuO2TensorProductConv,
 )
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
-from .o2 import O2ScatterMagneticTensorProduct, UvO2ScatterTensorProduct
+from .o2 import MagneticUvO2TensorProductConv, UvO2TensorProductConv
 from .paths import to_possible_tp_irreps
 from .residual import get_resnet_layer
 from .scatter_norm import get_scatter_norm_layer
@@ -49,7 +49,7 @@ class O3CgtpInteraction(Interaction):
         pass
 
     def _build_rejector(self) -> torch.nn.Module:
-        return O3ScatterTensorProduct(
+        return O3TensorProductConv(
             self.irreps_in,
             self.irreps_sh,
             self.irreps_out,
@@ -96,10 +96,10 @@ class O3CgtpInteraction(Interaction):
         if radial_norm is None:
             radial_norm = (
                 "layer_norm"
-                if self.radial_mlp_type == "mlp" and self.radial_layer_norm
+                if self.mlp_type == "mlp_v1" and self.radial_layer_norm
                 else None
             )
-        self.edge_info = MLP[self.radial_mlp_type](
+        self.edge_info = MLP[self.mlp_type](
             [self.edge_feats_channel]
             + self.radial_mlp
             + [self.rejector.weight_numel],
@@ -116,6 +116,7 @@ class O3CgtpInteraction(Interaction):
             edge_feats_channel=self.edge_feats_channel,
             radial_bias=self.radial_bias,
             radial_layer_norm=self.radial_layer_norm,
+            mlp_type=self.mlp_type,
         )
 
         if (self.use_first_resnet or self.layer > 0) and self.resnet_type == "BB":
@@ -329,7 +330,7 @@ class O3CartesianIctpIctcInteraction(O3CgtpInteraction):
     """
 
     def _build_rejector(self) -> torch.nn.Module:
-        return O3CartesianScatterTensorProduct(
+        return O3CartesianTensorProductConv(
             self.irreps_in,
             self.irreps_sh,
             self.irreps_out,
@@ -358,7 +359,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
     """
 
     def _build_rejector(self) -> torch.nn.Module:
-        return O2ScatterTensorProduct(
+        return O2TensorProductConv(
             self.irreps_in,
             self.irreps_sh,
             self.irreps_out,
@@ -535,7 +536,7 @@ class UvO2Interaction(O3CgtpInteraction):
     """
 
     def _build_rejector(self) -> torch.nn.Module:
-        rejector = UvO2ScatterTensorProduct(
+        rejector = UvO2TensorProductConv(
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
@@ -671,7 +672,7 @@ class UuO2Interaction(O3CgtpInteraction):
             raise ValueError("uu_o2 requires 0 <= mmax <= max(Lmax, lmax).")
 
     def _build_rejector(self) -> torch.nn.Module:
-        return UuO2ScatterTensorProduct(
+        return UuO2TensorProductConv(
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
@@ -777,7 +778,7 @@ class O2MagneticInteraction(UvO2Interaction):
         super()._prepare_setup()
 
     def _build_rejector(self) -> torch.nn.Module:
-        rejector = O2ScatterMagneticTensorProduct(
+        rejector = MagneticUvO2TensorProductConv(
             self.irreps_in,
             self.irreps_out,
             self.magnetic_edge_irreps_out,
@@ -824,12 +825,12 @@ class O2MagneticInteraction(UvO2Interaction):
             + self.radial_mlp
             + [self.magnetic_linear.weight_numel]
         )
-        self.source_magnetic_info = MLP["mlp"](
+        self.source_magnetic_info = MLP[self.mlp_type](
             magnetic_info_channels,
             bias=self.radial_bias,
             act="silu",
         )
-        self.target_magnetic_info = MLP["mlp"](
+        self.target_magnetic_info = MLP[self.mlp_type](
             magnetic_info_channels,
             bias=self.radial_bias,
             act="silu",

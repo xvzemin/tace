@@ -26,7 +26,7 @@ class NodeEmbedding(torch.nn.Module):
         avg_num_neighbors: float,
         bias: bool = False,
         radial_mlp: Union[list[int], None] = None,
-        radial_mlp_type: str = "mlp",
+        mlp_type: str = "mlp_v1",
         radial_mlp_norm: str | None = None,
     ) -> None:
         super().__init__()
@@ -41,7 +41,7 @@ class NodeEmbedding(torch.nn.Module):
         self.radial_mlp = (
             [num_channel, num_channel] if radial_mlp is None else list(radial_mlp)
         )
-        self.radial_mlp_type = radial_mlp_type
+        self.mlp_type = mlp_type
         self.radial_mlp_norm = radial_mlp_norm
 
         self._setup()
@@ -134,6 +134,7 @@ class EdgeInteraction(torch.nn.Module):
         num_channel: int,
         num_elements: int,
         radial_basis: dict,
+        mlp_type: str = "mlp_v1",
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
@@ -142,6 +143,7 @@ class EdgeInteraction(torch.nn.Module):
         self.num_channel = num_channel
         self.num_elements = num_elements
         self.radial_basis = radial_basis
+        self.mlp_type = mlp_type
         self._setup()
 
     @abc.abstractmethod
@@ -151,7 +153,8 @@ class EdgeInteraction(torch.nn.Module):
     @abc.abstractmethod
     def forward(
         self,
-        edge_feats: torch.Tensor,
+        node_feats: torch.Tensor,
+        edge_index: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_attrs: torch.Tensor | None,
         edge_cutoff: torch.Tensor,
@@ -207,7 +210,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         num_mag_radial_basis: int = 8,
         magnetic_node_info_channel: int = 0,
         magnetic_edge_irreps: o3.Irreps = None,
-        radial_mlp_type: str = "mlp",
+        mlp_type: str = "mlp_v1",
         radial_mlp_norm: str | None = None,
         path_irreps: o3.Irreps | None = None,
     ) -> None:
@@ -231,7 +234,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         )
         self.radial_mlp = radial_mlp
         self.radial_bias = radial_bias
-        self.radial_mlp_type = radial_mlp_type
+        self.mlp_type = mlp_type
         self.radial_mlp_norm = radial_mlp_norm
         self.use_bias = bias
         self.scatter_norm_type = scatter_norm

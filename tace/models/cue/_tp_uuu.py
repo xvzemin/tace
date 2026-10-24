@@ -21,7 +21,7 @@ except Exception:
 from .paths import generate_cueq_uuu_paths
 
 
-class e3nnCueTensorProduct(torch.nn.Module):
+class CueTensorProduct(torch.nn.Module):
     def __init__(
         self,
         irreps_in1: o3.Irreps,
