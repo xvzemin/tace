@@ -62,8 +62,8 @@ angular cutoff and nonlinearity:
 
 The merge order is ``tace.yaml``, then ``3bpa_cgtp.yaml``, then
 ``3bpa_uv_o2.yaml``. The magnetic examples follow the same pattern:
-``soc_o2_mtace.yaml`` supplies the shared magnetic settings, while
-``nonsoc_o2_mtace.yaml`` overrides the non-SOC settings.
+``soc_mtace.yaml`` supplies the shared magnetic settings, while
+``nonsoc_mtace.yaml`` overrides the non-SOC settings.
 
 Keep the referenced files and their relative locations when copying an example.
 These paths locate configuration files; they do not change dataset paths stored

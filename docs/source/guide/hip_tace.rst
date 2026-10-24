@@ -1,7 +1,7 @@
 HIP-TACE
 ========
 
-HIP-TACE predicts ``direct_hessian``, without differentiating energy or forces. 
+HIP-TACE predicts ``direct_hessian`` without differentiating energy or forces.
 
 Training Example
 ----------------
@@ -15,35 +15,20 @@ With TACE installed, run from the repository root:
    cd example/train
    tace-train -cn hip-tace.yaml
 
-``example/train/hip-tace.yaml`` trains energy, forces and direct Hessians.
+The example trains energy, forces and direct Hessians. Adjust the dataset paths
+and keep ``tace.yaml`` alongside it; see :doc:`details/defaults`.
 
-The main model options are:
-
-.. code-block:: yaml
-
-   model:
-     config:
-       parity: null # null or true
-       Lmax: 2
-       lmax: 3
-       special:
-         direct_hessian:
-           cutoff: 16.0
-           interaction_type: cgtp  # cgtp or o2
-
-Available Hessian losses are ``mae_direct_hessian``, ``mse_direct_hessian``,
-``huber_direct_hessian`` and ``l2mae_direct_hessian``. Set ``reduction: component`` 
-to average over entries (pairs for L2MAE), or ``structure`` to give each structure 
-equal weight.
+.. literalinclude:: ../../../example/train/hip-tace.yaml
+   :language: yaml
 
 
 Data and output
 ---------------
 
 Provide Hessian labels under ``atoms.info["direct_hessian"]``
-or the ASE database's ``data["direct_hessian"]``.  Supported label shapes are 
-``(3N, 3N)``, its row-major flattened form, ``(N, N, 3, 3)`` and ``(N², 3, 3)``. 
-Shapes are detected automatically; four-index labels use ``(i, j, a, b)`` order. 
+or the ASE database's ``data["direct_hessian"]``. Supported label shapes are
+``(3N, 3N)``, its row-major flattened form, ``(N, N, 3, 3)`` and ``(N², 3, 3)``.
+Shapes are detected automatically; four-index labels use ``(i, j, a, b)`` order.
 Predictions always use ``(N², 3, 3)`` blocks, ordered by ``i * N + j``.
 
 To recover one structure's full matrix:

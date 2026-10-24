@@ -1,6 +1,6 @@
 # Share the magnetic training setup and override the CrN data and non-SOC settings.
 defaults:
-  - soc_o2_mtace@_global_
+  - soc_mtace@_global_
   - _self_
 
 dataset:
