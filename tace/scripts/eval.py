@@ -6,6 +6,7 @@
 import argparse
 import copy
 import time
+from glob import glob
 from pathlib import Path
 from typing import Dict
 
@@ -14,9 +15,14 @@ import torch
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
+from tace.dataset.datamodule import GraphDatasetLMDB
 from tace.dataset.graph import from_atoms
-from tace.dataset.quantity import PROPERTIES, KeySpecification, update_keyspec_from_kwargs
-from tace.dataset.read import ase_db_connect, check_keys
+from tace.dataset.quantity import (
+    PROPERTIES,
+    KeySpecification,
+    update_keyspec_from_kwargs,
+)
+from tace.dataset.read import HOW_TO_READ, check_keys
 from tace.lightning import load_tace
 from tace.utils.metrics import build_metrics, update_metrics
 from tace.utils.utils import num_params
@@ -28,7 +34,11 @@ def parse_args():
         "You could also print test metrics."
     )
     parser.add_argument(
-        "-i", "--input", type=str, required=True, help="Path to ASE-readable input file"
+        "-i",
+        "--input",
+        type=str,
+        required=True,
+        help="ASE input or TACE graph LMDB shard, directory, or shard glob",
     )
     parser.add_argument(
         "-o",
@@ -89,14 +99,45 @@ def parse_args():
     return parser.parse_args()
 
 
+def iter_input_paths(path: Path):
+    if path.is_dir() and path.suffix not in {".lmdb",}:
+        for child in sorted(path.iterdir()):
+            yield from iter_input_paths(child)
+    else:
+        yield path
+
+
 def main():
     args = parse_args()
-    atomsList = (
-        ase_db_connect(args.input)
-        if Path(args.input).suffix == ".db"
-        else ase.io.read(args.input, index=":")
+    paths = sorted(
+        {
+            path.resolve()
+            for match in glob(str(Path(args.input).expanduser()), recursive=True)
+            for path in iter_input_paths(Path(match))
+        }
     )
-    atoms_list_copy = copy.deepcopy(atomsList)
+    if not paths:
+        raise FileNotFoundError(f"No input files found: {args.input}")
+    graph_input = all(path.is_dir() and path.suffix == ".lmdb" for path in paths)
+    if graph_input:
+        dataset = GraphDatasetLMDB(paths, cache_size=0)
+        atoms_list_copy = []
+        print(
+            f"Reading {len(paths)} graph shards directly. Cached neighbors must "
+            "match the model cutoff and max_neighbors."
+        )
+    else:
+        atomsList = []
+        for path in paths:
+            if path.is_dir() and path.suffix == ".lmdb":
+                continue
+            backend = {".db": "ase_db", ".aselmdb": "fair_aselmdb"}.get(
+                path.suffix, "ase"
+            )
+            atomsList.extend(HOW_TO_READ[backend](str(path)))
+        if not atomsList:
+            raise ValueError(f"No readable structures found: {args.input}")
+        atoms_list_copy = copy.deepcopy(atomsList)
     key_spec = KeySpecification()
     update_keyspec_from_kwargs(key_spec, vars(args))
     model = load_tace(
@@ -126,31 +167,55 @@ def main():
     training = (
         True if args.test else False
     )  # test which means your should extra provide label
-    dataset = [
-        from_atoms(
-            element,
-            atoms,
-            cutoff,
-            max_neighbors="inf" if max_neighbors is None else max_neighbors,
-            keyspec=key_spec,
-            target_property=target_property,
-            embedding_property=embedding_property,
-            neighborlist_backend=args.nl_backend,
-            dtype=model.get_model_dtype(),
-        )
-        for atoms in check_keys(
-            atomsList, target_property, key_spec, embedding_property, training
-        )
-    ]
+    if not graph_input:
+        dataset = [
+            from_atoms(
+                element,
+                atoms,
+                cutoff,
+                max_neighbors="inf" if max_neighbors is None else max_neighbors,
+                keyspec=key_spec,
+                target_property=target_property,
+                embedding_property=embedding_property,
+                neighborlist_backend=args.nl_backend,
+                dtype=model.get_model_dtype(),
+            )
+            for atoms in check_keys(
+                atomsList, target_property, key_spec, embedding_property, training
+            )
+        ]
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     preds, ptrs, edge_batches = [], [], []
-    has_edge_property = any(PROPERTIES[p]["scope"] == "per-edge" for p in target_property)
+    has_edge_property = any(
+        PROPERTIES[p]["scope"] == "per-edge" for p in target_property
+    )
     start_time = time.time()
 
     # Run inference
     for batch in tqdm(dataloader):
+        if graph_input:
+            for graph in batch.to_data_list():
+                atoms_list_copy.append(
+                    ase.Atoms(
+                        numbers=graph.atomic_numbers.cpu().numpy(),
+                        positions=graph.positions.cpu().numpy(),
+                        cell=graph.lattice.reshape(3, 3).cpu().numpy(),
+                        pbc=graph.pbc.reshape(3).cpu().numpy(),
+                    )
+                )
+            batch.apply(
+                lambda value: (
+                    value.to(dtype=model.get_model_dtype())
+                    if isinstance(value, torch.Tensor) and value.is_floating_point()
+                    else value
+                )
+            )
         batch.to(args.device)
+        if graph_input:
+            batch.node_attrs = element.z2onehot(batch.atomic_numbers).to(
+                dtype=model.get_model_dtype()
+            )
         for p in target_property:
             for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                 if requires_grad_p in batch:
@@ -172,6 +237,8 @@ def main():
                 batch.batch[batch.edge_index[0]].cpu() if has_edge_property else None
             )
 
+    if graph_input:
+        dataset.close()
     print(
         f"Inference finished in {time.time() - start_time:.2f} s "
         f"(batch_size={args.batch_size})"

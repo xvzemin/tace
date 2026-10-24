@@ -197,23 +197,6 @@ If you use cartnn, Cartesian-3j, cMACE, cNequIP, cAllegro, please cite our paper
 }
 ```
 
-If you use HIP-TACE for direct Hessian prediction, please cite
-[HIP: Hessian Interatomic Potentials without derivatives](https://arxiv.org/abs/2509.21624):
-
-```bibtex
-@misc{burger2025hiphessian,
-  title = {{HIP}: Hessian Interatomic Potentials without derivatives},
-  author = {Andreas Burger and Luca Thiede and Nikolaj R{\o}nne and
-            Varinia Bernales and Nandita Vijaykumar and Tejs Vegge and
-            Arghya Bhowmik and Alan Aspuru-Guzik},
-  year = {2025},
-  eprint = {2509.21624},
-  archivePrefix = {arXiv},
-  primaryClass = {cs.LG},
-  url = {https://arxiv.org/abs/2509.21624}
-}
-```
-
 ## Development
 
 Install the development tools and run the same formatting and lint checks used by

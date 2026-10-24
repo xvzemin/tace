@@ -984,7 +984,22 @@ def check_direct_hessian_periodic(device, dtype, interaction_type):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_eval_property_scopes(device, dtype, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "source",
+    [
+        "xyz",
+        "db",
+        "xyz_directory",
+        "xyz_glob",
+        "lmdb_file",
+        "mixed",
+        "lmdb",
+        "directory",
+        "nested_directory",
+        "glob",
+    ],
+)
+def test_eval_property_scopes(device, dtype, source, tmp_path, monkeypatch, capsys):
     from tace.scripts import eval as eval_script
 
     targets = ["energy", "edge_forces", "direct_hessian"]
@@ -996,7 +1011,75 @@ def test_eval_property_scopes(device, dtype, tmp_path, monkeypatch):
         Atoms("H2", positions=[[0, 0, 0], [0, 1, 0]]),
     ]
     filename = tmp_path / "structures.xyz"
-    write(filename, structures)
+    cached_files = {}
+    graph_input = source in {"lmdb", "directory", "nested_directory", "glob"}
+    if not graph_input:
+        if source in {"xyz_directory", "xyz_glob", "mixed"}:
+            nested = tmp_path / "nested"
+            nested.mkdir()
+            write(tmp_path / "a.xyz", structures[:2])
+            write(nested / "b.xyz", structures[2:])
+            (nested / "notes.txt").write_text("Not a structure file.\n")
+            if source == "mixed":
+                shard = tmp_path / "unused.lmdb"
+                shard.mkdir()
+                (shard / "data.mdb").write_bytes(b"Not to be read as a structure.")
+            filename = tmp_path / "**/*.xyz" if source == "xyz_glob" else tmp_path
+        else:
+            if source == "db":
+                filename = tmp_path / "structures.db"
+                with connect(filename) as db:
+                    for atoms in structures:
+                        db.write(atoms)
+            elif source == "lmdb_file":
+                filename = tmp_path / "structures.lmdb"
+                filename.write_text("Not an ASE structure file.\n")
+            else:
+                write(filename, structures, format="extxyz")
+    else:
+        import pickle
+
+        import lmdb
+
+        shards = [structures] if source == "lmdb" else [structures[:2], structures[2:]]
+        for i, shard in enumerate(shards):
+            path = tmp_path / f"test_shard{i:04d}.lmdb"
+            if source == "nested_directory":
+                path = tmp_path / str(i) / "nested" / path.name
+                path.parent.mkdir(parents=True)
+            env = lmdb.open(str(path), map_size=1 << 20)
+            with env.begin(write=True) as txn:
+                for j, atoms in enumerate(shard):
+                    graph = from_atoms(
+                        build_element_lookup([1, 8]),
+                        atoms,
+                        model.get_cutoff(),
+                        None,
+                        KeySpecification.from_defaults(),
+                        targets,
+                        [],
+                        neighborlist_backend="ase",
+                        dtype=torch.float64,
+                    )
+                    for name in targets:
+                        graph[f"{name}_weight"].fill_(1)
+                    txn.put(f"{j:09d}".encode(), pickle.dumps(graph))
+            env.close()
+            cached_files[path / "data.mdb"] = (path / "data.mdb").read_bytes()
+        filename = (
+            tmp_path
+            if source in {"directory", "nested_directory"}
+            else tmp_path
+            / ("test_shard*.lmdb" if source == "glob" else "test_shard0000.lmdb")
+        )
+
+        def no_rebuild(*args, **kwargs):
+            raise AssertionError(
+                "Cached evaluation must not read structures or rebuild graphs"
+            )
+
+        monkeypatch.setattr(eval_script, "from_atoms", no_rebuild)
+        monkeypatch.setattr(eval_script.ase.io, "read", no_rebuild)
     saved = []
     monkeypatch.setattr(eval_script, "load_tace", lambda *args, **kwargs: model)
     monkeypatch.setattr(
@@ -1018,9 +1101,19 @@ def test_eval_property_scopes(device, dtype, tmp_path, monkeypatch):
             str(dtype).split(".")[-1],
             "--nl_backend",
             "ase",
+            "--test",
+            "1" if graph_input else "0",
         ],
     )
+    if source == "lmdb_file":
+        with pytest.raises(ValueError, match="No readable structures found"):
+            eval_script.main()
+        return
     eval_script.main()
+    if graph_input:
+        output = capsys.readouterr().out
+        assert "Evaluation Metrics" in output
+        assert all(path.read_bytes() == value for path, value in cached_files.items())
     assert len(saved) == len(structures)
     for atoms, result in zip(structures, saved):
         graph = from_atoms(
