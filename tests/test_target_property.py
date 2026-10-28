@@ -1,7 +1,7 @@
 """Data handling, equivariance and training for target properties."""
 
 from copy import deepcopy
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -29,6 +29,9 @@ from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.mask_metrics import MaskMAE, supports_weight_filter
 from tace.utils.utils import torch_default_dtype
+
+DTYPE = torch.float64
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture
@@ -829,7 +832,9 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
         prediction = model(data)["direct_hessian"]
         prediction.square().sum().backward()
         gradients = [p.grad for p in model.parameters() if p.grad is not None]
-        assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients)
+        assert gradients and all(
+            torch.isfinite(gradient).all() for gradient in gradients
+        )
         assert any(gradient.abs().max() > 0 for gradient in gradients)
     assert "direct_hessian_pair_index" not in data
     assert "direct_hessian_edge_pairs" not in data
@@ -1482,3 +1487,57 @@ def test_nonbatch_external_field_uses_first_graph_without_value_checks(monkeypat
 
     assert len(calls) == 1
     assert torch.equal(calls[0]["e_ext"], external_field[0])
+
+
+@pytest.mark.parametrize("num_graphs", [1, 2])
+def test_periodic_graph_derivatives(num_graphs):
+    from tace.models.adapter import TensorModel
+
+    torch.manual_seed(71)
+    positions = torch.randn(3 * num_graphs, 3, dtype=DTYPE, requires_grad=True)
+    lattice = torch.randn(num_graphs, 3, 3, dtype=DTYPE, requires_grad=True)
+    edges = torch.cat(
+        [torch.tensor([[0, 1, 2, 1], [2, 0, 1, 2]]) + 3 * i for i in range(num_graphs)],
+        dim=1,
+    )
+    data = dict(
+        positions=positions,
+        lattice=lattice,
+        node_attrs=torch.ones(3 * num_graphs, 1, dtype=DTYPE),
+        edge_index=edges,
+        edge_shifts=torch.randint(-1, 2, (edges.size(1), 3)).to(DTYPE),
+        batch=torch.arange(num_graphs).repeat_interleave(3),
+        ptr=torch.arange(num_graphs + 1) * 3,
+        fidelity_idx=torch.zeros(num_graphs, dtype=torch.long),
+    )
+    model = Mock(
+        lmp=False,
+        readout_fn=torch.nn.Module(),
+        flags=Mock(compute_virials=True, compute_stress=True),
+    )
+    model.get_target_property.return_value = ["energy", "forces", "stress"]
+    graph = TensorModel.prepare_graph(model, data)
+    torch.testing.assert_close(graph.node_type, data["node_attrs"].argmax(-1))
+    source, target = edges
+    reference = (
+        data["positions"][target]
+        - data["positions"][source]
+        + torch.einsum(
+            "ni,nij->nj", data["edge_shifts"], data["lattice"][data["batch"][source]]
+        )
+    )
+    torch.testing.assert_close(graph.edge_vector, reference)
+    inputs = positions, lattice, graph.displacement
+    actual, expected = graph.edge_vector.sin(), reference.sin()
+    for _ in range(3):
+        seed = torch.randn_like(actual)
+        derivatives = [
+            torch.autograd.grad(
+                (value * seed).sum(), inputs, create_graph=True, retain_graph=True
+            )
+            for value in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in grads]) for grads in derivatives
+        ]
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)

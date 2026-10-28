@@ -8,6 +8,7 @@ import torch
 from e3nn import o3
 
 from .irreps import Irreps
+from .symmetric import SymmetricBasis
 
 
 @lru_cache(maxsize=None)
@@ -167,15 +168,26 @@ class Projector(torch.nn.Module):
         self.groups = tuple(
             (l, tuple(entries)) for l, entries in sorted(groups.items())
         )
+        self.symmetric_bases = torch.nn.ModuleDict(
+            {str(l): SymmetricBasis(l) for l, _ in self.groups if l >= 6}
+        )
         for l, _ in self.groups:
-            matrix = path_matrix(l)
-            if l == 2:
-                matrix = matrix @ matrix.T
             self.register_buffer(
                 f"basis_{l}",
-                matrix.to(torch.get_default_dtype()).clone(),
+                self.projection_matrix(l).to(torch.get_default_dtype()).clone(),
                 persistent=False,
             )
+
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def projection_matrix(l):
+        """Return CPU float64 projection coefficients in the working layout."""
+        matrix = path_matrix(l)
+        if l == 2:
+            return matrix @ matrix.T
+        if l >= 6:
+            return SymmetricBasis(l).double().pack(matrix.T).T
+        return matrix
 
     def forward(self, features):
         """Project features of shape (..., irreps_in.dim) in mul_ir order."""
@@ -201,9 +213,13 @@ class Projector(torch.nn.Module):
                 else torch.cat([values[i] for i, _ in entries], dim=-2)
             )
             matrix = getattr(self, f"basis_{l}")
+            if str(l) in self.symmetric_bases:
+                x = self.symmetric_bases[str(l)].pack(x)
             x = x @ matrix
             if l != 2:
                 x = x @ matrix.T
+            if str(l) in self.symmetric_bases:
+                x = self.symmetric_bases[str(l)].unpack(x)
             for (i, _), value in zip(
                 entries, x.split([mul for _, mul in entries], dim=-2)
             ):
@@ -213,11 +229,10 @@ class Projector(torch.nn.Module):
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for l, _ in self.groups:
-            matrix = path_matrix(l)
-            if l == 2:
-                matrix = matrix @ matrix.T
             name = f"basis_{l}"
-            setattr(self, name, matrix.to(getattr(self, name)).clone())
+            setattr(
+                self, name, self.projection_matrix(l).to(getattr(self, name)).clone()
+            )
         return self
 
     def extra_repr(self):

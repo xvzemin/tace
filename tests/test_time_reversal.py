@@ -10,7 +10,7 @@ from torch_geometric.data import Data
 
 from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
 from tace.dataset.quantity import PROPERTIES, TIME_ODD_PROPERTIES
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
 from tace.models._e3nn.edge import EDGE_UPDATE
 from tace.models._e3nn.fused import (
     O3TensorProductConv,
@@ -18,6 +18,7 @@ from tace.models._e3nn.fused import (
     UvuTensorProduct,
 )
 from tace.models._e3nn.layer_norm import get_normalization_layer
+from tace.models._e3nn.magnetic import MagneticBasis
 from tace.models._e3nn.node import ElementNodeUpdate
 from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
@@ -34,6 +35,9 @@ from tace.models.time_reversal import (
     with_natural_parity,
     with_time_reversal,
 )
+
+DTYPE = torch.float64
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _model_config() -> dict:
@@ -716,3 +720,351 @@ def test_time_odd_irreps_reject_oeq_tensor_product(monkeypatch):
             instructions,
             shared_weights=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("magnetic_scales", "expected_scales"),
+    [
+        ([None], [2.5]),
+        ([None, None], [2.5, 3.7]),
+        ([2.0, {26: 4.0}], [2.0, 4.0]),
+        ([None, {"26": 4.0}], [2.5, 4.0]),
+    ],
+)
+def test_magnetic_scale_is_resolved_per_fidelity(magnetic_scales, expected_scales):
+    config = check_model_config(
+        {
+            "statistics": [
+                {
+                    "atomic_numbers": [26],
+                    "avg_num_neighbors": 2.0,
+                    "max_noncollinear_magmoms_norm_by_element": {26: 2.0},
+                },
+                {
+                    "atomic_numbers": [26],
+                    "avg_num_neighbors": 4.0,
+                    "max_noncollinear_magmoms_norm_by_element": {26: 3.0},
+                },
+            ][: len(magnetic_scales)],
+            "target_property": [],
+            "fidelity": [
+                {"name": name, "magnetic_scale": scale}
+                for name, scale in zip(("PBE", "SCAN"), magnetic_scales)
+            ],
+        }
+    )
+
+    assert [scale[26] for scale in config["magnetic_scale"]] == pytest.approx(
+        expected_scales
+    )
+
+
+@pytest.mark.parametrize("magnetic_scale", [2.0, {26: 2.0}])
+def test_manual_magnetic_scale_is_used_without_rescaling(magnetic_scale):
+    config = check_model_config(
+        {
+            "statistics": [
+                {
+                    "atomic_numbers": [26],
+                    "avg_num_neighbors": 2.0,
+                    "max_noncollinear_magmoms_norm_by_element": {26: 9.0},
+                }
+            ],
+            "target_property": [],
+            "fidelity": [
+                {"name": "PBE", "magnetic_scale": magnetic_scale},
+            ],
+        }
+    )
+
+    assert config["magnetic_scale"] == [{26: 2.0}]
+
+
+@pytest.mark.parametrize("num_nodes", [0, 4])
+@pytest.mark.parametrize("num_fidelities", [1, 2])
+def test_magnetic_basis_selects_fidelity_and_element(num_nodes, num_fidelities):
+    basis = MagneticBasis(
+        [2.0, {26: 4.0, 28: 3.0}][:num_fidelities],
+        num_mag_radial_basis=4,
+        Lmax=1,
+        atomic_numbers=[26, 28],
+    ).to(DEVICE, DTYPE)
+    magmoms = (
+        torch.tensor(
+            [[0.3, -0.4, 0.5]] * num_nodes,
+            dtype=DTYPE,
+            device=DEVICE,
+        )
+        .reshape(num_nodes, 3)
+        .requires_grad_()
+    )
+    node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)[
+        torch.tensor([1, 0, 0, 1], device=DEVICE)[:num_nodes]
+    ]
+    node_fidelity = (
+        torch.tensor([0, 1, 0, 1], device=DEVICE)[:num_nodes] % num_fidelities
+    )
+    edge_index = torch.tensor([[0, 2, 1, 3], [2, 0, 3, 1]], device=DEVICE)[
+        :, :num_nodes
+    ]
+
+    radial, node_attrs_out, edge_attrs_out = basis(
+        magmoms, node_attrs, edge_index, node_fidelity
+    )
+    magnetic_scale = torch.tensor(
+        [2.0] * 4 if num_fidelities == 1 else [2.0, 4.0, 2.0, 3.0],
+        dtype=DTYPE,
+        device=DEVICE,
+    )[:num_nodes, None]
+    squared_magnitude = (magmoms / magnetic_scale).square().sum(-1, keepdim=True)
+    expected_radial = basis.radial_basis(1.0 - 2.0 * squared_magnitude.clamp(max=1.0))
+    torch.testing.assert_close(radial, expected_radial)
+    torch.testing.assert_close(
+        torch.autograd.grad(radial.sum(), magmoms)[0],
+        torch.autograd.grad(expected_radial.sum(), magmoms)[0],
+    )
+    torch.testing.assert_close(node_attrs_out, basis.angular_basis(magmoms))
+    assert edge_attrs_out.shape == (num_nodes, basis.magnetic_edge_irreps_out.dim)
+    assert basis.magnetic_scale.shape == (num_fidelities, 2)
+    assert "magnetic_scale=[[" in repr(basis)
+
+
+@pytest.mark.parametrize(
+    ("num_fidelities", "legacy"), [(1, True), (1, False), (2, False)]
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_magnetic_basis_loads_scale_fidelity_axis(num_fidelities, legacy, nested):
+    basis = MagneticBasis(
+        [1.0] * num_fidelities,
+        num_mag_radial_basis=4,
+        Lmax=1,
+        atomic_numbers=[26, 28],
+    ).to(DEVICE, DTYPE)
+    module = torch.nn.ModuleDict({"magnetic_basis": basis}) if nested else basis
+    key = "magnetic_basis.magnetic_scale" if nested else "magnetic_scale"
+    expected = torch.arange(2, 2 + num_fidelities * 2, dtype=DTYPE, device=DEVICE).view(
+        num_fidelities, 2
+    )
+    state_dict = module.state_dict()
+    state_dict[key] = expected[0] if legacy else expected
+
+    incompatible = module.load_state_dict(state_dict, strict=True)
+
+    assert incompatible.missing_keys == []
+    assert incompatible.unexpected_keys == []
+    torch.testing.assert_close(basis.magnetic_scale, expected)
+
+
+@pytest.mark.parametrize("Lmax", [1, 2])
+@pytest.mark.parametrize("parity", [False, True])
+def test_magnetic_basis_builds_regrouped_edge_attrs(Lmax, parity):
+    time_reversal = hasattr(o3.Irrep("0e"), "t")
+    basis = MagneticBasis(
+        [{26: 2.0}],
+        num_mag_radial_basis=4,
+        Lmax=Lmax,
+        atomic_numbers=[26],
+        time_reversal=time_reversal,
+        parity=parity,
+    ).to(DEVICE, DTYPE)
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
+        device=DEVICE,
+    )
+    magmoms = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    node_attrs = torch.ones(4, 1, dtype=DTYPE, device=DEVICE)
+    node_fidelity = torch.zeros(4, dtype=torch.long, device=DEVICE)
+
+    radial, magnetic_node_attrs, magnetic_edge_attrs = basis(
+        magmoms,
+        node_attrs,
+        edge_index,
+        node_fidelity,
+    )
+    source, target = edge_index
+    expected = basis.magnetic_edge_tensor_product(
+        magnetic_node_attrs[target],
+        magnetic_node_attrs[source],
+    )
+    scaled_magmoms = magmoms / basis.magnetic_scale[0]
+    squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
+    expected_radial_coordinate = 1.0 - 2.0 * torch.clamp(
+        squared_magnitude,
+        min=0.0,
+        max=1.0,
+    )
+
+    assert basis.angular_basis.normalization == "integral"
+    assert not basis.angular_basis.normalize
+    assert basis.angular_basis.irreps_in[0].ir.p == (1 if parity else -1)
+    assert basis.angular_basis.irreps_out == basis.magnetic_node_irreps_out
+    for _, ir in basis.magnetic_node_irreps_out:
+        assert ir.p == (1 if parity else (-1) ** ir.l)
+        assert getattr(ir, "t", 1) == ((-1) ** ir.l if time_reversal else 1)
+    if not parity:
+        assert all(ir.p == (-1) ** ir.l for _, ir in basis.magnetic_edge_irreps_out)
+    assert basis.radial_normalization == "clamp"
+    torch.testing.assert_close(
+        basis.magnetic_scale,
+        torch.tensor([[2.0]], dtype=DTYPE, device=DEVICE),
+    )
+    assert basis.magnetic_edge_tensor_product.weight_numel == 0
+    assert basis.magnetic_node_irreps_out.lmax == Lmax
+    assert basis.magnetic_edge_irreps_out.lmax == Lmax
+    assert basis.magnetic_edge_tensor_product.irreps_out.simplify() == (
+        basis.magnetic_edge_irreps_out
+    )
+    assert radial.shape == (4, 4)
+    assert magnetic_node_attrs.shape[-1] == basis.magnetic_node_irreps_out.dim
+    assert magnetic_edge_attrs.shape == (
+        edge_index.size(1),
+        basis.magnetic_edge_irreps_out.dim,
+    )
+    torch.testing.assert_close(radial, basis.radial_basis(expected_radial_coordinate))
+    torch.testing.assert_close(
+        magnetic_node_attrs,
+        basis.angular_basis(magmoms),
+    )
+    torch.testing.assert_close(magnetic_edge_attrs, expected)
+
+    if time_reversal:
+        reversed_radial, reversed_node, reversed_edge = basis(
+            -magmoms,
+            node_attrs,
+            edge_index,
+            node_fidelity,
+        )
+        torch.testing.assert_close(reversed_radial, radial)
+        torch.testing.assert_close(
+            reversed_node,
+            time_reverse_features(magnetic_node_attrs, basis.magnetic_node_irreps_out),
+        )
+        torch.testing.assert_close(
+            reversed_edge,
+            time_reverse_features(magnetic_edge_attrs, basis.magnetic_edge_irreps_out),
+        )
+
+
+def test_magnetic_basis_clamps_radial_coordinate_smoothly_at_zero():
+    basis = MagneticBasis(
+        [{26: 2.0, 28: 4.0}],
+        num_mag_radial_basis=4,
+        Lmax=2,
+        atomic_numbers=[26, 28],
+    ).to(DEVICE, DTYPE)
+    magmoms = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0, -2.0, 3.0]],
+        dtype=DTYPE,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    node_attrs = torch.eye(2, dtype=DTYPE, device=DEVICE)
+    edge_index = torch.tensor([[0, 1], [1, 0]], device=DEVICE)
+    node_fidelity = torch.zeros(2, dtype=torch.long, device=DEVICE)
+
+    radial, magnetic_node_attrs, _ = basis(
+        magmoms, node_attrs, edge_index, node_fidelity
+    )
+    magnetic_scale = basis.magnetic_scale[0].unsqueeze(-1)
+    scaled_magmoms = magmoms / magnetic_scale
+    squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
+    radial_coordinate = 1.0 - 2.0 * torch.clamp(
+        squared_magnitude,
+        min=0.0,
+        max=1.0,
+    )
+
+    assert basis.angular_basis.normalization == "integral"
+    torch.testing.assert_close(radial, basis.radial_basis(radial_coordinate))
+    torch.testing.assert_close(
+        magnetic_node_attrs,
+        basis.angular_basis(magmoms),
+    )
+    zero_gradient = torch.autograd.grad(radial[0].sum(), magmoms, create_graph=True)[0][
+        0
+    ]
+    torch.testing.assert_close(zero_gradient, torch.zeros_like(zero_gradient))
+    zero_hessian = torch.stack(
+        [
+            torch.autograd.grad(zero_gradient[axis], magmoms, retain_graph=True)[0][0]
+            for axis in range(3)
+        ]
+    )
+    orders = torch.arange(1, basis.num_mag_radial_basis + 1, dtype=DTYPE, device=DEVICE)
+    expected_curvature = (
+        -4.0 * orders.square().sum() / basis.magnetic_scale[0, 0].square()
+    )
+    torch.testing.assert_close(
+        zero_hessian,
+        expected_curvature * torch.eye(3, dtype=DTYPE, device=DEVICE),
+    )
+
+
+@pytest.mark.parametrize("Lmax", [1, 2, 3])
+def test_magnetic_basis_without_soc_keeps_independent_spin_scalars(Lmax):
+    basis = MagneticBasis(
+        [{26: 2.0}],
+        num_mag_radial_basis=4,
+        Lmax=Lmax,
+        atomic_numbers=[26],
+        time_reversal=hasattr(o3.Irrep("0e"), "t"),
+        use_spin_orbit_coupling=False,
+    ).to(DEVICE, DTYPE)
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]],
+        device=DEVICE,
+    )
+    magmoms = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
+    node_attrs = torch.ones(4, 1, dtype=DTYPE, device=DEVICE)
+    node_fidelity = torch.zeros(4, dtype=torch.long, device=DEVICE)
+
+    _, _, edge_scalars = basis(magmoms, node_attrs, edge_index, node_fidelity)
+    rotation = o3.rand_matrix(dtype=DTYPE, device=DEVICE)
+    _, _, rotated_edge_scalars = basis(
+        magmoms @ rotation.T,
+        node_attrs,
+        edge_index,
+        node_fidelity,
+    )
+    _, _, reversed_edge_scalars = basis(-magmoms, node_attrs, edge_index, node_fidelity)
+
+    assert not basis.use_spin_orbit_coupling
+    assert basis.magnetic_edge_irreps_out.num_irreps == Lmax + 1
+    assert len(basis.magnetic_edge_tensor_product.instructions) == Lmax + 1
+    assert all(
+        ir.l == 0 and ir.p == 1 and getattr(ir, "t", 1) == 1
+        for _, ir in basis.magnetic_edge_irreps_out
+    )
+    torch.testing.assert_close(rotated_edge_scalars, edge_scalars)
+    torch.testing.assert_close(reversed_edge_scalars, edge_scalars)
+
+
+def test_magnetic_radial_basis_is_bounded_and_has_no_constant_mode():
+    basis = MagneticBasis(
+        [{26: 2.0}],
+        num_mag_radial_basis=4,
+        Lmax=2,
+        atomic_numbers=[26],
+    ).to(DEVICE, DTYPE)
+    node_attrs = torch.ones(2, 1, dtype=DTYPE, device=DEVICE)
+    edge_index = torch.tensor([[0], [1]], device=DEVICE)
+    node_fidelity = torch.zeros(2, dtype=torch.long, device=DEVICE)
+    magmoms = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0e8, -2.0e8, 3.0e8]],
+        dtype=DTYPE,
+        device=DEVICE,
+    )
+
+    radial, angular, _ = basis(magmoms, node_attrs, edge_index, node_fidelity)
+
+    assert not basis.radial_basis.include_constant
+    torch.testing.assert_close(radial[0], torch.ones_like(radial[0]))
+    assert torch.isfinite(angular).all()
+    torch.testing.assert_close(angular, basis.angular_basis(magmoms))
+
+
+def time_reverse_features(features: torch.Tensor, irreps) -> torch.Tensor:
+    output = features.clone()
+    for ir_mul, ir_slice in zip(irreps, irreps.slices()):
+        output[..., ir_slice] *= ir_mul.ir.t
+    return output

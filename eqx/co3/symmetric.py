@@ -147,6 +147,15 @@ class SymmetricBasis(torch.nn.Module):
         """Expand normalized coordinates to full Cartesian storage."""
         if self.rank < 2:
             return tensor
+        if self.rank >= 6:
+            # Apply the transpose of pack in short reductions. A single gather
+            # would accumulate thousands of repeated indices in its backward.
+            for k in range(self.rank, 1, -1):
+                tensor = tensor.unflatten(
+                    -1, ((k + 1) * (k + 2) // 2, 3 ** (self.rank - k))
+                )
+                tensor = (getattr(self, f"output_{k}").T @ tensor).flatten(-2)
+            return tensor
         return (tensor / self.norm).index_select(-1, self.indices)
 
     def contract(self, tensor, vector):

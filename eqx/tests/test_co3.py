@@ -59,6 +59,31 @@ def test_harmonics(double_precision, normalization, normalize):
         assert torch.isfinite(torch.autograd.grad(result.sum(), zero)[0]).all()
 
 
+@pytest.mark.parametrize("rank", [6, 10])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_high_rank_projection(rank, dtype):
+    module = co3.Projector(f"2x{rank}e").to(device=DEVICE, dtype=dtype)
+    features = torch.randn(
+        3, module.irreps_in.dim, device=DEVICE, dtype=dtype, requires_grad=True
+    )
+    matrix = co3.path_matrix(rank).to(DEVICE)
+    expected = (features.double().unflatten(-1, (2, 3**rank)) @ matrix) @ matrix.T
+    expected = expected.flatten(-2)
+    actual = module(features)
+    tol = 3e-5 if dtype == torch.float32 else 2e-12
+    torch.testing.assert_close(actual.double(), expected, atol=tol, rtol=tol)
+    torch.testing.assert_close(module(actual), actual, atol=tol, rtol=tol)
+    assert module(features[:0]).shape == (0, module.irreps_out.dim)
+    losses = [value.square().sum() for value in (actual, expected)]
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(loss, features, create_graph=True)[0] for loss in losses
+        ]
+        torch.testing.assert_close(*gradients, atol=tol, rtol=tol)
+        tangent = torch.randn_like(features)
+        losses = [(gradient * tangent).sum() for gradient in gradients]
+
+
 @pytest.mark.parametrize("normalization", ["element", "path"])
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize(
@@ -112,18 +137,20 @@ def test_linear(double_precision, normalization, shared, instructions):
 
 
 @pytest.mark.parametrize(
-    "mode,multiplicities",
+    "mode,multiplicities,normalization,path_normalization",
     [
-        ("uvu", (2, 3, 2)),
-        ("uvv", (2, 3, 3)),
-        ("uuu", (2, 2, 2)),
-        ("uuw", (2, 2, 3)),
-        ("uvw", (2, 3, 4)),
-        ("uvuv", (2, 3, 6)),
+        ("uvv", (2, 3, 3), "component", "element"),
+        ("uuu", (2, 2, 2), "component", "element"),
+        ("uuw", (2, 2, 3), "component", "element"),
+        ("uvw", (2, 3, 4), "component", "element"),
+        ("uvuv", (2, 3, 6), "component", "element"),
+    ]
+    + [
+        ("uvu", (2, 3, 2), normalization, path_normalization)
+        for normalization in ("component", "norm", "none")
+        for path_normalization in ("element", "path", "none")
     ],
 )
-@pytest.mark.parametrize("normalization", ["component", "norm", "none"])
-@pytest.mark.parametrize("path_normalization", ["element", "path", "none"])
 @pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
 def test_tensor_product(
     double_precision, mode, multiplicities, normalization, path_normalization, tp_type

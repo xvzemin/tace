@@ -1,6 +1,7 @@
 """Tensor products, recoupling, and ACE contractions."""
 
 import itertools
+from copy import deepcopy
 from functools import partial
 
 import pytest
@@ -76,9 +77,7 @@ def test_possible_tp_irreps_time_reversal():
         target_irreps=o3.Irreps("1ee"),
     )
     assert {(ir.l, ir.p, ir.t) for _, ir in actual} == {
-        (ell, 1, time_reversal)
-        for ell in range(3)
-        for time_reversal in (-1, 1)
+        (ell, 1, time_reversal) for ell in range(3) for time_reversal in (-1, 1)
     }
 
 
@@ -1174,3 +1173,71 @@ def test_time_reversal_wigner6j_rejects_scatter_acceleration(
             o3.Irreps("2x0ee + 2x1eo"),
             spherical_harmonics_irreps(1, p=1, time_reversal=-1),
         )
+
+
+@pytest.mark.parametrize("matrix", ["0", "1"])
+@pytest.mark.parametrize(
+    "experts,shared,agnostic",
+    [(1, False, False), (2, False, False), (2, True, False), (1, False, True)],
+)
+def test_bilinear_product_integration(monkeypatch, matrix, experts, shared, agnostic):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models._e3nn.prod import BilinearMoEACE
+    from tace.models.linear import switch_e3nn_weight_layout
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    model = (
+        BilinearMoEACE(
+            layer=0,
+            num_layers=1,
+            num_elements=2,
+            Lmax=1,
+            lmax=1,
+            num_channel=4,
+            num_expert=experts,
+            num_channel_per_expert=2,
+            target_irreps=o3.Irreps("0e+1o"),
+            irreps_in=o3.Irreps("4x0e+4x1o"),
+            correlation=[2],
+            l1l2=None,
+            bias=True,
+            nonlinear="silu_bilineargate",
+            parity=True,
+            use_shared_expert=shared,
+            agnostic=agnostic,
+        )
+        .double()
+        .cuda()
+    )
+    switch_e3nn_weight_layout(model, "matrix" if matrix == "1" else "flat")
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "bias" in name:
+                p.normal_()
+    reference = deepcopy(model)
+    del reference.eqx_ace
+    x = torch.randn(3, 16, device="cuda", dtype=torch.float64, requires_grad=True)
+    attrs = torch.tensor(
+        [[1.0, 0.0], [0.0, 1.0], [0.2, 0.8]], device="cuda", dtype=torch.float64
+    )
+    batch = torch.zeros(3, device="cuda", dtype=torch.long)
+    actual, expected = [m(x, attrs, None, batch) for m in (model, reference)]
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    gradients = [
+        torch.autograd.grad(y.square().sum(), (x, *m.parameters()), create_graph=True)
+        for y, m in ((actual, model), (expected, reference))
+    ]
+    for a, b in zip(*gradients):
+        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+    # A loss on input derivatives exercises force-training parameter gradients.
+    second = [
+        torch.autograd.grad(
+            g[0].square().sum(), tuple(m.parameters()), allow_unused=True
+        )
+        for g, m in zip(gradients, (model, reference))
+    ]
+    for a, b in zip(*second):
+        if a is not None:
+            torch.testing.assert_close(a, b, atol=1e-8, rtol=1e-8)
+    assert model.state_dict().keys() == reference.state_dict().keys()

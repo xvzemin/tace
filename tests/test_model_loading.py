@@ -9,8 +9,10 @@ import numpy as np
 import pytest
 import torch
 from ase import Atoms
+from e3nn import o3
 from torch_geometric.data import Batch
 
+from eqx import o2
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KeySpecification
 from tace.foundations import resolve_model_path, tace_foundations
@@ -24,6 +26,9 @@ from tace.models.blocks import ScaleShift
 from tace.models.linear import switch_e3nn_weight_layout
 from tace.scripts.export_elements import select_elements
 from tace.utils.utils import torch_default_dtype
+
+DTYPE = torch.float64
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture(params=[torch.float32, torch.float64], ids=["fp32", "fp64"])
@@ -247,7 +252,6 @@ def test_loaded_force_training(precision_model, tmp_path, dtype):
 
 
 def test_precision_conversion_rebuilds_only_angular_constants():
-    from e3nn import o3
 
     def module(dtype):
         with torch_default_dtype(dtype):
@@ -331,9 +335,6 @@ def test_graph_explicit_precision(dtype):
     torch.testing.assert_close(
         graph.positions, torch.tensor(atoms.positions, dtype=dtype), atol=0, rtol=0
     )
-
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def make_model(interaction="cgtp", matrix=False, v2=False):
@@ -842,3 +843,265 @@ def test_foundation_ase_and_finetune(foundation_model):
     assert model.training
     assert model.get_model_dtype() == torch.float64
     foundation_model[1].assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "arguments,dtype,device",
+    [
+        ([], None, "cpu"),
+        (["--dtype", "float32"], "float32", "cpu"),
+        (["--dtype", "float64", "--device", "cuda:0"], "float64", "cuda:0"),
+    ],
+)
+def test_convert_cgtp_script_arguments(monkeypatch, tmp_path, arguments, dtype, device):
+    from tace.scripts import convert_cgtp as script
+
+    path = tmp_path / "model.pth"
+    load, convert, export = Mock(), Mock(), Mock()
+    monkeypatch.setattr(script, "load_tace", load)
+    monkeypatch.setattr(script, "convert_cgtp", convert)
+    monkeypatch.setattr(script, "export_tace", export)
+    monkeypatch.setattr(sys, "argv", ["tace-convert-cgtp", "-m", str(path), *arguments])
+    script.main()
+    load.assert_called_once_with(str(path), device=device, dtype=dtype)
+    convert.assert_called_once_with(load.return_value)
+    export.assert_called_once_with(
+        convert.return_value, str(tmp_path / "model-converted.pt")
+    )
+
+    output = tmp_path / "model-converted.pt"
+    output.write_bytes(b"existing model")
+    with pytest.raises(SystemExit) as error:
+        script.main()
+    assert error.value.code == 2
+    assert output.read_bytes() == b"existing model"
+    assert load.call_count == export.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("interaction", "node_embedding", "Lmax", "lmax"),
+    [
+        ("o2_cgtp", "linear", 2, 2),
+        (["cgtp", "o2_cgtp"], "linear", 2, 2),
+        ("o2_cgtp", "spherical_tensor", 2, 2),
+        ("o2_cgtp", "linear", 4, 2),
+        ("o2_cgtp", "linear", 1, 3),
+    ],
+)
+def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
+    double_precision,
+    monkeypatch,
+    tmp_path,
+    interaction,
+    node_embedding,
+    Lmax,
+    lmax,
+):
+    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.adapter import TensorModel
+
+    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
+        monkeypatch.setenv(name, "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        num_layers=2,
+        num_channel=3,
+        Lmax=Lmax,
+        lmax=lmax,
+        mmax=0,
+        parity=True,
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["node_embedding"]["type"] = node_embedding
+    config["atomic_basis"]["type"] = "cgtp"
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    config["radial_basis"]["hidden"] = [4]
+    config["readout_emlp"]["hidden"] = [2]
+    config["scale_shift"]["enable"] = False
+    reference = TensorModel(e3nnTACE(**deepcopy(config))).train()
+    for update in reference.readout_fn.representation.edge_updates:
+
+        def gather_inputs(*args, forward=update.forward, **kwargs):
+            features = forward(*args, **kwargs)
+            if isinstance(features, tuple):
+                return torch.cat(
+                    [x if index is None else x[index] for x, index in features], -1
+                )
+            return features
+
+        monkeypatch.setattr(update, "forward", gather_inputs)
+    config["atomic_basis"]["type"] = interaction
+    module = TensorModel(e3nnTACE(**config)).train()
+    reference_parameters = dict(reference.named_parameters())
+    assert reference_parameters.keys() == dict(module.named_parameters()).keys()
+    with torch.no_grad():
+        for name, parameter in module.named_parameters():
+            parameter.copy_(reference_parameters[name])
+    representation = module.readout_fn.representation
+    if representation.use_local_frame:
+        assert representation.o2_angular_basis.mmax == max(Lmax, lmax)
+    else:
+        assert representation.o2_angular_basis is None
+    if interaction == "o2_cgtp" and node_embedding == "linear":
+        assert not representation.use_o3_angular_basis
+        assert not representation.use_local_frame
+
+        def no_alignment(*args):
+            raise AssertionError("o2_cgtp should not construct an alignment frame")
+
+        monkeypatch.setattr(o2.WignerD, "forward", no_alignment)
+
+        def no_spherical_harmonics(*args):
+            raise AssertionError("o2_cgtp should not evaluate shared edge harmonics")
+
+        monkeypatch.setattr(
+            representation.o3_angular_basis, "forward", no_spherical_harmonics
+        )
+
+    data = dict(
+        positions=torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.3, 0.2],
+                [0.4, 1.1, -0.2],
+                [0.2, 0.1, 0.3],
+                [0.7, -0.3, 1.1],
+            ]
+        ),
+        node_attrs=torch.ones(5, 1),
+        edge_index=torch.tensor([[0, 1, 0, 2, 1, 2, 3, 4], [1, 0, 2, 0, 2, 1, 4, 3]]),
+        edge_shifts=torch.zeros(8, 3),
+        lattice=torch.eye(3).repeat(2, 1, 1) * 8,
+        batch=torch.tensor([0, 0, 0, 1, 1]),
+        ptr=torch.tensor([0, 3, 5]),
+        fidelity_idx=torch.zeros(2, dtype=torch.long),
+    )
+    expected = reference({key: value.clone() for key, value in data.items()})
+    actual = module({key: value.clone() for key, value in data.items()})
+    for key in ("energy", "forces", "stress", "virials"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
+
+    for model, output in ((reference, expected), (module, actual)):
+        sum(
+            output[key].square().sum() for key in ("energy", "forces", "stress")
+        ).backward()
+    for name, parameter in module.named_parameters():
+        expected_grad = reference_parameters[name].grad
+        if expected_grad is not None:
+            torch.testing.assert_close(
+                parameter.grad, expected_grad, atol=2e-8, rtol=2e-7
+            )
+
+    if isinstance(interaction, list):
+        from tace.lightning import convert_cgtp
+
+        converted = convert_cgtp(module)
+        assert converted.readout_fn.model_config["atomic_basis"]["type"] == [
+            "o2_cgtp",
+            "cgtp",
+        ]
+        output = converted({key: value.clone() for key, value in data.items()})
+        for key in ("energy", "forces", "stress", "virials"):
+            torch.testing.assert_close(output[key], expected[key], atol=2e-9, rtol=2e-8)
+
+    if interaction == "o2_cgtp" and node_embedding == "linear" and Lmax == lmax == 2:
+        from tace.models.compile.compile import trace_to_fx
+        from tace.models.compile.wrapper import (
+            CompileTensorModel,
+            _FlatE3nnCompileModel,
+        )
+
+        compiled_model = CompileTensorModel(module.readout_fn).eval()
+        input_keys = compiled_model._input_keys(data)
+        output_keys = compiled_model._output_keys()
+        flat_model = _FlatE3nnCompileModel(compiled_model, input_keys, output_keys)
+        inputs = tuple(data[key] for key in input_keys)
+        traced = trace_to_fx(flat_model, inputs)
+        for key, output in zip(output_keys, traced(*inputs)):
+            torch.testing.assert_close(output, actual[key], atol=2e-9, rtol=2e-8)
+
+    if interaction == "o2_cgtp" and node_embedding == "linear" and Lmax == lmax == 2:
+        from tace.lightning import convert_cgtp, export_tace, load_tace
+
+        reference.eval()
+        next(reference.parameters()).requires_grad_(False)
+        reference.retain_graph = True
+        converted = convert_cgtp(reference)
+        assert not converted.training
+        assert converted.retain_graph
+        assert reference.readout_fn.model_config["atomic_basis"]["type"] == "cgtp"
+        for (name, parameter), (other_name, other) in zip(
+            reference.named_parameters(), converted.named_parameters()
+        ):
+            assert name == other_name
+            assert parameter.requires_grad == other.requires_grad
+            assert parameter.data_ptr() != other.data_ptr()
+            torch.testing.assert_close(parameter, other, atol=0, rtol=0)
+        restored = convert_cgtp(converted)
+        path = str(tmp_path / "o2_cgtp.pt")
+        export_tace(converted, path)
+        reloaded = load_tace(path, device="cpu").eval()
+        assert reloaded.readout_fn.model_config["atomic_basis"]["type"] == [
+            "o2_cgtp",
+            "o2_cgtp",
+        ]
+        for model in (converted, restored, reloaded):
+            output = model({key: value.clone() for key, value in data.items()})
+            for key in ("energy", "forces", "stress", "virials"):
+                torch.testing.assert_close(
+                    output[key], expected[key], atol=2e-9, rtol=2e-8
+                )
+        with pytest.raises(ValueError, match="implementation"):
+            convert_cgtp(reference, "o2_linear")
+        with pytest.raises(TypeError, match="eager"):
+            convert_cgtp(torch.nn.Identity())
+
+        from tace.scripts.convert_cgtp import main
+
+        path = tmp_path / "cli.pt"
+        export_tace(reference, str(path))
+        source_bytes = path.read_bytes()
+        for kind in ("o2_cgtp", "cgtp"):
+            monkeypatch.setattr(
+                sys,
+                "argv",
+                [
+                    "tace-convert-cgtp",
+                    "-m",
+                    str(path),
+                    "--dtype",
+                    "float64",
+                    "--device",
+                    "cpu",
+                ],
+            )
+            main()
+            path = path.with_name(f"{path.stem}-converted.pt")
+            converted = load_tace(path, device="cpu")
+            assert converted.readout_fn.model_config["atomic_basis"]["type"] == [
+                kind,
+                kind,
+            ]
+            assert converted.get_model_dtype() == torch.float64
+            for name, parameter in converted.named_parameters():
+                torch.testing.assert_close(
+                    parameter, reference_parameters[name], atol=0, rtol=0
+                )
+            output = converted({key: value.clone() for key, value in data.items()})
+            for key in ("energy", "forces", "stress", "virials"):
+                torch.testing.assert_close(
+                    output[key], expected[key], atol=2e-9, rtol=2e-8
+                )
+        assert (tmp_path / "cli.pt").read_bytes() == source_bytes
+
+    data["edge_index"] = torch.empty(2, 0, dtype=torch.long)
+    data["edge_shifts"] = torch.empty(0, 3)
+    expected = reference({key: value.clone() for key, value in data.items()})
+    actual = module({key: value.clone() for key, value in data.items()})
+    for key in ("energy", "forces", "stress", "virials"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)

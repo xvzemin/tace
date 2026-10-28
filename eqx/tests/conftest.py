@@ -43,3 +43,8 @@ def wigner_3j():
             pytest.skip(str(error))
 
     return coefficients
+
+
+@pytest.fixture
+def device():
+    return "cuda" if torch.cuda.is_available() else "cpu"
