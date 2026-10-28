@@ -28,7 +28,7 @@ def test_path_matrix(m):
 
 def test_coupling_recurrence_phase(monkeypatch, double_precision):
     from eqx.co2.spherical import coupling_polynomial, coupling_recurrence
-    from eqx.o3 import so3_generators
+    from eqx.o3._rotation import so3_generators
 
     reference = o3.wigner_3j
 
@@ -133,7 +133,7 @@ def test_spherical_coupling(
 @pytest.mark.parametrize("l1,l3", [(0, 7), (7, 0), (3, 5), (8, 6), (16, 16)])
 def test_coupling_recurrence(l1, l3, double_precision, wigner_3j):
     from eqx.co2.spherical import coupling_recurrence
-    from eqx.o3 import so3_generators
+    from eqx.o3._rotation import so3_generators
 
     degree, delta = min(l1, l3), abs(l1 - l3)
     basis = [

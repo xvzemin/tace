@@ -5,7 +5,7 @@ from collections import defaultdict
 import torch
 from e3nn import o3
 
-from .contraction import contract
+from ..ops.ace import contract
 
 
 def make_metadata(rows, dims, weighted):

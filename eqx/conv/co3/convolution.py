@@ -5,11 +5,12 @@ from collections import defaultdict
 
 import torch
 
-from ... import co3
+from eqx import co3
+
 from ...co3.basis import path_normalization
 from ...co3.tensor_product import coupling_phase
+from ...o3.cgtp.convolution import O3TensorProductConv
 from ...utils.layout import _Permute
-from ..o3.convolution import O3TensorProductConv
 from .polynomials import (
     ANGULAR_TILE_SIZE,
     coupling_coefficients,
@@ -343,7 +344,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
             edge_attrs = edge_attrs + vectors.sum() * 0
             vectors = None
         if vectors is not None and self.pack_inputs and not packed_input:
-            from ...kernels.layout import indexed_sum
+            from ...ops.layout import indexed_sum
 
             if features.size(-1) != self.input_dim:
                 raise ValueError(

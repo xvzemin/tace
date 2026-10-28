@@ -23,7 +23,19 @@ Activations
 Tensor products
 ---------------
 
-Available from ``eqx.o3`` and its ``gtp``, ``mtp``, and ``wigner6j`` submodules.
+Available from ``eqx.o3`` and its ``cgtp``, ``gtp``, ``mtp``, and ``wigner6j``
+submodules. ``TensorProduct``, ``FullyConnectedTensorProduct``,
+``FullTensorProduct``, and ``ElementwiseTensorProduct`` reuse the corresponding
+e3nn classes, including their instructions and normalization.
+
+.. code-block:: python
+
+   from eqx import o3
+
+   tp = o3.FullyConnectedTensorProduct("4x0e + 4x1o", "0e + 1o", "4x0e")
+   x = tp.irreps_in1.randn(8, -1)
+   y = tp.irreps_in2.randn(8, -1)
+   output = tp(x, y)
 
 .. autoclass:: eqx.o3.GauntTensorProduct
    :members: forward

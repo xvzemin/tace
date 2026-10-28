@@ -1,7 +1,7 @@
 # EquivariantX
 
-EquivariantX (EQX) provides spherical and Cartesian equivariant operators,
-frame conversions, and fused CUDA convolutions.
+EquivariantX (EQX) provides spherical and Cartesian equivariant operators
+using PyTorch, with optional fused CUDA implementations.
 
 ## Installation
 
@@ -38,6 +38,23 @@ basis conversions, rotations, tensor decomposition, and module utilities.
 
 Spherical O(2) uses flattened `ir_mul` storage; Cartesian operators use `mul_ir`.
 Each operator documents its parameters, layouts, and usage examples.
+
+## Implementation
+
+The mathematical API is independent of the execution provider:
+
+| Layer | Responsibility |
+|---|---|
+| `o3`, `co3`, `co2`, `o2` | Representations, normalization and tensor operations |
+| `conv`, `ace`, `nn` | Convolutions, cluster expansions and nonlinearities |
+| `models` | Model conversion and parameter-layout adapters |
+| `ops` | Internal operator schemas, shape inference and autograd |
+| `backends` | PyTorch execution and optional device implementations |
+
+O(3) tensor products are organized into `cgtp`, `gtp`, `mtp`, and `wigner6j`;
+their public classes remain available through `eqx.o3`. Backend selection does
+not change parameters, paths or normalization. CUDA compilation is deferred
+until an accelerated operation runs.
 
 ## Tests
 

@@ -27,8 +27,6 @@ does not.
 .. autoclass:: eqx.o2.LocalFrame
    :members: restrict, forward, to_local, to_global, gather, scatter
 
-.. autofunction:: eqx.kernels.wigner_D
-
 Cartesian basis conversion
 --------------------------
 

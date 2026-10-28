@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, Mock
 import pytest
 import torch
 
-from eqx.kernels import cuda
-from eqx.utils import convert_modules, copy_model, default_dtype
+import eqx.backends.cuda.runtime as cuda
+from eqx.utils.module import convert_modules, copy_model, default_dtype
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,6 +60,8 @@ frame.to_global(frame.to_local(x, d), di)
 assert set(eqx.__all__).issubset(dir(eqx))
 assert not torch.cuda.is_initialized()
 assert "tace" not in sys.modules
+assert not any(name.startswith("eqx.backends.cuda") for name in sys.modules)
+assert not any(name.startswith("eqx.models.") for name in sys.modules)
 """
     result = subprocess.run(
         [sys.executable, "-B", "-c", script],
@@ -70,6 +72,43 @@ assert "tace" not in sys.modules
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_execution_provider(monkeypatch):
+    from eqx.backends import get_kernel, register_kernel
+    from eqx.backends.registry import IMPLEMENTATIONS
+
+    monkeypatch.setitem(IMPLEMENTATIONS, ("test_sine", "torch"), "torch:sin")
+    get_kernel.cache_clear()
+    assert get_kernel("test_sine", "torch") is torch.sin
+    with pytest.raises(ValueError, match="already has"):
+        register_kernel("test_sine", "torch", torch.cos)
+    with pytest.raises(NotImplementedError, match="does not support"):
+        get_kernel("test_sine", "unknown")
+    get_kernel.cache_clear()
+
+
+def test_tensor_product_exports():
+    from e3nn import o3 as e3nn_o3
+
+    from eqx import conv, o3
+
+    for name in (
+        "TensorProduct",
+        "FullyConnectedTensorProduct",
+        "FullTensorProduct",
+        "ElementwiseTensorProduct",
+    ):
+        assert getattr(o3, name) is getattr(o3.cgtp, name)
+        assert getattr(o3, name) is getattr(e3nn_o3, name)
+    for name, module in (
+        ("O3TensorProductConv", o3.cgtp),
+        ("GauntTensorProductConv", o3.gtp),
+        ("MatrixTensorProductConv", o3.mtp),
+        ("Wigner6jTensorProductConv", o3.wigner6j),
+    ):
+        assert getattr(o3, name) is getattr(module, name)
+        assert getattr(o3, name) is getattr(conv, name)
 
 
 @pytest.mark.parametrize(
@@ -83,7 +122,9 @@ assert "tace" not in sys.modules
     ids=lambda path: path.relative_to(ROOT).as_posix(),
 )
 def test_documentation_examples(path):
-    module = import_module(".".join(path.relative_to(ROOT.parent).with_suffix("").parts))
+    module = import_module(
+        ".".join(path.relative_to(ROOT.parent).with_suffix("").parts)
+    )
     with default_dtype(torch.float64), torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         result = doctest.testmod(module, raise_on_error=True)
@@ -141,7 +182,7 @@ def test_convert_modules(inplace):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_aoti_reload(tmp_path):
-    from eqx.kernels.layout import gather_sum
+    from eqx.ops.layout import gather_sum
 
     class Model(torch.nn.Module):
         def forward(self, features, indices):
@@ -220,7 +261,7 @@ def test_runtime_linker_flags(monkeypatch, tmp_path, platform):
 @pytest.mark.parametrize("edges", [0, 17])
 @pytest.mark.parametrize("first_indexed", [False, True])
 def test_gather_sum(dtype, edges, first_indexed):
-    from eqx.kernels.layout import gather_sum
+    from eqx.ops.layout import gather_sum
 
     indices = [torch.randint(5, (2 * edges,), device="cuda")[::2] for _ in range(3)]
     if not first_indexed:
@@ -277,7 +318,7 @@ def test_compilation_workers(monkeypatch, cpu_count, max_jobs, expected):
 
 
 def test_contraction_source_reuses_polynomials():
-    from eqx.kernels.codegen import contraction_source
+    from eqx.backends.cuda.codegen import contraction_source
 
     cache, lines = {}, []
     value = contraction_source([(2.0, ("x", "y")), (3.0, ("z", "x"))], cache, lines)
@@ -320,7 +361,7 @@ def test_shared_metadata_cache():
 def test_cuda_cache_does_not_log_lock_creation(tmp_path, monkeypatch, caplog):
     from types import SimpleNamespace
 
-    from eqx.kernels.cuda import compile_binary
+    from eqx.backends.cuda.runtime import compile_binary
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     caplog.set_level(logging.DEBUG, logger="filelock")
@@ -342,7 +383,7 @@ def test_cuda_cache_does_not_log_lock_creation(tmp_path, monkeypatch, caplog):
 def test_replay_tf32_cache():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels.recompute import Replay
+    from eqx.ops.recompute import Replay
 
     previous = torch.backends.cuda.matmul.allow_tf32
     program = Replay(lambda values, create_graph: (values[0] @ values[1],))

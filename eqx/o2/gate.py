@@ -385,7 +385,7 @@ class Gate(torch.nn.Module):
             self._gate_identity,
         )
         if backend == "cuda":
-            from ..kernels.gate import gate_program
+            from ..ops.gate import gate_program
 
             self.cuda_program = gate_program(self)
 
@@ -426,7 +426,7 @@ class Gate(torch.nn.Module):
         if not self.irreps_in:
             return features
         if self.backend == "cuda":
-            from ..kernels.gate import gate
+            from ..ops.gate import gate
 
             return gate(features, self.cuda_program, self.irreps_out.dim)
         inputs = features.split(self._input_sizes, dim=-1)

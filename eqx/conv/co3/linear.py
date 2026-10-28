@@ -4,8 +4,8 @@ from collections import defaultdict
 
 import torch
 
-from ...co3 import Linear as CartesianLinear
 from ...co3.basis import path_matrix
+from ...co3.linear import Linear as CartesianLinear
 from ...utils.layout import _Permute
 
 
@@ -140,7 +140,7 @@ class Linear(CartesianLinear):
             and self.input_permutation
         )
         if grouped:
-            from ...kernels.layout import grouped_permute
+            from ...ops.layout import grouped_permute
 
             features = grouped_permute(
                 features, self.input_index, self.input_inverse, self.group_widths

@@ -4,14 +4,14 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.ace import TACE
-from eqx.models.tace.tece_oam_rra import BilinearACE
+from eqx.ace.tace import TACE
+from eqx.models.tace.tece_oam_rra.product import BilinearACE
 
 
 def test_native_cuda_graph_ace(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels import cuda_graph
+    import eqx.backends.cuda.graph as cuda_graph
 
     tp = o3.TensorProduct(
         "2x0e",

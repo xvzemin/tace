@@ -5,8 +5,9 @@ import math
 import torch
 from e3nn import o3
 
-from ...co2 import SphericalCoupling
-from ...o2 import Irrep, WignerD
+from ...co2.spherical import SphericalCoupling
+from ...o2.irreps import Irrep
+from ...o2.wigner import WignerD
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
@@ -245,7 +246,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     def transform_weights(self, weights):
         """Express local order weights in the directional coupling basis."""
         if self.backend == "cuda" and weights.is_cuda:
-            from ...kernels.channel_product import local_product
+            from ...ops.channel_product import local_product
 
             return local_product(self.weight_metadata, weights)
         values = weights.reshape(
@@ -304,7 +305,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                 radial_network=radial_network,
             )
             return result if vectors is None else result + vectors.sum() * 0
-        from ..o2_o3.geometry import direction_contraction
+        from ...ops.geometry import direction_contraction
 
         operands = [
             features,
@@ -412,7 +413,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         if radial_network is not None and (
             self.backend != "cuda" or not features.is_cuda
         ):
-            from ..network import materialize
+            from ...ops.radial import materialize
 
             radial = radial_network(materialize(radial, edge_index))
             if radial.shape[-1] + 1 == projection.shape[0]:

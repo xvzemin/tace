@@ -1,1 +1,1 @@
-"""Model-specific operators and conversion functions."""
+"""Model conversion and integration."""

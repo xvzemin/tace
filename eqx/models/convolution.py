@@ -5,9 +5,10 @@ import operator
 
 import torch
 
-from eqx.conv import O2O3TensorProductConv, O3TensorProductConv
-from eqx.kernels import wigner_D
-from eqx.o2 import O3TensorProduct, WignerD
+from ..conv import O2O3TensorProductConv, O3TensorProductConv
+from ..o2.o3_tensor_product import O3TensorProduct
+from ..o2.wigner import WignerD
+from ..ops.wigner import wigner_D
 
 
 def harmonic_convention(model):

@@ -30,20 +30,44 @@ Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/api.html"
 
 [tool.setuptools]
 packages = [
-    "eqx", "eqx.o2", "eqx.o3", "eqx.co2", "eqx.co3", "eqx.ace", "eqx.kernels", "eqx.nn",
-    "eqx.o3.gtp", "eqx.o3.mtp",
+    "eqx",
+    "eqx.ace",
+    "eqx.backends",
+    "eqx.backends.cuda",
+    "eqx.backends.cuda.models",
+    "eqx.backends.cuda.models.tace",
+    "eqx.backends.cuda.o2_o3",
+    "eqx.backends.cuda.o3",
+    "eqx.backends.torch",
+    "eqx.co2",
+    "eqx.co3",
+    "eqx.conv",
+    "eqx.conv.co3",
+    "eqx.conv.o2_o3",
+    "eqx.conv.uu_o2",
+    "eqx.conv.uv_o2",
+    "eqx.models",
+    "eqx.models.equflash",
+    "eqx.models.mace",
+    "eqx.models.nequip",
+    "eqx.models.prophet",
+    "eqx.models.sevennet",
+    "eqx.models.tace",
+    "eqx.models.tace.tece_oam_rra",
+    "eqx.nn",
+    "eqx.o2",
+    "eqx.o3",
+    "eqx.o3.cgtp",
+    "eqx.o3.gtp",
+    "eqx.o3.mtp",
     "eqx.o3.wigner6j",
+    "eqx.ops",
     "eqx.utils",
-    "eqx.conv", "eqx.conv.o2_o3", "eqx.conv.o3", "eqx.conv.co3",
-    "eqx.conv.uu_o2", "eqx.conv.uv_o2", "eqx.models",
-    "eqx.models.tace", "eqx.models.tace.tece_oam_rra",
-    "eqx.models.mace", "eqx.models.nequip", "eqx.models.sevennet",
-    "eqx.models.prophet", "eqx.models.equflash",
 ]
 package-dir = { eqx = "." }
 
 [tool.setuptools.package-data]
-eqx = ["README.md", "kernels/csrc/*.cpp"]
+eqx = ["README.md", "backends/cuda/csrc/*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

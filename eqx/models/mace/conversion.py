@@ -5,10 +5,10 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.kernels import wigner_D
-from eqx.models.convolution import Convolution, RadialFeatures
-from eqx.o2 import WignerD
-from eqx.utils import copy_model, default_dtype
+from ...o2.wigner import WignerD
+from ...ops.wigner import wigner_D
+from ...utils.module import copy_model, default_dtype
+from ..convolution import Convolution, RadialFeatures
 
 __all__ = ["convert_mace_to_eqx"]
 

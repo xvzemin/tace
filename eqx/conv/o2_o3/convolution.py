@@ -1,121 +1,12 @@
 """Equivalent aligned and frame-free tensor-product convolutions."""
 
 import math
-from dataclasses import dataclass
-from functools import lru_cache
 
 import torch
 from e3nn import o3
 
-from ...utils.autograd import gradient_mask
+from ...ops.o2_o3 import contraction
 from ...utils.metadata import parse_metadata
-from ..contraction import adjoint_program
-
-
-@dataclass(eq=False)
-class _KernelPlan:
-    """Tensor-free scheduling metadata shared by compiled calls."""
-
-    path_data: tuple
-    weight_numel: int
-    has_unweighted: bool
-    sparse_paths: tuple
-    scalar_paths: tuple = ()
-    harmonic_degrees: tuple = ()
-
-
-@lru_cache(maxsize=256)
-def kernel_plan(metadata):
-    return _KernelPlan(*parse_metadata(metadata))
-
-
-@torch.library.custom_op("eqx::contraction", mutates_args=(), device_types="cuda")
-def contraction(
-    metadata: str,
-    program: str,
-    source: torch.Tensor,
-    target: torch.Tensor,
-    operands: list[torch.Tensor],
-) -> list[torch.Tensor]:
-    """Keep runtime scheduling and kernel compilation outside tensor tracing."""
-    from ...kernels.cuda_graph import convolution
-
-    plan = kernel_plan(metadata)
-    results = contraction_fake(metadata, program, source, target, operands)
-    terms = parse_metadata(program)
-
-    def run(inputs, outputs):
-        source, target, *values = inputs
-        for result in outputs:
-            result.zero_()
-        if not source.numel() or not plan.path_data:
-            return
-        from .cuda import contract_many
-
-        calls = [
-            (
-                tuple(role for role, _ in pairs),
-                tuple(values[i] for i in mapping),
-                tuple(outputs[slot] for _, slot in pairs),
-                weighted_only,
-            )
-            for mapping, weighted_only, pairs in terms
-        ]
-        contract_many(plan, source, target, calls)
-
-    convolution(
-        "o2_o3", (metadata, program), run, source, target, operands, results, terms, 6
-    )
-    return results
-
-
-@contraction.register_fake
-def contraction_fake(metadata, program, source, target, operands):
-    program = parse_metadata(program)
-    results = [None] * (1 + max(slot for _, _, pairs in program for _, slot in pairs))
-    for mapping, _, pairs in program:
-        for role, slot in pairs:
-            if results[slot] is None:
-                results[slot] = torch.empty_like(
-                    operands[mapping[role]], memory_format=torch.contiguous_format
-                )
-    return results
-
-
-def contraction_setup_context(ctx, inputs, output):
-    metadata, program, source, target, operands = inputs
-    ctx.kernel_metadata = metadata
-    ctx.program = parse_metadata(program)
-    ctx.set_materialize_grads(False)
-    ctx.save_for_backward(source, target, *operands)
-
-
-def contraction_backward(ctx, grad_outputs):
-    source, target, *operands = ctx.saved_tensors
-    program, values, destinations = adjoint_program(
-        ctx.program,
-        operands,
-        grad_outputs,
-        gradient_mask(operands, ctx.needs_input_grad[4]),
-        kernel_plan(ctx.kernel_metadata).has_unweighted,
-    )
-    gradients = [None] * len(operands)
-    if program:
-        results = contraction(
-            ctx.kernel_metadata,
-            repr(program),
-            source,
-            target,
-            values,
-        )
-        for index, slot in destinations.items():
-            gradients[index] = results[slot]
-    return None, None, None, None, gradients
-
-
-contraction.register_autograd(
-    contraction_backward, setup_context=contraction_setup_context
-)
 
 
 class O2O3TensorProductConv(torch.nn.Module):
@@ -192,7 +83,7 @@ class O2O3TensorProductConv(torch.nn.Module):
             sum((2 * k + 1) ** 2 for k in range(l))
             for l in range(tensor_product.lmax + 1)
         )
-        from ...co2 import SphericalCoupling
+        from ...co2.spherical import SphericalCoupling
 
         input_slices = self.irreps_in.slices()
         output_slices = self.irreps_out.slices()
@@ -395,7 +286,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         if radial_network is not None and (
             self.backend != "cuda" or not features.is_cuda
         ):
-            from ..network import materialize
+            from ...ops.radial import materialize
 
             radial = radial_network(materialize(radial, edge_index))
             if radial.shape[-1] + 1 == projection.shape[0]:
@@ -468,7 +359,7 @@ class O2O3TensorProductConv(torch.nn.Module):
             output,
         ]
         if radial_network is not None:
-            from ..network import convolve
+            from ...ops.radial import convolve
 
             return convolve(
                 "o2",
@@ -500,8 +391,8 @@ class O2O3TensorProductConv(torch.nn.Module):
     ):
         """Contract transverse tensors in spherical storage without alignment."""
         if self.backend == "cuda" and features.is_cuda:
-            from ...kernels.wigner import alignment_cuda
-            from ..o3.convolution import contraction as spherical_contraction
+            from ...ops.o3 import contraction as spherical_contraction
+            from ...ops.wigner import alignment_cuda
 
             if torch.compiler.is_compiling():
                 torch._dynamo.mark_static(vectors, -1)
@@ -515,7 +406,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                 direction,
             ]
             if radial_network is not None:
-                from ..network import convolve
+                from ...ops.radial import convolve
 
                 return convolve(
                     "o3",

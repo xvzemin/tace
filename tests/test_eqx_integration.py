@@ -807,8 +807,8 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if edges == 1025:
         from functools import partial
 
-        from eqx.conv import execution as convolution_execution
-        from eqx.models.tace.tece_oam_rra import execution
+        import eqx.backends.cuda.execution as convolution_execution
+        import eqx.backends.cuda.models.tace.attention as execution
 
         monkeypatch.setattr(execution, "BACKWARD_TILE_SIZE", 256)
         monkeypatch.setattr(
@@ -954,7 +954,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
 def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.kernels import recompute
+    import eqx.ops.recompute as recompute
     from eqx.models.tace.tece_oam_rra.interaction import stream
     from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.layout import LayoutTransform

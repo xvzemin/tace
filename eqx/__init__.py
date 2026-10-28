@@ -5,8 +5,6 @@ from importlib import import_module
 
 import torch
 
-# e3nn 0.4.x stores slices in its packaged CG constants. Keep this allowlist
-# scoped to import rather than changing torch.load or its process-wide defaults.
 with (
     torch.serialization.safe_globals(
         [] if slice in torch.serialization.get_safe_globals() else [slice]
@@ -14,7 +12,8 @@ with (
     if hasattr(torch.serialization, "safe_globals")
     else nullcontext()
 ):
-    from . import o2
+    from eqx import o2
+
 
 __all__ = [
     "o3",
@@ -23,7 +22,8 @@ __all__ = [
     "o2",
     "ace",
     "conv",
-    "kernels",
+    "ops",
+    "backends",
     "models",
     "nn",
     "utils",
@@ -42,4 +42,4 @@ def __dir__():
     return sorted(set(globals()) | set(__all__))
 
 
-import_module(".utils.registration", __name__)
+import_module(".ops.registration", __name__)

@@ -5,6 +5,8 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops.radial import materialize
+
 __all__ = ["FactorizedTensorProduct"]
 
 
@@ -274,3 +276,95 @@ class FactorizedTensorProduct(torch.nn.Module):
             f"{self.irreps_in1} x {self.irreps_in2} -> {self.irreps_out}, "
             f"{self.weight_numel} weights"
         )
+
+
+class TensorProductConv(torch.nn.Module):
+    """Gather source features, couple edge attributes and sum at destinations."""
+
+    def __init__(self, tensor_product):
+        super().__init__()
+        self.tensor_product = tensor_product
+        self.irreps_in1 = tensor_product.irreps_in1
+        self.irreps_in2 = tensor_product.irreps_in2
+        self.irreps_out = tensor_product.irreps_out
+        self.weight_numel = tensor_product.weight_numel
+        self.input_dim = self.irreps_in1.dim
+        self.edge_dim = self.irreps_in2.dim
+        self.output_dim = self.irreps_out.dim
+
+    def forward(
+        self,
+        features,
+        edge_attrs,
+        edge_index,
+        weight=None,
+        num_nodes=None,
+        *,
+        radial=None,
+        radial_network=None,
+    ):
+        """Evaluate messages and sum them at destination nodes.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Source-node features of shape ``(nodes, irreps_in1.dim)``.
+        edge_attrs : torch.Tensor
+            Edge features of shape ``(edges, irreps_in2.dim)``.
+        edge_index : torch.Tensor
+            Int64 source and destination indices of shape ``(2, edges)``.
+        weight : torch.Tensor, optional
+            Shared factors of shape ``(weight_numel,)`` or edge factors of shape
+            ``(edges, weight_numel)``, according to the tensor product.
+        num_nodes : int, optional
+            Number of destination nodes. Defaults to the source-node count.
+        radial : torch.Tensor or tuple, optional
+            Inputs to radial_network. A tuple of ``(tensor, storage)`` pairs
+            may use ``"edge"``, ``"source"`` and ``"target"`` storage.
+        radial_network : torch.nn.Module, optional
+            Network producing edge factors from radial inputs. Requires an
+            externally weighted tensor product with shared_weights=False.
+            Cannot be combined with weight.
+
+        Returns
+        -------
+        torch.Tensor
+            Destination features of shape ``(num_nodes, irreps_out.dim)``.
+        """
+        if features.ndim != 2 or features.shape[-1] != self.input_dim:
+            raise ValueError("features must have shape (nodes, irreps_in1.dim).")
+        if (
+            edge_index.ndim != 2
+            or edge_index.shape[0] != 2
+            or edge_index.dtype != torch.long
+        ):
+            raise ValueError("edge_index must be an int64 tensor of shape (2, edges).")
+        if edge_attrs.shape != (edge_index.shape[1], self.edge_dim):
+            raise ValueError("edge_attrs must have shape (edges, irreps_in2.dim).")
+        if radial_network is not None:
+            if weight is not None or radial is None:
+                raise ValueError(
+                    "Provide radial inputs instead of weight when using radial_network."
+                )
+            if (
+                self.tensor_product.shared_weights
+                or self.tensor_product.internal_weights
+            ):
+                raise ValueError("radial_network requires external, unshared weights.")
+            weight = radial_network(materialize(radial, edge_index))
+        elif radial is not None:
+            raise ValueError("radial inputs require radial_network.")
+        if (
+            weight is not None
+            and weight.ndim > 1
+            and weight.shape != (edge_index.shape[1], self.weight_numel)
+        ):
+            raise ValueError("Edge weights must have shape (edges, weight_numel).")
+        messages = self.tensor_product(features[edge_index[0]], edge_attrs, weight)
+        num_nodes = features.shape[0] if num_nodes is None else num_nodes
+        return messages.new_zeros((num_nodes, self.output_dim)).index_add(
+            0, edge_index[1], messages
+        )
+
+    def extra_repr(self):
+        return f"{self.irreps_in1} x {self.irreps_in2} -> {self.irreps_out}"

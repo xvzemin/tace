@@ -222,7 +222,7 @@ class O3TensorProduct(torch.nn.Module):
                     persistent=False,
                 )
 
-        from ..conv.o2_o3 import O2O3TensorProductConv
+        from ..conv.o2_o3.convolution import O2O3TensorProductConv
 
         self.convolution = O2O3TensorProductConv(self, backend="torch")
 

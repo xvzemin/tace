@@ -4,9 +4,10 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.nn import PolynomialActivation
-from eqx.o2 import Irrep, Irreps, O2Grid
-from eqx.o3 import S2Grid
+from eqx.nn.activation import PolynomialActivation
+from eqx.o2.irreps import Irrep, Irreps
+from eqx.o2.o2grid import O2Grid
+from eqx.o3.s2grid import S2Grid
 
 
 @pytest.fixture

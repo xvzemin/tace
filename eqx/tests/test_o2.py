@@ -109,8 +109,8 @@ for _ in range(2):
         torch.testing.assert_close(left, right, atol=1e-8, rtol=1e-8)
     actual = torch.cat([value.flatten() for value in a])
     expected = torch.cat([value.flatten() for value in b])
-assert "eqx.conv.o2_o3.cuda" not in sys.modules
-from eqx.kernels import cuda
+assert "eqx.backends.cuda.o2_o3.convolution" not in sys.modules
+from eqx.backends.cuda import runtime as cuda
 assert not cuda.runtime.cache_info().currsize
 assert "tace" not in sys.modules
 accelerated = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)

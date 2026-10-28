@@ -215,7 +215,7 @@ def test_radial_network(kind, width, shared, double_precision):
 def test_radial_network_compiled(kind, edges, monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import execution
+    import eqx.backends.cuda.execution as execution
 
     launch = execution.launch
     monkeypatch.setattr(execution, "launch", lambda *args: launch(*args, tile_size=3))
@@ -1328,7 +1328,7 @@ def test_cartesian_compact_linear(backend, double_precision):
     [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],
 )
 def test_cg_generator_constraints(degrees, double_precision):
-    from eqx.o3 import so3_generators
+    from eqx.o3._rotation import so3_generators
 
     ell1, ell2, ell3 = degrees
     cg = o3.wigner_3j(ell1, ell2, ell3)
@@ -1342,8 +1342,8 @@ def test_cg_generator_constraints(degrees, double_precision):
 @pytest.mark.parametrize("degree", [1, 5, 10, 16])
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 def test_generator_polynomials(degree, normalization, double_precision):
-    from eqx.conv.angular import generator_scale
-    from eqx.o3 import so3_generators
+    from eqx.backends.cuda.angular import generator_scale
+    from eqx.o3._rotation import so3_generators
 
     torch.manual_seed(91)
     vectors = torch.randn(19, 3)
@@ -1367,8 +1367,8 @@ def test_generator_polynomials(degree, normalization, double_precision):
 
 @pytest.mark.parametrize("degree", [2, 8, 16])
 def test_high_degree_angular_derivatives(degree, double_precision):
-    from eqx.conv.o2_o3.geometry import angular_coefficients
-    from eqx.o3 import so3_generators
+    from eqx.o3._rotation import so3_generators
+    from eqx.ops.geometry import angular_coefficients
 
     tp = o2.O3TensorProduct(f"{degree}e", "2e", f"{degree}e", [(0, 0, 0, "uvu", True)])
     conv = eqx_conv.O2O3TensorProductConv(tp, backend="torch")
@@ -1546,7 +1546,7 @@ def test_low_degree_couplings_fourth_derivatives(
 def test_hybrid_direction_derivatives(monkeypatch, shared, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o2_o3 import cuda
+    import eqx.backends.cuda.o2_o3.convolution as cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 2)
     torch.manual_seed(107)
@@ -1617,7 +1617,7 @@ def test_hybrid_direction_derivatives(monkeypatch, shared, double_precision):
 def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels import cuda_graph
+    import eqx.backends.cuda.graph as cuda_graph
 
     monkeypatch.setattr(cuda_graph, "EDGE_BUCKET", 8)
     monkeypatch.setattr(cuda_graph, "MIN_EDGES", 1)
@@ -1701,7 +1701,7 @@ def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):
 def test_native_cuda_graph_outer_capture(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels import cuda_graph
+    import eqx.backends.cuda.graph as cuda_graph
 
     monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
     monkeypatch.setattr(cuda_graph, "MIN_EDGES", 1)
@@ -1753,7 +1753,7 @@ def test_native_cuda_graph_outer_capture(monkeypatch):
 def test_online_attention_merge(dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.attention import merge_attention
+    from eqx.backends.cuda.attention import merge_attention
 
     torch.manual_seed(6)
     scores = torch.randn(3, 5, 7, 2, device="cuda", dtype=dtype) * 20 + 1000
@@ -1797,7 +1797,7 @@ def test_online_attention_merge(dtype):
 def test_streaming_attention_torch(tile_size, edges, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import StreamingGraphAttention, graph_softmax
+    from eqx.conv.attention import StreamingGraphAttention, graph_softmax
 
     def shapes(inputs):
         return tuple(
@@ -1946,8 +1946,8 @@ def test_uu_o2_convolution_derivatives(
 def test_uu_o2_chunked_reduction(monkeypatch, double_precision, channels, shared):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o2_o3 import cuda
-    from eqx.conv.o3 import cuda as o3_cuda
+    import eqx.backends.cuda.o2_o3.convolution as cuda
+    import eqx.backends.cuda.o3.convolution as o3_cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
     monkeypatch.setattr(o3_cuda, "CHUNK_SIZE", 1025)
@@ -2090,7 +2090,7 @@ def test_uu_o2_compile_and_empty_edges(double_precision):
 def test_local_channel_scaling():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels.channel_product import local_product
+    from eqx.ops.channel_product import local_product
 
     indices = [0, 1, 2, 1, 2]
     metadata = repr(
@@ -2115,7 +2115,7 @@ def test_local_channel_scaling():
 
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
 def test_cartesian_harmonic_tables(normalization):
-    from eqx.conv.o3.harmonics import polynomial_coefficients
+    from eqx.backends.cuda.o3.harmonics import polynomial_coefficients
 
     vectors = torch.randn(7, 3, dtype=torch.float64)
     vectors = torch.nn.functional.normalize(vectors, dim=-1)
@@ -2304,7 +2304,7 @@ def test_o3_cartesian_compile_and_empty_graph(
     conv = conv_cls(tp, normalize=False, **kwargs).cuda()
     reference = conv_cls(tp, normalize=False, backend="torch", **kwargs).cuda()
     if implementation == "compact":
-        from eqx.conv.co3 import Linear
+        from eqx.conv.co3.linear import Linear
 
         linear = Linear(tp.irreps_out, tp.irreps_out, conv.harmonic_output_index).cuda()
     else:
@@ -2413,7 +2413,7 @@ def test_sparse_direction_rotations(source_degree, double_precision):
 
 
 def test_convolution_backends_and_modes():
-    from eqx.kernels import wigner_D
+    from eqx.ops.wigner import wigner_D
 
     # Exported graphs can resolve the operator before any frame is evaluated.
     assert torch.ops.eqx.quaternion_polynomial.default is not None
@@ -2434,7 +2434,7 @@ def test_convolution_backends_and_modes():
 def test_quaternion_coefficients():
     from e3nn import o3
 
-    from eqx.kernels.quaternion import polynomial_coefficients
+    from eqx.backends.cuda.quaternion import polynomial_coefficients
     from eqx.o2.rotation_matrix import _quaternion_to_matrix
 
     q = torch.randn(
@@ -2464,7 +2464,7 @@ def test_quaternion_coefficients():
 def test_quaternion_wigner_frames(lmax):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels import wigner_D
+    from eqx.ops.wigner import wigner_D
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -2594,7 +2594,7 @@ def test_same_degree_output_rotations(channels, edge_count, merge_paths):
 
 
 def test_shared_path_rotation_schedule():
-    from eqx.conv.o2_o3.schedule import rotation_groups
+    from eqx.backends.cuda.o2_o3.schedule import rotation_groups
 
     # Three instructions sum into one output, while the fourth writes an
     # independent entry of the same degree. Do not split or merge those roles.
@@ -2611,7 +2611,7 @@ def test_shared_path_rotation_schedule():
 def test_projected_weight_only_workspace(monkeypatch, shared, contributions, inactive):
     from types import SimpleNamespace
 
-    from eqx.conv.o2_o3.schedule import project
+    from eqx.backends.cuda.o2_o3.schedule import project
 
     torch.manual_seed(46)
     rows = 1 if shared else 7
@@ -2694,7 +2694,7 @@ def test_projected_weight_only_workspace(monkeypatch, shared, contributions, ina
 
 @pytest.mark.parametrize("shared", [False, True])
 def test_projected_adjoint_reuse(shared):
-    from eqx.conv.radial import project
+    from eqx.backends.cuda.radial import project
 
     torch.manual_seed(47)
     edges = torch.arange(7)
@@ -2730,7 +2730,7 @@ def test_projected_adjoint_reuse(shared):
 
 
 def test_derivative_partition_reuses_rotations():
-    from eqx.conv.o2_o3.schedule import split_program
+    from eqx.backends.cuda.o2_o3.schedule import split_program
 
     x, w, projection, din, dout, s = (object() for _ in range(6))
     cotangents = (object(), object())
@@ -2750,7 +2750,7 @@ def test_derivative_partition_reuses_rotations():
 @pytest.mark.parametrize("degree", [0, 1, 2, 3, 5])
 @pytest.mark.parametrize("normalization", ["norm", "component", "integral"])
 def test_direction_coefficients_at_pole(degree, normalization):
-    from eqx.conv.o2_o3.geometry import angular_coefficients
+    from eqx.ops.geometry import angular_coefficients
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -2817,7 +2817,7 @@ def test_direction_derivatives(
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o2_o3 import cuda
+    import eqx.backends.cuda.o2_o3.convolution as cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 3)
     previous = torch.get_default_dtype()
@@ -2941,7 +2941,7 @@ def test_direction_zero_order_and_empty_edges(device, projected):
 def test_direction_node_reductions(monkeypatch, channels):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o2_o3 import cuda
+    import eqx.backends.cuda.o2_o3.convolution as cuda
 
     monkeypatch.setattr(cuda, "ROW_SIZE", 8)
     previous = torch.get_default_dtype()
@@ -3011,7 +3011,7 @@ def test_direction_node_reductions(monkeypatch, channels):
 def test_direction_compile_and_capture(edge_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels import wigner_D
+    from eqx.ops.wigner import wigner_D
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -3183,7 +3183,7 @@ def test_direction_derivatives_on_axes(device):
 def test_convolution_graph_order(owner, device):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.graph import prepare_graph
+    from eqx.backends.cuda.reduction import prepare_graph
 
     edges = torch.tensor(
         [[0, 0, 1, 0, 3, 0, 2, 0, 0], [2, 1, 2, 0, 2, 2, 1, 2, 2]],
@@ -3222,7 +3222,7 @@ def test_convolution_graph_order(owner, device):
 def test_graph_reduction(heads, weighted, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.graph import reduce_messages
+    from eqx.backends.cuda.reduction import reduce_messages
 
     target = torch.randint(5, (73,), device="cuda")
     channels = heads * 5
@@ -3244,7 +3244,8 @@ def test_graph_reduction(heads, weighted, double_precision):
 def test_graph_softmax_derivatives(heads, weight_heads, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.attention import graph_softmax, normalized_exp_forward
+    from eqx.backends.cuda.attention import normalized_exp_forward
+    from eqx.conv.attention import graph_softmax
 
     target = torch.randint(4, (146,), device="cuda")[::2]
     scores = torch.randn(73, heads, device="cuda", dtype=dtype, requires_grad=True)
@@ -3282,7 +3283,7 @@ def test_graph_softmax_derivatives(heads, weight_heads, dtype):
 def test_graph_softmax_adjoint(heads, weight_heads, output, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.attention import evaluate_adjoint
+    from eqx.ops.attention import evaluate_adjoint
 
     target = torch.randint(4, (73,), device="cuda")
     inputs = [
@@ -3346,7 +3347,7 @@ def test_graph_softmax_compile(double_precision):
 def test_fused_wigner_derivatives(degree, dtype, method):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels import wigner_D
+    from eqx.ops.wigner import wigner_D
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
@@ -3397,7 +3398,7 @@ def test_fused_wigner_derivatives(degree, dtype, method):
 def test_cuda_streams_capture_compile(monkeypatch, row_size):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o2_o3 import cuda
+    import eqx.backends.cuda.o2_o3.convolution as cuda
 
     monkeypatch.setattr(cuda, "ROW_SIZE", row_size)
     tp = (
@@ -3464,7 +3465,7 @@ def test_streaming_derivatives(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     if backend == "cuda":
-        from eqx.conv.o2_o3 import cuda
+        import eqx.backends.cuda.o2_o3.convolution as cuda
 
         monkeypatch.setattr(cuda, "CHUNK_SIZE", 3)
     previous_dtype = torch.get_default_dtype()
@@ -3762,7 +3763,7 @@ def test_streaming_high_degree(degree):
 def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o2_o3 import cuda as convolution_kernel
+    import eqx.backends.cuda.o2_o3.convolution as convolution_kernel
 
     monkeypatch.setattr(convolution_kernel, "CHUNK_SIZE", 1024)
     previous_dtype = torch.get_default_dtype()
@@ -4008,7 +4009,7 @@ def test_cuda_unequal_channels(edge_count, double_precision):
 def test_cuda_requested_gradients(monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels.cuda import runtime
+    from eqx.backends.cuda.runtime import runtime
 
     tp = tensor_product().cuda()
     module = eqx_conv.O3TensorProductConv(tp).cuda()
@@ -4049,7 +4050,7 @@ def test_cuda_requested_gradients(monkeypatch, double_precision):
 def test_o2_requested_gradients(monkeypatch, directions, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.kernels.cuda import runtime
+    from eqx.backends.cuda.runtime import runtime
 
     tp = o2.O3TensorProduct(
         "3x1o", "1o", "3x0e+3x1e+3x2e", [(0, 0, i, "uvu", True) for i in range(3)]
@@ -4199,7 +4200,7 @@ def test_o3_chunked_shared_gradients(
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o3 import cuda
+    import eqx.backends.cuda.o3.convolution as cuda
 
     # Two grouped chunks and a one-edge tail exercise private and broadcast
     # gradients without mistaking the tail for a shared operand.
@@ -4235,7 +4236,7 @@ def test_o3_chunked_shared_gradients(
 
 
 def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
-    from eqx.conv.o3.codegen import angular_source
+    from eqx.backends.cuda.o3.codegen import angular_source
 
     tp = tensor_product()
     conv = eqx_conv.O3TensorProductConv(tp)
@@ -4262,7 +4263,7 @@ def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
 def test_o3_mixed_node_adjoint_destination(double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv.o3.convolution import contraction
+    from eqx.ops.o3 import contraction
 
     tp = o3.TensorProduct(
         "3x0e",
@@ -4300,9 +4301,11 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
 def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from eqx.conv import edge, execution
-    from eqx.conv.program import Program
-    from eqx.kernels.cuda import runtime
+    import eqx.backends.cuda.execution as execution
+    import eqx.ops.edge as edge
+    from eqx.backends.cuda.runtime import runtime
+    from eqx.backends.torch.edge import evaluate_torch
+    from eqx.ops.program import Program
 
     program = Program()
     x = program.input(0, "source", 4)
@@ -4325,7 +4328,7 @@ def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     ]
     index = torch.randint(3, (2, edges), device="cuda")
     actual = edge.evaluate(metadata, values, *index, 3)[0]
-    expected = edge.evaluate_torch(metadata, values, *index, 3)[0]
+    expected = evaluate_torch(metadata, values, *index, 3)[0]
     torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
     masks = []
     query = runtime().gradient_mask

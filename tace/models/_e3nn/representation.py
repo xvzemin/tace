@@ -523,7 +523,7 @@ class NodeRepresentation(torch.nn.Module):
             if getattr(self, "use_packed_wigner", False) and (
                 not self.use_so2 or graph.edge_vector.is_cuda
             ):
-                from eqx.kernels import wigner_D
+                from eqx.ops.wigner import wigner_D
 
                 edge_wigner = wigner_D(self.o2_angular_basis, graph.edge_vector)
                 edge_wigner_inv = edge_wigner

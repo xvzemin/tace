@@ -433,7 +433,7 @@ class TensorProduct(torch.nn.Module):
             and input1.dtype == input2.dtype == weight.dtype
             and input1.device == input2.device == weight.device
         ):
-            from ..kernels.channel_product import channel_product
+            from ..ops.channel_product import channel_product
 
             operands = [
                 input1,

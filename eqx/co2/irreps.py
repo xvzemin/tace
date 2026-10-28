@@ -5,7 +5,7 @@ from typing import NamedTuple
 
 import torch
 
-from .. import o2
+from eqx import o2
 
 
 class Irrep(o2.Irrep):

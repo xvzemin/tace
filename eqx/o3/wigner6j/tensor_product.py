@@ -266,7 +266,7 @@ class Wigner6jTensorProduct(torch.nn.Module):
             if name == "output_index":
                 index = index.argsort()
             self.register_buffer(name, index, persistent=False)
-        from ...conv.o3 import O3TensorProductConv
+        from ..cgtp.convolution import O3TensorProductConv
 
         self.conv13 = O3TensorProductConv(self.tp13, batch_paths=True)
         self.conv132 = O3TensorProductConv(self.tp132, batch_paths=True)

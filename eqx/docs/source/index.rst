@@ -1,8 +1,8 @@
 EquivariantX
 ============
 
-Spherical and Cartesian equivariant operators, frame conversions, and fused
-CUDA convolutions.
+Spherical and Cartesian equivariant operators using PyTorch, with optional
+fused CUDA implementations.
 
 .. toctree::
    :maxdepth: 2

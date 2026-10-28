@@ -5,8 +5,8 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from eqx.models.convolution import Convolution, RadialFeatures, harmonic_convention
-from eqx.utils import convert_modules, default_dtype
+from ...utils.module import convert_modules, default_dtype
+from ..convolution import Convolution, RadialFeatures, harmonic_convention
 
 
 class TensorProductScatter(Convolution):

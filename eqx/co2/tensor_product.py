@@ -4,7 +4,8 @@ import math
 
 import torch
 
-from .. import o2
+from eqx import o2
+
 from .basis import Projector
 from .irreps import Irrep, Irreps
 

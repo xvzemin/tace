@@ -501,7 +501,7 @@ class LocalFrame(torch.nn.Module):
             return self.to_local(features.index_select(0, index), wigner)
         if backend != "cuda":
             raise ValueError("backend must be 'torch' or 'cuda'.")
-        from ..kernels.frame import transform
+        from ..ops.frame import transform
 
         return transform(self, features, wigner, index, features.size(0), False)
 
@@ -546,6 +546,6 @@ class LocalFrame(torch.nn.Module):
             )
         if backend != "cuda":
             raise ValueError("backend must be 'torch' or 'cuda'.")
-        from ..kernels.frame import transform
+        from ..ops.frame import transform
 
         return transform(self, features, wigner_inv, index, num_nodes, True)

@@ -7,7 +7,7 @@ from e3nn import o3
 
 from eqx import o3 as eqx_o3
 
-from .bilinear_contraction import contract, encode_metadata
+from ....ops.bilinear import contract, encode_metadata
 
 
 class BilinearACE(torch.nn.Module):

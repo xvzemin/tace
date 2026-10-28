@@ -47,7 +47,7 @@ class Gate(E3nnGate):
         if backend == "torch" or not self.irreps_out.dim:
             return
 
-        from ..conv.program import Program, activate
+        from ..ops.program import Program, activate
 
         program = Program()
         features = program.input(0, "edge", self.irreps_in.dim)
@@ -98,7 +98,7 @@ class Gate(E3nnGate):
             or features.dtype not in (torch.float32, torch.float64)
         ):
             return super().forward(features)
-        from ..conv.edge import evaluate
+        from ..ops.edge import evaluate
 
         if features.shape[-1] != self.input_dim:
             raise ValueError("The last feature dimension must equal irreps_in.dim.")

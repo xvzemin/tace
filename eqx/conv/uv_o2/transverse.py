@@ -5,7 +5,7 @@ import math
 import torch
 from e3nn import o3
 
-from ...co2 import SphericalCoupling
+from ...co2.spherical import SphericalCoupling
 from ...o2._layout import irrep_layout
 
 
@@ -118,7 +118,7 @@ class TransverseFrame(torch.nn.Module):
             features = features.index_select(1, self.inverse_permutation)
         width = self.input_dim if inverse else self.output_dim
         if self.backend == "cuda" and features.is_cuda:
-            from ..o3.convolution import contraction
+            from ...ops.o3 import contraction
 
             values = [
                 features,

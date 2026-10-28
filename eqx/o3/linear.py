@@ -2,7 +2,7 @@
 
 import torch
 
-from .contraction import contract
+from ..ops.linear import contract
 
 
 class ElementLinear(torch.nn.Module):

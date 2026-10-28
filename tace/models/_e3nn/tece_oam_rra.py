@@ -9,10 +9,10 @@ import torch
 
 from eqx import o2
 from eqx.conv.attention import graph_softmax
-from eqx.kernels.channel_product import local_product
-from eqx.kernels.rotation import rotate
 from eqx.models.tace.tece_oam_rra import LocalSplit
 from eqx.o2._clebsch_gordan import clebsch_gordan_product
+from eqx.ops.channel_product import local_product
+from eqx.ops.rotation import rotate
 
 
 class Convolution(torch.nn.Module):
@@ -372,7 +372,7 @@ class Convolution(torch.nn.Module):
         radial_bias, radial_phase = self.radial_proj(radial_basis).split(heads, dim=-1)
         radial_phase = math.pi * radial_phase.tanh()
         if fused:
-            from eqx.kernels.rotary import rotary_product
+            from eqx.ops.rotary import rotary_product
 
             orders = torch.arange(self.mmax + 1, device=query.device, dtype=query.dtype)
             angle = radial_phase[:, None, :] * orders[None, :, None]

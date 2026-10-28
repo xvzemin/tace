@@ -5,7 +5,8 @@ import math
 import torch
 from e3nn import o3
 
-from .. import co3
+from eqx import co3
+
 from .restriction import (
     Restriction,
     coupling_coefficients,
