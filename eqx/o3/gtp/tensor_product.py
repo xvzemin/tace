@@ -40,6 +40,15 @@ class GauntTensorProduct(FactorizedTensorProduct):
     for the unweighted product. Output components without a coupling are zero.
     Gaunt couplings with odd ``l1 + l2 + l_out`` vanish, including
     ``1o x 1o -> 1e``. Both natural and unnatural spatial parities are supported.
+
+    Examples
+    --------
+    >>> from eqx import o3
+    >>> tp = o3.GauntTensorProduct("2x1o", "2x1o", "2x0e + 2x2e")
+    >>> x = torch.randn(5, tp.irreps_in1.dim)
+    >>> y = torch.randn(5, tp.irreps_in2.dim)
+    >>> tp(x, y).shape
+    torch.Size([5, 12])
     """
 
     def __init__(

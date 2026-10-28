@@ -1,4 +1,4 @@
-"""Native CUDA local updates with receiver-normalized rotary attention."""
+"""CUDA local updates with receiver-normalized rotary attention."""
 
 import torch
 
@@ -201,7 +201,7 @@ def contraction(
     target: torch.Tensor,
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    """Evaluate recursively differentiated local expressions as native kernels."""
+    """Evaluate local expressions and their derivatives with CUDA kernels."""
     from ....conv.execution import launch
     from .execution import BACKWARD_TILE_SIZE
 

@@ -53,10 +53,10 @@ class TensorProduct(torch.nn.Module):
     Parameters
     ----------
     irreps_in1, irreps_in2, irreps_out : Irreps or str
-        Cartesian representations in flattened mul_ir layout.
+        Cartesian representations in flattened ``mul_ir`` layout.
     instructions : sequence of tuple
-        (i_in1, i_in2, i_out, mode, has_weight[, path_weight]) entries.
-        Modes are u1u, uuu, and uvw.
+        ``(i_in1, i_in2, i_out, mode, has_weight[, path_weight])`` entries.
+        Modes are ``u1u``, ``uuu``, and ``uvw``.
     in1_var, in2_var, out_var : sequence of float, optional
         Variance of each irreducible entry. Defaults to one.
     irrep_normalization : {"component", "norm", "none"}, optional
@@ -72,6 +72,16 @@ class TensorProduct(torch.nn.Module):
     -----
     Inputs must be symmetric traceless. Unprojected outputs must be projected
     before another tensor product or nonlinearity.
+
+    Examples
+    --------
+    >>> from eqx import co2
+    >>> tp = co2.TensorProduct(
+    ...     "2x1m", "2x1m", "2x2m", [(0, 0, 0, "uuu", True)]
+    ... )
+    >>> x, y = torch.randn(5, 4), torch.randn(5, 4)
+    >>> tp(x, y).shape
+    torch.Size([5, 8])
     """
 
     def __init__(
@@ -157,7 +167,23 @@ class TensorProduct(torch.nn.Module):
         )
 
     def forward(self, x, y, weight=None):
-        """Evaluate STF inputs and flattened weights over broadcast batch axes."""
+        """Evaluate the tensor product of symmetric traceless inputs.
+
+        Parameters
+        ----------
+        x, y : torch.Tensor
+            Features of shape ``(..., irreps_in1.dim)`` and
+            ``(..., irreps_in2.dim)`` in ``mul_ir`` layout.
+        weight : torch.Tensor, optional
+            Flattened path weights of shape ``(..., weight_numel)``.
+            Leading dimensions broadcast with both inputs. Defaults to
+            the internal parameters.
+
+        Returns
+        -------
+        torch.Tensor
+            Features of shape ``(..., irreps_out.dim)`` in ``mul_ir`` layout.
+        """
         if x.shape[-1] != self.input_dims[0] or y.shape[-1] != self.input_dims[1]:
             raise ValueError("Input feature dimensions do not match the irreps.")
         weight = self.weight if weight is None else weight

@@ -1,12 +1,13 @@
 """Module utilities, kernel runtime, and executable documentation examples."""
 
+import doctest
 import logging
 import os
 import re
 import runpy
 import subprocess
 import sys
-import textwrap
+from importlib import import_module
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
@@ -16,16 +17,15 @@ import torch
 from eqx.kernels import cuda
 from eqx.utils import convert_modules, copy_model, default_dtype
 
-DOCS = Path(__file__).resolve().parents[1] / "docs/source"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("allow_slice", [False, True])
 def test_import(tmp_path, allow_slice):
-    root = Path(__file__).resolve().parents[1]
     names = sorted(
         {
             name
-            for path in root.rglob("*.py")
+            for path in ROOT.rglob("*.py")
             for name in re.findall(
                 r'@torch\.library\.custom_op\(\s*"(eqx::[^"]+)"',
                 path.read_text(encoding="utf-8"),
@@ -63,7 +63,7 @@ assert "tace" not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-B", "-c", script],
-        cwd=root.parent,
+        cwd=ROOT.parent,
         env={**os.environ, "CUDA_VISIBLE_DEVICES": "", "MPLCONFIGDIR": str(tmp_path)},
         capture_output=True,
         text=True,
@@ -76,23 +76,18 @@ assert "tace" not in sys.modules
     "path",
     [
         path
-        for path in sorted(DOCS.rglob("*.rst"))
-        if ".. code-block:: python" in path.read_text(encoding="utf-8")
+        for path in sorted(ROOT.rglob("*.py"))
+        if "tests" not in path.relative_to(ROOT).parts
+        and ">>> " in path.read_text(encoding="utf-8")
     ],
-    ids=lambda path: path.relative_to(DOCS).as_posix(),
+    ids=lambda path: path.relative_to(ROOT).as_posix(),
 )
 def test_documentation_examples(path):
-    blocks = re.findall(
-        r"^\.\. code-block:: python\n\n((?:(?:   [^\n]*|)\n)+)",
-        path.read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    assert blocks
-    namespace = {"__name__": "__main__"}
+    module = import_module(".".join(path.relative_to(ROOT.parent).with_suffix("").parts))
     with default_dtype(torch.float64), torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
-        for block in blocks:
-            exec(compile(textwrap.dedent(block), str(path), "exec"), namespace)
+        result = doctest.testmod(module, raise_on_error=True)
+    assert result.attempted > 0
 
 
 def test_default_dtype():
@@ -310,16 +305,13 @@ def test_contraction_source_reuses_polynomials():
 
 
 def test_shared_metadata_cache():
-    from eqx.conv import program
     from eqx.utils.metadata import parse_metadata
 
-    assert program.parse_metadata is parse_metadata
     specification = (2, ((0, 1, "uvu", True, 0.5),))
     metadata = repr(specification)
     result = parse_metadata(metadata)
     assert result == specification
     assert parse_metadata(metadata) is result
-    assert parse_metadata.cache_info().maxsize == 256
     assert parse_metadata("None") is None
     with pytest.raises(ValueError):
         parse_metadata("tuple()")

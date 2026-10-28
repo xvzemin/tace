@@ -62,10 +62,10 @@ class TensorProduct(torch.nn.Module):
     Parameters
     ----------
     irreps_in1, irreps_in2, irreps_out : Irreps or str
-        Input and output representations in flattened mul_ir layout.
+        Input and output representations in flattened ``mul_ir`` layout.
     instructions : sequence of tuple
-        (i_in1, i_in2, i_out, mode, has_weight[, path_weight]) entries.
-        Modes are uvu, uvv, uuu, uuw, uvw and uvuv.
+        ``(i_in1, i_in2, i_out, mode, has_weight[, path_weight])`` entries.
+        Modes are ``uvu``, ``uvv``, ``uuu``, ``uuw``, ``uvw``, and ``uvuv``.
     irrep_normalization : {"component", "norm", "none"}, optional
         Normalization of independent irreducible coordinates.
     path_normalization : {"element", "path", "none"}, optional
@@ -85,6 +85,16 @@ class TensorProduct(torch.nn.Module):
     Cartesian-to-CG scale. Repeated output irreps are not regrouped or merged.
     Unprojected outputs must be projected before another tensor product or
     a nonlinear operation.
+
+    Examples
+    --------
+    >>> from eqx import co3
+    >>> tp = co3.TensorProduct(
+    ...     "2x1o", "2x1o", "2x2e", [(0, 0, 0, "uuu", True)]
+    ... )
+    >>> x, y = torch.randn(5, 6), torch.randn(5, 6)
+    >>> tp(x, y).shape
+    torch.Size([5, 18])
     """
 
     def __init__(

@@ -430,6 +430,15 @@ class SymmetricContraction(AsymmetricContraction):
     -----
     Permutation-equivalent and linearly dependent paths are removed. Both
     algorithms use the same basis and externally supplied path weights.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> contraction = o2.SymmetricContraction("2x0e + 2x1m", "2x0e", 3)
+    >>> x = contraction.irreps_in.randn(5, -1)
+    >>> weight = torch.randn(contraction.weight_numel)
+    >>> contraction(x, weight).shape
+    torch.Size([5, 2])
     """
 
     def __init__(

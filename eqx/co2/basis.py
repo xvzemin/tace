@@ -19,14 +19,13 @@ def path_matrix(m):
     Returns
     -------
     torch.Tensor
-        Cached CPU float64 matrix of shape (2**m, 1 if m == 0 else 2).
-        Columns are orthonormal.
+        Cached CPU float64 matrix of shape ``(2**m, 1 if m == 0 else 2)``
+        with orthonormal columns. Do not modify it in place.
 
     Notes
     -----
     The columns are the real and imaginary parts of the m-fold tensor
-    product of ``(1, 1j)``. Each step prepends a Cartesian index.
-    Normalization is applied once after constructing the integer entries.
+    product of ``(1, 1j)``, normalized to unit norm.
     """
     if not isinstance(m, int) or m < 0:
         raise ValueError("The order must be a non-negative integer.")
@@ -42,7 +41,7 @@ def path_matrix(m):
 
 
 class ChangeOfBasis(torch.nn.Module):
-    """Convert circular ir_mul features and Cartesian mul_ir tensors.
+    """Convert spherical O(2) features and Cartesian tensors.
 
     Parameters
     ----------
@@ -51,6 +50,22 @@ class ChangeOfBasis(torch.nn.Module):
     inverse : bool, optional
         False embeds compact O(2) features. True extracts compact features
         and discards components outside the symmetric traceless subspace.
+
+    Notes
+    -----
+    Spherical O(2) features use ``ir_mul`` layout; Cartesian tensors use
+    ``mul_ir`` layout.
+
+    Examples
+    --------
+    >>> from eqx import co2
+    >>> to_cartesian = co2.ChangeOfBasis("2x2m")
+    >>> to_spherical = co2.ChangeOfBasis("2x2m", inverse=True)
+    >>> x = torch.randn(5, 4)
+    >>> tensor = to_cartesian(x)
+    >>> tensor.shape
+    torch.Size([5, 8])
+    >>> torch.testing.assert_close(to_spherical(tensor), x)
     """
 
     def __init__(self, irreps, inverse=False):

@@ -37,6 +37,15 @@ class MatrixTensorProduct(FactorizedTensorProduct):
     coefficients are fixed by matrix_degree; individual paths can vanish.
     Changing matrix_degree changes the operator. Both spatial parities and
     antisymmetric couplings are supported. Channels are not mixed.
+
+    Examples
+    --------
+    >>> from eqx import o3
+    >>> tp = o3.MatrixTensorProduct("2x1o", "2x1o", "2x0e + 2x1e + 2x2e")
+    >>> x = torch.randn(5, tp.irreps_in1.dim)
+    >>> y = torch.randn(5, tp.irreps_in2.dim)
+    >>> tp(x, y).shape
+    torch.Size([5, 18])
     """
 
     def __init__(

@@ -63,6 +63,19 @@ class O2Grid(torch.nn.Module):
     degree-d polynomial is exactly O(2)-equivariant up to roundoff when
     ``resolution > (d + 1) * mmax``. General nonlinearities require a
     resolution-convergence check.
+
+    Examples
+    --------
+    Apply a cubic activation on both reflection sheets without aliasing.
+
+    >>> from eqx import o2
+    >>> grid = o2.O2Grid("2x0e + 2x0o + 4x1m", resolution=5)
+    >>> x = grid.irreps.randn(5, -1)
+    >>> values = grid.to_grid(x)
+    >>> values.shape
+    torch.Size([5, 2, 2, 5])
+    >>> grid.from_grid(values.pow(3)).shape
+    torch.Size([5, 12])
     """
 
     def __init__(

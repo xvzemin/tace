@@ -191,8 +191,8 @@ class UvO2TensorProductConv(torch.nn.Module):
     frame_in, frame_out : LocalFrame
         Node input and output representations, in flattened ir_mul layout.
     linear_up, linear_down : eqx.o2.Linear
-        Channel maps before and after the gate. Parameters remain owned by
-        the caller and are supplied to forward, preserving checkpoint layouts.
+        Channel maps before and after the gate. Supply their parameters to
+        :meth:`forward`.
     gate : eqx.o2.Gate
         Normalized scalar activations and gates, including odd scalar gates.
     frame_edge : LocalFrame, optional

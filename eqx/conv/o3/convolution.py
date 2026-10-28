@@ -161,6 +161,23 @@ class O3TensorProductConv(torch.nn.Module):
     Features use flattened ``ir_mul`` storage. Instructions, weights and
     output multiplicities are preserved. CUDA supports float32 and float64,
     including higher derivatives. Atomic reductions are not bitwise deterministic.
+
+    Examples
+    --------
+    >>> from e3nn import o3
+    >>> from eqx.conv import O3TensorProductConv
+    >>> tp = o3.TensorProduct(
+    ...     "2x0e", "1x1o", "2x1o", [(0, 0, 0, "uvu", True)],
+    ...     internal_weights=False, shared_weights=False,
+    ... )
+    >>> conv = O3TensorProductConv(tp, backend="torch")
+    >>> x = torch.randn(3, 2)
+    >>> edge_attrs = torch.randn(4, 3)
+    >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> radial = torch.randn(4, 8)
+    >>> projection = torch.randn(8, tp.weight_numel)
+    >>> conv(x, edge_attrs, radial, projection, edge_index).shape
+    torch.Size([3, 6])
     """
 
     batch_paths = False

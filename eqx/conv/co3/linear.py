@@ -14,7 +14,7 @@ class Linear(CartesianLinear):
 
     Parameters
     ----------
-    irreps_in, irreps_out : Irreps or str
+    irreps_in, irreps_out : eqx.co3.Irreps or str
         Input and output representations, including channel multiplicities.
     input_indices : sequence of int
         Expansion from compact storage to flattened Cartesian ``mul_ir``.
@@ -22,7 +22,7 @@ class Linear(CartesianLinear):
         CUDA packs contiguous group matrices in one permutation. CPU inputs
         use ordinary PyTorch operations.
     **kwargs
-        Weight, bias and normalization arguments of ``co3.Linear``.
+        Weight, bias and normalization arguments of :class:`eqx.co3.Linear`.
     """
 
     def __init__(

@@ -61,6 +61,23 @@ class TensorProduct(torch.nn.Module):
     -----
     CUDA supports repeated differentiation. Shared-weight gradients use atomic
     reductions and are not bitwise deterministic.
+
+    Examples
+    --------
+    Couple two order-one inputs into an even scalar, an odd scalar, and an
+    order-two output, with independent weights for each path.
+
+    >>> from eqx import o2
+    >>> tp = o2.TensorProduct(
+    ...     "2x1m", "2x1m", "2x0e + 2x0o + 2x2m",
+    ...     [(0, 0, i, "uuu", True) for i in range(3)],
+    ...     shared_weights=False,
+    ... )
+    >>> x = tp.irreps_in1.randn(5, -1)
+    >>> y = tp.irreps_in2.randn(5, -1)
+    >>> weight = torch.randn(5, tp.weight_numel)
+    >>> tp(x, y, weight).shape
+    torch.Size([5, 8])
     """
 
     def __init__(

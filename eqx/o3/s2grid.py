@@ -94,6 +94,16 @@ class S2Grid(torch.nn.Module):
     General nonlinearities require a resolution-convergence check. The grid
     represents scalar functions with natural spatial parity; it does not
     encode arbitrary spatial or time-parity assignments.
+
+    Examples
+    --------
+    >>> from eqx import o3
+    >>> grid = o3.S2Grid(lmax=2, resolution=8)
+    >>> x = torch.randn(5, 9)
+    >>> values = grid.to_grid(x)
+    >>> torch.testing.assert_close(grid.from_grid(values), x)
+    >>> grid.from_grid(values.pow(3)).shape
+    torch.Size([5, 9])
     """
 
     def __init__(

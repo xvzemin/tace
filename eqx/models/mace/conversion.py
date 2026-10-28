@@ -106,9 +106,13 @@ def convert_mace_to_eqx(
     --------
     Given a loaded MACE model:
 
-    >>> model = convert_mace_to_eqx(model.cuda())
-    >>> from mace.calculators import MACECalculator
-    >>> calculator = MACECalculator(models=model, device="cuda")
+    .. code-block:: python
+
+        from eqx.models.mace import convert_mace_to_eqx
+        from mace.calculators import MACECalculator
+
+        model = convert_mace_to_eqx(model.cuda())
+        calculator = MACECalculator(models=model, device="cuda")
     """
     from mace.modules.irreps_tools import tp_out_irreps_with_instructions
     from mace.modules.wrapper_ops import get_layout

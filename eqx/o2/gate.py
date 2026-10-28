@@ -199,6 +199,14 @@ class Gate(torch.nn.Module):
         permutations and gate multiplication for CUDA float32 and float64
         inputs. Supported activations are SiLU, sigmoid, tanh and identity,
         including their second-moment normalization. Requires the CUDA toolkit.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> gate = o2.Gate("2x0e", [torch.tanh], "3x0e", [torch.sigmoid], "3x1m")
+    >>> x = gate.irreps_in.randn(5, -1)
+    >>> gate(x).shape
+    torch.Size([5, 8])
     """
 
     def __init__(

@@ -55,11 +55,19 @@ class Wigner6jTensorProduct(torch.nn.Module):
 
     Notes
     -----
-    Each weight vector retains the ordering of its standard tensor product.
-    Repeated input irreps and standard paths retain their independent channels.
-    Distinct first--third couplings are shared before the second input is used.
-    CUDA batches compatible path groups and retains ``ir_mul`` storage between
-    the two contractions.
+    Each weight vector retains the ordering and normalization of its standard
+    tensor product. Repeated irreps and paths retain independent channels.
+
+    Examples
+    --------
+    >>> from eqx import o3
+    >>> tp = o3.Wigner6jTensorProduct(
+    ...     "2x1o", "1x1o", "1x1o", "2x2e", "2x1o",
+    ...     [(0, 0, 0, "uvu", True)], [(0, 0, 0, "uvu", True)],
+    ...     backend="torch",
+    ... )
+    >>> x1, x2, x3 = (torch.randn(5, dim) for dim in (6, 3, 3))
+    >>> torch.testing.assert_close(tp(x1, x2, x3), tp.forward_reference(x1, x2, x3))
     """
 
     def __init__(
@@ -310,11 +318,24 @@ class Wigner6jTensorProduct(torch.nn.Module):
         )
 
     def forward(self, x1, x2, x3, weight1=None, weight2=None):
-        """Evaluate three inputs of shape ``(..., irreps_inN.dim)``.
+        """Evaluate the recoupled tensor product.
 
-        Weight vectors follow the two standard products, with shape
-        ``(weight_numelN,)`` when shared or ``(..., weight_numelN)`` otherwise.
-        Leading dimensions broadcast. Output shape is ``(..., irreps_out.dim)``.
+        Parameters
+        ----------
+        x1, x2, x3 : torch.Tensor
+            Features with trailing sizes ``irreps_in1.dim``, ``irreps_in2.dim``,
+            and ``irreps_in3.dim`` in ``mul_ir`` layout. Leading dimensions
+            broadcast.
+        weight1, weight2 : torch.Tensor, optional
+            Weights of the two standard products, with trailing sizes
+            ``weight_numel1`` and ``weight_numel2``. Shared weights are
+            one-dimensional; otherwise their leading dimensions broadcast
+            with the inputs. Defaults to the internal parameters.
+
+        Returns
+        -------
+        torch.Tensor
+            Features of shape ``(..., irreps_out.dim)`` in ``mul_ir`` layout.
         """
         weight1, weight2 = self.get_weights(weight1, weight2)
         for value, width in zip((x1, x2, x3), self.input_dims):

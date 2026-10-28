@@ -23,7 +23,7 @@ Activations
 Tensor products
 ---------------
 
-Available from ``eqx.o3`` and the ``gtp``, ``mtp`` and ``wigner6j`` submodules.
+Available from ``eqx.o3`` and its ``gtp``, ``mtp``, and ``wigner6j`` submodules.
 
 .. autoclass:: eqx.o3.GauntTensorProduct
    :members: forward

@@ -73,15 +73,26 @@ def path_normalization(l1, l2, l3):
 
 
 class ChangeOfBasis(torch.nn.Module):
-    """Convert spherical coordinates and Cartesian tensors using path matrices.
+    """Convert spherical features and Cartesian tensors using path matrices.
 
     Parameters
     ----------
     irreps : Irreps or str
         Multiplicities and representation labels, without regrouping.
     inverse : bool, optional
-        False maps spherical coordinates to Cartesian tensors. True extracts
-        spherical coordinates and discards non-STF components.
+        False maps spherical features to Cartesian tensors. True extracts
+        spherical features and discards non-STF components.
+
+    Examples
+    --------
+    >>> from eqx import co3
+    >>> to_cartesian = co3.ChangeOfBasis("2x2e")
+    >>> to_spherical = co3.ChangeOfBasis("2x2e", inverse=True)
+    >>> x = torch.randn(5, 10)
+    >>> tensor = to_cartesian(x)
+    >>> tensor.shape
+    torch.Size([5, 18])
+    >>> torch.testing.assert_close(to_spherical(tensor), x)
     """
 
     def __init__(self, irreps, inverse=False):

@@ -108,7 +108,24 @@ class Linear(torch.nn.Module):
         )
 
     def forward(self, features, weight=None, bias=None):
-        """Mix (..., irreps_in.dim) features with optional external parameters."""
+        """Apply the linear map with optional external parameters.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Cartesian features of shape ``(..., irreps_in.dim)`` in ``mul_ir``
+            layout.
+        weight, bias : torch.Tensor, optional
+            Parameters with trailing sizes ``weight_numel`` and ``bias_numel``.
+            Leading dimensions broadcast with the input. Defaults to the
+            internal parameters.
+
+        Returns
+        -------
+        torch.Tensor
+            Features of shape ``(..., irreps_out.dim)`` in the selected
+            ``output_basis``.
+        """
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         weight = self.weight if weight is None else weight

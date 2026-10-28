@@ -38,6 +38,16 @@ class Linear(torch.nn.Module):
         Normalization applied when several paths contribute to one output.
         ``"element"`` normalizes by the total input multiplicity, while
         ``"path"`` assigns equal variance to each path.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> linear = o2.Linear("4x0e + 2x1m", "2x0e + 3x1m")
+    >>> linear.weight_numel
+    14
+    >>> x = linear.irreps_in.randn(5, -1)
+    >>> linear(x).shape
+    torch.Size([5, 8])
     """
 
     def __init__(
@@ -447,10 +457,6 @@ class Linear(torch.nn.Module):
 class UuLinear(torch.nn.Module):
     """Mix equivalent O(2) representations without mixing channels.
 
-    Summed paths are normalized by the inverse square root of the number of
-    input irrep copies. Expanded paths each have unit normalization. There
-    are no internal weights or biases.
-
     Parameters
     ----------
     irreps_in : Irreps, str, or sequence
@@ -463,6 +469,21 @@ class UuLinear(torch.nn.Module):
     path_mode : {"sum", "expand"}, optional
         Sum input copies or retain each input-output copy path as a separate
         output channel. The external weight layout is identical in both modes.
+
+    Notes
+    -----
+    Summed paths are normalized by the inverse square root of the number of
+    input irrep copies. Expanded paths have unit normalization. Weights are
+    external; biases are not supported.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> linear = o2.UuLinear("4x0e + 2x1m", "2x0e + 2x1m", num_channel=2)
+    >>> x = linear.irreps_in.randn(5, -1)
+    >>> weight = torch.randn(5, linear.weight_numel)
+    >>> linear(x, weight).shape
+    torch.Size([5, 6])
     """
 
     def __init__(

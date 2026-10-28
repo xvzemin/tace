@@ -14,7 +14,7 @@ def path_matrices(rank):
 
     Yields
     ------
-    path : tuple of Irrep
+    path : tuple of e3nn.o3.Irrep
         Intermediate irreps, starting with the even scalar. Higher
         degrees precede lower ones.
     matrix : torch.Tensor
@@ -60,9 +60,9 @@ class ICTD(torch.nn.Module):
 
     Attributes
     ----------
-    paths : tuple of tuple of Irrep
+    paths : tuple of tuple of e3nn.o3.Irrep
         Coupling paths including intermediate spatial parities.
-    irreps_out : Irreps
+    irreps_out : e3nn.o3.Irreps
         One multiplicity-one entry per path. Repeated irreps remain separate.
     change_of_basis : torch.Tensor
         Orthogonal matrix of shape (3**rank, 3**rank).

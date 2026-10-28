@@ -36,6 +36,22 @@ class LocalFrame(torch.nn.Module):
         entries. Defaults to ``True``. If ``False``, retain the spherical
         harmonic basis; subsequent operators must account for the different
         reflection matrices of natural- and unnatural-parity inputs.
+
+    Notes
+    -----
+    Both input and output use flattened ``ir_mul`` layout. Retaining all
+    orders gives an invertible transformation.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> frame = o2.LocalFrame("2x0e + 2x1o + 2x1e")
+    >>> wigner = o2.WignerD(mmax=1, lmax=1, method="recursive")
+    >>> vectors = torch.randn(5, 3)
+    >>> rotation = wigner.forward_packed(vectors)
+    >>> x = torch.randn(5, frame.input_dim)
+    >>> local = frame.to_local(x, rotation)
+    >>> torch.testing.assert_close(frame.to_global(local, rotation), x)
     """
 
     @staticmethod

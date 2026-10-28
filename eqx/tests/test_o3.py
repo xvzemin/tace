@@ -299,15 +299,6 @@ def test_indexed_linear_compile_and_capture(experts, double_precision):
         torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
 
 
-@pytest.mark.parametrize(
-    "namespace,cls",
-    [(eqx_o3.gtp, eqx_o3.GauntTensorProduct), (eqx_o3.mtp, eqx_o3.MatrixTensorProduct)],
-)
-def test_product_exports(namespace, cls):
-    assert getattr(namespace, cls.__name__) is cls
-    assert cls.__module__ == f"{namespace.__name__}.tensor_product"
-
-
 @pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])

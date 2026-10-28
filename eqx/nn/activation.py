@@ -25,8 +25,7 @@ class PolynomialActivation(torch.nn.Module):
 
     Notes
     -----
-    Coefficients are projected onto Chebyshev polynomials in float64 and
-    evaluated with Clenshaw recurrence. ``tanh`` preserves odd parity;
+    ``tanh`` preserves odd parity;
     ``sigmoid`` preserves its constant-plus-odd decomposition. The remaining
     activations preserve their linear-plus-even decomposition.
 
@@ -36,6 +35,15 @@ class PolynomialActivation(torch.nn.Module):
     conditions remove aliasing, not approximation error relative to ``act``.
     Apply the activation to grid values, not to individual irrep coefficients.
     Outside the approximation interval the polynomial can grow rapidly.
+
+    Examples
+    --------
+    >>> from eqx import nn, o2
+    >>> act = nn.PolynomialActivation("silu", degree=4)
+    >>> grid = o2.O2Grid("0e + 0o + 2x1m", resolution=6)
+    >>> x = grid.irreps.randn(5, -1)
+    >>> grid.from_grid(act(grid.to_grid(x))).shape
+    torch.Size([5, 6])
     """
 
     def __init__(self, act="silu", degree=8, bound=3.0, *, dtype=None, device=None):

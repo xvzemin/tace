@@ -14,7 +14,7 @@ pip install ./tace/eqx
 
 Requires PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
 For fused kernels, install `pip install './tace/eqx[cuda]'` and provide a CUDA
-toolkit. Kernels compile on first use and are cached. A standalone release is planned.
+toolkit. Kernels compile on first use and are cached.
 
 With e3nn 0.4.x, import `eqx` before `e3nn.o3`; supported degrees depend on its
 CG table. Global time-odd irreps require the
@@ -36,16 +36,8 @@ CG table. Global time-odd irreps require the
 [Tools](https://tace.readthedocs.io/en/latest/equivariantx/api/tools.html) cover
 basis conversions, rotations, tensor decomposition, and module utilities.
 
-```python
-from eqx import o2
-
-linear = o2.Linear("8x0e + 4x1m", "4x0e + 2x1m")
-features = linear.irreps_in.randn(32, -1)
-output = linear(features)
-```
-
 Spherical O(2) uses flattened `ir_mul` storage; Cartesian operators use `mul_ir`.
-See each operator's API for input layouts, weight shapes, and backend support.
+Each operator documents its parameters, layouts, and usage examples.
 
 ## Tests
 

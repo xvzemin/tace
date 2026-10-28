@@ -3,8 +3,9 @@
 Convolutions
 ============
 
-Fused spherical convolutions use ``ir_mul`` layout. Cartesian, Gaunt, Matrix
-and Wigner-6j convolutions use ``mul_ir``, unless compact Cartesian storage is selected.
+O(3) CG, O(2)/O(3), Uu, and Uv convolutions use ``ir_mul`` layout.
+Cartesian, Gaunt, matrix, and Wigner-6j convolutions use ``mul_ir`` by default.
+Gaunt and matrix convolutions use PyTorch operations rather than fused kernels.
 
 |eqx-convolutions|
 

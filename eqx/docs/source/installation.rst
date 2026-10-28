@@ -29,15 +29,4 @@ are limited by that version's CG table. Global time-odd irreps require:
    pip install --force-reinstall --no-deps \
      "e3nn @ git+https://github.com/xvzemin/e3nn.git@time-reversal"
 
-Example
--------
-
-.. code-block:: python
-
-   from eqx import o2
-
-   linear = o2.Linear("8x0e + 4x1m", "4x0e + 2x1m")
-   features = linear.irreps_in.randn(32, -1)
-   output = linear(features)
-
-See :ref:`equivariantx-api` for layouts, parameters, and supported operations.
+See :ref:`equivariantx-api` for parameters and usage examples.

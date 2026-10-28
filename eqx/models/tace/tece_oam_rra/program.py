@@ -28,7 +28,7 @@ def activation(module):
 
 
 def metadata(module):
-    """Serialize the native O(2) paths and the checkpoint's normalization."""
+    """Serialize O(2) paths and their normalization."""
     scalar, tensor = activation(module.scalar_act), activation(module.tensor_act)
     if scalar is None or tensor is None or not module.use_radial_rotary_attention:
         return None
