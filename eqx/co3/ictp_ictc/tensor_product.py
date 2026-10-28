@@ -7,9 +7,9 @@ from typing import NamedTuple
 import torch
 from e3nn import o3
 
-from .basis import Projector, path_matrix
-from .basis import path_normalization as coupling_scale
-from .irreps import Irreps
+from ..basis import Projector, path_matrix
+from ..basis import path_normalization as coupling_scale
+from ..irreps import Irreps
 
 
 def cartesian_product(x, y, l1, l2, l3):
@@ -22,6 +22,17 @@ def cartesian_product(x, y, l1, l2, l3):
     if not abs(l1 - l2) <= l3 <= l1 + l2:
         raise ValueError("Degrees must satisfy the triangle inequality.")
     k, odd = divmod(l1 + l2 - l3, 2)
+    if not k:
+        if not odd:
+            if not l1 or not l2:
+                return x * y
+            return (x.unsqueeze(-1) * y.unsqueeze(-2)).flatten(-2)
+        x = x.reshape(*x.shape[:-1], 3 ** (l1 - 1), 1, 3)
+        y = y.reshape(*y.shape[:-1], 3, 3 ** (l2 - 1))
+        y = y.transpose(-2, -1).unsqueeze(-3)
+        x, y = torch.broadcast_tensors(x, y)
+        value = torch.linalg.cross(x, y).transpose(-2, -1)
+        return value.flatten(-3) / math.sqrt(2)
     if not odd:
         x = x.reshape(*x.shape[:-1], 3 ** (l1 - k), 3**k)
         y = y.reshape(*y.shape[:-1], 3**k, 3 ** (l2 - k))
@@ -231,7 +242,23 @@ class TensorProduct(torch.nn.Module):
             self.register_buffer("weight", torch.empty(0))
         self.path_factors = tuple(scales)
         self.register_buffer("path_scales", torch.tensor(scales), persistent=False)
-        self.projection = Projector(self.irreps_out) if project else torch.nn.Identity()
+        self.projection_indices = tuple(
+            sorted(
+                {
+                    ins.i_out
+                    for ins in self.instructions
+                    if self.irreps_out[ins.i_out].ir.l > 1
+                    and self.irreps_out[ins.i_out].ir.l
+                    != abs(
+                        self.irreps_in1[ins.i_in1].ir.l
+                        - self.irreps_in2[ins.i_in2].ir.l
+                    )
+                }
+            )
+        )
+        self.projection = Projector(
+            self.irreps_out, instructions=self.projection_indices if project else ()
+        )
         self.slices_in1, self.slices_in2 = (
             self.irreps_in1.slices(),
             self.irreps_in2.slices(),
@@ -307,7 +334,7 @@ class TensorProduct(torch.nn.Module):
             mode = ins.connection_mode
             if mode not in ("uuu", "uuw"):
                 left, right = left.unsqueeze(-2), right.unsqueeze(-3)
-            value = cartesian_product(left, right, a.l, b.l, c.l)
+            value = self.couple(left, right, a.l, b.l, c.l)
             if ins.has_weight:
                 size = math.prod(ins.path_shape)
                 w = weight[..., offset : offset + size].reshape(
@@ -329,12 +356,16 @@ class TensorProduct(torch.nn.Module):
             elif mode == "uvuv":
                 value = value.flatten(-3, -2)
             outputs[ins.i_out] = outputs[ins.i_out] + value * self.path_scales[index]
-        result = (
+        outputs = self.projection.forward_blocks(outputs)
+        return (
             torch.cat([v.flatten(-2) for v in outputs], -1)
             if outputs
             else x.new_zeros((*shape, 0)) + zero
         )
-        return self.projection(result)
+
+    def couple(self, x, y, l1, l2, l3):
+        """Contract one angular path before output projection."""
+        return cartesian_product(x, y, l1, l2, l3)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
@@ -408,7 +439,7 @@ class ElementwiseTensorProduct(TensorProduct):
     """
 
     def __init__(self, irreps_in1, irreps_in2, filter_ir_out=None, **kwargs):
-        from .irreps import Irrep
+        from ..irreps import Irrep
 
         a, b = [list(Irreps(irreps).simplify()) for irreps in (irreps_in1, irreps_in2)]
         if sum(mul for mul, _ in a) != sum(mul for mul, _ in b):

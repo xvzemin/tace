@@ -1,5 +1,6 @@
 """Orthonormal path matrices and Cartesian coupling normalization."""
 
+from collections import defaultdict
 from functools import lru_cache
 from math import factorial, ldexp, prod, sqrt
 
@@ -144,23 +145,80 @@ class Projector(torch.nn.Module):
     ----------
     irreps : Irreps or str
         Representation labels and Cartesian storage layout.
+    instructions : sequence of int, optional
+        Entries to project. Other entries are passed through unchanged.
+        Defaults to all entries. Scalar and vector projections are identities.
     """
 
-    def __init__(self, irreps):
+    def __init__(self, irreps, instructions=None):
         super().__init__()
         self.irreps_in = self.irreps_out = Irreps(irreps)
-        self.basis = ChangeOfBasis(irreps, inverse=True)
+        self.slices = self.irreps_in.slices()
+        instructions = (
+            range(len(self.irreps_in)) if instructions is None else instructions
+        )
+        groups = defaultdict(list)
+        for i in sorted(set(instructions)):
+            if i < 0 or i >= len(self.irreps_in):
+                raise IndexError("Projection instruction is outside irreps.")
+            mul, ir = self.irreps_in[i]
+            if mul and ir.l > 1:
+                groups[ir.l].append((i, mul))
+        self.groups = tuple(
+            (l, tuple(entries)) for l, entries in sorted(groups.items())
+        )
+        for l, _ in self.groups:
+            matrix = path_matrix(l)
+            if l == 2:
+                matrix = matrix @ matrix.T
+            self.register_buffer(
+                f"basis_{l}",
+                matrix.to(torch.get_default_dtype()).clone(),
+                persistent=False,
+            )
 
     def forward(self, features):
-        """Apply C C.T without constructing a square Cartesian projector."""
-        if features.shape[-1] != self.basis.input_dim:
+        """Project features of shape (..., irreps_in.dim) in mul_ir order."""
+        if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        values = []
-        for mul, l, dim, section in self.basis.paths:
-            matrix = getattr(self.basis, f"basis_{l}")
-            x = features[..., section].reshape(*features.shape[:-1], mul, dim)
-            values.append(((x @ matrix) @ matrix.T).flatten(-2))
+        if not self.groups:
+            return features
+        values = [
+            features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
+            for (mul, ir), section in zip(self.irreps_in, self.slices)
+        ]
+        values = self.forward_blocks(values)
+        values = [value.flatten(-2) for value in values]
         return torch.cat(values, dim=-1) if values else features[..., :0]
+
+    def forward_blocks(self, features):
+        """Project blocks of shape (..., mul, 3**l), batching equal ranks."""
+        values = list(features)
+        for l, entries in self.groups:
+            x = (
+                values[entries[0][0]]
+                if len(entries) == 1
+                else torch.cat([values[i] for i, _ in entries], dim=-2)
+            )
+            matrix = getattr(self, f"basis_{l}")
+            x = x @ matrix
+            if l != 2:
+                x = x @ matrix.T
+            for (i, _), value in zip(
+                entries, x.split([mul for _, mul in entries], dim=-2)
+            ):
+                values[i] = value
+        return values
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        for l, _ in self.groups:
+            matrix = path_matrix(l)
+            if l == 2:
+                matrix = matrix @ matrix.T
+            name = f"basis_{l}"
+            setattr(self, name, matrix.to(getattr(self, name)).clone())
+        return self
 
     def extra_repr(self):
         return str(self.irreps_in)

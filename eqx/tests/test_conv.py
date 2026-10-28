@@ -1085,6 +1085,47 @@ def test_cartesian_convolution_derivatives(
         losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_cartesian_analytic_convolution(backend, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    args = (
+        "2x2e",
+        "1x1o",
+        "2x1o+2x2o+2x3o",
+        [(0, 0, k, "uvu", True) for k in range(3)],
+    )
+    kwargs = dict(internal_weights=False, shared_weights=False)
+    reference = eqx_conv.CartesianTensorProductConv(
+        co3.TensorProduct(*args, **kwargs), backend="torch"
+    ).to(device)
+    module = eqx_conv.CartesianTensorProductConv(
+        co3.ictp.TensorProduct(*args, **kwargs), backend=backend
+    ).to(device)
+    x = torch.randn(4, 10, device=device, requires_grad=True)
+    y = torch.randn(7, 3, device=device, requires_grad=True)
+    w = torch.randn(7, module.weight_numel, device=device, requires_grad=True)
+    cx = co3.ChangeOfBasis(args[0]).to(device)(x)
+    edges = torch.randint(4, (2, 7), device=device)
+    projection = x.new_empty(0, module.weight_numel)
+    actual, expected = [
+        layer(cx, y, w, projection, edges) for layer in (module, reference)
+    ]
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    losses = [value.sin().sum() for value in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, y, w), create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=5e-9, rtol=5e-9)
+        tangents = [torch.randn_like(t) for t in (x, y, w)]
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+
+
 @pytest.mark.parametrize("symmetric_inputs", [False, True])
 def test_cartesian_convolution_angular_tiles(double_precision, symmetric_inputs):
     if not torch.cuda.is_available():

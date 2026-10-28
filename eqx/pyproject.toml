@@ -41,6 +41,8 @@ packages = [
     "eqx.backends.torch",
     "eqx.co2",
     "eqx.co3",
+    "eqx.co3.ictp",
+    "eqx.co3.ictp_ictc",
     "eqx.conv",
     "eqx.conv.co3",
     "eqx.conv.o2_o3",
