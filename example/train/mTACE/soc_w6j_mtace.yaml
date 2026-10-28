@@ -1,0 +1,9 @@
+defaults:
+  - soc_o2_mtace@_global_
+  - _self_
+
+model:
+  config:
+    atomic_basis:
+      type: w6j_mag
+      use_radial_rotary_attention: false

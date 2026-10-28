@@ -11,12 +11,14 @@ from torch_geometric.data import Data
 from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
 from tace.dataset.quantity import PROPERTIES, TIME_ODD_PROPERTIES
 from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+from tace.models._e3nn.edge import EDGE_UPDATE
 from tace.models._e3nn.fused import (
     O3TensorProductConv,
     UuuTensorProduct,
     UvuTensorProduct,
 )
 from tace.models._e3nn.layer_norm import get_normalization_layer
+from tace.models._e3nn.node import ElementNodeUpdate
 from tace.models._e3nn.nonlinear import get_nonlinear_layer
 from tace.models._e3nn.paths import generate_paths
 from tace.models._e3nn.readout import TensorReadOut
@@ -64,6 +66,136 @@ def _time_reversal_model_config() -> dict:
     config = _model_config()
     config["universal_embedding"]["magnetic_field"]["enable"] = True
     return config
+
+
+@pytest.mark.parametrize(
+    "edge_update,mlp_type", [("element2", "mlp_v1"), ("element2_v2", "mlp_v2")]
+)
+def test_magnetic_wigner6j_model(edge_update, mlp_type, monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    config = _model_config()
+    config.update(num_layers=2, parity=True, mlp_type=mlp_type)
+    config["statistics"][0].update(
+        atomic_numbers=[1, 8], atomic_energy={1: 0.0, 8: 0.0}
+    )
+    config["target_property"] = ["energy", "forces", "noncollinear_magnetic_forces"]
+    config["fidelity"][0]["magnetic_scale"] = 2.0
+    config["atomic_basis"]["type"] = "w6j_mag"
+    config["angular_basis"]["magnetic_Lmax"] = 1
+    config["radial_basis"]["apply_cutoff"] = False
+    config["edge_embedding"]["type"] = "linear"
+    config["edge_update"]["type"] = edge_update
+    model = TensorModel(e3nnTACE(**config)).cuda().train()
+    representation = model.readout_fn.representation
+    assert not hasattr(representation, "magnetic_edge_embedding")
+    for node_update, spatial, magnetic in zip(
+        representation.node_updates,
+        representation.edge_updates,
+        representation.magnetic_edge_updates,
+    ):
+        assert isinstance(node_update, ElementNodeUpdate)
+        assert isinstance(spatial, EDGE_UPDATE[edge_update])
+        assert isinstance(magnetic, EDGE_UPDATE["identity"])
+        assert magnetic.out_dim == config["num_channel"]
+    data = {
+        "positions": torch.tensor(
+            [[0.0, 0.0, 0.0], [1.0, 0.2, 0.1], [-0.3, 1.1, 0.4]], device="cuda"
+        ),
+        "node_attrs": torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], device="cuda"),
+        "edge_index": torch.tensor(
+            [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device="cuda"
+        ),
+        "edge_shifts": torch.zeros(6, 3, device="cuda"),
+        "lattice": torch.eye(3, device="cuda").unsqueeze(0) * 10,
+        "batch": torch.zeros(3, dtype=torch.long, device="cuda"),
+        "ptr": torch.tensor([0, 3], device="cuda"),
+        "initial_noncollinear_magmoms": torch.randn(3, 3, device="cuda") / 2,
+    }
+    properties = config["target_property"]
+    radial, _, _ = representation.magnetic_basis(
+        data["initial_noncollinear_magmoms"],
+        data["node_attrs"],
+        data["edge_index"],
+        torch.zeros(3, dtype=torch.long, device="cuda"),
+    )
+    radial = radial.detach().requires_grad_()
+    captured = []
+    hooks = [
+        interaction.magnetic_edge_info.register_forward_hook(
+            lambda module, args, output: captured.append((args[0], output))
+        )
+        for interaction in representation.interactions
+    ]
+    model(dict(data))
+    for hook in hooks:
+        hook.remove()
+    source = data["edge_index"][0]
+    for node_update, interaction, (features, weights) in zip(
+        representation.node_updates, representation.interactions, captured
+    ):
+        node_features = node_update(radial, data["node_attrs"])[0]
+        expected_weights = interaction.magnetic_edge_info(node_features)[source]
+        torch.testing.assert_close(features, node_features[source])
+        torch.testing.assert_close(weights, expected_weights)
+        # Outgoing edges with different targets use the same source weights.
+        torch.testing.assert_close(weights[0], weights[2])
+        gradients = torch.autograd.grad(expected_weights[0].sum(), radial)[0]
+        assert gradients[1:].count_nonzero() == 0
+        assert gradients[0].count_nonzero() > 0
+    with monkeypatch.context() as patch:
+        for interaction in representation.interactions:
+            tp = interaction.rejector.eqx_tp
+            patch.setattr(
+                tp,
+                "forward",
+                lambda *args, reference=tp.forward_reference, **kwargs: reference(
+                    *args
+                ),
+            )
+        expected = model(dict(data))
+        expected_grad = torch.autograd.grad(
+            sum(expected[name].square().sum() for name in properties),
+            tuple(model.parameters()),
+            allow_unused=True,
+        )
+    for enabled in ("0", "1"):
+        monkeypatch.setenv("TACE_USE_EQX", enabled)
+        actual = model(dict(data))
+        for name in properties:
+            torch.testing.assert_close(
+                actual[name], expected[name], atol=1e-10, rtol=1e-10
+            )
+        actual_grad = torch.autograd.grad(
+            sum(actual[name].square().sum() for name in properties),
+            tuple(model.parameters()),
+            allow_unused=True,
+        )
+        for a, b in zip(actual_grad, expected_grad):
+            if b is None:
+                assert a is None
+            else:
+                torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+    # An axial magnetic moment is unchanged by spatial inversion.
+    baseline = model(dict(data))["energy"]
+    for rotation, reverse_time in (
+        (o3.rand_matrix().cuda(), False),
+        (-torch.eye(3, device="cuda"), False),
+        (torch.eye(3, device="cuda"), True),
+    ):
+        transformed = dict(data)
+        transformed["positions"] = data["positions"] @ rotation.T
+        transformed["initial_noncollinear_magmoms"] = (
+            data["initial_noncollinear_magmoms"]
+            @ rotation.T
+            * rotation.det()
+            * (-1 if reverse_time else 1)
+        )
+        if reverse_time and not supports_time_reversal():
+            continue
+        torch.testing.assert_close(
+            model(transformed)["energy"], baseline, atol=1e-10, rtol=1e-10
+        )
 
 
 def _time_parities(irreps: o3.Irreps) -> list[int]:

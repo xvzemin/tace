@@ -1,4 +1,7 @@
-"""TECE local updates composed from native O(2) operators."""
+################################################################################
+# Authors: Ilyes Batatia
+# Symmetric contraction algorithm presented in the MACE paper
+################################################################################
 
 import math
 

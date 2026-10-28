@@ -210,6 +210,8 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         num_mag_radial_basis: int = 8,
         magnetic_node_info_channel: int = 0,
         magnetic_edge_irreps: o3.Irreps = None,
+        magnetic_node_irreps: o3.Irreps | None = None,
+        magnetic_edge_feats_channel: int = 0,
         mlp_type: str = "mlp_v1",
         radial_mlp_norm: str | None = None,
         path_irreps: o3.Irreps | None = None,
@@ -279,6 +281,8 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.num_mag_radial_basis = num_mag_radial_basis
         self.magnetic_node_info_channel = magnetic_node_info_channel
         self.magnetic_edge_irreps = magnetic_edge_irreps
+        self.magnetic_node_irreps = magnetic_node_irreps
+        self.magnetic_edge_feats_channel = magnetic_edge_feats_channel
 
         self.irreps_in = irreps_in
         self.irreps_sh = o3.Irreps.spherical_harmonics(lmax=self.lmax, p=-1)

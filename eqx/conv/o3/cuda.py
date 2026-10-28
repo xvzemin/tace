@@ -15,11 +15,21 @@ CHUNK_SIZE = 65536
 WORKSPACE_BYTES = 512 << 20
 ROW_SIZE = 8
 REGISTER_LIMIT = 160
+PATH_BATCH_SIZE = 8
 
 
 @lru_cache(maxsize=256)
 def execution_plan(
-    metadata, program, dimensions, shared, dtype, grouped, device, initialize
+    metadata,
+    program,
+    dimensions,
+    shared,
+    dtype,
+    grouped,
+    device,
+    initialize,
+    batch_paths=False,
+    indexed=True,
 ):
     """Group shared inputs and derivative factors using compiled resource usage."""
     paths, _, _, *geometry = parse_metadata(metadata)
@@ -96,6 +106,7 @@ def execution_plan(
                 use_generators=geometry[1] if len(geometry) > 1 else False,
                 angular_derivatives=geometry[2] if len(geometry) > 2 else False,
                 direction_offset=geometry[3] if len(geometry) > 3 else 0,
+                indexed=indexed,
             )
             candidates.append((code, paths, terms, owner))
         compiled = kernels([code for code, *_ in candidates], device)
@@ -128,13 +139,25 @@ def execution_plan(
     separate, accepted = accepted, []
     # Preserve each tile's resource usage and block size. A merged kernel
     # makes independent tiles share its largest register footprint.
-    if not cartesian:
+    if not cartesian and not batch_paths:
         return tuple(separate)
-    limit = FUSED_TILE_LIMIT
-    pending = deque(
-        tuple(range(start, min(start + limit, len(scheduled))))
-        for start in range(0, len(scheduled), limit)
-    )
+    if cartesian:
+        pending = deque(
+            tuple(range(start, min(start + FUSED_TILE_LIMIT, len(scheduled))))
+            for start in range(0, len(scheduled), FUSED_TILE_LIMIT)
+        )
+    else:
+        groups = defaultdict(list)
+        for i, ((paths, _, owner), (kernel, width, _, threads)) in enumerate(
+            zip(scheduled, separate)
+        ):
+            key = width, paths[0][5], owner, (kernel.registers + 31) // 32, threads
+            groups[key].append(i)
+        pending = deque(
+            tuple(indices[start : start + PATH_BATCH_SIZE])
+            for indices in groups.values()
+            for start in range(0, len(indices), PATH_BATCH_SIZE)
+        )
     while pending:
         candidates = []
         while pending:
@@ -154,12 +177,20 @@ def execution_plan(
                 use_generators=geometry[1] if len(geometry) > 1 else False,
                 angular_derivatives=geometry[2] if len(geometry) > 2 else False,
                 direction_offset=geometry[3] if len(geometry) > 3 else 0,
+                indexed=indexed,
             )
             candidates.append((code, indices, phases))
         compiled = kernels([code for code, _, _ in candidates], device)
         for code, indices, phases in candidates:
             kernel = compiled[code]
-            if kernel.local_bytes or kernel.registers > 192:
+            register_limit = (
+                192
+                if cartesian
+                else min(
+                    REGISTER_LIMIT, max(separate[i][0].registers for i in indices) + 16
+                )
+            )
+            if kernel.local_bytes or kernel.registers > register_limit:
                 half = len(indices) // 2
                 pending.extend((indices[:half], indices[half:]))
                 continue
@@ -180,7 +211,9 @@ def execution_plan(
     return tuple(accepted)
 
 
-def contract_direct(metadata, source, target, calls, shared=None, initialize=()):
+def contract_direct(
+    metadata, source, target, calls, shared=None, initialize=(), batch_paths=False
+):
     """Share angular factors across derivative terms and reduce on their owners."""
     operands, results = [], []
     operand_ids, result_ids, program = {}, {}, []
@@ -202,6 +235,8 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
                 results.append(value)
             pairs.append((role, result_ids[id(value)]))
         program.append((tuple(mapping), weighted, tuple(pairs)))
+    indexed = source is not None
+    count = source.numel() if indexed else operands[program[0][0][0]].size(0)
     phases = execution_plan(
         metadata,
         tuple(program),
@@ -210,9 +245,11 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
             shared_values.get(i, value.size(0) == 1) for i, value in enumerate(operands)
         ),
         "float" if operands[0].dtype == torch.float32 else "double",
-        source.numel() >= 1024,
+        indexed and count >= 1024,
         operands[0].device,
         tuple(result_ids[id(value)] for value in initialize),
+        batch_paths,
+        indexed,
     )
     orders = {
         owner: prepare_graph(source, target, owner)
@@ -231,40 +268,40 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
         if isinstance(owner, tuple):
             arguments = [
                 *pointers,
-                source.data_ptr(),
-                target.data_ptr(),
+                source.data_ptr() if indexed else 0,
+                target.data_ptr() if indexed else 0,
                 orders[0].data_ptr() if 0 in orders else 0,
                 orders[1].data_ptr() if 1 in orders else 0,
-                source.numel(),
+                count,
                 ROW_SIZE,
             ]
             warps = threads // 32
-            edge_blocks = (source.numel() + warps - 1) // warps
-            node_blocks = (source.numel() + ROW_SIZE * warps - 1) // (ROW_SIZE * warps)
-            count = sum(
+            edge_blocks = (count + warps - 1) // warps
+            node_blocks = (count + ROW_SIZE * warps - 1) // (ROW_SIZE * warps)
+            blocks = sum(
                 (node_blocks if index >= 0 else edge_blocks) * channels
                 for index, channels in owner
             )
             widths = {channels for _, channels in owner}
             columns = widths.pop() if len(widths) == 1 else 1
-            launches.append((kernel, arguments, count // columns, columns, threads, 0))
+            launches.append((kernel, arguments, blocks // columns, columns, threads, 0))
             continue
         rows = ROW_SIZE if owner >= 0 else 1
-        count = (source.numel() + rows - 1) // rows
+        tasks = (count + rows - 1) // rows
         arguments = [
             *pointers,
-            source.data_ptr(),
-            target.data_ptr(),
+            source.data_ptr() if indexed else 0,
+            target.data_ptr() if indexed else 0,
             orders[owner].data_ptr() if owner >= 0 else 0,
-            source.numel(),
             count,
+            tasks,
             rows,
         ]
         launches.append(
             (
                 kernel,
                 arguments,
-                (count + threads // 32 - 1) // (threads // 32),
+                (tasks + threads // 32 - 1) // (threads // 32),
                 (width + 31) // 32,
                 threads,
                 0,
@@ -275,17 +312,20 @@ def contract_direct(metadata, source, target, calls, shared=None, initialize=())
     )
 
 
-def contract(metadata, program, source, target, operands, results):
+def contract(metadata, program, source, target, operands, results, batch_paths=False):
     """Contract without saving edge messages or full projected edge weights."""
     device, dtype = operands[0].device, operands[0].dtype
     if dtype not in (torch.float32, torch.float64):
         raise TypeError("The O3 CUDA convolution requires float32 or float64.")
     if any(value.device != device or value.dtype != dtype for value in operands):
         raise ValueError("Convolution operands must share a device and dtype.")
-    if source.dtype != torch.int64 or target.dtype != torch.int64:
-        raise TypeError("Edge indices must have dtype int64.")
-    if source.device != device or target.device != device:
-        raise ValueError("Edge indices and features must be on the same device.")
+    if (source is None) != (target is None):
+        raise ValueError("Both graph indices must be supplied or omitted.")
+    if source is not None:
+        if source.dtype != torch.int64 or target.dtype != torch.int64:
+            raise TypeError("Edge indices must have dtype int64.")
+        if source.device != device or target.device != device:
+            raise ValueError("Edge indices and features must be on the same device.")
     required = {
         mapping[i]
         for mapping, _, pairs in program
@@ -302,7 +342,8 @@ def contract(metadata, program, source, target, operands, results):
             value = contiguous[id(value)]
         prepared.append(value)
     operands = tuple(prepared)
-    source, target = source.contiguous(), target.contiguous()
+    if source is not None:
+        source, target = source.contiguous(), target.contiguous()
     calls = [
         (
             tuple(role for role, _ in pairs),
@@ -331,14 +372,16 @@ def contract(metadata, program, source, target, operands, results):
                 if any(role != 2 for role in outputs)
             ]
             if direct:
-                contract_direct(metadata, source, target, direct)
+                contract_direct(
+                    metadata, source, target, direct, batch_paths=batch_paths
+                )
         if projected:
             project(
                 weight_numel,
                 source,
                 target,
                 projected,
-                partial(contract_direct, metadata),
+                partial(contract_direct, metadata, batch_paths=batch_paths),
                 complete=sum(p[3] * p[4] for p in paths if p[8] >= 0) == weight_numel,
                 output_role=4,
                 chunk_size=CHUNK_SIZE,

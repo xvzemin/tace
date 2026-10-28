@@ -242,7 +242,9 @@ def check_model_config(cfg: dict[str, Any]):
     atomic_basis_type = cfg["atomic_basis"]["type"]
     if isinstance(atomic_basis_type, str):
         atomic_basis_type = [atomic_basis_type]
-    uses_magnetic_interaction = "o2_mag" in atomic_basis_type
+    uses_magnetic_interaction = any(
+        name in ("o2_mag", "w6j_mag") for name in atomic_basis_type
+    )
     if (
         not isinstance(magnetic_lmax, int)
         or magnetic_lmax < 1

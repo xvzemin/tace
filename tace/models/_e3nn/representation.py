@@ -24,6 +24,7 @@ from .inter import (
     O2CgtpInteraction,
     O2MagneticInteraction,
     O3CartesianIctpIctcInteraction,
+    O3MagneticWigner6jInteraction,
     UuO2Interaction,
     UvO2Interaction,
     UvSO2Interaction,
@@ -146,10 +147,19 @@ class NodeRepresentation(torch.nn.Module):
             and not uses_so2_interaction
             and not any(issubclass(cls, UvO2Interaction) for cls in interaction_classes)
         )
-        uses_magnetic_interaction = any(
+        uses_o2_magnetic_interaction = any(
             issubclass(interaction_cls, O2MagneticInteraction)
             for interaction_cls in interaction_classes
         )
+        self.use_magnetic_wigner6j = any(
+            issubclass(interaction_cls, O3MagneticWigner6jInteraction)
+            for interaction_cls in interaction_classes
+        )
+        uses_magnetic_interaction = (
+            uses_o2_magnetic_interaction or self.use_magnetic_wigner6j
+        )
+        if self.use_magnetic_wigner6j and not angular_basis["use_spin_orbit_coupling"]:
+            raise ValueError("w6j_mag requires use_spin_orbit_coupling=True.")
         uses_time_odd_property = any(
             PROPERTIES[name].get("time_reversal", 1) == -1
             for name in self.invariant_property + self.equivariant_property
@@ -174,6 +184,7 @@ class NodeRepresentation(torch.nn.Module):
             ]
             self.equivariant_property.extend(time_odd_scalars)
         self.use_magnetic_interaction = uses_magnetic_interaction
+        self.use_magnetic_edge_attrs = uses_o2_magnetic_interaction
         self.magnetic_node_irreps_out = None
         self.magnetic_edge_irreps_out = None
         if self.use_magnetic_interaction:
@@ -271,18 +282,39 @@ class NodeRepresentation(torch.nn.Module):
                 for layer in range(num_layers)
             ]
         )
+        self.magnetic_edge_updates = (
+            torch.nn.ModuleList(
+                [
+                    EDGE_UPDATE["identity"](
+                        layer=layer,
+                        num_layers=num_layers,
+                        num_elements=self.num_elements,
+                        num_radial_basis=radial_basis["num_mag_radial_basis"],
+                        edge_embedding_channel=num_channel,
+                        num_channel=num_channel,
+                    )
+                    if issubclass(cls, O3MagneticWigner6jInteraction)
+                    else torch.nn.Identity()
+                    for layer, cls in enumerate(interaction_classes)
+                ]
+            )
+            if self.use_magnetic_wigner6j
+            else None
+        )
         self.node_updates = (
             torch.nn.ModuleList(
                 [
-                    NODE_UPDATE[(node_update or {}).get(
-                        "magnetic_type", "identity"
-                    )](
+                    NODE_UPDATE[
+                        "element"
+                        if issubclass(cls, O3MagneticWigner6jInteraction)
+                        else (node_update or {}).get("magnetic_type", "identity")
+                    ](
                         num_elements=self.num_elements,
                         num_radial_basis=radial_basis["num_mag_radial_basis"],
                         num_channel=num_channel,
                         bias=radial_basis["bias"],
                     )
-                    for _ in range(num_layers)
+                    for cls in interaction_classes
                 ]
             )
             if uses_magnetic_interaction
@@ -325,6 +357,7 @@ class NodeRepresentation(torch.nn.Module):
             "tensor_act": atomic_basis["tensor_act"],
             "edge_ace_hidden": atomic_basis["edge_ace_hidden"],
             "magnetic_edge_irreps": self.magnetic_edge_irreps_out,
+            "magnetic_node_irreps": self.magnetic_node_irreps_out,
         }
 
         self.interactions = torch.nn.ModuleList()
@@ -344,6 +377,13 @@ class NodeRepresentation(torch.nn.Module):
                     magnetic_node_info_channel=(
                         self.node_updates[layer].out_dim
                         if self.node_updates is not None
+                        else 0
+                    ),
+                    magnetic_edge_feats_channel=(
+                        self.magnetic_edge_updates[layer].out_dim
+                        if issubclass(
+                            interaction_classes[layer], O3MagneticWigner6jInteraction
+                        )
                         else 0
                     ),
                     nonlinear=atomic_basis["nonlinear"][layer],
@@ -511,6 +551,7 @@ class NodeRepresentation(torch.nn.Module):
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
+        magnetic_node_attrs = None
         magnetic_edge_attrs = None
         if self.use_magnetic_interaction:
             if initial_noncollinear_magmoms is None:
@@ -519,7 +560,7 @@ class NodeRepresentation(torch.nn.Module):
                 )
             (
                 magnetic_radial_basis,
-                _,
+                magnetic_node_attrs,
                 magnetic_edge_attrs,
             ) = self.magnetic_basis(
                 initial_noncollinear_magmoms,
@@ -529,6 +570,7 @@ class NodeRepresentation(torch.nn.Module):
                     graph.node_fidelity[:1] if graph.lmp else graph.node_fidelity
                 ),
                 node_type=node_type,
+                compute_edge=getattr(self, "use_magnetic_edge_attrs", True),
             )
 
         # === node initialize ===
@@ -590,6 +632,19 @@ class NodeRepresentation(torch.nn.Module):
             )
             if graph.lmp and idx > 0:
                 node_attrs_slice = node_attrs_local
+            magnetic_inputs = {}
+            if isinstance(inter, O3MagneticWigner6jInteraction):
+                magnetic_inputs = {
+                    "magnetic_node_attrs": magnetic_node_attrs,
+                    "magnetic_edge_feats": self.magnetic_edge_updates[idx](
+                        node_feats,
+                        node_attrs_total,
+                        magnetic_node_info[0][data["edge_index"][0]],
+                        data["edge_index"],
+                        edge_cutoff,
+                        node_type=node_type,
+                    ),
+                }
             node_feats, sc = inter(
                 node_feats,
                 node_attrs_total,
@@ -607,6 +662,7 @@ class NodeRepresentation(torch.nn.Module):
                 magnetic_edge_attrs,
                 data["batch"],
                 graph,
+                **magnetic_inputs,
             )
             if graph.lmp and idx == 0:
                 node_attrs_slice = node_attrs_local

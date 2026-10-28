@@ -15,8 +15,9 @@ For SOC models with explicit time-reversal symmetry, install time-reversal e3nn:
      "e3nn @ git+https://github.com/xvzemin/e3nn.git@time-reversal"
    python -c "from e3nn import o3; print(o3.Irrep('1eo'))"
 
-``o2_mag`` detects time-reversal support automatically. Non-SOC models also
-support standard e3nn. Disable incompatible backends for time-reversal SOC models:
+``o2_mag`` and ``w6j_mag`` detect time-reversal support automatically.
+Non-SOC models also support standard e3nn. Disable incompatible backends for
+time-reversal SOC models:
 
 .. code-block:: bash
 
@@ -32,31 +33,47 @@ For collinear data, use vectors such as :math:`(0,0,m_i)`.
 Remove magnetic-force losses and metrics if these labels are unavailable.
 
 Adjust dataset paths, field mappings, cache directories and magnetic cutoffs.
-Keep the inherited YAML files alongside the examples; see :doc:`details/defaults`.
+Keep ``example/train/tace.yaml`` and the ``mTACE`` subdirectory together;
+see :doc:`details/defaults`.
 Run the following commands from the repository root.
 
-SOC
-~~~
+SOC: local O(2)
+~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
    python example/data/download_FeDeepSpin.py
-   cd example/train
-   tace-train -cn soc_mtace.yaml
+   cd example/train/mTACE
+   tace-train -cn soc_o2_mtace.yaml
 
-.. literalinclude:: ../../../example/train/soc_mtace.yaml
+.. literalinclude:: ../../../example/train/mTACE/soc_o2_mtace.yaml
    :language: yaml
 
-Non-SOC
-~~~~~~~
+Non-SOC: local O(2)
+~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
    python example/data/download_CrN.py
-   cd example/train
-   tace-train -cn nonsoc_mtace.yaml
+   cd example/train/mTACE
+   tace-train -cn nosoc_o2_mtace.yaml
 
-.. literalinclude:: ../../../example/train/nonsoc_mtace.yaml
+.. literalinclude:: ../../../example/train/mTACE/nosoc_o2_mtace.yaml
+   :language: yaml
+
+SOC: Wigner-6j
+~~~~~~~~~~~~~~
+
+This example inherits the SOC dataset and training settings. ``w6j_mag``
+requires ``angular_basis.use_spin_orbit_coupling: true``.
+
+.. code-block:: bash
+
+   python example/data/download_FeDeepSpin.py
+   cd example/train/mTACE
+   tace-train -cn soc_w6j_mtace.yaml
+
+.. literalinclude:: ../../../example/train/mTACE/soc_w6j_mtace.yaml
    :language: yaml
 
 SOC couples spatial and spin rotations; non-SOC allows them independently.

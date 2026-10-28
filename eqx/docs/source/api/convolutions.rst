@@ -3,8 +3,8 @@
 Convolutions
 ============
 
-Fused spherical convolutions use ``ir_mul`` layout. Cartesian, Gaunt and
-Matrix convolutions use ``mul_ir``, unless compact Cartesian storage is selected.
+Fused spherical convolutions use ``ir_mul`` layout. Cartesian, Gaunt, Matrix
+and Wigner-6j convolutions use ``mul_ir``, unless compact Cartesian storage is selected.
 
 |eqx-convolutions|
 
@@ -19,6 +19,9 @@ Tensor-product convolutions
 
 .. autoclass:: eqx.conv.MatrixTensorProductConv
    :members: forward
+
+.. autoclass:: eqx.conv.Wigner6jTensorProductConv
+   :members: forward, forward_reference
 
 .. autoclass:: eqx.conv.CartesianTensorProductConv
    :members: forward

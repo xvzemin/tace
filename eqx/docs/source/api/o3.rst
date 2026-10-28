@@ -23,11 +23,16 @@ Activations
 Tensor products
 ---------------
 
+Available from ``eqx.o3`` and the ``gtp``, ``mtp`` and ``wigner6j`` submodules.
+
 .. autoclass:: eqx.o3.GauntTensorProduct
    :members: forward
 
 .. autoclass:: eqx.o3.MatrixTensorProduct
    :members: forward
+
+.. autoclass:: eqx.o3.Wigner6jTensorProduct
+   :members: forward, forward_reference
 
 Grid transforms
 ---------------

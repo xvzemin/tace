@@ -746,3 +746,56 @@ class UuO2TensorProductConv(torch.nn.Module):
             radial_network=radial_network,
         )
         return self.reshape_out.inverse(message)
+
+class Wigner6jTensorProductConv(torch.nn.Module):
+    """Recouple a node--harmonic--node product before graph aggregation.
+
+    Parameters
+    ----------
+    irreps_in1, irreps_in2, irreps_in3 : o3.Irreps
+        Node, edge-harmonic and additional node representations.
+    irreps_mid, irreps_out : o3.Irreps
+        Allowed standard intermediate and output irrep types.
+    l1l2 : str, optional
+        Angular selection rule for the first standard tensor product.
+    """
+
+    def __init__(
+        self, irreps_in1, irreps_in2, irreps_in3, irreps_mid, irreps_out, l1l2=None
+    ):
+        super().__init__()
+        instructions1, irreps_mid = generate_paths(
+            irreps_mid, irreps_in1, irreps_in2, l1l2=l1l2, e3nn_mode="uvu"
+        )
+        instructions2, irreps_out = generate_paths(
+            irreps_out, irreps_mid, irreps_in3, e3nn_mode="uvu"
+        )
+        self.eqx_tp = eqx_conv.Wigner6jTensorProductConv(
+            irreps_in1,
+            irreps_in2,
+            irreps_in3,
+            irreps_mid,
+            irreps_out,
+            instructions1,
+            instructions2,
+            internal_weights=False,
+            shared_weights=False,
+        )
+        self.irreps_in1 = self.eqx_tp.irreps_in1
+        self.irreps_in2 = self.eqx_tp.irreps_in2
+        self.irreps_in3 = self.eqx_tp.irreps_in3
+        self.irreps_out = self.eqx_tp.irreps_out
+        self.weight_numel = self.eqx_tp.weight_numel1
+        self.magnetic_weight_numel = self.eqx_tp.weight_numel2
+
+    def forward(self, x1, x2, x3, weight1, weight2, edge_index):
+        """Use EQX CUDA contractions when TACE_USE_EQX enables convolutions."""
+        return self.eqx_tp(
+            x1,
+            x2,
+            x3,
+            edge_index,
+            weight1,
+            weight2,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )

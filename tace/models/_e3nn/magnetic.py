@@ -134,7 +134,8 @@ class MagneticBasis(torch.nn.Module):
         edge_index: torch.Tensor,
         node_fidelity: torch.Tensor,
         node_type: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        compute_edge: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if node_type is None:
             node_type = node_attrs.argmax(dim=-1)
         magnetic_scale = self.magnetic_scale[node_fidelity, node_type].unsqueeze(-1)
@@ -147,9 +148,11 @@ class MagneticBasis(torch.nn.Module):
         magnetic_radial_basis = self.radial_basis(radial_coordinate)
         magnetic_node_attrs = self.angular_basis(initial_noncollinear_magmoms)
         source, target = edge_index
-        magnetic_edge_attrs = self.magnetic_edge_tensor_product(
-            magnetic_node_attrs[target],
-            magnetic_node_attrs[source],
+        magnetic_edge_attrs = (
+            self.magnetic_edge_tensor_product(
+                magnetic_node_attrs[target], magnetic_node_attrs[source]
+            )
+            if compute_edge else None
         )
 
         return (

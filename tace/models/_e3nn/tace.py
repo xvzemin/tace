@@ -115,7 +115,9 @@ class e3nnTACE(torch.nn.Module):
             self.target_irreps = with_natural_parity(self.target_irreps)
         path_irreps = self.target_irreps
         path_properties = cfg["embedding_property"] + self.embedding_property
-        if "o2_mag" in cfg["atomic_basis"]["type"]:
+        if any(
+            name in ("o2_mag", "w6j_mag") for name in cfg["atomic_basis"]["type"]
+        ):
             path_properties.append("initial_noncollinear_magmoms")
         for name in path_properties:
             path_irreps += o3.Irreps(PROPERTIES[name]["irreps"])

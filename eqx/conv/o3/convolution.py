@@ -16,9 +16,11 @@ from ..network import materialize
 def contraction(
     metadata: str,
     program: str,
-    source: torch.Tensor,
-    target: torch.Tensor,
+    source: torch.Tensor | None,
+    target: torch.Tensor | None,
     operands: list[torch.Tensor],
+    *,
+    batch_paths: bool = False,
 ) -> list[torch.Tensor]:
     """Run sparse contractions outside the tensor tracing boundary."""
     from ...kernels.cuda_graph import convolution
@@ -30,19 +32,31 @@ def contraction(
         source, target, *values = inputs
         for result in outputs:
             result.zero_()
-        if source.numel() and parse_metadata(metadata)[0]:
+        count = values[0].shape[0] if source is None else source.numel()
+        if count and parse_metadata(metadata)[0]:
             from .cuda import contract
 
-            contract(metadata, terms, source, target, values, outputs)
+            contract(metadata, terms, source, target, values, outputs, batch_paths)
 
-    convolution(
-        "o3", (metadata, program), run, source, target, operands, results, terms, 4
-    )
+    if source is None:
+        run((source, target, *operands), results)
+    else:
+        convolution(
+            "o3",
+            (metadata, program, batch_paths),
+            run,
+            source,
+            target,
+            operands,
+            results,
+            terms,
+            4,
+        )
     return results
 
 
 @contraction.register_fake
-def contraction_fake(metadata, program, source, target, operands):
+def contraction_fake(metadata, program, source, target, operands, *, batch_paths=False):
     program = parse_metadata(program)
     results = [None] * (1 + max(slot for _, _, pairs in program for _, slot in pairs))
     for mapping, _, pairs in program:
@@ -54,10 +68,11 @@ def contraction_fake(metadata, program, source, target, operands):
     return results
 
 
-def contraction_setup_context(ctx, inputs, output):
+def contraction_setup_context(ctx, inputs, keyword_only_inputs, output):
     metadata, program, source, target, operands = inputs
     ctx.kernel_metadata = metadata
     ctx.program = parse_metadata(program)
+    ctx.batch_paths = keyword_only_inputs["batch_paths"]
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(source, target, *operands)
 
@@ -103,7 +118,12 @@ def contraction_backward(ctx, grad_outputs):
     gradients = [None] * len(operands)
     if program:
         results = contraction(
-            ctx.kernel_metadata, repr(program), source, target, values
+            ctx.kernel_metadata,
+            repr(program),
+            source,
+            target,
+            values,
+            batch_paths=ctx.batch_paths,
         )
         for index, slot in destinations.items():
             gradients[index] = results[slot]
@@ -132,6 +152,9 @@ class O3TensorProductConv(torch.nn.Module):
     normalize : bool, optional
         Normalize vector inputs before evaluating harmonics. If false,
         evaluate regular solid harmonics at the supplied vectors.
+    batch_paths : bool, optional
+        Batch compatible CUDA path groups when weights are supplied directly.
+        Defaults to false.
 
     Notes
     -----
@@ -140,6 +163,8 @@ class O3TensorProductConv(torch.nn.Module):
     including higher derivatives. Atomic reductions are not bitwise deterministic.
     """
 
+    batch_paths = False
+
     def __init__(
         self,
         tensor_product,
@@ -147,6 +172,7 @@ class O3TensorProductConv(torch.nn.Module):
         backend="cuda",
         normalization="component",
         normalize=True,
+        batch_paths=False,
     ):
         super().__init__()
         if backend not in ("cuda", "torch"):
@@ -156,6 +182,7 @@ class O3TensorProductConv(torch.nn.Module):
                 "O3TensorProductConv supports only 'uvu' instructions."
             )
         self.backend = backend
+        self.batch_paths = batch_paths
         if normalization not in ("component", "integral", "norm"):
             raise ValueError("normalization must be integral, component or norm.")
         self.normalization = normalization
@@ -250,8 +277,9 @@ class O3TensorProductConv(torch.nn.Module):
         projection : torch.Tensor
             Shared weights, shape ``(radial_dim, weight_numel)``. Shape
             ``(0, weight_numel)`` selects directly supplied path weights.
-        edge_index : torch.Tensor
+        edge_index : torch.Tensor or None
             Source and target indices, shape ``(2, edges)``, dtype int64.
+            None evaluates a row-wise tensor product without graph reduction.
         num_nodes : int, optional
             Number of target nodes. Defaults to the number of source nodes.
         vectors : torch.Tensor, optional
@@ -274,6 +302,14 @@ class O3TensorProductConv(torch.nn.Module):
         torch.Tensor
             Target features, shape ``(num_nodes, irreps_out.dim)``.
         """
+        indexed = edge_index is not None
+        if not indexed and (
+            vectors is not None or radial_network is not None or projection.numel()
+        ):
+            raise ValueError(
+                "Row-wise products require explicit attributes and weights."
+            )
+        count = edge_index.size(1) if indexed else features.size(0)
         if radial_network is not None and (
             self.backend != "cuda" or not features.is_cuda
         ):
@@ -298,7 +334,7 @@ class O3TensorProductConv(torch.nn.Module):
             for value in (features, edge_attrs, radial_values, projection)
         ):
             raise ValueError("Features, radial inputs and projection must be matrices.")
-        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+        if indexed and (edge_index.ndim != 2 or edge_index.size(0) != 2):
             raise ValueError("edge_index must have shape (2, edges).")
         if features.size(1) != (
             self.harmonic_input_dim if vectors is not None else self.input_dim
@@ -317,7 +353,7 @@ class O3TensorProductConv(torch.nn.Module):
                 "Radial width does not match the projection or path weights."
             )
         if any(
-            value.size(0) not in (1, edge_index.size(1))
+            value.size(0) not in (1, count)
             for value in (
                 (edge_attrs,) if isinstance(radial, tuple) else (edge_attrs, radial)
             )
@@ -326,6 +362,8 @@ class O3TensorProductConv(torch.nn.Module):
                 "Edge attributes and radial features need one row per edge or one shared row."
             )
         num_nodes = features.size(0) if num_nodes is None else num_nodes
+        if not indexed and num_nodes != features.size(0):
+            raise ValueError("Row-wise products require one output row per input row.")
         operands = [
             features,
             radial,
@@ -354,9 +392,10 @@ class O3TensorProductConv(torch.nn.Module):
             return contraction(
                 self.harmonic_metadata if vectors is not None else self.kernel_metadata,
                 repr(((tuple(range(len(operands))), False, ((4, 0),)),)),
-                edge_index[0],
-                edge_index[1],
+                edge_index[0] if indexed else None,
+                edge_index[1] if indexed else None,
                 operands,
+                batch_paths=self.batch_paths,
             )[0]
         if vectors is not None:
             sections, offset = [], 0
@@ -381,8 +420,10 @@ class O3TensorProductConv(torch.nn.Module):
         self, features, edge_attrs, radial, projection, edge_index, num_nodes
     ):
         """Evaluate the same paths with ordinary tensor operations."""
-        source, target = edge_index
-        edges = source.numel()
+        indexed = edge_index is not None
+        edges = edge_index.size(1) if indexed else features.size(0)
+        if indexed:
+            source, target = edge_index
         weights = radial @ projection if projection.numel() else radial
         weights = weights.expand(edges, -1)
         attrs = edge_attrs.expand(edges, -1)
@@ -393,7 +434,8 @@ class O3TensorProductConv(torch.nn.Module):
         result = features.new_zeros((num_nodes, self.output_dim)) + zero
         for index, path in enumerate(self.paths):
             start, attr, end, mul1, mul2, dim1, dim2, dim_out, weight, factor, _ = path
-            x = features[source, start : start + dim1 * mul1].reshape(edges, dim1, mul1)
+            x = features[:, start : start + dim1 * mul1]
+            x = (x[source] if indexed else x).reshape(edges, dim1, mul1)
             y = attrs[:, attr : attr + dim2 * mul2].reshape(edges, dim2, mul2)
             cg = getattr(self, f"cg_{index}").to(features)
             if weight >= 0:
@@ -402,9 +444,13 @@ class O3TensorProductConv(torch.nn.Module):
             else:
                 message = torch.einsum("abc,eau,ebv->ecu", cg, x, y)
             message = (factor * message).flatten(1)
-            result[:, end : end + dim_out * mul1] += message.new_zeros(
-                (num_nodes, dim_out * mul1)
-            ).index_add(0, target, message)
+            result[:, end : end + dim_out * mul1] += (
+                message.new_zeros((num_nodes, dim_out * mul1)).index_add(
+                    0, target, message
+                )
+                if indexed
+                else message
+            )
         return result
 
     def extra_repr(self):

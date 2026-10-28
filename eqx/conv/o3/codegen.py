@@ -9,7 +9,7 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines):
 
     def load(role, column, channel):
         pointer = mapping[role]
-        row = {0: "source[edge]", 3: "edge", 4: "target[edge]"}[role]
+        row = {0: "source_node", 3: "edge", 4: "target_node"}[role]
         if role == 3 and shared[pointer]:
             row = "0"
         key = pointer, row, column, channel
@@ -120,6 +120,7 @@ def convolution_source(
     use_generators=False,
     angular_derivatives=False,
     direction_offset=0,
+    indexed=True,
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
@@ -297,6 +298,10 @@ def convolution_source(
         ]
     else:
         lines += ["const int64_t edge = task;"]
+    lines += [
+        f"const int64_t source_node = {'source[edge]' if indexed else 'edge'};",
+        f"const int64_t target_node = {'target[edge]' if indexed else 'edge'};",
+    ]
     lines.extend(body)
 
     for i, ((slot, role, dim, offset), terms) in enumerate(node_terms.items()):
@@ -307,7 +312,7 @@ def convolution_source(
         for a, b in terms:
             lines.append(f"{name} = fma({a}, {b}, {name});")
         if not reduced:
-            row = "source[edge]" if role == 0 else "target[edge]"
+            row = "source_node" if role == 0 else "target_node"
             lines.append(
                 f"if (active) atomicAdd(g{slot} + {row} * {dim} + {offset} + u, {name});"
             )
@@ -362,6 +367,7 @@ def fused_source(
     use_generators=False,
     angular_derivatives=False,
     direction_offset=0,
+    indexed=True,
 ):
     """Execute independent path tiles in one grid with shared launch operands."""
     header = HEADER.replace("SCALAR", dtype)
@@ -397,6 +403,7 @@ def fused_source(
                 use_generators,
                 angular_derivatives,
                 direction_offset,
+                indexed,
             )
         )
     args += [

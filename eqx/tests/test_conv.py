@@ -9,6 +9,86 @@ from eqx import o2
 from eqx import o3 as eqx_o3
 
 
+@pytest.mark.parametrize("rows", [0, 1, 9])
+@pytest.mark.parametrize("shared", [False, True])
+def test_o3_rowwise_tensor_product(rows, shared, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = o3.TensorProduct(
+        "3x1o+3x1o+2x0e",
+        "2x1o+0e",
+        "3x0e+3x1e+3x2e+2x1o",
+        [(i, 0, k, "uvu", k != 1) for i in range(2) for k in range(3)]
+        + [(2, 0, 3, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    conv = eqx_conv.O3TensorProductConv(tp, batch_paths=True).cuda()
+    inputs = [
+        torch.randn(*shape, device="cuda", requires_grad=True)
+        for shape in (
+            (rows, tp.irreps_in1.dim),
+            (1 if shared else rows, tp.irreps_in2.dim),
+            (1 if shared else rows, tp.weight_numel),
+        )
+    ]
+    projection = inputs[0].new_empty(0, tp.weight_numel)
+    actual = conv(*inputs, projection, None)
+    expected = conv.reference(*inputs, projection, None, rows)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    for _ in range(3):
+        seed = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad((value.sin() * seed).sum(), inputs, create_graph=True)
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+        actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+
+@pytest.mark.parametrize("edges", [0, 7])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_wigner6j_convolution(edges, backend, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    module = eqx_conv.Wigner6jTensorProductConv(
+        "2x1o",
+        "1o",
+        "1e",
+        "2x1e",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, 0, "uvu", True)],
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+        backend=backend,
+    ).to(device)
+    inputs = [
+        torch.randn(*shape, device=device, requires_grad=True)
+        for shape in ((4, 6), (edges, 3), (4, 3), (edges, 2), (edges, 6))
+    ]
+    x1, x2, x3, w1, w2 = inputs
+    index = torch.randint(3, (2, edges), device=device)
+    expected = module.forward_reference(x1, x2, x3, index, w1, w2)
+    expected_grad = torch.autograd.grad(expected.square().sum(), inputs)
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for evaluate in (module, compiled):
+        actual = evaluate(x1, x2, x3, index, w1, w2)
+        torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+        actual_grad = torch.autograd.grad(actual.square().sum(), inputs)
+        for a, b in zip(actual_grad, expected_grad):
+            torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
+    exported = torch.export.export(module, (x1, x2, x3, index, w1, w2))
+    torch.testing.assert_close(
+        exported.module()(x1, x2, x3, index, w1, w2),
+        expected,
+        atol=1e-12,
+        rtol=1e-12,
+    )
+
+
 @pytest.mark.parametrize("kind", ["o3", "o2", "wigner", "uu", "cartesian"])
 @pytest.mark.parametrize("width", [64, 128, 1024])
 @pytest.mark.parametrize("shared", [False, True])

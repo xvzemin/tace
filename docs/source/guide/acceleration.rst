@@ -147,6 +147,8 @@ EQX in TACE
      - ``eqx.conv.CartesianTensorProductConv``
    * - ``uu_o2``
      - ``eqx.conv.UuO2TensorProductConv``
+   * - ``w6j_mag``
+     - ``eqx.conv.Wigner6jTensorProductConv``
    * - ``o2`` / ``o2_mag``
      - ``eqx.conv.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
