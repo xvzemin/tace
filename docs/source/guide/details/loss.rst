@@ -33,6 +33,6 @@ their own loss functions when needed.
 
 Example
 -------
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: loss
 

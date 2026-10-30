@@ -3,7 +3,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence
 
 import torch
 
-from ._clebsch_gordan import clebsch_gordan_products
+from .clebsch_gordan import clebsch_gordan_products
 from .irreps import Irreps, IrrepsLike
 
 

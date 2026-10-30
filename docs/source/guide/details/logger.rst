@@ -16,7 +16,7 @@ If you prefer to use wandb online, manually modify misc.env.WANDB_MODE in ``tace
 
 Example
 -------
-.. literalinclude:: ../../../../example/train/tace.yaml
+.. literalinclude:: ../../../../example/train/TACE/tace.yaml
    :language: yaml
    :start-at: # # You can specify the logger here
    :end-before: trainer:

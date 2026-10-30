@@ -11,6 +11,23 @@ from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
+def schedule_batches(groups, max_entries=1024):
+    """Partition contraction schedules into bounded CUDA translation units."""
+    batches, batch, size = [], [], 0
+    for key, entries in groups:
+        for start in range(0, len(entries), max_entries):
+            values = entries[start : start + max_entries]
+            if batch and size + len(values) > max_entries:
+                batches.append(tuple(batch))
+                batch, size = [], 0
+            batch.append((key, values))
+            size += len(values)
+    if batch:
+        batches.append(tuple(batch))
+    return tuple(batches)
+
+
+@lru_cache(maxsize=128)
 def weighted_source(dtype, dims, schedules, roles):
     """Share angular products and coefficient adjoints across channels."""
     paths = defaultdict(list)
@@ -225,6 +242,7 @@ def launch(metadata, program, node_type, operands, outputs):
         tiled = (
             weighted_source(operands[0].dtype, dims, schedules, roles)
             if weighted
+            and sum(len(entries) for _, entries in schedules[3]) <= 2048
             and len(set(roles)) == len(roles)
             and (all(role in (0, 1) for role in roles) or len(roles) == 1)
             else None
@@ -242,14 +260,15 @@ def launch(metadata, program, node_type, operands, outputs):
             groups = schedules[role]
             if not groups:
                 continue
-            code = source(operands[0].dtype, dims, weighted, role, groups)
-            width = max(key[1] for key, _ in groups)
             args = [operands[i].data_ptr() for i in mapping]
             args += [0] * (4 - len(args))
             args += [node_type.data_ptr(), outputs[slot].data_ptr(), node_type.numel()]
-            jobs.append(
-                (code, args, (node_type.numel() * width + 127) // 128, len(groups))
-            )
+            for batch in schedule_batches(groups):
+                code = source(operands[0].dtype, dims, weighted, role, batch)
+                width = max(key[1] for key, _ in batch)
+                jobs.append(
+                    (code, args, (node_type.numel() * width + 127) // 128, len(batch))
+                )
     compiled = kernels([job[0] for job in jobs], device)
     launches = [(compiled[code], args, nx, ny, 128, 0) for code, args, nx, ny in jobs]
     runtime().launch(launches, torch.cuda.current_stream(device).cuda_stream)

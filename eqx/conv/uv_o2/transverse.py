@@ -6,7 +6,7 @@ import torch
 from e3nn import o3
 
 from ...co2.spherical import SphericalCoupling
-from ...o2._layout import irrep_layout
+from ...o2.layout import irrep_layout
 
 
 class TransverseFrame(torch.nn.Module):

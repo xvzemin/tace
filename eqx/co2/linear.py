@@ -189,3 +189,86 @@ class Linear(torch.nn.Module):
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out} | {self.weight_numel} weights"
+
+
+class UuLinear(torch.nn.Module):
+    """Mix equivalent Cartesian O(2) copies channel-wise.
+
+    Parameters
+    ----------
+    irreps_in, irreps_out : Irreps or str
+        Representations in flattened ``mul_ir`` storage.
+    num_channel : int
+        Shared channel count, dividing each input and output multiplicity.
+    path_mode : {"sum", "expand"}, optional
+        Sum paths or retain each input/output-copy path separately.
+    """
+
+    def __init__(self, irreps_in, irreps_out, num_channel, *, path_mode="sum"):
+        super().__init__()
+        self.irreps_in = Irreps(irreps_in)
+        reference = o2.UuLinear(
+            self.irreps_in.circular(),
+            Irreps(irreps_out).circular(),
+            num_channel,
+            path_mode=path_mode,
+        )
+        self.irreps_out = Irreps(reference.irreps_out)
+        self.num_channel, self.path_mode = num_channel, path_mode
+        self.instructions = reference.instructions
+        self.weight_numel = reference.weight_numel
+        self.weight_shape = (self.weight_numel,)
+        self.slices = self.irreps_in.slices()
+
+    def forward(self, features, weight):
+        """Apply weights ordered as (copies_in, copies_out, num_channel)."""
+        if (
+            features.shape[-1] != self.irreps_in.dim
+            or weight.shape[-1] != self.weight_numel
+        ):
+            raise ValueError("Incorrect feature or weight dimension.")
+        shape = torch.broadcast_shapes(features.shape[:-1], weight.shape[:-1])
+        outputs = [[] for _ in self.irreps_out]
+        offset = 0
+        for ins in self.instructions:
+            _, ir = self.irreps_in[ins.i_in]
+            ni, no, channels = ins.path_shape
+            x = features[..., self.slices[ins.i_in]].reshape(
+                *features.shape[:-1], ni, channels, ir.dim
+            )
+            size = ni * no * channels
+            w = weight[..., offset : offset + size].reshape(
+                *weight.shape[:-1], ni, no, channels
+            )
+            offset += size
+            value = (
+                torch.einsum(
+                    "...iud,...iou->...ioud"
+                    if self.path_mode == "expand"
+                    else "...iud,...iou->...oud",
+                    x,
+                    w,
+                )
+                * ins.path_weight
+            )
+            outputs[ins.i_out].append(
+                value.flatten(-4, -2)
+                if self.path_mode == "expand"
+                else value.flatten(-3, -2)
+            )
+        zero = features[..., :0].sum() + weight[..., :0].sum()
+        values = []
+        for (mul, ir), parts in zip(self.irreps_out, outputs):
+            value = (
+                (
+                    torch.cat(parts, -2)
+                    if self.path_mode == "expand"
+                    else sum(parts[1:], parts[0])
+                )
+                if parts
+                else features.new_zeros((*shape, mul, ir.dim)) + zero
+            )
+            values.append(value.flatten(-2))
+        return (
+            torch.cat(values, -1) if values else features.new_zeros((*shape, 0)) + zero
+        )

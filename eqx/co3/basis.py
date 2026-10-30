@@ -13,7 +13,7 @@ from .symmetric import SymmetricBasis
 
 @lru_cache(maxsize=None)
 def path_matrix(l):
-    """Return the orthonormal path matrix.
+    """Return the orthonormal path matrix for rank-l STF tensors.
 
     Parameters
     ----------
@@ -25,6 +25,16 @@ def path_matrix(l):
     torch.Tensor
         Cached CPU float64 matrix of shape (3**l, 2*l+1).
         Do not modify the returned matrix in place.
+
+    Examples
+    --------
+    >>> from eqx import co3
+    >>> matrix = co3.path_matrix(2)
+    >>> matrix.shape
+    torch.Size([9, 5])
+    >>> x = torch.randn(4, 5, dtype=matrix.dtype, device=matrix.device)
+    >>> tensor = x @ matrix.T
+    >>> torch.testing.assert_close(tensor @ matrix, x)
     """
     if l < 0:
         raise ValueError("The angular degree must be non-negative.")
@@ -149,6 +159,15 @@ class Projector(torch.nn.Module):
     instructions : sequence of int, optional
         Entries to project. Other entries are passed through unchanged.
         Defaults to all entries. Scalar and vector projections are identities.
+
+    Examples
+    --------
+    >>> from eqx import co3
+    >>> project = co3.Projector("2e")
+    >>> x = torch.randn(3, 3)
+    >>> result = project(x.flatten()).reshape(3, 3)
+    >>> expected = (x + x.T) / 2 - torch.eye(3) * x.trace() / 3
+    >>> torch.testing.assert_close(result, expected, atol=1e-6, rtol=1e-6)
     """
 
     def __init__(self, irreps, instructions=None):

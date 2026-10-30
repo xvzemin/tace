@@ -5,9 +5,50 @@ from functools import lru_cache
 
 import torch
 
-from .....ops.bilinear import contract_fake, decode_metadata
+from .....ops.bilinear import contract_fake, decode_metadata, encode_metadata
 from .....utils.metadata import parse_metadata
 from ...runtime import kernels, runtime
+
+
+@lru_cache(maxsize=128)
+def metadata_batches(metadata, max_entries=1024):
+    """Partition complete angular paths into bounded compilation schedules."""
+    plans = decode_metadata(metadata)
+    sizes = defaultdict(int)
+    for _, _, schedules in plans:
+        for _, entries in schedules[3]:
+            for record, _ in entries:
+                sizes[record[10]] += 1
+    batches, batch, size = [], [], 0
+    for path, count in sorted(sizes.items()):
+        if batch and size + count > max_entries:
+            batches.append(set(batch))
+            batch, size = [], 0
+        batch.append(path)
+        size += count
+    if batch:
+        batches.append(set(batch))
+    if len(batches) <= 1:
+        return (metadata,)
+    result = []
+    for paths in batches:
+        selected = []
+        for dims, weighted, schedules in plans:
+            schedules = tuple(
+                tuple(
+                    (key, values)
+                    for key, entries in groups
+                    if (
+                        values := tuple(
+                            entry for entry in entries if entry[0][10] in paths
+                        )
+                    )
+                )
+                for groups in schedules
+            )
+            selected.append(repr((dims, weighted, schedules)))
+        result.append(encode_metadata(selected))
+    return tuple(result)
 
 
 @lru_cache(maxsize=128)
@@ -166,10 +207,13 @@ def inputs_source(dtype, metadata, branches, roles):
             maps[plan, mapping, r[2], r[3] - c, shift, r[4], r[5], branch] = r[11]
         dims = plans[entries[0][0]][0]
         mapping = entries[0][1]
-        shared_size = max(shared_size, width * dz)
+        itemsize = 8 if dtype == torch.float64 else 4
+        tile_width = min(width, max(1, 32 * ((32 << 10) // (itemsize * dz * 32))))
+        shared_size = max(shared_size, tile_width * dz)
         parts = [
             f"case {index}: {{",
-            f"for(int u=t/32;u<{width};u+=blockDim.x/32) {{ scalar sum[{dz}]={{}};",
+            f"for(int start=0;start<{width};start+={tile_width}) {{",
+            f"for(int u=start+t/32;u<{width} && u<start+{tile_width};u+=blockDim.x/32) {{ scalar sum[{dz}]={{}};",
         ]
         for (plan, indices, sw, so, shift, ci, co, _), scale in maps.items():
             z = "0" if plan else "types[n]"
@@ -185,16 +229,18 @@ def inputs_source(dtype, metadata, branches, roles):
         parts += [
             f"#pragma unroll\nfor(int m=0;m<{dz};++m) {{",
             "for(int s=16;s>0;s/=2) sum[m]+=__shfl_down_sync(0xffffffff,sum[m],s);",
-            f"if(t%32==0) adj[u*{dz}+m]=sum[m]; }} }}",
+            f"if(t%32==0) adj[(u-start)*{dz}+m]=sum[m]; }} }}",
             "__syncthreads();",
-            f"for(int u=t;u<{width};u+=blockDim.x) {{",
+            f"for(int u=start+t;u<{width} && u<start+{tile_width};u+=blockDim.x) {{",
             f"scalar gx[{dx}]={{}}, gy[{dy}]={{}}, gg=0;",
             f"scalar gate=p{mapping[4]}[n*{dims[4]}+{gate}+u];",
         ]
         for (a, b, c), coefficient in angular.items():
             x = f"p{mapping[0]}[n*{dims[0]}+{sx + a}+u*{dx}]"
             y = f"p{mapping[1]}[n*{dims[1]}+{sy + b}+u*{dy}]"
-            parts += [f"{{ scalar v=scalar({coefficient:.17g})*adj[u*{dz}+{c}];"]
+            parts += [
+                f"{{ scalar v=scalar({coefficient:.17g})*adj[(u-start)*{dz}+{c}];"
+            ]
             if 0 in roles:
                 parts.append(f"gx[{a}]+=v*{y}*gate;")
             if 1 in roles:
@@ -212,7 +258,7 @@ def inputs_source(dtype, metadata, branches, roles):
             )
         if 4 in roles:
             parts.append(f"atomicAdd(o4+n*{dims[4]}+{gate}+u,gg);")
-        parts.append("} return; }")
+        parts.append("} __syncthreads(); } return; }")
         cases.append("\n".join(parts))
     count = max(i for _, mapping in branches for i in mapping) + 1
     pointers = ", ".join(f"const scalar* p{i}" for i in range(count))
@@ -254,27 +300,31 @@ def weights_source(dtype, metadata, terms):
             ]
         dims = plans[entries[0][0]][0]
         mapping = entries[0][1]
-        shared_size = max(shared_size, width * dz)
+        itemsize = 8 if dtype == torch.float64 else 4
+        tile_width = min(width, max(1, 32 * ((32 << 10) // (itemsize * dz * 32))))
+        shared_size = max(shared_size, tile_width * dz)
         parts = [
             f"case {index}: {{",
-            f"for(int u=t;u<{width};u+=blockDim.x) {{ scalar v[{dz}]={{}};",
+            f"for(int start=0;start<{width};start+={tile_width}) {{",
+            f"for(int u=start+t;u<{width} && u<start+{tile_width};u+=blockDim.x) {{ scalar v[{dz}]={{}};",
         ]
         for (a, b, c), coefficient in angular.items():
             parts.append(
                 f"v[{c}]+=scalar({coefficient:.17g})*p{mapping[0]}[n*{dims[0]}+{sx + a}+u*{dx}]*p{mapping[1]}[n*{dims[1]}+{sy + b}+u*{dy}];"
             )
         parts += [
-            f"for(int m=0;m<{dz};++m) angular[u*{dz}+m]=v[m]*p{mapping[4]}[n*{dims[4]}+{gate}+u]; }}",
+            f"for(int m=0;m<{dz};++m) angular[(u-start)*{dz}+m]=v[m]*p{mapping[4]}[n*{dims[4]}+{gate}+u]; }}",
             "__syncthreads();",
         ]
         for (plan, mapping, sw, so, shift, ci, co, slot, _), scale in maps.items():
             z = "0" if plan else "types[n]"
             parts += [
                 f"for(int q=t;q<{ci * co};q+=blockDim.x) {{ int u=q/{co},v=q%{co}; scalar sum=0;",
-                f"for(int m=0;m<{dz};++m) sum+=angular[({shift}+u)*{dz}+m]*p{mapping[3]}[n*{dims[3]}+{so}+v*{dz}+m];",
+                f"if(u+{shift}<start || u+{shift}>=start+{tile_width}) continue;",
+                f"for(int m=0;m<{dz};++m) sum+=angular[({shift}+u-start)*{dz}+m]*p{mapping[3]}[n*{dims[3]}+{so}+v*{dz}+m];",
                 f"atomicAdd(o{slot}+{z}*{plans[plan][0][2]}+{sw}+q,scalar({scale:.17g})*sum); }}",
             ]
-        parts.append("return; }")
+        parts.append("__syncthreads(); } return; }")
         cases.append("\n".join(parts))
     count = max(i for _, mapping, _, _ in terms for i in mapping) + 1
     slots = tuple(sorted({slot for _, _, _, slot in terms}))
@@ -294,17 +344,9 @@ def weights_source(dtype, metadata, terms):
     )
 
 
-def launch(metadata, program, node_type, operands, outputs):
-
-    if operands[0].dtype not in (torch.float32, torch.float64):
-        raise TypeError("Bilinear CUDA kernels support float32 and float64.")
-    operands = [value.contiguous() for value in operands]
-    node_type = node_type.contiguous()
-    for output in outputs:
-        output.zero_()
+def execution_jobs(metadata, program, node_type, operands, outputs):
+    """Build forward and transposed launches for one group of angular paths."""
     nodes = node_type.numel()
-    if not nodes:
-        return
     grouped = defaultdict(list)
     weights = defaultdict(list)
     reverse = defaultdict(list)
@@ -316,7 +358,7 @@ def launch(metadata, program, node_type, operands, outputs):
             reverse[mapping[0], mapping[1], mapping[3], mapping[4]].append(term)
         else:
             weights[mapping[0], mapping[1], mapping[4]].append(term)
-    device, dtype = operands[0].device, operands[0].dtype
+    dtype = operands[0].dtype
     jobs = []
     for terms in reverse.values():
         by_role = defaultdict(list)
@@ -358,6 +400,25 @@ def launch(metadata, program, node_type, operands, outputs):
             args = [v.data_ptr() for v in operands[:count]] + [node_type.data_ptr()]
             args += [outputs[slot].data_ptr() for slot in slots] + [nodes]
             jobs.append((code, args, nodes, groups, 128, 0))
+    return jobs
+
+
+def launch(metadata, program, node_type, operands, outputs):
+    """Compile and execute bounded angular schedules on the current stream."""
+    if operands[0].dtype not in (torch.float32, torch.float64):
+        raise TypeError("Bilinear CUDA kernels support float32 and float64.")
+    operands = [value.contiguous() for value in operands]
+    node_type = node_type.contiguous()
+    for output in outputs:
+        output.zero_()
+    if not node_type.numel():
+        return
+    jobs = [
+        job
+        for batch in metadata_batches(metadata)
+        for job in execution_jobs(batch, program, node_type, operands, outputs)
+    ]
+    device = operands[0].device
     compiled = kernels([job[0] for job in jobs], device)
     runtime().launch(
         [(compiled[code], *rest) for code, *rest in jobs],

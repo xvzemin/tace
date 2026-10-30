@@ -28,6 +28,6 @@ you only need to modify the ``_target_`` field accordingly.
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: scheduler
 

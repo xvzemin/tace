@@ -19,7 +19,7 @@ model conversion, and deployment. Most scripts use ``argparse`` and support
 
    .. code-block:: bash
 
-      cd example/train
+      cd example/train/TACE
       tace-train -cn tace.yaml -h
 
 Script Overview

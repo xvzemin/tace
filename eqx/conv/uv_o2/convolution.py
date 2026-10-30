@@ -5,7 +5,7 @@ from functools import lru_cache
 import torch
 
 from ...backends.torch.edge import evaluate_torch
-from ...o2._layout import irrep_layout
+from ...o2.layout import irrep_layout
 from ...ops.edge import evaluate
 from ...ops.frame_program import frame_description, rotate
 from ...ops.gate import gate_program
@@ -90,6 +90,27 @@ class UvO2TensorProductConv(torch.nn.Module):
     Features use flattened ``ir_mul`` storage. CUDA fuses frame operations,
     gates and aggregation; channel mixing uses PyTorch matrix products.
     Both backends support higher derivatives.
+
+    Examples
+    --------
+    >>> from eqx import conv, o2
+    >>> frame = o2.LocalFrame("2x0e + 2x1o")
+    >>> gate = o2.Gate("4x0e", [torch.nn.functional.silu],
+    ...                "2x0e", [torch.sigmoid], "2x1m")
+    >>> inputs = (frame.irreps_out + frame.irreps_out).regroup()
+    >>> up = o2.Linear(inputs, gate.irreps_in)
+    >>> down = o2.Linear(gate.irreps_out, frame.irreps_out)
+    >>> layer = conv.UvO2TensorProductConv(
+    ...     frame, up, gate, down, frame, backend="torch",
+    ... )
+    >>> features = torch.randn(3, frame.input_dim)
+    >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> vectors = torch.randn(4, 3)
+    >>> weights = torch.randn(4, layer.weight_numel)
+    >>> parameters = [up.weight, up.bias, down.weight, down.bias]
+    >>> layer(features, None, weights, edge_index, None, None,
+    ...       torch.ones(4, 1), parameters, vectors=vectors).shape
+    torch.Size([3, 8])
     """
 
     def __init__(

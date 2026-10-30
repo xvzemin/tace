@@ -66,12 +66,17 @@ def create_model(
         "tace.models.e3nnTACE",
         "tace.models._e3nn.e3nnTACE",
     }
+    is_cartesian_model = model_path == "tace.models.cartTACE"
     wrapper_config = model_config.get("wrapper") or {}
     wrapper_path = wrapper_config.get("_target_", "tace.models.TensorModel")
 
-    use_aoti = acceleration_enabled("compile") and is_e3nn_model
+    use_aoti = acceleration_enabled("compile") and (is_e3nn_model or is_cartesian_model)
     if use_aoti:
-        model_path = "tace.models.compile.e3nnTACE"
+        model_path = (
+            "tace.models.compile.cartTACE"
+            if is_cartesian_model
+            else "tace.models.compile.e3nnTACE"
+        )
         if wrapper_path == "tace.models.TensorModel":
             wrapper_path = "tace.models.CompileTensorModel"
     elif _should_warn_without_aoti(
@@ -91,7 +96,7 @@ def create_model(
     module = importlib.import_module(module_name)
     MODEL_CLS = getattr(module, class_name)
     model_config = deep_convert(model_config)
-    if prune_removed_keys and is_e3nn_model:
+    if prune_removed_keys and (is_e3nn_model or is_cartesian_model):
         model_config = _prune_removed_keys(model_config)
     if "statistics" not in model_config:
         model_config["statistics"] = statistics

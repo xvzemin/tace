@@ -435,7 +435,7 @@ def test_o2_irreps_sort_and_serialization():
     "inputs", [("0o", "1m"), ("1m", "0o"), ("1m", "1m"), ("2m", "5m"), ("16m", "12m")]
 )
 def test_o2_coupling_generators(inputs, double_precision):
-    from eqx.o2._clebsch_gordan import clebsch_gordan_product
+    from eqx.o2.clebsch_gordan import clebsch_gordan_product
 
     ir1, ir2 = map(o2.Irrep, inputs)
     x, y = torch.randn(ir1.dim, 3), torch.randn(ir2.dim, 3)
@@ -744,7 +744,7 @@ def test_o2_tensor_product_zero_pads_missing_outputs():
 @pytest.mark.parametrize("order", [1, 2])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_o2_shared_couplings(mode, order, backend, double_precision):
-    from eqx.o2._clebsch_gordan import clebsch_gordan_product
+    from eqx.o2.clebsch_gordan import clebsch_gordan_product
 
     torch._dynamo.reset()
     ir1, ir2 = o2.Irrep("1mo"), o2.Irrep(order, 0, 1)

@@ -1,7 +1,7 @@
 # Reproduce the 3BPA CGTP setup while inheriting the current TACE defaults.
 
 defaults:
-  - ../tace@_global_
+  - ../../TACE/tace@_global_
   - _self_
 
 misc:

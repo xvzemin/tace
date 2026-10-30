@@ -508,6 +508,7 @@ class UvSO2Interaction(O3CgtpInteraction):
         if (
             node_feats.is_cuda
             and self.use_radial_rotary_attention
+            and self.use_eqx
             and acceleration_enabled("eqx", kernel="conv")
         ):
             from eqx.models.tace.tece_oam_rra.interaction import stream

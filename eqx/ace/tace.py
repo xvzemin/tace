@@ -55,6 +55,22 @@ class TACE(torch.nn.Module):
     Inputs use flattened ``mul_ir`` storage. The module owns no learned weights.
     Both backends support higher derivatives. CUDA weight gradients use
     atomic reductions and are not bitwise deterministic.
+
+    Examples
+    --------
+    >>> from eqx import ace
+    >>> from e3nn import o3
+    >>> irreps = "2x0e + 2x1o"
+    >>> tp = o3.ElementwiseTensorProduct(irreps, irreps)
+    >>> linears = [o3.Linear(layout, "2x0e", internal_weights=False,
+    ...                      shared_weights=False)
+    ...            for layout in (irreps, tp.irreps_out)]
+    >>> layer = ace.TACE([tp], linears, backend="torch")
+    >>> weights = [torch.randn(2, linear.weight_numel) for linear in linears]
+    >>> features = torch.randn(3, layer.input_dim)
+    >>> node_type = torch.tensor([0, 1, 0])
+    >>> layer(features, weights, node_type).shape
+    torch.Size([3, 2])
     """
 
     def __init__(self, tensor_products, linears, backend="cuda"):
@@ -125,24 +141,19 @@ class TACE(torch.nn.Module):
                     raise ValueError("Pass coefficient biases separately.")
                 linear_paths.append((ins.i_in, ins.i_out, offset, ins.path_weight))
                 offset += ins.path_shape[0] * ins.path_shape[1]
-            for ins in tp.instructions:
+            for index, ins in enumerate(tp.instructions):
                 i, j, k = ins.i_in1, ins.i_in2, ins.i_out
                 mul, ir1 = tp.irreps_in1[i]
                 mul2, ir2 = tp.irreps_in2[j]
                 mul3, ir3 = tp.irreps_out[k]
                 if mul != mul2 or mul != mul3:
                     raise ValueError("uuu paths require equal channel counts.")
-                cg = (
-                    o3.wigner_3j(ir1.l, ir2.l, ir3.l, dtype=torch.float64)
-                    * ins.path_weight
-                )
                 sx, sy, sz = (
                     tp.irreps_in1.slices()[i].start,
                     tp.irreps_in2.slices()[j].start,
                     tp.irreps_out.slices()[k].start,
                 )
-                for a, b, c in cg.nonzero().tolist():
-                    coefficient = float(cg[a, b, c])
+                for a, b, c, coefficient in self.coupling_entries(tp, index):
                     if weighted:
                         for input_ir, out_ir, sw, scale in linear_paths:
                             linear_slice = linear.irreps_in.slices()[input_ir]
@@ -186,6 +197,26 @@ class TACE(torch.nn.Module):
                             )
                         )
             self.metadata.append(make_metadata(rows, dims, weighted))
+
+    @staticmethod
+    def coupling_entries(tensor_product, index):
+        """Return nonzero angular coefficients for a coupling instruction."""
+        path = tensor_product.instructions[index]
+        degrees = (
+            tensor_product.irreps_in1[path.i_in1].ir.l,
+            tensor_product.irreps_in2[path.i_in2].ir.l,
+            tensor_product.irreps_out[path.i_out].ir.l,
+        )
+        cg = o3.wigner_3j(*degrees, dtype=torch.float64) * path.path_weight
+        return [(a, b, c, float(cg[a, b, c])) for a, b, c in cg.nonzero().tolist()]
+
+    def project_product(self, features, stage):
+        """Return the irreducible intermediate features."""
+        return features
+
+    def project_output(self, features):
+        """Return the irreducible coefficient output."""
+        return features
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
@@ -247,9 +278,9 @@ class TACE(torch.nn.Module):
                     operands,
                 )[0]
                 if stage == len(self.product_dims) - 1:
-                    output = output + result
+                    output = output + self.project_output(result)
                     continue
-                corr = result
+                corr = self.project_product(result, stage)
             else:
                 corr = self.tensor_products[stage](corr, features)
             output = output + self.linear(corr, weight, node_type, stage + 1)

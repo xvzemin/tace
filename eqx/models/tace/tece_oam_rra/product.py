@@ -50,7 +50,7 @@ class BilinearACE(torch.nn.Module):
             raise ValueError("BilinearACE requires weighted uuu paths.")
         if tensor_product.internal_weights or linear.internal_weights:
             raise ValueError("Provide external product and coefficient weights.")
-        full_input = o3.Irreps(
+        full_input = type(linear.irreps_in)(
             [(mul * num_experts, ir) for mul, ir in linear.irreps_in]
         )
         if full_input.simplify() != tensor_product.irreps_out.simplify():
@@ -66,7 +66,7 @@ class BilinearACE(torch.nn.Module):
         self.weight_numel = linear.weight_numel * num_experts
         self.gate_dim = tensor_product.weight_numel
         self.shared = (
-            BilinearACE(tensor_product, shared_linear, backend=backend)
+            type(self)(tensor_product, shared_linear, backend=backend)
             if shared_linear is not None
             else None
         )
@@ -74,7 +74,7 @@ class BilinearACE(torch.nn.Module):
             raise ValueError("Shared and expert coefficient outputs must match.")
         rows = []
         gate_offset = 0
-        for ins in tensor_product.instructions:
+        for index, ins in enumerate(tensor_product.instructions):
             mul, ir1 = tensor_product.irreps_in1[ins.i_in1]
             mul2, ir2 = tensor_product.irreps_in2[ins.i_in2]
             mul3, ir3 = tensor_product.irreps_out[ins.i_out]
@@ -83,9 +83,7 @@ class BilinearACE(torch.nn.Module):
             sx = tensor_product.irreps_in1.slices()[ins.i_in1].start
             sy = tensor_product.irreps_in2.slices()[ins.i_in2].start
             sz = tensor_product.irreps_out.slices()[ins.i_out].start
-            cg = (
-                o3.wigner_3j(ir1.l, ir2.l, ir3.l, dtype=torch.float64) * ins.path_weight
-            )
+            entries = self.coupling_entries(tensor_product, index)
             weight_offset = 0
             for path in linear.instructions:
                 if path.i_in < 0:
@@ -112,7 +110,7 @@ class BilinearACE(torch.nn.Module):
                             linear.irreps_out.slices()[path.i_out].start * num_experts
                             + expert * co * ir3.dim
                         )
-                        for a, b, c in cg.nonzero().tolist():
+                        for a, b, c, coefficient in entries:
                             record = (
                                 sx + shift * ir1.dim + a,
                                 sy + shift * ir2.dim + b,
@@ -126,7 +124,7 @@ class BilinearACE(torch.nn.Module):
                                 gate_offset + shift,
                                 gate_offset,
                                 float(path.path_weight),
-                                float(cg[a, b, c]),
+                                coefficient,
                                 sx,
                                 sy,
                                 so,
@@ -134,7 +132,7 @@ class BilinearACE(torch.nn.Module):
                                 b,
                                 c,
                             )
-                            rows.append((record, float(cg[a, b, c]) * path.path_weight))
+                            rows.append((record, coefficient * path.path_weight))
                 weight_offset += ci * co
             gate_offset += mul
         schedules = []
@@ -161,6 +159,22 @@ class BilinearACE(torch.nn.Module):
             if self.shared is None
             else [self.metadata, self.shared.metadata]
         )
+
+    @staticmethod
+    def coupling_entries(tensor_product, index):
+        """Return nonzero angular coefficients for a coupling instruction."""
+        path = tensor_product.instructions[index]
+        degrees = (
+            tensor_product.irreps_in1[path.i_in1].ir.l,
+            tensor_product.irreps_in2[path.i_in2].ir.l,
+            tensor_product.irreps_out[path.i_out].ir.l,
+        )
+        cg = o3.wigner_3j(*degrees, dtype=torch.float64) * path.path_weight
+        return [(a, b, c, float(cg[a, b, c])) for a, b, c in cg.nonzero().tolist()]
+
+    def project_output(self, features):
+        """Return irreducible output features."""
+        return features
 
     def forward(self, features, base, gates, weight, node_type, shared_weight=None):
         """Return bilinear coefficients from node features and external weights.
@@ -231,9 +245,10 @@ class BilinearACE(torch.nn.Module):
             if self.shared is not None:
                 operands.append(shared_weight.reshape(1, -1))
                 program.append((1, (0, 1, 5, 3, 4), 3, 0))
-            return contract(
+            result = contract(
                 self.kernel_metadata, repr(tuple(program)), node_type, operands
             )[0]
+            return self.project_output(result)
         product = self.tensor_products[0](features, base, gates)
         output = self.coefficients(product, weight, node_type)
         if self.shared is not None:

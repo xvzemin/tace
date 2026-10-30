@@ -48,8 +48,14 @@ def stream(
         )
     if features.dtype not in (torch.float32, torch.float64):
         raise TypeError("The fused local interaction requires float32 or float64.")
+    if hasattr(module, "prepare_stream"):
+        kernel_features, wigner, wigner_inv = module.prepare_stream(
+            features, wigner, wigner_inv
+        )
+    else:
+        kernel_features = module.reshape_in(features)
     inputs = [
-        module.reshape_in(features),
+        kernel_features,
         radial,
         projection,
         bias,
@@ -90,4 +96,8 @@ def stream(
         edge_index[1],
         inputs,
     )[0]
-    return module.reshape_out.inverse(result)
+    return (
+        module.finish_stream(result)
+        if hasattr(module, "finish_stream")
+        else module.reshape_out.inverse(result)
+    )

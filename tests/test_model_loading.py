@@ -31,6 +31,172 @@ DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        "cgtp",
+        "co3",
+        "o2_cgtp",
+        "o2",
+        "uu_o2",
+        "so2",
+        "spherical_tensor",
+        "wigner_tensor",
+        "hessian",
+        "hessian_o2",
+        "tensor_readouts",
+        "o2_mag",
+        "o2_mag_non_soc",
+        "w6j_mag",
+        "bilinear",
+        "moe",
+        "correlation3",
+        "matrix",
+        "normalization",
+    ],
+)
+@pytest.mark.parametrize("fused", [False, True])
+def test_native_cartesian_model(
+    double_precision, monkeypatch, tmp_path, interaction, fused
+):
+    from tace.lightning import convert_basis
+
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=4.0,
+        max_neighbors=None,
+        num_layers=2,
+        num_channel=3,
+        Lmax=2,
+        lmax=3,
+        mmax=1,
+        parity=True,
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+        ],
+        target_property=["energy", "forces", "stress", "virials"],
+    )
+    config["atomic_basis"].update(type=interaction, edge_nonlinear="gate")
+    if interaction in ("matrix", "normalization"):
+        config["atomic_basis"]["type"] = "cgtp"
+    if interaction == "normalization":
+        config["layer_norm"].update(
+            pre_norm_type="merge_layer_norm", final_norm_type="merge_rms_norm",
+            use_first_pre_norm=True,
+        )
+    if interaction in ("bilinear", "moe", "correlation3"):
+        config["atomic_basis"]["type"] = "cgtp"
+        if interaction == "correlation3":
+            config["product_basis"]["correlation"] = 3
+        else:
+            config["product_basis"]["nonlinear"] = "bilinear_gate"
+        if interaction == "moe":
+            config["product_basis"].update(
+                num_expert=2, num_channel_per_expert=2, use_shared_expert=True
+            )
+    if "mag" in interaction:
+        config["atomic_basis"]["type"] = (
+            "w6j_mag" if interaction == "w6j_mag" else "o2_mag"
+        )
+        config["fidelity"]["magnetic_scale"] = 3.0
+        config["angular_basis"].update(
+            magnetic_Lmax=1, use_spin_orbit_coupling=interaction != "o2_mag_non_soc"
+        )
+        config["target_property"].append("noncollinear_magnetic_forces")
+    if interaction in ("spherical_tensor", "wigner_tensor", "so2"):
+        config["node_embedding"]["type"] = (
+            interaction if interaction != "so2" else "spherical_tensor"
+        )
+        config["atomic_basis"]["type"] = "so2" if interaction == "so2" else "cgtp"
+    if interaction == "so2":
+        config["parity"] = False
+        config["lmax"] = config["Lmax"]
+        config["atomic_basis"]["num_head"] = 1
+        config["resnet"]["linear_type"] = "identity"
+    if interaction in ("hessian", "hessian_o2"):
+        config["atomic_basis"]["type"] = "cgtp"
+        config["target_property"].append("direct_hessian")
+        if interaction == "hessian_o2":
+            config["special"]["direct_hessian"]["interaction_type"] = "o2"
+    if interaction == "tensor_readouts":
+        config["atomic_basis"]["type"] = "cgtp"
+        config["target_property"].extend(
+            [
+                "direct_forces",
+                "direct_dipole",
+                "direct_polarizability",
+                "direct_virials",
+                "direct_stress",
+            ]
+        )
+        config["fidelity"] = [{"name": "first"}, {"name": "second"}]
+        config["statistics"] *= 2
+    if interaction == "uu_o2":
+        config["atomic_basis"].update(
+            use_radial_rotary_attention=False, edge_nonlinear=None
+        )
+    config["radial_basis"]["hidden"] = [4]
+    config["radial_basis"]["apply_cutoff"] = False
+    config["scale_shift"]["enable"] = False
+    reference = TensorModel(e3nnTACE(**config)).to(DEVICE).train()
+    if interaction == "matrix":
+        switch_e3nn_weight_layout(reference, "matrix")
+    if fused:
+        monkeypatch.setenv("TACE_USE_EQX", "1")
+    module = convert_basis(reference)
+    if fused:
+        for block in module.readout_fn.representation.interactions:
+            assert block.use_eqx
+            if hasattr(block.rejector, "eqx_tp"):
+                if interaction in ("o2", "uu_o2", "o2_mag", "o2_mag_non_soc"):
+                    assert block.rejector.eqx_tp is None
+                    assert block.rejector.local_frame_in.method == "direct"
+                    assert not hasattr(block.rejector, "to_spherical")
+                else:
+                    assert block.rejector.eqx_tp is not None
+    data = dict(
+        positions=torch.randn(3, 3, device=DEVICE),
+        node_attrs=torch.ones(3, 1, device=DEVICE),
+        edge_index=torch.tensor(
+            [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device=DEVICE
+        ),
+        edge_shifts=torch.zeros(6, 3, device=DEVICE),
+        lattice=torch.eye(3, device=DEVICE)[None] * 8,
+        batch=torch.zeros(3, dtype=torch.long, device=DEVICE),
+        ptr=torch.tensor([0, 3], device=DEVICE),
+        fidelity_idx=torch.zeros(1, dtype=torch.long, device=DEVICE),
+    )
+    if interaction == "tensor_readouts":
+        data["charges"] = torch.zeros(3, device=DEVICE)
+        data["fidelity_idx"].fill_(1)
+    if "mag" in interaction:
+        data["initial_noncollinear_magmoms"] = torch.randn(3, 3, device=DEVICE) * 0.2
+    parameters = dict(reference.named_parameters())
+    assert parameters.keys() == dict(module.named_parameters()).keys()
+    expected = reference({k: v.clone() for k, v in data.items()})
+    actual = module({k: v.clone() for k, v in data.items()})
+    for key in config["target_property"]:
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-10)
+    for model, output in ((reference, expected), (module, actual)):
+        sum(output[key].square().sum() for key in config["target_property"]).backward()
+    for name, parameter in module.named_parameters():
+        if parameters[name].grad is not None:
+            torch.testing.assert_close(
+                parameter.grad, parameters[name].grad, atol=2e-9, rtol=2e-9
+            )
+    path = tmp_path / "cartesian.pt"
+    export_tace(module, str(path))
+    restored = load_tace(str(path), device=DEVICE, dtype="float64")
+    spherical = convert_basis(module, "spherical")
+    for model in (restored, spherical):
+        output = model({k: v.clone() for k, v in data.items()})
+        for key in config["target_property"]:
+            torch.testing.assert_close(
+                output[key], expected[key], atol=2e-10, rtol=2e-10
+            )
+
+
 @pytest.fixture(params=[torch.float32, torch.float64], ids=["fp32", "fp64"])
 def precision_model(request, monkeypatch):
     monkeypatch.setenv("TACE_USE_TF32", "0")

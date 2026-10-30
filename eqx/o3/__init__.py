@@ -1,7 +1,6 @@
 """Spherical O(3) operators and Cartesian tensor decomposition."""
 
 from . import cgtp, gtp, mtp, wigner6j
-from ._rotation import so3_generators
 from .cgtp import (
     ElementwiseTensorProduct,
     FullTensorProduct,
@@ -14,6 +13,7 @@ from .gtp import GauntTensorProduct, GauntTensorProductConv
 from .ictd import ICTD, path_matrices
 from .linear import ElementLinear, MoEElementLinear
 from .mtp import MatrixTensorProduct, MatrixTensorProductConv
+from .rotation import so3_generators
 from .s2grid import S2Grid
 from .wigner6j.convolution import Wigner6jTensorProductConv
 from .wigner6j.tensor_product import Wigner6jTensorProduct

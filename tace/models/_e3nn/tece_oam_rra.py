@@ -10,7 +10,7 @@ import torch
 from eqx import o2
 from eqx.conv.attention import graph_softmax
 from eqx.models.tace.tece_oam_rra import LocalSplit
-from eqx.o2._clebsch_gordan import clebsch_gordan_product
+from eqx.o2.clebsch_gordan import clebsch_gordan_product
 from eqx.ops.channel_product import local_product
 from eqx.ops.rotation import rotate
 
@@ -439,11 +439,7 @@ class Convolution(torch.nn.Module):
             and self._eqx_rotation_in is not None
             and self._eqx_rotation_out is not None
         )
-        message = (
-            rotate(message, wigner, self._eqx_rotation_in)
-            if sparse_rotation
-            else torch.bmm(wigner, message)
-        )
+        message = self.align(message, wigner, sparse_rotation)
         if self.use_radial_rotary_attention:
             key = self.key_proj(message[..., : self.num_channel].flatten(1)).view(
                 edges, message.shape[1], self.num_channel
@@ -506,11 +502,7 @@ class Convolution(torch.nn.Module):
             edges, self.irreps_out.dim // self.num_channel, self.num_channel
         )
         if stage == "score_value":
-            value = (
-                rotate(message, wigner_inv, self._eqx_rotation_out)
-                if sparse_rotation
-                else torch.bmm(wigner_inv, message)
-            )
+            value = self.unalign(message, wigner_inv, sparse_rotation)
             return score, value
         if self.use_radial_rotary_attention:
             alpha = graph_softmax(
@@ -526,8 +518,24 @@ class Convolution(torch.nn.Module):
             ).reshape_as(message)
         elif cutoff is not None:
             message = message * cutoff.unsqueeze(-1)
-        message = torch.bmm(wigner_inv, message)
+        message = self.unalign(message, wigner_inv, False)
         output = message.new_zeros(
             (nodes, message.shape[1], self.num_channel)
         ).index_add(0, edge_index[1], message)
         return self.reshape_out.inverse(output)
+
+    def align(self, features, wigner, fused):
+        """Express gathered features in the local representation."""
+        return (
+            rotate(features, wigner, self._eqx_rotation_in)
+            if fused
+            else torch.bmm(wigner, features)
+        )
+
+    def unalign(self, features, wigner_inv, fused):
+        """Return edge messages to the node representation."""
+        return (
+            rotate(features, wigner_inv, self._eqx_rotation_out)
+            if fused
+            else torch.bmm(wigner_inv, features)
+        )

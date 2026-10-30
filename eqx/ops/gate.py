@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from ..o2._layout import irrep_layout
+from ..o2.layout import irrep_layout
 
 
 def gate_program(gate, transverse=False):
@@ -31,7 +31,7 @@ def gate_program(gate, transverse=False):
         width = gate.irreps_gated[path.i_gated].mul
         scalar = program.slice(gates[path.i_gate], path.gate_start, path.mul)
         if transverse and path.ir_gate.is_odd_scalar() and path.ir_gated.m > 0:
-            from ..o3._rotation import so3_generators
+            from ..o3.rotation import so3_generators
 
             value = program.concatenate(
                 [

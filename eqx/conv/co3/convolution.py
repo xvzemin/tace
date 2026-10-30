@@ -52,6 +52,22 @@ class CartesianTensorProductConv(O3TensorProductConv):
     storage. Every output path is retained. ``tensor_product.project`` selects
     STF or raw outputs; CUDA projects after aggregation. Both backends support
     higher derivatives.
+
+    Examples
+    --------
+    >>> from eqx import co3, conv
+    >>> tp = co3.TensorProduct(
+    ...     "2x0e", "1o", "2x1o", [(0, 0, 0, "uvu", True)],
+    ...     internal_weights=False, shared_weights=False,
+    ... )
+    >>> layer = conv.CartesianTensorProductConv(tp, backend="torch")
+    >>> features = tp.irreps_in1.randn(3, -1)
+    >>> edge_attrs = tp.irreps_in2.randn(4, -1)
+    >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> radial = torch.randn(4, 8)
+    >>> projection = torch.randn(8, tp.weight_numel)
+    >>> layer(features, edge_attrs, radial, projection, edge_index).shape
+    torch.Size([3, 6])
     """
 
     def __init__(

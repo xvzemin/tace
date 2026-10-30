@@ -10,7 +10,7 @@ from ...utils.layout import _Permute
 
 
 class Linear(CartesianLinear):
-    """Mix compact Cartesian channels before projection to spherical features.
+    """Mix compact Cartesian channels before irreducible projection.
 
     Parameters
     ----------
@@ -21,14 +21,23 @@ class Linear(CartesianLinear):
     backend : {"cuda", "torch"}, optional
         CUDA packs contiguous group matrices in one permutation. CPU inputs
         use ordinary PyTorch operations.
+    output_basis : {"spherical", "cartesian"}, optional
+        Angular storage after projection, in flattened ``mul_ir`` layout.
     **kwargs
         Weight, bias and normalization arguments of :class:`eqx.co3.Linear`.
     """
 
     def __init__(
-        self, irreps_in, irreps_out, input_indices, *, backend="cuda", **kwargs
+        self,
+        irreps_in,
+        irreps_out,
+        input_indices,
+        *,
+        backend="cuda",
+        output_basis="spherical",
+        **kwargs,
     ):
-        super().__init__(irreps_in, irreps_out, output_basis="spherical", **kwargs)
+        super().__init__(irreps_in, irreps_out, output_basis=output_basis, **kwargs)
         if backend not in ("cuda", "torch"):
             raise ValueError("backend must be cuda or torch.")
         self.backend = backend
@@ -105,6 +114,8 @@ class Linear(CartesianLinear):
             packed = matrix.new_zeros(width, 2 * ir.l + 1).index_add(
                 0, torch.tensor(expansion, dtype=torch.long), matrix
             )
+            if output_basis == "cartesian":
+                packed = packed @ matrix.T
             if self.uniform_scales[-1]:
                 packed = packed * self.scales[-1][0]
             self.register_buffer(
@@ -200,6 +211,8 @@ class Linear(CartesianLinear):
             packed = matrix.new_zeros(int(indices.max()) + 1, matrix.size(1)).index_add(
                 0, indices, matrix
             )
+            if self.output_basis == "cartesian":
+                packed = packed @ matrix.T
             if self.uniform_scales[i]:
                 packed = packed * self.scales[i][0]
             name = f"basis_{i}"

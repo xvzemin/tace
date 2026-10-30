@@ -43,18 +43,18 @@ Installation
 Training configuration
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The following blocks are read directly from ``example/train/tace.yaml`` so that
+The following blocks are read directly from ``example/train/TACE/tace.yaml`` so that
 the tutorial remains synchronized with the supported training configuration.
 Energy must be included in ``loss_property``. Natural parity already contains
 the ``1o`` and ``2e`` representations required by LES.
 
-.. yaml-config:: ../../../example/train/tace.yaml
+.. yaml-config:: ../../../example/train/TACE/tace.yaml
    :path: loss
 
-.. yaml-config:: ../../../example/train/tace.yaml
+.. yaml-config:: ../../../example/train/TACE/tace.yaml
    :path: model.config.parity
 
-.. yaml-config:: ../../../example/train/tace.yaml
+.. yaml-config:: ../../../example/train/TACE/tace.yaml
    :path: model.config.long_range.les
 
 Set ``model.config.long_range.les.enable`` to ``true`` and enable only the LES

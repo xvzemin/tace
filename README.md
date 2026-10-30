@@ -5,6 +5,9 @@
 
 # Tensor Atomic/Edge Cluster Expansion (TACE/TECE)
 
+> Cartesian TACE is under refactoring.
+Spherical/Cartesian conversion, including magnetic models, is available through `tace.lightning.convert_basis`.
+
 TACE is designed with physical priors and strong inductive biases to enhance extrapolation capability. 
 It performs Atomic Cluster Expansion and Edge Cluster Expansion based on spherical tensors 
 or irreducible Cartesian tensors, with an optional attention architecture.
@@ -68,7 +71,7 @@ TorchSim, LAMMPS, and other workflows in the
 git clone https://github.com/xvzemin/tace
 cd tace
 pip install . # or pip install tace
-cd example/train
+cd example/train/TACE
 tace-train -cn tace.yaml
 ```
 

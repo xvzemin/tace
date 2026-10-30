@@ -77,11 +77,14 @@ def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
     assert [call.args[0] for call in importer.call_args_list] == sorted(libs)
 
 
-@pytest.mark.parametrize("use_luna", [False, True], ids=["native", "luna"])
+@pytest.mark.parametrize(
+    "backend", ["native", "luna", "cartesian", "cartesian_eqx", "cartesian_o2"]
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_compiled_training_and_export(tmp_path, dtype, use_luna):
+def test_compiled_training_and_export(tmp_path, dtype, backend):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
+    use_luna = backend == "luna"
     if use_luna:
         if sys.platform != "linux" or torch.cuda.get_device_capability()[0] < 8:
             pytest.skip("LunaEquivariance requires Linux and compute capability >= 8.0")
@@ -92,9 +95,15 @@ def test_compiled_training_and_export(tmp_path, dtype, use_luna):
     torch.set_default_dtype(dtype)
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
-        num_layers=2, num_channel=2, Lmax=1, lmax=1, cutoff=4.0, max_neighbors=None
+        num_layers=2,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        cutoff=4.0,
+        max_neighbors=None,
     )
-    config["atomic_basis"]["type"] = "cgtp"
+    config["atomic_basis"]["type"] = "o2" if backend == "cartesian_o2" else "cgtp"
     config["radial_basis"].update(hidden=[4], apply_cutoff=False)
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
@@ -105,9 +114,20 @@ def test_compiled_training_and_export(tmp_path, dtype, use_luna):
     ]
     enable_acceleration(force=True)
     reference = create_model(config, statistics, targets, []).cuda()
-    enable_acceleration(enable_luna=use_luna, enable_compile=True, force=True)
+    state = reference.state_dict()
+    if backend.startswith("cartesian"):
+        from tace.lightning import convert_basis
+
+        state = convert_basis(reference).state_dict()
+        config["_target_"] = "tace.models.cartTACE"
+    enable_acceleration(
+        enable_luna=use_luna,
+        enable_eqx=backend in ("cartesian_eqx", "cartesian_o2"),
+        enable_compile=True,
+        force=True,
+    )
     model = create_model(config, statistics, targets, []).cuda()
-    model.load_state_dict(reference.state_dict())
+    model.load_state_dict(state)
     sample = _synthetic_graph_sample(model)
     tolerance = 2e-4 if dtype == torch.float32 else 2e-9
     for step in range(2):

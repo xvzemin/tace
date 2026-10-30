@@ -7,5 +7,5 @@ For a complete list of parameters, see the `Lightning Trainer documentation
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: trainer

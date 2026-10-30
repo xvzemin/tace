@@ -12,13 +12,14 @@ With TACE installed, run from the repository root:
 
    pip install 'kagglehub>=1.0.2'
    python example/data/download_HORM.py
-   cd example/train
+   cd example/train/HIP-TACE
    tace-train -cn hip-tace.yaml
 
 The example trains energy, forces and direct Hessians. Adjust the dataset paths
-and keep ``tace.yaml`` alongside it; see :doc:`details/defaults`.
+and keep the ``TACE`` and ``HIP-TACE`` subdirectories together; see
+:doc:`details/defaults`.
 
-.. literalinclude:: ../../../example/train/hip-tace.yaml
+.. literalinclude:: ../../../example/train/HIP-TACE/hip-tace.yaml
    :language: yaml
 
 

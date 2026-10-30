@@ -1285,7 +1285,8 @@ def test_cartesian_input_components(degree, symmetric_inputs, double_precision):
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_cartesian_compact_linear(backend, double_precision):
+@pytest.mark.parametrize("output_basis", ["spherical", "cartesian"])
+def test_cartesian_compact_linear(backend, output_basis, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from eqx import co3
@@ -1321,6 +1322,7 @@ def test_cartesian_compact_linear(backend, double_precision):
         compact.harmonic_output_index,
         internal_weights=False,
         backend=backend,
+        output_basis=output_basis,
     )
     # Reconstruct constants when changing model precision.
     compact, linear = [m.float().cuda().double() for m in (compact, linear)]
@@ -1332,7 +1334,8 @@ def test_cartesian_compact_linear(backend, double_precision):
         linear.irreps_in,
         linear.irreps_out,
         internal_weights=False,
-        output_basis="spherical",
+        output_basis=output_basis,
+        project=output_basis == "cartesian",
     ).cuda()
     edges = torch.randint(4, (2, 11), device="cuda")
     inputs = [
@@ -1369,7 +1372,7 @@ def test_cartesian_compact_linear(backend, double_precision):
     [(0, 0, 0), (1, 1, 0), (1, 1, 1), (1, 1, 2), (5, 1, 6), (12, 2, 14), (12, 5, 13)],
 )
 def test_cg_generator_constraints(degrees, double_precision):
-    from eqx.o3._rotation import so3_generators
+    from eqx.o3.rotation import so3_generators
 
     ell1, ell2, ell3 = degrees
     cg = o3.wigner_3j(ell1, ell2, ell3)
@@ -1384,7 +1387,7 @@ def test_cg_generator_constraints(degrees, double_precision):
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 def test_generator_polynomials(degree, normalization, double_precision):
     from eqx.backends.cuda.angular import generator_scale
-    from eqx.o3._rotation import so3_generators
+    from eqx.o3.rotation import so3_generators
 
     torch.manual_seed(91)
     vectors = torch.randn(19, 3)
@@ -1408,7 +1411,7 @@ def test_generator_polynomials(degree, normalization, double_precision):
 
 @pytest.mark.parametrize("degree", [2, 8, 16])
 def test_high_degree_angular_derivatives(degree, double_precision):
-    from eqx.o3._rotation import so3_generators
+    from eqx.o3.rotation import so3_generators
     from eqx.ops.geometry import angular_coefficients
 
     tp = o2.O3TensorProduct(f"{degree}e", "2e", f"{degree}e", [(0, 0, 0, "uvu", True)])

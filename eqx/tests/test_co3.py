@@ -403,3 +403,46 @@ def test_tensor_product_projection(double_precision):
         ]
         for actual, expected_value in zip(actual_grad, expected_grad):
             torch.testing.assert_close(actual, expected_value, atol=1e-11, rtol=1e-11)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
+def test_tensor_product_grouping(double_precision, weighted, tp_type):
+    a = "2x1o+2x2e+2x1e+2x1o"
+    b = "2x1o+2x1e"
+    c = "2x2e+2x2o+2x2e+2x0e"
+    instructions = [
+        (0, 0, 0, "uuu", weighted),
+        (1, 0, 1, "uuu", weighted),
+        (2, 1, 0, "uuu", weighted, 0.4),
+        (3, 0, 2, "uuu", weighted, 1.7),
+        (0, 1, 1, "uuu", weighted),
+    ]
+    options = dict(internal_weights=False, shared_weights=False)
+    module = tp_type(a, b, c, instructions, **options).to(DEVICE)
+    reference = o3.TensorProduct(a, b, c, instructions, **options).to(DEVICE)
+    assert len(module.groups) == 2
+    assert module.weight_numel == reference.weight_numel
+    x = torch.randn(2, 1, reference.irreps_in1.dim, device=DEVICE, requires_grad=True)
+    y = torch.randn(1, 3, reference.irreps_in2.dim, device=DEVICE, requires_grad=True)
+    weights = torch.randn(2, 3, module.weight_numel, device=DEVICE, requires_grad=True)
+    forward = [co3.ChangeOfBasis(ir).to(DEVICE) for ir in (a, b)]
+    inverse = co3.ChangeOfBasis(c, inverse=True).to(DEVICE)
+    actual = inverse(module(forward[0](x), forward[1](y), weights))
+    expected = reference(x, y, weights)
+    torch.testing.assert_close(actual, expected, atol=2e-13, rtol=2e-13)
+    losses = [value.square().sum() for value in (actual, expected)]
+    inputs = (x, y, weights) if weighted else (x, y)
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
+        ]
+        for left, right in zip(*gradients):
+            torch.testing.assert_close(left, right, atol=2e-10, rtol=2e-10)
+        tangents = [torch.randn_like(t) for t in inputs]
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+    assert module(forward[0](x[:0]), forward[1](y), weights[:0]).shape == (
+        0,
+        3,
+        module.irreps_out.dim,
+    )

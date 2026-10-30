@@ -38,7 +38,7 @@ YAML Configuration
 The configuration file of **TACE** is organized into **different fields**.  
 All other parameters must be placed under these fields. The examples in the
 detailed pages below are extracted directly from the canonical
-``example/train/tace.yaml`` file, so their values and comments remain
+``example/train/TACE/tace.yaml`` file, so their values and comments remain
 synchronized with the actual training configuration.
 
   defaults:

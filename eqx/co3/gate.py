@@ -50,12 +50,23 @@ class Gate(torch.nn.Module):
         One normalized activation per gate entry.
     irreps_gated : Irreps or str
         Symmetric traceless tensors multiplied by the activated gates.
+    backend : {"cuda", "torch"}, optional
+        Execution backend. Unsupported activations and CPU inputs use PyTorch.
     """
 
     def __init__(
-        self, irreps_scalars, act_scalars, irreps_gates, act_gates, irreps_gated
+        self,
+        irreps_scalars,
+        act_scalars,
+        irreps_gates,
+        act_gates,
+        irreps_gated,
+        backend="cuda",
     ):
         super().__init__()
+        if backend not in ("cuda", "torch"):
+            raise ValueError("backend must be cuda or torch.")
+        self.backend = backend
         self.act_scalars = Activation(irreps_scalars, act_scalars)
         self.act_gates = Activation(irreps_gates, act_gates)
         self.irreps_scalars = Irreps(irreps_scalars).simplify()
@@ -70,6 +81,7 @@ class Gate(torch.nn.Module):
         self.irreps_out = self.act_scalars.irreps_out + self.mul.irreps_out
         sections = sorted_irreps.slices()
         offset = 0
+        self.input_indices = []
         for name, irreps in (
             ("scalars", self.irreps_scalars),
             ("gates", self.irreps_gates),
@@ -87,12 +99,76 @@ class Gate(torch.nn.Module):
                 torch.tensor(indices, dtype=torch.long),
                 persistent=False,
             )
+            self.input_indices.append(tuple(indices))
             offset += len(irreps)
+        self.metadata = self.build_program()
+
+    def build_program(self):
+        """Describe scalar activations and channel-wise gate products."""
+        from ..ops.program import Program, activate
+
+        if self.backend == "torch" or not self.irreps_out.dim:
+            return None
+        program = Program()
+        features = program.input(0, "edge", self.irreps_in.dim)
+        scalars, gates, tensors = [
+            program.gather(features, indices) for indices in self.input_indices
+        ]
+        activated = []
+        try:
+            for values, module in (
+                (scalars, self.act_scalars),
+                (gates, self.act_gates),
+            ):
+                activation = getattr(module, "activation", module)
+                activated.append(
+                    program.concatenate(
+                        [
+                            activate(
+                                program, program.slice(values, section.start, mul), act
+                            )
+                            for (mul, _), section, act in zip(
+                                activation.irreps_in,
+                                activation.irreps_in.slices(),
+                                activation.acts,
+                            )
+                        ]
+                    )
+                )
+        except NotImplementedError:
+            return None
+        outputs = [activated[0]]
+        for path, scale in zip(self.mul.instructions, self.mul.path_factors):
+            mul, ir = self.mul.irreps_in1[path.i_in1]
+            section = self.mul.irreps_in1.slices()[path.i_in1]
+            start = self.mul.irreps_in2.slices()[path.i_in2].start
+            values = program.slice(tensors, section.start, mul * ir.dim)
+            weight = program.gather(
+                activated[1], [start + u for u in range(mul) for _ in range(ir.dim)]
+            )
+            outputs.append(program.scale(program.binary("mul", values, weight), scale))
+        result = program.concatenate(outputs)
+        return repr((tuple(program.nodes), ((result, 0, "edge"),)))
 
     def forward(self, features):
         """Evaluate features of shape (..., irreps_in.dim)."""
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
+        if (
+            self.metadata is not None
+            and features.is_cuda
+            and features.dtype in (torch.float32, torch.float64)
+        ):
+            from ..ops.edge import evaluate
+
+            values = features.reshape(-1, self.irreps_in.dim)
+            indices = torch.zeros(
+                values.shape[0], dtype=torch.int64, device=values.device
+            )
+            output = evaluate(
+                self.metadata, [values], indices, indices, values.shape[0]
+            )[0]
+            return output.reshape(*features.shape[:-1], self.irreps_out.dim)
         scalars = self.act_scalars(features.index_select(-1, self.indices_scalars))
         if not self.irreps_gates.dim:
             return scalars

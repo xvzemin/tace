@@ -35,6 +35,16 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=Tr
     -----
     Maxima are detached. Derivatives through scores and weights support
     higher orders, including weights equal to zero.
+
+    Examples
+    --------
+    >>> from eqx.conv import graph_softmax
+    >>> scores = torch.zeros(3, 1)
+    >>> target = torch.tensor([0, 0, 1])
+    >>> graph_softmax(scores, target, num_nodes=3, fused=False)
+    tensor([[0.5000],
+            [0.5000],
+            [1.0000]])
     """
     if weight is None:
         weight = scores.new_ones((scores.shape[0], 1))

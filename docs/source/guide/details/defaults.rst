@@ -12,13 +12,14 @@ parameters that differ. TACE uses Hydra to compose the files.
 Inherit a configuration
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Keep ``tace.yaml`` as the base configuration. An example in the same directory,
-``tace-les.yaml``, enables LES without repeating the training settings:
+Keep ``TACE/tace.yaml`` as the base configuration. The example
+``TACE-LES/tace-les.yaml`` enables LES without repeating the training settings:
 
-.. literalinclude:: ../../../../example/train/tace-les.yaml
+.. literalinclude:: ../../../../example/train/TACE-LES/tace-les.yaml
    :language: yaml
 
-- ``tace`` selects ``tace.yaml``; omit the extension inside ``defaults``.
+- ``../TACE/tace`` selects ``TACE/tace.yaml`` from the sibling directory;
+  omit the extension inside ``defaults``.
 - ``@_global_`` merges its contents at the configuration root. For example,
   ``model.config`` remains ``model.config``, rather than being nested under
   another configuration group.
@@ -39,30 +40,36 @@ For the benchmark examples, the files are arranged as follows:
 .. code-block:: text
 
    example/train/
-     tace.yaml
-     benchmark_configs/
-       3bpa_cgtp.yaml
-       3bpa_uv_o2.yaml
+     TACE/
+       tace.yaml
+     TACE-LES/
+       tace-les.yaml
+     HIP-TACE/
+       hip-tace.yaml
+     benchmark/
+       3BPA/
+         3bpa_cgtp.yaml
+         3bpa_uv_o2.yaml
 
-``3bpa_cgtp.yaml`` loads the base from the parent directory:
+``3bpa_cgtp.yaml`` loads the base from ``../../TACE/tace.yaml``:
 
-.. yaml-config:: ../../../../example/train/benchmark_configs/3bpa_cgtp.yaml
+.. yaml-config:: ../../../../example/train/benchmark/3BPA/3bpa_cgtp.yaml
    :path: defaults
 
-The path is relative to the containing configuration; ``../`` selects its
-parent directory. ``@_global_`` controls where the contents are merged, not
+The path is relative to the containing configuration; ``../../`` selects
+two directories above. ``@_global_`` controls where the contents are merged, not
 where the file is found.
 
 A variant can then inherit ``3bpa_cgtp.yaml`` from the same directory.
 For example, ``3bpa_uv_o2.yaml`` selects a local O(2) interaction and adjusts its
 angular cutoff and nonlinearity:
 
-.. literalinclude:: ../../../../example/train/benchmark_configs/3bpa_uv_o2.yaml
+.. literalinclude:: ../../../../example/train/benchmark/3BPA/3bpa_uv_o2.yaml
    :language: yaml
 
 The merge order is ``tace.yaml``, then ``3bpa_cgtp.yaml``, then
 ``3bpa_uv_o2.yaml``. The magnetic examples in ``example/train/mTACE`` follow
-the same pattern: ``soc_o2_mtace.yaml`` inherits ``../tace.yaml`` and supplies
+the same pattern: ``soc_o2_mtace.yaml`` inherits ``../TACE/tace.yaml`` and supplies
 the shared magnetic settings. ``nosoc_o2_mtace.yaml`` and
 ``soc_w6j_mtace.yaml`` inherit it and override the non-SOC or interaction settings.
 
@@ -111,7 +118,7 @@ An empty dictionary ``{}`` does not clear an inherited dictionary. The
 energy/force-only 3BPA benchmark replaces the entire inherited validation-metric
 mapping with a resolver instead:
 
-.. yaml-config:: ../../../../example/train/benchmark_configs/3bpa_cgtp.yaml
+.. yaml-config:: ../../../../example/train/benchmark/3BPA/3bpa_cgtp.yaml
    :path: synth_metric
 
 Inspect the merged configuration
@@ -122,7 +129,7 @@ configuration:
 
 .. code-block:: bash
 
-   cd example/train/benchmark_configs
+   cd example/train/benchmark/3BPA
    tace-train -cn 3bpa_uv_o2.yaml --cfg job --resolve
 
 This prints the merged configuration with interpolations resolved, without

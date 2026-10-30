@@ -20,6 +20,16 @@ class WignerD(torch.nn.Module):
         float64 inputs and recursive PyTorch contractions otherwise.
         ``"quaternion"`` requires CUDA and its toolkit. ``"recursive"``
         selects PyTorch contractions on either device.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> wigner = o2.WignerD(mmax=2, lmax=2, method="recursive")
+    >>> vectors = torch.tensor([[1.0, 2.0, 3.0], [0.0, 1.0, 0.0]])
+    >>> wigner.forward_packed(vectors).shape
+    torch.Size([2, 35])
+    >>> [matrix.shape for matrix in wigner.matrix_blocks(vectors)]
+    [torch.Size([2, 1, 1]), torch.Size([2, 3, 3]), torch.Size([2, 5, 5])]
     """
 
     def __init__(
@@ -192,7 +202,17 @@ class WignerD(torch.nn.Module):
                 )
             ]
         rotation = rotation_matrix_to_y_axis(vectors)
-        batch = vectors.shape[0]
+        return self.from_matrix(rotation)
+
+    def from_matrix(self, rotation: torch.Tensor) -> list[torch.Tensor]:
+        """Return degree-wise Wigner matrices from proper rotation matrices.
+
+        Parameters
+        ----------
+        rotation : torch.Tensor
+            Proper rotation matrices of shape ``(batch, 3, 3)``.
+        """
+        batch = rotation.shape[0]
         matrices = [rotation.new_ones((batch, 1, 1))]
         if self.lmax >= 1:
             matrices.append(rotation)

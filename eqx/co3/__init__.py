@@ -1,5 +1,6 @@
 """Cartesian O(3) representations, harmonics, and tensor operations."""
 
+from ..o3.linear import ElementLinear, MoEElementLinear
 from . import ictp, ictp_ictc
 from .basis import ChangeOfBasis, Projector, path_matrix, path_normalization
 from .cartesian_harmonics import CartesianHarmonics
@@ -23,6 +24,8 @@ __all__ = [
     "path_normalization",
     "CartesianHarmonics",
     "Linear",
+    "ElementLinear",
+    "MoEElementLinear",
     "Activation",
     "Gate",
     "TensorProduct",

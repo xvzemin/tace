@@ -72,6 +72,15 @@ def rotation_matrix_to_y_axis(
     torch.Tensor
         Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
         its corresponding input vector aligns the result with ``[0, 1, 0]``.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> vector = torch.tensor([1.0, 2.0, 3.0])
+    >>> rotation = o2.rotation_matrix_to_y_axis(vector)
+    >>> aligned = rotation @ vector
+    >>> expected = vector.norm() * vector.new_tensor([0.0, 1.0, 0.0])
+    >>> torch.testing.assert_close(aligned, expected, atol=1e-6, rtol=1e-6)
     """
     unit_vector = _normalize(vector, eps)
     x, y, z = unit_vector.unbind(dim=-1)

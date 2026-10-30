@@ -107,6 +107,7 @@ class DirectHessianReadout(torch.nn.Module):
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_edge = o3.Irreps(irreps_edge)
         self.num_fidelities = num_fidelities
+        self.component_dims = (1, 3, 5)
         self.irreps_out = o3.Irreps(
             f"{num_fidelities}x0e+{num_fidelities}x1e+{num_fidelities}x2e"
         )
@@ -134,13 +135,13 @@ class DirectHessianReadout(torch.nn.Module):
     ) -> torch.Tensor:
         """Select fidelity heads and convert irreps to Cartesian blocks."""
         parts = coefficients.split(
-            [self.num_fidelities, 3 * self.num_fidelities, 5 * self.num_fidelities],
+            [dim * self.num_fidelities for dim in self.component_dims],
             dim=-1,
         )
         coefficients = torch.cat(
             [
                 part.reshape(coefficients.size(0), self.num_fidelities, dim)
-                for part, dim in zip(parts, (1, 3, 5))
+                for part, dim in zip(parts, self.component_dims)
             ],
             dim=-1,
         )
@@ -183,17 +184,15 @@ def mh_mask(
     x: torch.Tensor,
     node_fidelity: torch.Tensor,
     num_fidelities: int,
-    l: int,
+    dim: int,
 ) -> torch.Tensor:
     B = x.size(0)
-    fid_mul_ir = x.size(-1)
-    ir = 2 * l + 1
-    fid_mul = fid_mul_ir // ir
+    fid_mul = x.size(-1) // dim
     mul = fid_mul // num_fidelities
     mask = torch.zeros(B, num_fidelities, mul, device=x.device, dtype=x.dtype)
     mask[torch.arange(B, device=x.device), node_fidelity, :] = 1
     mask = mask.reshape(B, fid_mul, 1)
-    x = x.reshape(B, fid_mul, ir)
+    x = x.reshape(B, fid_mul, dim)
     return (x * mask).view(B, -1)
 
 
@@ -246,7 +245,9 @@ class ScalarReadOut(ReadOut):
         for idx, linear in enumerate(self.linear2[:-1]):
             x = self.acts[idx](self._apply_linear(linear, x, node_attrs, node_type))
             if self.num_fidelities > 1:
-                x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
+                x = mh_mask(
+                    x, node_fidelity, self.num_fidelities, self.irreps_out[0].ir.dim
+                )
         return self._apply_linear(self.linear2[-1], x, node_attrs, node_type)
 
 
@@ -315,7 +316,9 @@ class TensorReadOut(ReadOut):
         for idx, linear in enumerate(self.linear2[:-1]):
             x = self.acts[idx](self._apply_linear(linear, x, node_attrs, node_type))
             if self.num_fidelities > 1:
-                x = mh_mask(x, node_fidelity, self.num_fidelities, self.l)
+                x = mh_mask(
+                    x, node_fidelity, self.num_fidelities, self.irreps_out[0].ir.dim
+                )
         return self._apply_linear(self.linear2[-1], x, node_attrs, node_type)
 
 

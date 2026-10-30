@@ -33,7 +33,7 @@ For collinear data, use vectors such as :math:`(0,0,m_i)`.
 Remove magnetic-force losses and metrics if these labels are unavailable.
 
 Adjust dataset paths, field mappings, cache directories and magnetic cutoffs.
-Keep ``example/train/tace.yaml`` and the ``mTACE`` subdirectory together;
+Keep the ``TACE`` and ``mTACE`` subdirectories together under ``example/train``;
 see :doc:`details/defaults`.
 Run the following commands from the repository root.
 

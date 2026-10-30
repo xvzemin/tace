@@ -73,6 +73,8 @@ class ICTD(torch.nn.Module):
     Batch and channel dimensions precede the flattened Cartesian indices.
     Constants are constructed in float64 by successive CG contractions [#ictd-o3]_.
     Full matrix storage scales as 3**(2*rank).
+    Unlike :func:`eqx.co3.path_matrix`, this decomposition retains every
+    irreducible path, not only the highest-degree STF subspace.
 
     References
     ----------
@@ -82,7 +84,8 @@ class ICTD(torch.nn.Module):
 
     Examples
     --------
-    >>> decomposition = ICTD(2)
+    >>> from eqx import o3
+    >>> decomposition = o3.ICTD(2)
     >>> decomposition.irreps_out.dim
     9
     >>> x = torch.randn(4, 9)

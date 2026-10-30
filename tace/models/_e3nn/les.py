@@ -27,6 +27,7 @@ class TACELES(torch.nn.Module):
     """Predict latent quantities with TACE readouts and pass them to LES."""
 
     batch_external_field = True
+    rank_two_dim = 5
     scale = {
         "latent_charges": 0.1,
         "latent_dipoles": 0.1,
@@ -174,7 +175,7 @@ class TACELES(torch.nn.Module):
                 descriptors,
                 num_atoms_arange,
                 node_fidelity,
-                5,
+                self.rank_two_dim,
             )
             latent_quads = self.latent_quads_basis_change(
                 latent_quads.new_zeros(latent_quads.shape[0]), latent_quads
@@ -209,7 +210,7 @@ class TACELES(torch.nn.Module):
                     descriptors,
                     num_atoms_arange,
                     node_fidelity,
-                    5,
+                    self.rank_two_dim,
                 )
                 latent_alphas = self.latent_alphas_basis_change(
                     latent_alphas, latent_alpha2

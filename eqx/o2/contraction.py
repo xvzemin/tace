@@ -7,7 +7,7 @@ from typing import NamedTuple, Sequence
 
 import torch
 
-from ._clebsch_gordan import clebsch_gordan_product
+from .clebsch_gordan import clebsch_gordan_product
 from .irreps import Irrep, Irreps, IrrepsLike
 
 

@@ -84,7 +84,7 @@ See :ref:`eqx-streaming` for training support and requirements.
 Cartesian O(3) ICTP/ICTC
 ------------------------
 
-``atomic_basis.type: co3`` selects
+For spherical node storage, ``atomic_basis.type: co3`` selects
 ``O3CartesianIctpIctcInteraction`` and automatically constructs the
 ``co3_angular_basis`` using ``eqx.co3.CartesianHarmonics``. ``lmax`` still
 controls the edge angular degrees; no separate basis selector is needed.
@@ -121,7 +121,7 @@ remain spherical.
 Conversion preserves all learned parameter names, shapes, and values.
 Predictions and derivatives agree up to floating-point roundoff; recreate
 the optimizer when continuing training with the returned model. New models
-can use ``example/train/benchmark_configs/3bpa_co3.yaml``.
+can use ``example/train/benchmark/3BPA/3bpa_co3.yaml``.
 
 This interaction uses native PyTorch, not the fused spherical CUDA kernel.
 Cartesian storage grows as ``3**l`` and can cost more memory at high degree.
@@ -177,7 +177,7 @@ transformations, cutoff, and scatter retain their usual behavior.
      apply_cutoff: false
 
 A 3BPA configuration is available as
-``example/train/benchmark_configs/3bpa_uu_o2.yaml``.
+``example/train/benchmark/3BPA/3bpa_uu_o2.yaml``.
 
 Set ``TACE_USE_EQX=1`` to use ``eqx.conv.UuO2TensorProductConv``. It fuses
 gather, both frame rotations, UuLinear, cutoff and scatter. The last radial

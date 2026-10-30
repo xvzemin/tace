@@ -1,6 +1,7 @@
 """Delta and Levi-Civita couplings with independent channel paths."""
 
 import math
+from collections import defaultdict
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -67,6 +68,18 @@ class Instruction(NamedTuple):
     path_shape: tuple
 
 
+class InstructionGroup(NamedTuple):
+    degrees: tuple
+    connection_mode: str
+    path_shape: tuple
+    i_in1: tuple
+    i_in2: tuple
+    i_out: tuple
+    weight_slices: tuple
+    weight_slice: slice | None
+    scale_slice: slice
+
+
 class TensorProduct(torch.nn.Module):
     """Couple Cartesian irreps through delta and Levi-Civita contractions.
 
@@ -93,7 +106,8 @@ class TensorProduct(torch.nn.Module):
     Notes
     -----
     Inputs must be symmetric traceless. Each path includes the analytic
-    Cartesian-to-CG scale. Repeated output irreps are not regrouped or merged.
+    Cartesian-to-CG scale. Compatible paths are evaluated together; output
+    entries and independent channel weights retain their original ordering.
     Unprojected outputs must be projected before another tensor product or
     a nonlinear operation.
 
@@ -241,7 +255,48 @@ class TensorProduct(torch.nn.Module):
         else:
             self.register_buffer("weight", torch.empty(0))
         self.path_factors = tuple(scales)
-        self.register_buffer("path_scales", torch.tensor(scales), persistent=False)
+        groups = defaultdict(list)
+        offset = 0
+        for index, ins in enumerate(self.instructions):
+            degrees = (
+                self.irreps_in1[ins.i_in1].ir.l,
+                self.irreps_in2[ins.i_in2].ir.l,
+                self.irreps_out[ins.i_out].ir.l,
+            )
+            size = math.prod(ins.path_shape) if ins.has_weight else 0
+            key = (degrees, ins.connection_mode, ins.has_weight, ins.path_shape)
+            groups[key].append((index, slice(offset, offset + size)))
+            offset += size
+        self.path_order = tuple(i for entries in groups.values() for i, _ in entries)
+        self.groups = []
+        offset = 0
+        for (degrees, mode, weighted, path_shape), entries in groups.items():
+            paths = [self.instructions[i] for i, _ in entries]
+            inputs = [tuple(p.i_in1 for p in paths), tuple(p.i_in2 for p in paths)]
+            inputs = [ids[:1] if len(set(ids)) == 1 else ids for ids in inputs]
+            sections = tuple(section for _, section in entries) if weighted else ()
+            contiguous = sections and all(
+                a.stop == b.start for a, b in zip(sections, sections[1:])
+            )
+            self.groups.append(
+                InstructionGroup(
+                    degrees,
+                    mode,
+                    path_shape,
+                    *inputs,
+                    tuple(p.i_out for p in paths),
+                    sections,
+                    slice(sections[0].start, sections[-1].stop) if contiguous else None,
+                    slice(offset, offset + len(paths)),
+                )
+            )
+            offset += len(paths)
+        self.groups = tuple(self.groups)
+        self.register_buffer(
+            "path_scales",
+            torch.tensor([scales[i] for i in self.path_order]),
+            persistent=False,
+        )
         self.projection_indices = tuple(
             sorted(
                 {
@@ -310,9 +365,7 @@ class TensorProduct(torch.nn.Module):
             raise ValueError("Shared weights must be one-dimensional.")
         shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
         zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
-        outputs = [
-            x.new_zeros((*shape, mul, ir.dim)) + zero for mul, ir in self.irreps_out
-        ]
+        outputs = [None] * len(self.irreps_out)
         inputs = [
             [
                 value[..., section].reshape(*value.shape[:-1], mul, ir.dim)
@@ -323,28 +376,41 @@ class TensorProduct(torch.nn.Module):
                 (y, self.irreps_in2, self.slices_in2),
             )
         ]
-        offset = 0
-        for index, ins in enumerate(self.instructions):
-            a, b, c = (
-                self.irreps_in1[ins.i_in1].ir,
-                self.irreps_in2[ins.i_in2].ir,
-                self.irreps_out[ins.i_out].ir,
-            )
-            left, right = inputs[0][ins.i_in1], inputs[1][ins.i_in2]
-            mode = ins.connection_mode
+        for group in self.groups:
+            operands = []
+            for blocks, indices in (
+                (inputs[0], group.i_in1),
+                (inputs[1], group.i_in2),
+            ):
+                operands.append(
+                    blocks[indices[0]].unsqueeze(-3)
+                    if len(indices) == 1
+                    else torch.stack([blocks[i] for i in indices], dim=-3)
+                )
+            left, right = operands
+            mode = group.connection_mode
             if mode not in ("uuu", "uuw"):
                 left, right = left.unsqueeze(-2), right.unsqueeze(-3)
-            value = self.couple(left, right, a.l, b.l, c.l)
-            if ins.has_weight:
-                size = math.prod(ins.path_shape)
-                w = weight[..., offset : offset + size].reshape(
-                    *weight.shape[:-1], *ins.path_shape
-                )
-                offset += size
+            value = self.couple(left, right, *group.degrees)
+            if group.weight_slices:
+                if group.weight_slice is not None:
+                    w = weight[..., group.weight_slice].reshape(
+                        *weight.shape[:-1], len(group.i_out), *group.path_shape
+                    )
+                else:
+                    w = torch.stack(
+                        [
+                            weight[..., section].reshape(
+                                *weight.shape[:-1], *group.path_shape
+                            )
+                            for section in group.weight_slices
+                        ],
+                        dim=-len(group.path_shape) - 1,
+                    )
                 if mode == "uvw":
-                    value = torch.einsum("...uvd,...uvw->...wd", value, w)
+                    value = torch.einsum("...puvd,...puvw->...pwd", value, w)
                 elif mode == "uuw":
-                    value = torch.einsum("...ud,...uw->...wd", value, w)
+                    value = torch.einsum("...pud,...puw->...pwd", value, w)
                 else:
                     value = value * w.unsqueeze(-1)
             elif mode == "uuw":
@@ -355,13 +421,22 @@ class TensorProduct(torch.nn.Module):
                 value = value.sum(-3)
             elif mode == "uvuv":
                 value = value.flatten(-3, -2)
-            outputs[ins.i_out] = outputs[ins.i_out] + value * self.path_scales[index]
+            value = value * self.path_scales[group.scale_slice, None, None]
+            for dest, block in zip(group.i_out, value.unbind(-3)):
+                previous = outputs[dest]
+                outputs[dest] = block if previous is None else previous + block
+        outputs = [
+            x.new_zeros((*shape, mul, ir.dim))
+            if block is None
+            else block.expand(*shape, mul, ir.dim)
+            for block, (mul, ir) in zip(outputs, self.irreps_out)
+        ]
         outputs = self.projection.forward_blocks(outputs)
         return (
             torch.cat([v.flatten(-2) for v in outputs], -1)
             if outputs
-            else x.new_zeros((*shape, 0)) + zero
-        )
+            else x.new_zeros((*shape, 0))
+        ) + zero
 
     def couple(self, x, y, l1, l2, l3):
         """Contract one angular path before output projection."""
@@ -370,7 +445,9 @@ class TensorProduct(torch.nn.Module):
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         self.path_scales = torch.tensor(
-            self.path_factors, dtype=torch.float64, device="cpu"
+            [self.path_factors[i] for i in self.path_order],
+            dtype=torch.float64,
+            device="cpu",
         ).to(self.path_scales)
         return self
 

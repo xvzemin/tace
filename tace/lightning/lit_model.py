@@ -562,6 +562,15 @@ def _load_model_state_dict(
     rebuild_constants: bool,
 ) -> None:
     """Load model state, rebuilding angular coupling constants when changing dtype."""
+    from tace.models.linear import switch_e3nn_weight_layout
+
+    for name, module in model.named_modules():
+        if hasattr(module, "use_matrix_weight"):
+            prefix = name + "." if name else ""
+            if prefix + "weight.0" in state_dict:
+                switch_e3nn_weight_layout(module, "matrix")
+            elif prefix + "weight" in state_dict:
+                switch_e3nn_weight_layout(module, "flat")
     if rebuild_constants:
         state_dict = copy.copy(state_dict)
         for name, value in model.named_buffers(remove_duplicate=False):

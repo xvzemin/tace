@@ -12,5 +12,5 @@ Any optimizer supported by PyTorch or third party can be used.
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: optimizer

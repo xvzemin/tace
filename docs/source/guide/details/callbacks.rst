@@ -10,5 +10,5 @@ you can add them here as callbacks.
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: callbacks

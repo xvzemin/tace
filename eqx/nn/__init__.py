@@ -1,4 +1,4 @@
-"""Nonlinearities shared by equivariant operators."""
+"""Neural network modules shared across representations."""
 
 from .activation import PolynomialActivation
 

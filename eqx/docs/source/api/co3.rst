@@ -28,6 +28,14 @@ Linear maps
 .. autoclass:: eqx.co3.Linear
    :members: forward, weight_view_for_instruction, weight_views
 
+.. autoclass:: eqx.co3.ElementLinear
+   :members: forward
+   :no-index:
+
+.. autoclass:: eqx.co3.MoEElementLinear
+   :members: forward
+   :no-index:
+
 Activations
 -----------
 
@@ -50,6 +58,9 @@ remaining projections by rank. A mixed output entry is projected if any
 incoming path requires projection; independent path weights are unchanged.
 Both routes use elementwise products for outer products and native cross
 products for uncontracted Levi-Civita couplings.
+Paths with the same input/output degrees, channel multiplicities and connection
+mode are contracted in batches. Their output entries and weights remain
+independent; paths with different input degrees are not merged.
 
 .. autoclass:: eqx.co3.TensorProduct
    :members: forward, weight_view_for_instruction, weight_views

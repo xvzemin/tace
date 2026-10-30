@@ -1,10 +1,11 @@
 """Cartesian O(2) operators and coordinate-free harmonic tensor products."""
 
-from .basis import ChangeOfBasis, Projector, path_matrix
+from .basis import ChangeOfBasis, Projector, path_matrix, projector_matrix
 from .cartesian_harmonics import CartesianHarmonics
 from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
-from .linear import Linear
+from .local_frame import LocalFrame
+from .linear import Linear, UuLinear
 from .o3_tensor_product import O3TensorProduct
 from .projection import PlanarDetracer, PlaneProjector, plane_projector
 from .restriction import (
@@ -27,8 +28,11 @@ __all__ = [
     "ChangeOfBasis",
     "Projector",
     "path_matrix",
+    "projector_matrix",
     "CartesianHarmonics",
     "Linear",
+    "UuLinear",
+    "LocalFrame",
     "Activation",
     "Gate",
     "TensorProduct",

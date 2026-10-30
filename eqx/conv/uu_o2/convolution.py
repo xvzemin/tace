@@ -28,6 +28,21 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         Execution backend. CUDA fuses directional couplings and aggregation
         without storing edge messages. ``"torch"`` uses PyTorch operations
         and automatic differentiation for both aligned and transverse forms.
+
+    Examples
+    --------
+    >>> from eqx import conv, o2
+    >>> frame = o2.LocalFrame("2x0e + 2x1o")
+    >>> linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, num_channel=2)
+    >>> layer = conv.UuO2TensorProductConv(frame, linear, frame, backend="torch")
+    >>> features = torch.randn(3, frame.input_dim)
+    >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> vectors = torch.randn(4, 3)
+    >>> radial = torch.randn(4, 8)
+    >>> projection = torch.randn(8, linear.weight_numel)
+    >>> layer(features, radial, projection, None, torch.ones(4, 1),
+    ...       edge_index, 3, vectors=vectors).shape
+    torch.Size([3, 8])
     """
 
     def __init__(self, frame_in, linear, frame_out, *, backend="cuda"):

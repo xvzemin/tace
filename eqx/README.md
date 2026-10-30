@@ -28,33 +28,17 @@ CG table. Global time-odd irreps require the
 | `eqx.co3` | [Cartesian O(3)](https://tace.readthedocs.io/en/latest/equivariantx/api/co3.html) |
 | `eqx.co2` | [Cartesian O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/co2.html) |
 | `eqx.o2` | [Spherical O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/o2.html) |
-| `eqx.nn` | [Nonlinearities](https://tace.readthedocs.io/en/latest/equivariantx/api/nn.html) |
-| `eqx.conv` | [Fused convolutions](https://tace.readthedocs.io/en/latest/equivariantx/api/convolutions.html) |
-| `eqx.ace` | [Cluster expansions](https://tace.readthedocs.io/en/latest/equivariantx/api/ace.html) |
-| `eqx.models` | [Model integration](https://tace.readthedocs.io/en/latest/equivariantx/api/models.html) |
+| Rotations, basis conversions, decomposition and module utilities | [Tools](https://tace.readthedocs.io/en/latest/equivariantx/api/tools.html) |
 
-[Tools](https://tace.readthedocs.io/en/latest/equivariantx/api/tools.html) cover
-basis conversions, rotations, tensor decomposition, and module utilities.
+Built-in modules: [neural network modules](https://tace.readthedocs.io/en/latest/equivariantx/api/nn.html),
+[convolutions](https://tace.readthedocs.io/en/latest/equivariantx/api/convolutions.html),
+and [cluster expansions](https://tace.readthedocs.io/en/latest/equivariantx/api/ace.html).
+[Model adapters](https://tace.readthedocs.io/en/latest/equivariantx/api/models.html)
+convert supported pretrained architectures.
 
 Spherical O(2) uses flattened `ir_mul` storage; Cartesian operators use `mul_ir`.
-Each operator documents its parameters, layouts, and usage examples.
-
-## Implementation
-
-The mathematical API is independent of the execution provider:
-
-| Layer | Responsibility |
-|---|---|
-| `o3`, `co3`, `co2`, `o2` | Representations, normalization and tensor operations |
-| `conv`, `ace`, `nn` | Convolutions, cluster expansions and nonlinearities |
-| `models` | Model conversion and parameter-layout adapters |
-| `ops` | Internal operator schemas, shape inference and autograd |
-| `backends` | PyTorch execution and optional device implementations |
-
-O(3) tensor products are organized into `cgtp`, `gtp`, `mtp`, and `wigner6j`;
-their public classes remain available through `eqx.o3`. Backend selection does
-not change parameters, paths or normalization. CUDA compilation is deferred
-until an accelerated operation runs.
+API pages are generated from NumPy-style docstrings, including executable
+examples. Each operator specifies its parameters, feature layout and backends.
 
 ## Tests
 

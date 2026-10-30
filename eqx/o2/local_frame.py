@@ -5,8 +5,8 @@ import torch
 from e3nn import o3
 
 from ..utils.layout import _Permute
-from ._layout import wigner_indices, wigner_orders
 from .irreps import Irrep, Irreps
+from .layout import wigner_indices, wigner_orders
 
 
 class _FrameEntry(NamedTuple):
@@ -40,7 +40,9 @@ class LocalFrame(torch.nn.Module):
     Notes
     -----
     Both input and output use flattened ``ir_mul`` layout. Retaining all
-    orders gives an invertible transformation.
+    orders gives an invertible transformation. Convert an e3nn ``mul_ir``
+    block of shape ``(..., mul, 2*l+1)`` by transposing its last two axes
+    before flattening.
 
     Examples
     --------

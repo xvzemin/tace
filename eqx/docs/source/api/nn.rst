@@ -1,7 +1,9 @@
 .. _equivariantx-api-nn:
 
-Nonlinearities
-==============
+Neural network modules
+======================
+
+.. automodule:: eqx.nn
 
 .. autoclass:: eqx.nn.PolynomialActivation
    :members: forward

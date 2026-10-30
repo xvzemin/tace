@@ -1,14 +1,11 @@
 .. _equivariantx-api-models:
 
-Model integration
-=================
+Model adapters
+==============
 
-Converters preserve forward interfaces. Install the model package separately,
-load its weights and set dtype and device before conversion. Construct the
-optimizer afterwards. Converted state dictionaries require the converted architecture.
-
-Converters
-----------
+Install the model package separately. Load weights before conversion and
+construct the optimizer afterwards. Each converter documents its supported
+architectures and calculator interface.
 
 .. autofunction:: eqx.models.mace.convert_mace_to_eqx
 
@@ -22,9 +19,3 @@ Converters
 
 Allegro's ``uuu`` environment products are not supported by the current
 ``uvu`` convolution adapters. Distributed ghost-atom exchange is not covered.
-
-TACE operators
---------------
-
-.. autoclass:: eqx.models.tace.tece_oam_rra.BilinearACE
-   :members: forward

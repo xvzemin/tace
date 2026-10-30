@@ -14,5 +14,5 @@ Note that the ``val/synth_metric`` is only supported for the validation, ``train
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: synth_metric

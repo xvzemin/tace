@@ -12,6 +12,153 @@ from eqx.co3.symmetric import SymmetricBasis
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize("basis_change", [False, True])
+@pytest.mark.parametrize("mmax", [1, 4])
+@pytest.mark.parametrize("method", ["direct", "rotation", "projection"])
+def test_cartesian_local_frame(double_precision, basis_change, mmax, method):
+    irreps = o3.Irreps("2x0e+2x1o+1x1e+2x2o+1x4e")
+    frame = co2.LocalFrame(irreps, mmax, basis_change, method=method).to(DEVICE)
+    reference = o2.LocalFrame(irreps, mmax=mmax, basis_change=basis_change).to(DEVICE)
+    embed = co3.ChangeOfBasis(irreps).to(DEVICE)
+    circular = co2.ChangeOfBasis(frame.irreps_out, inverse=True).to(DEVICE)
+    x = torch.randn(3, irreps.dim, device=DEVICE, requires_grad=True)
+    vectors = torch.randn(3, 3, device=DEVICE, requires_grad=True)
+    rotation = o2.rotation_matrix_to_y_axis(vectors)
+    wigner = o2.WignerD(4, 4, method="recursive").to(DEVICE).forward_packed(vectors)
+    ir_mul = torch.cat(
+        [
+            x[:, section].reshape(3, mul, ir.dim).transpose(-1, -2).flatten(1)
+            for (mul, ir), section in zip(irreps, irreps.slices())
+        ],
+        -1,
+    )
+    local = frame(embed(x), rotation)
+    actual, expected = circular(local), reference(ir_mul, wigner)
+    torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
+    if mmax == 4:
+        torch.testing.assert_close(
+            frame.to_global(local, rotation), embed(x), atol=3e-11, rtol=3e-11
+        )
+    projection = co2.LocalFrame(irreps, mmax, basis_change, method="projection").to(
+        DEVICE
+    )
+    torch.testing.assert_close(
+        frame.to_global(local, rotation),
+        projection.to_global(local, rotation),
+        atol=3e-11,
+        rtol=3e-11,
+    )
+    torch.testing.assert_close(
+        frame.rotate(frame.rotate(embed(x), rotation), rotation.transpose(-1, -2)),
+        embed(x),
+        atol=3e-11,
+        rtol=3e-11,
+    )
+    for _ in range(2):
+        probe = torch.randn_like(actual)
+        actual, expected = [
+            torch.cat(
+                [
+                    grad.flatten()
+                    for grad in torch.autograd.grad(
+                        value.sin(), (x, vectors), probe, create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=3e-9, rtol=3e-9)
+    assert frame(embed(x[:0]), rotation[:0]).shape == (0, frame.output_dim)
+    assert frame.to_global(local[:0], rotation[:0]).shape == (0, frame.input_dim)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_cartesian_frame_methods(dtype):
+    irreps = co3.Irreps("1x0e+1x1o+2x3e+1x6e")
+    features = irreps.randn(7, -1, device=DEVICE, dtype=dtype)
+    vectors = torch.cat((torch.eye(3), -torch.eye(3), torch.ones(1, 3))).to(
+        DEVICE, dtype
+    )
+    rotation = o2.rotation_matrix_to_y_axis(vectors)
+    outputs = []
+    for method in ("direct", "rotation", "projection"):
+        frame = co2.LocalFrame(irreps, method=method).float().to(DEVICE, dtype)
+        output = frame(features, rotation)
+        torch.testing.assert_close(
+            frame.to_global(output, rotation),
+            features,
+            atol=3e-5 if dtype == torch.float32 else 3e-11,
+            rtol=3e-5 if dtype == torch.float32 else 3e-11,
+        )
+        outputs.append(output)
+    for output in outputs[1:]:
+        torch.testing.assert_close(
+            output,
+            outputs[0],
+            atol=3e-5 if dtype == torch.float32 else 3e-11,
+            rtol=3e-5 if dtype == torch.float32 else 3e-11,
+        )
+    for method in ("direct", "rotation", "projection"):
+        scalar = co2.LocalFrame("2x0e", method=method).to(DEVICE, dtype)
+        value = torch.randn(1, 2, device=DEVICE, dtype=dtype)
+        expected = value.expand(vectors.shape[0], -1)
+        torch.testing.assert_close(scalar(value, rotation), expected)
+        torch.testing.assert_close(scalar.to_global(value, rotation), expected)
+        torch.testing.assert_close(scalar.rotate(value, rotation), expected)
+    with pytest.raises(ValueError, match="method"):
+        co2.LocalFrame(irreps, method="unknown")
+
+
+@pytest.mark.parametrize("method", ["direct", "rotation", "projection"])
+def test_cartesian_frame_export(double_precision, method):
+    frame = co2.LocalFrame("2x0e+2x1e+1x3o", method=method).to(DEVICE)
+    features = frame.irreps_in.randn(3, -1, device=DEVICE).requires_grad_()
+    rotation = o2.rotation_matrix_to_y_axis(torch.randn(3, 3, device=DEVICE))
+    exported = torch.export.export(frame, (features, rotation)).module()
+    actual, expected = exported(features, rotation), frame(features, rotation)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.square().sum(), features)[0],
+        torch.autograd.grad(expected.square().sum(), features)[0],
+    )
+
+
+@pytest.mark.parametrize("m", range(7))
+def test_cartesian_planar_projector(double_precision, m):
+    matrix = co2.projector_matrix(m).to(DEVICE)
+    basis = co2.path_matrix(m).to(DEVICE)
+    torch.testing.assert_close(matrix, basis @ basis.T, atol=2e-15, rtol=2e-15)
+    torch.testing.assert_close(matrix @ matrix, matrix, atol=2e-15, rtol=2e-15)
+    decomposition = o2.ICTD(m).to(DEVICE)
+    index = next(i for i, path in enumerate(decomposition.paths) if path[-1].m == m)
+    path = decomposition.path_matrix(index)
+    torch.testing.assert_close(matrix, path @ path.T, atol=2e-14, rtol=2e-14)
+    irrep = "0e" if m == 0 else f"{m}m"
+    irreps = co2.Irreps(f"2x{irrep}+1x{irrep}")
+    value = torch.randn(3, irreps.dim, device=DEVICE, requires_grad=True)
+    actual = co2.Projector(irreps).to(DEVICE)(value)
+    expected = co2.Projector(irreps, method="factorized").to(DEVICE)(value)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=3e-13, rtol=3e-13)
+        actual, expected = [
+            torch.autograd.grad(x.sin().sum(), value, create_graph=True)[0]
+            for x in (actual, expected)
+        ]
+
+
+@pytest.mark.parametrize("path_mode", ["sum", "expand"])
+def test_cartesian_uu_linear(double_precision, path_mode):
+    a, b = "4x0e+4x0o+6x1m+2x3m", "2x0e+2x0o+4x1m+2x3m"
+    reference = o2.UuLinear(a, b, 2, path_mode=path_mode).to(DEVICE)
+    module = co2.UuLinear(a, b, 2, path_mode=path_mode).to(DEVICE)
+    features = torch.randn(3, reference.irreps_in.dim, device=DEVICE)
+    weight = torch.randn(3, reference.weight_numel, device=DEVICE)
+    actual = co2.ChangeOfBasis(module.irreps_out, inverse=True).to(DEVICE)(
+        module(co2.ChangeOfBasis(a).to(DEVICE)(features), weight)
+    )
+    torch.testing.assert_close(actual, reference(features, weight))
+
+
 @pytest.mark.parametrize("m", [0, 1, 2, 3, 8, 16])
 def test_path_matrix(m):
     tensor = torch.ones(1, dtype=torch.complex128, device=DEVICE)
@@ -28,7 +175,7 @@ def test_path_matrix(m):
 
 def test_coupling_recurrence_phase(monkeypatch, double_precision):
     from eqx.co2.spherical import coupling_polynomial, coupling_recurrence
-    from eqx.o3._rotation import so3_generators
+    from eqx.o3.rotation import so3_generators
 
     reference = o3.wigner_3j
 
@@ -133,7 +280,7 @@ def test_spherical_coupling(
 @pytest.mark.parametrize("l1,l3", [(0, 7), (7, 0), (3, 5), (8, 6), (16, 16)])
 def test_coupling_recurrence(l1, l3, double_precision, wigner_3j):
     from eqx.co2.spherical import coupling_recurrence
-    from eqx.o3._rotation import so3_generators
+    from eqx.o3.rotation import so3_generators
 
     degree, delta = min(l1, l3), abs(l1 - l3)
     basis = [
@@ -324,7 +471,11 @@ def test_tensor_product(
     embed_a, embed_b = co2.ChangeOfBasis(a).to(DEVICE), co2.ChangeOfBasis(b).to(DEVICE)
     extract = co2.ChangeOfBasis(c, True).to(DEVICE)
     expected = ref(x, y, weight)
-    actual = extract(module(embed_a(x), embed_b(y), weight))
+    projected = co2.Projector(c).to(DEVICE)(module(embed_a(x), embed_b(y), weight))
+    torch.testing.assert_close(
+        projected, co2.ChangeOfBasis(c).to(DEVICE)(expected), atol=3e-13, rtol=3e-13
+    )
+    actual = extract(projected)
     torch.testing.assert_close(actual, expected, atol=3e-13, rtol=3e-13)
     for _ in range(2):
         probe = torch.randn_like(actual)

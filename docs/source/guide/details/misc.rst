@@ -6,5 +6,5 @@ The misc section contains miscellaneous configuration options for training and e
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: misc

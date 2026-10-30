@@ -21,5 +21,5 @@ nonlinearities to reduce the use of element-dependent modules.
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: model

@@ -10,7 +10,7 @@ class ElementLinear(torch.nn.Module):
 
     Parameters
     ----------
-    linear : o3.Linear
+    linear : o3.Linear or co3.Linear
         Unbiased linear map defining the irreps, paths and normalization.
         Weights are supplied to forward, not copied from this map.
     backend : {"cuda", "torch"}, optional

@@ -39,6 +39,23 @@ class O2O3TensorProductConv(torch.nn.Module):
     inputs. Without vectors, supplied Wigner matrices are used directly.
     CUDA supports float32, float64 and higher derivatives. Atomic reductions
     are not bitwise deterministic.
+
+    Examples
+    --------
+    >>> from eqx import conv, o2
+    >>> tp = o2.O3TensorProduct(
+    ...     "2x0e", "1o", "2x1o", [(0, 0, 0, "uvu", True)],
+    ...     internal_weights=False, shared_weights=False,
+    ... )
+    >>> layer = conv.O2O3TensorProductConv(tp, backend="torch", method="cg")
+    >>> features = torch.randn(3, 2)
+    >>> vectors = torch.randn(4, 3)
+    >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> radial = torch.randn(4, 8)
+    >>> projection = torch.randn(8, tp.weight_numel)
+    >>> layer(features, radial, projection, None, torch.ones(4, 1),
+    ...       edge_index, 3, vectors=vectors).shape
+    torch.Size([3, 6])
     """
 
     def __init__(self, tensor_product, *, backend="cuda", method="auto"):

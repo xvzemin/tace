@@ -6,7 +6,7 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-from ..o3._rotation import so3_generators
+from ..o3.rotation import so3_generators
 
 
 @lru_cache(maxsize=256)

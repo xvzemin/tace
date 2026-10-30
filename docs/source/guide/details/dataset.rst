@@ -118,5 +118,5 @@ LMDB storage, use a new ``shard_dirs`` directory to rebuild the cached graphs.
 Example
 -------
 
-.. yaml-config:: ../../../../example/train/tace.yaml
+.. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: dataset

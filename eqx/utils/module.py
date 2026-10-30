@@ -14,6 +14,17 @@ def default_dtype(dtype):
     ----------
     dtype : torch.dtype
         Floating-point dtype used inside the context.
+
+    Examples
+    --------
+    >>> from eqx import utils
+    >>> previous = torch.get_default_dtype()
+    >>> with utils.default_dtype(torch.float64):
+    ...     layer = torch.nn.Linear(2, 3)
+    >>> layer.weight.dtype
+    torch.float64
+    >>> torch.get_default_dtype() == previous
+    True
     """
     previous = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
@@ -35,6 +46,15 @@ def copy_model(model):
     -------
     torch.nn.Module
         Independent copy of parameters, buffers, and submodules.
+
+    Examples
+    --------
+    >>> from eqx import utils
+    >>> layer = torch.nn.Linear(2, 3)
+    >>> copied = utils.copy_model(layer)
+    >>> torch.testing.assert_close(copied.weight, layer.weight)
+    >>> copied.weight.data_ptr() != layer.weight.data_ptr()
+    True
     """
     functions = {
         id(value): value
@@ -62,6 +82,19 @@ def convert_modules(model, factory, *, inplace=False):
     -------
     torch.nn.Module
         Converted root module.
+
+    Examples
+    --------
+    >>> from eqx import utils
+    >>> model = torch.nn.Sequential(torch.nn.ReLU(), torch.nn.Linear(2, 3))
+    >>> def factory(module):
+    ...     if isinstance(module, torch.nn.ReLU):
+    ...         return torch.nn.SiLU()
+    >>> converted = utils.convert_modules(model, factory)
+    >>> isinstance(converted[0], torch.nn.SiLU)
+    True
+    >>> isinstance(model[0], torch.nn.ReLU)
+    True
     """
     if not inplace:
         model = copy_model(model)

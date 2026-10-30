@@ -6,7 +6,7 @@ import torch
 from e3nn import o3
 from scipy.integrate import lebedev_rule
 
-from ._rotation import so3_generators
+from .rotation import so3_generators
 
 __all__ = ["S2Grid"]
 

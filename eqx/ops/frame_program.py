@@ -2,7 +2,7 @@
 
 import math
 
-from ..o2._layout import wigner_indices, wigner_orders
+from ..o2.layout import wigner_indices, wigner_orders
 
 
 def frame_description(frame):

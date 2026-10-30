@@ -29,6 +29,8 @@ from .representation import NodeRepresentation, PairRepresentation
 
 
 class e3nnTACE(torch.nn.Module):
+    rank_two_dim = 5
+
     def __init__(
         self,
         Lmax: int,
@@ -493,7 +495,7 @@ class e3nnTACE(torch.nn.Module):
                     polarizability_readout2(
                         descriptors[ii],
                         node_fidelity,
-                    ).reshape(-1, self.num_fidelities, 5)[
+                    ).reshape(-1, self.num_fidelities, self.rank_two_dim)[
                         num_atoms_arange, node_fidelity, :
                     ]
                 )
@@ -525,7 +527,7 @@ class e3nnTACE(torch.nn.Module):
                 d_v2_list.append(
                     direct_virials_readout2(
                         descriptors[ii],
-                    ).reshape(-1, self.num_fidelities, 5)[
+                    ).reshape(-1, self.num_fidelities, self.rank_two_dim)[
                         num_atoms_arange, node_fidelity, :
                     ]
                 )

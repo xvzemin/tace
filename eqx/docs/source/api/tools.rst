@@ -3,15 +3,8 @@
 Tools
 =====
 
-Rotations and local frames
---------------------------
-
-|eqx-frames|
-
-Both sides of ``LocalFrame`` use flattened ``ir_mul`` storage.
-Convert each irrep entry from ``mul_ir`` before passing features in that layout.
-Keeping all orders gives an invertible transformation; truncating ``mmax``
-does not.
+Rotations
+---------
 
 .. autofunction:: eqx.o3.so3_generators
 
@@ -24,8 +17,13 @@ does not.
 .. autoclass:: eqx.o2.WignerD
    :members: forward, forward_packed, matrix_blocks
 
+Local frames
+------------
+
 .. autoclass:: eqx.o2.LocalFrame
    :members: restrict, forward, to_local, to_global, gather, scatter
+
+For Cartesian frames, see :class:`eqx.co2.LocalFrame`.
 
 Cartesian basis conversion
 --------------------------
@@ -43,30 +41,15 @@ Cartesian basis conversion
 .. autoclass:: eqx.co2.ChangeOfBasis
    :members: forward
 
-.. autoclass:: eqx.co2.Projector
-   :members: forward
-
 .. autofunction:: eqx.co2.path_matrix
 
 Plane projection and restriction
 --------------------------------
 
-These operators retain three-dimensional Cartesian indices, with trailing
-size ``3**m`` for a rank-``m`` tensor in the transverse plane.
+See :class:`eqx.co2.PlaneProjector`, :class:`eqx.co2.PlanarDetracer`, and
+:class:`eqx.co2.Restriction` for the corresponding modules.
 
 .. autofunction:: eqx.co2.plane_projector
-
-.. autoclass:: eqx.co2.PlaneProjector
-   :members: forward
-
-.. autoclass:: eqx.co2.PlanarDetracer
-   :members: forward, matrix
-
-.. autoclass:: eqx.co2.TransverseProjector
-   :members: forward
-
-.. autoclass:: eqx.co2.Restriction
-   :members: forward, inverse
 
 .. autofunction:: eqx.co2.restriction_scale
 
@@ -76,10 +59,6 @@ size ``3**m`` for a rank-``m`` tensor in the transverse plane.
 
 Tensor decomposition
 --------------------
-
-ICTD retains every irreducible path of an arbitrary Cartesian tensor.
-The ``co2`` and ``co3`` ``path_matrix`` functions instead select the
-highest-order symmetric traceless subspace.
 
 .. autoclass:: eqx.o3.ICTD
    :members: forward, inverse, path_matrix, project
@@ -99,10 +78,3 @@ Module utilities
 .. autofunction:: eqx.utils.copy_model
 
 .. autofunction:: eqx.utils.convert_modules
-
-Operator registration
----------------------
-
-``import eqx`` registers operators, fake implementations, and autograd formulas
-without initializing CUDA or compiling kernels. No additional imports are needed
-before loading an AOTInductor package containing EQX operators.
