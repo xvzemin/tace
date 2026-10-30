@@ -448,10 +448,10 @@ class O2O3TensorProductConv(torch.nn.Module):
         edges = source.numel()
         weights = radial @ projection if projection.numel() else radial
         zero = sum(
-            value.sum() * 0
+            value[..., :0].sum()
             for value in (features, radial, projection, amplitudes, direction)
         )
-        result = features.new_zeros((num_nodes, self.output_dim)) + zero
+        inputs, harmonics, outputs = {}, {}, {}
         for (mode, mul_out), path in zip(self.transverse_layout, self.transverse_paths):
             (
                 start,
@@ -466,20 +466,23 @@ class O2O3TensorProductConv(torch.nn.Module):
                 factor,
                 _,
             ) = path
-            x = (
-                features[source, start : start + dim * mul]
-                .reshape(edges, dim, mul)
-                .transpose(-1, -2)
-            )
+            key = (start, dim, mul)
+            if key not in inputs:
+                inputs[key] = (
+                    features[source, start : start + dim * mul]
+                    .reshape(edges, dim, mul)
+                    .transpose(-1, -2)
+                )
+            x = inputs[key]
             name = f"{(dim - 1) // 2}_{(harmonic_dim - 1) // 2}_{(dim_out - 1) // 2}"
             if method == "cg":
-                harmonic_features = self.harmonics[str((harmonic_dim - 1) // 2)](
-                    direction
-                )
+                degree = str((harmonic_dim - 1) // 2)
+                if degree not in harmonics:
+                    harmonics[degree] = self.harmonics[degree](direction)
                 value = torch.einsum(
                     "eua,eb,abc->ecu",
                     x,
-                    harmonic_features,
+                    harmonics[degree],
                     getattr(self, f"full_cg_{name}"),
                 )
             else:
@@ -499,12 +502,8 @@ class O2O3TensorProductConv(torch.nn.Module):
             value = value * (factor * amplitudes[:, harmonic : harmonic + 1]).unsqueeze(
                 -1
             )
-            result[:, end : end + dim_out * mul_out] += (
-                value.flatten(-2)
-                .new_zeros((num_nodes, dim_out * mul_out))
-                .index_add(0, target, value.flatten(-2))
-            )
-        return result
+            outputs[end] = value if end not in outputs else outputs[end] + value
+        return self.scatter_outputs(outputs, features, target, num_nodes, zero)
 
     def reference(
         self, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
@@ -514,22 +513,22 @@ class O2O3TensorProductConv(torch.nn.Module):
         edges = source.numel()
         weights = radial @ projection if projection.numel() else radial
         zero = sum(
-            value.sum() * 0
+            value[..., :0].sum()
             for value in (features, radial, projection, wigner, amplitudes)
         )
-        result = features.new_zeros((num_nodes, self.output_dim)) + zero
+        inputs, matrices, outputs, groups = {}, {}, {}, {}
         for index, (mode, path) in enumerate(self.path_data):
             start, end, mul, mul_out, dim, dim_out, dstart, dend, weight, harmonic = (
                 path
             )
-            x = features[source, start : start + dim * mul].reshape(edges, dim, mul)
-            din = wigner[:, dstart : dstart + dim * dim].reshape(
-                wigner.size(0), dim, dim
-            )
-            dout = wigner[:, dend : dend + dim_out * dim_out].reshape(
-                wigner.size(0), dim_out, dim_out
-            )
-            value = getattr(self, f"cg_{index}").to(features).T @ (din @ x)
+            key = (start, dim, mul, dstart)
+            if key not in inputs:
+                x = features[source, start : start + dim * mul].reshape(edges, dim, mul)
+                din = wigner[:, dstart : dstart + dim * dim].reshape(
+                    wigner.size(0), dim, dim
+                )
+                inputs[key] = din @ x
+            value = getattr(self, f"cg_{index}").to(features).T @ inputs[key]
             if weight >= 0:
                 if mode == "uvu":
                     value = value * weights[:, None, weight : weight + mul]
@@ -537,9 +536,36 @@ class O2O3TensorProductConv(torch.nn.Module):
                     value = value @ weights[:, weight : weight + mul * mul_out].reshape(
                         weights.size(0), mul, mul_out
                     )
-            value = dout.transpose(-1, -2) @ value
-            message = (value * amplitudes[:, harmonic, None, None]).flatten(1)
-            result[:, end : end + dim_out * mul_out] += message.new_zeros(
-                (num_nodes, dim_out * mul_out)
-            ).index_add(0, target, message)
-        return result
+            value = value * amplitudes[:, harmonic, None, None]
+            if end not in outputs:
+                groups.setdefault((dend, dim_out), []).append((end, mul_out))
+                matrices[dend] = wigner[:, dend : dend + dim_out * dim_out].reshape(
+                    wigner.size(0), dim_out, dim_out
+                )
+                outputs[end] = value
+            else:
+                outputs[end] = outputs[end] + value
+        for (dend, _), entries in groups.items():
+            values = [outputs[end] for end, _ in entries]
+            values = values[0] if len(values) == 1 else torch.cat(values, -1)
+            values = matrices[dend].transpose(-1, -2) @ values
+            for (end, _), value in zip(
+                entries, values.split([mul for _, mul in entries], -1)
+            ):
+                outputs[end] = value
+        return self.scatter_outputs(outputs, features, target, num_nodes, zero)
+
+    def scatter_outputs(self, outputs, features, target, num_nodes, zero):
+        """Aggregate each declared output block without merging path channels."""
+        values = []
+        for section in self.irreps_out.slices():
+            width = section.stop - section.start
+            value = features.new_zeros((num_nodes, width)) + zero
+            if section.start in outputs:
+                value = value.index_add(0, target, outputs[section.start].flatten(1))
+            values.append(value)
+        return (
+            torch.cat(values, -1)
+            if values
+            else features.new_zeros((num_nodes, 0)) + zero
+        )

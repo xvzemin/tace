@@ -378,6 +378,15 @@ class Gate(torch.nn.Module):
             persistent=False,
         )
         self._has_signs = -1.0 in signs
+        shapes = {(path.ir_gated.dim, path.mul) for path in paths}
+        self._broadcast_shape = (
+            (len(paths), *next(iter(shapes)))
+            if len(shapes) == 1
+            and self._gated_identity
+            and self._gate_identity
+            and not self._has_signs
+            else None
+        )
         self._gate_layout = (
             self._gate_sizes,
             self._dimensions,
@@ -435,6 +444,13 @@ class Gate(torch.nn.Module):
             return scalars
         gates = self.act_gates(self._select_entries(inputs, self._selections[1]))
         values = self._select_entries(inputs, self._selections[2])
+        if self._broadcast_shape is not None:
+            count, dim, mul = self._broadcast_shape
+            output = (
+                values.reshape(*features.shape[:-1], count, dim, mul)
+                * gates.reshape(*features.shape[:-1], count, 1, mul)
+            ).flatten(-3)
+            return torch.cat((scalars, output), -1) if scalars.size(-1) else output
         if not self._gated_identity:
             values = _Permute.apply(values, self._gated_indices, self._gated_inverse)
         if self._has_signs:

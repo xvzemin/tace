@@ -3,6 +3,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence, Union
 
 import torch
 
+from ..backends.torch.linear import linear, linear_layout
 from .irreps import Irreps, IrrepsLike
 
 
@@ -176,14 +177,6 @@ class Linear(torch.nn.Module):
         self._weight_offsets = tuple(weight_offsets)
         self._input_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
         self._weight_sizes = tuple(size for _, size in weight_offsets)
-        self._instructions_by_output = tuple(
-            tuple(
-                i
-                for i, ins in enumerate(self._weight_instructions)
-                if ins.i_out == i_out
-            )
-            for i_out in range(len(self.irreps_out))
-        )
         bias_offsets = {}
         offset = 0
         for instruction in self._bias_instructions:
@@ -191,42 +184,11 @@ class Linear(torch.nn.Module):
             bias_offsets[instruction.i_out] = (offset, size)
             offset += size
         self._bias_offsets = bias_offsets
-        self._bias_sizes = tuple(ins.path_shape[0] for ins in self._bias_instructions)
-        self._bias_indices = {
-            ins.i_out: i for i, ins in enumerate(self._bias_instructions)
-        }
-        # Group complete channel maps; keep sparse or repeated paths separate.
-        groups = []
-        remaining = set(range(len(self.irreps_out)))
-        for ir, _ in self.irreps_out:
-            outputs = tuple(
-                i
-                for i, (other, _) in enumerate(self.irreps_out)
-                if other == ir and i in remaining
-            )
-            if not outputs:
-                continue
-            inputs = tuple(
-                i for i, (other, _) in enumerate(self.irreps_in) if other == ir
-            )
-            paths = {
-                (ins.i_in, ins.i_out): i
-                for i, ins in enumerate(self._weight_instructions)
-                if ins.i_out in outputs
-            }
-            count = sum(len(self._instructions_by_output[i]) for i in outputs)
-            if inputs and len(paths) == count == len(inputs) * len(outputs):
-                groups.append(
-                    (
-                        inputs,
-                        outputs,
-                        tuple(tuple(paths[i, j] for j in outputs) for i in inputs),
-                    )
-                )
-            else:
-                groups.extend(((), (j,), ()) for j in outputs)
-            remaining.difference_update(outputs)
-        self._groups = tuple(groups)
+        self.layout = linear_layout(
+            [(ir.dim, mul) for ir, mul in self.irreps_in],
+            [(ir.dim, mul) for ir, mul in self.irreps_out],
+            self.instructions,
+        )
 
         output_mask = []
         for i_out, ir_mul in enumerate(self.irreps_out):
@@ -315,81 +277,12 @@ class Linear(torch.nn.Module):
                 self.irreps_in, features.split(self._input_sizes, dim=-1)
             )
         ]
-        matrices = [
-            value.reshape(*weight.shape[:-1], *ins.path_shape) * ins.path_weight
-            for ins, value in zip(
-                self._weight_instructions, weight.split(self._weight_sizes, dim=-1)
-            )
+        outputs = [
+            value.flatten(-2)
+            for value in linear(inputs, weight, bias, self.layout, leading_shape)
         ]
-        biases = bias.split(self._bias_sizes, dim=-1)
-        shared = all(size == 1 for size in weight.shape[:-1])
-        outputs = [None] * len(self.irreps_out)
-        zero = None
-        for input_indices, output_indices, paths in self._groups:
-            if input_indices:
-                values = (
-                    inputs[input_indices[0]]
-                    if len(input_indices) == 1
-                    else torch.cat([inputs[i] for i in input_indices], dim=-1)
-                )
-                rows = [
-                    matrices[row[0]]
-                    if len(row) == 1
-                    else torch.cat([matrices[i] for i in row], dim=-1)
-                    for row in paths
-                ]
-                matrix = rows[0] if len(rows) == 1 else torch.cat(rows, dim=-2)
-                ir = self.irreps_out[output_indices[0]].ir
-                if shared:
-                    result = torch.matmul(
-                        values.reshape(
-                            math.prod(features.shape[:-1]) * ir.dim, values.size(-1)
-                        ),
-                        matrix.reshape(matrix.shape[-2:]),
-                    ).reshape(*features.shape[:-1], ir.dim, matrix.size(-1))
-                else:
-                    result = torch.matmul(values, matrix)
-                sizes = tuple(self.irreps_out[i].mul for i in output_indices)
-                for i_out, output in zip(output_indices, result.split(sizes, dim=-1)):
-                    outputs[i_out] = output
-                continue
-            (i_out,) = output_indices
-            ir_out, mul_out = self.irreps_out[i_out]
-            contributions = []
-            for instruction_index in self._instructions_by_output[i_out]:
-                instruction = self._weight_instructions[instruction_index]
-                mul_in, _ = instruction.path_shape
-                matrix = matrices[instruction_index]
-                if shared:
-                    value = inputs[instruction.i_in].reshape(
-                        math.prod(features.shape[:-1]) * ir_out.dim, mul_in
-                    )
-                    output = torch.matmul(value, matrix.reshape(mul_in, mul_out))
-                    contributions.append(
-                        output.reshape(*features.shape[:-1], ir_out.dim, mul_out)
-                    )
-                else:
-                    contributions.append(torch.matmul(inputs[instruction.i_in], matrix))
-            if contributions:
-                output = sum(contributions[1:], contributions[0])
-            else:
-                if zero is None:
-                    zero = (
-                        features[..., :0].sum()
-                        + weight[..., :0].sum()
-                        + bias[..., :0].sum()
-                    )
-                output = (
-                    features.new_zeros((*leading_shape, ir_out.dim, mul_out)) + zero
-                )
-            outputs[i_out] = output
-        for i_out, (ir, mul) in enumerate(self.irreps_out):
-            output = outputs[i_out]
-            if i_out in self._bias_indices:
-                output = output + biases[self._bias_indices[i_out]].unsqueeze(-2)
-            outputs[i_out] = output.expand(*leading_shape, ir.dim, mul).reshape(
-                *leading_shape, ir.dim * mul
-            )
+        if not inputs:
+            outputs = [value + features[..., :0].sum() for value in outputs]
         if outputs:
             return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
         return features.new_empty((*leading_shape, 0)) + (

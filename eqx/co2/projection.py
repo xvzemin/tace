@@ -170,7 +170,28 @@ class PlanarDetracer(torch.nn.Module):
         """Detrace (..., 3**rank) tensors using broadcastable (..., 3, 3) planes."""
         if tensor.shape[-1] != self.dim:
             raise ValueError("Tensor has an incorrect trailing size.")
-        return (self.matrix(plane) @ tensor.unsqueeze(-1)).squeeze(-1)
+        if plane.shape[-2:] != (3, 3):
+            raise ValueError("Plane matrices must have trailing shape (3, 3).")
+        if self.rank < 2:
+            shape = torch.broadcast_shapes(tensor.shape[:-1], plane.shape[:-2])
+            return tensor.expand(*shape, self.dim)
+        value = (tensor @ self.basis).unsqueeze(-1)
+        contractions, traces = [], []
+        for k in range(len(self.coefficients) - 1):
+            contraction = torch.einsum(
+                "...ab,abij->...ij", plane, getattr(self, f"trace_{k}")
+            )
+            value = contraction @ value
+            contractions.append(contraction)
+            traces.append(value)
+        correction = self.coefficients[-1] * traces[-1]
+        for k in range(len(contractions) - 1, 0, -1):
+            correction = (
+                contractions[k].transpose(-1, -2) @ correction
+                + self.coefficients[k] * traces[k - 1]
+            )
+        correction = contractions[0].transpose(-1, -2) @ correction
+        return tensor + (self.basis @ correction).squeeze(-1)
 
     def extra_repr(self):
         return f"rank={self.rank}"

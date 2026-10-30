@@ -5,6 +5,7 @@ import math
 import torch
 
 from eqx import o2
+from eqx.backends.torch.linear import linear, linear_layout
 
 from .basis import ChangeOfBasis, Projector
 from .irreps import Irreps
@@ -29,6 +30,14 @@ class Linear(torch.nn.Module):
         Project Cartesian outputs onto their STF subspaces.
     output_basis : {"cartesian", "circular"}, optional
         Cartesian mul_ir or compact circular ir_mul output storage.
+
+    Examples
+    --------
+    >>> from eqx import co2
+    >>> linear = co2.Linear("4x0e+2x2m", "2x0e+3x2m")
+    >>> x = linear.irreps_in.randn(5, -1)
+    >>> linear(x).shape
+    torch.Size([5, 14])
     """
 
     def __init__(
@@ -60,7 +69,6 @@ class Linear(torch.nn.Module):
             (mul, ir.dim, section)
             for (mul, ir), section in zip(self.irreps_in, self.irreps_in.slices())
         )
-        self.output_shapes = tuple((mul, ir.dim) for mul, ir in self.cartesian_out)
         reference = o2.Linear(
             self.irreps_in.circular(),
             self.cartesian_out.circular(),
@@ -86,6 +94,11 @@ class Linear(torch.nn.Module):
                 self.register_parameter(name, value)
             else:
                 self.register_buffer(name, value)
+        self.layout = linear_layout(
+            [(ir.dim, mul) for mul, ir in self.irreps_in],
+            [(ir.dim, mul) for mul, ir in self.cartesian_out],
+            self.instructions,
+        )
         if output_basis == "circular":
             self.projection = ChangeOfBasis(self.cartesian_out, inverse=True)
         elif project:
@@ -136,32 +149,20 @@ class Linear(torch.nn.Module):
         shape = torch.broadcast_shapes(
             features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
         )
-        zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
         inputs = [
-            features[..., section].reshape(*features.shape[:-1], mul, dim)
+            features[..., section]
+            .reshape(*features.shape[:-1], mul, dim)
+            .transpose(-1, -2)
             for mul, dim, section in self.input_paths
         ]
-        outputs = [
-            features.new_zeros((*shape, mul, dim)) + zero
-            for mul, dim in self.output_shapes
-        ]
-        offset, bias_offset = 0, 0
-        for ins in self.instructions:
-            size = math.prod(ins.path_shape)
-            if ins.i_in == -1:
-                value = bias[..., bias_offset : bias_offset + size].unsqueeze(-1)
-                bias_offset += size
-            else:
-                w = weight[..., offset : offset + size].reshape(
-                    *weight.shape[:-1], *ins.path_shape
-                )
-                offset += size
-                value = torch.einsum("...ud,...uv->...vd", inputs[ins.i_in], w)
-            outputs[ins.i_out] = outputs[ins.i_out] + value * ins.path_weight
+        outputs = linear(inputs, weight, bias, self.layout, shape)
         output = (
-            torch.cat([v.flatten(-2) for v in outputs], -1)
+            torch.cat([v.transpose(-1, -2).flatten(-2) for v in outputs], -1)
             if outputs
-            else features.new_zeros((*shape, 0)) + zero
+            else features.new_zeros((*shape, 0))
+            + features[..., :0].sum()
+            + weight[..., :0].sum()
+            + bias[..., :0].sum()
         )
         return self.projection(output)
 

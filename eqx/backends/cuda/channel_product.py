@@ -11,9 +11,12 @@ from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
-def product_source(dtype, metadata, role, required, shared):
+def product_source(dtype, metadata, role, required, shared, accumulate):
     width, dims, rows = parse_metadata(metadata)
     groups = defaultdict(list)
+    if not shared[role] and not accumulate:
+        for offset in range(dims[role]):
+            groups[offset] = []
     for indices, coefficient in rows:
         if indices[role] >= 0 and all(
             index >= 0 for k, index in enumerate(indices) if required & (1 << k)
@@ -36,7 +39,7 @@ def product_source(dtype, metadata, role, required, shared):
             f"case {group}: {{ {''.join(terms)} break; }}"
             if shared[role]
             else f"case {group}: {{ scalar sum=0; {''.join(terms)} "
-            f"out[n*{dims[role] * width}+{offset * width}+c]+=sum; break; }}"
+            f"out[n*{dims[role] * width}+{offset * width}+c]{'+=' if accumulate else '='}sum; break; }}"
         )
     pointers = ",".join(f"const scalar* p{k}" for k in range(len(dims)))
     strides = ",".join(f"long long s{k}, long long t{k}" for k in range(len(dims)))
@@ -88,18 +91,23 @@ def channel_product(
 ) -> list[torch.Tensor]:
     """Evaluate sparse diagonal products and their recursive transposes."""
     outputs = channel_product_fake(metadata, program, operands)
-    for output in outputs:
-        output.zero_()
     nodes = operands[0].shape[0]
     if not nodes:
+        for output in outputs:
+            output.zero_()
         return outputs
     width = parse_metadata(metadata)[0]
     jobs = []
+    initialized = set()
     for mapping, role, slot, required in parse_metadata(program):
         shared = tuple(operands[k].size(0) == 1 and nodes != 1 for k in mapping)
+        accumulate = slot in initialized
+        if shared[role] and not accumulate:
+            outputs[slot].zero_()
         source, groups = product_source(
-            operands[0].dtype, metadata, role, required, shared
+            operands[0].dtype, metadata, role, required, shared, accumulate
         )
+        initialized.add(slot)
         if groups:
             args = [operands[k].data_ptr() for k in mapping]
             args += [stride for k in mapping for stride in operands[k].stride()]

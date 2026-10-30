@@ -51,12 +51,8 @@ def gate(module):
         module.irreps_gated,
     )
     result.act_scalars, result.act_gates = module.act_scalars, module.act_gates
-    result.mul = co2.ElementwiseTensorProduct(
-        result.irreps_gated, co2.Irreps(module.act_gates.irreps_out)
-    )
-    result.irreps_out = (
-        co2.Irreps(module.act_scalars.irreps_out) + result.mul.irreps_out
-    )
+    result._paths = module._paths
+    result.irreps_out = co2.Irreps(module.irreps_out)
     return result
 
 

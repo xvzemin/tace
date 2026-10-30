@@ -5,6 +5,8 @@ from functools import lru_cache
 import torch
 
 from ...backends.torch.edge import evaluate_torch
+from ...backends.torch.linear import linear as linear_blocks
+from ...backends.torch.linear import linear_layout
 from ...o2.layout import irrep_layout
 from ...ops.edge import evaluate
 from ...ops.frame_program import frame_description, rotate
@@ -15,50 +17,28 @@ from .transverse import TransverseFrame
 
 
 def linear_description(linear, transverse=False):
-    paths = tuple(
-        (ins.i_in, ins.i_out, offset, ins.path_weight)
-        for ins, (offset, _) in zip(linear._weight_instructions, linear._weight_offsets)
-    )
-    return (
-        irrep_layout(linear.irreps_in, transverse),
-        tuple(
-            (dim, mul) for dim, mul, _ in irrep_layout(linear.irreps_out, transverse)
-        ),
-        paths,
-        tuple(linear._bias_offsets.items()),
+    return linear_layout(
+        [(dim, mul) for dim, mul, _ in irrep_layout(linear.irreps_in, transverse)],
+        [(dim, mul) for dim, mul, _ in irrep_layout(linear.irreps_out, transverse)],
+        linear.instructions,
     )
 
 
 def linear(features, weight, bias, description):
     """Keep channel contractions in batched GEMM, including parameter adjoints."""
-    inputs, outputs, paths, biases = description
+    inputs = description[0]
     values = [
-        features[:, start : start + dim * mul].reshape(features.shape[0], dim, mul)
-        for dim, mul, start in inputs
-    ]
-    result = []
-    for j, (dim, mul) in enumerate(outputs):
-        terms = [
-            (
-                values[i].reshape(features.shape[0] * dim, inputs[i][1])
-                @ (
-                    weight[offset : offset + inputs[i][1] * mul].view(inputs[i][1], mul)
-                    * scale
-                )
-            ).reshape(features.shape[0], dim, mul)
-            for i, k, offset, scale in paths
-            if k == j
-        ]
-        value = (
-            sum(terms[1:], terms[0])
-            if terms
-            else features.new_zeros((features.shape[0], dim, mul))
+        value.reshape(features.shape[0], dim, mul)
+        for value, (dim, mul) in zip(
+            features.split([dim * mul for dim, mul in inputs], -1), inputs
         )
-        for k, (start, size) in biases:
-            if k == j:
-                value = value + bias[start : start + size]
-        result.append(value.reshape(features.shape[0], dim * mul))
-    return torch.cat(result, dim=-1)
+    ]
+    result = linear_blocks(values, weight, bias, description, features.shape[:-1])
+    return (
+        torch.cat([value.flatten(-2) for value in result], -1)
+        if result
+        else features[..., :0]
+    )
 
 
 class UvO2TensorProductConv(torch.nn.Module):
@@ -190,8 +170,8 @@ class UvO2TensorProductConv(torch.nn.Module):
             for l in (linear_up, linear_down, query, key)
             if l is not None
         )
-        self.gate_metadata = gate_program(gate)
-        self.transverse_gate_metadata = gate_program(gate, True)
+        self.gate_metadata = gate_program(gate, blocks=True)
+        self.transverse_gate_metadata = gate_program(gate, True, blocks=True)
         self.attention = query is not None
         self.num_heads, self.attention_scale, self.eps = num_heads, attention_scale, eps
         self.weight_numel = self.irreps_in.num_irreps
@@ -464,15 +444,32 @@ class UvO2TensorProductConv(torch.nn.Module):
             target,
             features.shape[0],
         )
-        message = linear(local[0], *parameters[:2], linears[0])
+        values = [
+            value.reshape(source.shape[0], dim, mul)
+            for value, (dim, mul) in zip(
+                local[0].split([dim * mul for dim, mul in linears[0][0]], -1),
+                linears[0][0],
+            )
+        ]
+        message = linear_blocks(values, *parameters[:2], linears[0], (source.shape[0],))
         message = execute(
             self.transverse_gate_metadata if transverse else self.gate_metadata,
-            [message, direction] if transverse else [message],
+            [value.flatten(-2) for value in message]
+            + ([direction] if transverse else []),
             source,
             target,
             features.shape[0],
-        )[0]
-        message = linear(message, *parameters[2:4], linears[1])
+        )
+        message = linear_blocks(
+            [
+                value.reshape(source.shape[0], dim, mul)
+                for value, (dim, mul) in zip(message, linears[1][0])
+            ],
+            *parameters[2:4],
+            linears[1],
+            (source.shape[0],),
+        )
+        message = torch.cat([value.flatten(-2) for value in message], -1)
         scale = cutoff
         if self.attention:
             if radial_attention is None:

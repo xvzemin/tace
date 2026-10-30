@@ -86,9 +86,12 @@ class LocalFrame(torch.nn.Module):
                 offsets[index] += mul
                 name = f"basis_{ir.l}_{m}"
                 if not hasattr(self, name):
+                    matrix = self.basis_matrix(ir.l, m)
+                    if method != "projection":
+                        matrix = matrix * restriction_scale(ir.l, m)
                     self.register_buffer(
                         name,
-                        self.basis_matrix(ir.l, m).to(torch.get_default_dtype()),
+                        matrix.to(torch.get_default_dtype()),
                         persistent=False,
                     )
                     if method == "rotation":
@@ -168,7 +171,7 @@ class LocalFrame(torch.nn.Module):
         if features.shape[-1] != self.input_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
         direction = rotation[..., 1, :].unsqueeze(-2)
-        axes = rotation[..., [2, 0], :].unsqueeze(-3)
+        axes = torch.stack((rotation[..., 2, :], rotation[..., 0, :]), -2).unsqueeze(-3)
         shape = torch.broadcast_shapes(features.shape[:-1], rotation.shape[:-2])
         outputs = [[] for _ in self.irreps_out]
         for section, mul, l, odd, paths in self.entries:
@@ -192,8 +195,6 @@ class LocalFrame(torch.nn.Module):
                     value = tensor.index_select(-1, getattr(self, f"indices_{l}_{m}"))
                 else:
                     value = transform_tensor(values[m], axes, m)
-                if self.method != "projection":
-                    value = value * restriction_scale(l, m)
                 value = value @ getattr(self, f"basis_{l}_{m}").T
                 if odd and m and self.basis_change:
                     value = quarter_turn(value)
@@ -209,7 +210,11 @@ class LocalFrame(torch.nn.Module):
         if features.shape[-1] != self.output_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
         direction = rotation[..., 1, :].unsqueeze(-2)
-        axes = rotation[..., [2, 0], :].transpose(-1, -2).unsqueeze(-3)
+        axes = (
+            torch.stack((rotation[..., 2, :], rotation[..., 0, :]), -2)
+            .transpose(-1, -2)
+            .unsqueeze(-3)
+        )
         local = [
             features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
             for (mul, ir), section in zip(self.irreps_out, self.irreps_out.slices())
@@ -253,7 +258,10 @@ class LocalFrame(torch.nn.Module):
         for _, _, l, _, paths in self.entries:
             for m in range(len(paths)):
                 name = f"basis_{l}_{m}"
-                self._buffers[name] = self.basis_matrix(l, m).to(getattr(self, name))
+                matrix = self.basis_matrix(l, m)
+                if self.method != "projection":
+                    matrix = matrix * restriction_scale(l, m)
+                self._buffers[name] = matrix.to(getattr(self, name))
         if self.method != "projection":
             for l in {ir.l for _, ir in self.irreps_in}:
                 name = f"synthesis_{l}"

@@ -429,12 +429,96 @@ def test_linear_and_gate(double_precision, path_normalization):
         "2x1mo+2x3m",
     )
     gate = co2.Gate(*args).to(DEVICE)
+    state = gate.state_dict()
+    state["mul.weight"] = torch.empty(0, device=DEVICE)
+    gate.load_state_dict(state)
     compact_gate = o2.Gate(*args).to(DEVICE)
     x = compact_gate.irreps_in.randn(5, -1, device=DEVICE)
     actual = co2.ChangeOfBasis(gate.irreps_out, True).to(DEVICE)(
         gate(co2.ChangeOfBasis(gate.irreps_in).to(DEVICE)(x))
     )
     torch.testing.assert_close(actual, compact_gate(x))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_gate_derivatives_and_compile(dtype, backend):
+    if backend == "cuda" and DEVICE.type != "cuda":
+        pytest.skip("CUDA is unavailable")
+    torch.compiler.reset()
+    args = (
+        "2x0e+1x0oo",
+        [torch.nn.functional.silu, torch.tanh],
+        "2x0e+3x0oo",
+        [torch.sigmoid, torch.tanh],
+        "1x0o+2x1mo+2x4m",
+    )
+    reference = o2.Gate(*args).to(device=DEVICE, dtype=dtype)
+    gate = co2.Gate(*args, backend=backend).to(device=DEVICE, dtype=dtype)
+    embed = co2.ChangeOfBasis(gate.irreps_in).to(device=DEVICE, dtype=dtype)
+    output = co2.ChangeOfBasis(gate.irreps_out).to(device=DEVICE, dtype=dtype)
+    compiled = torch.compile(gate, backend="aot_eager", fullgraph=True, dynamic=True)
+    for batch in ((3,), (2, 3), (0,)):
+        x = torch.randn(
+            *batch,
+            reference.irreps_in.dim,
+            device=DEVICE,
+            dtype=dtype,
+            requires_grad=True,
+        )
+        for method in (gate, compiled):
+            values = [output(reference(x)), method(embed(x))]
+            for _ in range(3 if method is gate else 1):
+                torch.testing.assert_close(
+                    *values,
+                    atol=2e-5 if dtype == torch.float32 else 2e-12,
+                    rtol=2e-5 if dtype == torch.float32 else 2e-12,
+                )
+                values = [
+                    torch.autograd.grad(
+                        value.sin().sum(), x, create_graph=method is gate
+                    )[0]
+                    for value in values
+                ]
+                torch.testing.assert_close(
+                    *values,
+                    atol=2e-5 if dtype == torch.float32 else 2e-12,
+                    rtol=2e-5 if dtype == torch.float32 else 2e-12,
+                )
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_linear_sparse_paths(double_precision, shared):
+    args = ("2x0e+3x1m+2x1m", "3x0e+2x1m+1x1m+1x2m")
+    kwargs = dict(
+        instructions=[(0, 0), (1, 1), (1, 1), (2, 1), (1, 2)],
+        biases=True,
+        internal_weights=False,
+        shared_weights=shared,
+    )
+    reference = o2.Linear(*args, **kwargs).to(DEVICE)
+    module = co2.Linear(*args, **kwargs).to(DEVICE)
+    embed = co2.ChangeOfBasis(args[0]).to(DEVICE)
+    output = co2.ChangeOfBasis(args[1]).to(DEVICE)
+    x = torch.randn(3, reference.irreps_in.dim, device=DEVICE, requires_grad=True)
+    weight = torch.randn(
+        1 if shared else 3, module.weight_numel, device=DEVICE, requires_grad=True
+    )
+    bias = torch.randn(3, module.bias_numel, device=DEVICE, requires_grad=True)
+    values = [output(reference(x, weight, bias)), module(embed(x), weight, bias)]
+    for _ in range(3):
+        torch.testing.assert_close(*values)
+        values = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        value.sin().sum(), (x, weight, bias), create_graph=True
+                    )
+                ]
+            )
+            for value in values
+        ]
 
 
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])

@@ -477,7 +477,7 @@ class TensorProduct(torch.nn.Module):
                 _, index = self._coupling_indices[instruction_index]
                 contribution = couplings[index]
                 if instruction.has_weight:
-                    path_weight = weights[instruction_index]
+                    path_weight = weights[instruction_index] * instruction.path_weight
                     if instruction.connection_mode == "uvw":
                         mul_out = self.irreps_out[instruction.i_out].mul
                         path_weight = path_weight.reshape(
@@ -489,7 +489,9 @@ class TensorProduct(torch.nn.Module):
                     else:
                         contribution = contribution * path_weight.unsqueeze(-2)
                 contributions[instruction_index] = (
-                    contribution * instruction.path_weight
+                    contribution
+                    if instruction.has_weight
+                    else contribution * instruction.path_weight
                 )
         outputs = []
         zero = None

@@ -150,6 +150,13 @@ class TensorProduct(torch.nn.Module):
             )
             for ins in self.instructions
         )
+        self.coupling_keys = tuple(
+            (ins.i_in1, ins.i_in2, c, ins.connection_mode == "uvw")
+            for ins, (_, _, c) in zip(self.instructions, self.paths)
+        )
+        self.coupling_last_use = {
+            key: index for index, key in enumerate(self.coupling_keys)
+        }
         self.projection = Projector(self.irreps_out) if project else torch.nn.Identity()
         connected = {ins.i_out for ins in self.instructions if ins.path_weight}
         self.register_buffer(
@@ -193,10 +200,7 @@ class TensorProduct(torch.nn.Module):
         if x.is_complex() or y.is_complex() or weight.is_complex():
             raise TypeError("Cartesian O(2) products require real inputs and weights.")
         shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
-        outputs = [
-            x.new_zeros((*shape, mul, dim)) + zero for mul, dim in self.output_shapes
-        ]
+        outputs = [None] * len(self.output_shapes)
         inputs = [
             [
                 value[..., section].reshape(*value.shape[:-1], mul, dim)
@@ -205,27 +209,54 @@ class TensorProduct(torch.nn.Module):
             for value, paths in zip((x, y), self.input_paths)
         ]
         offset = 0
-        for ins, (a, b, c) in zip(self.instructions, self.paths):
+        couplings = {}
+        for index, (ins, (a, b, c), key) in enumerate(
+            zip(self.instructions, self.paths, self.coupling_keys)
+        ):
             left, right = inputs[0][ins.i_in1], inputs[1][ins.i_in2]
             if ins.connection_mode == "uvw":
                 left, right = left.unsqueeze(-2), right.unsqueeze(-3)
-            value = cartesian_product(left, right, a, b, c)
+            value = (
+                couplings[key]
+                if key in couplings
+                else cartesian_product(left, right, a, b, c)
+            )
+            if index < self.coupling_last_use[key]:
+                couplings[key] = value
+            else:
+                couplings.pop(key, None)
             if ins.has_weight:
                 size = math.prod(ins.path_shape)
                 w = weight[..., offset : offset + size].reshape(
                     *weight.shape[:-1], *ins.path_shape
                 )
                 offset += size
+                w = w * ins.path_weight
                 value = (
                     torch.einsum("...uvd,...uvw->...wd", value, w)
                     if ins.connection_mode == "uvw"
                     else value * w.unsqueeze(-1)
                 )
-            outputs[ins.i_out] = outputs[ins.i_out] + value * ins.path_weight
+            else:
+                value = value * ins.path_weight
+            outputs[ins.i_out] = (
+                value if outputs[ins.i_out] is None else outputs[ins.i_out] + value
+            )
+        zero = None
+        for i, (mul, dim) in enumerate(self.output_shapes):
+            if outputs[i] is None:
+                if zero is None:
+                    zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
+                outputs[i] = x.new_zeros((*shape, mul, dim)) + zero
+            else:
+                outputs[i] = outputs[i].expand(*shape, mul, dim)
         output = (
             torch.cat([value.flatten(-2) for value in outputs], -1)
             if outputs
-            else x.new_zeros((*shape, 0)) + zero
+            else x.new_zeros((*shape, 0))
+            + x[..., :0].sum()
+            + y[..., :0].sum()
+            + weight[..., :0].sum()
         )
         return self.projection(output)
 
