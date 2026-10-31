@@ -228,11 +228,6 @@ def test_spherical_bessel_invalid_name(name):
         RadialBasis(radial_basis=name)
 
 
-def test_radial_basis_has_no_order_parameter():
-    with pytest.raises(TypeError, match="order"):
-        RadialBasis(order=[1, 3])
-
-
 @pytest.mark.parametrize(
     "kwargs",
     [

@@ -77,32 +77,6 @@ def test_element_linear(backend, device, mode, dtype, expand_weights):
             ]
 
 
-def test_element_linear_compile(device, double_precision):
-    torch.compiler.reset()
-    if device != "cuda":
-        pytest.skip("CUDA graph tracing requires the CUDA backend")
-    linear = o2.Linear("2x0e+2x1m", "3x0e+3x1m")
-    module = o2.ElementLinear(linear, backend="cuda")
-    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
-    weight = torch.randn(3, 4, linear.weight_numel, device=device, requires_grad=True)
-    for count in (3, 7, 0):
-        features = torch.randn(
-            count, linear.irreps_in.dim, device=device, requires_grad=True
-        )
-        source = torch.arange(count, device=device) % 3
-        target = torch.arange(count, device=device) % 4
-        actual, expected = (
-            compiled(features, weight, source, target),
-            module(features, weight, source, target),
-        )
-        torch.testing.assert_close(actual, expected)
-        for a, b in zip(
-            torch.autograd.grad(actual.square().sum(), (features, weight)),
-            torch.autograd.grad(expected.square().sum(), (features, weight)),
-        ):
-            torch.testing.assert_close(a, b)
-
-
 def test_element_linear_parameters():
     linear = o2.Linear("0e", "0e")
     layer = o2.ElementLinear(linear, backend="torch")

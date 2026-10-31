@@ -1,4 +1,4 @@
-"""Module utilities, kernel runtime, and executable documentation examples."""
+"""Shared modules, kernel runtime, and executable documentation examples."""
 
 import doctest
 import logging
@@ -101,27 +101,62 @@ def test_execution_provider(monkeypatch):
     get_kernel.cache_clear()
 
 
-def test_tensor_product_exports():
-    from e3nn import o3 as e3nn_o3
+@pytest.mark.parametrize("space,experts", [("o3", 1), ("o3", 2), ("co3", 1), ("o2", 1)])
+@pytest.mark.parametrize("mode", ["single", "pair"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_element_linear_compile(
+    space, experts, mode, backend, device, double_precision
+):
+    from torch.fx.experimental.proxy_tensor import make_fx
 
-    from eqx import conv, o3
-
-    for name in (
-        "TensorProduct",
-        "FullyConnectedTensorProduct",
-        "FullTensorProduct",
-        "ElementwiseTensorProduct",
-    ):
-        assert getattr(o3, name) is getattr(o3.cgtp, name)
-        assert getattr(o3, name) is getattr(e3nn_o3, name)
-    for name, module in (
-        ("O3TensorProductConv", o3.cgtp),
-        ("GauntTensorProductConv", o3.gtp),
-        ("MatrixTensorProductConv", o3.mtp),
-        ("Wigner6jTensorProductConv", o3.wigner6j),
-    ):
-        assert getattr(o3, name) is getattr(module, name)
-        assert getattr(o3, name) is getattr(conv, name)
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.compiler.reset()
+    group = {"o3": eqx_o3, "co3": co3, "o2": o2}[space]
+    linear_cls = o3.Linear if space == "o3" else group.Linear
+    linear = linear_cls(
+        "2x0e+0e+2x1m+2x2m" if space == "o2" else "2x0e+0e+2x1o+2x2e",
+        "3x0e+2x1m+2m+3m" if space == "o2" else "3x0e+2x1o+1o+3o",
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    cls = group.ElementLinear if experts == 1 else group.MoEElementLinear
+    module = cls(
+        linear,
+        backend=backend,
+        element_mode=mode,
+        **({} if experts == 1 else {"num_experts": experts}),
+    )
+    reference = copy_model(module)
+    reference.backend = "torch"
+    reference.expand_weights = True
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    shape = (3, 4) if mode == "pair" else (3,)
+    weight = torch.randn(
+        *shape, experts, linear.weight_numel, device=device, requires_grad=True
+    )
+    traced = None
+    for count in (5, 9, 9, 0):
+        features = torch.randn(
+            module.input_dim, count, device=device
+        ).T.requires_grad_()
+        source = torch.randint(3, (count,), device=device)
+        target = torch.randint(4, (count,), device=device) if mode == "pair" else None
+        args = (features, weight, source, target)
+        if traced is None:
+            traced = make_fx(module, tracing_mode="symbolic")(*args)
+        expected = reference(*args)
+        for evaluate in (module, traced, compiled):
+            actual = evaluate(*args)
+            torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+            for a, b in zip(
+                torch.autograd.grad(actual.square().sum(), (features, weight)),
+                torch.autograd.grad(
+                    expected.square().sum(), (features, weight), retain_graph=True
+                ),
+            ):
+                torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-10)
 
 
 @pytest.mark.parametrize(

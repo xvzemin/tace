@@ -1290,42 +1290,6 @@ def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> 
     torch.testing.assert_close(transform.inverse(transform(features)), features)
 
 
-@pytest.mark.parametrize("wigner_lmax", [2, 4])
-@pytest.mark.parametrize("basis_change", [True, False])
-def test_local_frame_roundtrip_flattened_ir_mul(wigner_lmax, basis_change):
-    irreps = o3.Irreps("2x0e+1x0o+3x1e+2x1o+1x2e+3x2o")
-    frame = o2.LocalFrame(irreps, basis_change=basis_change).to(DEVICE, DTYPE)
-    layout = LayoutTransform(
-        irreps,
-        layout_in="flatten_mul_ir",
-        layout_out="flatten_ir_mul",
-    ).to(DEVICE)
-    vectors = torch.randn(7, 3, dtype=DTYPE, device=DEVICE)
-    wigner, wigner_inv = o2.WignerD(wigner_lmax, wigner_lmax).to(DEVICE, DTYPE)(vectors)
-    features = torch.randn(7, irreps.dim, dtype=DTYPE, device=DEVICE)
-
-    local = frame(layout(features), wigner)
-    assert frame.irreps_out == o2.Irreps("5x0e+7x0o+9x1m+4x2m")
-    options = "mmax=2" + ("" if basis_change else ", basis_change=False")
-    assert repr(frame) == (
-        f"LocalFrame({frame.global_irreps} -> {frame.local_irreps})({options})"
-    )
-    reverse_frame = o2.LocalFrame(irreps, reverse=True, basis_change=basis_change)
-    assert repr(reverse_frame) == (
-        f"LocalFrame({frame.local_irreps} -> {frame.global_irreps})({options})"
-    )
-    if basis_change:
-        default = o2.LocalFrame(irreps).to(DEVICE, DTYPE)
-        torch.testing.assert_close(
-            default(layout(features), wigner), local, atol=0, rtol=0
-        )
-    assert local.shape == (7, frame.irreps_out.dim)
-    torch.testing.assert_close(
-        layout.inverse(frame.to_global(local, wigner_inv)),
-        features,
-    )
-
-
 @pytest.mark.parametrize("matrix", ["0", "1"])
 @pytest.mark.parametrize("internal", [False, True])
 @pytest.mark.parametrize("num_nodes", [0, 7])

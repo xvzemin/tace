@@ -166,7 +166,7 @@ class CgtpACE(Product):
 
 
 class MaceACE(Product):
-    """Linear projection, channel-wise symmetric contraction and output Linear.
+    """Channel-wise symmetric contraction with optional input projection.
 
     Parameters
     ----------
@@ -174,13 +174,16 @@ class MaceACE(Product):
         Parameters of :class:`~tace.models._e3nn.base.Product`. ``correlation``
         selects the maximum polynomial degree. ``num_channel_per_expert``
         sets the contraction width, defaulting to ``num_channel``.
+        An input Linear is used only when these widths differ.
         ``agnostic=True`` shares contraction coefficients across elements.
+        ``l1l2`` compares the intermediate and next input angular degrees
+        at each recursive coupling. Degree-one terms are unaffected.
 
     Notes
     -----
     Select with ``product_basis.type: mace``. The contraction backend follows
     ``TACE_USE_EQX`` and ``TACE_USE_CUE``, in that priority order.
-    Expert mixtures, bilinear gates and ``l1l2`` restrictions are not supported.
+    Expert mixtures and bilinear gates are not supported.
     """
 
     def _setup(self):
@@ -190,11 +193,15 @@ class MaceACE(Product):
             raise ValueError("MACE products require a positive correlation.")
         if self.num_expert != 1 or self.use_shared_expert:
             raise ValueError("MACE products do not support expert mixtures.")
-        if self.nonlinear is not None or self.l1l2 is not None:
-            raise ValueError("MACE products require nonlinear=None and l1l2=None.")
+        if self.nonlinear is not None:
+            raise ValueError("MACE products require nonlinear=None.")
 
-        self.linear_up = e3nnLinear(
-            self.irreps_in, self.irreps_hidden, bias=self.use_bias
+        self.linear_up = (
+            e3nnLinear(
+                self.irreps_in, self.irreps_hidden, bias=self.use_bias
+            )
+            if self.num_channel != self.num_hidden_channel
+            else torch.nn.Identity()
         )
         self.reshape = LayoutTransform(self.irreps_hidden, layout_out="mul_ir")
         coupling_irreps = o3.Irreps([(1, ir) for _, ir in self.irreps_hidden])
@@ -208,6 +215,7 @@ class MaceACE(Product):
                     degree,
                     dtype=torch.float64,
                     use_cueq_cg=False,
+                    l1l2=self.l1l2,
                 )[-1]
                 if not tensor.any():
                     continue

@@ -409,7 +409,8 @@ def make_product(irreps, correlation, **kwargs):
 @pytest.mark.parametrize("agnostic", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("backend", ["eqx", "cue", "both"])
-def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend):
+@pytest.mark.parametrize("hidden", [None, 3])
+def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden):
     from tace.models._e3nn.symmetric_contraction import SymmetricContraction
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -424,7 +425,7 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend):
         lmax=1,
         num_channel=2,
         num_expert=None,
-        num_channel_per_expert=3,
+        num_channel_per_expert=hidden,
         target_irreps=o3.Irreps("0e+1o"),
         irreps_in=o3.Irreps("2x0e+2x1o"),
         correlation=[correlation],
@@ -440,6 +441,7 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend):
     monkeypatch.setenv("TACE_USE_CUE", "0" if backend == "eqx" else "1")
     module = MaceACE(**kwargs).to(device=device, dtype=dtype)
     module.load_state_dict(reference.state_dict(), strict=True)
+    assert isinstance(module.linear_up, torch.nn.Identity) == (hidden is None)
     assert module.product.use_eqx == (backend != "cue")
     assert module.product.use_cue == (backend == "cue")
     assert reference.product.backend == "torch"
@@ -468,9 +470,7 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend):
     actual = module(x, attrs, sc, batch, types)
     tolerance = 3e-5 if dtype == torch.float32 else 1e-10
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    torch.testing.assert_close(
-        module(x, attrs, sc, batch), actual, atol=0, rtol=0
-    )
+    torch.testing.assert_close(module(x, attrs, sc, batch), actual, atol=0, rtol=0)
     derivatives = []
     for model in (reference, module):
         output = model(x, attrs, sc, batch, types)
@@ -496,12 +496,93 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend):
     empty = module(x[:0], attrs[:0], sc[:0], batch[:0], types[:0])
     assert empty.shape == (0, module.irreps_out.dim)
     if correlation == 3 and not agnostic and dtype == torch.float64:
-        compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+        torch.compiler.reset()
+        compiled = torch.compile(
+            module, backend="aot_eager", fullgraph=True, dynamic=True
+        )
         torch.testing.assert_close(
             compiled(x, attrs, sc, batch, types), module(x, attrs, sc, batch, types)
         )
         inputs = tuple(value.detach().cpu() for value in (x, attrs, sc, batch, types))
         torch.testing.assert_close(module.cpu()(*inputs), reference.cpu()(*inputs))
+
+
+@pytest.mark.parametrize("l1l2", ["<", "<=", ">", ">=", "==", "!="])
+@pytest.mark.parametrize("backend", ["torch", "eqx", "cue"])
+def test_mace_product_paths(monkeypatch, l1l2, backend):
+    from tace.models._e3nn.symmetric_contraction import _wigner_nj
+
+    if backend == "cue":
+        pytest.importorskip("cuequivariance_torch")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[3],
+        bias=True,
+        nonlinear=None,
+        parity=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    monkeypatch.setenv("TACE_USE_CUE", "0")
+    reference = MaceACE(l1l2=None, **kwargs).to(device)
+    monkeypatch.setenv("TACE_USE_EQX", "1" if backend == "eqx" else "0")
+    monkeypatch.setenv("TACE_USE_CUE", "1" if backend == "cue" else "0")
+    module = MaceACE(l1l2=l1l2, **kwargs).to(device)
+
+    def allowed(path):
+        if not hasattr(path, "op"):
+            return True
+        left, right, _ = path.op
+        return satisfy(left.l, right.l, l1l2) and all(allowed(p) for p in path.args)
+
+    irreps = o3.Irreps([(1, ir) for _, ir in module.irreps_hidden])
+    paths = {degree: _wigner_nj([irreps] * degree) for degree in (1, 2, 3)}
+    selected, offset = [], 0
+    for _, output in module.irreps_coefs_out:
+        for degree in (3, 2, 1):
+            for ir, path, _ in paths[degree]:
+                if ir == output:
+                    if allowed(path):
+                        selected.append(offset)
+                    offset += 1
+    assert offset == reference.product.num_paths
+    assert len(selected) == module.product.num_paths < reference.product.num_paths
+    indices = torch.tensor(selected, device=device)
+    weight = module.weight.new_zeros(reference.weight.shape).index_copy(
+        1, indices, module.weight
+    )
+    x = torch.randn(4, module.irreps_in.dim, device=device, requires_grad=True)
+    types = torch.tensor([0, 1, 0, 1], device=device)
+    attrs = torch.nn.functional.one_hot(types, 2).to(x.dtype)
+    batch = torch.tensor([0, 0, 1, 1], device=device)
+    expected = module.linear(
+        reference.product(module.reshape(module.linear_up(x)), weight, types)
+    )
+    actual = module(x, attrs, None, batch, types)
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    derivatives = []
+    for output in (expected, actual):
+        loss = output.square().sum()
+        first = torch.autograd.grad(loss, x, create_graph=True)[0]
+        derivatives.append(
+            torch.autograd.grad(loss + first.square().sum(), (x, *module.parameters()))
+        )
+    for actual, expected in zip(*derivatives):
+        torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
+    torch.compiler.reset()
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    torch.testing.assert_close(
+        compiled(x, attrs, None, batch, types), module(x, attrs, None, batch, types)
+    )
 
 
 @pytest.mark.parametrize("correlation", [1, 2, 3])

@@ -308,8 +308,7 @@ def test_indexed_linear_derivatives(
 
 @pytest.mark.parametrize("mode", ["single", "pair"])
 @pytest.mark.parametrize("experts", [1, 2])
-def test_indexed_linear_compile_and_capture(mode, experts, double_precision):
-    torch.compiler.reset()
+def test_indexed_linear_capture(mode, experts, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     linear = o3.Linear(
@@ -318,27 +317,11 @@ def test_indexed_linear_compile_and_capture(mode, experts, double_precision):
     module = eqx_o3.MoEElementLinear(
         linear, experts, backend="cuda", element_mode=mode
     )
-    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
-    for count in (3, 7, 0):
-        x = torch.randn(count, module.irreps_in.dim, device="cuda", requires_grad=True)
-        shape = (
-            (2, 3, experts, linear.weight_numel)
-            if mode == "pair"
-            else (2, experts, linear.weight_numel)
-        )
-        weight = torch.randn(*shape, device="cuda", requires_grad=True)
-        types = torch.arange(count, device="cuda") % 2
-        target = torch.arange(count, device="cuda") % 3 if mode == "pair" else None
-        actual, expected = (
-            compiled(x, weight, types, target),
-            module(x, weight, types, target),
-        )
-        torch.testing.assert_close(actual, expected)
-        for a, b in zip(
-            torch.autograd.grad(actual.square().sum(), (x, weight)),
-            torch.autograd.grad(expected.square().sum(), (x, weight)),
-        ):
-            torch.testing.assert_close(a, b)
+    shape = (
+        (2, 3, experts, linear.weight_numel)
+        if mode == "pair"
+        else (2, experts, linear.weight_numel)
+    )
     x = torch.randn(7, module.irreps_in.dim, device="cuda", requires_grad=True)
     weight = torch.randn(*shape, device="cuda", requires_grad=True)
     types = torch.arange(7, device="cuda") % 2

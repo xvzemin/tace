@@ -3,6 +3,7 @@
 import math
 
 import torch
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 
 def element_linear_blocks(features, weight, paths, output_dim, layout):
@@ -32,7 +33,8 @@ def element_linear_blocks(features, weight, paths, output_dim, layout):
         value = value.reshape(groups, nodes, experts * co * dim)
         blocks[sy] = value if sy not in blocks else blocks[sy] + value
     pieces, offset = [], 0
-    for sy, value in sorted(blocks.items()):
+    for sy in sorted(blocks):
+        value = blocks[sy]
         if sy > offset:
             pieces.append(features.new_zeros((groups, nodes, sy - offset)) + zero)
         pieces.append(value)
@@ -50,7 +52,8 @@ def element_linear(
     zero = features[..., :0].sum() + weight[..., :0].sum()
     if not nodes or not paths:
         return features.new_zeros((nodes, output_dim)) + zero
-    if expand_weights:
+    # Element counts are data-dependent. Keep grouping outside traced graphs.
+    if expand_weights or torch.compiler.is_compiling() or get_proxy_mode() is not None:
         return element_linear_blocks(
             features.unsqueeze(1),
             weight.index_select(0, node_type),

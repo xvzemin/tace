@@ -32,6 +32,8 @@ class SymmetricContraction(EqxSymmetricContraction):
     coupling_tensors : sequence of tuple
         ``(output_index, degree, tensor)`` entries accepted by
         :class:`eqx.ace.SymmetricContraction`.
+    instructions : sequence of tuple, optional
+        ``(i_tensor, i_path)`` selections in external weight order.
 
     Notes
     -----
@@ -40,13 +42,14 @@ class SymmetricContraction(EqxSymmetricContraction):
     All backends retain the same external weights and coupling paths.
     """
 
-    def __init__(self, irreps_in, irreps_out, coupling_tensors):
+    def __init__(self, irreps_in, irreps_out, coupling_tensors, *, instructions=None):
         backend = select_acceleration("eqx", "cue", kernel="product")
         super().__init__(
             irreps_in,
             irreps_out,
             coupling_tensors,
             backend="cuda" if backend == "eqx" else "torch",
+            instructions=instructions,
         )
         self.use_eqx = backend == "eqx"
         self.use_cue = backend == "cue"

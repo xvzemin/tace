@@ -11,27 +11,45 @@ from eqx.models.tace.tece_oam_rra.product import BilinearACE
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_symmetric_contraction(device, dtype):
+@pytest.mark.parametrize("instructions", [None, [(1, 1), (0, 0)], []])
+def test_symmetric_contraction(device, dtype, instructions):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.manual_seed(9)
     coupling = torch.randn(3, 4, 4, 4, 2, dtype=torch.float64)
     first = torch.randn(1, 4, 1, dtype=torch.float64)
     module = SymmetricContraction(
-        "3x0e+3x1o", "3x0e+3x1o", [(0, 1, first), (1, 3, coupling)]
+        "3x0e+3x1o",
+        "3x0e+3x1o",
+        [(0, 1, first), (1, 3, coupling)],
+        instructions=instructions,
     ).to(device, dtype)
     x = torch.randn(4, 3, 4, device=device, dtype=dtype, requires_grad=True)
-    weight = torch.randn(2, 3, 3, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(
+        2, module.num_paths, 3, device=device, dtype=dtype, requires_grad=True
+    )
+    indices = torch.tensor(
+        [path if tensor == 0 else path + 1 for tensor, path in module.instructions],
+        device=device,
+        dtype=torch.long,
+    )
+    full_weight = weight.new_zeros(2, 3, 3).index_add(1, indices, weight)
+    assert module.num_paths == (3 if instructions is None else len(instructions))
+    if instructions is not None:
+        assert module.instructions == tuple(instructions)
     node_type = torch.tensor([0, 1, 1, 0], device=device)
     expected = torch.cat(
         (
             torch.einsum(
-                "ak,nkc,nca->nc", first[0].to(device, dtype), weight[node_type, :1], x
+                "ak,nkc,nca->nc",
+                first[0].to(device, dtype),
+                full_weight[node_type, :1],
+                x,
             ),
             torch.einsum(
                 "mabck,nku,nua,nub,nuc->num",
                 coupling.to(device, dtype),
-                weight[node_type, 1:],
+                full_weight[node_type, 1:],
                 x,
                 x,
                 x,
@@ -42,7 +60,7 @@ def test_symmetric_contraction(device, dtype):
     actual = module(x, weight, node_type)
     atol, rtol = (1e-9, 1e-9) if dtype == torch.float64 else (3e-4, 1e-4)
     torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
-    for _ in range(3):
+    for _ in range(3 if module.num_paths else 1):
         vector = torch.randn_like(actual)
         actual = torch.cat(
             [
@@ -61,6 +79,7 @@ def test_symmetric_contraction(device, dtype):
             ]
         )
         torch.testing.assert_close(actual, expected, atol=atol * 10, rtol=rtol * 10)
+    torch.compiler.reset()
     compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
     for nodes in (2, 0):
         a = x[:nodes].detach().requires_grad_()

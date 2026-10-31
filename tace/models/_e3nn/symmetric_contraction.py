@@ -14,6 +14,9 @@ import torch
 import torch.fx
 from e3nn import o3
 from e3nn.util.codegen import CodeGenMixin
+
+from .paths import satisfy
+
 try:
     import cuequivariance as cue
     CUET_AVAILABLE = True
@@ -30,6 +33,7 @@ def _wigner_nj(
     normalization: str = "component",
     filter_ir_mid=None,
     dtype=torch.float64,
+    l1l2: Optional[str] = None,
 ):
     irrepss = [o3.Irreps(irreps) for irreps in irrepss]
     if filter_ir_mid is not None:
@@ -54,9 +58,13 @@ def _wigner_nj(
         normalization=normalization,
         filter_ir_mid=filter_ir_mid,
         dtype=dtype,
+        l1l2=l1l2,
     ):
         i = 0
         for mul, ir in irreps_right:
+            if not satisfy(ir_left.l, ir.l, l1l2):
+                i += mul * ir.dim
+                continue
             for ir_out in ir_left * ir:
                 if filter_ir_mid is not None and ir_out not in filter_ir_mid:
                     continue
@@ -106,21 +114,23 @@ def U_matrix_real(
     dtype=torch.float64,
     use_cueq_cg=True,
     use_nonsymmetric_product=False,
+    l1l2: Optional[str] = None,
 ):
+    satisfy(0, 0, l1l2)
     irreps_out = o3.Irreps(irreps_out)
     irrepss = [o3.Irreps(irreps_in)] * correlation
 
     if correlation == 4 and not use_cueq_cg:
         filter_ir_mid = [(i, 1 if i % 2 == 0 else -1) for i in range(12)]
-    if use_cueq_cg and CUET_AVAILABLE:
+    if use_cueq_cg and CUET_AVAILABLE and l1l2 is None:
         return compute_U_cueq(  # pylint: disable=possibly-used-before-assignment
             irreps_in, irreps_out=irreps_out, correlation=correlation, dtype=dtype
         )
 
     try:
-        wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype)
+        wigners = _wigner_nj(irrepss, normalization, filter_ir_mid, dtype, l1l2)
     except NotImplementedError as e:
-        if CUET_AVAILABLE:
+        if CUET_AVAILABLE and l1l2 is None:
             return compute_U_cueq(  # pylint: disable=possibly-used-before-assignment
                 irreps_in,
                 irreps_out=irreps_out,
@@ -128,9 +138,17 @@ def U_matrix_real(
                 use_nonsymmetric_product=use_nonsymmetric_product,
                 dtype=dtype,
             )
+        if l1l2 is not None:
+            raise
         raise NotImplementedError(
             "The requested Clebsch-Gordan coefficients are not implemented, please install cuequivariance; pip install cuequivariance"
         ) from e
+
+    if not wigners:
+        shape = [o3.Irreps(irreps_in).dim] * correlation + [0]
+        if irreps_out.dim != 1:
+            shape.insert(0, irreps_out.dim)
+        return [str(irreps_out), torch.zeros(shape, dtype=dtype)]
 
     current_ir = wigners[0][0]
     out = []
