@@ -1,4 +1,4 @@
-"""Convert MACE interactions to streamed tensor-product convolutions."""
+"""Convert MACE convolutions and symmetric contractions."""
 
 from collections import OrderedDict
 
@@ -9,6 +9,7 @@ from ...o2.wigner import WignerD
 from ...ops.wigner import wigner_D
 from ...utils.module import copy_model, default_dtype
 from ..convolution import Convolution, RadialFeatures
+from .product import SymmetricContraction
 
 __all__ = ["convert_mace_to_eqx"]
 
@@ -55,7 +56,7 @@ def convert_mace_to_eqx(
     backend="cuda",
     stream_radial=True,
 ):
-    """Replace MACE spatial convolutions with streamed EQX operations.
+    """Replace MACE convolutions and symmetric contractions with EQX operations.
 
     Parameters
     ----------
@@ -65,8 +66,8 @@ def convert_mace_to_eqx(
     implementation : {"o3", "o2"}, optional
         Direct or aligned convolution. Defaults to "o3".
     enable_cueq : bool, optional
-        Also convert the remaining operators using MACE's cuEquivariance
-        converter. Defaults to False. Existing cuEquivariance operators
+        Also convert the remaining operators using MACE's CuEquivariance
+        converter. Defaults to False. Existing CuEquivariance operators
         are retained without requiring another conversion. If enabled, apply
         selective parameter freezing after MACE's conversion rebuilds the model.
     inplace : bool, optional
@@ -74,7 +75,7 @@ def convert_mace_to_eqx(
         copy. Enabling cuEquivariance may construct a new model even when
         this is True.
     backend : {"cuda", "torch"}, optional
-        Convolution backend. Defaults to CUDA kernels on CUDA tensors and
+        Operator backend. Defaults to CUDA kernels on CUDA tensors and
         PyTorch operations on CPU. Select "torch" for a reference on either
         device.
     stream_radial : bool, optional
@@ -96,6 +97,7 @@ def convert_mace_to_eqx(
     RealAgnosticResidualNonLinearInteractionBlock. Edge harmonics must have
     natural spatial parity for the aligned implementation. Magnetic interactions
     are not supported.
+    Chemical node attributes must be one-hot element indicators.
 
     Load weights before conversion, and construct the optimizer afterwards.
     Force training requires ``training=True`` in the model's forward call.
@@ -134,6 +136,11 @@ def convert_mace_to_eqx(
             raise ValueError(
                 "Convert the original model to select another implementation."
             )
+        if any(
+            not isinstance(block.symmetric_contractions, SymmetricContraction)
+            for block in model.products
+        ):
+            raise ValueError("The model contains unconverted symmetric contractions.")
         return model if inplace else copy_model(model)
     supported = {
         "RealAgnosticInteractionBlock",
@@ -237,4 +244,10 @@ def convert_mace_to_eqx(
             layer.conv_tp_weights = radial
             layer.conv_fusion = True
         model.spherical_harmonics = attributes
+        for block in model.products:
+            block.symmetric_contractions = SymmetricContraction(
+                block.symmetric_contractions,
+                backend,
+                layout=get_layout(getattr(block, "cueq_config", None)),
+            )
         return model.to(device=parameter.device, dtype=parameter.dtype)

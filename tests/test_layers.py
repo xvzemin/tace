@@ -1373,8 +1373,12 @@ def test_shared_linear(matrix, internal, num_nodes, double_precision):
 @pytest.mark.parametrize("matrix", ["0", "1"])
 @pytest.mark.parametrize("lora", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_tace_indexed_linear(monkeypatch, experts, matrix, lora, dtype):
-    if not torch.cuda.is_available():
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("cartesian", [False, True])
+def test_tace_indexed_linear(
+    monkeypatch, experts, matrix, lora, dtype, device, cartesian
+):
+    if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.set_default_dtype(dtype)
     cls = e3nnElementLinear if experts == 1 else e3nnMoEElementLinear
@@ -1385,7 +1389,15 @@ def test_tace_indexed_linear(monkeypatch, experts, matrix, lora, dtype):
         bias=True,
         use_matrix_weight=matrix,
         **({} if experts == 1 else {"num_experts": experts}),
-    ).cuda()
+    )
+    if cartesian:
+        from tace.models._cart.layers import cartesian_modules
+
+        module = cartesian_modules(module)
+    module = module.to(device)
+    assert module.torch_linear.backend == "torch"
+    assert not module.torch_linear.expand_weights
+    assert module.eqx_linear.backend == "cuda"
     if lora:
         enable_lora(module, r=2, freeze_base=False)
         with torch.no_grad():
@@ -1393,16 +1405,30 @@ def test_tace_indexed_linear(monkeypatch, experts, matrix, lora, dtype):
                 parameter.normal_()
     with torch.no_grad():
         module.bias.normal_()
-    attrs = torch.rand(5, 3, device="cuda", requires_grad=True)
-    x = torch.randn(5, module.irreps_in.dim, device="cuda", requires_grad=True)
+    attrs = torch.rand(5, 3, device=device, requires_grad=True)
+    x = torch.randn(5, module.irreps_in.dim, device=device, requires_grad=True)
     # A supplied element index takes precedence over attrs.argmax for weights.
-    types = torch.tensor([2, 0, 1, 2, 1], device="cuda")
-    monkeypatch.setenv("TACE_USE_EQX", "1")
+    types = torch.tensor([2, 0, 1, 2, 1], device=device)
     outputs, derivatives = [], []
     inputs = (x, attrs, *module.parameters())
-    for enabled in (False, True):
+    for env, enabled in ((None, True), ("0", True), ("1", False), ("1", True)):
+        if env is None:
+            monkeypatch.delenv("TACE_USE_EQX", raising=False)
+        else:
+            monkeypatch.setenv("TACE_USE_EQX", env)
         monkeypatch.setitem(EQX_KERNELS, "linear", enabled)
-        output = module(x, attrs, types)
+        with (
+            patch.object(
+                module.torch_linear, "forward", wraps=module.torch_linear.forward
+            ) as torch_forward,
+            patch.object(
+                module.eqx_linear, "forward", wraps=module.eqx_linear.forward
+            ) as cuda_forward,
+        ):
+            output = module(x, attrs, types)
+            use_cuda = device == "cuda" and env == "1" and enabled
+            assert cuda_forward.call_count == int(use_cuda)
+            assert torch_forward.call_count == int(not use_cuda)
         first = torch.autograd.grad(output.square().mean(), x, create_graph=True)[0]
         derivatives.append(
             torch.autograd.grad(
@@ -1413,18 +1439,20 @@ def test_tace_indexed_linear(monkeypatch, experts, matrix, lora, dtype):
         )
         outputs.append(output)
     tol = 3e-4 if dtype == torch.float32 else 1e-10
-    torch.testing.assert_close(*outputs, atol=tol, rtol=tol)
-    for actual, expected in zip(*derivatives):
-        if expected is None:
-            assert actual is None
-        else:
-            torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
-    if dtype == torch.float64 and matrix == "1" and lora:
+    for output, gradients in zip(outputs[1:], derivatives[1:]):
+        torch.testing.assert_close(output, outputs[0], atol=tol, rtol=tol)
+        for actual, expected in zip(gradients, derivatives[0]):
+            if expected is None:
+                assert actual is None
+            else:
+                torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
+    if device == "cuda" and dtype == torch.float64 and matrix == "1" and lora:
+        torch.compiler.reset()
         compiled = torch.compile(
             module, backend="aot_eager", fullgraph=True, dynamic=True
         )
         output = compiled(x, attrs, types)
-        torch.testing.assert_close(output, outputs[1], atol=tol, rtol=tol)
+        torch.testing.assert_close(output, outputs[-1], atol=tol, rtol=tol)
         torch.testing.assert_close(
             torch.autograd.grad(output.square().mean(), x)[0],
             torch.autograd.grad(module(x, attrs, types).square().mean(), x)[0],

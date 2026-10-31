@@ -4,6 +4,7 @@ from importlib import import_module
 
 for module in (
     "eqx.ops.ace",
+    "eqx.ops.symmetric",
     "eqx.ops.attention",
     "eqx.ops.edge",
     "eqx.ops.o2_o3",

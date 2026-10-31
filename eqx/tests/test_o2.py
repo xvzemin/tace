@@ -18,6 +18,120 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("mode", ["single", "pair"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("expand_weights", [False, True])
+def test_element_linear(backend, device, mode, dtype, expand_weights):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    linear = o2.Linear(
+        "2x0ee+0ee+2x0oo+3x1me+2x1mo+2x3me",
+        "3x0ee+2x0oo+2x1me+1me+2x1mo+2x3me+2me",
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device=device, dtype=dtype)
+    module = o2.ElementLinear(linear, backend, element_mode=mode)
+    assert not module.expand_weights
+    module.expand_weights = expand_weights
+    assert o2.ElementLinear(linear).element_mode == "pair"
+    assert o2.ElementLinear(linear).backend == "torch"
+    shape = (3, 4, linear.weight_numel) if mode == "pair" else (3, linear.weight_numel)
+    weight = torch.randn(*shape, dtype=dtype, device=device, requires_grad=True)
+    for count in (0, 7):
+        x = torch.randn(
+            linear.irreps_in.dim, count, dtype=dtype, device=device
+        ).T.requires_grad_()
+        source = (torch.arange(2 * count, device=device) % 3)[::2]
+        target = torch.arange(count, device=device) % 4 if mode == "pair" else None
+        actual = module(x, weight, source, target)
+        selected = weight[source, target] if mode == "pair" else weight[source]
+        expected = linear(x, selected)
+        tolerance = 3e-5 if dtype == torch.float32 else 2e-11
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        for reflected, time_reversal in ((False, False), (True, False), (False, True)):
+            torch.testing.assert_close(
+                module(
+                    _transform(x, linear.irreps_in, 0.37, reflected, time_reversal),
+                    weight,
+                    source,
+                    target,
+                ),
+                _transform(actual, linear.irreps_out, 0.37, reflected, time_reversal),
+                atol=tolerance,
+                rtol=tolerance,
+            )
+        for _ in range(3):
+            seed = torch.randn_like(actual)
+            gradients = [
+                torch.autograd.grad(
+                    (y.sin() * seed).sum(), (x, weight), create_graph=True
+                )
+                for y in (actual, expected)
+            ]
+            for a, b in zip(*gradients):
+                torch.testing.assert_close(a, b, atol=5 * tolerance, rtol=5 * tolerance)
+            actual, expected = [
+                torch.cat([g.flatten() for g in gs]) for gs in gradients
+            ]
+
+
+def test_element_linear_compile(device, double_precision):
+    torch.compiler.reset()
+    if device != "cuda":
+        pytest.skip("CUDA graph tracing requires the CUDA backend")
+    linear = o2.Linear("2x0e+2x1m", "3x0e+3x1m")
+    module = o2.ElementLinear(linear, backend="cuda")
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    weight = torch.randn(3, 4, linear.weight_numel, device=device, requires_grad=True)
+    for count in (3, 7, 0):
+        features = torch.randn(
+            count, linear.irreps_in.dim, device=device, requires_grad=True
+        )
+        source = torch.arange(count, device=device) % 3
+        target = torch.arange(count, device=device) % 4
+        actual, expected = (
+            compiled(features, weight, source, target),
+            module(features, weight, source, target),
+        )
+        torch.testing.assert_close(actual, expected)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), (features, weight)),
+            torch.autograd.grad(expected.square().sum(), (features, weight)),
+        ):
+            torch.testing.assert_close(a, b)
+
+
+def test_element_linear_parameters():
+    linear = o2.Linear("0e", "0e")
+    layer = o2.ElementLinear(linear, backend="torch")
+    weight = torch.tensor([[[1.0], [2.0]], [[3.0], [4.0]]])
+    source = torch.tensor([0, 0, 1, 1])
+    target = torch.tensor([0, 1, 0, 1])
+    x = torch.ones(4, 1)
+    torch.testing.assert_close(
+        layer(x, weight, source, target), torch.arange(1.0, 5.0).reshape(4, 1)
+    )
+    source = torch.tensor([0] * 16 + [0, 1, 1])
+    target = torch.tensor([0] * 16 + [1, 0, 1])
+    x = torch.ones(19, 1, requires_grad=True)
+    weight.requires_grad_()
+    actual, expected = layer(x, weight, source, target), x * weight[source, target]
+    torch.testing.assert_close(actual, expected)
+    for a, b in zip(
+        torch.autograd.grad(actual.square().sum(), (x, weight)),
+        torch.autograd.grad(expected.square().sum(), (x, weight)),
+    ):
+        torch.testing.assert_close(a, b)
+    with pytest.raises(ValueError, match="target_type"):
+        layer(x, weight, source)
+    with pytest.raises(ValueError, match="Weights"):
+        layer(x, weight.flatten(0, 1), source, target)
+    with pytest.raises(ValueError, match="unbiased"):
+        o2.ElementLinear(o2.Linear("0e", "0e", biases=True))
+
+
 def test_wigner_invalid_method(device):
     wigner = o2.WignerD(lmax=2, mmax=2).to(device)
     vectors = torch.randn(3, 3, device=device)

@@ -9,6 +9,31 @@ from eqx import co3
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_element_linear_high_degree(backend, double_precision):
+    linear = co3.Linear(
+        "2x0e+2x2e+2x5o",
+        "3x0e+3x2e+3x5o",
+        internal_weights=False,
+        shared_weights=False,
+    ).to(DEVICE)
+    module = co3.ElementLinear(linear, backend, element_mode="pair")
+    x = torch.randn(35, linear.irreps_in.dim, device=DEVICE, requires_grad=True)
+    weight = torch.randn(3, 4, linear.weight_numel, device=DEVICE, requires_grad=True)
+    source = torch.arange(35, device=DEVICE) % 3
+    target = torch.arange(35, device=DEVICE) % 4
+    actual, expected = (
+        module(x, weight, source, target),
+        linear(x, weight[source, target]),
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    for a, b in zip(
+        torch.autograd.grad(actual.square().sum(), (x, weight)),
+        torch.autograd.grad(expected.square().sum(), (x, weight)),
+    ):
+        torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-11)
+
+
 def test_irreps_and_basis(double_precision):
     irreps = co3.Irreps("2x0e+1x1o+2x2e+1x2o+1x1o")
     assert irreps.dim == 2 + 3 + 27 + 3

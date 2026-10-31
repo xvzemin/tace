@@ -4,8 +4,72 @@ import pytest
 import torch
 from e3nn import o3
 
+from eqx.ace import SymmetricContraction
 from eqx.ace.tace import TACE
 from eqx.models.tace.tece_oam_rra.product import BilinearACE
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_symmetric_contraction(device, dtype):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    torch.manual_seed(9)
+    coupling = torch.randn(3, 4, 4, 4, 2, dtype=torch.float64)
+    first = torch.randn(1, 4, 1, dtype=torch.float64)
+    module = SymmetricContraction(
+        "3x0e+3x1o", "3x0e+3x1o", [(0, 1, first), (1, 3, coupling)]
+    ).to(device, dtype)
+    x = torch.randn(4, 3, 4, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(2, 3, 3, device=device, dtype=dtype, requires_grad=True)
+    node_type = torch.tensor([0, 1, 1, 0], device=device)
+    expected = torch.cat(
+        (
+            torch.einsum(
+                "ak,nkc,nca->nc", first[0].to(device, dtype), weight[node_type, :1], x
+            ),
+            torch.einsum(
+                "mabck,nku,nua,nub,nuc->num",
+                coupling.to(device, dtype),
+                weight[node_type, 1:],
+                x,
+                x,
+                x,
+            ).flatten(1),
+        ),
+        dim=1,
+    )
+    actual = module(x, weight, node_type)
+    atol, rtol = (1e-9, 1e-9) if dtype == torch.float64 else (3e-4, 1e-4)
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+    for _ in range(3):
+        vector = torch.randn_like(actual)
+        actual = torch.cat(
+            [
+                g.flatten()
+                for g in torch.autograd.grad(
+                    (actual * vector).sum(), (x, weight), create_graph=True
+                )
+            ]
+        )
+        expected = torch.cat(
+            [
+                g.flatten()
+                for g in torch.autograd.grad(
+                    (expected * vector).sum(), (x, weight), create_graph=True
+                )
+            ]
+        )
+        torch.testing.assert_close(actual, expected, atol=atol * 10, rtol=rtol * 10)
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for nodes in (2, 0):
+        a = x[:nodes].detach().requires_grad_()
+        torch.testing.assert_close(
+            compiled(a, weight, node_type[:nodes]),
+            module(a, weight, node_type[:nodes]),
+            atol=atol,
+            rtol=rtol,
+        )
 
 
 @pytest.mark.parametrize(

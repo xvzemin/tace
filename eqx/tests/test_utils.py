@@ -7,8 +7,10 @@ import re
 import runpy
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 from pathlib import Path
+from threading import Event
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -243,6 +245,11 @@ def test_runtime_linker_flags(monkeypatch, tmp_path, platform, lib_dir):
     import torch.utils.cpp_extension as extension
 
     namespace = runpy.run_path(cuda.__file__)
+    cache = tmp_path / "eqx_cuda_runtime"
+    build_dir = cache / "build"
+    build_dir.mkdir(parents=True)
+    (cache / "lock").touch()
+    (build_dir / "lock").touch()
     lib_dir = tmp_path / lib_dir
     lib_dir.mkdir(parents=True)
     load = Mock(return_value=object())
@@ -250,10 +257,14 @@ def test_runtime_linker_flags(monkeypatch, tmp_path, platform, lib_dir):
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(os, "add_dll_directory", dll_directory, raising=False)
     monkeypatch.setattr(extension, "CUDA_HOME", str(tmp_path))
+    monkeypatch.setattr(extension, "_get_build_directory", lambda *args: str(cache))
     monkeypatch.setattr(extension, "load", load)
     try:
         assert namespace["runtime"]() is load.return_value
         kwargs = load.call_args.kwargs
+        assert kwargs["build_directory"] == str(build_dir)
+        assert not (build_dir / "lock").exists()
+        assert (cache / "lock").exists()
         if platform == "win32":
             dll_directory.assert_called_once_with(str(tmp_path / "bin"))
             assert kwargs["extra_cflags"] == ["/O2"]
@@ -269,6 +280,58 @@ def test_runtime_linker_flags(monkeypatch, tmp_path, platform, lib_dir):
             assert "-lcuda" in kwargs["extra_ldflags"]
             assert f"-L{lib_dir}" in kwargs["extra_ldflags"]
             assert f"-Wl,-rpath,{lib_dir}" in kwargs["extra_ldflags"]
+    finally:
+        namespace["_POOL"].shutdown()
+
+
+def test_runtime_build_lock(monkeypatch, tmp_path):
+    import torch.utils.cpp_extension as extension
+
+    namespace = runpy.run_path(cuda.__file__)
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    started, loaded = Event(), Event()
+
+    def build_directory(*args):
+        started.set()
+        return str(tmp_path)
+
+    def load(**kwargs):
+        assert not (build_dir / "lock").exists()
+        loaded.set()
+
+    monkeypatch.setattr(extension, "CUDA_HOME", str(tmp_path))
+    monkeypatch.setattr(extension, "_get_build_directory", build_directory)
+    monkeypatch.setattr(extension, "load", load)
+    monkeypatch.setattr(os, "add_dll_directory", MagicMock(), raising=False)
+    script = """
+import sys
+from pathlib import Path
+from filelock import FileLock
+with FileLock(sys.argv[1] + ".lock"):
+    Path(sys.argv[1], "lock").touch()
+    print("locked", flush=True)
+    sys.stdin.read()
+"""
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-c", script, str(build_dir)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        ) as owner:
+            assert owner.stdout.readline().strip() == "locked"
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(namespace["runtime"])
+                try:
+                    assert started.wait(10)
+                    assert not loaded.wait(0.1)
+                    assert (build_dir / "lock").exists()
+                finally:
+                    owner.kill()
+                    owner.wait(timeout=10)
+                pending.result(timeout=10)
+            assert loaded.is_set()
     finally:
         namespace["_POOL"].shutdown()
 

@@ -13,11 +13,12 @@ from eqx.ace import TACE
 from eqx.models.tace.tece_oam_rra import BilinearACE
 from tace.utils.env import select_acceleration
 
+from ..layout import LayoutTransform
 from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
 from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
-from .fused import UuuTensorProduct
+from .fused import SymmetricContraction, UuuTensorProduct
 from .paths import SymmetricProductPaths
 
 
@@ -162,6 +163,97 @@ class CgtpACE(Product):
         if sc is not None:
             outs = outs + sc
         return outs
+
+
+class MaceACE(Product):
+    """Linear projection, channel-wise symmetric contraction and output Linear.
+
+    Parameters
+    ----------
+    **kwargs
+        Parameters of :class:`~tace.models._e3nn.base.Product`. ``correlation``
+        selects the maximum polynomial degree. ``num_channel_per_expert``
+        sets the contraction width, defaulting to ``num_channel``.
+        ``agnostic=True`` shares contraction coefficients across elements.
+
+    Notes
+    -----
+    Select with ``product_basis.type: mace``. The contraction backend follows
+    ``TACE_USE_EQX`` and ``TACE_USE_CUE``, in that priority order.
+    Expert mixtures, bilinear gates and ``l1l2`` restrictions are not supported.
+    """
+
+    def _setup(self):
+        from .symmetric_contraction import U_matrix_real
+
+        if self.correlation < 1:
+            raise ValueError("MACE products require a positive correlation.")
+        if self.num_expert != 1 or self.use_shared_expert:
+            raise ValueError("MACE products do not support expert mixtures.")
+        if self.nonlinear is not None or self.l1l2 is not None:
+            raise ValueError("MACE products require nonlinear=None and l1l2=None.")
+
+        self.linear_up = e3nnLinear(
+            self.irreps_in, self.irreps_hidden, bias=self.use_bias
+        )
+        self.reshape = LayoutTransform(self.irreps_hidden, layout_out="mul_ir")
+        coupling_irreps = o3.Irreps([(1, ir) for _, ir in self.irreps_hidden])
+        tensors, weights = [], []
+        num_elements = 1 if self.agnostic else self.num_elements
+        for output, (_, ir) in enumerate(self.irreps_coefs_out):
+            for degree in range(self.correlation, 0, -1):
+                tensor = U_matrix_real(
+                    coupling_irreps,
+                    o3.Irreps([(1, ir)]),
+                    degree,
+                    dtype=torch.float64,
+                    use_cueq_cg=False,
+                )[-1]
+                if not tensor.any():
+                    continue
+                num_paths = tensor.shape[-1]
+                tensors.append((output, degree, tensor))
+                weights.append(
+                    torch.randn(num_elements, num_paths, self.num_hidden_channel)
+                    / num_paths
+                )
+        self.product = SymmetricContraction(
+            self.irreps_hidden,
+            self.irreps_coefs_out,
+            tensors,
+        )
+        self.weight = torch.nn.Parameter(
+            torch.cat(weights, dim=1)
+            if weights
+            else torch.empty(num_elements, 0, self.num_hidden_channel)
+        )
+        self.linear = e3nnLinear(
+            self.irreps_coefs_out, self.irreps_out, bias=self.use_bias
+        )
+        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0.0:
+            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs: torch.Tensor,
+        sc: torch.Tensor | None,
+        batch: torch.Tensor,
+        node_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.agnostic:
+            node_type = torch.zeros(
+                node_feats.shape[0], dtype=torch.long, device=node_feats.device
+            )
+        elif node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        features = self.reshape(self.linear_up(node_feats))
+        output = self.linear(self.product(features, self.weight, node_type))
+        if hasattr(self, "stochastic_depth"):
+            output = self.stochastic_depth(output, batch)
+        if sc is not None:
+            output = output + sc
+        return output
 
 
 class BilinearMoEACE(Product):
@@ -484,6 +576,7 @@ class BilinearMoEACE(Product):
 
 PRODUCT: Dict[str, torch.nn.Module] = {
     "cgtp": CgtpACE,
+    "mace": MaceACE,
 }
 
 product_aliases = {

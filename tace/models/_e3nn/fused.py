@@ -12,6 +12,7 @@ from e3nn import o3
 
 from eqx import co3, o2
 from eqx import conv as eqx_conv
+from eqx.ace import SymmetricContraction as EqxSymmetricContraction
 from tace.utils.env import acceleration_enabled, select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
@@ -19,6 +20,47 @@ from ..layout import LayoutTransform
 from ..time_reversal import contains_time_odd_irreps
 from ..utils import repr_without
 from .paths import SymmetricProductPaths, generate_paths
+
+
+class SymmetricContraction(EqxSymmetricContraction):
+    """Channel-wise symmetric contraction with external element weights.
+
+    Parameters
+    ----------
+    irreps_in, irreps_out : o3.Irreps
+        Input and output representations with equal multiplicities.
+    coupling_tensors : sequence of tuple
+        ``(output_index, degree, tensor)`` entries accepted by
+        :class:`eqx.ace.SymmetricContraction`.
+
+    Notes
+    -----
+    Selects ``TACE_USE_EQX`` before ``TACE_USE_CUE`` at construction.
+    CPU tensors and disabled acceleration use PyTorch operations.
+    All backends retain the same external weights and coupling paths.
+    """
+
+    def __init__(self, irreps_in, irreps_out, coupling_tensors):
+        backend = select_acceleration("eqx", "cue", kernel="product")
+        super().__init__(
+            irreps_in,
+            irreps_out,
+            coupling_tensors,
+            backend="cuda" if backend == "eqx" else "torch",
+        )
+        self.use_eqx = backend == "eqx"
+        self.use_cue = backend == "cue"
+        if self.use_cue and self.has_terms:
+            from ..cue import CueSymmetricContraction
+
+            self.fused_tp = CueSymmetricContraction(self)
+
+    def forward(
+        self, features: torch.Tensor, weight: torch.Tensor, node_type: torch.Tensor
+    ) -> torch.Tensor:
+        if self.use_cue and self.has_terms and features.is_cuda:
+            return self.fused_tp(features, weight, node_type)
+        return super().forward(features, weight, node_type)
 
 
 class UuuTensorProduct(torch.nn.Module):

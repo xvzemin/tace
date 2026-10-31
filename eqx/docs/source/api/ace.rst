@@ -3,6 +3,9 @@
 Atomic cluster expansion
 ========================
 
+.. autoclass:: eqx.ace.SymmetricContraction
+   :members: forward, from_entries
+
 .. autoclass:: eqx.ace.TACE
    :members: forward
 

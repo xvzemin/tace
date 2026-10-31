@@ -516,6 +516,9 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
         target_property=["energy", "forces", "stress"],
     )
     config["atomic_basis"].update(type=["cgtp", interaction], num_head=1)
+    if interaction == "mace":
+        config["atomic_basis"]["type"] = "cgtp"
+        config["product_basis"].update(type="mace", correlation=3)
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
@@ -580,7 +583,7 @@ def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
     )
 
 
-@pytest.mark.parametrize("interaction", ["cgtp", "so2", "o2", "o2_mag"])
+@pytest.mark.parametrize("interaction", ["cgtp", "so2", "o2", "o2_mag", "mace"])
 @pytest.mark.parametrize("elements", [["O", "H"], [14, 8, 6, 1], ["H", "O", "Si"]])
 def test_select_elements(interaction, elements, tmp_path, double_precision):
     model = make_model(interaction)

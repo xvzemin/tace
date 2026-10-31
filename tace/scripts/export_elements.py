@@ -1,4 +1,7 @@
-"""Export a model with a selected set of chemical elements."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import argparse
 from collections.abc import Sequence
@@ -12,6 +15,7 @@ from tace.lightning import create_model, export_tace, load_tace
 from tace.models._e3nn.base import NodeEmbedding
 from tace.models._e3nn.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
 from tace.models._e3nn.magnetic import MagneticBasis
+from tace.models._e3nn.prod import MaceACE
 from tace.models._e3nn.symmetric_contraction import Contraction
 from tace.models.adapter import TensorModel
 from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
@@ -126,6 +130,8 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
         if isinstance(module, (e3nnElementLinear, e3nnMoEElementLinear, Contraction)):
             for key, _ in module.named_parameters():
                 element_axes[f"{name}.{key}"] = (0, 1.0)
+        elif isinstance(module, MaceACE) and not module.agnostic:
+            element_axes[f"{name}.weight"] = (0, 1.0)
         elif isinstance(module, OneHotToAtomicEnergy):
             element_axes[f"{name}.atomic_energy"] = (1, 1.0)
         elif isinstance(module, ScaleShift):

@@ -83,7 +83,7 @@ inference.
      - ACE
    * - 5. cuEquivariance
      - ``TACE_USE_CUE=1``
-     - Convolution
+     - Convolution and MACE symmetric contraction
 
 If several flags are enabled, each operator selects the highest-priority
 backend it supports: **EQX > Luna > OEQ > EQT > CUEQ**. Different operators may therefore

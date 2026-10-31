@@ -4,6 +4,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence, Union
 import torch
 
 from ..backends.torch.linear import linear, linear_layout
+from ..nn.element_linear import ElementLinear as ElementLinearBase
 from .irreps import Irreps, IrrepsLike
 
 
@@ -345,6 +346,37 @@ class Linear(torch.nn.Module):
             f"{self.__class__.__name__}({self.irreps_in} -> "
             f"{self.irreps_out} | {self.weight_numel} weights)"
         )
+
+
+class ElementLinear(ElementLinearBase):
+    """Apply element-dependent O(2) Linear paths in ``ir_mul`` layout.
+
+    Parameters
+    ----------
+    linear : Linear
+        Unbiased map defining irreps, paths and normalization. Weights are
+        supplied to :meth:`forward`; the map's parameters are not copied.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Defaults to ``"torch"``. CPU tensors use PyTorch.
+    element_mode : {"pair", "single"}, optional
+        Independent weights for each ordered element pair, or each element.
+        Defaults to ``"pair"``.
+
+    Examples
+    --------
+    >>> from eqx import o2
+    >>> linear = o2.Linear("2x0e + 2x1m", "3x0e + 2x1m")
+    >>> layer = o2.ElementLinear(linear)
+    >>> x = torch.randn(4, linear.irreps_in.dim)
+    >>> source = torch.tensor([0, 1, 0, 1])
+    >>> target = torch.tensor([1, 0, 1, 1])
+    >>> weight = torch.randn(2, 2, linear.weight_numel)
+    >>> layer(x, weight, source, target).shape
+    torch.Size([4, 7])
+    """
+
+    def __init__(self, linear, backend="torch", *, element_mode="pair"):
+        super().__init__(linear, backend, element_mode, "ir_mul")
 
 
 class UuLinear(torch.nn.Module):

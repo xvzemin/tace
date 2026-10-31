@@ -24,7 +24,7 @@ from .._e3nn.layer_norm import EquivariantMergeLayerNorm
 from .._e3nn.les import TACELES
 from .._e3nn.node import SphericalTensorNodeEmbedding
 from .._e3nn.o2 import MagneticUvO2TensorProductConv, UvO2TensorProductConv
-from .._e3nn.prod import BilinearMoEACE, CgtpACE
+from .._e3nn.prod import BilinearMoEACE, CgtpACE, MaceACE
 from .._e3nn.readout import DirectHessianReadout
 from .._e3nn.residual import ProjectDown, ProjectUp
 from .._e3nn.tece_oam_rra import Convolution
@@ -197,7 +197,8 @@ def linear_layout(module):
         shared_weights=old.shared_weights,
     )
     if isinstance(module, e3nnElementLinear):
-        module.eqx_linear = ElementLinear(module.linear)
+        module.eqx_linear = ElementLinear(module.linear, backend="cuda")
+        module.torch_linear = ElementLinear(module.linear)
     indices = torch.zeros(module.irreps_out.dim, dtype=torch.long)
     mask = torch.zeros(module.irreps_out.dim, dtype=torch.float64)
     offset = 0
@@ -213,6 +214,8 @@ def linear_layout(module):
 
 def cartesian_modules(module):
     """Construct Cartesian operators while retaining the model's parameters."""
+    if isinstance(module, MaceACE):
+        raise NotImplementedError("MACE products currently require spherical storage.")
     if isinstance(module, UuO2TensorProductConv):
         return UuConvolution(module)
     if isinstance(module, UvO2TensorProductConv):
@@ -239,13 +242,16 @@ def cartesian_modules(module):
             internal_weights=False,
             shared_weights=False,
         )
-        module.eqx_linear = MoEElementLinear(module.linear, module.num_experts)
+        module.eqx_linear = MoEElementLinear(
+            module.linear, module.num_experts, backend="cuda"
+        )
+        module.torch_linear = MoEElementLinear(module.linear, module.num_experts)
         for side, irreps in (
             ("input", module.irreps_in),
             ("output", module.irreps_out),
         ):
             setattr(module, f"_{side}_slices", list(irreps.slices()))
-            setattr(module, f"_{side}_dims", [ir.dim for _, ir in irreps])
+        module._output_dims = [ir.dim for _, ir in module.irreps_out]
         return module
     if isinstance(module, _SymmetricRankTwoBasisChange):
         return RankTwoReadout()

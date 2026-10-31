@@ -42,7 +42,8 @@ def runtime():
         raise NotImplementedError(
             "The CUDA implementation requires NVIDIA CUDA. Use backend='torch' on ROCm."
         )
-    from torch.utils.cpp_extension import CUDA_HOME, load
+    from filelock import FileLock
+    from torch.utils.cpp_extension import CUDA_HOME, _get_build_directory, load
 
     if CUDA_HOME is None:
         raise ImportError(
@@ -67,12 +68,20 @@ def runtime():
     with _RUNTIME_LOCK, ExitStack() as stack:
         if sys.platform == "win32":
             stack.enter_context(os.add_dll_directory(str(cuda_home / "bin")))
+        build_dir = Path(_get_build_directory("eqx_cuda_runtime", False)) / "build"
+        build_dir.mkdir(parents=True, exist_ok=True)
+        # Only OS-locked loaders use this directory. The OS releases this lock
+        # on exit, so a torch FileBaton left by an interrupted build is stale.
+        stack.enter_context(FileLock(str(build_dir) + ".lock", timeout=600))
+        (build_dir / "lock").unlink(missing_ok=True)
+        logging.getLogger(__name__).info("Loading EQX CUDA runtime: %s", build_dir)
         return load(
             name="eqx_cuda_runtime",
             sources=[str(Path(__file__).parent / "csrc" / "runtime.cpp")],
             extra_include_paths=[str(cuda_home / "include")],
             extra_cflags=cflags,
             extra_ldflags=ldflags,
+            build_directory=str(build_dir),
             with_cuda=False,
             verbose=False,
         )

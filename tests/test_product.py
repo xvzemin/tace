@@ -17,7 +17,7 @@ from tace.models._e3nn.paths import (
     satisfy,
     to_possible_tp_irreps,
 )
-from tace.models._e3nn.prod import BilinearMoEACE, CgtpACE
+from tace.models._e3nn.prod import PRODUCT, BilinearMoEACE, CgtpACE, MaceACE
 from tace.models._e3nn.wigner6j import (
     O3Wigner6jTensorProductConv,
     wigner_6j,
@@ -403,6 +403,105 @@ def make_product(irreps, correlation, **kwargs):
         parity=True,
         **kwargs,
     ).double()
+
+
+@pytest.mark.parametrize("correlation", [1, 2, 3])
+@pytest.mark.parametrize("agnostic", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("backend", ["eqx", "cue", "both"])
+def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend):
+    from tace.models._e3nn.symmetric_contraction import SymmetricContraction
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if backend == "cue":
+        pytest.importorskip("cuequivariance_torch")
+    torch.set_default_dtype(dtype)
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=3,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[correlation],
+        l1l2=None,
+        bias=True,
+        nonlinear=None,
+        agnostic=agnostic,
+        parity=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    reference = PRODUCT["mace"](**kwargs).to(device=device, dtype=dtype)
+    monkeypatch.setenv("TACE_USE_EQX", "0" if backend == "cue" else "1")
+    monkeypatch.setenv("TACE_USE_CUE", "0" if backend == "eqx" else "1")
+    module = MaceACE(**kwargs).to(device=device, dtype=dtype)
+    module.load_state_dict(reference.state_dict(), strict=True)
+    assert module.product.use_eqx == (backend != "cue")
+    assert module.product.use_cue == (backend == "cue")
+    assert reference.product.backend == "torch"
+    dense = SymmetricContraction(
+        module.irreps_hidden,
+        module.irreps_coefs_out,
+        correlation,
+        num_elements=1 if agnostic else 2,
+    ).to(device=device, dtype=dtype)
+    with torch.no_grad():
+        offset = 0
+        for part in dense.contractions:
+            for weight in (part.weights_max, *part.weights):
+                count = weight.shape[1]
+                weight.copy_(module.weight[:, offset : offset + count])
+                offset += count
+        assert offset == module.weight.shape[1]
+
+    x = torch.randn(4, module.irreps_in.dim, device=device, requires_grad=True)
+    types = torch.tensor([0, 1, 0, 1], device=device)
+    attrs = torch.nn.functional.one_hot(types, 2).to(dtype)
+    sc = torch.randn(4, module.irreps_out.dim, device=device, requires_grad=True)
+    batch = torch.tensor([0, 0, 1, 1], device=device)
+    elements = torch.ones_like(attrs[:, :1]) if agnostic else attrs
+    expected = module.linear(dense(module.reshape(module.linear_up(x)), elements)) + sc
+    actual = module(x, attrs, sc, batch, types)
+    tolerance = 3e-5 if dtype == torch.float32 else 1e-10
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    torch.testing.assert_close(
+        module(x, attrs, sc, batch), actual, atol=0, rtol=0
+    )
+    derivatives = []
+    for model in (reference, module):
+        output = model(x, attrs, sc, batch, types)
+        first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
+        gradients = torch.autograd.grad(
+            output.square().sum() + first.square().sum(),
+            (x, sc, *model.parameters()),
+        )
+        derivatives.append((output, first, *gradients))
+    for actual, expected in zip(*derivatives):
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
+    for sign in (1, -1):
+        matrix = sign * o3.rand_matrix(dtype=dtype)
+        rotation_in = module.irreps_in.D_from_matrix(matrix).to(device)
+        rotation_out = module.irreps_out.D_from_matrix(matrix).to(device)
+        torch.testing.assert_close(
+            module(x @ rotation_in.T, attrs, sc @ rotation_out.T, batch, types),
+            module(x, attrs, sc, batch, types) @ rotation_out.T,
+            atol=tolerance,
+            rtol=tolerance,
+        )
+    empty = module(x[:0], attrs[:0], sc[:0], batch[:0], types[:0])
+    assert empty.shape == (0, module.irreps_out.dim)
+    if correlation == 3 and not agnostic and dtype == torch.float64:
+        compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+        torch.testing.assert_close(
+            compiled(x, attrs, sc, batch, types), module(x, attrs, sc, batch, types)
+        )
+        inputs = tuple(value.detach().cpu() for value in (x, attrs, sc, batch, types))
+        torch.testing.assert_close(module.cpu()(*inputs), reference.cpu()(*inputs))
 
 
 @pytest.mark.parametrize("correlation", [1, 2, 3])
