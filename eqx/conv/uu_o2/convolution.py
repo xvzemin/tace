@@ -58,6 +58,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         self.irreps_in = frame_in.irreps_in
         self.irreps_out = frame_out.irreps_in
         self.output_dim = self.irreps_out.dim
+        self.output_sections = tuple(
+            (section.start, section.stop - section.start)
+            for section in self.irreps_out.slices()
+        )
         self.instructions = linear.instructions
         self.weight_numel = linear.weight_numel
         self.num_harmonics = 1

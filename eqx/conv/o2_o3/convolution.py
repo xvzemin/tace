@@ -104,6 +104,9 @@ class O2O3TensorProductConv(torch.nn.Module):
 
         input_slices = self.irreps_in.slices()
         output_slices = self.irreps_out.slices()
+        self.output_sections = tuple(
+            (section.start, section.stop - section.start) for section in output_slices
+        )
         self.transverse_couplings = torch.nn.ModuleDict()
         self.harmonics = torch.nn.ModuleDict()
         transverse_paths = []
@@ -558,11 +561,10 @@ class O2O3TensorProductConv(torch.nn.Module):
     def scatter_outputs(self, outputs, features, target, num_nodes, zero):
         """Aggregate each declared output block without merging path channels."""
         values = []
-        for section in self.irreps_out.slices():
-            width = section.stop - section.start
+        for start, width in self.output_sections:
             value = features.new_zeros((num_nodes, width)) + zero
-            if section.start in outputs:
-                value = value.index_add(0, target, outputs[section.start].flatten(1))
+            if start in outputs:
+                value = value.index_add(0, target, outputs[start].flatten(1))
             values.append(value)
         return (
             torch.cat(values, -1)

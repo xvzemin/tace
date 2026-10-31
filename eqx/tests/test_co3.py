@@ -316,6 +316,32 @@ def test_time_reversal_labels(double_precision, tp_type):
         gate(co3.ChangeOfBasis(gate.irreps_in).to(DEVICE)(h))
     )
     torch.testing.assert_close(actual, ref(h))
+    irreps = co3.Irreps("2x0eo+1x1ee+2x1eo+1x2oo")
+    assert co3.Irrep(1, 1, -1) == co3.Irrep("1eo")
+    x = irreps.randn(3, -1, device=DEVICE)
+    change = co3.ChangeOfBasis(irreps, inverse=True).to(DEVICE)
+    signs = x.new_tensor([ir.t for mul, ir in irreps for _ in range(mul * ir.dim)])
+    for matrix in (torch.eye(3, device=DEVICE), -o3.rand_matrix(device=DEVICE)):
+        spatial = irreps.D_from_matrix(matrix)
+        combined = irreps.D_from_matrix(matrix, time_reversal=True)
+        torch.testing.assert_close(x @ combined.T, (x * signs) @ spatial.T)
+        spherical = irreps.spherical().D_from_matrix(matrix.cpu()).to(DEVICE)
+        torch.testing.assert_close(
+            change(x @ combined.T), change(x * signs) @ spherical.T
+        )
+    linear = co3.Linear(irreps, irreps, biases=True).to(DEVICE)
+    torch.testing.assert_close(linear(x * signs), linear(x) * signs)
+    assert linear.bias_numel == 0
+    angles = o3.rand_angles(device=DEVICE)
+    ir = co3.Irrep("2oo")
+    kt = torch.tensor(1, device=DEVICE)
+    torch.testing.assert_close(
+        ir.D_from_angles(*angles, kt=kt), -ir.D_from_angles(*angles)
+    )
+    quaternion = o3.angles_to_quaternion(*angles)
+    torch.testing.assert_close(
+        ir.D_from_quaternion(quaternion, kt=kt), -ir.D_from_quaternion(quaternion)
+    )
 
 
 @pytest.mark.parametrize(

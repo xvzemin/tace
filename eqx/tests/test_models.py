@@ -19,14 +19,22 @@ from eqx.utils import copy_model
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
-def test_radial_adapter(implementation, device, double_precision):
+@pytest.mark.parametrize("time_reversal", [False, True])
+def test_radial_adapter(implementation, device, time_reversal, double_precision):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    if time_reversal and not hasattr(o3.Irrep("0e"), "t"):
+        pytest.skip("Requires time-reversal e3nn")
+    torch.compiler.reset()
     tp = o3.TensorProduct(
-        "2x0e+2x1o",
+        "2x0ee+2x1oo" if time_reversal else "2x0e+2x1o",
         "0e+1o",
-        "2x0e+2x1o",
-        [(0, 0, 0, "uvu", True), (1, 1, 0, "uvu", True), (0, 1, 1, "uvu", True)],
+        "2x0ee+2x0eo+2x1oe" if time_reversal else "2x0e+2x1o",
+        [
+            (0, 0, 0, "uvu", True),
+            (1, 1, int(time_reversal), "uvu", True),
+            (0, 1, 1 + int(time_reversal), "uvu", True),
+        ],
         internal_weights=False,
         shared_weights=False,
     )

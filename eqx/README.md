@@ -17,8 +17,11 @@ For fused kernels, install `pip install './tace/eqx[cuda]'` and provide a CUDA
 toolkit. Kernels compile on first use and are cached.
 
 With e3nn 0.4.x, import `eqx` before `e3nn.o3`; supported degrees depend on its
-CG table. Global time-odd irreps require the
+CG table. `o2` and `co2` support time-reversal labels directly. Time-odd
+`o3` and `co3` irreps require the
 [time-reversal e3nn extension](https://github.com/xvzemin/e3nn/tree/time-reversal).
+Linear maps preserve the time label; tensor products multiply it. Biases
+are restricted to invariant scalars, and activations respect both parity labels.
 
 ## API
 

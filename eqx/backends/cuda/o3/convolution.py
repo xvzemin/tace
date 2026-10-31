@@ -9,7 +9,7 @@ from ....ops.o3 import contraction_fake
 from ....utils.metadata import parse_metadata
 from ..radial import project
 from ..reduction import prepare_graph
-from ..runtime import kernels, runtime
+from ..runtime import SOURCE_SIZE_LIMIT, kernels, runtime
 from .codegen import convolution_source, fused_source
 
 CHUNK_SIZE = 65536
@@ -109,6 +109,16 @@ def execution_plan(
                 direction_offset=geometry[3] if len(geometry) > 3 else 0,
                 indexed=indexed,
             )
+            # Bound compiler work before querying the kernel's register usage.
+            if len(code) > SOURCE_SIZE_LIMIT:
+                if len(terms) > 1:
+                    half = len(terms) // 2
+                    pending.extend(((paths, terms[:half]), (paths, terms[half:])))
+                    continue
+                if len(paths) > 1:
+                    half = len(paths) // 2
+                    pending.extend(((paths[:half], terms), (paths[half:], terms)))
+                    continue
             candidates.append((code, paths, terms, owner))
         compiled = kernels([code for code, *_ in candidates], device)
         for code, paths, terms, owner in candidates:
@@ -180,6 +190,10 @@ def execution_plan(
                 direction_offset=geometry[3] if len(geometry) > 3 else 0,
                 indexed=indexed,
             )
+            if len(code) > SOURCE_SIZE_LIMIT:
+                half = len(indices) // 2
+                pending.extend((indices[:half], indices[half:]))
+                continue
             candidates.append((code, indices, phases))
         compiled = kernels([code for code, _, _ in candidates], device)
         for code, indices, phases in candidates:

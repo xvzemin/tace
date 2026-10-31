@@ -18,6 +18,7 @@ class MatrixTensorProduct(FactorizedTensorProduct):
     irreps_in1, irreps_in2, irreps_out : e3nn.o3.Irreps or str
         Representations with uniform multiplicity after grouping equal irreps.
         Inputs match the output multiplicity or have multiplicity one.
+        Spatial and time parities follow the supplied e3nn representation labels.
     irrep_normalization : {"component", "norm", "none"}, optional
         Unit component variance, unit expected squared irrep norm, or unscaled
         multiplication in the orthonormal matrix basis. Normalization assumes

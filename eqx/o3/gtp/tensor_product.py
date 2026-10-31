@@ -19,7 +19,8 @@ class GauntTensorProduct(FactorizedTensorProduct):
     irreps_in1, irreps_in2, irreps_out : e3nn.o3.Irreps or str
         Input and output representations. Each has uniform multiplicity after
         grouping equal irreps. Inputs match the output multiplicity or have
-        multiplicity one for channel broadcasting.
+        multiplicity one for channel broadcasting. Spatial and time parities
+        follow the supplied e3nn representation labels.
     irrep_normalization : {"component", "norm", "none"}, optional
         Unit component variance, unit expected squared irrep norm, or the
         unscaled integral of three surface-orthonormal spherical harmonics.
@@ -133,6 +134,8 @@ class GauntTensorProduct(FactorizedTensorProduct):
                 for ir in irreps_out:
                     if (
                         ir.p == ir1.p * ir2.p
+                        and getattr(ir, "t", 1)
+                        == getattr(ir1, "t", 1) * getattr(ir2, "t", 1)
                         and abs(ir1.l - ir2.l) <= ir.l <= ir1.l + ir2.l
                     ):
                         coefficients[

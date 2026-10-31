@@ -8,7 +8,7 @@ import torch
 from ....ops.o2_o3 import contraction_fake, kernel_plan
 from ....utils.metadata import parse_metadata
 from ..reduction import prepare_graph
-from ..runtime import kernels, launch_config, runtime
+from ..runtime import SOURCE_SIZE_LIMIT, kernels, launch_config, runtime
 from .codegen import convolution_source
 from .schedule import (
     contraction_groups,
@@ -121,11 +121,19 @@ def execution_plan(
     # state. Splitting is independent of angular degree and never changes paths.
     accepted = []
     while phases:
-        compiled = kernels([phase[0] for phase in phases], device)
+        compiled = kernels(
+            [
+                code
+                for code, _, _, _, _, _, paths, terms in phases
+                if len(code) <= SOURCE_SIZE_LIMIT
+                or (len(paths) == 1 and sum(len(term[0]) for term in terms) <= 1)
+            ],
+            device,
+        )
         pending = []
         for code, width, shared_bytes, owner, inputs, results, paths, terms in phases:
-            kernel = compiled[code]
-            if kernel.registers > 160 or kernel.local_bytes:
+            kernel = compiled.get(code)
+            if kernel is None or kernel.registers > 160 or kernel.local_bytes:
                 boundaries = [
                     i
                     for i in range(1, len(paths))

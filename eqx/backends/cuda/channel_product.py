@@ -5,9 +5,90 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.channel_product import channel_product_fake
+from ...ops.channel_product import channel_product_fake, product_layout
 from ...utils.metadata import parse_metadata
 from .runtime import kernels, runtime
+
+
+@lru_cache(maxsize=128)
+def strided_product_source(metadata, dtype, role, required, shared):
+    """Generate contractions for mixed multiplicities and Cartesian layouts."""
+    dims, rows = product_layout(metadata)
+    groups = defaultdict(list)
+    for indices, coefficient, width, strides in rows:
+        if (
+            width
+            and indices[role] >= 0
+            and all(
+                index >= 0 for k, index in enumerate(indices) if required & (1 << k)
+            )
+        ):
+            groups[indices[role], strides[role], width].append(
+                (indices, coefficient, strides)
+            )
+    cases = []
+    counts = defaultdict(int)
+    for offset, stride, width in groups:
+        for index in {offset + c * stride for c in range(width)}:
+            counts[index] += 1
+    for group, ((offset, stride, width), entries) in enumerate(groups.items()):
+        terms = []
+        for indices, coefficient, steps in entries:
+            factors = (
+                "*".join(
+                    f"p{k}[{'0' if shared[k] else f'n*s{k}'}+({index}+c*{steps[k]})*t{k}]"
+                    for k, index in enumerate(indices)
+                    if k != role and index >= 0
+                )
+                or "scalar(1)"
+            )
+            terms.append(f"sum+=scalar({coefficient:.17g})*({factors});")
+        if shared[role]:
+            body = f"""
+                const int tiles=({width}+31)/32;
+                int c=(blockIdx.x%tiles)*32+threadIdx.x%32;
+                long long begin=(blockIdx.x/tiles)*128;
+                scalar sum=0;
+                if(c<{width}) {{
+                    for(long long n=begin+threadIdx.x/32;n<nodes && n<begin+128;n+=4) {{
+                        {"".join(terms)}
+                    }}
+                }}
+                partial[threadIdx.x]=sum;
+                __syncthreads();
+                if(threadIdx.x<32 && c<{width}) {{
+                    sum+=partial[threadIdx.x+32]+partial[threadIdx.x+64]+partial[threadIdx.x+96];
+                    atomicAdd(out+{offset}+c*{stride},sum);
+                }}
+            """
+        else:
+            # Broadcast channels can overlap paths of different widths.
+            atomic = not stride or any(
+                counts[offset + c * stride] > 1 for c in range(width)
+            )
+            store = (
+                f"atomicAdd(out+n*{dims[role]}+{offset}+c*{stride},sum);"
+                if atomic
+                else f"out[n*{dims[role]}+{offset}+c*{stride}]+=sum;"
+            )
+            body = f"""
+                long long i=(long long)blockIdx.x*blockDim.x+threadIdx.x;
+                if(i>=nodes*{width}) return;
+                long long n=i/{width}; int c=i%{width}; scalar sum=0;
+                {"".join(terms)}
+                {store}
+            """
+        cases.append(f"case {group}: {{ {body} break; }}")
+    pointers = ",".join(f"const scalar* __restrict__ p{k}" for k in range(len(dims)))
+    strides = ",".join(f"long long s{k}, long long t{k}" for k in range(len(dims)))
+    source = f"""
+        using scalar={"double" if dtype == torch.float64 else "float"};
+        extern "C" __global__ void run({pointers}, {strides}, scalar* out, long long nodes) {{
+            {"__shared__ scalar partial[128];" if shared[role] else ""}
+            switch(blockIdx.y) {{ {"".join(cases)} }}
+        }}
+    """
+    return source, len(groups), max((key[2] for key in groups), default=1)
 
 
 @lru_cache(maxsize=128)
@@ -102,20 +183,26 @@ def channel_product(
     for mapping, role, slot, required in parse_metadata(program):
         shared = tuple(operands[k].size(0) == 1 and nodes != 1 for k in mapping)
         accumulate = slot in initialized
-        if shared[role] and not accumulate:
+        if (shared[role] or not width) and not accumulate:
             outputs[slot].zero_()
-        source, groups = product_source(
-            operands[0].dtype, metadata, role, required, shared, accumulate
-        )
+        if width:
+            source, groups = product_source(
+                operands[0].dtype, metadata, role, required, shared, accumulate
+            )
+            channels = width
+        else:
+            source, groups, channels = strided_product_source(
+                metadata, operands[0].dtype, role, required, shared
+            )
         initialized.add(slot)
         if groups:
             args = [operands[k].data_ptr() for k in mapping]
             args += [stride for k in mapping for stride in operands[k].stride()]
             args += [outputs[slot].data_ptr(), nodes]
             blocks = (
-                (nodes + 127) // 128 * ((width + 31) // 32)
+                (nodes + 127) // 128 * ((channels + 31) // 32)
                 if shared[role]
-                else (nodes * width + 127) // 128
+                else (nodes * channels + 127) // 128
             )
             jobs.append((source, args, blocks, groups, 128, 0))
     compiled = kernels([job[0] for job in jobs], operands[0].device)

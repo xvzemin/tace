@@ -4,8 +4,9 @@ import math
 
 import torch
 
-from eqx import o2
-
+from ..backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ..backends.torch.tensor_product import instruction_groups
+from ..utils.tensor_product import tensor_product_instructions
 from .basis import Projector
 from .irreps import Irrep, Irreps
 
@@ -48,6 +49,43 @@ def cartesian_product(x, y, ir1, ir2, ir_out):
     return (x.unsqueeze(-2) @ y.reshape(*y.shape[:-1], a.dim, c.dim)).squeeze(-2)
 
 
+def coupling_entries(a, b, c):
+    """Return nonzero delta/epsilon entries before STF projection."""
+    if not a.m or not b.m:
+        tensor, scalar = (b, a) if not a.m else (a, b)
+        half = tensor.dim // 2
+        return tuple(
+            (
+                (0, (i + half) % tensor.dim, i, -1.0 if i < half else 1.0)
+                if not a.m
+                else ((i + half) % tensor.dim, 0, i, -1.0 if i < half else 1.0)
+            )
+            if scalar.p == -1 and tensor.m
+            else ((0, i, i, 1.0) if not a.m else (i, 0, i, 1.0))
+            for i in range(tensor.dim)
+        )
+    if c.m == a.m + b.m:
+        return tuple(
+            (i, j, i * b.dim + j, 1.0) for i in range(a.dim) for j in range(b.dim)
+        )
+    if not c.m:
+        half = a.dim // 2
+        return tuple(
+            (
+                i,
+                (i + half) % a.dim if c.p == -1 else i,
+                0,
+                (-1.0 if c.p == -1 and i < half else 1.0) / math.sqrt(2),
+            )
+            for i in range(a.dim)
+        )
+    if a.m > b.m:
+        return tuple(
+            (i * b.dim + j, j, i, 1.0) for i in range(c.dim) for j in range(b.dim)
+        )
+    return tuple((i, i * c.dim + j, j, 1.0) for i in range(a.dim) for j in range(c.dim))
+
+
 class TensorProduct(torch.nn.Module):
     """Couple two-dimensional Cartesian irreps.
 
@@ -68,6 +106,9 @@ class TensorProduct(torch.nn.Module):
         Store weights and share them over leading feature dimensions.
     project : bool, optional
         Apply STF projection. False defers it until after linear operations.
+    backend : {"torch", "cuda"}, optional
+        CUDA evaluates ``uuu`` and ``u1u`` paths and STF projection using
+        float32 or float64 CUDA tensors. Unsupported modes raise an error.
 
     Notes
     -----
@@ -100,47 +141,49 @@ class TensorProduct(torch.nn.Module):
         shared_weights=None,
         *,
         project=True,
+        backend="torch",
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         self.irreps_in1, self.irreps_in2, self.irreps_out = map(
             Irreps, (irreps_in1, irreps_in2, irreps_out)
         )
         self.input_dims = (self.irreps_in1.dim, self.irreps_in2.dim)
-        self.input_paths = tuple(
-            tuple(
-                (mul, ir.dim, section)
-                for (mul, ir), section in zip(irreps, irreps.slices())
-            )
-            for irreps in (self.irreps_in1, self.irreps_in2)
-        )
-        self.output_shapes = tuple((mul, ir.dim) for mul, ir in self.irreps_out)
-        metadata = o2.TensorProduct(
-            self.irreps_in1.circular(),
-            self.irreps_in2.circular(),
-            self.irreps_out.circular(),
+        self.instructions = tensor_product_instructions(
+            self.irreps_in1,
+            self.irreps_in2,
+            self.irreps_out,
             instructions,
             in1_var,
             in2_var,
             out_var,
             irrep_normalization,
             path_normalization,
-            internal_weights,
-            shared_weights,
+            dimensions=tuple(
+                tuple(ir.circular_dim for _, ir in irreps)
+                for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+            ),
         )
-        for name in (
-            "instructions",
-            "weight_numel",
-            "weight_shape",
-            "internal_weights",
-            "shared_weights",
-            "irrep_normalization",
-            "path_normalization",
-        ):
-            setattr(self, name, getattr(metadata, name))
-        if isinstance(metadata.weight, torch.nn.Parameter):
-            self.weight = metadata.weight
+        self.irrep_normalization = irrep_normalization
+        self.path_normalization = path_normalization
+        self.shared_weights = True if shared_weights is None else shared_weights
+        self.internal_weights = (
+            self.shared_weights and any(ins.has_weight for ins in self.instructions)
+            if internal_weights is None
+            else internal_weights
+        )
+        if self.internal_weights and not self.shared_weights:
+            raise ValueError("Internal weights require shared_weights=True.")
+        self.weight_numel = sum(
+            math.prod(ins.path_shape) for ins in self.instructions if ins.has_weight
+        )
+        self.weight_shape = (self.weight_numel,)
+        if self.internal_weights and self.weight_numel:
+            self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
         else:
-            self.register_buffer("weight", metadata.weight)
+            self.register_buffer("weight", torch.empty(0))
         self.project = project
         self.paths = tuple(
             (
@@ -150,14 +193,66 @@ class TensorProduct(torch.nn.Module):
             )
             for ins in self.instructions
         )
-        self.coupling_keys = tuple(
-            (ins.i_in1, ins.i_in2, c, ins.connection_mode == "uvw")
-            for ins, (_, _, c) in zip(self.instructions, self.paths)
+        self.path_order, self.groups = instruction_groups(
+            self.instructions,
+            [tuple(Irrep(ir.m, ir.p) for ir in path) for path in self.paths],
         )
-        self.coupling_last_use = {
-            key: index for index, key in enumerate(self.coupling_keys)
-        }
-        self.projection = Projector(self.irreps_out) if project else torch.nn.Identity()
+        self.register_buffer(
+            "path_scales",
+            torch.tensor(
+                [self.instructions[i].path_weight for i in self.path_order],
+                dtype=torch.float64,
+            ),
+            persistent=False,
+        )
+        self.contraction = GroupedTensorProduct(
+            [
+                tuple((entry.mul, entry.ir.dim) for entry in irreps)
+                for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+            ],
+            self.groups,
+            cartesian_product,
+        )
+        self.kernel_metadata = None
+        if backend == "cuda" and all(
+            p.connection_mode != "uvw" for p in self.instructions
+        ):
+            rows, offset = [], 0
+            sections = tuple(
+                irs.slices()
+                for irs in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+            )
+            for ins, (a, b, c) in zip(self.instructions, self.paths):
+                width = self.irreps_out[ins.i_out].mul
+                steps = (a.dim, b.dim if ins.connection_mode != "u1u" else 0, 1, c.dim)
+                for i, j, k, coefficient in coupling_entries(a, b, c):
+                    rows.append(
+                        (
+                            (
+                                sections[0][ins.i_in1].start + i,
+                                sections[1][ins.i_in2].start + j,
+                                offset if ins.has_weight else -1,
+                                sections[2][ins.i_out].start + k,
+                            ),
+                            coefficient * ins.path_weight,
+                            width,
+                            steps,
+                        )
+                    )
+                if ins.has_weight:
+                    offset += math.prod(ins.path_shape)
+            self.kernel_metadata = repr(
+                (
+                    0,
+                    (*self.input_dims, self.weight_numel, self.irreps_out.dim),
+                    tuple(rows),
+                )
+            )
+        self.projection = (
+            Projector(self.irreps_out, backend=backend)
+            if project
+            else torch.nn.Identity()
+        )
         connected = {ins.i_out for ins in self.instructions if ins.path_weight}
         self.register_buffer(
             "output_mask",
@@ -199,66 +294,25 @@ class TensorProduct(torch.nn.Module):
             raise ValueError("Weights must have trailing size weight_numel.")
         if x.is_complex() or y.is_complex() or weight.is_complex():
             raise TypeError("Cartesian O(2) products require real inputs and weights.")
-        shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        outputs = [None] * len(self.output_shapes)
-        inputs = [
-            [
-                value[..., section].reshape(*value.shape[:-1], mul, dim)
-                for mul, dim, section in paths
-            ]
-            for value, paths in zip((x, y), self.input_paths)
-        ]
-        offset = 0
-        couplings = {}
-        for index, (ins, (a, b, c), key) in enumerate(
-            zip(self.instructions, self.paths, self.coupling_keys)
-        ):
-            left, right = inputs[0][ins.i_in1], inputs[1][ins.i_in2]
-            if ins.connection_mode == "uvw":
-                left, right = left.unsqueeze(-2), right.unsqueeze(-3)
-            value = (
-                couplings[key]
-                if key in couplings
-                else cartesian_product(left, right, a, b, c)
+        torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
+        if self.backend == "cuda":
+            from ..ops.channel_product import tensor_product as cuda_product
+
+            output = cuda_product(
+                self.kernel_metadata, x, y, weight, self.irreps_out.dim
             )
-            if index < self.coupling_last_use[key]:
-                couplings[key] = value
-            else:
-                couplings.pop(key, None)
-            if ins.has_weight:
-                size = math.prod(ins.path_shape)
-                w = weight[..., offset : offset + size].reshape(
-                    *weight.shape[:-1], *ins.path_shape
-                )
-                offset += size
-                w = w * ins.path_weight
-                value = (
-                    torch.einsum("...uvd,...uvw->...wd", value, w)
-                    if ins.connection_mode == "uvw"
-                    else value * w.unsqueeze(-1)
-                )
-            else:
-                value = value * ins.path_weight
-            outputs[ins.i_out] = (
-                value if outputs[ins.i_out] is None else outputs[ins.i_out] + value
-            )
-        zero = None
-        for i, (mul, dim) in enumerate(self.output_shapes):
-            if outputs[i] is None:
-                if zero is None:
-                    zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
-                outputs[i] = x.new_zeros((*shape, mul, dim)) + zero
-            else:
-                outputs[i] = outputs[i].expand(*shape, mul, dim)
-        output = (
-            torch.cat([value.flatten(-2) for value in outputs], -1)
-            if outputs
-            else x.new_zeros((*shape, 0))
-            + x[..., :0].sum()
-            + y[..., :0].sum()
-            + weight[..., :0].sum()
-        )
+            return self.projection(output)
+        output = self.contraction(x, y, weight, self.path_scales.to(x))
         return self.projection(output)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        self.path_scales = torch.tensor(
+            [self.instructions[i].path_weight for i in self.path_order],
+            dtype=torch.float64,
+            device="cpu",
+        ).to(self.path_scales)
+        return self
 
     def weight_view_for_instruction(self, instruction, weight=None):
         """Return a view of one instruction's weights."""

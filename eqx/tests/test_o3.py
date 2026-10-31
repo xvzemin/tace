@@ -12,6 +12,46 @@ from eqx.o3.s2grid import S2Grid
 IRREPS = "0e+0o+1e+1o+2e+2o"
 
 
+@pytest.mark.skipif(
+    not hasattr(o3.Irrep("0e"), "t"), reason="Requires time-reversal e3nn"
+)
+@pytest.mark.parametrize("kind", ["gaunt", "matrix"])
+def test_tensor_product_time_reversal(kind, device, double_precision):
+    irreps = o3.Irreps("2x0ee+2x0eo+2x1ee+2x1eo+2x1oe+2x1oo+2x2ee+2x2eo")
+    cls = eqx_o3.GauntTensorProduct if kind == "gaunt" else eqx_o3.MatrixTensorProduct
+    tp = cls(irreps, irreps, irreps, internal_weights=False).to(device)
+    signs = torch.tensor(
+        [ir.t for mul, ir in irreps for _ in range(mul * ir.dim)], device=device
+    )
+    x, y = [
+        torch.randn(3, irreps.dim, device=device, requires_grad=True) for _ in range(2)
+    ]
+    w = torch.randn(tp.weight_numel, device=device, requires_grad=True)
+    actual, expected = tp(x * signs, y * signs, w), tp(x, y, w) * signs
+    if kind == "gaunt":
+        reference = cls(
+            irreps, irreps, irreps, method="coefficients", internal_weights=False
+        ).to(device)
+        torch.testing.assert_close(
+            tp(x, y, w), reference(x, y, w), atol=2e-12, rtol=2e-12
+        )
+    rotation = irreps.D_from_matrix(-o3.rand_matrix(dtype=x.dtype)).to(device)
+    torch.testing.assert_close(
+        tp(x @ rotation.T, y @ rotation.T, w),
+        tp(x, y, w) @ rotation.T,
+        atol=2e-11,
+        rtol=2e-11,
+    )
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        probe = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad((z.sin() * probe).sum(), (x, y, w), create_graph=True)
+            for z in (actual, expected)
+        ]
+        actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize(
     "irrep_normalization,path_normalization",

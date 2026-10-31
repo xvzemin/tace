@@ -12,11 +12,60 @@ from eqx.co3.symmetric import SymmetricBasis
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_time_reversal_operators(backend, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    irreps = co2.Irreps("2x0ee+2x0eo+2x0oe+2x0oo+2x1me+2x1mo+2x2me+2x2mo")
+    instructions = [
+        (i, j, k, "uuu", True)
+        for i, (_, a) in enumerate(irreps)
+        for j, (_, b) in enumerate(irreps)
+        for k, (_, c) in enumerate(irreps)
+        if c in a * b
+    ]
+    tp = co2.TensorProduct(
+        irreps, irreps, irreps, instructions, backend=backend, internal_weights=False
+    ).to(DEVICE)
+    x, y = [irreps.randn(5, -1, device=DEVICE).requires_grad_() for _ in range(2)]
+    w = torch.randn(tp.weight_numel, device=DEVICE, requires_grad=True)
+    time = irreps.D_from_angle(x.new_tensor(0), time_reversal=True)
+    actual, expected = tp(x @ time.T, y @ time.T, w), tp(x, y, w) @ time.T
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        probe = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad((z.sin() * probe).sum(), (x, y, w), create_graph=True)
+            for z in (actual, expected)
+        ]
+        actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+    linear = co2.Linear(irreps, irreps, biases=True).to(DEVICE)
+    torch.testing.assert_close(linear(x @ time.T), linear(x) @ time.T)
+    gate = co2.Gate(
+        "2x0eo", [torch.tanh], "2x0oo", [torch.tanh], "2x1mo", backend=backend
+    ).to(DEVICE)
+    h = gate.irreps_in.randn(5, -1, device=DEVICE)
+    din = gate.irreps_in.D_from_angle(h.new_tensor(0), time_reversal=True)
+    dout = gate.irreps_out.D_from_angle(h.new_tensor(0), time_reversal=True)
+    torch.testing.assert_close(gate(h @ din.T), gate(h) @ dout.T)
+    with pytest.raises(ValueError):
+        co2.TensorProduct(
+            "1mo", "1me", "0ee", [(0, 0, 0, "uuu", True)], backend=backend
+        )
+
+
 @pytest.mark.parametrize("basis_change", [False, True])
 @pytest.mark.parametrize("mmax", [1, 4])
 @pytest.mark.parametrize("method", ["direct", "rotation", "projection"])
-def test_cartesian_local_frame(double_precision, basis_change, mmax, method):
-    irreps = o3.Irreps("2x0e+2x1o+1x1e+2x2o+1x4e")
+@pytest.mark.parametrize("time_reversal", [False, True])
+def test_cartesian_local_frame(
+    double_precision, basis_change, mmax, method, time_reversal
+):
+    if time_reversal and not hasattr(o3.Irrep("0e"), "t"):
+        pytest.skip("Requires time-reversal e3nn")
+    irreps = o3.Irreps(
+        "2x0eo+2x1oo+1x1ee+2x2oe+1x4eo" if time_reversal else "2x0e+2x1o+1x1e+2x2o+1x4e"
+    )
     frame = co2.LocalFrame(irreps, mmax, basis_change, method=method).to(DEVICE)
     reference = o2.LocalFrame(irreps, mmax=mmax, basis_change=basis_change).to(DEVICE)
     embed = co3.ChangeOfBasis(irreps).to(DEVICE)
@@ -33,6 +82,13 @@ def test_cartesian_local_frame(double_precision, basis_change, mmax, method):
         -1,
     )
     local = frame(embed(x), rotation)
+    if time_reversal:
+        signs = x.new_tensor([ir.t for mul, ir in irreps for _ in range(mul * ir.dim)])
+        transformed = frame(embed(x * signs), rotation)
+        reverse = frame.irreps_out.D_from_angle(x.new_tensor(0), time_reversal=True)
+        torch.testing.assert_close(
+            transformed, local @ reverse.T, atol=3e-11, rtol=3e-11
+        )
     actual, expected = circular(local), reference(ir_mul, wigner)
     torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
     if mmax == 4:
@@ -124,7 +180,10 @@ def test_cartesian_frame_export(double_precision, method):
 
 
 @pytest.mark.parametrize("m", range(7))
-def test_cartesian_planar_projector(double_precision, m):
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_cartesian_planar_projector(double_precision, m, backend):
+    if backend == "cuda" and DEVICE.type != "cuda":
+        pytest.skip("CUDA is unavailable")
     matrix = co2.projector_matrix(m).to(DEVICE)
     basis = co2.path_matrix(m).to(DEVICE)
     torch.testing.assert_close(matrix, basis @ basis.T, atol=2e-15, rtol=2e-15)
@@ -136,7 +195,7 @@ def test_cartesian_planar_projector(double_precision, m):
     irrep = "0e" if m == 0 else f"{m}m"
     irreps = co2.Irreps(f"2x{irrep}+1x{irrep}")
     value = torch.randn(3, irreps.dim, device=DEVICE, requires_grad=True)
-    actual = co2.Projector(irreps).to(DEVICE)(value)
+    actual = co2.Projector(irreps, backend=backend).to(DEVICE)(value)
     expected = co2.Projector(irreps, method="factorized").to(DEVICE)(value)
     for _ in range(3):
         torch.testing.assert_close(actual, expected, atol=3e-13, rtol=3e-13)
@@ -440,6 +499,34 @@ def test_linear_and_gate(double_precision, path_normalization):
     torch.testing.assert_close(actual, compact_gate(x))
 
 
+def test_linear_compiled_derivatives(double_precision):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    torch.compiler.reset()
+    module = co2.Linear("4x0e+2x1m", "4x0e+2x1m").to(DEVICE)
+
+    def evaluate(x, weight):
+        output = module(x, weight)
+        gradient = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
+        return output, gradient
+
+    x = torch.randn(3, 8, device=DEVICE, requires_grad=True)
+    weight = module.weight.detach().clone().requires_grad_()
+    graph = make_fx(evaluate, tracing_mode="symbolic")(x, weight)
+    compiled = torch.compile(graph, backend="inductor", fullgraph=True, dynamic=True)
+    for size in (3, 5):
+        x = torch.randn(size, 8, device=DEVICE, requires_grad=True)
+        expected, actual = evaluate(x, weight), compiled(x, weight)
+        for a, b in zip(actual, expected):
+            torch.testing.assert_close(a, b)
+        gradients = [
+            torch.autograd.grad(sum(y.square().sum() for y in values), (x, weight))
+            for values in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_gate_derivatives_and_compile(dtype, backend):
@@ -524,9 +611,12 @@ def test_linear_sparse_paths(double_precision, shared):
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
 @pytest.mark.parametrize("irrep_normalization", ["component", "norm", "none"])
 @pytest.mark.parametrize("path_normalization", ["element", "path", "none"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_tensor_product(
-    double_precision, mode, irrep_normalization, path_normalization
+    double_precision, mode, irrep_normalization, path_normalization, backend
 ):
+    if backend == "cuda" and (mode == "uvw" or DEVICE.type != "cuda"):
+        pytest.skip("CUDA requires uuu/u1u paths and a CUDA device")
     v = 1 if mode == "u1u" else 2
     a, b = co2.Irreps("2x0oo+2x1mo+2x2m"), co2.Irreps(f"{v}x0o+{v}x1m+{v}x2mo")
     output, ins = [], []
@@ -548,9 +638,11 @@ def test_tensor_product(
     ref = o2.TensorProduct(a.circular(), b.circular(), c.circular(), ins, **kwargs).to(
         DEVICE
     )
-    module = co2.TensorProduct(a, b, c, ins, project=False, **kwargs).to(DEVICE)
+    module = co2.TensorProduct(
+        a, b, c, ins, project=False, backend=backend, **kwargs
+    ).to(DEVICE)
     x = a.circular().randn(2, -1, device=DEVICE, requires_grad=True)
-    y = b.circular().randn(1, -1, device=DEVICE, requires_grad=True)
+    y = b.circular().randn(2, -1, device=DEVICE, requires_grad=True)
     weight = torch.randn(2, module.weight_numel, device=DEVICE, requires_grad=True)
     embed_a, embed_b = co2.ChangeOfBasis(a).to(DEVICE), co2.ChangeOfBasis(b).to(DEVICE)
     extract = co2.ChangeOfBasis(c, True).to(DEVICE)
@@ -578,7 +670,57 @@ def test_tensor_product(
             for value in (actual, expected)
         ]
         torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
-    assert module(embed_a(x[:0]), embed_b(y), weight[:0]).shape == (0, c.dim)
+    assert module(embed_a(x[:0]), embed_b(y[:0]), weight[:0]).shape == (0, c.dim)
+
+
+@pytest.mark.parametrize("space", [o2, co2])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_tensor_product_export(space, backend, double_precision):
+    if backend == "cuda" and DEVICE.type != "cuda":
+        pytest.skip("CUDA is unavailable")
+    module = space.TensorProduct(
+        "2x1m+3x2m",
+        "2x1m+3x2m",
+        "2x0e+3x4m+3x0o",
+        [(0, 0, 0, "uuu", True), (1, 1, 1, "uuu", True), (1, 1, 2, "uuu", True)],
+        internal_weights=False,
+        shared_weights=False,
+        backend=backend,
+    ).to(DEVICE)
+    inputs = tuple(
+        torch.randn(3, dim, device=DEVICE, requires_grad=True)
+        for dim in (module.irreps_in1.dim, module.irreps_in2.dim, module.weight_numel)
+    )
+    expected = module(*inputs)
+    expected_grads = torch.autograd.grad(expected.square().sum(), inputs)
+    assert set(module.state_dict()) == {"weight"}
+    # Static coefficients must not retain intermediate fp32 rounding.
+    module.float().double()
+    for model in (
+        module,
+        torch.export.export(module, inputs).module(),
+        torch.compile(module, fullgraph=True, backend="aot_eager"),
+    ):
+        actual = model(*inputs)
+        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), inputs), expected_grads
+        ):
+            torch.testing.assert_close(a, b, atol=2e-11, rtol=2e-11)
+
+
+@pytest.mark.parametrize("space", [o2, co2])
+def test_tensor_product_backend_errors(space):
+    module = space.TensorProduct(
+        "2x1m", "2x1m", "2x0e", [(0, 0, 0, "uuu", True)], backend="cuda"
+    )
+    with pytest.raises(ValueError, match="CUDA inputs"):
+        module(torch.randn(3, 4), torch.randn(3, 4))
+    module = space.TensorProduct(
+        "1m", "1m", "0e", [(0, 0, 0, "uvw", True)], backend="cuda"
+    )
+    with pytest.raises(NotImplementedError, match="uuu and u1u"):
+        module(torch.randn(3, 2), torch.randn(3, 2))
 
 
 @pytest.mark.parametrize("l", range(7))

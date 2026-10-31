@@ -1,20 +1,14 @@
 import math
-from typing import Iterator, NamedTuple, Optional, Sequence
+from typing import Iterator, Optional, Sequence
 
 import torch
 
-from .clebsch_gordan import clebsch_gordan_products
+from ..backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ..backends.torch.tensor_product import instruction_groups
+from ..utils.tensor_product import tensor_product_instructions
+from .clebsch_gordan import channel_product as couple_channels
+from .clebsch_gordan import clebsch_gordan_products, coupling_entries, coupling_type
 from .irreps import Irreps, IrrepsLike
-
-
-class Instruction(NamedTuple):
-    i_in1: int
-    i_in2: int
-    i_out: int
-    connection_mode: str
-    has_weight: bool
-    path_weight: float
-    path_shape: tuple[int, ...]
 
 
 class TensorProduct(torch.nn.Module):
@@ -54,8 +48,8 @@ class TensorProduct(torch.nn.Module):
     shared_weights : bool, optional
         Whether one weight vector is shared over all leading dimensions.
     backend : {"torch", "cuda"}, optional
-        CUDA fuses channel-wise paths of equal multiplicity for matrix inputs.
-        Other shapes and connection modes use torch operations.
+        CUDA evaluates ``uuu`` and ``u1u`` paths with float32 or float64
+        CUDA tensors. Unsupported modes raise an error.
 
     Notes
     -----
@@ -99,157 +93,51 @@ class TensorProduct(torch.nn.Module):
         if backend not in ("torch", "cuda"):
             raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
-        if irrep_normalization not in ("component", "norm", "none"):
-            raise ValueError(
-                "irrep_normalization must be 'component', 'norm', or 'none'."
-            )
-        if path_normalization not in ("element", "path", "none"):
-            raise ValueError("path_normalization must be 'element', 'path', or 'none'.")
         self.irreps_in1 = Irreps(irreps_in1)
         self.irreps_in2 = Irreps(irreps_in2)
         self.irreps_out = Irreps(irreps_out)
         self.irrep_normalization = irrep_normalization
         self.path_normalization = path_normalization
 
-        parsed = []
-        for instruction in instructions:
-            instruction = tuple(instruction)
-            if len(instruction) == 5:
-                instruction += (1.0,)
-            if len(instruction) != 6:
-                raise TypeError(
-                    "TensorProduct instructions must be "
-                    "(i_in1, i_in2, i_out, mode, train[, path_weight])."
-                )
-            i_in1, i_in2, i_out, mode, train, path_weight = instruction
-            if mode not in ("u1u", "uuu", "uvw"):
-                raise ValueError("connection_mode must be 'u1u', 'uuu', or 'uvw'.")
-            if not 0 <= i_in1 < len(self.irreps_in1):
-                raise IndexError(f"{i_in1} is not a valid irreps_in1 index.")
-            if not 0 <= i_in2 < len(self.irreps_in2):
-                raise IndexError(f"{i_in2} is not a valid irreps_in2 index.")
-            if not 0 <= i_out < len(self.irreps_out):
-                raise IndexError(f"{i_out} is not a valid irreps_out index.")
-            ir1, mul1 = self.irreps_in1[i_in1]
-            ir2, mul2 = self.irreps_in2[i_in2]
-            ir_out, mul_out = self.irreps_out[i_out]
-            if ir_out not in ir1 * ir2:
-                raise ValueError(
-                    f"Illegal O(2) TensorProduct instruction: "
-                    f"{ir1} x {ir2} -> {ir_out}."
-                )
-            if mode == "u1u" and not (mul2 == 1 and mul1 == mul_out):
-                raise ValueError(
-                    "connection_mode='u1u' requires mul_in2=1 and mul_in1=mul_out."
-                )
-            if mode == "uuu" and not (mul1 == mul2 == mul_out):
-                raise ValueError("connection_mode='uuu' requires equal multiplicities.")
-            if mode == "uvw" and not train:
-                raise ValueError("uvw instructions require weights.")
-            path_shape = {
-                "u1u": (mul1,),
-                "uuu": (mul1,),
-                "uvw": (mul1, mul2, mul_out),
-            }[mode]
-            parsed.append(
-                Instruction(
-                    i_in1,
-                    i_in2,
-                    i_out,
-                    mode,
-                    bool(train),
-                    float(path_weight),
-                    path_shape,
-                )
-            )
-
-        def variances(
-            values: Optional[Sequence[float]],
-            size: int,
-            name: str,
-        ) -> tuple[float, ...]:
-            if values is None:
-                return (1.0,) * size
-            values = tuple(float(value) for value in values)
-            if len(values) != size:
-                raise ValueError(f"{name} must have one value per irrep entry.")
-            return values
-
-        in1_var = variances(in1_var, len(self.irreps_in1), "in1_var")
-        in2_var = variances(in2_var, len(self.irreps_in2), "in2_var")
-        out_var = variances(out_var, len(self.irreps_out), "out_var")
-
-        def num_elements(instruction: Instruction) -> int:
-            mul1 = self.irreps_in1[instruction.i_in1].mul
-            mul2 = self.irreps_in2[instruction.i_in2].mul
-            return mul1 * mul2 if instruction.connection_mode == "uvw" else 1
-
-        normalized = []
-        for instruction in parsed:
-            ir1 = self.irreps_in1[instruction.i_in1].ir
-            ir2 = self.irreps_in2[instruction.i_in2].ir
-            ir_out = self.irreps_out[instruction.i_out].ir
-            if irrep_normalization == "norm":
-                coefficient = ir1.dim * ir2.dim / ir_out.dim
-            elif irrep_normalization == "none":
-                coefficient = 1.0 / ir_out.dim
-            else:
-                coefficient = 1.0
-
-            if path_normalization == "element":
-                denominator = sum(
-                    in1_var[item.i_in1] * in2_var[item.i_in2] * num_elements(item)
-                    for item in parsed
-                    if item.i_out == instruction.i_out
-                )
-            elif path_normalization == "path":
-                denominator = (
-                    in1_var[instruction.i_in1]
-                    * in2_var[instruction.i_in2]
-                    * num_elements(instruction)
-                    * sum(item.i_out == instruction.i_out for item in parsed)
-                )
-            else:
-                denominator = 1.0
-            if denominator > 0:
-                coefficient /= denominator
-            coefficient *= out_var[instruction.i_out]
-            coefficient *= instruction.path_weight
-            normalized.append(instruction._replace(path_weight=math.sqrt(coefficient)))
-        self.instructions = tuple(normalized)
-        couplings = {}
-        for instruction in self.instructions:
-            key = (
-                instruction.i_in1,
-                instruction.i_in2,
-                instruction.connection_mode != "uvw",
-            )
-            ir = self.irreps_out[instruction.i_out].ir
-            outputs = couplings.setdefault(key, [])
-            if ir not in outputs:
-                outputs.append(ir)
-        self._couplings = tuple((*key, tuple(irs)) for key, irs in couplings.items())
-        indices = {
-            (i1, i2, elementwise, ir): (i, j)
-            for i, (i1, i2, elementwise, irs) in enumerate(self._couplings)
-            for j, ir in enumerate(irs)
-        }
-        self._coupling_indices = tuple(
-            indices[
-                instruction.i_in1,
-                instruction.i_in2,
-                instruction.connection_mode != "uvw",
-                self.irreps_out[instruction.i_out].ir,
-            ]
-            for instruction in self.instructions
+        self.instructions = tensor_product_instructions(
+            self.irreps_in1,
+            self.irreps_in2,
+            self.irreps_out,
+            instructions,
+            in1_var,
+            in2_var,
+            out_var,
+            irrep_normalization,
+            path_normalization,
         )
-        self._instructions_by_coupling = tuple(
-            tuple(
-                j for j, (index, _) in enumerate(self._coupling_indices) if index == i
-            )
-            for i in range(len(self._couplings))
+        self.path_order, self.groups = instruction_groups(
+            self.instructions,
+            [
+                coupling_type(
+                    self.irreps_in1[p.i_in1].ir,
+                    self.irreps_in2[p.i_in2].ir,
+                    self.irreps_out[p.i_out].ir,
+                )
+                for p in self.instructions
+            ],
         )
-
+        self.register_buffer(
+            "path_scales",
+            torch.tensor(
+                [self.instructions[i].path_weight for i in self.path_order],
+                dtype=torch.float64,
+            ),
+            persistent=False,
+        )
+        self.contraction = GroupedTensorProduct(
+            [
+                tuple((entry.mul, entry.ir.dim) for entry in irreps)
+                for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+            ],
+            self.groups,
+            couple_channels,
+            layout="ir_mul",
+        )
         if shared_weights is None:
             shared_weights = True
         if internal_weights is None:
@@ -271,8 +159,6 @@ class TensorProduct(torch.nn.Module):
         else:
             self.register_buffer("weight", torch.empty(0))
 
-        self._input1_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in1)
-        self._input2_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in2)
         offsets = []
         offset = 0
         for instruction in self.instructions:
@@ -284,11 +170,18 @@ class TensorProduct(torch.nn.Module):
                 offsets.append(None)
         self._weight_offsets = tuple(offsets)
         self._weight_sizes = tuple(0 if item is None else item[1] for item in offsets)
-        self._instructions_by_output = tuple(
-            tuple(i for i, ins in enumerate(self.instructions) if ins.i_out == i_out)
-            for i_out in range(len(self.irreps_out))
+        couplings = {}
+        for index, ins in enumerate(self.instructions):
+            key = ins.i_in1, ins.i_in2, ins.connection_mode != "uvw"
+            irreps, paths = couplings.setdefault(key, ([], []))
+            ir = self.irreps_out[ins.i_out].ir
+            if ir not in irreps:
+                irreps.append(ir)
+            paths.append((index, irreps.index(ir)))
+        self.couplings = tuple(
+            (*key, tuple(irreps), tuple(paths))
+            for key, (irreps, paths) in couplings.items()
         )
-
         output_mask = []
         for i_out, ir_mul in enumerate(self.irreps_out):
             connected = any(
@@ -309,13 +202,10 @@ class TensorProduct(torch.nn.Module):
             for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
             for _, mul in irreps
         }
-        if (
-            backend == "cuda"
-            and len(multiplicities) == 1
-            and next(iter(multiplicities)) > 0
-            and all(ins.connection_mode != "uvw" for ins in self.instructions)
+        if backend == "cuda" and all(
+            ins.connection_mode != "uvw" for ins in self.instructions
         ):
-            channels = multiplicities.pop()
+            channels = next(iter(multiplicities)) if len(multiplicities) == 1 else 0
             slices1 = self.irreps_in1.slices()
             slices2 = self.irreps_in2.slices()
             slices_out = self.irreps_out.slices()
@@ -324,32 +214,41 @@ class TensorProduct(torch.nn.Module):
                 ir1 = self.irreps_in1[ins.i_in1].ir
                 ir2 = self.irreps_in2[ins.i_in2].ir
                 ir_out = self.irreps_out[ins.i_out].ir
-                x = torch.eye(ir1.dim, dtype=torch.float64, device="cpu")
-                y = torch.eye(ir2.dim, dtype=torch.float64, device="cpu")
-                coupling = clebsch_gordan_products(
-                    x[:, None, :, None],
-                    ir1,
-                    y[None, :, :, None],
-                    ir2,
-                    (ir_out,),
-                    elementwise=True,
-                )[0].squeeze(-1)
-                for i, j, k in coupling.nonzero().tolist():
+                for i, j, k, value in coupling_entries(ir1, ir2, ir_out):
+                    c1 = self.irreps_in1[ins.i_in1].mul
+                    c2 = self.irreps_in2[ins.i_in2].mul
+                    co = self.irreps_out[ins.i_out].mul
                     indices = (
-                        slices1[ins.i_in1].start // channels + i,
-                        slices2[ins.i_in2].start // channels + j,
-                        weight_slice[0] // channels if weight_slice else -1,
-                        slices_out[ins.i_out].start // channels + k,
+                        slices1[ins.i_in1].start + i * c1,
+                        slices2[ins.i_in2].start + j * c2,
+                        weight_slice[0] if weight_slice else -1,
+                        slices_out[ins.i_out].start + k * co,
                     )
-                    rows.append((indices, float(coupling[i, j, k]) * ins.path_weight))
+                    coefficient = value * ins.path_weight
+                    if channels:
+                        rows.append(
+                            (
+                                tuple(v // channels if v >= 0 else -1 for v in indices),
+                                coefficient,
+                            )
+                        )
+                    else:
+                        rows.append(
+                            (
+                                indices,
+                                coefficient,
+                                co,
+                                (1, int(c2 != 1 or co == 1), 1, 1),
+                            )
+                        )
             self.kernel_metadata = repr(
                 (
                     channels,
                     (
-                        self.irreps_in1.dim // channels,
-                        self.irreps_in2.dim // channels,
-                        self.weight_numel // channels,
-                        self.irreps_out.dim // channels,
+                        self.irreps_in1.dim // (channels or 1),
+                        self.irreps_in2.dim // (channels or 1),
+                        self.weight_numel // (channels or 1),
+                        self.irreps_out.dim // (channels or 1),
                     ),
                     tuple(rows),
                 )
@@ -411,7 +310,7 @@ class TensorProduct(torch.nn.Module):
             )
         weight = self._get_weights(weight)
         try:
-            leading_shape = torch.broadcast_shapes(
+            torch.broadcast_shapes(
                 input1.shape[:-1],
                 input2.shape[:-1],
                 weight.shape[:-1],
@@ -421,102 +320,87 @@ class TensorProduct(torch.nn.Module):
                 "TensorProduct input and weight batch dimensions do not broadcast."
             ) from error
 
-        if (
-            getattr(self, "backend", "torch") == "cuda"
-            and self.kernel_metadata is not None
-            and input1.is_cuda
-            and input1.dtype in (torch.float32, torch.float64)
-            and input1.ndim == input2.ndim == 2
-            and input1.shape[0] == input2.shape[0]
-            and weight.ndim in (1, 2)
-            and (weight.ndim == 1 or weight.shape[0] in (1, input1.shape[0]))
-            and input1.dtype == input2.dtype == weight.dtype
-            and input1.device == input2.device == weight.device
-        ):
-            from ..ops.channel_product import channel_product
+        if self.backend == "cuda":
+            from ..ops.channel_product import tensor_product as cuda_product
 
-            operands = [
-                input1,
-                input2,
-                weight.unsqueeze(0) if weight.ndim == 1 else weight,
+            return cuda_product(
+                self.kernel_metadata, input1, input2, weight, self.irreps_out.dim
+            )
+
+        if self.contraction.indexed:
+            return self.contraction(input1, input2, weight, self.path_scales.to(input1))
+        return self.forward_paths(input1, input2, weight)
+
+    def forward_paths(self, input1, input2, weight):
+        """Reuse angular products when instruction batches are too small to pack."""
+        shape = torch.broadcast_shapes(
+            input1.shape[:-1], input2.shape[:-1], weight.shape[:-1]
+        )
+        inputs = [
+            [
+                block.reshape(*value.shape[:-1], ir.dim, mul)
+                for block, (ir, mul) in zip(
+                    value.split([entry.dim for entry in irreps], -1), irreps
+                )
             ]
-            operands.append(input1.new_empty((0, self.irreps_out.dim)))
-            return channel_product(
-                self.kernel_metadata, repr((((0, 1, 2, 3), 3, 0, 0),)), operands
-            )[0]
-
-        values1 = [
-            values.reshape(*input1.shape[:-1], ir.dim, mul)
-            for (ir, mul), values in zip(
-                self.irreps_in1, input1.split(self._input1_sizes, dim=-1)
-            )
+            for value, irreps in ((input1, self.irreps_in1), (input2, self.irreps_in2))
         ]
-        values2 = [
-            values.reshape(*input2.shape[:-1], ir.dim, mul)
-            for (ir, mul), values in zip(
-                self.irreps_in2, input2.split(self._input2_sizes, dim=-1)
-            )
-        ]
-        weights = weight.split(self._weight_sizes, dim=-1)
-        contributions = [None] * len(self.instructions)
-        for (i1, i2, elementwise, irreps_out), indices in zip(
-            self._couplings, self._instructions_by_coupling
-        ):
-            couplings = clebsch_gordan_products(
-                values1[i1],
-                self.irreps_in1[i1].ir,
-                values2[i2],
-                self.irreps_in2[i2].ir,
-                irreps_out,
+        weights = weight.split(self._weight_sizes, -1)
+        outputs = [None] * len(self.irreps_out)
+        for i, j, elementwise, irreps, paths in self.couplings:
+            values = clebsch_gordan_products(
+                inputs[0][i],
+                self.irreps_in1[i].ir,
+                inputs[1][j],
+                self.irreps_in2[j].ir,
+                irreps,
                 elementwise=elementwise,
             )
-            for instruction_index in indices:
-                instruction = self.instructions[instruction_index]
-                _, mul1 = self.irreps_in1[instruction.i_in1]
-                _, mul2 = self.irreps_in2[instruction.i_in2]
-                _, index = self._coupling_indices[instruction_index]
-                contribution = couplings[index]
-                if instruction.has_weight:
-                    path_weight = weights[instruction_index] * instruction.path_weight
-                    if instruction.connection_mode == "uvw":
-                        mul_out = self.irreps_out[instruction.i_out].mul
-                        path_weight = path_weight.reshape(
-                            *weight.shape[:-1], mul1, mul2, mul_out
-                        )
-                        contribution = torch.einsum(
-                            "...duv,...uvw->...dw", contribution, path_weight
+            for index, angular in paths:
+                ins = self.instructions[index]
+                value = values[angular]
+                if ins.has_weight:
+                    w = weights[index] * ins.path_weight
+                    if ins.connection_mode == "uvw":
+                        value = torch.einsum(
+                            "...duv,...uvw->...dw",
+                            value,
+                            w.reshape(*weight.shape[:-1], *ins.path_shape),
                         )
                     else:
-                        contribution = contribution * path_weight.unsqueeze(-2)
-                contributions[instruction_index] = (
-                    contribution
-                    if instruction.has_weight
-                    else contribution * instruction.path_weight
-                )
-        outputs = []
-        zero = None
-        for i_out, (ir_out, mul_out) in enumerate(self.irreps_out):
-            values = [contributions[i] for i in self._instructions_by_output[i_out]]
-            if values:
-                output = sum(values[1:], values[0])
-            else:
-                if zero is None:
-                    zero = (
-                        input1[..., :0].sum()
-                        + input2[..., :0].sum()
-                        + weight[..., :0].sum()
-                    )
-                output = input1.new_zeros((*leading_shape, ir_out.dim, mul_out)) + zero
-            outputs.append(
-                output.expand(*leading_shape, ir_out.dim, mul_out).reshape(
-                    *leading_shape, ir_out.dim * mul_out
-                )
-            )
-        if outputs:
-            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        return input1.new_empty((*leading_shape, 0)) + (
+                        value = value * w.unsqueeze(-2)
+                else:
+                    value = value * ins.path_weight
+                previous = outputs[ins.i_out]
+                outputs[ins.i_out] = value if previous is None else previous + value
+        zero = (
             input1[..., :0].sum() + input2[..., :0].sum() + weight[..., :0].sum()
+            if not self.contraction.complete or not outputs
+            else None
         )
+        if not outputs:
+            return input1.new_zeros((*shape, 0)) + zero
+        result = torch.cat(
+            [
+                (
+                    input1.new_zeros((*shape, ir.dim, mul))
+                    if value is None
+                    else value.expand(*shape, ir.dim, mul)
+                ).flatten(-2)
+                for value, (ir, mul) in zip(outputs, self.irreps_out)
+            ],
+            -1,
+        )
+        return result if zero is None else result + zero
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        self.path_scales = torch.tensor(
+            [self.instructions[i].path_weight for i in self.path_order],
+            dtype=torch.float64,
+            device="cpu",
+        ).to(self.path_scales)
+        return self
 
     def weight_view_for_instruction(
         self,

@@ -66,9 +66,12 @@ def linear(inputs, weight, bias, layout, shape):
             ).reshape(*value.shape[:-1], matrix.shape[-1])
         else:
             result = value @ matrix
-        for (j, _), part in zip(
-            entries, result.split([output_shapes[j][1] for j, _ in entries], -1)
-        ):
+        parts = (
+            (result,)
+            if len(entries) == 1
+            else result.split([output_shapes[j][1] for j, _ in entries], -1)
+        )
+        for (j, _), part in zip(entries, parts):
             outputs[j] = part
     for j, start, size in biases:
         outputs[j] = outputs[j] + bias[..., start : start + size].unsqueeze(-2)

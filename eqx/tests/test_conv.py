@@ -9,17 +9,92 @@ from eqx import o2
 from eqx import o3 as eqx_o3
 
 
+@pytest.mark.skipif(
+    not hasattr(o3.Irrep("0e"), "t"), reason="Requires time-reversal e3nn"
+)
+@pytest.mark.parametrize("kind", ["o3", "o2", "co3"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_convolution_time_reversal(kind, backend, device, double_precision):
+    if backend == "cuda" and device != "cuda":
+        pytest.skip("CUDA is unavailable")
+    from eqx import co3
+
+    args = (
+        "2x1ee+2x1eo",
+        "1oe",
+        "2x0oe+2x1oe+2x2oe+2x0oo+2x1oo+2x2oo",
+        [(i, 0, 3 * i + k, "uvu", True) for i in range(2) for k in range(3)],
+    )
+    reference = o3.TensorProduct(
+        *args, internal_weights=False, shared_weights=False
+    ).to(device)
+    x = torch.randn(3, reference.irreps_in1.dim, device=device, requires_grad=True)
+    vectors = torch.randn(7, 3, device=device, requires_grad=True)
+    weight = torch.randn(7, reference.weight_numel, device=device, requires_grad=True)
+    index = torch.randint(3, (2, 7), device=device)
+    sh = o3.spherical_harmonics(1, vectors, normalize=True, normalization="component")
+    expected = x.new_zeros(3, reference.irreps_out.dim).index_add(
+        0, index[1], reference(x[index[0]], sh, weight)
+    )
+    projection = x.new_empty(0, reference.weight_numel)
+    if kind == "co3":
+        tp = co3.TensorProduct(*args, internal_weights=False, shared_weights=False).to(
+            device
+        )
+        module = eqx_conv.CartesianTensorProductConv(tp, backend=backend).to(device)
+        embed = co3.ChangeOfBasis(tp.irreps_in1).to(device)
+        inverse = co3.ChangeOfBasis(tp.irreps_out, inverse=True).to(device)
+        actual = inverse(module(embed(x), sh, weight, projection, index))
+    elif kind == "o3":
+        module = eqx_conv.O3TensorProductConv(reference, backend=backend).to(device)
+        actual = layout(
+            module(layout(x, reference.irreps_in1), sh, weight, projection, index),
+            reference.irreps_out,
+            inverse=True,
+        )
+    else:
+        tp = o2.O3TensorProduct(*args, internal_weights=False, shared_weights=False).to(
+            device
+        )
+        module = eqx_conv.O2O3TensorProductConv(tp, backend=backend).to(device)
+        actual = layout(
+            module(
+                layout(x, reference.irreps_in1),
+                weight,
+                projection,
+                None,
+                x.new_ones(1, 1),
+                index,
+                3,
+                vectors=vectors,
+            ),
+            reference.irreps_out,
+            inverse=True,
+        )
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        probe = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad(
+                (z.sin() * probe).sum(), (x, vectors, weight), create_graph=True
+            )
+            for z in (actual, expected)
+        ]
+        actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+
 @pytest.mark.parametrize("rows", [0, 1, 9])
 @pytest.mark.parametrize("shared", [False, True])
-def test_o3_rowwise_tensor_product(rows, shared, double_precision):
+@pytest.mark.parametrize("copies", [2, 4])
+def test_o3_rowwise_tensor_product(rows, shared, copies, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = o3.TensorProduct(
-        "3x1o+3x1o+2x0e",
+        "+".join(["3x1o"] * copies + ["2x0e"]),
         "2x1o+0e",
         "3x0e+3x1e+3x2e+2x1o",
-        [(i, 0, k, "uvu", k != 1) for i in range(2) for k in range(3)]
-        + [(2, 0, 3, "uvu", True)],
+        [(i, 0, k, "uvu", k != 1) for i in range(copies) for k in range(3)]
+        + [(copies, 0, 3, "uvu", True)],
         internal_weights=False,
         shared_weights=False,
     ).cuda()
@@ -35,6 +110,15 @@ def test_o3_rowwise_tensor_product(rows, shared, double_precision):
     projection = inputs[0].new_empty(0, tp.weight_numel)
     actual = conv(*inputs, projection, None)
     expected = conv.reference(*inputs, projection, None, rows)
+    reference = layout(
+        tp(
+            layout(inputs[0], tp.irreps_in1, inverse=True),
+            layout(inputs[1], tp.irreps_in2, inverse=True),
+            inputs[2],
+        ),
+        tp.irreps_out,
+    )
+    torch.testing.assert_close(actual, reference, atol=1e-12, rtol=1e-12)
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
     for _ in range(3):
         seed = torch.randn_like(actual)
@@ -45,6 +129,24 @@ def test_o3_rowwise_tensor_product(rows, shared, double_precision):
         for a, b in zip(*gradients):
             torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
         actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_partitioned_paths(monkeypatch, double_precision, implementation):
+    if implementation == "o3":
+        from eqx.backends.cuda.o3 import convolution
+    else:
+        from eqx.backends.cuda.o2_o3 import convolution
+
+    monkeypatch.setattr(convolution, "SOURCE_SIZE_LIMIT", 0)
+    convolution.execution_plan.cache_clear()
+    try:
+        if implementation == "o3":
+            test_o3_rowwise_tensor_product(9, False, 4, double_precision)
+        else:
+            test_streaming_projected_tiles(monkeypatch, 1, 35)
+    finally:
+        convolution.execution_plan.cache_clear()
 
 
 @pytest.mark.parametrize("edges", [0, 7])

@@ -236,11 +236,15 @@ for nodes, edges in ((4, 5), (7, 11)):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
-def test_runtime_linker_flags(monkeypatch, tmp_path, platform):
+@pytest.mark.parametrize(
+    "platform,lib_dir", [("linux", "lib64"), ("linux", "lib"), ("win32", "lib/x64")]
+)
+def test_runtime_linker_flags(monkeypatch, tmp_path, platform, lib_dir):
     import torch.utils.cpp_extension as extension
 
     namespace = runpy.run_path(cuda.__file__)
+    lib_dir = tmp_path / lib_dir
+    lib_dir.mkdir(parents=True)
     load = Mock(return_value=object())
     dll_directory = MagicMock()
     monkeypatch.setattr(sys, "platform", platform)
@@ -263,6 +267,8 @@ def test_runtime_linker_flags(monkeypatch, tmp_path, platform):
             assert kwargs["extra_cflags"] == ["-O3"]
             assert "-lnvrtc" in kwargs["extra_ldflags"]
             assert "-lcuda" in kwargs["extra_ldflags"]
+            assert f"-L{lib_dir}" in kwargs["extra_ldflags"]
+            assert f"-Wl,-rpath,{lib_dir}" in kwargs["extra_ldflags"]
     finally:
         namespace["_POOL"].shutdown()
 

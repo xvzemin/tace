@@ -170,6 +170,8 @@ class Projector(torch.nn.Module):
     method : {"matrix", "factorized"}, optional
         Analytic Cartesian projection or factored path-matrix evaluation.
         Defaults to "matrix".
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CUDA uses the analytic Cartesian projector.
 
     Examples
     --------
@@ -181,13 +183,22 @@ class Projector(torch.nn.Module):
     >>> torch.testing.assert_close(result, expected)
     """
 
-    def __init__(self, irreps, *, method="matrix"):
+    def __init__(self, irreps, *, method="matrix", backend="torch"):
         super().__init__()
         if method not in ("matrix", "factorized"):
             raise ValueError("method must be 'matrix' or 'factorized'.")
         self.method = method
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        if backend == "cuda" and method != "matrix":
+            raise ValueError("The CUDA projector requires method='matrix'.")
+        self.backend = backend
         self.irreps_in = self.irreps_out = Irreps(irreps)
         self.input_dim = self.irreps_in.dim
+        if backend == "cuda":
+            from ..backends.cuda.co2 import projector_metadata
+
+            self.kernel_metadata = projector_metadata(self.irreps_in)
         groups = defaultdict(list)
         for i, (mul, ir) in enumerate(self.irreps_in):
             if ir.m > 1:
@@ -210,6 +221,10 @@ class Projector(torch.nn.Module):
         """Project equal-order Cartesian blocks together."""
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
+        if self.backend == "cuda":
+            from ..backends.cuda.co2 import project
+
+            return project(self.kernel_metadata, features)
         values = [
             features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
             for (mul, ir), section in zip(self.irreps_in, self.irreps_in.slices())

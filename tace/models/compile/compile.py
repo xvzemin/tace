@@ -34,15 +34,26 @@ def trace_and_compile(
 ) -> tuple[Callable, tuple[str, ...], tuple[str, ...]]:
     parameter_names = tuple(name for name, _ in model.named_parameters())
     buffer_names = tuple(name for name, _ in model.named_buffers())
-    state_names = parameter_names + buffer_names
+    state_values = _state_values(model, parameter_names, buffer_names)
+    state_indices = {id(value): i for i, value in enumerate(state_values)}
+    state_entries = tuple(
+        (f"{prefix}.{name}" if prefix else name, state_indices[id(value)])
+        for prefix, module in model.named_modules()
+        for name, value in (
+            *module.named_parameters(recurse=False, remove_duplicate=False),
+            *module.named_buffers(recurse=False, remove_duplicate=False),
+        )
+    )
 
     def compute(*args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         num_inputs = len(inputs)
-        state = {name: value for name, value in zip(state_names, args[num_inputs:])}
-        return functional_call(model, state, args=args[:num_inputs])
+        state = {name: args[num_inputs + index] for name, index in state_entries}
+        # Write each module attribute once. Expanding shared-module aliases can
+        # restore a tracing tensor instead of the original parameter or buffer.
+        return functional_call(model, state, args=args[:num_inputs], tie_weights=False)
 
     trace_inputs = [value.clone() for value in inputs]
-    trace_inputs.extend(_state_values(model, parameter_names, buffer_names))
+    trace_inputs.extend(state_values)
     traced = trace_to_fx(compute, trace_inputs)
 
     compiled = torch.compile(

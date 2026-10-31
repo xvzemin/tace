@@ -5,6 +5,8 @@ import math
 import torch
 from e3nn import o3
 
+from ...backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ...backends.torch.tensor_product import instruction_groups
 from ...ops.o3 import contraction
 from ...ops.radial import materialize
 
@@ -91,6 +93,10 @@ class O3TensorProductConv(torch.nn.Module):
         slices = [
             ir.slices() for ir in (self.irreps_in1, self.irreps_in2, self.irreps_out)
         ]
+        self.output_sections = tuple(
+            (section.start, section.stop - section.start) for section in slices[2]
+        )
+        self.harmonic_entries = tuple((mul, ir.l) for mul, ir in self.irreps_in2)
         paths, offset = [], 0
         for ins in self.instructions:
             mul1, ir1 = self.irreps_in1[ins.i_in1]
@@ -122,6 +128,40 @@ class O3TensorProductConv(torch.nn.Module):
                 )
             )
         self.paths = tuple(paths)
+        couplings = [
+            (
+                self.irreps_in1[p.i_in1].ir.l,
+                self.irreps_in2[p.i_in2].ir.l,
+                self.irreps_out[p.i_out].ir.l,
+            )
+            for p in self.instructions
+        ]
+        self.reference_order, groups = instruction_groups(self.instructions, couplings)
+        self.grouped_reference = len(groups) * 2 < len(self.instructions)
+        if self.grouped_reference:
+            for degrees in dict.fromkeys(couplings):
+                self.register_buffer(
+                    "reference_cg_" + "_".join(map(str, degrees)),
+                    o3.wigner_3j(*degrees),
+                    persistent=False,
+                )
+            self.register_buffer(
+                "reference_scales",
+                torch.tensor(
+                    [self.instructions[i].path_weight for i in self.reference_order],
+                    dtype=torch.float64,
+                ),
+                persistent=False,
+            )
+            self.reference_contraction = GroupedTensorProduct(
+                [
+                    tuple((entry.mul, entry.ir.dim) for entry in irreps)
+                    for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+                ],
+                groups,
+                self.couple,
+                layout="ir_mul",
+            )
         self.kernel_metadata = repr(
             (self.paths, self.weight_numel, any(path[8] < 0 for path in paths))
         )
@@ -290,9 +330,9 @@ class O3TensorProductConv(torch.nn.Module):
             )[0]
         if vectors is not None:
             sections, offset = [], 0
-            for mul, ir in self.irreps_in2:
+            for mul, degree in self.harmonic_entries:
                 harmonic = o3.spherical_harmonics(
-                    ir.l, vectors, normalize=False, normalization=self.normalization
+                    degree, vectors, normalize=False, normalization=self.normalization
                 )
                 sections.append(
                     (
@@ -322,27 +362,72 @@ class O3TensorProductConv(torch.nn.Module):
         zero = sum(
             value.sum() * 0 for value in (features, edge_attrs, radial, projection)
         )
-        result = features.new_zeros((num_nodes, self.output_dim)) + zero
-        for index, path in enumerate(self.paths):
-            start, attr, end, mul1, mul2, dim1, dim2, dim_out, weight, factor, _ = path
-            x = features[:, start : start + dim1 * mul1]
-            x = (x[source] if indexed else x).reshape(edges, dim1, mul1)
-            y = attrs[:, attr : attr + dim2 * mul2].reshape(edges, dim2, mul2)
-            cg = getattr(self, f"cg_{index}").to(features)
-            if weight >= 0:
-                w = weights[:, weight : weight + mul1 * mul2].reshape(edges, mul1, mul2)
-                message = torch.einsum("abc,eau,ebv,euv->ecu", cg, x, y, w)
-            else:
-                message = torch.einsum("abc,eau,ebv->ecu", cg, x, y)
-            message = (factor * message).flatten(1)
-            result[:, end : end + dim_out * mul1] += (
-                message.new_zeros((num_nodes, dim_out * mul1)).index_add(
-                    0, target, message
-                )
-                if indexed
-                else message
+        if self.grouped_reference:
+            message = self.reference_contraction(
+                features[source] if indexed else features,
+                attrs,
+                weights,
+                self.reference_scales.to(features),
             )
-        return result
+        else:
+            inputs, angular, outputs = {}, {}, {}
+            for index, path in enumerate(self.paths):
+                start, attr, end, mul1, mul2, dim1, dim2, dim_out, weight, factor, _ = (
+                    path
+                )
+                key = start, mul1, dim1
+                if key not in inputs:
+                    x = features[:, start : start + dim1 * mul1]
+                    inputs[key] = (x[source] if indexed else x).reshape(
+                        edges, dim1, mul1
+                    )
+                other = attr, mul2, dim2
+                if other not in angular:
+                    angular[other] = attrs[:, attr : attr + dim2 * mul2].reshape(
+                        edges, dim2, mul2
+                    )
+                x, y = inputs[key], angular[other]
+                cg = getattr(self, f"cg_{index}").to(features)
+                if weight >= 0:
+                    w = weights[:, weight : weight + mul1 * mul2].reshape(
+                        edges, mul1, mul2
+                    )
+                    value = torch.einsum("abc,eau,ebv,euv->ecu", cg, x, y, w)
+                else:
+                    value = torch.einsum("abc,eau,ebv->ecu", cg, x, y)
+                value = (factor * value).flatten(1)
+                outputs[end] = value if end not in outputs else outputs[end] + value
+            blocks = [
+                outputs[start]
+                if start in outputs
+                else features.new_zeros((edges, width))
+                for start, width in self.output_sections
+            ]
+            message = (
+                torch.cat(blocks, -1) if blocks else features.new_zeros((edges, 0))
+            )
+        return (
+            features.new_zeros((num_nodes, self.output_dim)).index_add(
+                0, target, message
+            )
+            if indexed
+            else message
+        ) + zero
+
+    def couple(self, x, y, l1, l2, l3):
+        """Contract angular indices while retaining independent channels."""
+        cg = getattr(self, f"reference_cg_{l1}_{l2}_{l3}").to(x)
+        return torch.einsum("...a,...b,abc->...c", x, y, cg)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        if getattr(self, "grouped_reference", False):
+            self.reference_scales = torch.tensor(
+                [self.instructions[i].path_weight for i in self.reference_order],
+                dtype=torch.float64,
+                device="cpu",
+            ).to(self.reference_scales)
+        return self
 
     def extra_repr(self):
         return (

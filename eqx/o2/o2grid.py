@@ -11,7 +11,7 @@ __all__ = ["O2Grid"]
 
 
 class O2Grid(torch.nn.Module):
-    """Transform O(2) features to two circular grids per channel.
+    """Transform O(2) features to circular grids per channel.
 
     Parameters
     ----------
@@ -20,7 +20,7 @@ class O2Grid(torch.nn.Module):
         Requires ``C x 0e + C x 0o`` and ``2C x m`` at every order from one
         to ``mmax``, with ``C > 0``. Multiplicities are summed over repeated
         entries, so ``2C x m`` may also be supplied as ``C x m + C x m``.
-        Only time-even irreps are supported.
+        Time-odd inputs require the same multiplicities in both time sectors.
     resolution : int, optional
         Angular samples per grid, at least ``2 * mmax + 1``. Defaults to
         ``4 * mmax + 1``, where ``mmax`` is the largest input order.
@@ -38,12 +38,13 @@ class O2Grid(torch.nn.Module):
     Attributes
     ----------
     num_sheets : int
-        Number of reflection sheets, always two.
+        Two reflection sheets, or four sheets when time-odd irreps are present.
     num_channels : int
         Number of grid channels, equal to ``C``.
     irreps_in1, irreps_in2 : Irreps
         Representations for separate inputs. Each has ``C`` copies per order
         in increasing order, starting with ``0e`` and ``0o``, respectively.
+        Time-even entries precede time-odd entries when both are present.
     grid_shape : tuple of int
         ``(num_channels, num_sheets, resolution)``.
     grid : torch.Tensor
@@ -59,7 +60,9 @@ class O2Grid(torch.nn.Module):
     set uses the inverse of the fixed O(2) basis change on positive orders.
     Their normalized sum and difference are exchanged by reflection.
 
-    Apply the same pointwise activation to both sheets. Projection of a
+    With time-odd inputs, a second sum-and-difference transform makes time
+    reversal exchange the two sets of reflection sheets.
+    Apply the same pointwise activation to every sheet. Projection of a
     degree-d polynomial is exactly O(2)-equivariant up to roundoff when
     ``resolution > (d + 1) * mmax``. General nonlinearities require a
     resolution-convergence check.
@@ -89,20 +92,28 @@ class O2Grid(torch.nn.Module):
     ):
         super().__init__()
         self.irreps = Irreps(irreps)
-        if any(ir.t != 1 for ir, _ in self.irreps):
-            raise ValueError("O2Grid only supports time-even irreps.")
+        self.time_parities = (
+            (1, -1) if any(ir.t == -1 for ir, _ in self.irreps) else (1,)
+        )
         self.dim = self.irreps.dim
         self.mmax = max(0, self.irreps.mmax)
         self.num_channels = self.irreps.count("0e")
         if self.num_channels == 0:
             raise ValueError("O2Grid requires C copies of 0e, with C > 0.")
-        irrep_list = [(Irrep(m, 0), self.num_channels) for m in range(1, self.mmax + 1)]
-        self.irreps_in1 = Irreps([(Irrep(0, 1), self.num_channels)] + irrep_list)
-        self.irreps_in2 = Irreps([(Irrep(0, -1), self.num_channels)] + irrep_list)
+        self.irreps_in1, self.irreps_in2 = (
+            Irreps(
+                [
+                    (Irrep(m, parity if m == 0 else 0, t), self.num_channels)
+                    for t in self.time_parities
+                    for m in range(self.mmax + 1)
+                ]
+            )
+            for parity in (1, -1)
+        )
         if self.irreps.regroup() != (self.irreps_in1 + self.irreps_in2).regroup():
             raise ValueError(
                 "O2Grid requires C copies of 0e and 0o and 2C copies of each "
-                "order from 1 to mmax, with C > 0."
+                "order from 1 to mmax, with C > 0, in each time-parity sector."
             )
         resolution = 4 * self.mmax + 1 if resolution is None else resolution
         if not isinstance(resolution, int) or resolution < 2 * self.mmax + 1:
@@ -111,7 +122,7 @@ class O2Grid(torch.nn.Module):
             raise ValueError("normalization must be component, norm, or integral.")
         self.resolution = resolution
         self.normalization = normalization
-        self.num_sheets = 2
+        self.num_sheets = 2 * len(self.time_parities)
         self.grid_shape = (self.num_channels, self.num_sheets, self.resolution)
         dim = 2 * self.mmax + 1
         self._coefficient_shape = (self.num_channels, self.num_sheets, dim)
@@ -165,6 +176,7 @@ class O2Grid(torch.nn.Module):
                             # J^{-1}(h_+, h_-) = (h_-, -h_+).
                             order = 2 * ir.m - component
                             sign = -1 if component == 0 else 1
+                    sheet += 2 * int(ir.t == -1)
                     position = (
                         (channel % self.num_channels) * self.num_sheets + sheet
                     ) * dim + order
@@ -250,14 +262,19 @@ class O2Grid(torch.nn.Module):
                 )
             if features2.shape != features.shape:
                 raise ValueError("Both coefficient sets must have the same shape.")
-            shape = (2 * self.mmax + 1, self.num_channels)
-            first = features.unflatten(-1, shape).transpose(-1, -2)
-            second = features2.unflatten(-1, shape).transpose(-1, -2)
+            shape = (len(self.time_parities), 2 * self.mmax + 1, self.num_channels)
+            first = features.unflatten(-1, shape).movedim(-1, -3)
+            second = features2.unflatten(-1, shape).movedim(-1, -3)
             second = second.index_select(-1, self.second_index) * self.second_sign
-            coefficients = torch.stack((first, second), dim=-2)
+            coefficients = torch.stack((first, second), dim=-2).flatten(-3, -2)
         values = coefficients @ self.synthesis.T
+        values = values.unflatten(-2, (len(self.time_parities), 2))
         even, odd = values.unbind(-2)
-        return torch.stack((even + odd, even - odd), dim=-2) / math.sqrt(2)
+        values = torch.stack((even + odd, even - odd), dim=-2) / math.sqrt(2)
+        if len(self.time_parities) == 2:
+            even, odd = values.unbind(-3)
+            values = torch.stack((even + odd, even - odd), dim=-3) / math.sqrt(2)
+        return values.flatten(-3, -2)
 
     def from_grid(self, features, *, split=False):
         """Project grid values onto the original O(2) irreps.
@@ -278,6 +295,12 @@ class O2Grid(torch.nn.Module):
         """
         if features.ndim < 3 or features.shape[-3:] != self.grid_shape:
             raise ValueError(f"Expected trailing grid dimensions {self.grid_shape}.")
+        features = features.unflatten(-2, (len(self.time_parities), 2))
+        if len(self.time_parities) == 2:
+            positive, negative = features.unbind(-3)
+            features = torch.stack(
+                (positive + negative, positive - negative), dim=-3
+            ) / math.sqrt(2)
         positive, negative = features.unbind(-2)
         features = torch.stack(
             (positive + negative, positive - negative), dim=-2
@@ -286,10 +309,8 @@ class O2Grid(torch.nn.Module):
         if split:
             first, second = coefficients.unbind(-2)
             second = (second * self.second_sign).index_select(-1, self.second_index)
-            return first.transpose(-1, -2).flatten(-2), second.transpose(
-                -1, -2
-            ).flatten(-2)
-        coefficients = coefficients.flatten(-3)
+            return first.movedim(-3, -1).flatten(-3), second.movedim(-3, -1).flatten(-3)
+        coefficients = coefficients.flatten(-4)
         return coefficients.index_select(-1, self.output_index) * self.output_sign
 
     def extra_repr(self):

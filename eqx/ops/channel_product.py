@@ -1,8 +1,54 @@
 """Channel-wise local products without expanded edge intermediates."""
 
+import math
+
 import torch
 
 from ..utils.metadata import parse_metadata
+
+
+def product_layout(metadata):
+    """Return flat dimensions and sparse channel-strided contractions."""
+    width, dims, rows = parse_metadata(metadata)
+    if width:
+        return tuple(d * width for d in dims), tuple(
+            (
+                tuple(i * width if i >= 0 else -1 for i in indices),
+                coefficient,
+                width,
+                (1,) * len(dims),
+            )
+            for indices, coefficient in rows
+        )
+    return dims, rows
+
+
+def tensor_product(metadata, x, y, weight, output_dim):
+    """Evaluate supported CUDA paths without a PyTorch fallback."""
+    if metadata is None:
+        raise NotImplementedError(
+            "The CUDA tensor product supports uuu and u1u paths only."
+        )
+    if not all(value.is_cuda for value in (x, y, weight)):
+        raise ValueError("backend='cuda' requires CUDA inputs and weights.")
+    if (
+        x.dtype not in (torch.float32, torch.float64)
+        or not x.dtype == y.dtype == weight.dtype
+    ):
+        raise ValueError("CUDA inputs and weights must share float32 or float64 dtype.")
+    if not x.device == y.device == weight.device:
+        raise ValueError("CUDA inputs and weights must share a device.")
+    shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
+    rows = math.prod(shape)
+    operands = [
+        value.reshape(1, value.shape[-1])
+        if i and math.prod(value.shape[:-1]) == 1
+        else value.expand(*shape, value.shape[-1]).reshape(rows, value.shape[-1])
+        for i, value in enumerate((x, y, weight))
+    ]
+    operands.append(x.new_empty((0, output_dim)))
+    result = channel_product(metadata, repr((((0, 1, 2, 3), 3, 0, 0),)), operands)[0]
+    return result.reshape(*shape, output_dim)
 
 
 def local_product(metadata, *features):
@@ -36,13 +82,14 @@ def channel_product(
 @channel_product.register_fake
 def channel_product_fake(metadata, program, operands):
     width, dims, _ = parse_metadata(metadata)
+    dims = tuple(d * (width or 1) for d in dims)
     terms = parse_metadata(program)
     outputs = [None] * (max(slot for _, _, slot, _ in terms) + 1)
     for mapping, role, slot, _ in terms:
         if outputs[slot] is None:
             rows = operands[mapping[role]].size(0)
             outputs[slot] = operands[0].new_empty(
-                (1 if rows == 1 else operands[0].shape[0], dims[role] * width)
+                (1 if rows == 1 else operands[0].shape[0], dims[role])
             )
     return outputs
 

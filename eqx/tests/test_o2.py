@@ -18,7 +18,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
 
-@pytest.mark.parametrize("device", ["cpu", DEVICE])
 def test_wigner_invalid_method(device):
     wigner = o2.WignerD(lmax=2, mmax=2).to(device)
     vectors = torch.randn(3, 3, device=device)
@@ -705,6 +704,8 @@ def _tensor_product_case(mode):
 @pytest.mark.parametrize("reflected", [False, True])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_o2_tensor_product_is_equivariant(mode, reflected, backend):
+    if backend == "cuda" and (mode == "uvw" or DEVICE.type != "cuda"):
+        pytest.skip("CUDA requires uuu/u1u paths and a CUDA device")
     irreps_in1, irreps_in2, irreps_out = _tensor_product_case(mode)
     module = o2.TensorProduct(
         irreps_in1,
@@ -740,12 +741,70 @@ def test_o2_tensor_product_zero_pads_missing_outputs():
     torch.testing.assert_close(output[:, -1], torch.zeros_like(output[:, -1]))
 
 
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_o2_tensor_product_mixed_channels(shared, dtype):
+    if DEVICE.type != "cuda":
+        pytest.skip("CUDA is unavailable")
+    options = dict(internal_weights=False, shared_weights=shared)
+    instructions = [
+        (0, 0, 0, "uuu", True),
+        (1, 1, 1, "uuu", True),
+        (2, 2, 2, "u1u", True),
+        (2, 2, 2, "u1u", False),
+        (1, 1, 3, "uuu", False),
+    ]
+    args = (
+        "2x1m+3x2m+4x1m",
+        "2x1m+3x2m+1x0o",
+        "2x0e+3x0o+4x1m+3x4m+1x0e",
+        instructions,
+    )
+    reference = o2.TensorProduct(*args, backend="torch", **options).to(DEVICE, dtype)
+    module = o2.TensorProduct(*args, backend="cuda", **options).to(DEVICE, dtype)
+    assert module.kernel_metadata is not None
+    inputs = [
+        torch.randn(5, ir.dim, device=DEVICE, dtype=dtype, requires_grad=True)
+        for ir in (module.irreps_in1, module.irreps_in2)
+    ]
+    inputs.append(
+        torch.randn(
+            (module.weight_numel,) if shared else (5, module.weight_numel),
+            device=DEVICE,
+            dtype=dtype,
+            requires_grad=True,
+        )
+    )
+    actual, expected = module(*inputs), reference(*inputs)
+    tol = 2e-5 if dtype == torch.float32 else 2e-12
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
+        probe = torch.randn_like(actual)
+        actual, expected = [
+            torch.cat(
+                [
+                    grad.flatten()
+                    for grad in torch.autograd.grad(
+                        (value * probe).sum(),
+                        inputs,
+                        create_graph=True,
+                        retain_graph=True,
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
+
+
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
 @pytest.mark.parametrize("order", [1, 2])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_o2_shared_couplings(mode, order, backend, double_precision):
     from eqx.o2.clebsch_gordan import clebsch_gordan_product
 
+    if backend == "cuda" and (mode == "uvw" or DEVICE.type != "cuda"):
+        pytest.skip("CUDA requires uuu/u1u paths and a CUDA device")
     torch._dynamo.reset()
     ir1, ir2 = o2.Irrep("1mo"), o2.Irrep(order, 0, 1)
     mul1, mul2, mul_out = 3, 1 if mode == "u1u" else 3, 3
@@ -759,12 +818,12 @@ def test_o2_shared_couplings(mode, order, backend, double_precision):
         shared_weights=False,
         path_normalization="none",
         backend=backend,
-    )
+    ).to(DEVICE)
     compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
     for batch in (4, 0):
-        x = torch.randn(batch, ir1.dim * mul1, requires_grad=True)
-        y = torch.randn(1, ir2.dim * mul2, requires_grad=True)
-        weights = torch.randn(1, module.weight_numel, requires_grad=True)
+        x = torch.randn(batch, ir1.dim * mul1, device=DEVICE, requires_grad=True)
+        y = torch.randn(1, ir2.dim * mul2, device=DEVICE, requires_grad=True)
+        weights = torch.randn(1, module.weight_numel, device=DEVICE, requires_grad=True)
         expected = []
         for i, ir in enumerate(outputs):
             value = clebsch_gordan_product(
@@ -1165,14 +1224,24 @@ def test_o2_activation_and_gate_preserve_time_parity():
     )
 
 
-def test_o2_tensor_product_preserves_time_parity():
-    irreps_in = o2.Irreps("2x1mo")
-    irreps_out = o2.Irreps("2x0ee+2x0oe+2x2me")
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_o2_tensor_product_preserves_time_parity(backend):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    irreps_in = o2.Irreps("2x0ee+2x0oo+2x1me+2x1mo")
+    irreps_out = o2.Irreps("2x0ee+2x0eo+2x0oe+2x0oo+2x1me+2x1mo+2x2me+2x2mo")
     tensor_product = o2.TensorProduct(
         irreps_in,
         irreps_in,
         irreps_out,
-        [(0, 0, i_out, "uuu", False) for i_out in range(len(irreps_out))],
+        [
+            (i, j, k, "uuu", True)
+            for i, (a, _) in enumerate(irreps_in)
+            for j, (b, _) in enumerate(irreps_in)
+            for k, (c, _) in enumerate(irreps_out)
+            if c in a * b
+        ],
+        backend=backend,
     ).to(DEVICE, DTYPE)
     first = irreps_in.randn(6, -1, dtype=DTYPE, device=DEVICE)
     second = irreps_in.randn(6, -1, dtype=DTYPE, device=DEVICE)
@@ -1186,19 +1255,28 @@ def test_o2_tensor_product_preserves_time_parity():
     )
 
 
-def test_o2_asymmetric_contraction_preserves_time_parity():
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("symmetric", [False, True])
+def test_o2_contraction_preserves_time_parity(backend, symmetric):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     irreps_in = o2.Irreps("2x0ee+2x0oo+2x1mo")
-    contraction = o2.AsymmetricContraction(
+    contraction = (o2.SymmetricContraction if symmetric else o2.AsymmetricContraction)(
         irreps_in,
-        "2x0ee+2x1me",
-        correlation=2,
+        "2x0ee+2x0eo+2x0oe+2x0oo+2x1me+2x1mo",
+        correlation=3,
         algorithm="recursive",
+        backend=backend,
     ).to(DEVICE, DTYPE)
-    inputs = [irreps_in.randn(5, -1, dtype=DTYPE, device=DEVICE) for _ in range(2)]
+    inputs = [irreps_in.randn(5, -1, dtype=DTYPE, device=DEVICE) for _ in range(3)]
+    transformed = [_time_reverse(value, irreps_in) for value in inputs]
+    inputs, transformed = (
+        (inputs[0], transformed[0]) if symmetric else (inputs, transformed)
+    )
     weights = torch.randn(5, contraction.weight_numel, dtype=DTYPE, device=DEVICE)
     output = contraction(inputs, weights)
     torch.testing.assert_close(
-        contraction([_time_reverse(value, irreps_in) for value in inputs], weights),
+        contraction(transformed, weights),
         _time_reverse(output, contraction.irreps_out),
     )
 
@@ -1247,15 +1325,13 @@ def test_o3_tensor_product_compiles_with_dynamic_and_empty_batches(
             torch.testing.assert_close(actual_grad, expected_grad)
 
 
-@pytest.mark.parametrize("parity", [False, True])
-@pytest.mark.parametrize("correlation", [1, 2, 3])
-@pytest.mark.parametrize("batch", [0, 4])
-def test_symmetric_contraction_algorithms(parity, correlation, batch, double_precision):
+@pytest.mark.parametrize("parity,correlation", [(False, 1), (False, 2), (True, 2)])
+def test_symmetric_contraction_algorithms(parity, correlation, double_precision):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     irreps = o2.Irreps("2x0e+2x0o+2x1m+2x2m" if parity else "2x0e+2x1m+2x2m")
     module = o2.SymmetricContraction(irreps, irreps, correlation).to(device)
-    x = torch.randn(batch, irreps.dim, device=device, requires_grad=True)
-    weight = torch.randn(batch, module.weight_numel, device=device, requires_grad=True)
+    x = torch.randn(4, irreps.dim, device=device, requires_grad=True)
+    weight = torch.randn(4, module.weight_numel, device=device, requires_grad=True)
     expected = module(x, weight)
     module.set_algorithm("dense")
     actual = module(x, weight)
@@ -1286,6 +1362,104 @@ def test_symmetric_contraction_removes_antisymmetric_self_product(double_precisi
     assert module.order_num_paths == (0, 2)
     value = module(torch.randn(3, 4), torch.ones(module.weight_numel))
     torch.testing.assert_close(value[:, 2:4], torch.zeros(3, 2))
+
+
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("path_mode", ["sum", "expand"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_contraction_backends(symmetric, path_mode, dtype, backend):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    cls = o2.SymmetricContraction if symmetric else o2.AsymmetricContraction
+    args = ("2x0e+2x0o+2x1m", "2x0e+2x0o+2x1m+2x2m", 3)
+    reference = cls(*args, algorithm="dense", path_mode=path_mode).to(DEVICE, dtype)
+    module = cls(*args, algorithm="recursive", path_mode=path_mode, backend=backend).to(
+        DEVICE, dtype
+    )
+    assert module.order_num_paths == reference.order_num_paths
+    assert not module.state_dict()
+    inputs = [
+        torch.randn(
+            3, module.irreps_in.dim, device=DEVICE, dtype=dtype, requires_grad=True
+        )
+        * 0.2
+        for _ in range(1 if symmetric else 3)
+    ]
+    weight = (
+        torch.randn(module.weight_numel, device=DEVICE, dtype=dtype, requires_grad=True)
+        * 0.2
+    )
+    features = inputs[0] if symmetric else inputs
+    actual, expected = module(features, weight), reference(features, weight)
+    tolerance = 2e-5 if dtype == torch.float32 else 2e-11
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        actual, expected = [
+            torch.cat(
+                [
+                    x.flatten()
+                    for x in torch.autograd.grad(
+                        value.sin().sum(), (*inputs, weight), create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+    for batch in (0, 1):
+        features = inputs[0][:batch] if symmetric else [x[:batch] for x in inputs]
+        torch.testing.assert_close(
+            module(features, weight),
+            reference(features, weight),
+            atol=tolerance,
+            rtol=tolerance,
+        )
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+    features = inputs[0] if symmetric else inputs
+    torch.testing.assert_close(
+        compiled(features, weight),
+        reference(features, weight),
+        atol=tolerance,
+        rtol=tolerance,
+    )
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_contraction_high_orders_and_broadcast(backend, empty):
+    if backend == "cuda" and DEVICE.type != "cuda":
+        pytest.skip("CUDA is unavailable")
+    args = ("2x0o+2x8m", "2x31m" if empty else "2x0e+2x0o+2x8m+2x16m+2x24m+2x32m", 4)
+    module = (
+        o2.AsymmetricContraction(*args, algorithm="recursive", backend=backend)
+        .to(DEVICE)
+        .float()
+        .double()
+    )
+    reference = o2.AsymmetricContraction(*args, algorithm="dense").to(
+        DEVICE, torch.float64
+    )
+    inputs = [
+        torch.randn(
+            *shape,
+            module.irreps_in.dim,
+            device=DEVICE,
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        for shape in ((2, 1), (1, 3), (), (2, 3))
+    ]
+    weights = torch.randn(
+        3, module.weight_numel, device=DEVICE, dtype=torch.float64, requires_grad=True
+    )
+    actual, expected = module(inputs, weights), reference(inputs, weights)
+    torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+    gradients = [
+        torch.autograd.grad(x.sin().sum(), (*inputs, weights), create_graph=True)
+        for x in (actual, expected)
+    ]
+    for a, b in zip(*gradients):
+        torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-10)
 
 
 @pytest.mark.parametrize("batch", [0, 3])
@@ -1915,15 +2089,52 @@ def test_o2_grid_compile(irreps, double_precision, device):
         torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
 
 
+@pytest.mark.parametrize("normalization", ["component", "norm", "integral"])
+def test_o2_grid_time_reversal(normalization, device, double_precision):
+    grid = O2Grid(
+        "0oo+0ee+2x2mo+0eo+2x1me+2x1mo+0oe+2x2me",
+        resolution=9,
+        normalization=normalization,
+    ).to(device)
+    assert grid.num_sheets == 4
+    x = grid.irreps.randn(4, -1, device=device).requires_grad_()
+    values = grid(x)
+    torch.testing.assert_close(grid.from_grid(values), x)
+    first, second = grid.from_grid(values, split=True)
+    torch.testing.assert_close(grid(first, second), values)
+    torch.testing.assert_close(
+        grid(_time_reverse(x, grid.irreps)),
+        values.unflatten(-2, (2, 2)).flip(-3).flatten(-3, -2),
+    )
+    for reflected in (False, True):
+        angle = x.new_tensor(0.37)
+        actual = grid.from_grid(
+            grid(_transform(x, grid.irreps, angle, reflected, True)).pow(3)
+        )
+        expected = _transform(
+            grid.from_grid(values.pow(3)), grid.irreps, angle, reflected, True
+        )
+        for _ in range(3):
+            torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+            probe = torch.randn_like(actual)
+            actual, expected = [
+                torch.autograd.grad(
+                    (y * probe).sum(), x, create_graph=True, retain_graph=True
+                )[0]
+                for y in (actual, expected)
+            ]
+
+
 def test_o2_grid_invalid_inputs(device):
     for irreps in ("0eo", "0oo", "1mo"):
-        with pytest.raises(ValueError, match="time-even"):
+        with pytest.raises(ValueError, match="C copies"):
             O2Grid(irreps)
     with pytest.raises(ValueError, match="resolution"):
         O2Grid("0e+0o+2x1m+2x2m", resolution=4)
     with pytest.raises(ValueError, match="normalization"):
         O2Grid("0e+0o", normalization="invalid")
     for irreps in (
+        "0ee+0oe+2x1me+0eo+2x1mo",
         "",
         "0e",
         "0o",

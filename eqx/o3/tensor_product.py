@@ -49,12 +49,6 @@ class FactorizedTensorProduct(torch.nn.Module):
         self.input_dim1 = self.irreps_in1.dim
         self.input_dim2 = self.irreps_in2.dim
         self.output_dim = self.irreps_out.dim
-        if any(
-            getattr(ir, "t", 1) != 1
-            for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
-            for _, ir in irreps
-        ):
-            raise ValueError("Only spatial O(3) irreps are supported.")
         if irrep_normalization not in ("component", "norm", "none"):
             raise ValueError("irrep_normalization must be component, norm, or none.")
         self.irrep_normalization = irrep_normalization
@@ -109,7 +103,9 @@ class FactorizedTensorProduct(torch.nn.Module):
             offset += len(layout) * mul
             sectors = {}
             for ir in layout:
-                sectors.setdefault(self.sector(ir), []).append(ir)
+                sectors.setdefault((self.sector(ir), getattr(ir, "t", 1)), []).append(
+                    ir
+                )
             inputs = []
             for sector, irreps in sorted(sectors.items()):
                 name = f"input{number + 1}_{len(inputs)}"
@@ -144,13 +140,18 @@ class FactorizedTensorProduct(torch.nn.Module):
             for j, (_, sector2, irreps2, _, _) in enumerate(self.inputs[1]):
                 outputs = []
                 for ir in layout:
-                    if self.sector(ir) != sector1 * sector2:
+                    if (self.sector(ir), getattr(ir, "t", 1)) != (
+                        sector1[0] * sector2[0],
+                        sector1[1] * sector2[1],
+                    ):
                         continue
                     squared_norm = sum(
                         self.reduced_coefficient(ir1.l, ir2.l, ir.l) ** 2
                         for ir1 in irreps1
                         for ir2 in irreps2
                         if ir.p == ir1.p * ir2.p
+                        and getattr(ir, "t", 1)
+                        == getattr(ir1, "t", 1) * getattr(ir2, "t", 1)
                         and abs(ir1.l - ir2.l) <= ir.l <= ir1.l + ir2.l
                     )
                     if squared_norm > 0:

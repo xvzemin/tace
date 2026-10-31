@@ -14,6 +14,8 @@ from pathlib import Path
 
 import torch
 
+SOURCE_SIZE_LIMIT = 256 << 10
+
 logging.getLogger("filelock").addFilter(
     lambda record: (
         record.levelno >= logging.WARNING
@@ -51,11 +53,14 @@ def runtime():
         cflags = ["/O2"]
         ldflags = [f"/LIBPATH:{cuda_home / 'lib' / 'x64'}", "nvrtc.lib", "cuda.lib"]
     else:
+        lib_dir = cuda_home / "lib64"
+        if not lib_dir.exists() and (cuda_home / "lib").exists():
+            lib_dir = cuda_home / "lib"
         cflags = ["-O3"]
         ldflags = [
-            f"-L{cuda_home / 'lib64'}",
-            f"-Wl,-rpath,{cuda_home / 'lib64'}",
-            f"-L{cuda_home / 'lib64' / 'stubs'}",
+            f"-L{lib_dir}",
+            f"-Wl,-rpath,{lib_dir}",
+            f"-L{lib_dir / 'stubs'}",
             "-lnvrtc",
             "-lcuda",
         ]

@@ -16,6 +16,8 @@ class Irrep(tuple):
         Angular degree, an irrep name, or an existing representation.
     p : {-1, 1}, optional
         Spatial inversion parity when l is an integer.
+    t : {-1, 1}, optional
+        Time-reversal parity. Odd parity requires time-reversal e3nn.
 
     Notes
     -----
@@ -24,8 +26,13 @@ class Irrep(tuple):
     independent of tensor rank.
     """
 
-    def __new__(cls, l, p=None):
-        return tuple.__new__(cls, [value for value in o3.Irrep(l, p)])
+    def __new__(cls, l, p=None, t=1):
+        ir = o3.Irrep(l, p)
+        if t not in (-1, 1):
+            raise ValueError("Time-reversal parity must be -1 or 1.")
+        if t != 1:
+            ir = o3.Irrep((ir.l, ir.p, t))
+        return tuple.__new__(cls, [value for value in ir])
 
     @property
     def l(self) -> int:  # noqa: E743
@@ -75,8 +82,16 @@ class Irrep(tuple):
         """Iterate over angular degrees and spatial parities."""
         return (cls(ir) for ir in o3.Irrep.iterator(lmax))
 
-    def D_from_matrix(self, matrix):
-        """Return Cartesian transformation matrices of shape (..., dim, dim)."""
+    def D_from_matrix(self, matrix, time_reversal=False):
+        """Return Cartesian transformation matrices.
+
+        Parameters
+        ----------
+        matrix : torch.Tensor
+            Orthogonal matrices of shape (..., 3, 3).
+        time_reversal : bool, optional
+            Apply time reversal independently of the spatial transformation.
+        """
         value = matrix.new_ones((*matrix.shape[:-2], 1, 1))
         for _ in range(self.l):
             value = (
@@ -86,17 +101,29 @@ class Irrep(tuple):
             )
         if self.p != (-1) ** self.l:
             value = value * torch.linalg.det(matrix)[..., None, None]
-        return value
+        return value * self.t if time_reversal else value
 
-    def D_from_angles(self, alpha, beta, gamma, k=None):
-        """Return the representation of Y-X-Y rotations and optional inversion."""
+    def D_from_angles(self, alpha, beta, gamma, k=None, kt=None):
+        """Return the representation of Y-X-Y rotations.
+
+        Parameters
+        ----------
+        alpha, beta, gamma : torch.Tensor
+            Broadcastable rotation angles.
+        k, kt : torch.Tensor, optional
+            Exponents of spatial inversion and time reversal.
+        """
         value = self.D_from_matrix(o3.angles_to_matrix(alpha, beta, gamma))
-        return value if k is None else value * self.p ** k[..., None, None]
+        if k is not None:
+            value = value * self.p ** k[..., None, None]
+        return value if kt is None else value * self.t ** kt[..., None, None]
 
-    def D_from_quaternion(self, quaternion, k=None):
-        """Return the representation of a quaternion and optional inversion."""
+    def D_from_quaternion(self, quaternion, k=None, kt=None):
+        """Return a quaternion rotation multiplied by ``p**k * t**kt``."""
         value = self.D_from_matrix(o3.quaternion_to_matrix(quaternion))
-        return value if k is None else value * self.p ** k[..., None, None]
+        if k is not None:
+            value = value * self.p ** k[..., None, None]
+        return value if kt is None else value * self.t ** kt[..., None, None]
 
     def D_from_axis_angle(self, axis, angle):
         """Return the representation of an axis-angle rotation."""
@@ -247,12 +274,12 @@ class Irreps(tuple):
             ]
         )
 
-    def D_from_matrix(self, matrix):
-        """Return the block-diagonal Cartesian representation of a matrix."""
+    def D_from_matrix(self, matrix, time_reversal=False):
+        """Return Cartesian blocks with optional independent time reversal."""
         result = matrix.new_zeros((*matrix.shape[:-2], self.dim, self.dim))
         offset = 0
         for mul, ir in self:
-            value = ir.D_from_matrix(matrix)
+            value = ir.D_from_matrix(matrix, time_reversal)
             for _ in range(mul):
                 result[..., offset : offset + ir.dim, offset : offset + ir.dim] = value
                 offset += ir.dim

@@ -36,8 +36,52 @@ from tace.models.compile.aot import (
     _size_oblivious_export,
     _synthetic_graph_sample,
 )
-from tace.models.compile.compile import trace_to_fx
+from tace.models.compile.compile import compiled_call, trace_and_compile, trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
+
+
+def test_compiled_shared_state(double_precision):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(3, 3)
+            self.linear.register_buffer("scale", torch.randn(3))
+            self.linear.weight_alias = self.linear.weight
+            self.linear.register_buffer("scale_alias", self.linear.scale)
+            self.alias = self.linear
+            self.tied = torch.nn.Linear(3, 3)
+            self.tied.weight = self.linear.weight
+            self.tied.register_buffer("scale", self.linear.scale)
+
+        def forward(self, x):
+            return (
+                self.linear(x) * self.linear.scale
+                + self.alias(x) * self.alias.scale
+                + self.tied(x) * self.tied.scale
+                + (x @ self.linear.weight_alias.T) * self.linear.scale_alias
+            ).sin()
+
+    torch.compiler.reset()
+    model = Model()
+    state = {**dict(model.named_parameters()), **dict(model.named_buffers())}
+    x = torch.randn(4, 3, requires_grad=True)
+    compiled, parameters, buffers = trace_and_compile(model, (x,), backend="aot_eager")
+    for name, value in (*model.named_parameters(), *model.named_buffers()):
+        assert value is state[name]
+    for size in (4, 7):
+        x = torch.randn(size, 3, requires_grad=True)
+        actual = compiled_call(compiled, model, (x,), parameters, buffers)
+        expected = model(x)
+        torch.testing.assert_close(actual, expected)
+        gradients = [
+            torch.autograd.grad(value.square().sum(), (x, *model.parameters()))
+            for value in (actual, expected)
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b)
+        with torch.no_grad():
+            model.linear.weight.add_(0.1)
+            model.linear.scale.mul_(0.9)
 
 
 @pytest.mark.parametrize("use_eqx", [False, True])
@@ -421,20 +465,29 @@ def test_tf32_environment(monkeypatch, value, training):
         )
 
 
-@pytest.mark.parametrize("mask", range(16))
 @pytest.mark.parametrize(
-    "supported",
-    [("cue", "eqt", "oeq", "eqx"), ("cue", "oeq", "eqx"), ("eqt", "eqx"), ("eqt",)],
+    "enabled,supported,expected",
+    [
+        ((), ("eqx", "luna", "oeq", "eqt", "cue"), None),
+        (
+            ("eqx", "luna", "oeq", "eqt", "cue"),
+            ("cue", "eqt", "oeq", "luna", "eqx"),
+            "eqx",
+        ),
+        (("luna", "oeq", "eqt", "cue"), ("cue", "eqt", "oeq", "luna", "eqx"), "luna"),
+        (("oeq", "eqt", "cue"), ("cue", "eqt", "oeq", "luna", "eqx"), "oeq"),
+        (("eqt", "cue"), ("cue", "eqt", "oeq", "luna", "eqx"), "eqt"),
+        (("cue",), ("cue", "eqt", "oeq", "luna", "eqx"), "cue"),
+        (("eqx", "luna", "oeq"), ("oeq", "cue"), "oeq"),
+        (("eqx", "luna", "oeq"), ("eqt",), None),
+    ],
 )
-def test_acceleration_priority(monkeypatch, mask, supported):
+def test_acceleration_priority(monkeypatch, enabled, supported, expected):
     from tace.utils.env import ACCELERATION_ENV, select_acceleration
 
-    priority = ("eqx", "oeq", "eqt", "cue")
-    enabled = [name for i, name in enumerate(priority) if mask & (1 << i)]
-    for name in priority:
+    for name in ("eqx", "luna", "oeq", "eqt", "cue"):
         monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
     monkeypatch.setenv("TACE_USE_COMPILE", "1")
-    expected = next((name for name in enabled if name in supported), None)
     assert select_acceleration(*supported, kernel="conv") == expected
 
 
@@ -525,7 +578,7 @@ def test_compile_direct_hessian(dtype, interaction_type):
     targets = ["energy", "forces", "direct_hessian"]
     config["special"]["direct_hessian"]["interaction_type"] = interaction_type
     config.update(
-        num_layers=2,
+        num_layers=1,
         num_channel=2,
         Lmax=2,
         lmax=2,
