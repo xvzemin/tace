@@ -23,7 +23,7 @@ from .inter import (
     INTERACTION,
     O2CgtpInteraction,
     O2MagneticInteraction,
-    O3CartesianIctpIctcInteraction,
+    O3IctdInteraction,
     O3MagneticWigner6jInteraction,
     UuO2Interaction,
     UvO2Interaction,
@@ -120,12 +120,12 @@ class NodeRepresentation(torch.nn.Module):
             and not node_embedding_cls.use_wigner
         ) or any(
             not issubclass(
-                interaction_cls, (O2CgtpInteraction, O3CartesianIctpIctcInteraction)
+                interaction_cls, (O2CgtpInteraction, O3IctdInteraction)
             )
             for interaction_cls in interaction_classes
         )
         uses_co3_interaction = any(
-            issubclass(cls, O3CartesianIctpIctcInteraction)
+            issubclass(cls, O3IctdInteraction)
             for cls in interaction_classes
         )
         self.use_so2 = uses_so2_interaction
@@ -544,7 +544,7 @@ class NodeRepresentation(torch.nn.Module):
             and not all(
                 interaction.use_eqx
                 for interaction in self.interactions
-                if isinstance(interaction, O3CartesianIctpIctcInteraction)
+                if isinstance(interaction, O3IctdInteraction)
             )
             else None
         )
@@ -652,7 +652,7 @@ class NodeRepresentation(torch.nn.Module):
                 edge_radial_basis,
                 this_edge_feats,
                 cartesian_edge_attrs
-                if isinstance(inter, O3CartesianIctpIctcInteraction)
+                if isinstance(inter, O3IctdInteraction)
                 else edge_attrs,
                 data["edge_index"],
                 edge_cutoff,

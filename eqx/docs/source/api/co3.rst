@@ -48,11 +48,12 @@ Activations
 Tensor products
 ---------------
 
-``co3.ictp_ictc`` contracts Cartesian tensors and then projects the output.
-``co3.ictp`` constructs the STF output by analytic symmetrization and trace
-subtraction. Both retain every allowed angular path, including Levi-Civita
-couplings, and use identical instruction weights and normalization.
-``co3.TensorProduct`` continues to select ``co3.ictp_ictc.TensorProduct``.
+``co3.ictp`` implements the 1989 ICTP theory through analytic symmetrization
+and trace subtraction. ``co3.ictd`` implements TACE's formulation based on
+the 2024 ICTD theory through Cartesian contractions and irreducible projection.
+Both retain every allowed angular path, including Levi-Civita couplings,
+and use identical instruction weights and normalization.
+``co3.TensorProduct`` is ``co3.ictd.TensorProduct``.
 The projection route skips outputs already known to be STF and batches the
 remaining projections by rank. A mixed output entry is projected if any
 incoming path requires projection; independent path weights are unchanged.
@@ -78,9 +79,9 @@ independent; paths with different input degrees are not merged.
 
    args = ("4x1o", "4x1o", "4x0e+4x1e+4x2e")
    paths = [(0, 0, k, "uuu", True) for k in range(3)]
-   projected = co3.ictp_ictc.TensorProduct(*args, paths)
-   analytic = co3.ictp.TensorProduct(*args, paths)
-   analytic.load_state_dict(projected.state_dict())
+   ictd = co3.ictd.TensorProduct(*args, paths)
+   ictp = co3.ictp.TensorProduct(*args, paths)
+   ictp.load_state_dict(ictd.state_dict())
 
 With ``irrep_normalization="component"``, unit variance refers to independent
 orthonormal irreducible coordinates, not to all ``3**l`` Cartesian entries.
@@ -102,7 +103,7 @@ The analytic route combines fixed symmetrization, delta insertion and output
 scaling for small tensors. Larger tensors retain factored transformations to
 bound the size of constant matrices.
 
-For convolutions, ``co3.ictp_ictc.TensorProduct(project=False)`` allows a single
+For convolutions, ``co3.ictd.TensorProduct(project=False)`` allows a single
 projection after graph reduction and channel mixing. The analytic algorithm
 produces an STF tensor on each edge. Both can be passed to
 :class:`eqx.conv.CartesianTensorProductConv`; its PyTorch backend follows the

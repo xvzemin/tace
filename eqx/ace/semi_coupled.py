@@ -1,4 +1,4 @@
-"""Atomic cluster expansion with external element-dependent coefficients."""
+"""Channel-wise symmetric contractions with linear channel mixing."""
 
 from collections import defaultdict
 
@@ -34,8 +34,8 @@ def make_metadata(rows, dims, weighted):
     return repr((dims, weighted, tuple(schedules)))
 
 
-class TACE(torch.nn.Module):
-    """Evaluate successive channel-wise products and coefficient contractions.
+class SemiCoupledSymmetricContraction(torch.nn.Module):
+    """Channel-wise symmetric contractions with linear channel mixing.
 
     Parameters
     ----------
@@ -53,11 +53,14 @@ class TACE(torch.nn.Module):
     Notes
     -----
     Inputs use flattened ``mul_ir`` storage. The module owns no learned weights.
+    Linear maps mix channels of equivalent irreps at each correlation order.
+    Tensor products remain channel-wise and retain the supplied coupling paths.
     Both backends support higher derivatives. CUDA weight gradients use
     atomic reductions and are not bitwise deterministic.
 
     Examples
     --------
+    >>> import torch
     >>> from eqx import ace
     >>> from e3nn import o3
     >>> irreps = "2x0e + 2x1o"
@@ -65,7 +68,7 @@ class TACE(torch.nn.Module):
     >>> linears = [o3.Linear(layout, "2x0e", internal_weights=False,
     ...                      shared_weights=False)
     ...            for layout in (irreps, tp.irreps_out)]
-    >>> layer = ace.TACE([tp], linears, backend="torch")
+    >>> layer = ace.SemiCoupledSymmetricContraction([tp], linears, backend="torch")
     >>> weights = [torch.randn(2, linear.weight_numel) for linear in linears]
     >>> features = torch.randn(3, layer.input_dim)
     >>> node_type = torch.tensor([0, 1, 0])

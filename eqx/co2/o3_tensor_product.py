@@ -176,7 +176,7 @@ class O3TensorProduct(torch.nn.Module):
         Parameters
         ----------
         tensor_product : torch.nn.Module
-            Spherical CGTP or Cartesian ICTP/ICTC TensorProduct with uvu/uvw paths.
+            Spherical CGTP or Cartesian ICTD TensorProduct with uvu/uvw paths.
         normalization : {"component", "norm", "integral"}, optional
             Harmonic normalization of the original second input.
         input_basis, output_basis : {"cartesian", "spherical"}, optional

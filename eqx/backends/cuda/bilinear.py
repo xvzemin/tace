@@ -5,9 +5,9 @@ from functools import lru_cache
 
 import torch
 
-from .....ops.bilinear import contract_fake, decode_metadata, encode_metadata
-from .....utils.metadata import parse_metadata
-from ...runtime import kernels, runtime
+from ...ops.bilinear import contract_fake, decode_metadata, encode_metadata
+from ...utils.metadata import parse_metadata
+from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
@@ -429,8 +429,7 @@ def launch(metadata, program, node_type, operands, outputs):
 def contract(
     metadata: str, program: str, node_type: torch.Tensor, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
-    from ...graph import execute
-    from .bilinear import launch
+    from .graph import execute
 
     outputs = contract_fake(metadata, program, node_type, operands)
     terms = parse_metadata(program)

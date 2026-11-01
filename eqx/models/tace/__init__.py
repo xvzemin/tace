@@ -1,1 +1,1 @@
-"""Specialized interactions and product contractions for TACE models."""
+"""Specialized interactions for TACE models."""

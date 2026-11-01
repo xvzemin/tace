@@ -32,6 +32,8 @@ class SymmetricContraction(torch.nn.Module):
 
     Examples
     --------
+    >>> import torch
+    >>> from eqx.ace import SymmetricContraction
     >>> coupling = torch.ones(1, 1, 1, 1)
     >>> layer = SymmetricContraction("2x0e", "2x0e", [(0, 2, coupling)])
     >>> x = torch.randn(3, 2, 1)

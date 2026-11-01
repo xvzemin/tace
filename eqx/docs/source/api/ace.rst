@@ -6,17 +6,17 @@ Atomic cluster expansion
 .. autoclass:: eqx.ace.SymmetricContraction
    :members: forward, from_entries
 
-.. autoclass:: eqx.ace.TACE
+.. autoclass:: eqx.ace.SemiCoupledSymmetricContraction
    :members: forward
 
-.. autoclass:: eqx.ace.CartesianTACE
+.. autoclass:: eqx.ace.IctdSemiCoupledSymmetricContraction
    :members: forward
 
 Gated products
 --------------
 
-.. autoclass:: eqx.models.tace.tece_oam_rra.BilinearACE
+.. autoclass:: eqx.ace.BilinearContraction
    :members: forward
 
-.. autoclass:: eqx.ace.CartesianBilinearACE
+.. autoclass:: eqx.ace.IctdBilinearContraction
    :members: forward

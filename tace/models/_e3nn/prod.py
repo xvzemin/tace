@@ -9,8 +9,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from eqx.ace import TACE
-from eqx.models.tace.tece_oam_rra import BilinearACE
+from eqx.ace import BilinearContraction, SemiCoupledSymmetricContraction
 from tace.utils.env import select_acceleration
 
 from ..layout import LayoutTransform
@@ -77,7 +76,7 @@ class CgtpACE(Product):
             product_in1 = ace.irreps_out
 
         if self.use_eqx and self.aces:
-            self.eqx_ace = TACE(
+            self.eqx_ace = SemiCoupledSymmetricContraction(
                 [ace.tp for ace in self.aces],
                 [coef.linear for coef in self.coefs],
             )
@@ -365,7 +364,7 @@ class BilinearMoEACE(Product):
 
         if self.use_eqx:
             coef = self.coefs[1]
-            self.eqx_ace = BilinearACE(
+            self.eqx_ace = BilinearContraction(
                 self.aces[0].tp, coef.linear, getattr(coef, "num_experts", 1),
                 shared_linear=self.shared_coefs[1].linear if hasattr(self, "shared_coefs") else None,
             )

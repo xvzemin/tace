@@ -717,7 +717,7 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
         other CGTP implementations to spherical ones. Select ``"o2"`` or
         ``"o3"`` to convert all CGTP
         interactions to aligned-frame or spherical tensor products. Select
-        ``"co3"`` for Cartesian ICTP/ICTC contractions with spherical products.
+        ``"co3"`` for Cartesian ICTD contractions with spherical products.
 
     Returns
     -------
@@ -734,8 +734,8 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
     """
     from tace.models._e3nn.inter import (
         O2CgtpInteraction,
-        O3CartesianIctpIctcInteraction,
         O3CgtpInteraction,
+        O3IctdInteraction,
     )
 
     if implementation not in ("auto", "o2", "o3", "co3"):
@@ -752,7 +752,9 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
         index
         for index, interaction in enumerate(interactions)
         if type(interaction) in (
-            O3CgtpInteraction, O2CgtpInteraction, O3CartesianIctpIctcInteraction
+            O3CgtpInteraction,
+            O2CgtpInteraction,
+            O3IctdInteraction,
         )
     ]
     if not selected:

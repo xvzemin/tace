@@ -81,11 +81,11 @@ See :ref:`eqx-streaming` for training support and requirements.
 
 .. autofunction:: tace.lightning.convert_cgtp
 
-Cartesian O(3) ICTP/ICTC
-------------------------
+Cartesian O(3) ICTD
+------------------
 
 For spherical node storage, ``atomic_basis.type: co3`` selects
-``O3CartesianIctpIctcInteraction`` and automatically constructs the
+``O3IctdInteraction`` and automatically constructs the
 ``co3_angular_basis`` using ``eqx.co3.CartesianHarmonics``. ``lmax`` still
 controls the edge angular degrees; no separate basis selector is needed.
 Node embeddings that require spherical harmonics retain their own spherical
@@ -97,7 +97,7 @@ weights, and normalization. Its computation is:
 .. code-block:: text
 
    spherical nodes -> linear up -> Cartesian basis -> gather
-   Cartesian edge harmonics ------------------------> ICTP/ICTC x radial weights
+   Cartesian edge harmonics ------------------------> ICTD x radial weights
      -> scatter -> Cartesian linear down -> transposed path matrix
      -> spherical nonlinearity and product basis
 
@@ -127,7 +127,7 @@ This interaction uses native PyTorch, not the fused spherical CUDA kernel.
 Cartesian storage grows as ``3**l`` and can cost more memory at high degree.
 See :ref:`equivariantx-api-co3` for layout and normalization conventions.
 
-.. autoclass:: tace.models._e3nn.inter.O3CartesianIctpIctcInteraction
+.. autoclass:: tace.models._e3nn.inter.O3IctdInteraction
    :no-members:
    :show-inheritance:
 

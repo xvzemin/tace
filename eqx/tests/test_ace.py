@@ -4,9 +4,13 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx.ace import SymmetricContraction
-from eqx.ace.tace import TACE
-from eqx.models.tace.tece_oam_rra.product import BilinearACE
+from eqx.ace import (
+    BilinearContraction,
+    IctdBilinearContraction,
+    IctdSemiCoupledSymmetricContraction,
+    SemiCoupledSymmetricContraction,
+    SymmetricContraction,
+)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -103,9 +107,8 @@ def test_symmetric_contraction(device, dtype, instructions):
         "moe_split",
     ],
 )
-def test_cartesian_products(kind, double_precision, monkeypatch):
+def test_ictd_contractions(kind, double_precision, monkeypatch):
     from eqx import co3
-    from eqx.ace import CartesianBilinearACE, CartesianTACE
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -116,7 +119,7 @@ def test_cartesian_products(kind, double_precision, monkeypatch):
         monkeypatch.setattr(ace, "schedule_batches", lambda groups: batches(groups, 7))
         monkeypatch.setattr(ace, "weighted_source", lambda *args: None)
     elif kind.endswith("_split"):
-        from eqx.backends.cuda.models.tace import bilinear
+        from eqx.backends.cuda import bilinear
 
         batches = bilinear.metadata_batches
         monkeypatch.setattr(
@@ -148,13 +151,15 @@ def test_cartesian_products(kind, double_precision, monkeypatch):
     )
     if weighted:
         modules = [
-            CartesianBilinearACE(tp, coefficient, experts, backend=backend)
+            IctdBilinearContraction(tp, coefficient, experts, backend=backend)
             for backend in ("torch", "cuda")
         ]
     else:
         first = co3.Linear(irreps, output, internal_weights=False, shared_weights=False)
         modules = [
-            CartesianTACE([tp], [first, coefficient], backend=backend)
+            IctdSemiCoupledSymmetricContraction(
+                [tp], [first, coefficient], backend=backend
+            )
             for backend in ("torch", "cuda")
         ]
     modules = [module.cuda() for module in modules]
@@ -210,7 +215,7 @@ def test_native_cuda_graph_ace(monkeypatch):
         o3.Linear("2x0e", "3x0e", internal_weights=False, shared_weights=False)
         for _ in range(3)
     ]
-    module = TACE([tp, tp], linears).cuda().double()
+    module = SemiCoupledSymmetricContraction([tp, tp], linears).cuda().double()
     cuda_graph._GRAPHS.clear()
     try:
         for seed in (2, 3):
@@ -249,9 +254,7 @@ def test_native_cuda_graph_ace(monkeypatch):
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("num_nodes", [0, 3, 9])
 @pytest.mark.parametrize("channels_in,channels_out,degree", [(2, 2, 1), (33, 17, 5)])
-def test_ace_external_coefficients(
-    device, num_nodes, channels_in, channels_out, degree
-):
+def test_semi_coupled_contraction(device, num_nodes, channels_in, channels_out, degree):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     irreps = o3.Irreps([(channels_in, (0, 1)), (channels_in, (degree, (-1) ** degree))])
@@ -273,7 +276,9 @@ def test_ace_external_coefficients(
         o3.Linear(inp, irreps_out, internal_weights=False, shared_weights=False)
         for inp in (irreps, tp.irreps_out.simplify())
     ]
-    module = TACE([tp], linears).to(device=device, dtype=torch.float64)
+    module = SemiCoupledSymmetricContraction([tp], linears).to(
+        device=device, dtype=torch.float64
+    )
     x = torch.randn(num_nodes, 2 * irreps.dim, device=device, dtype=torch.float64)[
         :, ::2
     ].requires_grad_()
@@ -329,7 +334,7 @@ def test_ace_external_coefficients(
 @pytest.mark.parametrize("nodes", [0, 3, 9])
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("degree", [1, 3])
-def test_bilinear_ace(device, experts, nodes, shared, degree):
+def test_bilinear_contraction(device, experts, nodes, shared, degree):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = o3.TensorProduct(
@@ -356,7 +361,7 @@ def test_bilinear_ace(device, experts, nodes, shared, degree):
         if shared
         else None
     )
-    module = BilinearACE(tp, linear, experts, shared_linear=shared_linear).to(
+    module = BilinearContraction(tp, linear, experts, shared_linear=shared_linear).to(
         device=device, dtype=torch.float64
     )
     x, y, gates = [

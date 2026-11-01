@@ -3,7 +3,7 @@
 import torch
 from e3nn.nn import Activation as ScalarActivation
 
-from .ictp_ictc import ElementwiseTensorProduct
+from .ictd import ElementwiseTensorProduct
 from .irreps import Irreps
 
 

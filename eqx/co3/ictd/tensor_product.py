@@ -1,4 +1,4 @@
-"""Delta and Levi-Civita couplings with independent channel paths."""
+"""Cartesian contractions and irreducible projection with independent paths."""
 
 import math
 from collections import defaultdict

@@ -6,8 +6,8 @@ from functools import lru_cache
 
 import torch
 
-from ..ictp_ictc.tensor_product import TensorProduct as ContractionTensorProduct
-from ..ictp_ictc.tensor_product import cartesian_product
+from ..ictd.tensor_product import TensorProduct as IctdTensorProduct
+from ..ictd.tensor_product import cartesian_product
 from ..symmetric import SymmetricBasis, symmetric_basis, symmetric_powers
 
 SYMMETRIC_MATRIX_SIZE = 8192
@@ -140,7 +140,7 @@ class CartesianProduct(torch.nn.Module):
         return self
 
 
-class TensorProduct(ContractionTensorProduct):
+class TensorProduct(IctdTensorProduct):
     """Couple Cartesian irreps with analytic symmetrization and trace removal.
 
     Parameters

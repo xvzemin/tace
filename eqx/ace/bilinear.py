@@ -7,10 +7,10 @@ from e3nn import o3
 
 from eqx import o3 as eqx_o3
 
-from ....ops.bilinear import contract, encode_metadata
+from ..ops.bilinear import contract, encode_metadata
 
 
-class BilinearACE(torch.nn.Module):
+class BilinearContraction(torch.nn.Module):
     """Contract a gated bilinear product directly into its coefficient output.
 
     Parameters
@@ -35,6 +35,25 @@ class BilinearACE(torch.nn.Module):
     by the caller. The order-one contribution is added by the caller.
     Both backends support higher derivatives. CUDA weight gradients use
     atomic reductions and are not bitwise deterministic.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from e3nn import o3
+    >>> from eqx import ace
+    >>> tp = o3.TensorProduct(
+    ...     "2x0e", "2x0e", "2x0e", [(0, 0, 0, "uuu", True)],
+    ...     internal_weights=False, shared_weights=False
+    ... )
+    >>> linear = o3.Linear("2x0e", "3x0e", internal_weights=False,
+    ...                    shared_weights=False)
+    >>> layer = ace.BilinearContraction(tp, linear, backend="torch")
+    >>> features = torch.randn(3, 2)
+    >>> gates = torch.randn(3, tp.weight_numel)
+    >>> weight = torch.randn(2, linear.weight_numel)
+    >>> node_type = torch.tensor([0, 1, 0])
+    >>> layer(features, features, gates, weight, node_type).shape
+    torch.Size([3, 3])
     """
 
     def __init__(
@@ -47,7 +66,7 @@ class BilinearACE(torch.nn.Module):
             ins.connection_mode != "uuu" or not ins.has_weight
             for ins in tensor_product.instructions
         ):
-            raise ValueError("BilinearACE requires weighted uuu paths.")
+            raise ValueError("BilinearContraction requires weighted uuu paths.")
         if tensor_product.internal_weights or linear.internal_weights:
             raise ValueError("Provide external product and coefficient weights.")
         full_input = type(linear.irreps_in)(

@@ -332,8 +332,8 @@ class O3CgtpInteraction(Interaction):
         return m_i, self.truncate_ghosts(sc, nlocal)
 
 
-class O3CartesianIctpIctcInteraction(O3CgtpInteraction):
-    """Evaluate CGTP interactions with Cartesian ICTP/ICTC contractions.
+class O3IctdInteraction(O3CgtpInteraction):
+    """Evaluate CGTP interactions with Cartesian ICTD contractions.
 
     Node inputs and outputs use spherical coordinates. Intermediate tensor
     products use Cartesian storage with identical paths and radial weights.
@@ -992,7 +992,7 @@ class O2MagneticInteraction(UvO2Interaction):
 
 INTERACTION: Dict[str, type[Interaction]] = {
     "cgtp": O3CgtpInteraction,
-    "co3": O3CartesianIctpIctcInteraction,
+    "co3": O3IctdInteraction,
     "o2_cgtp": O2CgtpInteraction,
     "so2": UvSO2Interaction,
     "o2": UvO2Interaction,

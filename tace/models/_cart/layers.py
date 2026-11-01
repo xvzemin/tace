@@ -5,7 +5,7 @@ from e3nn import o3
 from e3nn.nn import Gate
 
 from eqx import co3
-from eqx.ace.cartesian import CartesianBilinearACE, CartesianTACE
+from eqx.ace import IctdBilinearContraction, IctdSemiCoupledSymmetricContraction
 from eqx.co3 import ElementLinear, MoEElementLinear
 from eqx.conv.co3 import CartesianTensorProductConv, Linear
 from tace.utils.env import acceleration_enabled
@@ -343,14 +343,14 @@ def cartesian_modules(module):
         module.__class__ = RadialRotaryConvolution
         module.setup_cartesian()
     if isinstance(module, CgtpACE) and module.aces:
-        module.eqx_ace = CartesianTACE(
+        module.eqx_ace = IctdSemiCoupledSymmetricContraction(
             [ace.tp for ace in module.aces],
             [coef.linear for coef in module.coefs],
             backend="cuda" if module.use_eqx else "torch",
         )
     if isinstance(module, BilinearMoEACE) and module.use_eqx:
         coef = module.coefs[1]
-        module.eqx_ace = CartesianBilinearACE(
+        module.eqx_ace = IctdBilinearContraction(
             module.aces[0].tp,
             coef.linear,
             getattr(coef, "num_experts", 1),

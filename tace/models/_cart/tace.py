@@ -23,7 +23,7 @@ class cartTACE(e3nnTACE):
 
     def __init__(self, **kwargs):
         kwargs = deepcopy(kwargs)
-        # Equivalent CGTP algorithms share paths; native storage uses ICTP--ICTC.
+        # Equivalent CGTP algorithms share paths; native storage uses ICTD.
         atomic = kwargs.get("atomic_basis", {})
         kinds = atomic.get("type", "cgtp")
         atomic["type"] = (

@@ -733,6 +733,8 @@ def test_export_elements_cli(tmp_path, monkeypatch, double_precision, capsys):
 def test_cartesian_conversion(
     double_precision, monkeypatch, tmp_path, parity, node_embedding, fused
 ):
+    from tace.models._e3nn.inter import O3IctdInteraction
+
     for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -766,6 +768,10 @@ def test_cartesian_conversion(
     for name, p in module.named_parameters():
         torch.testing.assert_close(p, parameters[name], rtol=0, atol=0)
     representation = module.readout_fn.representation
+    assert all(
+        isinstance(block, O3IctdInteraction)
+        for block in representation.interactions
+    )
     assert representation.co3_angular_basis is not None
     assert representation.use_o3_angular_basis == (node_embedding == "spherical_tensor")
     for original, converted in zip(

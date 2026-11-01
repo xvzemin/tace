@@ -8,7 +8,7 @@ import torch
 from eqx import co3
 
 from ...co3.basis import path_normalization
-from ...co3.ictp_ictc.tensor_product import coupling_phase
+from ...co3.ictd.tensor_product import coupling_phase
 from ...o3.cgtp.convolution import O3TensorProductConv
 from ...utils.layout import _Permute
 from .polynomials import (

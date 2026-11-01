@@ -3,9 +3,10 @@ Cartesian TACE
 
 Cartesian TACE is under refactoring. Set ``model.config._target_`` to
 ``tace.models.cartTACE`` with the same configuration as spherical
-TACE. ``atomic_basis.type: cgtp`` uses native ICTP--ICTC contractions, with
-projection after aggregation and channel compression. The node product block
-also uses Cartesian tensors. Weights, biases, and coupling paths are unchanged.
+TACE. ``atomic_basis.type: cgtp`` uses Cartesian contractions based on the
+2024 ICTD theory, with projection after aggregation and channel compression.
+The node product block also uses Cartesian tensors. Weights, biases, and
+coupling paths are unchanged.
 
 ``o2`` and ``uu_o2`` use direct Cartesian plane restriction and ``eqx.co2``
 operators. Each local order stores ``2**m`` Cartesian entries per channel,

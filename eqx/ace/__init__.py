@@ -1,7 +1,15 @@
 """Fused atomic cluster expansions."""
 
-from .cartesian import CartesianBilinearACE, CartesianTACE
+from .bilinear import BilinearContraction
+from .ictd_bilinear import IctdBilinearContraction
+from .ictd_semi_coupled import IctdSemiCoupledSymmetricContraction
+from .semi_coupled import SemiCoupledSymmetricContraction
 from .symmetric import SymmetricContraction
-from .tace import TACE
 
-__all__ = ["TACE", "CartesianTACE", "CartesianBilinearACE", "SymmetricContraction"]
+__all__ = [
+    "SymmetricContraction",
+    "SemiCoupledSymmetricContraction",
+    "IctdSemiCoupledSymmetricContraction",
+    "BilinearContraction",
+    "IctdBilinearContraction",
+]

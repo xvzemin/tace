@@ -5,9 +5,7 @@ from .registry import get_kernel, register_kernel
 register_kernel("ace_contract", "cuda", "eqx.backends.cuda.ace:contract")
 register_kernel("symmetric_contract", "cuda", "eqx.backends.cuda.symmetric:contract")
 register_kernel("alignment_cuda", "cuda", "eqx.backends.cuda.wigner:alignment_cuda")
-register_kernel(
-    "bilinear_ace", "cuda", "eqx.backends.cuda.models.tace.bilinear:contract"
-)
+register_kernel("bilinear_ace", "cuda", "eqx.backends.cuda.bilinear:contract")
 register_kernel(
     "contraction", "cuda", "eqx.backends.cuda.o2_o3.convolution:contraction"
 )

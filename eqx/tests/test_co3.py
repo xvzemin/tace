@@ -176,10 +176,13 @@ def test_linear(double_precision, normalization, shared, instructions):
         for path_normalization in ("element", "path", "none")
     ],
 )
-@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
+@pytest.mark.parametrize(
+    "tp_type", [co3.ictd.TensorProduct, co3.ictp.TensorProduct], ids=["ictd", "ictp"]
+)
 def test_tensor_product(
     double_precision, mode, multiplicities, normalization, path_normalization, tp_type
 ):
+    assert co3.TensorProduct is co3.ictd.TensorProduct
     u, v, w = multiplicities
     a, b, c = f"{u}x1o+{u}x2e", f"{v}x1o", f"{w}x1e+{w}x2e+{w}x1o+{w}x3o"
     instructions = [
@@ -254,7 +257,9 @@ def test_gate_and_elementwise(double_precision):
         co3.Gate("", [], "1x0o", [torch.sigmoid], "1x1e")
 
 
-@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
+@pytest.mark.parametrize(
+    "tp_type", [co3.ictd.TensorProduct, co3.ictp.TensorProduct], ids=["ictd", "ictp"]
+)
 def test_high_degree_and_compile(double_precision, tp_type):
     assert co3.path_normalization(0, 2000, 2000) == pytest.approx((4001) ** 0.5)
     kwargs = dict(internal_weights=False, shared_weights=False)
@@ -274,13 +279,15 @@ def test_high_degree_and_compile(double_precision, tp_type):
     torch.testing.assert_close(actual, ref(x, y, w), atol=1e-13, rtol=1e-13)
 
 
-@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
+@pytest.mark.parametrize(
+    "tp_type", [co3.ictd.TensorProduct, co3.ictp.TensorProduct], ids=["ictd", "ictp"]
+)
 def test_all_angular_paths(double_precision, tp_type):
     for l1 in range(5):
         for l2 in range(5):
             a, b = f"1x{l1}e", f"1x{l2}o"
-            x = torch.randn(3, 2 * l1 + 1, device=DEVICE)
-            y = torch.randn(3, 2 * l2 + 1, device=DEVICE)
+            x = torch.eye(2 * l1 + 1, device=DEVICE).unsqueeze(1)
+            y = torch.eye(2 * l2 + 1, device=DEVICE).unsqueeze(0)
             cx = co3.ChangeOfBasis(a).to(DEVICE)(x)
             cy = co3.ChangeOfBasis(b).to(DEVICE)(y)
             for l3 in range(abs(l1 - l2), min(l1 + l2, 6) + 1):
@@ -288,12 +295,16 @@ def test_all_angular_paths(double_precision, tp_type):
                 tp = tp_type(a, b, out, [(0, 0, 0, "uuu", False)]).to(DEVICE)
                 actual = co3.ChangeOfBasis(out, True).to(DEVICE)(tp(cx, cy))
                 cg = o3.wigner_3j(l1, l2, l3, dtype=torch.float64, device=DEVICE)
-                expected = torch.einsum("bi,bj,ijk->bk", x, y, cg) * (2 * l3 + 1) ** 0.5
+                expected = (
+                    torch.einsum("...i,...j,ijk->...k", x, y, cg) * (2 * l3 + 1) ** 0.5
+                )
                 torch.testing.assert_close(actual, expected, atol=3e-13, rtol=3e-13)
 
 
-@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
-def test_broadcast_weights_and_disconnected_paths(double_precision, tp_type):
+@pytest.mark.parametrize(
+    "tp_type", [co3.ictd.TensorProduct, co3.ictp.TensorProduct], ids=["ictd", "ictp"]
+)
+def test_broadcast_weights(double_precision, tp_type):
     kwargs = dict(internal_weights=False, shared_weights=False)
     a, b, c = "2x1e", "2x2o", "2x1o+2x2o"
     ins = [(0, 0, 0, "uuu", True), (0, 0, 1, "uuu", True)]
@@ -308,6 +319,9 @@ def test_broadcast_weights_and_disconnected_paths(double_precision, tp_type):
     torch.testing.assert_close(
         co3.ChangeOfBasis(c, True).to(DEVICE)(result), ref(x, y, w)
     )
+
+
+def test_linear_disconnected_paths(double_precision):
     for count in (0, 3):
         linear = co3.Linear("0x0e+2x1e", "1x0e+0x1e").to(DEVICE)
         feats = torch.randn(
@@ -320,20 +334,20 @@ def test_broadcast_weights_and_disconnected_paths(double_precision, tp_type):
         assert not torch.autograd.grad(result.sum(), feats)[0].count_nonzero()
 
 
-@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
-def test_time_reversal_labels(double_precision, tp_type):
+def test_time_reversal_labels(double_precision):
     try:
         o3.Irrep("1eo")
     except ValueError:
         pytest.skip("Time-reversal representations are not installed")
     a, b, c = "2x1eo", "1x1oe", "2x0oo+2x1oo+2x2oo"
     ins = [(0, 0, i, "uvu", True) for i in range(3)]
-    tp = tp_type(a, b, c, ins).to(DEVICE)
-    x, y = (
-        tp.irreps_in1.randn(3, -1, device=DEVICE),
-        tp.irreps_in2.randn(3, -1, device=DEVICE),
-    )
-    torch.testing.assert_close(tp(-x, y), -tp(x, y))
+    for tp_type in (co3.ictd.TensorProduct, co3.ictp.TensorProduct):
+        tp = tp_type(a, b, c, ins).to(DEVICE)
+        x, y = (
+            tp.irreps_in1.randn(3, -1, device=DEVICE),
+            tp.irreps_in2.randn(3, -1, device=DEVICE),
+        )
+        torch.testing.assert_close(tp(-x, y), -tp(x, y))
     gate = co3.Gate("1x0eo", [torch.tanh], "1x0ee", [torch.sigmoid], "1x1eo").to(DEVICE)
     ref = nn.Gate("1x0eo", [torch.tanh], "1x0ee", [torch.sigmoid], "1x1eo").to(DEVICE)
     h = torch.randn(3, ref.irreps_in.dim, device=DEVICE)
@@ -373,10 +387,10 @@ def test_time_reversal_labels(double_precision, tp_type):
     "degrees", [(6, 3, 7), (7, 2, 8), (5, 4, 5), (6, 6, 0), (6, 5, 10)]
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_analytic_tensor_product(degrees, dtype):
+def test_ictp_ictd_equivalence(degrees, dtype):
     l1, l2, l3 = degrees
     args = f"2x{l1}o", f"2x{l2}e", f"2x{l3}o", [(0, 0, 0, "uuu", True)]
-    reference = co3.TensorProduct(*args).to(device=DEVICE, dtype=dtype)
+    reference = co3.ictd.TensorProduct(*args).to(device=DEVICE, dtype=dtype)
     module = co3.ictp.TensorProduct(*args).to(device=DEVICE, dtype=dtype)
     module.load_state_dict(reference.state_dict())
     x = torch.randn(3, 2 * (2 * l1 + 1), device=DEVICE, dtype=dtype, requires_grad=True)
@@ -397,24 +411,6 @@ def test_analytic_tensor_product(degrees, dtype):
             torch.testing.assert_close(a, b, atol=10 * tol, rtol=10 * tol)
         tangents = [torch.randn_like(t) for t in (x, y)]
         losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
-
-
-def test_analytic_tensor_product_normalization(double_precision):
-    for l1, l2 in ((1, 1), (2, 3)):
-        a, b = f"{l1}o", f"{l2}e"
-        x = co3.path_matrix(l1).T.to(DEVICE).unsqueeze(1)
-        y = co3.path_matrix(l2).T.to(DEVICE).unsqueeze(0)
-        for l3 in range(abs(l1 - l2), l1 + l2 + 1):
-            out = f"{l3}o"
-            tp = co3.ictp.TensorProduct(a, b, out, [(0, 0, 0, "uuu", False)]).to(DEVICE)
-            inverse = co3.ChangeOfBasis(out, inverse=True).to(DEVICE)
-            values = inverse(tp(x, y)).flatten(0, 1)
-            torch.testing.assert_close(
-                values.T @ values,
-                torch.eye(2 * l3 + 1, device=DEVICE),
-                atol=2e-13,
-                rtol=2e-13,
-            )
 
 
 def test_tensor_product_projection(double_precision):
@@ -457,7 +453,9 @@ def test_tensor_product_projection(double_precision):
 
 
 @pytest.mark.parametrize("weighted", [False, True])
-@pytest.mark.parametrize("tp_type", [co3.TensorProduct, co3.ictp.TensorProduct])
+@pytest.mark.parametrize(
+    "tp_type", [co3.ictd.TensorProduct, co3.ictp.TensorProduct], ids=["ictd", "ictp"]
+)
 def test_tensor_product_grouping(double_precision, weighted, tp_type):
     a = "2x1o+2x2e+2x1e+2x1o"
     b = "2x1o+2x1e"

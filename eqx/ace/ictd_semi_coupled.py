@@ -1,12 +1,10 @@
-"""Channel-wise Cartesian cluster expansions."""
+"""ICTD symmetric contractions with linear channel mixing."""
 
 import math
 
-from eqx.co3 import Projector
-from eqx.conv.co3.polynomials import coupling_coefficients
-from eqx.models.tace.tece_oam_rra.product import BilinearACE
-
-from .tace import TACE
+from ..co3 import Projector
+from ..conv.co3.polynomials import coupling_coefficients
+from .semi_coupled import SemiCoupledSymmetricContraction
 
 
 def coupling_entries(tensor_product, index):
@@ -25,8 +23,8 @@ def coupling_entries(tensor_product, index):
     ]
 
 
-class CartesianTACE(TACE):
-    """Evaluate Cartesian products and element-dependent coefficient maps.
+class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
+    """Evaluate ICTD products and element-dependent coefficient maps.
 
     Parameters
     ----------
@@ -51,7 +49,9 @@ class CartesianTACE(TACE):
     >>> linears = [co3.Linear(layout, "2x0e", internal_weights=False,
     ...                       shared_weights=False)
     ...            for layout in (irreps, tp.irreps_out)]
-    >>> layer = ace.CartesianTACE([tp], linears, backend="torch")
+    >>> layer = ace.IctdSemiCoupledSymmetricContraction(
+    ...     [tp], linears, backend="torch"
+    ... )
     >>> weights = [torch.randn(2, linear.weight_numel) for linear in linears]
     >>> node_type = torch.tensor([0, 1, 0])
     >>> layer(irreps.randn(3, -1), weights, node_type).shape
@@ -66,37 +66,6 @@ class CartesianTACE(TACE):
 
     def project_product(self, features, stage):
         return self.tensor_products[stage].projection(features)
-
-    def project_output(self, features):
-        return self.projection(features)
-
-
-class CartesianBilinearACE(BilinearACE):
-    """Contract Cartesian products with gates and element/expert coefficients.
-
-    Parameters
-    ----------
-    tensor_product : co3.TensorProduct
-        External-weight channel-wise product.
-    linear : co3.Linear
-        External-weight coefficient map for one expert.
-    num_experts : int, optional
-        Number of independent channel groups.
-    backend : {"cuda", "torch"}, optional
-        Execution backend. CPU inputs use PyTorch.
-    shared_linear : co3.Linear, optional
-        Element-independent coefficient map over all channels.
-    """
-
-    coupling_entries = staticmethod(coupling_entries)
-
-    def __init__(
-        self, tensor_product, linear, num_experts=1, backend="cuda", shared_linear=None
-    ):
-        super().__init__(tensor_product, linear, num_experts, backend, shared_linear)
-        self.projection = Projector(
-            [(mul * num_experts, ir) for mul, ir in linear.irreps_out]
-        )
 
     def project_output(self, features):
         return self.projection(features)

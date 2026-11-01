@@ -1,4 +1,4 @@
-"""Cartesian tensor products and contractions followed by STF projection."""
+"""Cartesian tensor products with irreducible decomposition."""
 
 from .tensor_product import (
     ElementwiseTensorProduct,
