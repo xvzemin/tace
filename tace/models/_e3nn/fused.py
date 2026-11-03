@@ -22,50 +22,6 @@ from ..utils import repr_without
 from .paths import SymmetricProductPaths, generate_paths
 
 
-class SymmetricContraction(EqxSymmetricContraction):
-    """Channel-wise symmetric contraction with external element weights.
-
-    Parameters
-    ----------
-    irreps_in, irreps_out : o3.Irreps
-        Input and output representations with equal multiplicities.
-    coupling_tensors : sequence of tuple
-        ``(output_index, degree, tensor)`` entries accepted by
-        :class:`eqx.ace.SymmetricContraction`.
-    instructions : sequence of tuple, optional
-        ``(i_tensor, i_path)`` selections in external weight order.
-
-    Notes
-    -----
-    Selects ``TACE_USE_EQX`` before ``TACE_USE_CUE`` at construction.
-    CPU tensors and disabled acceleration use PyTorch operations.
-    All backends retain the same external weights and coupling paths.
-    """
-
-    def __init__(self, irreps_in, irreps_out, coupling_tensors, *, instructions=None):
-        backend = select_acceleration("eqx", "cue", kernel="product")
-        super().__init__(
-            irreps_in,
-            irreps_out,
-            coupling_tensors,
-            backend="cuda" if backend == "eqx" else "torch",
-            instructions=instructions,
-        )
-        self.use_eqx = backend == "eqx"
-        self.use_cue = backend == "cue"
-        if self.use_cue and self.has_terms:
-            from ..cue import CueSymmetricContraction
-
-            self.fused_tp = CueSymmetricContraction(self)
-
-    def forward(
-        self, features: torch.Tensor, weight: torch.Tensor, node_type: torch.Tensor
-    ) -> torch.Tensor:
-        if self.use_cue and self.has_terms and features.is_cuda:
-            return self.fused_tp(features, weight, node_type)
-        return super().forward(features, weight, node_type)
-
-
 class UuuTensorProduct(torch.nn.Module):
     def __init__(
         self,
@@ -792,6 +748,7 @@ class UuO2TensorProductConv(torch.nn.Module):
         )
         return self.reshape_out.inverse(message)
 
+
 class Wigner6jTensorProductConv(torch.nn.Module):
     """Recouple a node--harmonic--node product before graph aggregation.
 
@@ -844,3 +801,44 @@ class Wigner6jTensorProductConv(torch.nn.Module):
             weight2,
             backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
         )
+
+
+class SymmetricContraction(EqxSymmetricContraction):
+    """Channel-wise symmetric contraction with external element weights.
+
+    Parameters
+    ----------
+    irreps_in, irreps_out : o3.Irreps
+        Input and output representations with equal multiplicities.
+    coupling_tensors : sequence of tuple
+        ``(output_index, degree, tensor)`` entries accepted by
+        :class:`eqx.ace.SymmetricContraction`.
+
+    Notes
+    -----
+    Selects ``TACE_USE_EQX`` before ``TACE_USE_CUE`` at construction.
+    CPU tensors and disabled acceleration use PyTorch operations.
+    All backends retain the same external weights and coupling paths.
+    """
+
+    def __init__(self, irreps_in, irreps_out, coupling_tensors):
+        backend = select_acceleration("eqx", "cue", kernel="product")
+        super().__init__(
+            irreps_in,
+            irreps_out,
+            coupling_tensors,
+            backend="cuda" if backend == "eqx" else "torch",
+        )
+        self.use_eqx = backend == "eqx"
+        self.use_cue = backend == "cue"
+        if self.use_cue and self.has_terms:
+            from ..cue import CueSymmetricContraction
+
+            self.fused_tp = CueSymmetricContraction(self)
+
+    def forward(
+        self, features: torch.Tensor, weight: torch.Tensor, node_type: torch.Tensor
+    ) -> torch.Tensor:
+        if self.use_cue and self.has_terms and features.is_cuda:
+            return self.fused_tp(features, weight, node_type)
+        return super().forward(features, weight, node_type)

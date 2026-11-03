@@ -15,8 +15,7 @@ from eqx.ace import (
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("instructions", [None, [(1, 1), (0, 0)], []])
-def test_symmetric_contraction(device, dtype, instructions):
+def test_symmetric_contraction(device, dtype):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.manual_seed(9)
@@ -26,34 +25,25 @@ def test_symmetric_contraction(device, dtype, instructions):
         "3x0e+3x1o",
         "3x0e+3x1o",
         [(0, 1, first), (1, 3, coupling)],
-        instructions=instructions,
     ).to(device, dtype)
     x = torch.randn(4, 3, 4, device=device, dtype=dtype, requires_grad=True)
     weight = torch.randn(
         2, module.num_paths, 3, device=device, dtype=dtype, requires_grad=True
     )
-    indices = torch.tensor(
-        [path if tensor == 0 else path + 1 for tensor, path in module.instructions],
-        device=device,
-        dtype=torch.long,
-    )
-    full_weight = weight.new_zeros(2, 3, 3).index_add(1, indices, weight)
-    assert module.num_paths == (3 if instructions is None else len(instructions))
-    if instructions is not None:
-        assert module.instructions == tuple(instructions)
+    assert module.num_paths == 3
     node_type = torch.tensor([0, 1, 1, 0], device=device)
     expected = torch.cat(
         (
             torch.einsum(
                 "ak,nkc,nca->nc",
                 first[0].to(device, dtype),
-                full_weight[node_type, :1],
+                weight[node_type, :1],
                 x,
             ),
             torch.einsum(
                 "mabck,nku,nua,nub,nuc->num",
                 coupling.to(device, dtype),
-                full_weight[node_type, 1:],
+                weight[node_type, 1:],
                 x,
                 x,
                 x,
@@ -64,7 +54,7 @@ def test_symmetric_contraction(device, dtype, instructions):
     actual = module(x, weight, node_type)
     atol, rtol = (1e-9, 1e-9) if dtype == torch.float64 else (3e-4, 1e-4)
     torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
-    for _ in range(3 if module.num_paths else 1):
+    for _ in range(3):
         vector = torch.randn_like(actual)
         actual = torch.cat(
             [

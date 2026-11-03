@@ -60,6 +60,6 @@ Flat and per-path matrix parameter layouts survive conversion and save/load.
 interfaces. Cartesian storage grows as ``3**l``; conversion is not a guarantee
 of lower memory use or higher speed.
 
-Training example: ``example/train/benchmark/3BPA/3bpa_cartesian.yaml``.
+Training example: ``example/train/benchmark/3BPA/co3.yaml``.
 
 .. autofunction:: tace.lightning.convert_basis

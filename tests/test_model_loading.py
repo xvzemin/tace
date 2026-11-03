@@ -51,6 +51,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         "bilinear",
         "moe",
         "correlation3",
+        "nonlinear_cgtp",
         "matrix",
         "normalization",
     ],
@@ -78,8 +79,10 @@ def test_native_cartesian_model(
         target_property=["energy", "forces", "stress", "virials"],
     )
     config["atomic_basis"].update(type=interaction, edge_nonlinear="gate")
-    if interaction in ("matrix", "normalization"):
+    if interaction in ("matrix", "normalization", "nonlinear_cgtp"):
         config["atomic_basis"]["type"] = "cgtp"
+    if interaction == "nonlinear_cgtp":
+        config["product_basis"].update(type="nonlinear_cgtp", correlation=3)
     if interaction == "normalization":
         config["layer_norm"].update(
             pre_norm_type="merge_layer_norm", final_norm_type="merge_rms_norm",
@@ -145,6 +148,14 @@ def test_native_cartesian_model(
     if fused:
         monkeypatch.setenv("TACE_USE_EQX", "1")
     module = convert_basis(reference)
+    if interaction == "nonlinear_cgtp":
+        from tace.models._cart.prod import NonlinearIctdACE
+
+        assert all(
+            isinstance(block, NonlinearIctdACE)
+            for block in module.readout_fn.representation.products
+        )
+        assert module.readout_fn.model_config["product_basis"]["type"] == "nonlinear_ictd"
     if fused:
         for block in module.readout_fn.representation.interactions:
             assert block.use_eqx
@@ -516,9 +527,12 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
         target_property=["energy", "forces", "stress"],
     )
     config["atomic_basis"].update(type=["cgtp", interaction], num_head=1)
-    if interaction == "mace":
+    if interaction in ("mace", "nonlinear_cgtp", "nonlinear_ictd"):
         config["atomic_basis"]["type"] = "cgtp"
-        config["product_basis"].update(type="mace", correlation=3)
+        config["product_basis"].update(type=interaction, correlation=3)
+    if interaction == "nonlinear_ictd":
+        config["_target_"] = "tace.models.cartTACE"
+        config["product_basis"]["type"] = [interaction] * config["num_layers"]
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
@@ -583,7 +597,25 @@ def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
     )
 
 
-@pytest.mark.parametrize("interaction", ["cgtp", "so2", "o2", "o2_mag", "mace"])
+@pytest.mark.parametrize("product", ["nonlinear_cgtp", "nonlinear_ictd"])
+def test_nonlinear_product_loading(tmp_path, double_precision, product):
+    model = make_model(product).train()
+    expected = evaluate(model)
+    (expected["energy"].square().sum() + expected["forces"].square().sum()).backward()
+    for block in model.readout_fn.representation.products:
+        assert block.embedding.weight.grad is not None
+    path = tmp_path / "model.pt"
+    export_tace(model, str(path))
+    restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()
+    actual = evaluate(restored)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key], atol=1e-10, rtol=1e-10)
+
+
+@pytest.mark.parametrize(
+    "interaction",
+    ["cgtp", "so2", "o2", "o2_mag", "mace", "nonlinear_cgtp", "nonlinear_ictd"],
+)
 @pytest.mark.parametrize("elements", [["O", "H"], [14, 8, 6, 1], ["H", "O", "Si"]])
 def test_select_elements(interaction, elements, tmp_path, double_precision):
     model = make_model(interaction)

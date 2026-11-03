@@ -1,8 +1,8 @@
 defaults:
-  - 3bpa_cgtp
+  - o3
   - _self_
 
 model:
   config:
     atomic_basis:
-      type: co3
+      type: o2_cgtp

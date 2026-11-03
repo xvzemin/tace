@@ -15,7 +15,7 @@ from tace.lightning import create_model, export_tace, load_tace
 from tace.models._e3nn.base import NodeEmbedding
 from tace.models._e3nn.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
 from tace.models._e3nn.magnetic import MagneticBasis
-from tace.models._e3nn.prod import MaceACE
+from tace.models._e3nn.prod import MaceACE, NonlinearCgtpACE
 from tace.models._e3nn.symmetric_contraction import Contraction
 from tace.models.adapter import TensorModel
 from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
@@ -143,7 +143,8 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
         elif isinstance(module, torch.nn.Embedding):
             parent_name, _, field = name.rpartition(".")
             if isinstance(
-                modules[parent_name], (NodeEmbedding, Element2EdgeUpdateV2)
+                modules[parent_name],
+                (NodeEmbedding, Element2EdgeUpdateV2, NonlinearCgtpACE),
             ) and field in {"embedding", "source_embedding", "target_embedding"}:
                 element_axes[f"{name}.weight"] = (0, 1.0)
         elif isinstance(module, e3nnLinear):

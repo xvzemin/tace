@@ -121,7 +121,7 @@ remain spherical.
 Conversion preserves all learned parameter names, shapes, and values.
 Predictions and derivatives agree up to floating-point roundoff; recreate
 the optimizer when continuing training with the returned model. New models
-can use ``example/train/benchmark/3BPA/3bpa_co3.yaml``.
+can select ``atomic_basis.type: co3``.
 
 This interaction uses native PyTorch, not the fused spherical CUDA kernel.
 Cartesian storage grows as ``3**l`` and can cost more memory at high degree.
@@ -177,7 +177,7 @@ transformations, cutoff, and scatter retain their usual behavior.
      apply_cutoff: false
 
 A 3BPA configuration is available as
-``example/train/benchmark/3BPA/3bpa_uu_o2.yaml``.
+``example/train/benchmark/3BPA/uuo2.yaml``.
 
 Set ``TACE_USE_EQX=1`` to use ``eqx.conv.UuO2TensorProductConv``. It fuses
 gather, both frame rotations, UuLinear, cutoff and scatter. The last radial

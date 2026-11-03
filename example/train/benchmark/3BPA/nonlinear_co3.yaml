@@ -1,0 +1,9 @@
+defaults:
+  - co3@_global_
+  - _self_
+
+model:
+  config:
+    product_basis:
+      type: nonlinear_ictd
+      nonlinear: null

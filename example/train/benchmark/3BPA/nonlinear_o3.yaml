@@ -1,0 +1,9 @@
+defaults:
+  - o3
+  - _self_
+
+model:
+  config:
+    product_basis:
+      type: nonlinear_cgtp
+      nonlinear: null

@@ -1302,20 +1302,20 @@ def test_shared_linear(matrix, internal, num_nodes, double_precision):
         bias=True,
         internal_weights=internal,
         use_matrix_weight=matrix,
-    )
+    ).to(DEVICE)
     reference = copy.deepcopy(actual)
     reference.linear = o3.Linear(
         actual.irreps_in,
         actual.irreps_out,
         internal_weights=False,
         shared_weights=False,
-    )
+    ).to(DEVICE)
     reference.load_state_dict(actual.state_dict(), strict=True)
-    x = torch.randn(num_nodes, actual.irreps_in.dim, requires_grad=True)
+    x = torch.randn(num_nodes, actual.irreps_in.dim, device=DEVICE, requires_grad=True)
     weight = (
         None
         if internal
-        else torch.randn(num_nodes, actual.weight_numel, requires_grad=True)
+        else torch.randn(num_nodes, actual.weight_numel, device=DEVICE, requires_grad=True)
     )
     values = [module(x, weight) for module in (actual, reference)]
     torch.testing.assert_close(*values, atol=1e-12, rtol=1e-12)

@@ -25,10 +25,6 @@ class SymmetricContraction(torch.nn.Module):
         Execution backend. CPU tensors use PyTorch operations.
     layout : {"mul_ir", "ir_mul"}, optional
         Output layout. Defaults to ``"mul_ir"``.
-    instructions : sequence of tuple, optional
-        Entries ``(i_tensor, i_path)`` select columns of ``coupling_tensors``.
-        Each entry has an independent weight vector, in instruction order.
-        Defaults to every column in tensor order. An empty sequence gives zero.
 
     Examples
     --------
@@ -40,11 +36,6 @@ class SymmetricContraction(torch.nn.Module):
     >>> weight = torch.randn(2, 1, 2)
     >>> layer(x, weight, torch.tensor([0, 1, 0])).shape
     torch.Size([3, 2])
-    >>> selected = SymmetricContraction(
-    ...     "2x0e", "2x0e", [(0, 2, coupling)], instructions=[(0, 0)]
-    ... )
-    >>> selected.num_paths
-    1
     """
 
     def __init__(
@@ -54,8 +45,6 @@ class SymmetricContraction(torch.nn.Module):
         coupling_tensors,
         backend="cuda",
         layout="mul_ir",
-        *,
-        instructions=None,
     ):
         super().__init__()
         irreps_in, irreps_out = o3.Irreps(irreps_in), o3.Irreps(irreps_out)
@@ -64,7 +53,7 @@ class SymmetricContraction(torch.nn.Module):
         for _, ir in irreps_out:
             offsets.append(offset)
             offset += ir.dim
-        tensors = []
+        entries, num_paths = [], 0
         for output, degree, tensor in coupling_tensors:
             if degree < 1 or not 0 <= output < len(irreps_out):
                 raise ValueError("Provide a positive degree and a valid output index.")
@@ -73,47 +62,19 @@ class SymmetricContraction(torch.nn.Module):
             tensor = tensor.reshape(
                 irreps_out[output].ir.dim, *([input_dim] * degree), paths
             )
-            tensors.append((output, tensor))
-        if instructions is None:
-            instructions = tuple(
-                (i, path)
-                for i, (_, tensor) in enumerate(tensors)
-                for path in range(tensor.shape[-1])
-            )
-        else:
-            instructions = tuple(tuple(item) for item in instructions)
-        selected = defaultdict(list)
-        for weight, instruction in enumerate(instructions):
-            if len(instruction) != 2 or any(
-                not isinstance(index, int) for index in instruction
-            ):
-                raise ValueError(
-                    "Instructions must contain integer tensor/path indices."
-                )
-            i, path = instruction
-            if not 0 <= i < len(tensors) or not 0 <= path < tensors[i][1].shape[-1]:
-                raise ValueError("Instruction tensor or path index is out of range.")
-            selected[i].append((path, weight))
-        entries = []
-        for i, (output, tensor) in enumerate(tensors):
-            if i not in selected:
-                continue
-            paths, weights = zip(*selected[i])
-            if paths != tuple(range(tensor.shape[-1])):
-                tensor = tensor[..., list(paths)]
             for index in tensor.nonzero().tolist():
                 entries.append(
                     (
                         tuple(index[1:-1]),
-                        weights[index[-1]],
+                        num_paths + index[-1],
                         offsets[output] + index[0],
                         tensor[tuple(index)].item(),
                     )
                 )
+            num_paths += paths
         self.initialize(
-            irreps_in, irreps_out, entries, len(instructions), backend, layout
+            irreps_in, irreps_out, entries, num_paths, backend, layout
         )
-        self.instructions = instructions
 
     @classmethod
     def from_entries(
@@ -137,7 +98,6 @@ class SymmetricContraction(torch.nn.Module):
         module = cls.__new__(cls)
         torch.nn.Module.__init__(module)
         module.initialize(irreps_in, irreps_out, entries, num_paths, backend, layout)
-        module.instructions = None
         return module
 
     def initialize(self, irreps_in, irreps_out, entries, num_paths, backend, layout):

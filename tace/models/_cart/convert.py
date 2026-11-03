@@ -37,6 +37,13 @@ def convert_basis(model, basis="cartesian"):
     config["_target_"] = (
         "tace.models.cartTACE" if basis == "cartesian" else "tace.models.e3nnTACE"
     )
+    if basis == "spherical":
+        kinds = config["product_basis"]["type"]
+        config["product_basis"]["type"] = (
+            ["nonlinear_cgtp" if kind == "nonlinear_ictd" else kind for kind in kinds]
+            if isinstance(kinds, list)
+            else ("nonlinear_cgtp" if kinds == "nonlinear_ictd" else kinds)
+        )
     with (
         torch.random.fork_rng(devices=[]),
         torch_default_dtype(model.get_model_dtype()),
@@ -73,6 +80,7 @@ def convert_basis(model, basis="cartesian"):
                     "eqx.co2",
                     "tace.models._cart.local",
                     "tace.models._cart.layers",
+                    "tace.models._cart.prod",
                 )
             ) or isinstance(module, (LayoutTransform, EquivariantMergeLayerNorm)):
                 constants.update(

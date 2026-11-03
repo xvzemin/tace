@@ -13,7 +13,13 @@ from eqx.ace import BilinearContraction, SemiCoupledSymmetricContraction
 from tace.utils.env import select_acceleration
 
 from ..layout import LayoutTransform
-from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear, has_lora
+from ..linear import (
+    e3nnElementLinear,
+    e3nnLinear,
+    e3nnMoEElementLinear,
+    has_lora,
+    torchLinear,
+)
 from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
@@ -175,8 +181,8 @@ class MaceACE(Product):
         sets the contraction width, defaulting to ``num_channel``.
         An input Linear is used only when these widths differ.
         ``agnostic=True`` shares contraction coefficients across elements.
-        ``l1l2`` compares the intermediate and next input angular degrees
-        at each recursive coupling. Degree-one terms are unaffected.
+        ``l1l2`` must be ``None``; explicit selection of MACE symmetric
+        contraction paths is not currently supported.
 
     Notes
     -----
@@ -188,6 +194,11 @@ class MaceACE(Product):
     def _setup(self):
         from .symmetric_contraction import U_matrix_real
 
+        if self.l1l2 is not None:
+            raise NotImplementedError(
+                "Explicit selection of MACE symmetric contraction paths is not "
+                "currently supported. Set product_basis.l1l2 to null."
+            )
         if self.correlation < 1:
             raise ValueError("MACE products require a positive correlation.")
         if self.num_expert != 1 or self.use_shared_expert:
@@ -214,7 +225,6 @@ class MaceACE(Product):
                     degree,
                     dtype=torch.float64,
                     use_cueq_cg=False,
-                    l1l2=self.l1l2,
                 )[-1]
                 if not tensor.any():
                     continue
@@ -261,6 +271,149 @@ class MaceACE(Product):
         if sc is not None:
             output = output + sc
         return output
+
+
+class NonlinearCgtpACE(Product):
+    """Channel-wise recursive products with invariant path gates.
+
+    Parameters
+    ----------
+    **kwargs
+        Parameters of :class:`~tace.models._e3nn.base.Product`.
+
+    Notes
+    -----
+    Select with ``product_basis.type: nonlinear_cgtp``. Linear up produces
+    independent factors and invariant scalars. Scalars and element embeddings
+    generate one scaled-SiLU coefficient per path and channel. Ordinary Linear
+    maps mix the gated products. Only symmetric-product paths are retained.
+    Set the class attribute ``asymmetric=False`` before construction to reuse
+    one factor at every order. No additional model parameter is required.
+    """
+
+    asymmetric = True
+
+    def _setup(self):
+        self.asymmetric = bool(self.asymmetric)
+        if self.correlation < 1:
+            raise ValueError("Nonlinear products require a positive correlation.")
+        if self.num_expert != 1 or self.use_shared_expert:
+            raise ValueError("Nonlinear products do not support expert mixtures.")
+        if self.nonlinear is not None:
+            raise ValueError("Nonlinear products require nonlinear=None.")
+        if not any(ir.is_scalar() for _, ir in self.irreps_in):
+            raise ValueError("Nonlinear products require invariant scalar inputs.")
+
+        self.num_inputs = self.correlation if self.asymmetric else 1
+        self.setup_contraction()
+        self.setup_indices()
+        irreps_up = (
+            o3.Irreps([(self.num_hidden_channel, "0e")])
+            + self.irreps_hidden * self.num_inputs
+        )
+        self.linear_up = e3nnLinear(
+            self.irreps_in.simplify(),
+            irreps_up.regroup(),
+            bias=self.use_bias,
+        )
+        self.embedding = torch.nn.Embedding(self.num_elements, self.num_hidden_channel)
+        self.gate = torch.nn.Sequential(
+            torchLinear(
+                2 * self.num_hidden_channel, self.weight_numel, bias=self.use_bias
+            ),
+            ACTIVATION["scaled_silu"](),
+        )
+        self.linear = e3nnLinear(
+            self.irreps_coefs_out, self.irreps_out, bias=self.use_bias
+        )
+        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0.0:
+            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
+
+    def setup_contraction(self):
+        self.aces = torch.nn.ModuleList()
+        self.coefs = torch.nn.ModuleList()
+        irreps = self.irreps_hidden
+        paths = SymmetricProductPaths(irreps)
+        self.gate_slices = []
+        self.weight_numel = 0
+        for degree in range(1, self.correlation + 1):
+            if degree > 1:
+                product = UuuTensorProduct(
+                    irreps,
+                    self.irreps_hidden,
+                    self.irreps_tp_out_list[degree - 2],
+                    l1l2=self.l1l2,
+                    symmetric_paths=paths,
+                )
+                self.aces.append(product)
+                irreps = product.irreps_out
+            self.coefs.append(
+                e3nnLinear(irreps.simplify(), self.irreps_coefs_out, bias=self.use_bias)
+            )
+            offset = sum(mul for mul, _ in irreps)
+            self.gate_slices.append((self.weight_numel, self.weight_numel + offset))
+            self.weight_numel += offset
+
+    def setup_indices(self):
+        """Build factor and gate indices for the angular storage layout."""
+        self.factor_dim = self.irreps_hidden.dim
+        irreps_up = (
+            type(self.irreps_hidden)([(self.num_hidden_channel, "0e")])
+            + type(self.irreps_hidden)(list(self.irreps_hidden) * self.num_inputs)
+        )
+        slices = irreps_up.slices()
+        order = torch.cat(
+            [torch.arange(slices[i].start, slices[i].stop) for i in irreps_up.sort().inv]
+        )
+        self.register_buffer("factor_index", order.argsort(), persistent=False)
+        for degree, irreps in enumerate(
+            [self.irreps_hidden, *(tp.irreps_out for tp in self.aces)], start=1
+        ):
+            indices, offset = [], 0
+            for mul, ir in irreps:
+                indices.extend(
+                    offset + channel for channel in range(mul) for _ in range(ir.dim)
+                )
+                offset += mul
+            self.register_buffer(
+                f"gate_index_{degree}",
+                torch.tensor(indices, dtype=torch.long),
+                persistent=False,
+            )
+
+    def contract(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        factors = features.reshape(features.shape[0], self.num_inputs, self.factor_dim)
+        corr = factors[:, 0]
+        start, stop = self.gate_slices[0]
+        output = self.coefs[0](corr * weight[:, start:stop][:, self.gate_index_1])
+        for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
+            corr = product(corr, factors[:, index + 1 if self.asymmetric else 0])
+            start, stop = self.gate_slices[index + 1]
+            gate = weight[:, start:stop].index_select(
+                -1, getattr(self, f"gate_index_{index + 2}")
+            )
+            output = output + linear(corr * gate)
+        return output
+
+    def forward(
+        self,
+        node_feats: torch.Tensor,
+        node_attrs: torch.Tensor,
+        sc: torch.Tensor | None,
+        batch: torch.Tensor,
+        node_type: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if node_type is None:
+            node_type = node_attrs.argmax(dim=-1)
+        projected = self.linear_up(node_feats).index_select(-1, self.factor_index)
+        scalars = projected[:, : self.num_hidden_channel]
+        weight = self.gate(torch.cat((scalars, self.embedding(node_type)), dim=-1))
+        output = self.linear(
+            self.contract(projected[:, self.num_hidden_channel :], weight)
+        )
+        if hasattr(self, "stochastic_depth"):
+            output = self.stochastic_depth(output, batch)
+        return output if sc is None else output + sc
 
 
 class BilinearMoEACE(Product):
@@ -584,6 +737,7 @@ class BilinearMoEACE(Product):
 PRODUCT: Dict[str, torch.nn.Module] = {
     "cgtp": CgtpACE,
     "mace": MaceACE,
+    "nonlinear_cgtp": NonlinearCgtpACE,
 }
 
 product_aliases = {

@@ -48,27 +48,27 @@ For the benchmark examples, the files are arranged as follows:
        hip-tace.yaml
      benchmark/
        3BPA/
-         3bpa_cgtp.yaml
-         3bpa_uv_o2.yaml
+         o3.yaml
+         uv_o2.yaml
 
-``3bpa_cgtp.yaml`` loads the base from ``../../TACE/tace.yaml``:
+``o3.yaml`` loads the base from ``../../TACE/tace.yaml``:
 
-.. yaml-config:: ../../../../example/train/benchmark/3BPA/3bpa_cgtp.yaml
+.. yaml-config:: ../../../../example/train/benchmark/3BPA/o3.yaml
    :path: defaults
 
 The path is relative to the containing configuration; ``../../`` selects
 two directories above. ``@_global_`` controls where the contents are merged, not
 where the file is found.
 
-A variant can then inherit ``3bpa_cgtp.yaml`` from the same directory.
-For example, ``3bpa_uv_o2.yaml`` selects a local O(2) interaction and adjusts its
+A variant can then inherit ``o3.yaml`` from the same directory.
+For example, ``uv_o2.yaml`` selects a local O(2) interaction and adjusts its
 angular cutoff and nonlinearity:
 
-.. literalinclude:: ../../../../example/train/benchmark/3BPA/3bpa_uv_o2.yaml
+.. literalinclude:: ../../../../example/train/benchmark/3BPA/uv_o2.yaml
    :language: yaml
 
-The merge order is ``tace.yaml``, then ``3bpa_cgtp.yaml``, then
-``3bpa_uv_o2.yaml``. The magnetic examples in ``example/train/mTACE`` follow
+The merge order is ``tace.yaml``, then ``o3.yaml``, then
+``uv_o2.yaml``. The magnetic examples in ``example/train/mTACE`` follow
 the same pattern: ``soc_o2_mtace.yaml`` inherits ``../TACE/tace.yaml`` and supplies
 the shared magnetic settings. ``nosoc_o2_mtace.yaml`` and
 ``soc_w6j_mtace.yaml`` inherit it and override the non-SOC or interaction settings.
@@ -118,7 +118,7 @@ An empty dictionary ``{}`` does not clear an inherited dictionary. The
 energy/force-only 3BPA benchmark replaces the entire inherited validation-metric
 mapping with a resolver instead:
 
-.. yaml-config:: ../../../../example/train/benchmark/3BPA/3bpa_cgtp.yaml
+.. yaml-config:: ../../../../example/train/benchmark/3BPA/o3.yaml
    :path: synth_metric
 
 Inspect the merged configuration
@@ -130,14 +130,14 @@ configuration:
 .. code-block:: bash
 
    cd example/train/benchmark/3BPA
-   tace-train -cn 3bpa_uv_o2.yaml --cfg job --resolve
+   tace-train -cn uv_o2.yaml --cfg job --resolve
 
 This prints the merged configuration with interpolations resolved, without
 starting training. Command-line values can override the merged settings:
 
 .. code-block:: bash
 
-   tace-train -cn 3bpa_uv_o2.yaml model.config.num_channel=32 --cfg job --resolve
+   tace-train -cn uv_o2.yaml model.config.num_channel=32 --cfg job --resolve
 
 Use ``--info defaults-tree`` to inspect the inheritance tree. Remove the
 inspection flags when ready to train. For more override syntax, see the

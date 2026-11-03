@@ -31,6 +31,13 @@ class cartTACE(e3nnTACE):
             if isinstance(kinds, list)
             else ("cgtp" if kinds in ("co3", "o2_cgtp") else kinds)
         )
+        product = kwargs.get("product_basis", {})
+        kinds = product.get("type", "cgtp")
+        product["type"] = (
+            ["nonlinear_cgtp" if kind == "nonlinear_ictd" else kind for kind in kinds]
+            if isinstance(kinds, list)
+            else ("nonlinear_cgtp" if kinds == "nonlinear_ictd" else kinds)
+        )
         super().__init__(**kwargs)
         cartesian_modules(self)
         representation = self.representation
@@ -46,4 +53,10 @@ class cartTACE(e3nnTACE):
         ):
             self.pair_representation.o2_angular_basis = RotationMatrices()
         self.model_config["_target_"] = "tace.models.cartTACE"
+        kinds = self.model_config["product_basis"]["type"]
+        self.model_config["product_basis"]["type"] = (
+            ["nonlinear_ictd" if kind == "nonlinear_cgtp" else kind for kind in kinds]
+            if isinstance(kinds, list)
+            else ("nonlinear_ictd" if kinds == "nonlinear_cgtp" else kinds)
+        )
         self.to(dtype=torch.get_default_dtype())

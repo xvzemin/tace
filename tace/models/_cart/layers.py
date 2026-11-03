@@ -24,7 +24,7 @@ from .._e3nn.layer_norm import EquivariantMergeLayerNorm
 from .._e3nn.les import TACELES
 from .._e3nn.node import SphericalTensorNodeEmbedding
 from .._e3nn.o2 import MagneticUvO2TensorProductConv, UvO2TensorProductConv
-from .._e3nn.prod import BilinearMoEACE, CgtpACE, MaceACE
+from .._e3nn.prod import BilinearMoEACE, CgtpACE, MaceACE, NonlinearCgtpACE
 from .._e3nn.readout import DirectHessianReadout
 from .._e3nn.residual import ProjectDown, ProjectUp
 from .._e3nn.tece_oam_rra import Convolution
@@ -38,6 +38,7 @@ from .local import (
     UvConvolution,
     UvTensorProduct,
 )
+from .prod import NonlinearIctdACE
 
 
 class RankTwoReadout(torch.nn.Module):
@@ -375,6 +376,9 @@ def cartesian_modules(module):
     for name, value in list(vars(module).items()):
         if isinstance(value, o3.Irreps):
             setattr(module, name, co3.Irreps(value))
+    if isinstance(module, NonlinearCgtpACE):
+        module.__class__ = NonlinearIctdACE
+        module.setup_indices()
     if isinstance(module, (ProjectDown, ProjectUp)):
         irreps_in, irreps_out = module.irreps_in, module.irreps_out
         if isinstance(module, ProjectDown):

@@ -1,5 +1,5 @@
 defaults:
-  - 3bpa_cgtp@_global_
+  - o3@_global_
   - _self_
 
 model:
