@@ -62,4 +62,45 @@ of lower memory use or higher speed.
 
 Training example: ``example/train/benchmark/3BPA/3bpa_cartesian.yaml``.
 
+Reducible tensors
+-----------------
+
+Set ``model.config.reducible: true`` with ``atomic_basis.type: cgtp`` and
+``product_basis.type: cgtp``. The default is ``false``.
+
+* ``tace.models.cartTACE`` gives ``rco3``: unprojected Cartesian rank blocks.
+* ``tace.models.e3nnTACE`` gives ``ro3``: the complete coupled spherical basis
+  of the same blocks, including repeated irreducible components.
+
+Both store ``3**l`` values per rank and channel. Angular inputs are tensor
+powers, not STF harmonics. Contractions, channel mixing, gates and residuals
+retain the original path ordering and parameter shapes. Only at the readout
+boundary is each rank block projected onto its original descriptor irrep.
+The spherical contraction coefficients are transformed at construction;
+hidden layers do not convert tensors to Cartesian storage at runtime.
+
+``ro3`` restricts contractions to their reachable input and output subspaces
+at construction. Symmetric angular moments need only ``(l+1)*(l+2)/2``
+coordinates; the standard scalar node embedding uses this compact angular
+storage. Convolutions gather packed node features and aggregate compact edge
+messages before restoring node coordinates. ACE contractions propagate the
+reachable spaces through each product. Original path weights and normalization
+are unchanged. Node Linear, Gate and residual boundaries still use complete
+rank blocks; this is not a globally minimal storage layout.
+
+``convert_basis`` also converts trained ``ro3`` and ``rco3`` models without
+changing predictions or weights. This equivalence is between the two
+**reducible** models: removing intermediate projections changes the function
+of an irreducible model, even when its weights are retained.
+
+These products use PyTorch, including on CUDA. STF-specific convolution and
+ACE kernels are not used; compatible channel Linear and Gate kernels remain
+available. Local O(2), magnetic recoupling and MACE symmetric products are
+not selectable in this mode.
+
+The 3BPA examples ``3bpa_rco3.yaml`` and ``3bpa_ro3.yaml`` in
+``example/train/benchmark/3BPA`` inherit ``3bpa_cgtp.yaml``, as does
+``3bpa_cartesian.yaml``. All four configurations use the same parameter
+names, shapes and count.
+
 .. autofunction:: tace.lightning.convert_basis

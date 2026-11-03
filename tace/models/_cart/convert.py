@@ -73,6 +73,7 @@ def convert_basis(model, basis="cartesian"):
                     "eqx.co2",
                     "tace.models._cart.local",
                     "tace.models._cart.layers",
+                    "tace.models.reducible",
                 )
             ) or isinstance(module, (LayoutTransform, EquivariantMergeLayerNorm)):
                 constants.update(

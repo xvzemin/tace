@@ -53,9 +53,16 @@ class RankTwoReadout(torch.nn.Module):
         return scalar[:, None, None] * self.zero + tensor.reshape(-1, 3, 3)
 
 
-def cartesian_tensor_product(module, *, project=True):
-    """Build a Cartesian product with unchanged normalized instructions."""
-    return co3.TensorProduct(
+def cartesian_tensor_product(module, *, project=True, reducible=False, spherical=False):
+    """Build rank contractions with unchanged normalized instructions."""
+    tensor_product = co3.TensorProduct
+    options = {"project": project}
+    if reducible:
+        from ..reducible import TensorProduct
+
+        tensor_product = TensorProduct
+        options = {"spherical": spherical}
+    return tensor_product(
         module.irreps_in1,
         module.irreps_in2,
         module.irreps_out,
@@ -74,7 +81,7 @@ def cartesian_tensor_product(module, *, project=True):
         path_normalization="none",
         internal_weights=False,
         shared_weights=module.shared_weights,
-        project=project,
+        **options,
     )
 
 
@@ -212,8 +219,22 @@ def linear_layout(module):
     return module
 
 
-def cartesian_modules(module):
-    """Construct Cartesian operators while retaining the model's parameters."""
+def cartesian_modules(module, *, reducible=False, spherical=False):
+    """Construct rank-based operators while retaining the model's parameters."""
+    if reducible:
+        from ..reducible import TensorMoments, TensorProductConv
+
+        if isinstance(module, O3TensorProductConv):
+            return TensorProductConv(
+                cartesian_tensor_product(module.tp, reducible=True, spherical=spherical)
+            )
+        if isinstance(module, (o3.SphericalHarmonics, SphericalHarmonics)):
+            return TensorMoments(
+                module.irreps_out,
+                module.normalize,
+                module.normalization,
+                spherical=spherical,
+            )
     if isinstance(module, MaceACE):
         raise NotImplementedError("MACE products currently require spherical storage.")
     if isinstance(module, UuO2TensorProductConv):
@@ -311,7 +332,9 @@ def cartesian_modules(module):
     if isinstance(module, O3TensorProductConv):
         return CartesianTensorProductConvLayer(module.tp)
     if isinstance(module, (UuuTensorProduct, UvuTensorProduct)):
-        module.tp = cartesian_tensor_product(module.tp)
+        module.tp = cartesian_tensor_product(
+            module.tp, reducible=reducible, spherical=spherical
+        )
         module.irreps_in1 = module.tp.irreps_in1
         module.irreps_in2 = module.tp.irreps_in2
         module.irreps_out = module.tp.irreps_out
@@ -338,17 +361,20 @@ def cartesian_modules(module):
             if name.startswith("eqx_"):
                 delattr(module, name)
     for name, child in list(module.named_children()):
-        setattr(module, name, cartesian_modules(child))
+        setattr(
+            module, name,
+            cartesian_modules(child, reducible=reducible, spherical=spherical),
+        )
     if isinstance(module, Convolution):
         module.__class__ = RadialRotaryConvolution
         module.setup_cartesian()
-    if isinstance(module, CgtpACE) and module.aces:
+    if isinstance(module, CgtpACE) and module.aces and not reducible:
         module.eqx_ace = IctdSemiCoupledSymmetricContraction(
             [ace.tp for ace in module.aces],
             [coef.linear for coef in module.coefs],
             backend="cuda" if module.use_eqx else "torch",
         )
-    if isinstance(module, BilinearMoEACE) and module.use_eqx:
+    if isinstance(module, BilinearMoEACE) and module.use_eqx and not reducible:
         coef = module.coefs[1]
         module.eqx_ace = IctdBilinearContraction(
             module.aces[0].tp,

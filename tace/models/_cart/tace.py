@@ -1,4 +1,4 @@
-"""TACE in irreducible Cartesian tensor storage."""
+"""TACE in Cartesian tensor storage."""
 
 from copy import deepcopy
 
@@ -17,9 +17,11 @@ class cartTACE(e3nnTACE):
     ----------
     **kwargs
         Configuration options accepted by :class:`tace.models.e3nnTACE`.
+        ``reducible=True`` retains full rank blocks until the readout.
     """
 
     rank_two_dim = 9
+    tensor_basis = "cartesian"
 
     def __init__(self, **kwargs):
         kwargs = deepcopy(kwargs)
@@ -32,6 +34,9 @@ class cartTACE(e3nnTACE):
             else ("cgtp" if kinds in ("co3", "o2_cgtp") else kinds)
         )
         super().__init__(**kwargs)
+        if self.reducible:
+            self.model_config["_target_"] = "tace.models.cartTACE"
+            return
         cartesian_modules(self)
         representation = self.representation
         if isinstance(representation.node_embedding, SphericalTensorNodeEmbedding):

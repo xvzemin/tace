@@ -31,6 +31,203 @@ pytestmark = pytest.mark.usefixtures("double_precision")
 
 
 @pytest.mark.parametrize(
+    "degrees",
+    [
+        (0, 0, 0),
+        (0, 2, 2),
+        (2, 0, 2),
+        (1, 1, 2),
+        (2, 2, 0),
+        (2, 2, 1),
+        (2, 2, 2),
+        (2, 3, 3),
+    ],
+)
+@pytest.mark.parametrize("compact", [False, True])
+def test_reducible_tensor_product(degrees, compact):
+    from tace.models.compile.compile import trace_to_fx
+    from tace.models.reducible import TensorProduct, coupled_basis, moment_basis
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    l1, l2, l3 = degrees
+    labels = [
+        f"2x{l1}{'o' if l1 % 2 else 'e'}",
+        f"2x{l2}{'o' if l2 % 2 else 'e'}",
+        f"2x{l3}{'o' if (l1 + l2) % 2 else 'e'}",
+    ]
+    cartesian = TensorProduct(
+        *labels, [(0, 0, 0, "uuu", True)], internal_weights=False, shared_weights=False
+    ).to(device)
+    spherical = TensorProduct(
+        *labels,
+        [(0, 0, 0, "uuu", True)],
+        spherical=True,
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    if compact:
+        spherical.optimize({l1: moment_basis(l1)}, {l2: moment_basis(l2)})
+    left = torch.randn(2, 2, 3**l1, device=device, requires_grad=True)
+    right = torch.randn(2, 2, 3**l2, device=device, requires_grad=True)
+    leaf_inputs = (left, right)
+    if compact:
+        basis1, basis2 = moment_basis(l1).to(device), moment_basis(l2).to(device)
+        left = (left @ basis1) @ basis1.T
+        right = (right @ basis2) @ basis2.T
+    weight = torch.randn(2, 2, device=device, requires_grad=True)
+    bases = [coupled_basis(rank).to(device) for rank in degrees]
+    expected = (
+        cartesian(left.flatten(-2), right.flatten(-2), weight).reshape(2, 2, -1)
+        @ bases[2]
+    )
+    args = ((left @ bases[0]).flatten(-2), (right @ bases[1]).flatten(-2), weight)
+    actual = spherical(*args).reshape_as(expected)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    torch.testing.assert_close(
+        deepcopy(spherical).float().double()(*args), actual.flatten(-2)
+    )
+    derivatives = []
+    for output in (expected, actual):
+        first = torch.autograd.grad(
+            output.square().sum(), (*leaf_inputs, weight), create_graph=True
+        )
+        second = torch.autograd.grad(
+            sum(x.square().sum() for x in first),
+            (*leaf_inputs, weight),
+            retain_graph=True,
+        )
+        derivatives.append((*first, *second))
+    for actual_grad, expected_grad in zip(derivatives[1], derivatives[0]):
+        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-9, rtol=2e-11)
+    if degrees == (1, 1, 2):
+        matrix = cartesian(left.flatten(-2), right.flatten(-2), weight).reshape(
+            2, 2, 3, 3
+        )
+        assert matrix.diagonal(dim1=-2, dim2=-1).sum(-1).abs().max() > 1e-3
+        assert (matrix - matrix.transpose(-1, -2)).abs().max() > 1e-3
+    compiled = torch.compile(
+        trace_to_fx(spherical, args), backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for size in (2, 5, 3):
+        inputs = tuple(
+            torch.randn(size, value.shape[-1], device=device, requires_grad=True)
+            for value in args
+        )
+        actual, expected = compiled(*inputs), spherical(*inputs)
+        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+        gradients = [
+            torch.autograd.grad(output.square().sum(), inputs)
+            for output in (actual, expected)
+        ]
+        for actual_grad, expected_grad in zip(*gradients):
+            torch.testing.assert_close(
+                actual_grad, expected_grad, atol=2e-9, rtol=2e-11
+            )
+
+
+def test_reducible_tensor_moments():
+    from tace.models.reducible import (
+        ReadoutProjection,
+        TensorMoments,
+        coupled_basis,
+        moment_basis,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    irreps = o3.Irreps.spherical_harmonics(4)
+    cartesian = TensorMoments(irreps, False, "component").to(device)
+    spherical = TensorMoments(irreps, False, "component", spherical=True).to(device)
+    vectors = torch.randn(3, 3, device=device, requires_grad=True)
+    cart, sph = cartesian(vectors), spherical(vectors)
+    for rank, (a, b) in enumerate(
+        zip(
+            cart.split([3**l for l in range(5)], -1),
+            sph.split([3**l for l in range(5)], -1),
+        )
+    ):
+        torch.testing.assert_close(a @ coupled_basis(rank).to(device), b)
+    expected = o3.spherical_harmonics(
+        irreps, vectors, normalize=False, normalization="component"
+    )
+    for is_spherical, features in ((False, cart), (True, sph)):
+        projection = ReadoutProjection(irreps, spherical=is_spherical).to(device)
+        torch.testing.assert_close(projection(features), expected)
+    restored = deepcopy(spherical).float().double()
+    torch.testing.assert_close(restored(vectors), sph, atol=0, rtol=0)
+    compact = deepcopy(spherical)
+    compact.set_compact()
+    widths = [(rank + 1) * (rank + 2) // 2 for rank in range(5)]
+    assert compact(vectors).shape[-1] == sum(widths)
+    reconstructed = torch.cat(
+        [
+            values @ (moment_basis(rank).T @ coupled_basis(rank)).to(device)
+            for rank, values in enumerate(compact(vectors).split(widths, dim=-1))
+        ],
+        dim=-1,
+    )
+    torch.testing.assert_close(reconstructed, sph, atol=2e-12, rtol=2e-12)
+    gradients = [
+        torch.autograd.grad(value.square().sum(), vectors, retain_graph=True)[0]
+        for value in (reconstructed, sph)
+    ]
+    torch.testing.assert_close(*gradients, atol=2e-10, rtol=2e-12)
+    restored = deepcopy(compact).float().double()
+    torch.testing.assert_close(restored(vectors), compact(vectors), atol=0, rtol=0)
+    zero = torch.zeros(1, 3, device=device, requires_grad=True)
+    first = torch.autograd.grad(spherical(zero).sum(), zero, create_graph=True)[0]
+    second = torch.autograd.grad(first.sum(), zero)[0]
+    assert torch.isfinite(first).all() and torch.isfinite(second).all()
+
+
+@pytest.mark.parametrize("identical_inputs", [False, True])
+def test_reducible_reachable_spaces(identical_inputs):
+    from tace.models.reducible import TensorProduct, coupled_basis, moment_basis
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    instructions = [(0, 0, 0, "uuu", False), (0, 0, 1, "uuu", False)]
+    reference = TensorProduct("2x2e", "2x2e", "2x1e+2x2e", instructions).to(device)
+    optimized = TensorProduct(
+        "2x2e", "2x2e", "2x1e+2x2e", instructions, spherical=True
+    ).to(device)
+    spaces = optimized.optimize(
+        {2: moment_basis(2)}, {2: moment_basis(2)}, identical_inputs=identical_inputs
+    )
+    # AB need not be symmetric even when A and B are symmetric; A squared is.
+    assert spaces[1].shape[1] == (0 if identical_inputs else 3)
+    assert spaces[2].shape[1] == (6 if identical_inputs else 9)
+    coefficients = torch.randn(3, 2, 2, 6, device=device, requires_grad=True)
+    basis = moment_basis(2).to(device)
+    left, right = coefficients.unbind(1)
+    left, right = left @ basis.T, right @ basis.T
+    if identical_inputs:
+        right = left
+    expected = reference(left.flatten(-2), right.flatten(-2))
+    expected = torch.cat(
+        [
+            (block.reshape(3, 2, 3**rank) @ coupled_basis(rank).to(device)).flatten(-2)
+            for rank, block in zip((1, 2), expected.split((6, 18), dim=-1))
+        ],
+        dim=-1,
+    )
+    full_basis = coupled_basis(2).to(device)
+    actual = optimized(
+        (left @ full_basis).flatten(-2), (right @ full_basis).flatten(-2)
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    derivatives = []
+    for value in (actual, expected):
+        first = torch.autograd.grad(
+            value.square().sum(), coefficients, create_graph=True
+        )[0]
+        second = torch.autograd.grad(
+            first.square().sum(), coefficients, retain_graph=True
+        )[0]
+        derivatives.append((first, second))
+    for actual_grad, expected_grad in zip(*derivatives):
+        torch.testing.assert_close(actual_grad, expected_grad, atol=2e-9, rtol=2e-11)
+
+
+@pytest.mark.parametrize(
     "parity,expected",
     [
         (False, "0e + 1o + 2e + 3o"),

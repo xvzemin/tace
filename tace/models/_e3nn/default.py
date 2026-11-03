@@ -13,6 +13,7 @@ from ...dataset.quantity import PROPERTIES
 from ..mlp import MLP
 
 DEFAULT_MODEL_CONFIG = {
+    "reducible": False,
     "mmax": 2,
     "Lmax": 2,
     "lmax": 3,
@@ -213,6 +214,23 @@ def check_model_config(cfg: dict[str, Any]):
 
     # Update default config with user config
     cfg = recursive_update(cfg)
+
+    if not isinstance(cfg["reducible"], bool):
+        raise TypeError("reducible must be a bool.")
+    if cfg["reducible"]:
+        kinds = cfg["atomic_basis"]["type"]
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        if any(kind != "cgtp" for kind in kinds):
+            raise ValueError("Reducible models require atomic_basis.type='cgtp'.")
+        products = cfg["product_basis"]["type"]
+        products = [products] if isinstance(products, str) else products
+        if any(kind != "cgtp" for kind in products):
+            raise ValueError("Reducible models require product_basis.type='cgtp'.")
+        if (
+            "direct_hessian" in cfg["target_property"]
+            and cfg["special"]["direct_hessian"]["interaction_type"] != "cgtp"
+        ):
+            raise ValueError("Reducible pair representations require CGTP interactions.")
 
     if cfg["mlp_type"] not in MLP:
         raise ValueError("mlp_type must be 'mlp_v1' or 'mlp_v2'.")

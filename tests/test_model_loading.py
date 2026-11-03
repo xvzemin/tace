@@ -53,6 +53,16 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         "correlation3",
         "matrix",
         "normalization",
+        "reducible_cgtp",
+        "reducible_spherical_tensor",
+        "reducible_normalization",
+        "reducible_correlation3",
+        "reducible_bilinear",
+        "reducible_matrix",
+        "reducible_hessian",
+        "reducible_moe",
+        "reducible_tensor_readouts",
+        "reducible_wigner_tensor",
     ],
 )
 @pytest.mark.parametrize("fused", [False, True])
@@ -63,6 +73,8 @@ def test_native_cartesian_model(
 
     monkeypatch.setenv("TACE_USE_EQT", "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config["reducible"] = interaction.startswith("reducible_")
+    interaction = interaction.removeprefix("reducible_")
     config.update(
         cutoff=4.0,
         max_neighbors=None,
@@ -140,6 +152,13 @@ def test_native_cartesian_model(
     config["radial_basis"]["apply_cutoff"] = False
     config["scale_shift"]["enable"] = False
     reference = TensorModel(e3nnTACE(**config)).to(DEVICE).train()
+    if config["reducible"]:
+        original_config = deepcopy(config)
+        original_config["reducible"] = False
+        original = TensorModel(e3nnTACE(**original_config))
+        assert {
+            name: parameter.shape for name, parameter in reference.named_parameters()
+        } == {name: parameter.shape for name, parameter in original.named_parameters()}
     if interaction == "matrix":
         switch_e3nn_weight_layout(reference, "matrix")
     if fused:
@@ -147,6 +166,9 @@ def test_native_cartesian_model(
     module = convert_basis(reference)
     if fused:
         for block in module.readout_fn.representation.interactions:
+            if config["reducible"]:
+                assert not block.use_eqx
+                continue
             assert block.use_eqx
             if hasattr(block.rejector, "eqx_tp"):
                 if interaction in ("o2", "uu_o2", "o2_mag", "o2_mag_non_soc"):
@@ -178,6 +200,17 @@ def test_native_cartesian_model(
     actual = module({k: v.clone() for k, v in data.items()})
     for key in config["target_property"]:
         torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-10)
+    if config["reducible"] and interaction == "cgtp":
+        for sign in (-1, 1):
+            rotation = sign * o3.rand_matrix(device=DEVICE)
+            rotated = {k: v.clone() for k, v in data.items()}
+            rotated["positions"] = rotated["positions"] @ rotation.T
+            rotated["lattice"] = rotated["lattice"] @ rotation.T
+            transformed = module(rotated)
+            torch.testing.assert_close(transformed["energy"], actual["energy"], atol=2e-9, rtol=2e-9)
+            torch.testing.assert_close(
+                transformed["forces"], actual["forces"] @ rotation.T, atol=2e-9, rtol=2e-9
+            )
     for model, output in ((reference, expected), (module, actual)):
         sum(output[key].square().sum() for key in config["target_property"]).backward()
     for name, parameter in module.named_parameters():
@@ -195,6 +228,14 @@ def test_native_cartesian_model(
             torch.testing.assert_close(
                 output[key], expected[key], atol=2e-10, rtol=2e-10
             )
+    if config["reducible"] and interaction == "cgtp":
+        reference.float()
+        module = convert_basis(reference)
+        inputs = {k: v.float() if v.is_floating_point() else v for k, v in data.items()}
+        expected = reference({k: v.clone() for k, v in inputs.items()})
+        actual = module({k: v.clone() for k, v in inputs.items()})
+        for key in config["target_property"]:
+            torch.testing.assert_close(actual[key], expected[key], atol=2e-5, rtol=2e-4)
 
 
 @pytest.fixture(params=[torch.float32, torch.float64], ids=["fp32", "fp64"])

@@ -122,7 +122,8 @@ def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
 
 
 @pytest.mark.parametrize(
-    "backend", ["native", "luna", "cartesian", "cartesian_eqx", "cartesian_o2"]
+    "backend",
+    ["native", "luna", "cartesian", "cartesian_eqx", "cartesian_o2", "reducible_eqx"],
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_compiled_training_and_export(tmp_path, dtype, backend):
@@ -137,15 +138,17 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
     from tace.utils.env import enable_acceleration
 
     torch.set_default_dtype(dtype)
+    reducible = backend == "reducible_eqx"
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
         num_layers=2,
         num_channel=2,
-        Lmax=1,
-        lmax=1,
+        Lmax=2 if reducible else 1,
+        lmax=3 if reducible else 1,
         mmax=1,
         cutoff=4.0,
         max_neighbors=None,
+        reducible=reducible,
     )
     config["atomic_basis"]["type"] = "o2" if backend == "cartesian_o2" else "cgtp"
     config["radial_basis"].update(hidden=[4], apply_cutoff=False)
@@ -166,7 +169,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         config["_target_"] = "tace.models.cartTACE"
     enable_acceleration(
         enable_luna=use_luna,
-        enable_eqx=backend in ("cartesian_eqx", "cartesian_o2"),
+        enable_eqx=backend in ("cartesian_eqx", "cartesian_o2", "reducible_eqx"),
         enable_compile=True,
         force=True,
     )

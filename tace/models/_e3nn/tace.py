@@ -29,7 +29,17 @@ from .representation import NodeRepresentation, PairRepresentation
 
 
 class e3nnTACE(torch.nn.Module):
+    """TACE with spherical tensor features.
+
+    Parameters
+    ----------
+    reducible : bool, optional
+        Retain all coupled components of each Cartesian rank block, with
+        projection only at readout. Defaults to irreducible representations.
+    """
+
     rank_two_dim = 5
+    tensor_basis = "spherical"
 
     def __init__(
         self,
@@ -64,6 +74,7 @@ class e3nnTACE(torch.nn.Module):
         embedding_property=[],
         atomic_numbers=None,
         mlp_type: str = "mlp_v1",
+        reducible: bool = False,
         **kwargs,
     ):
         cfg = {
@@ -76,6 +87,9 @@ class e3nnTACE(torch.nn.Module):
         self.model_config = cfg
         cfg = check_model_config(cfg)
         super().__init__()
+        self.reducible = cfg["reducible"]
+        if self.reducible:
+            self.rank_two_dim = 5
 
         # === Will be called by other module ===
         self.fidelity = cfg["fidelity"]
@@ -334,6 +348,31 @@ class e3nnTACE(torch.nn.Module):
         #         cfg['normalizer'][p].get('mean', 0.0),
         #         cfg['normalizer'][p].get('rmsd', 1.0),
         #     )
+
+        if self.reducible:
+            from .._cart.layers import cartesian_modules
+            from ..reducible import ReadoutProjection, optimize_representation
+
+            spherical = self.tensor_basis == "spherical"
+            self.descriptor_projections = torch.nn.ModuleList(
+                [
+                    ReadoutProjection(irreps, spherical=spherical)
+                    for irreps in self.representation.irreps_outs
+                ]
+            )
+            cartesian_modules(self.representation, reducible=True, spherical=spherical)
+            self.representation.use_o3_angular_basis = True
+            self.representation.use_local_frame = False
+            self.representation.o2_angular_basis = None
+            if spherical:
+                optimize_representation(self.representation)
+            if hasattr(self, "pair_representation"):
+                self.pair_projection = ReadoutProjection(
+                    self.pair_representation.irreps_out, spherical=spherical
+                )
+                cartesian_modules(
+                    self.pair_representation, reducible=True, spherical=spherical
+                )
 
         # Constants are constructed in float64, then cast once for model execution.
         self.to(dtype=torch.get_default_dtype())
@@ -693,4 +732,15 @@ class e3nnTACE(torch.nn.Module):
                 graph.lattice,
                 data["batch"],
             )
+        if self.reducible:
+            rep = rep | {
+                "descriptors": [
+                    projection(features)
+                    for projection, features in zip(
+                        self.descriptor_projections, rep["descriptors"]
+                    )
+                ]
+            }
+            if pair_rep is not None:
+                pair_rep = self.pair_projection(pair_rep)
         return self.readout_fn(data, graph, rep, pair_rep) | rep
