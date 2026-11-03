@@ -2,6 +2,12 @@
 
 import torch
 
+from ..utils.outputs import (
+    gather_sum_output,
+    grouped_permute_output,
+    indexed_sum_output,
+)
+
 
 @torch.library.custom_op("eqx::gather_sum", mutates_args=(), device_types="cuda")
 def gather_sum(
@@ -22,10 +28,7 @@ def gather_sum(
     return get_kernel("gather_sum", "cuda")(features, indices)
 
 
-@gather_sum.register_fake
-def gather_sum_fake(features, indices):
-    rows = features[0].size(0) if indices[0] is None else indices[0].numel()
-    return features[0].new_empty((rows, features[0].size(1)))
+gather_sum.register_fake(gather_sum_output)
 
 
 def gather_sum_setup_context(ctx, inputs, output):
@@ -70,9 +73,7 @@ def grouped_permute(
     )
 
 
-@grouped_permute.register_fake
-def grouped_permute_fake(features, indices, inverse, widths, transpose=False):
-    return torch.empty_like(features, memory_format=torch.contiguous_format)
+grouped_permute.register_fake(grouped_permute_output)
 
 
 def permutation_setup_context(ctx, inputs, output):
@@ -128,11 +129,7 @@ def indexed_sum(
     )
 
 
-@indexed_sum.register_fake
-def indexed_sum_fake(
-    features, indices, ptr, transpose_indices, transpose_ptr, count, transpose=False
-):
-    return features.new_empty((features.size(0), ptr.numel() - 1))
+indexed_sum.register_fake(indexed_sum_output)
 
 
 def setup_context(ctx, inputs, output):

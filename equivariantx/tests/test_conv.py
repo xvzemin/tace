@@ -1514,7 +1514,7 @@ def test_generator_polynomials(degree, normalization, double_precision):
 @pytest.mark.parametrize("degree", [2, 8, 16])
 def test_high_degree_angular_derivatives(degree, double_precision):
     from equivariantx.o3.rotation import so3_generators
-    from equivariantx.ops.geometry import angular_coefficients
+    from equivariantx.utils.geometry import angular_coefficients
 
     tp = o2.O3TensorProduct(f"{degree}e", "2e", f"{degree}e", [(0, 0, 0, "uvu", True)])
     conv = eqx_conv.O2O3TensorProductConv(tp, backend="torch")
@@ -2896,7 +2896,7 @@ def test_derivative_partition_reuses_rotations():
 @pytest.mark.parametrize("degree", [0, 1, 2, 3, 5])
 @pytest.mark.parametrize("normalization", ["norm", "component", "integral"])
 def test_direction_coefficients_at_pole(degree, normalization):
-    from equivariantx.ops.geometry import angular_coefficients
+    from equivariantx.utils.geometry import angular_coefficients
 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
@@ -4451,7 +4451,7 @@ def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     import equivariantx.ops.edge as edge
     from equivariantx.backends.cuda.runtime import runtime
     from equivariantx.backends.torch.edge import evaluate_torch
-    from equivariantx.ops.program import Program
+    from equivariantx.utils.program import Program
 
     program = Program()
     x = program.input(0, "source", 4)

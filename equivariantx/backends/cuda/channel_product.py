@@ -5,15 +5,15 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.channel_product import channel_product_fake, product_layout
-from ...utils.metadata import parse_metadata
+from ...utils.metadata import channel_product_layout, parse_metadata
+from ...utils.outputs import channel_product_outputs
 from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
 def strided_product_source(metadata, dtype, role, required, shared):
     """Generate contractions for mixed multiplicities and Cartesian layouts."""
-    dims, rows = product_layout(metadata)
+    dims, rows = channel_product_layout(metadata)
     groups = defaultdict(list)
     for indices, coefficient, width, strides in rows:
         if (
@@ -171,7 +171,7 @@ def channel_product(
     metadata: str, program: str, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
     """Evaluate sparse diagonal products and their recursive transposes."""
-    outputs = channel_product_fake(metadata, program, operands)
+    outputs = channel_product_outputs(metadata, program, operands)
     nodes = operands[0].shape[0]
     if not nodes:
         for output in outputs:

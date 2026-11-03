@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from ..utils.metadata import parse_metadata
+from .metadata import parse_metadata
 
 
 def activate(program, value, module):

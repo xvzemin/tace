@@ -2,6 +2,8 @@
 
 import torch
 
+from ..utils.outputs import quaternion_polynomial_output
+
 
 @torch.library.custom_op(
     "eqx::quaternion_polynomial", mutates_args=(), device_types="cuda"
@@ -15,10 +17,7 @@ def quaternion_polynomial(
     return get_kernel("quaternion_polynomial", "cuda")(lmax, transpose, values)
 
 
-@quaternion_polynomial.register_fake
-def quaternion_polynomial_fake(lmax, transpose, values):
-    width = 4 if transpose else sum((2 * l + 1) ** 2 for l in range(lmax + 1))
-    return values[0].new_empty((values[0].size(0), width))
+quaternion_polynomial.register_fake(quaternion_polynomial_output)
 
 
 def polynomial_setup_context(ctx, inputs, output):

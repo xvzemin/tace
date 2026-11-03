@@ -4,8 +4,8 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.rotation import contract_fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import rotation_output
 from .runtime import kernels, runtime
 
 
@@ -83,7 +83,7 @@ def contract(
     role: int,
 ) -> torch.Tensor:
     features, matrix, edge = (x.contiguous() for x in (features, matrix, edge))
-    result = contract_fake(features, matrix, edge, metadata, role)
+    result = rotation_output(features, matrix, edge, metadata, role)
     if role == 1:
         result.zero_()
     if features.shape[0]:

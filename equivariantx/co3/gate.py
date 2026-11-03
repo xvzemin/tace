@@ -105,7 +105,7 @@ class Gate(torch.nn.Module):
 
     def build_program(self):
         """Describe scalar activations and channel-wise gate products."""
-        from ..ops.program import Program, activate
+        from ..utils.program import Program, activate
 
         if self.backend == "torch" or not self.irreps_out.dim:
             return None

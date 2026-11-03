@@ -5,22 +5,45 @@ import math
 import torch
 
 from ..utils.metadata import parse_metadata
+from ..utils.outputs import channel_product_outputs
 
 
-def product_layout(metadata):
-    """Return flat dimensions and sparse channel-strided contractions."""
-    width, dims, rows = parse_metadata(metadata)
-    if width:
-        return tuple(d * width for d in dims), tuple(
-            (
-                tuple(i * width if i >= 0 else -1 for i in indices),
-                coefficient,
-                width,
-                (1,) * len(dims),
-            )
-            for indices, coefficient in rows
+def project(metadata, features):
+    """Apply the native Cartesian projector and its recursive transpose."""
+    if not features.is_cuda or features.dtype not in (torch.float32, torch.float64):
+        raise ValueError("The CUDA projector requires float32 or float64 CUDA tensors.")
+    dim = features.shape[-1]
+    operands = [
+        features.reshape(math.prod(features.shape[:-1]), dim),
+        features.new_empty((0, dim)),
+    ]
+    return channel_product(metadata, repr((((0, 1), 1, 0, 0),)), operands)[0].reshape(
+        features.shape
+    )
+
+
+def polynomial_contraction(metadata, inputs, weight, shape, output_dim):
+    """Evaluate all paths using CUDA and recursive multilinear adjoints."""
+    values = (*inputs, weight)
+    if any(
+        not x.is_cuda or x.dtype not in (torch.float32, torch.float64) for x in values
+    ):
+        raise ValueError(
+            "The CUDA contraction requires float32 or float64 CUDA tensors."
         )
-    return dims, rows
+    if any(x.device != inputs[0].device or x.dtype != inputs[0].dtype for x in values):
+        raise ValueError("Inputs and weights must have the same device and dtype.")
+    rows = math.prod(shape)
+    operands = [
+        x.reshape(1, x.shape[-1])
+        if i and math.prod(x.shape[:-1]) == 1
+        else x.expand(*shape, x.shape[-1]).reshape(rows, x.shape[-1])
+        for i, x in enumerate(values)
+    ]
+    operands.append(inputs[0].new_empty((0, output_dim)))
+    role = len(values)
+    program = repr(((tuple(range(role + 1)), role, 0, 0),))
+    return channel_product(metadata, program, operands)[0].reshape(*shape, output_dim)
 
 
 def tensor_product(metadata, x, y, weight, output_dim):
@@ -79,19 +102,7 @@ def channel_product(
     return get_kernel("local_channel_product", "cuda")(metadata, program, operands)
 
 
-@channel_product.register_fake
-def channel_product_fake(metadata, program, operands):
-    width, dims, _ = parse_metadata(metadata)
-    dims = tuple(d * (width or 1) for d in dims)
-    terms = parse_metadata(program)
-    outputs = [None] * (max(slot for _, _, slot, _ in terms) + 1)
-    for mapping, role, slot, _ in terms:
-        if outputs[slot] is None:
-            rows = operands[mapping[role]].size(0)
-            outputs[slot] = operands[0].new_empty(
-                (1 if rows == 1 else operands[0].shape[0], dims[role])
-            )
-    return outputs
+channel_product.register_fake(channel_product_outputs)
 
 
 def setup_context(ctx, inputs, output):

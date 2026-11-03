@@ -5,15 +5,15 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.bilinear import contract_fake, decode_metadata, encode_metadata
-from ...utils.metadata import parse_metadata
+from ...utils.metadata import decode_plans, encode_plans, parse_metadata
+from ...utils.outputs import bilinear_outputs
 from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
 def metadata_batches(metadata, max_entries=1024):
     """Partition complete angular paths into bounded compilation schedules."""
-    plans = decode_metadata(metadata)
+    plans = decode_plans(metadata)
     sizes = defaultdict(int)
     for _, _, schedules in plans:
         for _, entries in schedules[3]:
@@ -47,13 +47,13 @@ def metadata_batches(metadata, max_entries=1024):
                 for groups in schedules
             )
             selected.append(repr((dims, weighted, schedules)))
-        result.append(encode_metadata(selected))
+        result.append(encode_plans(selected))
     return tuple(result)
 
 
 @lru_cache(maxsize=128)
 def forward_source(dtype, metadata, terms):
-    plans = decode_metadata(metadata)
+    plans = decode_plans(metadata)
     groups = defaultdict(list)
     for term_index, (plan, mapping, _, _) in enumerate(terms):
         for _, entries in plans[plan][2][3]:
@@ -125,7 +125,7 @@ def forward_source(dtype, metadata, terms):
 
 @lru_cache(maxsize=128)
 def transpose_source(dtype, metadata, terms):
-    plans = decode_metadata(metadata)
+    plans = decode_plans(metadata)
     # Contract coefficients with output cotangents before sparse CG entries.
     # Angular products are independent of the output-channel summation.
     groups = defaultdict(list)
@@ -186,7 +186,7 @@ def transpose_source(dtype, metadata, terms):
 
 @lru_cache(maxsize=128)
 def inputs_source(dtype, metadata, branches, roles):
-    plans = decode_metadata(metadata)
+    plans = decode_plans(metadata)
     paths = defaultdict(list)
     for branch, (plan, mapping) in enumerate(branches):
         for _, entries in plans[plan][2][3]:
@@ -278,7 +278,7 @@ def inputs_source(dtype, metadata, branches, roles):
 
 @lru_cache(maxsize=128)
 def weights_source(dtype, metadata, terms):
-    plans = decode_metadata(metadata)
+    plans = decode_plans(metadata)
     paths = defaultdict(list)
     for term_index, (plan, mapping, _, slot) in enumerate(terms):
         for _, entries in plans[plan][2][3]:
@@ -431,7 +431,7 @@ def contract(
 ) -> list[torch.Tensor]:
     from .graph import execute
 
-    outputs = contract_fake(metadata, program, node_type, operands)
+    outputs = bilinear_outputs(metadata, program, node_type, operands)
     terms = parse_metadata(program)
 
     def run(inputs, outputs):

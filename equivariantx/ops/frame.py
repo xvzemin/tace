@@ -2,9 +2,7 @@
 
 import torch
 
-from ..utils.metadata import parse_metadata
-
-NODE, MATRIX, EDGE = 0, 1, 2
+from ..utils.outputs import EDGE, MATRIX, NODE, indexed_frame_output
 
 
 def transform(frame, features, wigner, index, num_nodes, inverse):
@@ -72,11 +70,7 @@ def contract(
     )
 
 
-@contract.register_fake
-def contract_fake(nodes, matrix, edges, index, num_nodes, layout, role):
-    ni, no, nw, _ = parse_metadata(layout)
-    shape = ((num_nodes, ni), (index.numel(), nw), (index.numel(), no))[role]
-    return nodes.new_empty(shape)
+contract.register_fake(indexed_frame_output)
 
 
 def setup_context(ctx, inputs, output):

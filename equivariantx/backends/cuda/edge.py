@@ -1,9 +1,39 @@
 """CUDA evaluation of edge expressions."""
 
+from functools import lru_cache
+
 import torch
 
-from ...ops.edge import evaluate_fake, execution_mode, input_specifications
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import edge_outputs
+
+
+@lru_cache(maxsize=256)
+def execution_mode(metadata):
+    """Select element-wise execution or a narrow node reduction."""
+    nodes, outputs = parse_metadata(metadata)
+    if any(
+        op in ("product", "matmul", "normalize", "inv_norm", "mean", "rsqrt")
+        or op == "scatter"
+        and nodes[args[0]][1] > 32
+        for op, _, args, _ in nodes
+    ):
+        return "edge"
+    if all(kind == "edge" for _, _, kind in outputs):
+        return "pointwise"
+    if len(outputs) == 1 and outputs[0][2] in ("source", "target"):
+        if nodes[outputs[0][0]][1] <= 32:
+            return "node"
+    return "edge"
+
+
+@lru_cache(maxsize=256)
+def input_specifications(metadata):
+    return tuple(
+        (data[0], data[1], size)
+        for op, size, _, data in parse_metadata(metadata)[0]
+        if op == "input"
+    )
 
 
 def evaluate(
@@ -28,7 +58,7 @@ def evaluate(
         if inputs[slot].numel() != rows * width:
             raise ValueError("Input shape does not match the fused expression layout.")
     inputs = [x.contiguous() for x in inputs]
-    outputs = evaluate_fake(metadata, inputs, source, target, num_nodes)
+    outputs = edge_outputs(metadata, inputs, source, target, num_nodes)
     descriptions = parse_metadata(metadata)[1]
     slots = sorted({slot for _, slot, _ in descriptions})
     for slot, output in zip(slots, outputs):

@@ -8,6 +8,28 @@ import torch
 from .irreps import Irreps
 
 
+def projector_metadata(irreps):
+    """Return analytic Cartesian STF coefficients in mul_ir layout."""
+    rows = []
+    for (mul, ir), section in zip(irreps, irreps.slices()):
+        for i in range(ir.dim):
+            for j in range(ir.dim):
+                phase = (i.bit_count() - j.bit_count()) % 4
+                coefficient = (
+                    (1.0, 0.0, -1.0, 0.0)[phase] * 2.0 ** (1 - ir.m) if ir.m else 1.0
+                )
+                if coefficient:
+                    rows.append(
+                        (
+                            (section.start + i, section.start + j),
+                            coefficient,
+                            mul,
+                            (ir.dim, ir.dim),
+                        )
+                    )
+    return repr((0, (irreps.dim, irreps.dim), tuple(rows)))
+
+
 @lru_cache(maxsize=None)
 def path_matrix(m):
     """Return the orthonormal circular-to-Cartesian path matrix.
@@ -196,8 +218,6 @@ class Projector(torch.nn.Module):
         self.irreps_in = self.irreps_out = Irreps(irreps)
         self.input_dim = self.irreps_in.dim
         if backend == "cuda":
-            from ..backends.cuda.co2 import projector_metadata
-
             self.kernel_metadata = projector_metadata(self.irreps_in)
         groups = defaultdict(list)
         for i, (mul, ir) in enumerate(self.irreps_in):
@@ -222,7 +242,7 @@ class Projector(torch.nn.Module):
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if self.backend == "cuda":
-            from ..backends.cuda.co2 import project
+            from ..ops.channel_product import project
 
             return project(self.kernel_metadata, features)
         values = [

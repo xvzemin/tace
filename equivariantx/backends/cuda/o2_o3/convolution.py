@@ -5,8 +5,8 @@ from functools import lru_cache
 
 import torch
 
-from ....ops.o2_o3 import contraction_fake, kernel_plan
-from ....utils.metadata import parse_metadata
+from ....utils.metadata import kernel_plan, parse_metadata
+from ....utils.outputs import contraction_outputs, direction_outputs
 from ..reduction import prepare_graph
 from ..runtime import SOURCE_SIZE_LIMIT, kernels, launch_config, runtime
 from .codegen import convolution_source
@@ -315,7 +315,6 @@ def direction_plan(
     metadata, specification, layouts, dtype, grouped, device, initialize=()
 ):
     """Compile shared tiles of mixed angular and vector adjoints."""
-    from ....ops.o2_o3 import kernel_plan
     from .direction_codegen import direction_source
 
     plan = kernel_plan(metadata)
@@ -425,8 +424,6 @@ def direction_plan(
 
 def contract_directions(metadata, source, target, calls):
     """Stream radial projections once across all geometric derivative terms."""
-    from ....ops.o2_o3 import kernel_plan
-
     plan = kernel_plan(metadata)
     contiguous, prepared = {}, []
     for rank, outputs, operands, results, weighted in calls:
@@ -568,8 +565,6 @@ def harmonic_plan(metadata):
 
     from e3nn import o3
 
-    from ....ops.o2_o3 import kernel_plan
-
     plan = kernel_plan(metadata)
     if not plan.harmonic_degrees:
         return None, plan, metadata
@@ -651,7 +646,7 @@ def contraction(
     from ..graph import convolution
 
     plan = kernel_plan(metadata)
-    results = contraction_fake(metadata, program, source, target, operands)
+    results = contraction_outputs(program, operands)
     terms = parse_metadata(program)
 
     def run(inputs, outputs):
@@ -675,5 +670,46 @@ def contraction(
 
     convolution(
         "o2_o3", (metadata, program), run, source, target, operands, results, terms, 6
+    )
+    return results
+
+
+def direction_contraction(metadata, program, vectors, source, target, operands, use_cuda):
+    from ..graph import convolution
+
+    results = direction_outputs(program, operands)
+    plan = kernel_plan(metadata)
+    terms = parse_metadata(program)
+
+    def run(inputs, outputs):
+        source, target, *values = inputs
+        for result in outputs:
+            result.zero_()
+        if not source.numel() or not plan.path_data:
+            return
+        calls = [
+            (
+                rank,
+                tuple(role for role, _ in pairs),
+                tuple(values[i] for i in mapping),
+                tuple(outputs[slot] for _, slot in pairs),
+                weighted,
+            )
+            for rank, mapping, weighted, pairs in terms
+        ]
+        if vectors.dtype not in (torch.float32, torch.float64):
+            raise TypeError("The CUDA convolution requires float32 or float64.")
+        contract_directions(metadata, source, target, calls)
+
+    convolution(
+        "o2_o3",
+        ("direction", metadata, program),
+        run,
+        source,
+        target,
+        operands,
+        results,
+        tuple((mapping, weighted, pairs) for _, mapping, weighted, pairs in terms),
+        6,
     )
     return results

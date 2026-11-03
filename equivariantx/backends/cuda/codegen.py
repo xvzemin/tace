@@ -4,7 +4,7 @@ import math
 from collections import Counter, defaultdict
 from functools import lru_cache
 
-from ...ops.scalar import alignment_program
+from ...utils.scalar import alignment_program
 
 HEADER = r"""
 using int64_t = long long;

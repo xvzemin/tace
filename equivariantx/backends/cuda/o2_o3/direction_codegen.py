@@ -2,8 +2,8 @@
 
 from functools import lru_cache
 
-from ....ops.geometry import angular_coefficients
-from ....ops.o2_o3 import kernel_plan
+from ....utils.geometry import angular_coefficients
+from ....utils.metadata import kernel_plan
 from ..codegen import HEADER, contraction_source
 
 

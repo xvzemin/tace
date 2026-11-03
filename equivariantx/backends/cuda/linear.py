@@ -5,8 +5,8 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.linear import fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import linear_output
 from .runtime import kernels, runtime
 
 
@@ -179,7 +179,7 @@ def source(metadata, role, dtype, transposed):
 
 def contract(metadata, role, node_type, features, weight, output):
     """Contract into features, coefficients or outputs without expanded weights."""
-    result = fake(metadata, role, node_type, features, weight, output)
+    result = linear_output(metadata, role, node_type, features, weight, output)
     if result.dtype not in (torch.float32, torch.float64):
         raise TypeError("Linear CUDA kernels support float32 and float64.")
     plan = parse_metadata(metadata)

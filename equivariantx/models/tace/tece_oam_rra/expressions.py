@@ -2,9 +2,24 @@
 
 from functools import lru_cache
 
-from ..utils.metadata import parse_metadata
-from .frame_program import rotate
-from .program import Program
+from ....utils.frame_program import rotate
+from ....utils.metadata import parse_metadata
+from ....utils.program import Program
+
+
+def base_program(metadata, inputs):
+    """Return score and value expressions for the input layout."""
+    description = parse_metadata(metadata)
+    if len(description) == 2:
+        return description[1]
+    return build(
+        metadata,
+        inputs[1].shape[1],
+        inputs[7].shape[1],
+        inputs[0].shape[1],
+        (description[0] + 1) ** 2 if inputs[5].ndim == 2 else inputs[6].shape[1],
+        inputs[5].ndim == 2,
+    )
 
 
 @lru_cache(maxsize=64)

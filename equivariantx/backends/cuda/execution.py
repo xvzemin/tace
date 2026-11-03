@@ -5,8 +5,8 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.program import Program
 from ...utils.metadata import parse_metadata
+from ...utils.program import Program
 from .edge_codegen import source as expression_source
 from .runtime import kernels, runtime
 
@@ -440,7 +440,7 @@ class TiledProgram:
                 )
                 contract(metadata, program, source, target, operands, outputs)
             else:
-                from ...ops.o2_o3 import kernel_plan
+                from ...utils.metadata import kernel_plan
                 from .o2_o3.convolution import contract_many
 
                 contract_many(

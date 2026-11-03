@@ -1,4 +1,4 @@
-"""Scalar expressions and their transposes."""
+"""Scalar expression graphs and their transposes."""
 
 import math
 from functools import lru_cache

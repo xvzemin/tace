@@ -6,7 +6,7 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.quaternion import quaternion_polynomial_fake
+from ...utils.outputs import quaternion_polynomial_output
 
 
 @lru_cache(maxsize=32)
@@ -245,7 +245,7 @@ def quaternion_polynomial(
     """Contract Wigner polynomial derivatives without materializing Jacobians."""
     from .runtime import kernels
 
-    result = quaternion_polynomial_fake(lmax, transpose, values)
+    result = quaternion_polynomial_output(lmax, transpose, values)
     if len(values) - 1 > 2 * lmax:
         return result.zero_()
     if result.numel():

@@ -9,9 +9,9 @@ from ...backends.torch.linear import linear as linear_blocks
 from ...backends.torch.linear import linear_layout
 from ...o2.layout import irrep_layout
 from ...ops.edge import evaluate
-from ...ops.frame_program import frame_description, rotate
 from ...ops.gate import gate_program
-from ...ops.program import Program
+from ...utils.frame_program import frame_description, rotate
+from ...utils.program import Program
 from ..attention import graph_softmax
 from .transverse import TransverseFrame
 

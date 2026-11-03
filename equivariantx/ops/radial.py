@@ -3,7 +3,7 @@
 import torch
 
 from ..utils.metadata import parse_metadata
-from .program import Program
+from ..utils.program import Program
 
 
 def compose_radial(metadata, inputs, slot, network):

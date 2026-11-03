@@ -14,7 +14,7 @@ or irreducible Cartesian tensors, with an optional attention architecture.
 
 ## O(3) Cartesian Architecture
 
-<img src="fig/cartesian_arch.png" width="100%" align="center">
+<img src="figures/cartesian_arch.png" width="100%" align="center">
 
 ```math
 (A\otimes_k^\delta B)_{\boldsymbol i\boldsymbol j}
@@ -37,7 +37,7 @@ The SO(2) implementation in TACE will be gradually replaced by an O(2) formulati
 to ensure complete parity support for O(3). Backward compatibility will be maintained for the SO(2) implementation, 
 while backward compatibility for the O(2) implementation is not currently guaranteed.
 
-<img src="fig/o2.svg" width="100%" align="center">
+<img src="figures/o2.svg" width="100%" align="center">
 
 ```math
 \left.(l,p,t)_{O(3)\times\mathbb Z_2^{\mathcal T}}
@@ -140,10 +140,10 @@ For bugs or feature requests, please use the
   </tr>
   <tr>
     <td align="center">
-      <img src="fig/qq.jpg" alt="TACE QQ QR code" width="260">
+      <img src="figures/qq.jpg" alt="TACE QQ QR code" width="260">
     </td>
     <td align="center">
-      <img src="fig/discord.jpg" alt="TACE Discord QR code" width="260">
+      <img src="figures/discord.jpg" alt="TACE Discord QR code" width="260">
     </td>
   </tr>
 </table> -->

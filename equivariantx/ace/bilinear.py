@@ -7,7 +7,8 @@ from e3nn import o3
 
 from equivariantx import o3 as eqx_o3
 
-from ..ops.bilinear import contract, encode_metadata
+from ..ops.bilinear import contract
+from ..utils.metadata import encode_plans
 
 
 class BilinearContraction(torch.nn.Module):
@@ -173,7 +174,7 @@ class BilinearContraction(torch.nn.Module):
             self.gate_dim,
         )
         self.metadata = repr((dims, True, tuple(schedules)))
-        self.kernel_metadata = encode_metadata(
+        self.kernel_metadata = encode_plans(
             [self.metadata]
             if self.shared is None
             else [self.metadata, self.shared.metadata]

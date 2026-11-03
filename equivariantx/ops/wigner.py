@@ -3,6 +3,11 @@
 import torch
 
 from ..utils.metadata import parse_metadata
+from ..utils.outputs import (
+    alignment_outputs,
+    packed_wigner_output,
+    wigner_rotation_output,
+)
 from .quaternion import quaternion_wigner
 
 
@@ -14,13 +19,7 @@ def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
     return get_kernel("alignment_cuda", "cuda")(key, values)
 
 
-@alignment_cuda.register_fake
-def alignment_fake(key, values):
-    from .scalar import alignment_program
-
-    dtype = "float" if values[0].dtype == torch.float32 else "double"
-    _, outputs, _ = alignment_program(parse_metadata(key), dtype)
-    return [values[0].new_empty((values[0].size(0), len(group))) for group in outputs]
+alignment_cuda.register_fake(alignment_outputs)
 
 
 def alignment_setup_context(ctx, inputs, output):
@@ -60,9 +59,7 @@ def rotation(cg: torch.Tensor, output: int, values: list[torch.Tensor]) -> torch
     return get_kernel("rotation", "cuda")(cg, output, values)
 
 
-@rotation.register_fake
-def rotation_fake(cg, output, values):
-    return torch.empty_like(values[output], memory_format=torch.contiguous_format)
+rotation.register_fake(wigner_rotation_output)
 
 
 def rotation_setup_context(ctx, inputs, output):
@@ -99,10 +96,7 @@ def packed_wigner(
     return get_kernel("packed_wigner", "cuda")(vectors, degree, coefficients)
 
 
-@packed_wigner.register_fake
-def packed_wigner_fake(vectors, degree, coefficients):
-    width = sum((2 * l + 1) ** 2 for l in range(degree + 1))
-    return vectors.new_empty(vectors.size(0), width)
+packed_wigner.register_fake(packed_wigner_output)
 
 
 def wigner_D(frame, vectors, *, backend="cuda", method=None):

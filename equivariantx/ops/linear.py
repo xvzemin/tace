@@ -2,7 +2,7 @@
 
 import torch
 
-from ..utils.metadata import parse_metadata
+from ..utils.outputs import linear_output
 
 
 @torch.library.custom_op("eqx::element_linear", mutates_args=(), device_types="cuda")
@@ -22,13 +22,7 @@ def contract(
     )
 
 
-@contract.register_fake
-def fake(metadata, role, node_type, features, weight, output):
-    din, dout = parse_metadata(metadata)[:2]
-    shape = (
-        weight.shape if role == 1 else (node_type.shape[0], din if role == 0 else dout)
-    )
-    return features.new_empty(shape)
+contract.register_fake(linear_output)
 
 
 def setup_context(ctx, inputs, output):

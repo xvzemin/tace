@@ -4,6 +4,7 @@ import torch
 
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
+from ..utils.outputs import symmetric_outputs
 
 
 @torch.library.custom_op(
@@ -20,27 +21,7 @@ def symmetric_contract(
     )
 
 
-@symmetric_contract.register_fake
-def symmetric_contract_fake(metadata, program, node_type, operands):
-    input_dim, paths, output_dim, degree, _ = parse_metadata(metadata)
-    terms = parse_metadata(program)
-    outputs = [None] * (max(term[2] for term in terms) + 1)
-    for mapping, role, slot, _ in terms:
-        if outputs[slot] is None:
-            size = (
-                paths
-                if role == degree
-                else output_dim
-                if role == degree + 1
-                else input_dim
-            )
-            nodes = (
-                operands[mapping[role]].shape[0]
-                if role == degree
-                else node_type.shape[0]
-            )
-            outputs[slot] = operands[0].new_empty((nodes, size, operands[0].shape[-1]))
-    return outputs
+symmetric_contract.register_fake(symmetric_outputs)
 
 
 def setup_context(ctx, inputs, output):

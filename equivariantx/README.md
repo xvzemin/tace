@@ -71,21 +71,15 @@ published.
 | Use | Reference |
 |---|---|
 | `o3`: spherical O(3) | [e3nn](https://github.com/e3nn/e3nn) |
-| `co3`: Cartesian O(3) | [Cartesian TACE](#cartesian-tace) |
+| `co3`: Cartesian O(3) | We recommend citing [Cartesian TACE](#cartesian-tace) and [ICTP](https://github.com/nec-research/ictp). |
 | `o2`: spherical O(2), including global/local conversion | [Local O(2)](#local-o2) |
 | `co2`: Cartesian O(2) | [EquivariantX](#equivariantx-unpublished) |
 | Any fused kernel | We recommend citing [EquivariantX](#equivariantx-unpublished) and [Sobek](https://github.com/Cortex-Discovery/sobek). |
 
 ### EquivariantX (unpublished)
 
-```bibtex
-@unpublished{xu2026equivariantx,
-  title={{EquivariantX}: Unifying Spherical and Cartesian {O(3)} and {O(2)} Representations with High-Performance Fused Kernels},
-  author={Zemin Xu and Wenbo Xie},
-  year={2026},
-  note={Unpublished manuscript}
-}
-```
+Zemin Xu and Wenbo Xie. *EquivariantX: Unifying Spherical and Cartesian O(3)
+and O(2) Representations with High-Performance Fused Kernels.*
 
 ### Cartesian TACE
 

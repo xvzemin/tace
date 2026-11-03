@@ -4,6 +4,7 @@ import torch
 
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
+from ..utils.outputs import o3_outputs
 from .contraction import adjoint_program
 
 
@@ -25,17 +26,7 @@ def contraction(
     )
 
 
-@contraction.register_fake
-def contraction_fake(metadata, program, source, target, operands, *, batch_paths=False):
-    program = parse_metadata(program)
-    results = [None] * (1 + max(slot for _, _, pairs in program for _, slot in pairs))
-    for mapping, _, pairs in program:
-        for role, slot in pairs:
-            if results[slot] is None:
-                results[slot] = torch.empty_like(
-                    operands[mapping[role]], memory_format=torch.contiguous_format
-                )
-    return results
+contraction.register_fake(o3_outputs)
 
 
 def contraction_setup_context(ctx, inputs, keyword_only_inputs, output):

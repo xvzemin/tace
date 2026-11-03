@@ -4,8 +4,12 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.layout import gather_sum_fake, indexed_sum_fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import (
+    gather_sum_output,
+    grouped_permute_output,
+    indexed_sum_output,
+)
 from .runtime import kernels, runtime
 
 
@@ -126,7 +130,7 @@ def gather_sum(
             raise ValueError(
                 "Row indices must be one-dimensional int64 tensors on the feature device."
             )
-    result = gather_sum_fake(features, indices)
+    result = gather_sum_output(features, indices)
     for value, index in zip(features, indices):
         if value.size(1) != result.size(1) or (
             value.size(0) if index is None else index.numel()
@@ -161,7 +165,7 @@ def grouped_permute(
     """Pack feature groups into contiguous batch matrices, or apply its transpose."""
     if features.dtype not in (torch.float32, torch.float64):
         raise TypeError("Grouped permutations require float32 or float64 features.")
-    result = torch.empty_like(features, memory_format=torch.contiguous_format)
+    result = grouped_permute_output(features, indices, inverse, widths, transpose)
     if result.numel():
         code = permutation_source(parse_metadata(widths), features.dtype, transpose)
         kernel = kernels([code], features.device)[code]
@@ -213,7 +217,7 @@ def indexed_sum(
     """
     if features.dtype not in (torch.float32, torch.float64):
         raise TypeError("Indexed sums require float32 or float64 features.")
-    result = indexed_sum_fake(
+    result = indexed_sum_output(
         features, indices, ptr, transpose_indices, transpose_ptr, count, transpose
     )
     if result.numel():

@@ -5,8 +5,8 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.ace import contract_fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import ace_outputs
 from .runtime import kernels, runtime
 
 
@@ -284,7 +284,7 @@ def contract(
     from .ace import launch
     from .graph import execute
 
-    outputs = contract_fake(metadata, program, node_type, operands)
+    outputs = ace_outputs(metadata, program, node_type, operands)
     terms = parse_metadata(program)
 
     def run(inputs, outputs):

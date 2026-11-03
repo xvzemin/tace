@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from ..ops.program import activate
+from ..utils.program import activate
 
 
 def radial_program(network, inputs, program, value):

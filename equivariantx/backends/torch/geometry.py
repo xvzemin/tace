@@ -4,8 +4,33 @@ from string import ascii_letters
 
 import torch
 
-from ...ops.geometry import angular_coefficients
-from ...ops.o2_o3 import kernel_plan
+from ...utils.geometry import angular_coefficients
+from ...utils.metadata import kernel_plan, parse_metadata
+from ...utils.outputs import direction_outputs
+
+
+def direction_contraction(metadata, program, vectors, source, target, operands, use_cuda):
+    results = direction_outputs(program, operands)
+    plan = kernel_plan(metadata)
+    terms = parse_metadata(program)
+    for result in results:
+        result.zero_()
+    if not source.numel() or not plan.path_data:
+        return results
+    calls = [
+        (
+            rank,
+            tuple(role for role, _ in pairs),
+            tuple(operands[i] for i in mapping),
+            tuple(results[slot] for _, slot in pairs),
+            weighted,
+        )
+        for rank, mapping, weighted, pairs in terms
+    ]
+    for rank, outputs, values, destinations, weighted in calls:
+        for output, result in zip(outputs, destinations):
+            reference(metadata, rank, output, source, target, values, result, weighted)
+    return results
 
 
 def reference(metadata, rank, output, source, target, operands, result, weighted_only):

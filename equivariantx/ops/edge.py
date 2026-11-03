@@ -1,12 +1,11 @@
 """Differentiable CUDA execution of static edge expressions."""
 
-from functools import lru_cache
-
 import torch
 
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
-from .program import next_adjoint
+from ..utils.outputs import edge_outputs
+from ..utils.program import next_adjoint
 
 
 @torch.library.custom_op("eqx::edge_program", mutates_args=(), device_types="cuda")
@@ -24,51 +23,7 @@ def evaluate(
     )
 
 
-@lru_cache(maxsize=256)
-def execution_mode(metadata):
-    """Select element-wise execution or a narrow node reduction."""
-    nodes, outputs = parse_metadata(metadata)
-    if any(
-        op in ("product", "matmul", "normalize", "inv_norm", "mean", "rsqrt")
-        or op == "scatter"
-        and nodes[args[0]][1] > 32
-        for op, _, args, _ in nodes
-    ):
-        return "edge"
-    if all(kind == "edge" for _, _, kind in outputs):
-        return "pointwise"
-    if len(outputs) == 1 and outputs[0][2] in ("source", "target"):
-        if nodes[outputs[0][0]][1] <= 32:
-            return "node"
-    return "edge"
-
-
-@lru_cache(maxsize=256)
-def input_specifications(metadata):
-    return tuple(
-        (data[0], data[1], size)
-        for op, size, _, data in parse_metadata(metadata)[0]
-        if op == "input"
-    )
-
-
-@evaluate.register_fake
-def evaluate_fake(metadata, inputs, source, target, num_nodes):
-    nodes, outputs = parse_metadata(metadata)
-    specifications = {slot: (nodes[root][1], kind) for root, slot, kind in outputs}
-    return [
-        inputs[0].new_empty(
-            (
-                1
-                if kind == "shared"
-                else source.numel()
-                if kind == "edge"
-                else num_nodes
-            ),
-            width,
-        )
-        for _, (width, kind) in sorted(specifications.items())
-    ]
+evaluate.register_fake(edge_outputs)
 
 
 def setup_context(ctx, inputs, output):

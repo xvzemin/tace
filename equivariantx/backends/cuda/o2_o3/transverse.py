@@ -9,7 +9,7 @@ from e3nn import o3
 
 from ....co2.spherical import coupling_polynomial, coupling_recurrence
 from ....o3.rotation import so3_generators
-from ....ops.scalar import ScalarProgram
+from ....utils.scalar import ScalarProgram
 from ..angular import generator_action
 from ..codegen import contraction_source
 

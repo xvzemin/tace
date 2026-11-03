@@ -1,4 +1,4 @@
-"""Local-frame expressions."""
+"""Local-frame rotation expressions."""
 
 import math
 

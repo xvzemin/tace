@@ -208,7 +208,7 @@ Honors and Milestones
   <https://matbench-discovery.materialsproject.org/>`_ by Combined Performance
   Score (CPS), with a score of 0.908.
 
-.. figure:: ../../../fig/matbench_tece_rra.png
+.. figure:: ../../../figures/matbench_tece_rra.png
    :alt: Matbench Discovery ranking on July 8, 2026, led by TECE-OAM-RRA-1.0 with a CPS of 0.908.
    :width: 100%
 

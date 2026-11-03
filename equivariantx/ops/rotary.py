@@ -2,6 +2,8 @@
 
 import torch
 
+from ..utils.outputs import rotary_output
+
 
 def rotary_product(query, key, phase, lmax, mmax, heads):
     empty = query.new_empty((0, heads))
@@ -26,13 +28,7 @@ def contract(
     )
 
 
-@contract.register_fake
-def contract_fake(query, key, phase, score, lmax, mmax, heads, role):
-    if role < 2:
-        return torch.empty_like(query)
-    if role == 2:
-        return torch.empty_like(phase)
-    return query.new_empty((query.shape[0], heads))
+contract.register_fake(rotary_output)
 
 
 def setup_context(ctx, inputs, output):

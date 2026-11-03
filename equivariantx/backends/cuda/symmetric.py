@@ -5,8 +5,8 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.symmetric import symmetric_contract_fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import symmetric_outputs
 from .runtime import kernels, runtime
 
 
@@ -170,7 +170,7 @@ def contract(metadata, program, node_type, operands):
     """Evaluate the polynomial and arbitrary recursive derivatives."""
     if operands[0].dtype not in (torch.float32, torch.float64):
         raise TypeError("Symmetric CUDA contractions require float32 or float64.")
-    outputs = symmetric_contract_fake(metadata, program, node_type, operands)
+    outputs = symmetric_outputs(metadata, program, node_type, operands)
     groups = polynomial_groups(metadata, program)
     for slot, output in enumerate(outputs):
         assigned = {

@@ -4,8 +4,8 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.frame import EDGE, MATRIX, NODE, contract_fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import EDGE, MATRIX, NODE, indexed_frame_output
 from .runtime import kernels, runtime
 
 
@@ -127,7 +127,7 @@ def contract(
     nodes, matrix, edges, index = (
         x.contiguous() for x in (nodes, matrix, edges, index)
     )
-    output = contract_fake(nodes, matrix, edges, index, num_nodes, layout, role)
+    output = indexed_frame_output(nodes, matrix, edges, index, num_nodes, layout, role)
     if not output.numel():
         return output
     if not index.numel():

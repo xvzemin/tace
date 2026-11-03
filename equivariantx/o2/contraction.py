@@ -7,7 +7,7 @@ from typing import NamedTuple, Sequence
 
 import torch
 
-from .clebsch_gordan import clebsch_gordan_product
+from .clebsch_gordan import clebsch_gordan_product, coupling_entries
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
@@ -15,6 +15,69 @@ class _Path(NamedTuple):
     leaves: tuple[int, ...]
     intermediates: tuple[Irrep, ...]
     output_index: int
+
+
+def contraction_metadata(
+    irreps_in,
+    paths_by_order,
+    scales_by_order,
+    input_slices,
+    output_slices,
+    input_dim,
+    output_dim,
+    channels,
+):
+    """Expand analytic coupling paths into scalar monomials with independent weights."""
+    correlation = len(paths_by_order)
+    rows, cache, weight_index = [], {}, 0
+    for paths, scales in zip(paths_by_order, scales_by_order):
+        for path, scale in zip(paths, scales):
+            for order, leaf in enumerate(path.leaves):
+                key = path.leaves[: order + 1], path.intermediates[: order + 1]
+                if key in cache:
+                    continue
+                start = input_slices[leaf].start
+                if not order:
+                    cache[key] = tuple(
+                        {(start + k,): 1.0} for k in range(irreps_in[leaf].dim)
+                    )
+                    continue
+                previous = cache[path.leaves[:order], path.intermediates[:order]]
+                result = [{} for _ in range(path.intermediates[order].dim)]
+                for i, j, k, coefficient in coupling_entries(
+                    path.intermediates[order - 1],
+                    irreps_in[leaf],
+                    path.intermediates[order],
+                ):
+                    for monomial, value in previous[i].items():
+                        indices = (*monomial, start + j)
+                        result[k][indices] = (
+                            result[k].get(indices, 0.0) + value * coefficient
+                        )
+                cache[key] = result
+            output = output_slices[path.output_index].start
+            for k, polynomial in enumerate(cache[path.leaves, path.intermediates]):
+                for indices, coefficient in polynomial.items():
+                    if coefficient:
+                        rows.append(
+                            (
+                                (
+                                    *indices,
+                                    *([-1] * (correlation - len(indices))),
+                                    weight_index,
+                                    output + k,
+                                ),
+                                coefficient * scale,
+                            )
+                        )
+            weight_index += 1
+    return repr(
+        (
+            channels,
+            (*([input_dim] * correlation), weight_index, output_dim),
+            tuple(rows),
+        )
+    )
 
 
 class AsymmetricContraction(torch.nn.Module):
@@ -201,8 +264,6 @@ class AsymmetricContraction(torch.nn.Module):
                 self._basis_reference
             )
         else:
-            from ..backends.cuda.o2_contraction import contraction_metadata
-
             self.kernel_metadata = contraction_metadata(
                 *arguments,
                 self._base_input_dim,
@@ -379,9 +440,9 @@ class AsymmetricContraction(torch.nn.Module):
             *(features.shape[:-1] for features in inputs), weight.shape[:-1]
         )
         if self.backend == "cuda":
-            from ..backends.cuda.o2_contraction import contract
+            from ..ops.channel_product import polynomial_contraction
 
-            output = contract(
+            output = polynomial_contraction(
                 self.kernel_metadata, inputs, weight, leading_shape, self.irreps_out.dim
             )
             return self._flatten_output(

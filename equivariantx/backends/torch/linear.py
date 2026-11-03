@@ -160,3 +160,52 @@ def linear(inputs, weight, bias, layout, shape):
     for j, start, size in biases:
         outputs[j] = outputs[j] + bias[..., start : start + size].unsqueeze(-2)
     return [value.expand(*shape, *dims) for value, dims in zip(outputs, output_shapes)]
+
+
+def cartesian_linear(
+    features, weight, bias, output_shapes, groups, input_slices, group_sections
+):
+    """Mix Cartesian channels and retain gradient connections to unused operands."""
+    shape = torch.broadcast_shapes(
+        features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
+    )
+    zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
+    outputs = []
+    for (mul, dim), group, input_section in zip(output_shapes, groups, group_sections):
+        inputs, weights, biases = [], [], []
+        for ins, section in group:
+            if ins.i_in < 0:
+                biases.append(bias[..., section].unsqueeze(-1))
+                continue
+            if input_section is None:
+                inputs.append(
+                    features[..., input_slices[ins.i_in]].reshape(
+                        *features.shape[:-1], ins.path_shape[0], dim
+                    )
+                )
+            weights.append(
+                weight[..., section].reshape(*weight.shape[:-1], *ins.path_shape)
+                * ins.path_weight
+            )
+        if weights:
+            if input_section is not None:
+                width = (input_section.stop - input_section.start) // dim
+                x = features[..., input_section].reshape(
+                    *features.shape[:-1], width, dim
+                )
+            else:
+                x = inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
+            w = weights[0] if len(weights) == 1 else torch.cat(weights, dim=-2)
+            value = torch.einsum("...ui,...uv->...vi", x, w)
+            value = value.expand(*shape, mul, dim)
+        else:
+            value = features.new_zeros((*shape, mul, dim)) + zero
+        for b in biases:
+            value = value + b
+        outputs.append(value)
+    output = (
+        torch.cat([x.flatten(-2) for x in outputs], -1)
+        if outputs
+        else features.new_zeros((*shape, 0)) + zero
+    )
+    return output, zero

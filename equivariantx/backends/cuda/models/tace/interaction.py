@@ -2,7 +2,8 @@
 
 import torch
 
-from .....ops.tece import base_program, contraction_fake, interaction_fake
+from .....models.tace.tece_oam_rra.expressions import base_program
+from .....utils.outputs import tece_contraction_outputs, tece_outputs
 
 
 def interaction(
@@ -26,7 +27,7 @@ def interaction(
         )
         if value.numel() != rows * width:
             raise ValueError("Input shape does not match the local interaction layout.")
-    result, denominator, maximum = interaction_fake(metadata, source, target, inputs)
+    result, denominator, maximum = tece_outputs(metadata, source, target, inputs)
     if not source.numel():
         result.zero_()
         denominator.fill_(base[-1])
@@ -47,7 +48,7 @@ def contraction(
     from .attention import BACKWARD_TILE_SIZE
 
     inputs = [x.contiguous() for x in inputs]
-    result = contraction_fake(metadata, source, target, inputs)
+    result = tece_contraction_outputs(metadata, source, target, inputs)
     for value in result:
         value.zero_()
     if result and source.numel():

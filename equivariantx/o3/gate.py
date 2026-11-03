@@ -47,7 +47,7 @@ class Gate(E3nnGate):
         if backend == "torch" or not self.irreps_out.dim:
             return
 
-        from ..ops.program import Program, activate
+        from ..utils.program import Program, activate
 
         program = Program()
         features = program.input(0, "edge", self.irreps_in.dim)

@@ -4,7 +4,7 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.rotary import contract_fake
+from ...utils.outputs import rotary_output
 from .runtime import kernels, runtime
 
 
@@ -107,7 +107,7 @@ def contract(
     role: int,
 ) -> torch.Tensor:
     query, key, phase, score = (x.contiguous() for x in (query, key, phase, score))
-    result = contract_fake(query, key, phase, score, lmax, mmax, heads, role)
+    result = rotary_output(query, key, phase, score, lmax, mmax, heads, role)
     edges, angular, channels = query.shape
     if edges:
         code = source(query.dtype, lmax, mmax, channels, heads, role)

@@ -9,7 +9,7 @@ from ..o2.layout import irrep_layout
 
 def gate_program(gate, transverse=False, *, cartesian=False, blocks=False):
     """Build the shared gate expression for standalone and convolution kernels."""
-    from .program import Program, activate
+    from ..utils.program import Program, activate
 
     program = Program()
     inputs = (

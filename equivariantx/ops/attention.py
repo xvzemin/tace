@@ -4,6 +4,8 @@ from functools import lru_cache
 
 import torch
 
+from ..utils.outputs import attention_adjoint_outputs
+
 
 @torch.library.custom_op(
     "eqx::graph_normalized_exp", mutates_args=(), device_types="cuda"
@@ -35,7 +37,7 @@ def setup_context(ctx, inputs, output):
 @lru_cache(maxsize=32)
 def adjoint_program(heads, weight_heads):
     """Build the grouped dot product and normalized-exponential adjoints."""
-    from .program import Program
+    from ..utils.program import Program
 
     program = Program()
     exp = program.input(0, "edge", heads)
@@ -85,13 +87,7 @@ def evaluate_adjoint(
     )
 
 
-@evaluate_adjoint.register_fake
-def adjoint_fake(values, grad, weight, target, num_nodes):
-    return (
-        torch.empty_like(values, memory_format=torch.contiguous_format),
-        torch.empty_like(weight, memory_format=torch.contiguous_format),
-        values.new_empty((num_nodes, values.shape[1])),
-    )
+evaluate_adjoint.register_fake(attention_adjoint_outputs)
 
 
 def adjoint_setup_context(ctx, inputs, output):
@@ -102,8 +98,8 @@ def adjoint_setup_context(ctx, inputs, output):
 
 def adjoint_backward(ctx, grad_scores, grad_weight, grad_total):
     from ..utils.metadata import parse_metadata
+    from ..utils.program import next_adjoint
     from .edge import evaluate
-    from .program import next_adjoint
 
     values, grad, weight, target, total = ctx.saved_tensors
     reduction, pointwise = adjoint_program(int(values.shape[1]), int(weight.shape[1]))

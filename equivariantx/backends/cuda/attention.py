@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import torch
 
-from ...ops.attention import adjoint_fake
+from ...utils.outputs import attention_adjoint_outputs
 from .reduction import prepare_graph
 
 
@@ -230,7 +230,7 @@ def evaluate_adjoint(
 
     if not 1 <= values.shape[1] <= 32:
         raise ValueError("The fused attention adjoint supports 1 to 32 heads.")
-    outputs = adjoint_fake(values, grad, weight, target, num_nodes)
+    outputs = attention_adjoint_outputs(values, grad, weight, target, num_nodes)
     if not num_nodes:
         return outputs
     values, grad, weight = (x.contiguous() for x in (values, grad, weight))

@@ -2,6 +2,8 @@
 
 import torch
 
+from ..utils.outputs import rotation_output
+
 
 def rotate(features, matrix, metadata):
     """Multiply frames within matching degrees without dense angular work."""
@@ -22,13 +24,7 @@ def contract(
     return get_kernel("frame_rotation", "cuda")(features, matrix, edge, metadata, role)
 
 
-@contract.register_fake
-def contract_fake(features, matrix, edge, metadata, role):
-    if role == 0:
-        return torch.empty_like(features)
-    if role == 1:
-        return torch.empty_like(matrix)
-    return features.new_empty((features.shape[0], matrix.shape[1], features.shape[2]))
+contract.register_fake(rotation_output)
 
 
 def setup_context(ctx, inputs, output):

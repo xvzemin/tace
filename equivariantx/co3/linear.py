@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 import torch
 
+from ..backends.torch.linear import cartesian_linear
 from .basis import ChangeOfBasis, Projector
 from .irreps import Irreps
 
@@ -150,6 +151,7 @@ class Linear(torch.nn.Module):
                 else None
             )
         self.cartesian_out = cartesian_out
+        self.output_shapes = tuple((mul, ir.dim) for mul, ir in cartesian_out)
         if output_basis == "spherical":
             self.projection = ChangeOfBasis(cartesian_out, inverse=True)
         elif project:
@@ -196,49 +198,14 @@ class Linear(torch.nn.Module):
             raise ValueError("Weight or bias size does not match the instructions.")
         if self.shared_weights and (weight.ndim != 1 or bias.ndim != 1):
             raise ValueError("Shared weights and biases must be one-dimensional.")
-        shape = torch.broadcast_shapes(
-            features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
-        )
-        zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
-        outputs = []
-        for (mul, ir), group, input_section in zip(
-            self.cartesian_out, self.groups, self.group_sections
-        ):
-            inputs, weights, biases = [], [], []
-            for ins, section in group:
-                if ins.i_in < 0:
-                    biases.append(bias[..., section].unsqueeze(-1))
-                    continue
-                if input_section is None:
-                    inputs.append(
-                        features[..., self.slices_in[ins.i_in]].reshape(
-                            *features.shape[:-1], ins.path_shape[0], ir.dim
-                        )
-                    )
-                weights.append(
-                    weight[..., section].reshape(*weight.shape[:-1], *ins.path_shape)
-                    * ins.path_weight
-                )
-            if weights:
-                if input_section is not None:
-                    width = (input_section.stop - input_section.start) // ir.dim
-                    x = features[..., input_section].reshape(
-                        *features.shape[:-1], width, ir.dim
-                    )
-                else:
-                    x = inputs[0] if len(inputs) == 1 else torch.cat(inputs, dim=-2)
-                w = weights[0] if len(weights) == 1 else torch.cat(weights, dim=-2)
-                value = torch.einsum("...ui,...uv->...vi", x, w)
-                value = value.expand(*shape, mul, ir.dim)
-            else:
-                value = features.new_zeros((*shape, mul, ir.dim)) + zero
-            for b in biases:
-                value = value + b
-            outputs.append(value)
-        output = (
-            torch.cat([x.flatten(-2) for x in outputs], -1)
-            if outputs
-            else features.new_zeros((*shape, 0)) + zero
+        output, zero = cartesian_linear(
+            features,
+            weight,
+            bias,
+            self.output_shapes,
+            self.groups,
+            self.slices_in,
+            self.group_sections,
         )
         return self.projection(output) + zero
 

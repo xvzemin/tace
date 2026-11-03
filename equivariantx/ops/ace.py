@@ -4,6 +4,7 @@ import torch
 
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
+from ..utils.outputs import ace_outputs
 
 
 @torch.library.custom_op("eqx::ace_contract", mutates_args=(), device_types="cuda")
@@ -19,20 +20,7 @@ def contract(
     return get_kernel("ace_contract", "cuda")(metadata, program, node_type, operands)
 
 
-@contract.register_fake
-def contract_fake(metadata, program, node_type, operands):
-    dims, weighted, _ = parse_metadata(metadata)
-    terms = parse_metadata(program)
-    outputs = [None] * (max(slot for _, _, slot in terms) + 1)
-    for mapping, role, slot in terms:
-        if outputs[slot] is None:
-            rows = (
-                operands[mapping[2]].shape[0]
-                if weighted and role == 2
-                else node_type.shape[0]
-            )
-            outputs[slot] = operands[0].new_empty((rows, dims[role]))
-    return outputs
+contract.register_fake(ace_outputs)
 
 
 def setup_context(ctx, inputs, output):

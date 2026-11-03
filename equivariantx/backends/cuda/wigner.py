@@ -4,8 +4,12 @@ from weakref import ref
 
 import torch
 
-from ...ops.wigner import alignment_fake, packed_wigner_fake
 from ...utils.metadata import parse_metadata
+from ...utils.outputs import (
+    alignment_outputs,
+    packed_wigner_output,
+    wigner_rotation_output,
+)
 
 _PLANS = {}
 
@@ -82,7 +86,7 @@ def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
     from .codegen import alignment_source
     from .runtime import kernels
 
-    results = alignment_fake(key, values)
+    results = alignment_outputs(key, values)
     if values[0].size(0):
         dtype = "float" if values[0].dtype == torch.float32 else "double"
         code = alignment_source(parse_metadata(key), dtype)
@@ -103,7 +107,7 @@ def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
 
 def rotation(cg: torch.Tensor, output: int, values: list[torch.Tensor]) -> torch.Tensor:
     """Evaluate a degree contraction or any of its multilinear transposes."""
-    result = torch.empty_like(values[output], memory_format=torch.contiguous_format)
+    result = wigner_rotation_output(cg, output, values)
     if result.numel():
         rotate(cg, output, values, result, rotation_plan)
     return result
@@ -113,7 +117,7 @@ def packed_wigner(
     vectors: torch.Tensor, degree: int, coefficients: list[torch.Tensor]
 ) -> torch.Tensor:
     """Build cached degree matrices directly in one packed allocation."""
-    result = packed_wigner_fake(vectors, degree, coefficients)
+    result = packed_wigner_output(vectors, degree, coefficients)
     if not vectors.size(0):
         return result
     result[:, :1].fill_(1)

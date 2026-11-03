@@ -5,8 +5,8 @@ from functools import lru_cache, partial
 
 import torch
 
-from ....ops.o3 import contraction_fake
 from ....utils.metadata import parse_metadata
+from ....utils.outputs import o3_outputs
 from ..radial import project
 from ..reduction import prepare_graph
 from ..runtime import SOURCE_SIZE_LIMIT, kernels, runtime
@@ -416,7 +416,7 @@ def contraction(
     """Run sparse contractions outside the tensor tracing boundary."""
     from ..graph import convolution
 
-    results = contraction_fake(metadata, program, source, target, operands)
+    results = o3_outputs(metadata, program, source, target, operands)
     terms = parse_metadata(program)
 
     def run(inputs, outputs):

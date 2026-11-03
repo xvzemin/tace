@@ -4,22 +4,8 @@ import torch
 
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
-from .program import next_adjoint
-from .tece_program import build, first_adjoint
-
-
-def base_program(metadata, inputs):
-    description = parse_metadata(metadata)
-    if len(description) == 2:
-        return description[1]
-    return build(
-        metadata,
-        inputs[1].shape[1],
-        inputs[7].shape[1],
-        inputs[0].shape[1],
-        (description[0] + 1) ** 2 if inputs[5].ndim == 2 else inputs[6].shape[1],
-        inputs[5].ndim == 2,
-    )
+from ..utils.outputs import tece_contraction_outputs, tece_outputs
+from ..utils.program import next_adjoint
 
 
 @torch.library.custom_op("eqx::tece_interaction", mutates_args=(), device_types="cuda")
@@ -34,26 +20,7 @@ def interaction(
     return get_kernel("tece_interaction", "cuda")(metadata, source, target, inputs)
 
 
-@interaction.register_fake
-def interaction_fake(metadata, source, target, inputs):
-    description = parse_metadata(metadata)
-    if len(description) == 2:
-        description = parse_metadata(description[0])
-    channels, heads = description[2:4]
-    nodes = inputs[0].shape[0]
-    return [
-        inputs[0].new_empty(
-            (
-                nodes,
-                (description[0] + 1) ** 2
-                if inputs[5].ndim == 2
-                else inputs[6].shape[1],
-                channels,
-            )
-        ),
-        inputs[0].new_empty((nodes, heads)),
-        inputs[0].new_empty((nodes, heads)),
-    ]
+interaction.register_fake(tece_outputs)
 
 
 def setup_context(ctx, inputs, output):
@@ -65,6 +32,8 @@ def setup_context(ctx, inputs, output):
 
 
 def backward(ctx, gradients):
+    from ..models.tace.tece_oam_rra.expressions import base_program, first_adjoint
+
     source, target, *saved = ctx.saved_tensors
     values = saved[: ctx.num_inputs]
     result, denominator, maximum = saved[ctx.num_inputs :]
@@ -101,13 +70,7 @@ def contraction(
     return get_kernel("tece_contraction", "cuda")(metadata, source, target, inputs)
 
 
-@contraction.register_fake
-def contraction_fake(metadata, source, target, inputs):
-    slots = sorted({slot for _, slot, _ in parse_metadata(metadata)[1]})
-    return [
-        torch.empty_like(inputs[slot], memory_format=torch.contiguous_format)
-        for slot in slots
-    ]
+contraction.register_fake(tece_contraction_outputs)
 
 
 def contraction_setup_context(ctx, inputs, output):

@@ -1,1 +1,1 @@
-"""PyTorch operator definitions, shape rules and automatic differentiation."""
+"""PyTorch operator registration, shape inference and automatic differentiation."""

@@ -3,8 +3,8 @@
 import torch
 
 from ....ops.tece import interaction
-from ....ops.tece_program import build
 from ....utils.metadata import parse_metadata
+from .expressions import build
 
 
 def stream(

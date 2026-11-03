@@ -1,4 +1,4 @@
-"""Execution providers for PyTorch tensors."""
+"""PyTorch and CUDA execution providers."""
 
 from .registry import get_kernel, register_kernel
 
@@ -8,6 +8,16 @@ register_kernel("alignment_cuda", "cuda", "equivariantx.backends.cuda.wigner:ali
 register_kernel("bilinear_ace", "cuda", "equivariantx.backends.cuda.bilinear:contract")
 register_kernel(
     "contraction", "cuda", "equivariantx.backends.cuda.o2_o3.convolution:contraction"
+)
+register_kernel(
+    "direction_contraction",
+    "cuda",
+    "equivariantx.backends.cuda.o2_o3.convolution:direction_contraction",
+)
+register_kernel(
+    "direction_contraction",
+    "torch",
+    "equivariantx.backends.torch.geometry:direction_contraction",
 )
 register_kernel("edge_program", "cuda", "equivariantx.backends.cuda.edge:evaluate")
 register_kernel("element_linear", "cuda", "equivariantx.backends.cuda.linear:contract")
