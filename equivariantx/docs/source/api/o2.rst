@@ -1,0 +1,72 @@
+.. _equivariantx-api-o2:
+
+Spherical O(2)
+==============
+
+Features use flattened ``ir_mul`` layout. ``Irreps`` entries are ``(ir, mul)``.
+
+Representations
+---------------
+
+.. autoclass:: equivariantx.o2.Irrep
+   :members:
+   :special-members: __mul__
+
+.. autoclass:: equivariantx.o2.Irreps
+   :members:
+
+Harmonics
+---------
+
+.. autofunction:: equivariantx.o2.circular_harmonics
+
+.. autoclass:: equivariantx.o2.CircularHarmonics
+   :members: forward
+
+Linear maps
+-----------
+
+.. autoclass:: equivariantx.o2.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: equivariantx.o2.UuLinear
+   :members: forward
+
+.. autoclass:: equivariantx.o2.ElementLinear
+   :members: forward
+
+Activations
+-----------
+
+.. autoclass:: equivariantx.o2.Activation
+   :members: forward
+
+.. autoclass:: equivariantx.o2.Gate
+   :members: forward
+
+Tensor products
+---------------
+
+.. autoclass:: equivariantx.o2.TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
+Harmonic O(3) coupling
+----------------------
+
+.. autoclass:: equivariantx.o2.O3TensorProduct
+   :members: forward, forward_local, forward_scatter
+
+Many-body contractions
+----------------------
+
+.. autoclass:: equivariantx.o2.AsymmetricContraction
+   :members: forward, set_algorithm
+
+.. autoclass:: equivariantx.o2.SymmetricContraction
+   :members: forward, set_algorithm
+
+Grid transforms
+---------------
+
+.. autoclass:: equivariantx.o2.O2Grid
+   :members: forward, to_grid, from_grid

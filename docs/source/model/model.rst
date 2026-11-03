@@ -1,11 +1,13 @@
 Model Arch
 ==========
 
-This section is mainly intended for users who need to modify the model architecture. 
-For most users, this part can be safely ignored.
-
-Here, we provide a detailed introduction to several components of the model. 
-Only the components recommended for users will be presented; components that are still under development will not be covered.
+``tace.models.SphericalTACE`` is the default model. Select
+``tace.models.CartesianTACE`` through ``model.config._target_`` for Cartesian
+storage. Their components are in ``tace.models.spherical`` and
+``tace.models.cartesian``. For ``.pt`` parameter-dictionary models, saved
+configuration names using ``e3nnTACE``, ``cartTACE``, ``_e3nn`` or ``_cart``
+are resolved during loading. This compatibility does not cover serialized
+model objects; new code uses the names above.
 
 .. toctree::
    :maxdepth: 2

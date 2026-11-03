@@ -8,12 +8,12 @@ from .aot import (
     load_ase_aotinductor,
     load_lammps_aotinductor,
 )
-from .tace import cartTACE, e3nnTACE
+from .tace import CartesianTACE, SphericalTACE
 from .wrapper import CompileTensorModel
 
 __all__ = [
-    "e3nnTACE",
-    "cartTACE",
+    "SphericalTACE",
+    "CartesianTACE",
     "CompileTensorModel",
     "AOTICompiledLammpsModel",
     "AOTICompiledTensorModel",

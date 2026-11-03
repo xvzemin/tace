@@ -35,7 +35,7 @@ each module.
 O(3) Cgtp
 ---------
 
-.. autoclass:: tace.models._e3nn.inter.O3CgtpInteraction
+.. autoclass:: tace.models.spherical.inter.O3CgtpInteraction
    :no-members:
    :show-inheritance:
 
@@ -75,7 +75,7 @@ reductions. ``TACE_USE_EQX=1`` selects the streamed CUDA implementation for
 ``o2_cgtp``, without changing its learned parameters or model-loading behavior.
 See :ref:`eqx-streaming` for training support and requirements.
 
-.. autoclass:: tace.models._e3nn.inter.O2CgtpInteraction
+.. autoclass:: tace.models.spherical.inter.O2CgtpInteraction
    :no-members:
    :show-inheritance:
 
@@ -86,7 +86,7 @@ Cartesian O(3) ICTD
 
 For spherical node storage, ``atomic_basis.type: co3`` selects
 ``O3IctdInteraction`` and automatically constructs the
-``co3_angular_basis`` using ``eqx.co3.CartesianHarmonics``. ``lmax`` still
+``co3_angular_basis`` using ``equivariantx.co3.CartesianHarmonics``. ``lmax`` still
 controls the edge angular degrees; no separate basis selector is needed.
 Node embeddings that require spherical harmonics retain their own spherical
 inputs. Cartesian and spherical interaction layers can be mixed.
@@ -127,7 +127,7 @@ This interaction uses native PyTorch, not the fused spherical CUDA kernel.
 Cartesian storage grows as ``3**l`` and can cost more memory at high degree.
 See :ref:`equivariantx-api-co3` for layout and normalization conventions.
 
-.. autoclass:: tace.models._e3nn.inter.O3IctdInteraction
+.. autoclass:: tace.models.spherical.inter.O3IctdInteraction
    :no-members:
    :show-inheritance:
 
@@ -135,7 +135,7 @@ O(2) Linear
 -----------
 
 ``TACE_USE_EQX=1`` enables CUDA fusion for ``o2`` and ``o2_mag`` on float32
-and float64 inputs. Both use ``eqx.conv.UvO2TensorProductConv``: gather,
+and float64 inputs. Both use ``equivariantx.conv.UvO2TensorProductConv``: gather,
 frame rotation, basis changes and radial multiplication are fused, as are
 gates, attention scores and inverse rotation with scatter. Channel maps remain
 batched GEMMs. Radial weights and local GEMM operands are still materialized;
@@ -144,9 +144,9 @@ checkpoint parameters are unchanged. CPU and unsupported activations retain
 the native PyTorch implementation. Derivatives include force training and
 recursive higher orders.
 
-.. autoclass:: tace.models._e3nn.inter.UvO2Interaction
+.. autoclass:: tace.models.spherical.inter.UvO2Interaction
 
-.. autoclass:: tace.models._e3nn.inter.O2MagneticInteraction
+.. autoclass:: tace.models.spherical.mtace.O2MagneticInteraction
    :no-members:
    :show-inheritance:
 
@@ -154,7 +154,7 @@ O(2) Channelwise Linear
 ------------------------
 
 ``atomic_basis.type: uu_o2`` uses an externally weighted
-``eqx.o2.UuLinear`` in the local frame. Only source node features are
+``equivariantx.o2.UuLinear`` in the local frame. Only source node features are
 gathered and rotated; target features are not concatenated. Compatible
 representation copies mix within each channel. The edge MLP supplies a
 separate weight for each path and channel. These weights are used directly,
@@ -179,18 +179,18 @@ transformations, cutoff, and scatter retain their usual behavior.
 A 3BPA configuration is available as
 ``example/train/benchmark/3BPA/uuo2.yaml``.
 
-Set ``TACE_USE_EQX=1`` to use ``eqx.conv.UuO2TensorProductConv``. It fuses
+Set ``TACE_USE_EQX=1`` to use ``equivariantx.conv.UuO2TensorProductConv``. It fuses
 gather, both frame rotations, UuLinear, cutoff and scatter. The last radial
 MLP projection uses reusable bounded workspaces instead of a full edge-weight
 tensor. The preceding MLP layers and node-level linear maps remain unchanged.
 The same weights can be used with or without fusion. CUDA supports force
 training, recursive higher derivatives and ``torch.compile``.
 
-.. autoclass:: tace.models._e3nn.inter.UuO2Interaction
+.. autoclass:: tace.models.spherical.inter.UuO2Interaction
    :no-members:
    :show-inheritance:
 
 SO(2) Linear
 ------------
 
-.. autoclass:: tace.models._e3nn.inter.UvSO2Interaction
+.. autoclass:: tace.models.spherical.tece_oam_rra.UvSO2Interaction

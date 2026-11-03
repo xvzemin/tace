@@ -1,0 +1,114 @@
+.. _equivariantx-api-co3:
+
+Cartesian O(3)
+==============
+
+Features use flattened ``mul_ir`` storage with ``3**l`` entries per channel.
+Tensor-product inputs lie in the symmetric traceless subspace.
+
+Representations
+---------------
+
+.. autoclass:: equivariantx.co3.Irrep
+   :members:
+   :special-members: __mul__
+
+.. autoclass:: equivariantx.co3.Irreps
+   :members:
+
+Harmonics
+---------
+
+.. autoclass:: equivariantx.co3.CartesianHarmonics
+   :members: forward
+
+Linear maps
+-----------
+
+.. autoclass:: equivariantx.co3.Linear
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: equivariantx.co3.ElementLinear
+   :members: forward
+   :no-index:
+
+.. autoclass:: equivariantx.co3.MoEElementLinear
+   :members: forward
+   :no-index:
+
+Activations
+-----------
+
+.. autoclass:: equivariantx.co3.Activation
+   :members: forward
+
+.. autoclass:: equivariantx.co3.Gate
+   :members: forward
+
+Tensor products
+---------------
+
+``co3.ictp`` implements the 1989 ICTP theory through analytic symmetrization
+and trace subtraction. ``co3.ictd`` implements TACE's formulation based on
+the 2024 ICTD theory through Cartesian contractions and irreducible projection.
+Both retain every allowed angular path, including Levi-Civita couplings,
+and use identical instruction weights and normalization.
+``co3.TensorProduct`` is ``co3.ictd.TensorProduct``.
+The projection route skips outputs already known to be STF and batches the
+remaining projections by rank. A mixed output entry is projected if any
+incoming path requires projection; independent path weights are unchanged.
+Both routes use elementwise products for outer products and native cross
+products for uncontracted Levi-Civita couplings.
+Paths with the same input/output degrees, channel multiplicities and connection
+mode are contracted in batches. Their output entries and weights remain
+independent; paths with different input degrees are not merged.
+
+.. autoclass:: equivariantx.co3.TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. autoclass:: equivariantx.co3.FullyConnectedTensorProduct
+
+.. autoclass:: equivariantx.co3.ElementwiseTensorProduct
+
+.. autoclass:: equivariantx.co3.ictp.TensorProduct
+   :members: forward, weight_view_for_instruction, weight_views
+
+.. code-block:: python
+
+   from equivariantx import co3
+
+   args = ("4x1o", "4x1o", "4x0e+4x1e+4x2e")
+   paths = [(0, 0, k, "uuu", True) for k in range(3)]
+   ictd = co3.ictd.TensorProduct(*args, paths)
+   ictp = co3.ictp.TensorProduct(*args, paths)
+   ictp.load_state_dict(ictd.state_dict())
+
+With ``irrep_normalization="component"``, unit variance refers to independent
+orthonormal irreducible coordinates, not to all ``3**l`` Cartesian entries.
+For an isotropic rank-``l`` feature with unit covariance in these coordinates,
+the mean squared Cartesian entry is ``(2*l+1)/3**l``. Self-products and correlated
+paths do not in general retain unit variance.
+
+Both algorithms require STF inputs. Their derivatives agree along the STF
+subspace, not necessarily along perturbations that violate the input constraint.
+
+Storage and composition
+-----------------------
+
+The public layout is flattened ``mul_ir``. A block can be viewed as
+``(..., mul, 3, ..., 3)`` without copying; splitting the Cartesian axes does
+not change storage or arithmetic. Internal symmetric coordinates store
+``(l+1)*(l+2)//2`` permutation classes where useful.
+The analytic route combines fixed symmetrization, delta insertion and output
+scaling for small tensors. Larger tensors retain factored transformations to
+bound the size of constant matrices.
+
+For convolutions, ``co3.ictd.TensorProduct(project=False)`` allows a single
+projection after graph reduction and channel mixing. The analytic algorithm
+produces an STF tensor on each edge. Both can be passed to
+:class:`equivariantx.conv.CartesianTensorProductConv`; its PyTorch backend follows the
+supplied product, while CUDA uses the equivalent contraction with node-level
+projection. There is no separate analytic ICTP CUDA kernel.
+
+In recursive products, an intermediate consumed by another tensor product must
+be STF. Deferring the final projection is valid only across linear operations.

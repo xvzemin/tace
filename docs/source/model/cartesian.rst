@@ -2,13 +2,13 @@ Cartesian TACE
 ==============
 
 Cartesian TACE is under refactoring. Set ``model.config._target_`` to
-``tace.models.cartTACE`` with the same configuration as spherical
+``tace.models.CartesianTACE`` with the same configuration as spherical
 TACE. ``atomic_basis.type: cgtp`` uses Cartesian contractions based on the
 2024 ICTD theory, with projection after aggregation and channel compression.
 The node product block also uses Cartesian tensors. Weights, biases, and
 coupling paths are unchanged.
 
-``o2`` and ``uu_o2`` use direct Cartesian plane restriction and ``eqx.co2``
+``o2`` and ``uu_o2`` use direct Cartesian plane restriction and ``equivariantx.co2``
 operators. Each local order stores ``2**m`` Cartesian entries per channel,
 without first constructing ``3**m`` transverse tensors. UV attention evaluates
 Frobenius inner products in the same Cartesian storage.
@@ -52,7 +52,7 @@ Acceleration
 Local O(2) and magnetic O(2) use the ``2**m`` PyTorch path even when EQX is
 enabled. They are not silently converted to the compact CUDA layout.
 The full-rotation and ambient-projection algorithms remain available through
-``eqx.co2.LocalFrame(method="rotation")`` and ``method="projection"``.
+``equivariantx.co2.LocalFrame(method="rotation")`` and ``method="projection"``.
 Weights, biases, multiplicities, and coupling paths are unchanged.
 Flat and per-path matrix parameter layouts survive conversion and save/load.
 

@@ -12,11 +12,11 @@ separate. The first MLP linear map projects the node features before gathering
 them onto edges. This is equivalent to projecting their concatenation, while
 avoiding repeated element projections on edges.
 
-.. autoclass:: tace.models._e3nn.edge.IdentityEdgeUpdate
+.. autoclass:: tace.models.spherical.edge.IdentityEdgeUpdate
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.edge.Element2EdgeUpdate
+.. autoclass:: tace.models.spherical.edge.Element2EdgeUpdate
    :no-members:
    :show-inheritance:
 
@@ -28,6 +28,6 @@ class constant ``ELEMENT_STD``; it is not a configuration option.
 This update requires ``radial_basis.apply_cutoff: false`` so that the envelope
 acts after the radial MLP, including the element-dependent contributions.
 
-.. autoclass:: tace.models._e3nn.edge.Element2EdgeUpdateV2
+.. autoclass:: tace.models.spherical.edge.Element2EdgeUpdateV2
    :no-members:
    :show-inheritance:

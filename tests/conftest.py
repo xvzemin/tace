@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-import eqx  # noqa: F401 - Load constants before importing legacy e3nn modules.
+import equivariantx as eqx  # noqa: F401 - Load constants before importing legacy e3nn modules.
 from tace.utils.env import ACCELERATION_ENV
 
 

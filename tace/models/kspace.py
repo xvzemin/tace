@@ -10,7 +10,6 @@ import torch
 
 from tace.utils.torch_scatter import scatter_sum
 
-
 GridSize = Union[int, Sequence[int]]
 
 

@@ -24,4 +24,4 @@ jobs:
       - name: Test TACE CPU operations and interfaces
         run: python -m pytest tests -q
       - name: Test EQX portable operations
-        run: python -m pytest eqx/tests -q
+        run: python -m pytest equivariantx/tests -q

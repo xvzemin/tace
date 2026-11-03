@@ -9,19 +9,19 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx import conv as eqx_conv
-from eqx import o2
-from tace.models._e3nn.base import NodeUpdate
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-from tace.models._e3nn.fused import UuO2TensorProductConv
-from tace.models._e3nn.inter import O2MagneticInteraction
-from tace.models._e3nn.node import NODE_UPDATE
-from tace.models._e3nn.o2 import (
-    MagneticUvO2TensorProductConv,
-    UvO2TensorProductConv,
-)
-from tace.models._e3nn.representation import NodeRepresentation
+from equivariantx import conv as eqx_conv
+from equivariantx import o2
 from tace.models.layout import LayoutTransform
+from tace.models.spherical.base import NodeUpdate
+from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+from tace.models.spherical.fused import UuO2TensorProductConv
+from tace.models.spherical.mtace import (
+    MagneticUvO2TensorProductConv,
+    O2MagneticInteraction,
+)
+from tace.models.spherical.node import NODE_UPDATE
+from tace.models.spherical.o2 import UvO2TensorProductConv
+from tace.models.spherical.representation import NodeRepresentation
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
@@ -31,7 +31,7 @@ DTYPE = torch.float64
 def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.fused import O2TensorProductConv, O3TensorProductConv
+    from tace.models.spherical.fused import O2TensorProductConv, O3TensorProductConv
 
     for backend in ("EQX", "OEQ", "EQT", "CUEQ"):
         monkeypatch.setenv(f"TACE_USE_{backend}", "0")
@@ -76,10 +76,8 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
 def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.o2 import (
-        MagneticUvO2TensorProductConv,
-        UvO2TensorProductConv,
-    )
+    from tace.models.spherical.mtace import MagneticUvO2TensorProductConv
+    from tace.models.spherical.o2 import UvO2TensorProductConv
 
     torch.manual_seed(401)
     torch.set_default_dtype(torch.float64)
@@ -162,8 +160,8 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
 def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.o2 import MagneticUvO2TensorProductConv
     from tace.models.compile.compile import trace_to_fx
+    from tace.models.spherical.mtace import MagneticUvO2TensorProductConv
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
     irreps = "2x0ee+2x1eo+2x1oe" if hasattr(o3.Irrep("0e"), "t") else "2x0e+2x1e+2x1o"
@@ -228,7 +226,7 @@ def test_uv_o2_compile_and_force_training(monkeypatch, double_precision, packed)
 @pytest.mark.parametrize("mask", range(32))
 @pytest.mark.parametrize("compile_enabled", [False, True])
 def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
-    from tace.models._e3nn.fused import O3TensorProductConv
+    from tace.models.spherical.fused import O3TensorProductConv
     from tace.utils.env import ACCELERATION_ENV
 
     enabled = [
@@ -258,17 +256,17 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
 
     monkeypatch.setitem(
         sys.modules,
-        "tace.models.luna",
+        "tace.models.backends.lunaequivariance",
         types.SimpleNamespace(LunaTensorProductConv=luna),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tace.models.oeq",
+        "tace.models.backends.openequivariance",
         types.SimpleNamespace(OeqTensorProductConv=oeq),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tace.models.cue",
+        "tace.models.backends.cuequivariance",
         types.SimpleNamespace(CueTensorProductConv=cue),
     )
     module = O3TensorProductConv("2x0e", "0e", "2x0e")
@@ -286,7 +284,7 @@ def test_luna_scatter(dtype):
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("LunaEquivariance requires compute capability >= 8.0")
     pytest.importorskip("LunaEquivariance")
-    from tace.models._e3nn.fused import O3TensorProductConv
+    from tace.models.spherical.fused import O3TensorProductConv
     from tace.utils.env import enable_acceleration
 
     torch.set_default_dtype(dtype)
@@ -360,8 +358,8 @@ def test_luna_scatter(dtype):
 def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.models.tace.tece_oam_rra.interaction import stream
-    from tace.models._e3nn.tece_oam_rra import Convolution
+    from equivariantx.models.tace.tece_oam_rra.interaction import stream
+    from tace.models.spherical.tece_oam_rra import Convolution
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
     irreps = o3.Irreps("4x0e+4x1o+4x2e")
@@ -444,8 +442,8 @@ def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
 def test_tece_state_dict(device, mmax, ece, attention, gate_m0, double_precision):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from tace.models._e3nn.tece_oam_rra import Convolution
     from tace.models.mlp import get_scaled_activation
+    from tace.models.spherical.tece_oam_rra import Convolution
 
     torch.manual_seed(18)
     irreps = o3.Irreps("4x0e+4x1o+4x2e")
@@ -566,14 +564,14 @@ def test_tece_state_dict(device, mmax, ece, attention, gate_m0, double_precision
 def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.models.tace.tece_oam_rra.interaction import stream
-    from tace.models._e3nn.tece_oam_rra import Convolution
+    from equivariantx.models.tace.tece_oam_rra.interaction import stream
+    from tace.models.spherical.tece_oam_rra import Convolution
 
     if edges == 1025:
         from functools import partial
 
-        import eqx.backends.cuda.execution as convolution_execution
-        import eqx.backends.cuda.models.tace.attention as execution
+        import equivariantx.backends.cuda.execution as convolution_execution
+        import equivariantx.backends.cuda.models.tace.attention as execution
 
         monkeypatch.setattr(execution, "BACKWARD_TILE_SIZE", 256)
         monkeypatch.setattr(
@@ -719,10 +717,10 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
 def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    import eqx.ops.recompute as recompute
-    from eqx.models.tace.tece_oam_rra.interaction import stream
-    from tace.models._e3nn.tece_oam_rra import Convolution
+    import equivariantx.ops.recompute as recompute
+    from equivariantx.models.tace.tece_oam_rra.interaction import stream
     from tace.models.mlp import get_scaled_activation
+    from tace.models.spherical.tece_oam_rra import Convolution
 
     def no_replay(*args, **kwargs):
         raise AssertionError("The native interaction must not use Graph replay.")
@@ -883,9 +881,9 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.lightning import convert_cgtp, load_tace
-    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+    from tace.models.spherical.tace import SphericalTACE
 
     for name in ("TACE_USE_EQX", "TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
         monkeypatch.setenv(name, "0")
@@ -916,7 +914,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
             config["radial_basis"]["apply_cutoff"] = False
         config["readout_emlp"]["hidden"] = [2]
         config["scale_shift"]["enable"] = False
-        reference = TensorModel(e3nnTACE(**deepcopy(config))).train().to(device)
+        reference = TensorModel(SphericalTACE(**deepcopy(config))).train().to(device)
         monkeypatch.setenv("TACE_USE_EQX", "1")
         model = convert_cgtp(reference, "o2")
         representation = model.readout_fn.representation
@@ -1008,8 +1006,8 @@ def test_tace_radial_bias_cutoff_and_force_training(
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.fused import O3TensorProductConv
     from tace.models.mlp import MLP
+    from tace.models.spherical.fused import O3TensorProductConv
 
     monkeypatch.setenv("TACE_USE_OEQ", "0")
     monkeypatch.setenv("TACE_USE_CUEQ", "0")
@@ -1064,10 +1062,10 @@ def test_tace_model_force_training(
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-    from tace.models._e3nn.fused import O3TensorProductConv, UuO2TensorProductConv
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+    from tace.models.spherical.fused import O3TensorProductConv, UuO2TensorProductConv
+    from tace.models.spherical.tace import SphericalTACE
 
     for name in ("EQX", "OEQ", "CUE", "EQT"):
         monkeypatch.setenv(f"TACE_USE_{name}", "0")
@@ -1103,9 +1101,9 @@ def test_tace_model_force_training(
     config["readout_emlp"]["hidden"] = [3]
     config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
-    reference_model = TensorModel(e3nnTACE(**config)).cuda().train()
+    reference_model = TensorModel(SphericalTACE(**config)).cuda().train()
     monkeypatch.setenv("TACE_USE_EQX", "1")
-    model = TensorModel(e3nnTACE(**config)).cuda().train()
+    model = TensorModel(SphericalTACE(**config)).cuda().train()
     model.load_state_dict(reference_model.state_dict(), strict=True)
     assert model.state_dict().keys() == reference_model.state_dict().keys()
     data = dict(
@@ -1527,9 +1525,9 @@ def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
 def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
     double_precision, use_attention
 ):
-    from tace.models._e3nn.inter import UuO2Interaction, UvO2Interaction
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.inter import UuO2Interaction, UvO2Interaction
+    from tace.models.spherical.tace import SphericalTACE
 
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -1562,9 +1560,9 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
         with pytest.raises(
             ValueError, match="uu_o2 does not support radial rotary attention"
         ):
-            e3nnTACE(**config)
+            SphericalTACE(**config)
         return
-    model = TensorModel(e3nnTACE(**config)).train()
+    model = TensorModel(SphericalTACE(**config)).train()
     assert model.readout_fn.representation.use_o2
     assert model.readout_fn.representation._can_pack_wigner
     for interaction in model.readout_fn.representation.interactions:
@@ -1703,7 +1701,7 @@ def test_o2_cgtp_infers_degrees_and_accepts_larger_shared_wigner(
 ):
     from types import SimpleNamespace
 
-    from tace.models._e3nn.fused import (
+    from tace.models.spherical.fused import (
         O2TensorProductConv,
         O3TensorProductConv,
     )

@@ -22,9 +22,9 @@ from tace.lightning.torch_model import (
     _should_warn_without_aoti,
     create_model,
 )
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
 from tace.models.compile.aot import (
     TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY,
+    TACE_AOTI_LUNA_OPS_ENTRY,
     AOTICompiledTensorModel,
     _custom_ops_libs_from_model,
     _embed_custom_ops_libs,
@@ -38,6 +38,7 @@ from tace.models.compile.aot import (
 )
 from tace.models.compile.compile import compiled_call, trace_and_compile, trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
+from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
 
 def test_compiled_shared_state(double_precision):
@@ -84,11 +85,14 @@ def test_compiled_shared_state(double_precision):
             model.linear.scale.mul_(0.9)
 
 
-@pytest.mark.parametrize("use_eqx", [False, True])
-def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
+@pytest.mark.parametrize(
+    "backend", [None, "eqx", "openequivariance", "cuequivariance", "lunaequivariance"]
+)
+def test_aoti_dependencies(tmp_path, monkeypatch, backend):
     model = torch.nn.Linear(2, 2)
-    if use_eqx:
-        import eqx  # noqa: F401
+    expected_libs = set()
+    if backend == "eqx":
+        import equivariantx as eqx  # noqa: F401
 
         graph = torch.fx.Graph()
         operator = torch.ops.eqx.gather_sum.default
@@ -97,13 +101,27 @@ def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
         )
         graph.output(graph.call_function(operator, inputs))
         model = torch.fx.GraphModule(torch.nn.Module(), graph)
+        expected_libs = {"equivariantx"}
+    elif backend is not None:
+        model = type(
+            "Convolution",
+            (torch.nn.Module,),
+            {"__module__": f"tace.models.backends.{backend}._tp_scatter"},
+        )()
+        expected_libs = {
+            "openequivariance": {"openequivariance"},
+            "cuequivariance": {"cuequivariance", "cuequivariance_torch"},
+            "lunaequivariance": {"tace.models.backends.lunaequivariance"},
+        }[backend]
+        if backend == "lunaequivariance":
+            model.aoti_config = {"dtype": "float64"}
     libs = _custom_ops_libs_from_model(model)
-    assert libs == ({"eqx"} if use_eqx else set())
+    assert libs == expected_libs
 
     path = tmp_path / "model.pt2"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("model/archive_format", "pt2")
-    _embed_custom_ops_libs(path, libs)
+    _embed_custom_ops_libs(path, libs, model)
     if libs:
         with zipfile.ZipFile(path) as archive:
             assert (
@@ -114,11 +132,26 @@ def test_aoti_dependencies(tmp_path, monkeypatch, use_eqx):
                 )
                 == libs
             )
+            if backend == "lunaequivariance":
+                assert json.loads(
+                    archive.read(f"model/{TACE_AOTI_LUNA_OPS_ENTRY}")
+                ) == [model.aoti_config]
 
+    register = Mock()
+    if backend == "lunaequivariance":
+        from types import SimpleNamespace
+
+        monkeypatch.setitem(
+            sys.modules,
+            "tace.models.backends.lunaequivariance",
+            SimpleNamespace(register_luna_ops=register),
+        )
     importer = Mock()
     monkeypatch.setattr("tace.models.compile.aot.importlib.import_module", importer)
     _import_custom_ops_libs(path)
     assert [call.args[0] for call in importer.call_args_list] == sorted(libs)
+    if backend == "lunaequivariance":
+        register.assert_called_once_with(model.aoti_config)
 
 
 @pytest.mark.parametrize(
@@ -163,7 +196,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         from tace.lightning import convert_basis
 
         state = convert_basis(reference).state_dict()
-        config["_target_"] = "tace.models.cartTACE"
+        config["_target_"] = "tace.models.CartesianTACE"
     enable_acceleration(
         enable_luna=use_luna,
         enable_eqx=backend in ("cartesian_eqx", "cartesian_o2"),
@@ -250,10 +283,6 @@ for key, expected in case["expected"].items():
 def test_constant_construction_precision():
     from e3nn import o3
 
-    from tace.models._e3nn.basis_change import DirectVirials
-    from tace.models._e3nn.layer_norm import EquivariantMergeLayerNorm
-    from tace.models._e3nn.magnetic import MagneticBasis
-    from tace.models._e3nn.symmetric_contraction import Contraction
     from tace.models.angular import CartesianHarmonics
     from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
     from tace.models.linear import e3nnLinear
@@ -269,6 +298,10 @@ def test_constant_construction_precision():
         j0SphericalBesselBasis,
         jnSphericalBesselBasis,
     )
+    from tace.models.spherical.basis_change import DirectVirials
+    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
+    from tace.models.spherical.mtace import MagneticBasis
+    from tace.models.spherical.symmetric_contraction import Contraction
 
     constants = []
     for dtype in (torch.float32, torch.float64):
@@ -925,7 +958,7 @@ sys.modules["torch.utils.cpp_extension"] = None
 from tace.interface.ase import TACEAseCalc
 from tace.lightning import load_tace
 from tace.scripts.train import main
-from eqx.backends.cuda import runtime as cuda
+from equivariantx.backends.cuda import runtime as cuda
 
 assert not hasattr(os, "sched_getaffinity")
 assert not cuda._POOL._threads

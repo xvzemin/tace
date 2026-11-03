@@ -5,11 +5,11 @@ The following modules implement many-body expansions using different strategies.
 We recommend using ``CgtpACE`` in practice. For other ACE variants, interested
 users are encouraged to refer to the source code for further exploration.
 
-.. autoclass:: tace.models._e3nn.prod.CgtpACE
+.. autoclass:: tace.models.spherical.prod.CgtpACE
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.prod.MaceACE
+.. autoclass:: tace.models.spherical.prod.MaceACE
    :no-members:
    :show-inheritance:
 
@@ -37,7 +37,7 @@ Nonlinear products
 ------------------
 
 Set ``product_basis.type`` to ``nonlinear_cgtp``.
-For ``tace.models.cartTACE``, use ``nonlinear_ictd``. The Cartesian block uses
+For ``tace.models.CartesianTACE``, use ``nonlinear_ictd``. The Cartesian block uses
 ICTD products with the same paths and trainable parameters; ``convert_basis``
 converts between the two representations.
 It always applies Linear up to produce contraction inputs and invariant scalars.
@@ -54,8 +54,8 @@ Both modes retain only paths that are nonzero for symmetric products. There
 are no additional configuration options. Expert mixtures and
 ``product_basis.nonlinear`` are not used; leave the latter at ``null``.
 
-.. autoclass:: tace.models._e3nn.prod.NonlinearCgtpACE
+.. autoclass:: tace.models.spherical.prod.NonlinearCgtpACE
    :no-members:
 
-.. autoclass:: tace.models._cart.prod.NonlinearIctdACE
+.. autoclass:: tace.models.cartesian.prod.NonlinearIctdACE
    :no-members:

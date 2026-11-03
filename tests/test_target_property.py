@@ -19,10 +19,10 @@ from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, KeySpecificatio
 from tace.dataset.read import ase_db_connect, ase_io_read
 from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
 from tace.lightning import create_model, export_tace, load_tace
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-from tace.models._e3nn.les import TACELES, required_les_irreps
-from tace.models._e3nn.readout import DirectHessianReadout
-from tace.models._e3nn.representation import PairRepresentation
+from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+from tace.models.spherical.les import TACELES, required_les_irreps
+from tace.models.spherical.readout import DirectHessianReadout
+from tace.models.spherical.representation import PairRepresentation
 from tace.models.utils import get_target_irreps, prepare_direct_hessian_inputs
 from tace.utils.loss.common import hessian_loss
 from tace.utils.loss.normal import NormalLoss
@@ -1225,7 +1225,7 @@ def test_direct_hessian(device, tmp_path, interaction_type):
 
 @pytest.fixture
 def small_system(double_precision):
-    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -1268,8 +1268,8 @@ def small_system(double_precision):
 
 
 def test_embedding_parity_paths(small_system):
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.tace import SphericalTACE
 
     config, data = small_system
     assert DEFAULT_MODEL_CONFIG["parity"] is None
@@ -1277,7 +1277,7 @@ def test_embedding_parity_paths(small_system):
     config["target_property"] = ["energy"]
     config["universal_embedding"]["magnetic_field"]["enable"] = True
     data["magnetic_field"] = data["positions"].new_tensor([[0.2, 0.1, -0.1]])
-    model = TensorModel(e3nnTACE(**config)).to(data["positions"].device)
+    model = TensorModel(SphericalTACE(**config)).to(data["positions"].device)
     core = model.readout_fn
     assert {(ir.l, ir.p) for _, ir in core.target_irreps} == {(0, 1)}
     assert {(ir.l, ir.p) for _, ir in core.representation.irreps_outs[-1]} == {(0, 1)}
@@ -1295,15 +1295,15 @@ def test_embedding_parity_paths(small_system):
     "denoising,all_layers", [(False, False), (False, True), (True, False)]
 )
 def test_vector_readouts(small_system, monkeypatch, denoising, all_layers):
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.tace import SphericalTACE
 
     monkeypatch.setenv("TACE_USE_DENS", str(int(denoising)))
     config, data = small_system
     config["target_property"] = ["energy", "direct_forces"]
     config["readout_emlp"]["use_alllayer"] = all_layers
     data["forces"] = torch.randn_like(data["positions"])
-    model = TensorModel(e3nnTACE(**config)).to(data["positions"].device).train()
+    model = TensorModel(SphericalTACE(**config)).to(data["positions"].device).train()
     keys = ["direct_forces", "noise_vec"] if denoising else ["direct_forces"]
     output = model(data)
     for key in keys:
@@ -1326,8 +1326,8 @@ def test_vector_readouts(small_system, monkeypatch, denoising, all_layers):
 @pytest.mark.parametrize("training", [False, True])
 @pytest.mark.parametrize("empty_edges", [False, True])
 def test_edge_forces_match_position_derivatives(small_system, training, empty_edges):
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.tace import SphericalTACE
     from tace.models.utils import compute_forces_stress_from_edge_forces
 
     config, data = small_system
@@ -1335,7 +1335,7 @@ def test_edge_forces_match_position_derivatives(small_system, training, empty_ed
         data["edge_index"] = data["edge_index"][:, :0]
         data["edge_shifts"] = data["edge_shifts"][:0]
     config["target_property"] = ["energy", "forces", "stress"]
-    model = TensorModel(e3nnTACE(**config)).to(data["positions"].device).train(training)
+    model = TensorModel(SphericalTACE(**config)).to(data["positions"].device).train(training)
     reference = model({key: value.clone() for key, value in data.items()})
     model.reset_target_property(["energy", "edge_forces"])
     edge_data = {key: value.clone() for key, value in data.items()}

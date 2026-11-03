@@ -10,25 +10,25 @@ from torch_geometric.data import Data
 
 from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
 from tace.dataset.quantity import PROPERTIES, TIME_ODD_PROPERTIES
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models._e3nn.edge import EDGE_UPDATE
-from tace.models._e3nn.fused import (
-    O3TensorProductConv,
-    UuuTensorProduct,
-    UvuTensorProduct,
-)
-from tace.models._e3nn.layer_norm import get_normalization_layer
-from tace.models._e3nn.magnetic import MagneticBasis
-from tace.models._e3nn.node import ElementNodeUpdate
-from tace.models._e3nn.nonlinear import get_nonlinear_layer
-from tace.models._e3nn.paths import generate_paths
-from tace.models._e3nn.readout import TensorReadOut
-from tace.models._e3nn.tace import e3nnTACE
-from tace.models._e3nn.ue import UniversalEquivariantEmbedding
 from tace.models.adapter import TensorModel
 from tace.models.angular import SolidHarmonics
 from tace.models.layout import LayoutTransform
 from tace.models.linear import e3nnLinear
+from tace.models.spherical.default import DEFAULT_MODEL_CONFIG, check_model_config
+from tace.models.spherical.edge import EDGE_UPDATE
+from tace.models.spherical.fused import (
+    O3TensorProductConv,
+    UuuTensorProduct,
+    UvuTensorProduct,
+)
+from tace.models.spherical.layer_norm import get_normalization_layer
+from tace.models.spherical.mtace import MagneticBasis
+from tace.models.spherical.node import ElementNodeUpdate
+from tace.models.spherical.nonlinear import get_nonlinear_layer
+from tace.models.spherical.paths import generate_paths
+from tace.models.spherical.readout import TensorReadOut
+from tace.models.spherical.tace import SphericalTACE
+from tace.models.spherical.ue import UniversalEquivariantEmbedding
 from tace.models.time_reversal import (
     spherical_harmonics_irreps,
     supports_time_reversal,
@@ -90,7 +90,7 @@ def test_magnetic_wigner6j_model(edge_update, mlp_type, monkeypatch, double_prec
     config["radial_basis"]["apply_cutoff"] = False
     config["edge_embedding"]["type"] = "linear"
     config["edge_update"]["type"] = edge_update
-    model = TensorModel(e3nnTACE(**config)).cuda().train()
+    model = TensorModel(SphericalTACE(**config)).cuda().train()
     representation = model.readout_fn.representation
     assert not hasattr(representation, "magnetic_edge_embedding")
     for node_update, spatial, magnetic in zip(
@@ -372,7 +372,7 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     config = _model_config()
     config["parity"] = False
     config["universal_embedding"]["magnetic_field"]["enable"] = True
-    model = e3nnTACE(**config)
+    model = SphericalTACE(**config)
     representation = model.representation
 
     assert representation.invariant_property == []
@@ -381,7 +381,7 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
     assert ir.l == 1 and ir.p == -1 and ir.t == -1
 
     config["parity"] = True
-    full_o3_model = e3nnTACE(**config)
+    full_o3_model = SphericalTACE(**config)
     full_o3_ir = (
         full_o3_model.representation.uee_embeddings[0]
         .uee["magnetic_field"]
@@ -399,7 +399,7 @@ def test_parity_selects_natural_or_complete_magnetic_paths():
     config["fidelity"][0]["magnetic_scale"] = 2.0
     config["mmax"] = 1
 
-    natural_model = e3nnTACE(**config)
+    natural_model = SphericalTACE(**config)
     natural_representation = natural_model.representation
     natural_basis = natural_representation.magnetic_basis.angular_basis
     assert natural_basis.irreps_in[0].ir.p == -1
@@ -413,7 +413,7 @@ def test_parity_selects_natural_or_complete_magnetic_paths():
         assert all(ir.p == (-1) ** ir.l for _, ir in irreps)
 
     config["parity"] = True
-    complete_model = e3nnTACE(**config)
+    complete_model = SphericalTACE(**config)
     complete_representation = complete_model.representation
     complete_basis = complete_representation.magnetic_basis.angular_basis
     assert complete_basis.irreps_in[0].ir.p == 1
@@ -444,7 +444,7 @@ def test_magnetic_representation_uses_node_fidelity(num_fidelities):
         {"name": "PBE", "magnetic_scale": 2.0},
         {"name": "SCAN", "magnetic_scale": 4.0},
     ][:num_fidelities]
-    model = TensorModel(e3nnTACE(**config)).double().eval()
+    model = TensorModel(SphericalTACE(**config)).double().eval()
     representation = model.readout_fn.representation
     assert representation.magnetic_basis.magnetic_scale.shape == (num_fidelities, 1)
     data = {
@@ -508,7 +508,7 @@ def test_o2_magnetic_interactions_keep_complete_soc_irreps():
         use_radial_rotary_attention=False,
     )
     config["product_basis"].update(type="cgtp", correlation=2)
-    model = e3nnTACE(**config)
+    model = SphericalTACE(**config)
 
     for interaction in model.representation.interactions:
         output_lmax = (
@@ -549,7 +549,7 @@ def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     config = _time_reversal_model_config()
     config["product_basis"]["correlation"] = 3
-    model = e3nnTACE(**config)
+    model = SphericalTACE(**config)
     representation = model.representation
     interaction = representation.interactions[0]
 
@@ -582,7 +582,7 @@ def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
     config["mmax"] = 1
     config["atomic_basis"]["type"] = ["o2"]
     config["atomic_basis"]["edge_nonlinear"] = ["silu"]
-    model = e3nnTACE(**config)
+    model = SphericalTACE(**config)
 
     assert model.representation.use_o2
     assert model.representation.use_time_reversal is time_reversal

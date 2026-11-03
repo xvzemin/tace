@@ -1,1 +1,1 @@
-.. include:: ../../../../eqx/docs/source/api/models.rst
+.. include:: ../../../../equivariantx/docs/source/api/models.rst

@@ -4,4 +4,4 @@ defaults:
 
 model:
   config:
-    _target_: tace.models.cartTACE
+    _target_: tace.models.CartesianTACE

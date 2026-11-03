@@ -699,17 +699,21 @@ def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
     libs: Set[str] = set()
     for module in model.modules():
         module_name = type(module).__module__.lower()
-        if module_name.startswith("openequivariance") or ".models.oeq" in module_name:
+        if module_name.startswith(
+            ("openequivariance", "tace.models.backends.openequivariance.")
+        ):
             libs.add("openequivariance")
-        if module_name.startswith("cuequivariance") or ".models.cue" in module_name:
+        if module_name.startswith(
+            ("cuequivariance", "tace.models.backends.cuequivariance.")
+        ):
             libs.update({"cuequivariance", "cuequivariance_torch"})
-        if module_name.startswith("tace.models.luna."):
-            libs.add("tace.models.luna")
+        if module_name.startswith("tace.models.backends.lunaequivariance."):
+            libs.add("tace.models.backends.lunaequivariance")
         if isinstance(module, torch.fx.GraphModule):
             for node in module.graph.nodes:
                 if isinstance(node.target, torch._ops.OpOverload):
                     if node.target.namespace == "eqx":
-                        libs.add("eqx")
+                        libs.add("equivariantx")
     return libs
 
 
@@ -726,11 +730,16 @@ def _embed_custom_ops_libs(
             f"{archive_root}/{TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY}",
             " ".join(sorted(custom_ops_libs)),
         )
-        if model is not None and "tace.models.luna" in custom_ops_libs:
+        if (
+            model is not None
+            and "tace.models.backends.lunaequivariance" in custom_ops_libs
+        ):
             configs = {
                 json.dumps(module.aoti_config): module.aoti_config
                 for module in model.modules()
-                if type(module).__module__.startswith("tace.models.luna.")
+                if type(module).__module__.startswith(
+                    "tace.models.backends.lunaequivariance."
+                )
             }
             archive.writestr(
                 f"{archive_root}/{TACE_AOTI_LUNA_OPS_ENTRY}",
@@ -757,7 +766,7 @@ def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
     for lib in sorted(libs):
         importlib.import_module(lib)
     if luna_configs:
-        from ..luna import register_luna_ops
+        from ..backends.lunaequivariance import register_luna_ops
 
         for config in luna_configs:
             register_luna_ops(config)

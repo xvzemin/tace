@@ -299,7 +299,7 @@ model:
   
   config:
 
-    _target_: tace.models.e3nnTACE # [e3nnTACE]
+    _target_: tace.models.SphericalTACE # [SphericalTACE]
     wrapper:
       _target_: tace.models.TensorModel # [TensorModel]
 

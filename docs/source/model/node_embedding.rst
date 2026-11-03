@@ -8,7 +8,7 @@ The linear embedding, which relies solely on element, is the most conservative a
 In principle, node embeddings can also incorporate information from the local environment (including scalar and tensor features). 
 However, based on our current experiments, the linear approach remains the most reliable.
 
-.. autoclass:: tace.models._e3nn.node.LinearNodeEmbedding
+.. autoclass:: tace.models.spherical.node.LinearNodeEmbedding
    :no-members:
    :show-inheritance:
 
@@ -52,18 +52,18 @@ features. Corresponding spherical and Wigner variants share learned weights
 and produce the same output when supplied with the same normalized directions.
 The names ``tensor`` and ``o2_tensor`` are not accepted.
 
-.. autoclass:: tace.models._e3nn.node.SphericalTensorNodeEmbedding
+.. autoclass:: tace.models.spherical.node.SphericalTensorNodeEmbedding
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.Element2SphericalTensorNodeEmbedding
+.. autoclass:: tace.models.spherical.node.Element2SphericalTensorNodeEmbedding
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.WignerTensorNodeEmbedding
+.. autoclass:: tace.models.spherical.node.WignerTensorNodeEmbedding
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.Element2WignerTensorNodeEmbedding
+.. autoclass:: tace.models.spherical.node.Element2WignerTensorNodeEmbedding
    :no-members:
    :show-inheritance:

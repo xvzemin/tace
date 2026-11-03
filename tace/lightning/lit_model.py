@@ -503,7 +503,9 @@ class LightningWrapperModel(L.LightningModule):
     ) -> Any:
 
         checkpoint = torch.load(
-            ckpt_path, map_location=map_location, weights_only=False
+            ckpt_path,
+            map_location=map_location,
+            weights_only=False,
         )
         checkpoint_dtype = _dominant_floating_dtype(
             value
@@ -732,7 +734,7 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
     up to floating-point roundoff. Other interaction types are unchanged.
     Recreate any optimizer for the returned model before further training.
     """
-    from tace.models._e3nn.inter import (
+    from tace.models.spherical.inter import (
         O2CgtpInteraction,
         O3CgtpInteraction,
         O3IctdInteraction,

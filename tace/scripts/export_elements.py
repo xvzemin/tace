@@ -12,11 +12,6 @@ import torch
 
 from tace.dataset.element import atomic_numbers, chemical_symbols
 from tace.lightning import create_model, export_tace, load_tace
-from tace.models._e3nn.base import NodeEmbedding
-from tace.models._e3nn.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
-from tace.models._e3nn.magnetic import MagneticBasis
-from tace.models._e3nn.prod import MaceACE, NonlinearCgtpACE
-from tace.models._e3nn.symmetric_contraction import Contraction
 from tace.models.adapter import TensorModel
 from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
 from tace.models.linear import (
@@ -26,6 +21,11 @@ from tace.models.linear import (
     has_lora,
     switch_e3nn_weight_layout,
 )
+from tace.models.spherical.base import NodeEmbedding
+from tace.models.spherical.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
+from tace.models.spherical.mtace import MagneticBasis
+from tace.models.spherical.prod import MaceACE, NonlinearCgtpACE
+from tace.models.spherical.symmetric_contraction import Contraction
 from tace.utils.env import enable_acceleration
 from tace.utils.utils import torch_default_dtype
 

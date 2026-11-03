@@ -56,6 +56,10 @@ Exporting with ``state_dict`` or ``full_model`` does **not** compile the model.
 Alternative backends
 --------------------
 
+Backend adapters are grouped under ``tace.models.backends`` as
+``cuequivariance``, ``openequivariance``, ``equitorch`` and ``lunaequivariance``.
+EQX operators are provided by the independent ``equivariantx`` package.
+
 In either workflow, ``TACE_USE_EQX=1`` can be replaced by the backend flags
 below for supported operators. This changes operator implementations, not the
 training or export steps for compilation-compatible backends. Keep
@@ -140,21 +144,21 @@ EQX in TACE
    * - TACE operation
      - EQX implementation
    * - ``cgtp``
-     - ``eqx.conv.O3TensorProductConv``
+     - ``equivariantx.conv.O3TensorProductConv``
    * - ``o2_cgtp``
-     - ``eqx.conv.O2O3TensorProductConv``
+     - ``equivariantx.conv.O2O3TensorProductConv``
    * - ``co3``
-     - ``eqx.conv.CartesianTensorProductConv``
+     - ``equivariantx.conv.CartesianTensorProductConv``
    * - ``uu_o2``
-     - ``eqx.conv.UuO2TensorProductConv``
+     - ``equivariantx.conv.UuO2TensorProductConv``
    * - ``w6j_mag``
-     - ``eqx.conv.Wigner6jTensorProductConv``
+     - ``equivariantx.conv.Wigner6jTensorProductConv``
    * - ``o2`` / ``o2_mag``
-     - ``eqx.conv.UvO2TensorProductConv``
+     - ``equivariantx.conv.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
-     - ``eqx.models.tace.tece_oam_rra``
+     - ``equivariantx.models.tace.tece_oam_rra``
    * - Standard / gated bilinear ACE
-     - ``eqx.ace.SemiCoupledSymmetricContraction`` / ``eqx.ace.BilinearContraction``
+     - ``equivariantx.ace.SemiCoupledSymmetricContraction`` / ``equivariantx.ace.BilinearContraction``
 
 By default, EQX streams the convolution's complete radial MLP in bounded edge
 tiles and recomputes nonlinear activations during backward, including force training.

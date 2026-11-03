@@ -40,8 +40,8 @@ napoleon_type_aliases = {
     "o3.Irreps": "e3nn.o3.Irreps",
     "o3.Linear": "``e3nn.o3.Linear``",
     "o3.TensorProduct": "e3nn.o3.TensorProduct",
-    "LocalFrame": "eqx.o2.LocalFrame",
-    "UuLinear": "eqx.o2.UuLinear",
+    "LocalFrame": "equivariantx.o2.LocalFrame",
+    "UuLinear": "equivariantx.o2.UuLinear",
 }
 autodoc_mock_imports = ["torch_sim"]
 autosummary_generate = True
@@ -82,11 +82,11 @@ html_static_path = ["_static"]
 html_favicon = "_static/favicon.svg"
 
 rst_prolog = """
-.. |eqx-frames| image:: /../../eqx/docs/source/_static/frames.svg
+.. |eqx-frames| image:: /../../equivariantx/docs/source/_static/frames.svg
    :alt: Node layout conversion, edge gather, local O(2) update, and node scatter.
    :width: 100%
 
-.. |eqx-convolutions| image:: /../../eqx/docs/source/_static/convolutions.svg
+.. |eqx-convolutions| image:: /../../equivariantx/docs/source/_static/convolutions.svg
    :alt: Direct CGTP, aligned CGTP, Uu, and Uv convolution flows.
    :width: 100%
 """

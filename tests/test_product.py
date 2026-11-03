@@ -8,22 +8,23 @@ import pytest
 import torch
 from e3nn import o3
 
-import tace.models.eqt.equitorch.nn.sparse_product as sparse_product
-import tace.models.eqt.equitorch.nn.tensor_products as tensor_products
-from tace.models._e3nn.fused import UuuTensorProduct, UvuTensorProduct
-from tace.models._e3nn.paths import (
+import tace.models.backends.equitorch.equitorch.nn.sparse_product as sparse_product
+import tace.models.backends.equitorch.equitorch.nn.tensor_products as tensor_products
+from tace.models.backends.equitorch.equitorch.nn import TensorProduct
+from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
+from tace.models.spherical.fused import UuuTensorProduct, UvuTensorProduct
+from tace.models.spherical.paths import (
     SymmetricProductPaths,
     generate_paths,
     satisfy,
     to_possible_tp_irreps,
 )
-from tace.models._e3nn.prod import PRODUCT, BilinearMoEACE, CgtpACE, MaceACE
-from tace.models._e3nn.wigner6j import (
+from tace.models.spherical.prod import PRODUCT, CgtpACE, MaceACE
+from tace.models.spherical.tece_oam_rra import BilinearMoEACE
+from tace.models.spherical.wigner6j import (
     O3Wigner6jTensorProductConv,
     wigner_6j,
 )
-from tace.models.eqt.equitorch.nn import TensorProduct
-from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 from tace.models.time_reversal import spherical_harmonics_irreps, supports_time_reversal
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
@@ -159,7 +160,7 @@ def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     monkeypatch.setenv("TACE_USE_EQT", "0")
-    import tace.models._e3nn.prod as prod
+    import tace.models.spherical.prod as prod
 
     for name in ("e3nnLinear", "e3nnElementLinear"):
         monkeypatch.setattr(
@@ -512,9 +513,9 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation):
 @pytest.mark.parametrize("asymmetric", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
-    from eqx import co3
-    from tace.models._cart.prod import NonlinearIctdACE
-    from tace.models._e3nn.prod import NonlinearCgtpACE
+    from equivariantx import co3
+    from tace.models.cartesian.prod import NonlinearIctdACE
+    from tace.models.spherical.prod import NonlinearCgtpACE
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     monkeypatch.setattr(NonlinearCgtpACE, "asymmetric", asymmetric)
@@ -591,7 +592,7 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
 @pytest.mark.parametrize("backend", ["eqx", "cue", "both"])
 @pytest.mark.parametrize("hidden", [None, 3])
 def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden):
-    from tace.models._e3nn.symmetric_contraction import SymmetricContraction
+    from tace.models.spherical.symmetric_contraction import SymmetricContraction
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if backend == "cue":
@@ -692,7 +693,7 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_mace_official_contraction(monkeypatch, degree, correlation, dtype, backend):
     official = pytest.importorskip("mace.modules.symmetric_contraction")
-    from tace.models._e3nn.symmetric_contraction import U_matrix_real
+    from tace.models.spherical.symmetric_contraction import U_matrix_real
 
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -1558,8 +1559,8 @@ def test_time_reversal_wigner6j_rejects_scatter_acceleration(
 def test_bilinear_product_integration(monkeypatch, matrix, experts, shared, agnostic):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from tace.models._e3nn.prod import BilinearMoEACE
     from tace.models.linear import switch_e3nn_weight_layout
+    from tace.models.spherical.tece_oam_rra import BilinearMoEACE
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
     model = (

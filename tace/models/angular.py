@@ -13,8 +13,8 @@ from e3nn.o3._irreps import Irreps
 from e3nn.o3._spherical_harmonics import _spherical_harmonics
 from e3nn.util.jit import compile_mode
 
-from .time_reversal import make_irrep
 from .ictd import ICTD
+from .time_reversal import make_irrep
 from .utils import expand_dims_to
 
 

@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "equivariantx"
+version = "0.1.0"
+description = "Spherical and Cartesian O(3)/O(2) operators, frame conversions, and fused CUDA convolutions."
+readme = "README.md"
+authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
+license = "Apache-2.0"
+license-files = ["LICENSE.md"]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.4",
+    "e3nn>=0.4.4",
+    "scipy>=1.15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+cuda = ["ninja", "filelock"]
+mace = ["mace-torch>=0.3.17"]
+nequip = ["nequip>=0.19.1"]
+sevennet = ["sevenn>=0.13.0"]
+
+[project.urls]
+Homepage = "https://github.com/xvzemin/tace"
+Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/api.html"
+
+[tool.setuptools]
+packages = [
+    "equivariantx",
+    "equivariantx.ace",
+    "equivariantx.backends",
+    "equivariantx.backends.cuda",
+    "equivariantx.backends.cuda.models",
+    "equivariantx.backends.cuda.models.tace",
+    "equivariantx.backends.cuda.o2_o3",
+    "equivariantx.backends.cuda.o3",
+    "equivariantx.backends.torch",
+    "equivariantx.co2",
+    "equivariantx.co3",
+    "equivariantx.co3.ictp",
+    "equivariantx.co3.ictd",
+    "equivariantx.conv",
+    "equivariantx.conv.co3",
+    "equivariantx.conv.o2_o3",
+    "equivariantx.conv.uu_o2",
+    "equivariantx.conv.uv_o2",
+    "equivariantx.models",
+    "equivariantx.models.equflash",
+    "equivariantx.models.mace",
+    "equivariantx.models.nequip",
+    "equivariantx.models.prophet",
+    "equivariantx.models.sevennet",
+    "equivariantx.models.tace",
+    "equivariantx.models.tace.tece_oam_rra",
+    "equivariantx.nn",
+    "equivariantx.o2",
+    "equivariantx.o3",
+    "equivariantx.o3.cgtp",
+    "equivariantx.o3.gtp",
+    "equivariantx.o3.mtp",
+    "equivariantx.o3.wigner6j",
+    "equivariantx.ops",
+    "equivariantx.utils",
+]
+package-dir = { equivariantx = "." }
+
+[tool.setuptools.package-data]
+equivariantx = ["README.md", "backends/cuda/csrc/*.cpp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

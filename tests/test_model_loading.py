@@ -12,23 +12,89 @@ from ase import Atoms
 from e3nn import o3
 from torch_geometric.data import Batch
 
-from eqx import o2
+from equivariantx import o2
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KeySpecification
 from tace.foundations import resolve_model_path, tace_foundations
 from tace.interface.ase import TACEAseCalc
 from tace.lightning import convert_cgtp, create_model, export_tace, load_tace
 from tace.lightning.lit_model import LightningWrapperModel, _load_model_state_dict
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-from tace.models._e3nn.tace import e3nnTACE
 from tace.models.adapter import TensorModel
 from tace.models.blocks import ScaleShift
 from tace.models.linear import switch_e3nn_weight_layout
+from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+from tace.models.spherical.tace import SphericalTACE
 from tace.scripts.export_elements import select_elements
 from tace.utils.utils import torch_default_dtype
 
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def test_model_config_class_names():
+    from importlib import import_module
+
+    from tace.lightning.torch_model import select_wrapper
+
+    for old, new, old_cls, new_cls in (
+        ("_e3nn", "spherical", "e3nnTACE", "SphericalTACE"),
+        ("_cart", "cartesian", "cartTACE", "CartesianTACE"),
+    ):
+        package = import_module(f"tace.models.{new}")
+        model_cls = getattr(package, new_cls)
+        for prefix in ("tace.models", f"tace.models.{old}", f"tace.models.{old}.tace"):
+            assert select_wrapper(f"{prefix}.{old_cls}") is model_cls
+        for prefix in ("tace.models.compile", "tace.models.compile.tace"):
+            assert select_wrapper(f"{prefix}.{old_cls}") is getattr(
+                import_module(prefix), new_cls
+            )
+    assert not any(
+        name.startswith(("tace.models._e3nn", "tace.models._cart"))
+        for name in sys.modules
+    )
+
+
+@pytest.mark.parametrize("basis", ["spherical", "cartesian"])
+@pytest.mark.parametrize("compiled", [False, True])
+def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, compiled):
+    from tace import models
+    from tace.lightning import convert_basis
+
+    reference = make_model()
+    if basis == "cartesian":
+        reference = convert_basis(reference)
+    expected = evaluate(reference)
+    cls_name = "SphericalTACE" if basis == "spherical" else "CartesianTACE"
+    old_package = "_e3nn" if basis == "spherical" else "_cart"
+    old_name = "e3nnTACE" if basis == "spherical" else "cartTACE"
+    canonical = f"tace.models.{cls_name}"
+    assert reference.readout_fn.model_config["_target_"] == canonical
+    path = tmp_path / "model.pt"
+    export_tace(reference, str(path))
+    saved = torch.load(path, weights_only=False)
+    names = [f"tace.models.{old_package}.tace.{old_name}"]
+    if basis == "spherical":
+        names.append(None)
+    monkeypatch.setenv("TACE_USE_COMPILE", str(int(compiled)))
+    if compiled:
+        saved["cfg"]["compile_backend"] = "aot_eager"
+    for name in names:
+        if name is None:
+            saved["cfg"].pop("_target_", None)
+        else:
+            saved["cfg"]["_target_"] = name
+        torch.save(saved, path)
+        restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()
+        assert type(restored.readout_fn) is getattr(
+            models.compile if compiled else models, cls_name
+        )
+        assert restored.readout_fn.model_config["_target_"] == canonical
+        assert dict(restored.named_parameters()).keys() == dict(
+            reference.named_parameters()
+        ).keys()
+        actual = evaluate(restored)
+        for key in ("energy", "forces", "stress"):
+            torch.testing.assert_close(actual[key], expected[key], atol=1e-10, rtol=1e-10)
 
 
 @pytest.mark.parametrize(
@@ -142,14 +208,14 @@ def test_native_cartesian_model(
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
     config["scale_shift"]["enable"] = False
-    reference = TensorModel(e3nnTACE(**config)).to(DEVICE).train()
+    reference = TensorModel(SphericalTACE(**config)).to(DEVICE).train()
     if interaction == "matrix":
         switch_e3nn_weight_layout(reference, "matrix")
     if fused:
         monkeypatch.setenv("TACE_USE_EQX", "1")
     module = convert_basis(reference)
     if interaction == "nonlinear_cgtp":
-        from tace.models._cart.prod import NonlinearIctdACE
+        from tace.models.cartesian.prod import NonlinearIctdACE
 
         assert all(
             isinstance(block, NonlinearIctdACE)
@@ -531,7 +597,7 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
         config["atomic_basis"]["type"] = "cgtp"
         config["product_basis"].update(type=interaction, correlation=3)
     if interaction == "nonlinear_ictd":
-        config["_target_"] = "tace.models.cartTACE"
+        config["_target_"] = "tace.models.CartesianTACE"
         config["product_basis"]["type"] = [interaction] * config["num_layers"]
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
@@ -765,7 +831,7 @@ def test_export_elements_cli(tmp_path, monkeypatch, double_precision, capsys):
 def test_cartesian_conversion(
     double_precision, monkeypatch, tmp_path, parity, node_embedding, fused
 ):
-    from tace.models._e3nn.inter import O3IctdInteraction
+    from tace.models.spherical.inter import O3IctdInteraction
 
     for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
@@ -788,7 +854,7 @@ def test_cartesian_conversion(
     config["readout_emlp"].update(use_one_body_magmoms=False, hidden=[2])
     config["radial_basis"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
-    reference = TensorModel(e3nnTACE(**config)).to(DEVICE).train()
+    reference = TensorModel(SphericalTACE(**config)).to(DEVICE).train()
     if node_embedding == "spherical_tensor":
         assert (
             reference.readout_fn.representation.node_embedding.edge_info.dims[1:-1]
@@ -1104,8 +1170,8 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     Lmax,
     lmax,
 ):
-    from tace.models._e3nn.tace import e3nnTACE
     from tace.models.adapter import TensorModel
+    from tace.models.spherical.tace import SphericalTACE
 
     for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
@@ -1130,7 +1196,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     config["radial_basis"]["hidden"] = [4]
     config["readout_emlp"]["hidden"] = [2]
     config["scale_shift"]["enable"] = False
-    reference = TensorModel(e3nnTACE(**deepcopy(config))).train()
+    reference = TensorModel(SphericalTACE(**deepcopy(config))).train()
     for update in reference.readout_fn.representation.edge_updates:
 
         def gather_inputs(*args, forward=update.forward, **kwargs):
@@ -1143,7 +1209,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
 
         monkeypatch.setattr(update, "forward", gather_inputs)
     config["atomic_basis"]["type"] = interaction
-    module = TensorModel(e3nnTACE(**config)).train()
+    module = TensorModel(SphericalTACE(**config)).train()
     reference_parameters = dict(reference.named_parameters())
     assert reference_parameters.keys() == dict(module.named_parameters()).keys()
     with torch.no_grad():

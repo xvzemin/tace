@@ -31,7 +31,7 @@ def _should_warn_without_aoti(target_property: List[str]) -> bool:
 
 def _prune_removed_keys(model_config: Dict) -> Dict:
     """Remove legacy architecture keys from a saved model config."""
-    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
     pruned_config = model_config.copy()
     for section in ("atomic_basis", "product_basis"):
@@ -49,6 +49,15 @@ def _prune_removed_keys(model_config: Dict) -> Dict:
 def select_wrapper(wrapper_path: str) -> Any:
     """Import a model wrapper from its fully qualified class path."""
     module_name, class_name = wrapper_path.rsplit(".", 1)
+    if module_name == "tace.models" or module_name.startswith("tace.models."):
+        for old, new in (("_e3nn", "spherical"), ("_cart", "cartesian")):
+            prefix = f"tace.models.{old}"
+            if module_name == prefix or module_name.startswith(prefix + "."):
+                module_name = f"tace.models.{new}" + module_name[len(prefix) :]
+                break
+        class_name = {"e3nnTACE": "SphericalTACE", "cartTACE": "CartesianTACE"}.get(
+            class_name, class_name
+        )
     return getattr(importlib.import_module(module_name), class_name)
 
 
@@ -59,24 +68,26 @@ def create_model(
     embedding_property: List[str],
     prune_removed_keys: bool = False,
 ) -> torch.nn.Module:
+    from tace.models import CartesianTACE, SphericalTACE
 
     # === model cls ===
-    model_path = model_config.get("_target_", "tace.models.e3nnTACE")
-    is_e3nn_model = model_path in {
-        "tace.models.e3nnTACE",
-        "tace.models._e3nn.e3nnTACE",
-    }
-    is_cartesian_model = model_path == "tace.models.cartTACE"
+    model_path = model_config.get("_target_", "tace.models.SphericalTACE")
+    MODEL_CLS = select_wrapper(model_path)
+    is_spherical_model = MODEL_CLS is SphericalTACE
+    is_cartesian_model = MODEL_CLS is CartesianTACE
     wrapper_config = model_config.get("wrapper") or {}
     wrapper_path = wrapper_config.get("_target_", "tace.models.TensorModel")
 
-    use_aoti = acceleration_enabled("compile") and (is_e3nn_model or is_cartesian_model)
+    use_aoti = acceleration_enabled("compile") and (
+        is_spherical_model or is_cartesian_model
+    )
     if use_aoti:
         model_path = (
-            "tace.models.compile.cartTACE"
+            "tace.models.compile.CartesianTACE"
             if is_cartesian_model
-            else "tace.models.compile.e3nnTACE"
+            else "tace.models.compile.SphericalTACE"
         )
+        MODEL_CLS = select_wrapper(model_path)
         if wrapper_path == "tace.models.TensorModel":
             wrapper_path = "tace.models.CompileTensorModel"
     elif _should_warn_without_aoti(
@@ -92,11 +103,8 @@ def create_model(
     # === wrapper cls ===
     WRAPPER_CLS = select_wrapper(wrapper_path)
 
-    module_name, class_name = model_path.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    MODEL_CLS = getattr(module, class_name)
     model_config = deep_convert(model_config)
-    if prune_removed_keys and (is_e3nn_model or is_cartesian_model):
+    if prune_removed_keys and (is_spherical_model or is_cartesian_model):
         model_config = _prune_removed_keys(model_config)
     if "statistics" not in model_config:
         model_config["statistics"] = statistics

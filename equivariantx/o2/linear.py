@@ -1,0 +1,551 @@
+import math
+from typing import Iterator, NamedTuple, Optional, Sequence, Union
+
+import torch
+
+from ..backends.torch.linear import linear, linear_layout
+from ..nn.element_linear import ElementLinear as ElementLinearBase
+from .irreps import Irreps, IrrepsLike
+
+
+class Instruction(NamedTuple):
+    i_in: int
+    i_out: int
+    path_shape: tuple[int, ...]
+    path_weight: float
+
+
+class Linear(torch.nn.Module):
+    """Linear operation equivariant to O(2) and time reversal.
+
+    Parameters
+    ----------
+    irreps_in : Irreps, str, or sequence
+        Input representation.
+    irreps_out : Irreps, str, or sequence
+        Output representation.
+    internal_weights : bool, optional
+        Store trainable weights and biases in the module. Defaults to ``True``
+        unless ``shared_weights=False``. Otherwise, supply them to :meth:`forward`.
+    shared_weights : bool, optional
+        Share weights over batch dimensions. Defaults to ``True``;
+        required when ``internal_weights=True``.
+    instructions : sequence of tuple of int, optional
+        Paths ``(i_in, i_out)`` connecting identical irreps. Defaults to all
+        compatible input-output pairs.
+    biases : bool or sequence of bool, optional
+        Enable biases for all eligible outputs or per output entry. Only
+        reflection- and time-even scalars admit biases. Defaults to ``False``.
+    path_normalization : {"element", "path"}, optional
+        Normalization applied when several paths contribute to one output.
+        ``"element"`` normalizes by the total input multiplicity, while
+        ``"path"`` assigns equal variance to each path.
+
+    Examples
+    --------
+    >>> from equivariantx import o2
+    >>> linear = o2.Linear("4x0e + 2x1m", "2x0e + 3x1m")
+    >>> linear.weight_numel
+    14
+    >>> x = linear.irreps_in.randn(5, -1)
+    >>> linear(x).shape
+    torch.Size([5, 8])
+    """
+
+    def __init__(
+        self,
+        irreps_in: IrrepsLike,
+        irreps_out: IrrepsLike,
+        *,
+        internal_weights: Optional[bool] = None,
+        shared_weights: Optional[bool] = None,
+        instructions: Optional[Sequence[tuple[int, int]]] = None,
+        biases: Union[bool, Sequence[bool]] = False,
+        path_normalization: str = "element",
+    ) -> None:
+        super().__init__()
+
+        if path_normalization not in ("element", "path"):
+            raise ValueError("path_normalization must be 'element' or 'path'.")
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
+        self.path_normalization = path_normalization
+
+        if instructions is None:
+            instructions = [
+                (i_in, i_out)
+                for i_in, (ir_in, _) in enumerate(self.irreps_in)
+                for i_out, (ir_out, _) in enumerate(self.irreps_out)
+                if ir_in == ir_out
+            ]
+        else:
+            instructions = list(instructions)
+
+        for instruction in instructions:
+            if not isinstance(instruction, tuple) or len(instruction) != 2:
+                raise TypeError("Each Linear instruction must be (i_in, i_out).")
+            i_in, i_out = instruction
+            if not isinstance(i_in, int):
+                raise TypeError("Linear instruction indices must be integers.")
+            if not isinstance(i_out, int):
+                raise TypeError("Linear instruction indices must be integers.")
+            if not 0 <= i_in < len(self.irreps_in):
+                raise IndexError(f"{i_in} is not a valid index for irreps_in.")
+            if not 0 <= i_out < len(self.irreps_out):
+                raise IndexError(f"{i_out} is not a valid index for irreps_out.")
+            if self.irreps_in[i_in].ir != self.irreps_out[i_out].ir:
+                raise ValueError(f"{i_in} and {i_out} do not have the same irrep.")
+
+        weighted_instructions = []
+        for i_in, i_out in instructions:
+            mul_in = self.irreps_in[i_in].mul
+            if path_normalization == "element":
+                denominator = sum(
+                    self.irreps_in[j_in].mul
+                    for j_in, j_out in instructions
+                    if j_out == i_out
+                )
+            else:
+                denominator = mul_in * sum(j_out == i_out for _, j_out in instructions)
+            path_weight = 1.0 if denominator == 0 else denominator**-0.5
+            weighted_instructions.append(
+                Instruction(
+                    i_in,
+                    i_out,
+                    (mul_in, self.irreps_out[i_out].mul),
+                    path_weight,
+                )
+            )
+
+        if isinstance(biases, bool):
+            bias_list = [
+                biases and ir.is_invariant_scalar() for ir, _ in self.irreps_out
+            ]
+        else:
+            bias_list = list(biases)
+            if len(bias_list) != len(self.irreps_out):
+                raise ValueError("biases must have one value per output entry.")
+        for bias, (ir, _) in zip(bias_list, self.irreps_out):
+            if bias and not ir.is_invariant_scalar():
+                raise ValueError(
+                    "Only reflection- and time-reversal-even scalars can have biases."
+                )
+
+        bias_instructions = [
+            Instruction(-1, i_out, (mul,), 1.0)
+            for i_out, (bias, (_, mul)) in enumerate(zip(bias_list, self.irreps_out))
+            if bias
+        ]
+        self.instructions = tuple(weighted_instructions + bias_instructions)
+        self._weight_instructions = tuple(weighted_instructions)
+        self._bias_instructions = tuple(bias_instructions)
+
+        if shared_weights is False and internal_weights is None:
+            internal_weights = False
+        if shared_weights is None:
+            shared_weights = True
+        if internal_weights is None:
+            internal_weights = True
+        if internal_weights and not shared_weights:
+            raise ValueError("Internal weights require shared_weights=True.")
+        self.internal_weights = bool(internal_weights)
+        self.shared_weights = bool(shared_weights)
+
+        self.weight_numel = sum(
+            math.prod(instruction.path_shape)
+            for instruction in self._weight_instructions
+        )
+        self.bias_numel = sum(
+            math.prod(instruction.path_shape) for instruction in self._bias_instructions
+        )
+        self.weight_shape = (self.weight_numel,)
+        if self.internal_weights and self.weight_numel > 0:
+            self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
+        else:
+            self.register_buffer("weight", torch.empty(0))
+        if self.internal_weights and self.bias_numel > 0:
+            self.bias = torch.nn.Parameter(torch.zeros(self.bias_numel))
+        else:
+            self.register_buffer("bias", torch.empty(0))
+
+        self._input_slices = self.irreps_in.slices()
+        weight_offsets = []
+        offset = 0
+        for instruction in self._weight_instructions:
+            size = math.prod(instruction.path_shape)
+            weight_offsets.append((offset, size))
+            offset += size
+        self._weight_offsets = tuple(weight_offsets)
+        self._input_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
+        self._weight_sizes = tuple(size for _, size in weight_offsets)
+        bias_offsets = {}
+        offset = 0
+        for instruction in self._bias_instructions:
+            size = math.prod(instruction.path_shape)
+            bias_offsets[instruction.i_out] = (offset, size)
+            offset += size
+        self._bias_offsets = bias_offsets
+        self.layout = linear_layout(
+            [(ir.dim, mul) for ir, mul in self.irreps_in],
+            [(ir.dim, mul) for ir, mul in self.irreps_out],
+            self.instructions,
+        )
+
+        output_mask = []
+        for i_out, ir_mul in enumerate(self.irreps_out):
+            connected = any(
+                instruction.i_out == i_out for instruction in self.instructions
+            )
+            output_mask.append(
+                torch.ones(ir_mul.dim) if connected else torch.zeros(ir_mul.dim)
+            )
+        self.register_buffer(
+            "output_mask",
+            torch.cat(output_mask) if output_mask else torch.ones(0),
+            persistent=False,
+        )
+
+    def _get_weights(self, weight: Optional[torch.Tensor]) -> torch.Tensor:
+        if weight is None:
+            if self.weight_numel > 0 and not self.internal_weights:
+                raise RuntimeError(
+                    "Weights must be provided when internal_weights=False."
+                )
+            weight = self.weight
+        if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
+            raise ValueError(
+                "Linear weight trailing dimension must be "
+                f"{self.weight_numel}, got {tuple(weight.shape)}."
+            )
+        return weight
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Apply the linear map.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)`` in flattened ``ir_mul`` order.
+        weight : torch.Tensor, optional
+            External weights with shape ``weight_shape``. Leading
+            dimensions must broadcast with ``features``. Omit when internal
+            weights are enabled.
+        bias : torch.Tensor, optional
+            External biases with dimension ``bias_numel``. Leading
+            dimensions follow the same broadcasting rules as ``weight``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output with shape ``(..., irreps_out.dim)`` over the broadcast
+            leading shape.
+        """
+        if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
+            raise ValueError(
+                "Linear feature trailing dimension must be "
+                f"{self.irreps_in.dim}, got {tuple(features.shape)}."
+            )
+        weight = self._get_weights(weight)
+        if bias is None:
+            if self.bias_numel > 0 and not self.internal_weights:
+                raise RuntimeError(
+                    "Biases must be provided when internal_weights=False."
+                )
+            bias = self.bias
+        if bias.ndim < 1 or bias.size(-1) != self.bias_numel:
+            raise ValueError(
+                f"Linear bias trailing dimension must be {self.bias_numel}."
+            )
+        try:
+            leading_shape = torch.broadcast_shapes(
+                features.shape[:-1],
+                weight.shape[:-1],
+                bias.shape[:-1],
+            )
+        except RuntimeError as error:
+            raise ValueError(
+                "Linear feature, weight, and bias batch dimensions do not broadcast."
+            ) from error
+
+        inputs = [
+            value.reshape(*features.shape[:-1], ir.dim, mul)
+            for (ir, mul), value in zip(
+                self.irreps_in, features.split(self._input_sizes, dim=-1)
+            )
+        ]
+        outputs = [
+            value.flatten(-2)
+            for value in linear(inputs, weight, bias, self.layout, leading_shape)
+        ]
+        if not inputs:
+            outputs = [value + features[..., :0].sum() for value in outputs]
+        if outputs:
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return features.new_empty((*leading_shape, 0)) + (
+            features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
+        )
+
+    def weight_view_for_instruction(
+        self,
+        instruction: int,
+        weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return the weight matrix associated with one weighted instruction.
+
+        Parameters
+        ----------
+        instruction : int
+            Index into the weighted instructions.
+        weight : torch.Tensor, optional
+            Weight storage to view. The module weight is used when omitted.
+
+        Returns
+        -------
+        torch.Tensor
+            A view with trailing shape ``(mul_in, mul_out)``.
+        """
+        weight = self._get_weights(weight)
+        weighted_instruction = self._weight_instructions[instruction]
+        offset, size = self._weight_offsets[instruction]
+        return weight.narrow(-1, offset, size).view(
+            *weight.shape[:-1],
+            *weighted_instruction.path_shape,
+        )
+
+    def weight_views(
+        self,
+        weight: Optional[torch.Tensor] = None,
+        yield_instruction: bool = False,
+    ) -> Iterator:
+        """Iterate over instruction-shaped views of the weight storage.
+
+        Parameters
+        ----------
+        weight : torch.Tensor, optional
+            Weight storage to view. The module weight is used when omitted.
+        yield_instruction : bool, optional
+            If ``True``, yield ``(index, instruction, view)`` tuples instead
+            of views alone.
+
+        Yields
+        ------
+        torch.Tensor or tuple
+            One weight view, optionally accompanied by its metadata.
+        """
+        for index, instruction in enumerate(self._weight_instructions):
+            view = self.weight_view_for_instruction(index, weight)
+            yield (index, instruction, view) if yield_instruction else view
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}({self.irreps_in} -> "
+            f"{self.irreps_out} | {self.weight_numel} weights)"
+        )
+
+
+class ElementLinear(ElementLinearBase):
+    """Apply element-dependent O(2) Linear paths in ``ir_mul`` layout.
+
+    Parameters
+    ----------
+    linear : Linear
+        Unbiased map defining irreps, paths and normalization. Weights are
+        supplied to :meth:`forward`; the map's parameters are not copied.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Defaults to ``"torch"``. CPU tensors use PyTorch.
+    element_mode : {"pair", "single"}, optional
+        Independent weights for each ordered element pair, or each element.
+        Defaults to ``"pair"``.
+
+    Examples
+    --------
+    >>> from equivariantx import o2
+    >>> linear = o2.Linear("2x0e + 2x1m", "3x0e + 2x1m")
+    >>> layer = o2.ElementLinear(linear)
+    >>> x = torch.randn(4, linear.irreps_in.dim)
+    >>> source = torch.tensor([0, 1, 0, 1])
+    >>> target = torch.tensor([1, 0, 1, 1])
+    >>> weight = torch.randn(2, 2, linear.weight_numel)
+    >>> layer(x, weight, source, target).shape
+    torch.Size([4, 7])
+    """
+
+    def __init__(self, linear, backend="torch", *, element_mode="pair"):
+        super().__init__(linear, backend, element_mode, "ir_mul")
+
+
+class UuLinear(torch.nn.Module):
+    """Mix equivalent O(2) representations without mixing channels.
+
+    Parameters
+    ----------
+    irreps_in : Irreps, str, or sequence
+        Input representation in flattened ``ir_mul`` layout.
+    irreps_out : Irreps, str, or sequence
+        Output representation in flattened ``ir_mul`` layout.
+    num_channel : int
+        Number of matching channels. Each multiplicity must be divisible by
+        this value and is interpreted as ``(copies, num_channel)``.
+    path_mode : {"sum", "expand"}, optional
+        Sum input copies or retain each input-output copy path as a separate
+        output channel. The external weight layout is identical in both modes.
+
+    Notes
+    -----
+    Summed paths are normalized by the inverse square root of the number of
+    input irrep copies. Expanded paths have unit normalization. Weights are
+    external; biases are not supported.
+
+    Examples
+    --------
+    >>> from equivariantx import o2
+    >>> linear = o2.UuLinear("4x0e + 2x1m", "2x0e + 2x1m", num_channel=2)
+    >>> x = linear.irreps_in.randn(5, -1)
+    >>> weight = torch.randn(5, linear.weight_numel)
+    >>> linear(x, weight).shape
+    torch.Size([5, 6])
+    """
+
+    def __init__(
+        self,
+        irreps_in: IrrepsLike,
+        irreps_out: IrrepsLike,
+        num_channel: int,
+        *,
+        path_mode: str = "sum",
+    ) -> None:
+        super().__init__()
+        self.irreps_in = Irreps(irreps_in)
+        self.irreps_out = Irreps(irreps_out)
+        self.num_channel = num_channel
+        if path_mode not in ("sum", "expand"):
+            raise ValueError("path_mode must be 'sum' or 'expand'.")
+        self.path_mode = path_mode
+        self.requested_irreps_out = self.irreps_out
+        if num_channel < 1 or any(
+            mul % num_channel for _, mul in self.irreps_in + self.irreps_out
+        ):
+            raise ValueError("num_channel must divide every positive multiplicity.")
+        self.instructions = tuple(
+            Instruction(
+                i_in,
+                i_out,
+                (mul_in // num_channel, mul_out // num_channel, num_channel),
+                1.0
+                if path_mode == "expand"
+                else (self.irreps_in.count(ir_in) // num_channel) ** -0.5,
+            )
+            for i_in, (ir_in, mul_in) in enumerate(self.irreps_in)
+            for i_out, (ir_out, mul_out) in enumerate(self.irreps_out)
+            if ir_in == ir_out and mul_in and mul_out
+        )
+        self.weight_numel = sum(
+            math.prod(instruction.path_shape) for instruction in self.instructions
+        )
+        self.weight_shape = (self.weight_numel,)
+        self._input_slices = self.irreps_in.slices()
+        self._instructions_by_output = tuple(
+            tuple(i for i, ins in enumerate(self.instructions) if ins.i_out == i_out)
+            for i_out in range(len(self.irreps_out))
+        )
+        offsets = []
+        offset = 0
+        for instruction in self.instructions:
+            size = math.prod(instruction.path_shape)
+            offsets.append((offset, size))
+            offset += size
+        self._weight_offsets = tuple(offsets)
+        self._input_sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
+        self._weight_sizes = tuple(size for _, size in offsets)
+        if path_mode == "expand":
+            self.irreps_out = Irreps(
+                (
+                    ir,
+                    sum(
+                        math.prod(self.instructions[i].path_shape)
+                        for i in self._instructions_by_output[j]
+                    ),
+                )
+                for j, (ir, _) in enumerate(self.requested_irreps_out)
+            )
+
+    def forward(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Apply externally weighted channelwise paths.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Input with shape ``(..., irreps_in.dim)``.
+        weight : torch.Tensor
+            Weights with shape ``(..., weight_numel)``, ordered as
+            ``(copies_in, copies_out, num_channel)`` within each instruction.
+            Leading dimensions must broadcast with the input.
+
+        Returns
+        -------
+        torch.Tensor
+            Output with shape ``(..., irreps_out.dim)`` over the broadcast
+            leading dimensions.
+        """
+        if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
+            raise ValueError(f"UuLinear features must end in {self.irreps_in.dim}.")
+        if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
+            raise ValueError(f"UuLinear weights must end in {self.weight_numel}.")
+        leading_shape = torch.broadcast_shapes(features.shape[:-1], weight.shape[:-1])
+        inputs = [
+            values.reshape(
+                *features.shape[:-1], ir.dim, mul // self.num_channel, self.num_channel
+            )
+            for (ir, mul), values in zip(
+                self.irreps_in, features.split(self._input_sizes, dim=-1)
+            )
+        ]
+        weights = weight.split(self._weight_sizes, dim=-1)
+        outputs = []
+        zero = None
+        for i_out, (ir, mul) in enumerate(self.irreps_out):
+            contributions = []
+            for index in self._instructions_by_output[i_out]:
+                instruction = self.instructions[index]
+                matrix = weights[index].reshape(
+                    *weight.shape[:-1], *instruction.path_shape
+                )
+                contributions.append(
+                    torch.einsum(
+                        "...diu,...iou->...diou"
+                        if self.path_mode == "expand"
+                        else "...diu,...iou->...dou",
+                        inputs[instruction.i_in],
+                        matrix,
+                    )
+                    * instruction.path_weight
+                )
+            if contributions:
+                output = (
+                    torch.cat([x.flatten(-3) for x in contributions], dim=-1)
+                    if self.path_mode == "expand"
+                    else sum(contributions[1:], contributions[0])
+                )
+                outputs.append(output.reshape(*leading_shape, ir.dim * mul))
+            else:
+                if zero is None:
+                    zero = features[..., :0].sum() + weight[..., :0].sum()
+                outputs.append(
+                    features.new_zeros((*leading_shape, ir.dim * mul)) + zero
+                )
+        if outputs:
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        return features.new_empty((*leading_shape, 0)) + (
+            features[..., :0].sum() + weight[..., :0].sum()
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}({self.irreps_in} -> {self.irreps_out} | "
+            f"{self.num_channel} channels, {self.weight_numel} weights)"
+        )

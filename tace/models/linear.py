@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from e3nn import o3
 
-from eqx import o3 as eqx_o3
+from equivariantx import o3 as eqx_o3
 from tace.utils.env import acceleration_enabled, get_tace_use_matrix_weight
 
 IndexedFeatures = tuple[tuple[torch.Tensor, torch.Tensor | None], ...]
@@ -303,7 +303,7 @@ class mlpLinear(torch.nn.Module):
                 and len(input) > 1
                 and acceleration_enabled("eqx", kernel="linear")
             ):
-                from eqx.ops.layout import gather_sum
+                from equivariantx.ops.layout import gather_sum
 
                 projected = [
                     torch.addmm(self.bias, value, part)

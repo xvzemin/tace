@@ -52,11 +52,11 @@ _cart/
 !BaTiO3.xyz
 !Jd.pt
 !matbench_tece_rra.png
-!_cart/README.md
-!tace/models/_cart/
-!tace/models/_cart/*.py
+!cartesian/README.md
+!tace/models/cartesian/
+!tace/models/cartesian/*.py
 !example/data/liquid-64.xyz
 !o2.svg
 !docs/source/_static/acceleration.svg
-!eqx/docs/source/_static/frames.svg
-!eqx/docs/source/_static/convolutions.svg
+!equivariantx/docs/source/_static/frames.svg
+!equivariantx/docs/source/_static/convolutions.svg

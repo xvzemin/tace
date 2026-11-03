@@ -8,27 +8,8 @@ import pytest
 import torch
 from e3nn import o3
 
-from eqx import o2
+from equivariantx import o2
 from tace.lightning import create_model, export_tace, load_tace
-from tace.models._e3nn import readout
-from tace.models._e3nn.base import (
-    EdgeInteraction,
-    EdgeUpdate,
-    NodeEmbedding,
-)
-from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models._e3nn.edge import Element2EdgeUpdateV2
-from tace.models._e3nn.fused import UvO2TensorProduct
-from tace.models._e3nn.node import NODE_EMBEDDING, NODE_UPDATE, LinearNodeEmbedding
-from tace.models._e3nn.readout import EdgeReadOut
-from tace.models._e3nn.representation import PairRepresentation
-from tace.models._e3nn.scatter_norm import (
-    AvgNumNeighborsScatterNorm,
-    DensityScatterNorm,
-    IdentityScatterNorm,
-    NoCutoffDensityScatterNorm,
-    get_scatter_norm_layer,
-)
 from tace.models.layout import LayoutTransform
 from tace.models.linear import (
     e3nnElementLinear,
@@ -38,6 +19,25 @@ from tace.models.linear import (
     mlpLinear,
 )
 from tace.models.mlp import MLP, MLPV2
+from tace.models.spherical import readout
+from tace.models.spherical.base import (
+    EdgeInteraction,
+    EdgeUpdate,
+    NodeEmbedding,
+)
+from tace.models.spherical.default import DEFAULT_MODEL_CONFIG, check_model_config
+from tace.models.spherical.edge import Element2EdgeUpdateV2
+from tace.models.spherical.fused import UvO2TensorProduct
+from tace.models.spherical.node import NODE_EMBEDDING, NODE_UPDATE, LinearNodeEmbedding
+from tace.models.spherical.readout import EdgeReadOut
+from tace.models.spherical.representation import PairRepresentation
+from tace.models.spherical.scatter_norm import (
+    AvgNumNeighborsScatterNorm,
+    DensityScatterNorm,
+    IdentityScatterNorm,
+    NoCutoffDensityScatterNorm,
+    get_scatter_norm_layer,
+)
 from tace.utils.env import EQX_KERNELS
 from tace.utils.utils import torch_default_dtype
 
@@ -52,8 +52,8 @@ pytestmark = pytest.mark.usefixtures("double_precision")
     "embedding", ["linear", "spherical_tensor_element2", "wigner_tensor_element2"]
 )
 def test_radial_mlp_configuration(mlp_type, norm, embedding):
-    from tace.models._e3nn.default import DEFAULT_MODEL_CONFIG
-    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+    from tace.models.spherical.tace import SphericalTACE
 
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -82,7 +82,7 @@ def test_radial_mlp_configuration(mlp_type, norm, embedding):
     )
     config["atomic_basis"]["scatter_norm"] = "density"
     config["scale_shift"]["enable"] = False
-    representation = e3nnTACE(**config).to(DEVICE).representation
+    representation = SphericalTACE(**config).to(DEVICE).representation
     networks = [representation.interactions[0].edge_info]
     if hasattr(representation.node_embedding, "edge_info"):
         networks.append(representation.node_embedding.edge_info)
@@ -102,7 +102,7 @@ def test_radial_mlp_configuration(mlp_type, norm, embedding):
 
 @pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
 def test_magnetic_mlp_configuration(mlp_type):
-    from tace.models._e3nn.tace import e3nnTACE
+    from tace.models.spherical.tace import SphericalTACE
 
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -128,7 +128,7 @@ def test_magnetic_mlp_configuration(mlp_type):
     config["radial_basis"]["hidden"] = [4]
     config["readout_emlp"]["use_one_body_magmoms"] = False
     config["scale_shift"]["enable"] = False
-    interaction = e3nnTACE(**config).to(DEVICE).representation.interactions[0]
+    interaction = SphericalTACE(**config).to(DEVICE).representation.interactions[0]
     networks = [interaction.source_magnetic_info, interaction.target_magnetic_info]
     for network in networks:
         assert type(network) is MLP[mlp_type]
@@ -152,7 +152,7 @@ def test_magnetic_mlp_configuration(mlp_type):
 
 @pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
 def test_universal_invariant_mlp_configuration(mlp_type):
-    from tace.models._e3nn.ue import UniversalInvariantEmbedding
+    from tace.models.spherical.ue import UniversalInvariantEmbedding
 
     module = UniversalInvariantEmbedding(
         4,
@@ -196,7 +196,7 @@ def test_universal_invariant_mlp_configuration(mlp_type):
     ],
 )
 def test_v2_configuration_errors(options, match):
-    from tace.models._e3nn.default import check_model_config
+    from tace.models.spherical.default import check_model_config
 
     with pytest.raises(ValueError, match=match):
         check_model_config(
@@ -209,14 +209,14 @@ def test_v2_configuration_errors(options, match):
 
 @pytest.mark.parametrize("mlp_type", ["unknown", "mlp", "v1", "v2", None])
 def test_unknown_model_mlp_type(mlp_type):
-    from tace.models._e3nn.default import check_model_config
+    from tace.models.spherical.default import check_model_config
 
     with pytest.raises(ValueError, match="mlp_type"):
         check_model_config({"mlp_type": mlp_type})
 
 
 def test_model_mlp_type_defaults():
-    from tace.models._e3nn.default import check_model_config
+    from tace.models.spherical.default import check_model_config
 
     assert set(MLP) == {"mlp_v1", "mlp_v2"}
     assert DEFAULT_MODEL_CONFIG["mlp_type"] == "mlp_v1"
@@ -929,9 +929,9 @@ def test_unknown_scatter_norm(small_model):
 def test_element2_projects_nodes_before_gather(
     bias, lora, hidden, num_edges, use_eqx, monkeypatch
 ):
-    from tace.models._e3nn.edge import Element2EdgeUpdate
     from tace.models.linear import enable_lora
     from tace.models.mlp import MLP
+    from tace.models.spherical.edge import Element2EdgeUpdate
 
     if use_eqx and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -1355,7 +1355,7 @@ def test_tace_indexed_linear(
         **({} if experts == 1 else {"num_experts": experts}),
     )
     if cartesian:
-        from tace.models._cart.layers import cartesian_modules
+        from tace.models.cartesian.layers import cartesian_modules
 
         module = cartesian_modules(module)
     module = module.to(device)
@@ -1430,7 +1430,7 @@ def test_tace_indexed_linear(
 def test_graph_attention_derivatives(device, edges):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.attention import graph_softmax
+    from equivariantx.conv.attention import graph_softmax
     from tace.models.softmax import GraphSoftmax
 
     target = torch.arange(edges, device=device) % 4
@@ -1459,7 +1459,7 @@ def test_graph_attention_derivatives(device, edges):
 def test_streaming_graph_attention_weights(device, nodes):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from eqx.conv.attention import StreamingGraphAttention
+    from equivariantx.conv.attention import StreamingGraphAttention
     from tace.models.softmax import GraphSoftmax
 
     edges, heads = (9 if nodes else 0), 2

@@ -7,14 +7,14 @@ magnetic interaction. ``magnetic_type`` accepts ``identity``, ``element``, or
 ``element2``.
 
 
-.. autoclass:: tace.models._e3nn.node.IdentityNodeUpdate
+.. autoclass:: tace.models.spherical.node.IdentityNodeUpdate
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.ElementNodeUpdate
+.. autoclass:: tace.models.spherical.node.ElementNodeUpdate
    :no-members:
    :show-inheritance:
 
-.. autoclass:: tace.models._e3nn.node.Element2NodeUpdate
+.. autoclass:: tace.models.spherical.node.Element2NodeUpdate
    :no-members:
    :show-inheritance:
