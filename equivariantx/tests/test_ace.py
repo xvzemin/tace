@@ -85,6 +85,59 @@ def test_symmetric_contraction(device, dtype):
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("nodes", [0, 5, 65])
+def test_symmetric_shared_polynomials(dtype, nodes, wigner_3j):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    cg = wigner_3j(2, 4, 4, dtype=torch.float64) * 5**0.5
+    entries = []
+    for output, left, right in cg.nonzero().tolist():
+        value = cg[output, left, right].item()
+        for path, scalar_factors, scale in (
+            (0, 0, 1),
+            (1, 1, 1),
+            (2, 1, -0.75),
+            (3, 2, 1),
+        ):
+            entries.append(
+                (
+                    (0,) * scalar_factors + (left + 1, right + 1),
+                    path,
+                    output,
+                    scale * value,
+                )
+            )
+    module = SymmetricContraction.from_entries("3x0e+3x4e", "3x2e", entries, 4).to(
+        "cuda", dtype
+    )
+    x = (torch.randn(nodes, 3, 20, device="cuda", dtype=dtype) * 0.2)[
+        ..., ::2
+    ].requires_grad_()
+    weights = torch.randn(3, 4, 3, device="cuda", dtype=dtype, requires_grad=True)
+    species = torch.arange(nodes, device="cuda", dtype=torch.int32) % 3
+    actual = module(x, weights, species)
+    module.backend = "torch"
+    expected = module(x, weights, species)
+    tolerance = 2e-10 if dtype == torch.float64 else 5e-4
+    for order in range(5):
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        if order == 4 or (not nodes and order == 1):
+            break
+        direction = torch.randn_like(actual)
+        actual, expected = [
+            torch.cat(
+                [
+                    part.flatten()
+                    for part in torch.autograd.grad(
+                        (value * direction).sum(), (x, weights), create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+
+
 @pytest.mark.parametrize(
     "kind",
     [

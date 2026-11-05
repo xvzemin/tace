@@ -51,6 +51,12 @@ def evaluate(
         raise TypeError("Fused edge expressions require float32 or float64.")
     if source.ndim != 1 or target.shape != source.shape:
         raise ValueError("Source and target must be one-dimensional edge indices.")
+    if any(x.device != inputs[0].device or x.dtype != inputs[0].dtype for x in inputs):
+        raise ValueError("Expression inputs must have the same dtype and device.")
+    if any(
+        x.device != inputs[0].device or x.dtype != torch.int64 for x in (source, target)
+    ):
+        raise ValueError("Edge indices must be int64 tensors on the input device.")
     for slot, kind, width in input_specifications(metadata):
         rows = (
             1 if kind == "shared" else source.numel() if kind == "edge" else num_nodes

@@ -406,14 +406,40 @@ def make_product(irreps, correlation, **kwargs):
     ).double()
 
 
+def fused_nonlinear_product(module, features, attrs, batch, types):
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class EdgeCalls(TorchDispatchMode):
+        calls = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func is torch.ops.eqx.edge_program.default:
+                self.calls += 1
+            return func(*args, **(kwargs or {}))
+
+    with EdgeCalls() as dispatch:
+        output = module(features, attrs, None, batch, types)
+    assert dispatch.calls == int(features.is_cuda)
+    return output
+
+
 @pytest.mark.parametrize("asymmetric", [False, True])
 @pytest.mark.parametrize("correlation", [1, 2, 3])
-def test_nonlinear_product(monkeypatch, asymmetric, correlation):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
+    import tace.models.spherical.prod as prod
     from tace.models.linear import e3nnLinear
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.set_default_dtype(dtype)
     cls = PRODUCT["nonlinear_cgtp"]
     monkeypatch.setattr(cls, "asymmetric", asymmetric)
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setattr(
+        prod,
+        "e3nnLinear",
+        partial(e3nnLinear, use_matrix_weight="1" if asymmetric else "0"),
+    )
     kwargs = dict(
         layer=0,
         num_layers=2,
@@ -427,15 +453,23 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation):
         irreps_in=o3.Irreps("2x0e+2x1o"),
         correlation=[correlation, correlation],
         l1l2=None,
-        bias=True,
+        bias=correlation != 1,
         nonlinear=None,
         parity=True,
     )
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    reference = cls(**kwargs).to(device)
+    reference = cls(**kwargs).to(device=device, dtype=dtype)
+    with torch.no_grad():
+        for name, parameter in reference.named_parameters():
+            if name.endswith("bias"):
+                parameter.normal_(std=0.2)
     monkeypatch.setenv("TACE_USE_EQX", "1")
-    module = cls(**kwargs).to(device)
+    module = cls(**kwargs).to(device=device, dtype=dtype)
     module.load_state_dict(reference.state_dict(), strict=True)
+    assert module.state_dict().keys() == reference.state_dict().keys()
+    assert dict(module.named_parameters()).keys() == dict(
+        reference.named_parameters()
+    ).keys()
     assert isinstance(module.linear_up, e3nnLinear)
     assert module.linear_up.irreps_out == module.linear_up.irreps_out.regroup()
     irreps_up = (
@@ -451,26 +485,36 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation):
     assert not any(isinstance(layer, e3nnElementLinear) for layer in module.modules())
     assert module.num_inputs == (correlation if asymmetric else 1)
 
-    x = torch.randn(3, module.irreps_in.dim, device=device, requires_grad=True)
+    x = (0.2 * torch.randn(3, module.irreps_in.dim, device=device)).requires_grad_()
     types = torch.tensor([0, 1, 0], device=device)
     attrs = torch.nn.functional.one_hot(types, 2).to(x)
     batch = torch.zeros(3, device=device, dtype=torch.long)
     values, gradients = [], []
     for product in (reference, module):
-        value = product(x, attrs, None, batch, types)
-        first = torch.autograd.grad(value.square().sum(), x, create_graph=True)[0]
+        monkeypatch.setenv("TACE_USE_EQX", "1" if product is module else "0")
+        value = (
+            fused_nonlinear_product(product, x, attrs, batch, types)
+            if product is module
+            else product(x, attrs, None, batch, types)
+        )
+        inputs = (x, *product.parameters())
+        first = torch.autograd.grad(
+            value.square().sum(), inputs, create_graph=True, allow_unused=True
+        )
         second = torch.autograd.grad(
-            first.square().sum(), (x, *product.parameters()), allow_unused=True
+            first[0].square().sum(), inputs, allow_unused=True
         )
         values.append(value)
-        gradients.append((first, *second))
-    torch.testing.assert_close(*values, atol=1e-10, rtol=1e-10)
+        gradients.append((*first, *second))
+    tolerance = 5e-5 if dtype == torch.float32 else 1e-8
+    forward_tolerance = 5e-5 if dtype == torch.float32 else 1e-10
+    torch.testing.assert_close(*values, atol=forward_tolerance, rtol=forward_tolerance)
     for expected, actual in zip(*gradients):
         if expected is None:
             assert actual is None
         else:
             assert torch.isfinite(actual).all()
-            torch.testing.assert_close(actual, expected, atol=1e-8, rtol=1e-8)
+            torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
 
     rotation = -o3.rand_matrix()
     transformed = module(
@@ -479,47 +523,115 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation):
     torch.testing.assert_close(
         transformed,
         values[1] @ module.irreps_out.D_from_matrix(rotation).to(x).T,
-        atol=1e-8,
-        rtol=1e-8,
+        atol=tolerance,
+        rtol=tolerance,
     )
     residual = torch.randn_like(values[1])
     torch.testing.assert_close(module(x, attrs, residual, batch), values[1] + residual)
 
     # Switching input symmetry does not add paths; identical factors agree.
     monkeypatch.setattr(cls, "asymmetric", not asymmetric)
-    other = cls(**kwargs).to(device)
+    other = cls(**kwargs).to(device=device, dtype=dtype)
     assert other.weight_numel == module.weight_numel
     for left, right in zip(module.coefs, other.coefs):
         right.load_state_dict(left.state_dict())
+    other.linear.load_state_dict(module.linear.state_dict())
     for left, right in zip(module.aces, other.aces):
         assert left.instructions == right.instructions
     weight = torch.randn(3, module.weight_numel, device=device)
     factor = torch.randn(3, module.irreps_hidden.dim, device=device)
-    torch.testing.assert_close(
-        module.contract(factor.repeat(1, module.num_inputs), weight),
-        other.contract(factor.repeat(1, other.num_inputs), weight),
-        atol=1e-9,
-        rtol=1e-9,
+    with monkeypatch.context() as patch:
+        patch.setenv("TACE_USE_EQX", "0")
+        outputs = []
+        for product in (module, other):
+            projected = torch.cat(
+                (
+                    factor.new_zeros(3, product.num_hidden_channel),
+                    factor.repeat(1, product.num_inputs),
+                ),
+                dim=-1,
+            ).index_select(-1, product.factor_index.argsort())
+            patch.setattr(
+                product.linear_up, "forward", lambda _, value=projected: value
+            )
+            patch.setattr(product.gate, "forward", lambda _: weight)
+            outputs.append(product(x, attrs, None, batch, types))
+        torch.testing.assert_close(*outputs, atol=tolerance, rtol=tolerance)
+    empty_x = x.detach()[:0].requires_grad_()
+    empty = module(empty_x, attrs[:0], None, batch[:0])
+    assert empty.shape == (0, module.irreps_out.dim)
+    empty_gradients = torch.autograd.grad(
+        empty.sum(), (empty_x, *module.parameters()), allow_unused=True
+    )
+    assert empty_gradients[0].shape == empty_x.shape
+    assert all(
+        gradient is None or not gradient.count_nonzero() for gradient in empty_gradients
     )
     if correlation == 2 and asymmetric:
         compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
         actual = compiled(x, attrs, None, batch)
-        torch.testing.assert_close(actual, values[0])
+        torch.testing.assert_close(actual, values[0], atol=tolerance, rtol=tolerance)
         actual.square().sum().backward()
         assert module.embedding.weight.grad.abs().sum() > 0
+        for parameter, expected in zip(module.parameters(), gradients[0][1:]):
+            if expected is None:
+                assert parameter.grad is None
+            else:
+                torch.testing.assert_close(
+                    parameter.grad, expected, atol=tolerance, rtol=tolerance
+                )
+        exported = torch.export.export(module, (x, attrs, None, batch), strict=True)
+        torch.testing.assert_close(
+            exported.module()(x, attrs, None, batch),
+            values[0],
+            atol=tolerance,
+            rtol=tolerance,
+        )
+    if correlation == 3 and asymmetric and dtype == torch.float64 and x.is_cuda:
+        import equivariantx.backends.cuda.execution as execution
+
+        with monkeypatch.context() as patch:
+            patch.setattr(execution, "launch", partial(execution.launch, tile_size=2))
+            output = module(x, attrs, None, batch, types)
+            inputs = (x, *module.parameters())
+            first = torch.autograd.grad(
+                output.square().sum(), inputs, create_graph=True, allow_unused=True
+            )
+            second = torch.autograd.grad(
+                first[0].square().sum(), inputs, allow_unused=True
+            )
+        torch.testing.assert_close(
+            output, values[0], atol=forward_tolerance, rtol=forward_tolerance
+        )
+        for actual, expected in zip((*first, *second), gradients[0]):
+            if expected is None:
+                assert actual is None
+            else:
+                torch.testing.assert_close(
+                    actual, expected, atol=tolerance, rtol=tolerance
+                )
 
 
 @pytest.mark.parametrize("correlation", [1, 2, 3])
 @pytest.mark.parametrize("asymmetric", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
+    import tace.models.spherical.prod as prod
     from equivariantx import co3
+    from tace.models.cartesian.layers import cartesian_modules
     from tace.models.cartesian.prod import NonlinearIctdACE
+    from tace.models.linear import e3nnLinear
     from tace.models.spherical.prod import NonlinearCgtpACE
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.set_default_dtype(dtype)
     monkeypatch.setattr(NonlinearCgtpACE, "asymmetric", asymmetric)
     monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setattr(
+        prod,
+        "e3nnLinear",
+        partial(e3nnLinear, use_matrix_weight="1" if asymmetric else "0"),
+    )
     kwargs = dict(
         layer=0,
         num_layers=2,
@@ -533,17 +645,38 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
         irreps_in=o3.Irreps("2x0e+2x1e+2x1o+2x2e"),
         correlation=[correlation, correlation],
         l1l2=None,
-        bias=True,
+        bias=correlation != 1,
         nonlinear=None,
         parity=True,
     )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     reference = NonlinearCgtpACE(**kwargs).to(device=device, dtype=dtype)
+    with torch.no_grad():
+        for name, parameter in reference.named_parameters():
+            if name.endswith("bias"):
+                parameter.normal_(std=0.2)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
     module = NonlinearIctdACE(**kwargs).to(device=device, dtype=dtype)
     parameters = dict(reference.named_parameters())
     assert parameters.keys() == dict(module.named_parameters()).keys()
     with torch.no_grad():
         for name, parameter in module.named_parameters():
             parameter.copy_(parameters[name])
+    if correlation == 2 and asymmetric and dtype == torch.float64:
+        converted = deepcopy(reference).cpu()
+        original = dict(converted.named_parameters(remove_duplicate=False))
+        rng = torch.random.get_rng_state()
+        cartesian_modules(converted)
+        metadata = converted.eqx_metadata
+        indices = converted.factor_index.clone()
+        converted.build_eqx()
+        assert converted.eqx_metadata == metadata
+        torch.testing.assert_close(converted.factor_index, indices)
+        torch.testing.assert_close(torch.random.get_rng_state(), rng)
+        current = dict(converted.named_parameters(remove_duplicate=False))
+        assert current.keys() == original.keys()
+        assert all(current[name] is value for name, value in original.items())
+        converted.load_state_dict(module.state_dict(), strict=True)
     assert isinstance(module.irreps_in, co3.Irreps)
     assert module.linear_up.irreps_out == module.linear_up.irreps_out.regroup()
     for cartesian, spherical in zip(module.aces, reference.aces):
@@ -560,30 +693,68 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
     types = torch.tensor([0, 1, 0], device=device)
     attrs = torch.nn.functional.one_hot(types, 2).to(x)
     batch = torch.zeros(3, dtype=torch.long, device=device)
-    expected = reference(x, attrs, None, batch, types)
-    actual = to_spherical(module(to_cartesian(x), attrs, None, batch, types))
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    expected_output = reference(x, attrs, None, batch, types)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    actual_output = to_spherical(
+        fused_nonlinear_product(module, to_cartesian(x), attrs, batch, types)
+    )
     tolerance = 5e-5 if dtype == torch.float32 else 1e-10
-    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    torch.testing.assert_close(
+        actual_output, expected_output, atol=tolerance, rtol=tolerance
+    )
     gradients = []
-    for product, output in ((reference, expected), (module, actual)):
-        first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
-        second = torch.autograd.grad(
-            first.square().sum(), (x, *product.parameters()), allow_unused=True
+    for product, output in ((reference, expected_output), (module, actual_output)):
+        inputs = (x, *product.parameters())
+        first = torch.autograd.grad(
+            output.square().sum(), inputs, create_graph=True, allow_unused=True
         )
-        gradients.append((first, *second))
+        second = torch.autograd.grad(
+            first[0].square().sum(), inputs, allow_unused=True
+        )
+        gradients.append((*first, *second))
     for expected, actual in zip(*gradients):
         if expected is None:
             assert actual is None
         else:
+            assert torch.isfinite(actual).all()
             torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    empty = module(to_cartesian(x[:0]), attrs[:0], None, batch[:0])
+    empty_x = x.detach()[:0].requires_grad_()
+    empty = module(to_cartesian(empty_x), attrs[:0], None, batch[:0])
     assert empty.shape == (0, module.irreps_out.dim)
-    if correlation == 2 and asymmetric and dtype == torch.float64:
+    empty_gradients = torch.autograd.grad(
+        empty.sum(), (empty_x, *module.parameters()), allow_unused=True
+    )
+    assert empty_gradients[0].shape == empty_x.shape
+    assert all(
+        gradient is None or not gradient.count_nonzero() for gradient in empty_gradients
+    )
+    if correlation == 2 and asymmetric:
         compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
         output = to_spherical(compiled(to_cartesian(x), attrs, None, batch, types))
-        torch.testing.assert_close(output, reference(x, attrs, None, batch, types))
+        torch.testing.assert_close(
+            output,
+            expected_output,
+            atol=tolerance,
+            rtol=tolerance,
+        )
         output.square().sum().backward()
         assert module.embedding.weight.grad.abs().sum() > 0
+        for parameter, expected in zip(module.parameters(), gradients[0][1:]):
+            if expected is None:
+                assert parameter.grad is None
+            else:
+                torch.testing.assert_close(
+                    parameter.grad, expected, atol=tolerance, rtol=tolerance
+                )
+        args = (to_cartesian(x), attrs, None, batch, types)
+        exported = torch.export.export(module, args, strict=True)
+        torch.testing.assert_close(
+            to_spherical(exported.module()(*args)),
+            expected_output,
+            atol=tolerance,
+            rtol=tolerance,
+        )
 
 
 @pytest.mark.parametrize("correlation", [1, 2, 3])

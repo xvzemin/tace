@@ -382,7 +382,35 @@ def cartesian_modules(module):
             setattr(module, name, co3.Irreps(value))
     if isinstance(module, NonlinearCgtpACE):
         module.__class__ = NonlinearIctdACE
-        module.setup_indices()
+        module.factor_dim = module.irreps_hidden.dim
+        device = module.factor_index.device
+        irreps_up = co3.Irreps(
+            [(module.num_hidden_channel, "0e")]
+            + list(module.irreps_hidden) * module.num_inputs
+        )
+        slices = irreps_up.slices()
+        order = torch.cat(
+            [
+                torch.arange(slices[i].start, slices[i].stop, device=device)
+                for i in irreps_up.sort().inv
+            ]
+        )
+        module.register_buffer("factor_index", order.argsort(), persistent=False)
+        for degree, irreps in enumerate(
+            [module.irreps_hidden, *(tp.irreps_out for tp in module.aces)], start=1
+        ):
+            indices, offset = [], 0
+            for mul, ir in irreps:
+                indices.extend(
+                    offset + channel for channel in range(mul) for _ in range(ir.dim)
+                )
+                offset += mul
+            module.register_buffer(
+                f"gate_index_{degree}",
+                torch.tensor(indices, dtype=torch.long, device=device),
+                persistent=False,
+            )
+        module.build_eqx()
     if isinstance(module, (ProjectDown, ProjectUp)):
         irreps_in, irreps_out = module.irreps_in, module.irreps_out
         if isinstance(module, ProjectDown):

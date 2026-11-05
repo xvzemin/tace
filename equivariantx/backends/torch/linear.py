@@ -120,11 +120,17 @@ def linear(inputs, weight, bias, layout, shape):
     """Contract (..., dimension, channels) blocks with flat path weights."""
     input_shapes, output_shapes, paths, biases, groups = layout
     sizes = tuple(input_shapes[i][1] * output_shapes[j][1] for i, j, _, _ in paths)
+    uniform_scale = bool(paths) and all(path[3] == paths[0][3] for path in paths)
+    if uniform_scale:
+        # Shared path normalization needs only one elementwise launch, while
+        # each path keeps its own slice of the independent weight tensor.
+        weight = weight * paths[0][3]
     matrices = [
         value.reshape(*weight.shape[:-1], input_shapes[i][1], output_shapes[j][1])
-        * scale
-        for value, (i, j, _, scale) in zip(weight.split(sizes, -1), paths)
+        for value, (i, j, _, _) in zip(weight.split(sizes, -1), paths)
     ]
+    if not uniform_scale:
+        matrices = [value * path[3] for value, path in zip(matrices, paths)]
     outputs = [None] * len(output_shapes)
     shared = all(size == 1 for size in weight.shape[:-1])
     for entries in groups:

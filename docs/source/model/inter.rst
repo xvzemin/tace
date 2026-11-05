@@ -177,7 +177,7 @@ transformations, cutoff, and scatter retain their usual behavior.
      apply_cutoff: false
 
 A 3BPA configuration is available as
-``example/train/benchmark/3BPA/uuo2.yaml``.
+``example/train/benchmark/3BPA/uu_o2.yaml``.
 
 Set ``TACE_USE_EQX=1`` to use ``equivariantx.conv.UuO2TensorProductConv``. It fuses
 gather, both frame rotations, UuLinear, cutoff and scatter. The last radial

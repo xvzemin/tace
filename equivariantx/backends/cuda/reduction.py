@@ -63,8 +63,41 @@ def prepare_graph(source, target, owner, num_nodes=None):
         result = torch.argsort(index, stable=True)
     else:
         order = prepare_graph(source, target, owner)
-        boundaries = torch.arange(num_nodes + 1, device=index.device, dtype=index.dtype)
-        pointers = torch.searchsorted(index[order], boundaries)
+        if (
+            index.is_cuda
+            and index.dtype in (torch.int32, torch.int64)
+            and num_nodes >= 0
+        ):
+            from .runtime import kernels, runtime
+
+            pointers = order.new_empty(num_nodes + 1)
+            code = csr_source(index.dtype)
+            kernel = kernels([code], index.device)[code]
+            runtime().launch(
+                [
+                    (
+                        kernel,
+                        [
+                            index.data_ptr(),
+                            order.data_ptr(),
+                            pointers.data_ptr(),
+                            index.numel(),
+                            num_nodes,
+                            index.stride(0),
+                        ],
+                        min((num_nodes + 256) // 256, 65535),
+                        1,
+                        256,
+                        0,
+                    )
+                ],
+                torch.cuda.current_stream(index.device).cuda_stream,
+            )
+        else:
+            boundaries = torch.arange(
+                num_nodes + 1, device=index.device, dtype=index.dtype
+            )
+            pointers = torch.searchsorted(index[order], boundaries)
         result = order, pointers
     if cacheable:
         ready, stream_id = None, None
@@ -82,6 +115,28 @@ def prepare_graph(source, target, owner, num_nodes=None):
         if len(_GRAPHS) > 64:
             _GRAPHS.popitem(last=False)
     return result
+
+
+@lru_cache(maxsize=2)
+def csr_source(dtype):
+    """Find CSR boundaries without gathering all sorted edge indices."""
+    scalar = "int" if dtype == torch.int32 else "long long"
+    return f"""
+using int64_t = long long;
+extern "C" __global__ void run(const {scalar}* index, const int64_t* order,
+    int64_t* pointers, int64_t edges, int64_t nodes, int64_t stride) {{
+    for (int64_t node = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+         node <= nodes; node += int64_t(gridDim.x) * blockDim.x) {{
+        int64_t lo = 0, hi = edges;
+        while (lo < hi) {{
+            const int64_t mid = lo + (hi - lo) / 2;
+            if (index[order[mid] * stride] < node) lo = mid + 1;
+            else hi = mid;
+        }}
+        pointers[node] = lo;
+    }}
+}}
+"""
 
 
 @lru_cache(maxsize=64)

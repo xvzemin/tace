@@ -159,6 +159,8 @@ EQX in TACE
      - ``equivariantx.models.tace.tece_oam_rra``
    * - Standard / gated bilinear ACE
      - ``equivariantx.ace.SemiCoupledSymmetricContraction`` / ``equivariantx.ace.BilinearContraction``
+   * - Nonlinear CGTP / ICTD ACE
+     - ``equivariantx.models.tace.nonlinear_ace``
 
 By default, EQX streams the convolution's complete radial MLP in bounded edge
 tiles and recomputes nonlinear activations during backward, including force training.

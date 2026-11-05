@@ -9,7 +9,7 @@ import torch
 from e3nn import o3
 
 from equivariantx.ace import SemiCoupledSymmetricContraction
-from tace.utils.env import select_acceleration
+from tace.utils.env import acceleration_enabled, select_acceleration
 
 from ..layout import LayoutTransform
 from ..linear import (
@@ -291,7 +291,7 @@ class NonlinearCgtpACE(Product):
 
     asymmetric = True
 
-    def _setup(self):
+    def _setup(self) -> None:
         self.asymmetric = bool(self.asymmetric)
         if self.correlation < 1:
             raise ValueError("Nonlinear products require a positive correlation.")
@@ -303,31 +303,6 @@ class NonlinearCgtpACE(Product):
             raise ValueError("Nonlinear products require invariant scalar inputs.")
 
         self.num_inputs = self.correlation if self.asymmetric else 1
-        self.setup_contraction()
-        self.setup_indices()
-        irreps_up = (
-            o3.Irreps([(self.num_hidden_channel, "0e")])
-            + self.irreps_hidden * self.num_inputs
-        )
-        self.linear_up = e3nnLinear(
-            self.irreps_in.simplify(),
-            irreps_up.regroup(),
-            bias=self.use_bias,
-        )
-        self.embedding = torch.nn.Embedding(self.num_elements, self.num_hidden_channel)
-        self.gate = torch.nn.Sequential(
-            torchLinear(
-                2 * self.num_hidden_channel, self.weight_numel, bias=self.use_bias
-            ),
-            ACTIVATION["scaled_silu"](),
-        )
-        self.linear = e3nnLinear(
-            self.irreps_coefs_out, self.irreps_out, bias=self.use_bias
-        )
-        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0.0:
-            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
-
-    def setup_contraction(self):
         self.aces = torch.nn.ModuleList()
         self.coefs = torch.nn.ModuleList()
         irreps = self.irreps_hidden
@@ -352,12 +327,10 @@ class NonlinearCgtpACE(Product):
             self.gate_slices.append((self.weight_numel, self.weight_numel + offset))
             self.weight_numel += offset
 
-    def setup_indices(self):
-        """Build factor and gate indices for the angular storage layout."""
         self.factor_dim = self.irreps_hidden.dim
         irreps_up = (
-            type(self.irreps_hidden)([(self.num_hidden_channel, "0e")])
-            + type(self.irreps_hidden)(list(self.irreps_hidden) * self.num_inputs)
+            o3.Irreps([(self.num_hidden_channel, "0e")])
+            + self.irreps_hidden * self.num_inputs
         )
         slices = irreps_up.slices()
         order = torch.cat(
@@ -379,19 +352,28 @@ class NonlinearCgtpACE(Product):
                 persistent=False,
             )
 
-    def contract(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        factors = features.reshape(features.shape[0], self.num_inputs, self.factor_dim)
-        corr = factors[:, 0]
-        start, stop = self.gate_slices[0]
-        output = self.coefs[0](corr * weight[:, start:stop][:, self.gate_index_1])
-        for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
-            corr = product(corr, factors[:, index + 1 if self.asymmetric else 0])
-            start, stop = self.gate_slices[index + 1]
-            gate = weight[:, start:stop].index_select(
-                -1, getattr(self, f"gate_index_{index + 2}")
-            )
-            output = output + linear(corr * gate)
-        return output
+        self.linear_up = e3nnLinear(
+            self.irreps_in.simplify(), irreps_up.regroup(), bias=self.use_bias
+        )
+        self.embedding = torch.nn.Embedding(self.num_elements, self.num_hidden_channel)
+        self.gate = torch.nn.Sequential(
+            torchLinear(
+                2 * self.num_hidden_channel, self.weight_numel, bias=self.use_bias
+            ),
+            ACTIVATION["scaled_silu"](),
+        )
+        self.linear = e3nnLinear(
+            self.irreps_coefs_out, self.irreps_out, bias=self.use_bias
+        )
+        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0.0:
+            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
+        self.build_eqx()
+
+    def build_eqx(self) -> None:
+        """Build the fused product from its operators and parameters."""
+        from equivariantx.models.tace.nonlinear_ace import build
+
+        self.eqx_metadata, self.eqx_bindings = build(self)
 
     def forward(
         self,
@@ -403,12 +385,36 @@ class NonlinearCgtpACE(Product):
     ) -> torch.Tensor:
         if node_type is None:
             node_type = node_attrs.argmax(dim=-1)
-        projected = self.linear_up(node_feats).index_select(-1, self.factor_index)
-        scalars = projected[:, : self.num_hidden_channel]
-        weight = self.gate(torch.cat((scalars, self.embedding(node_type)), dim=-1))
-        output = self.linear(
-            self.contract(projected[:, self.num_hidden_channel :], weight)
-        )
+        if (
+            node_feats.is_cuda
+            and node_feats.dtype in (torch.float32, torch.float64)
+            and acceleration_enabled("eqx", kernel="product")
+            and not any(
+                has_lora(layer)
+                for layer in (self.linear_up, self.gate[0], *self.coefs, self.linear)
+            )
+        ):
+            from equivariantx.models.tace.nonlinear_ace import run
+
+            output = run(self, node_feats, self.embedding(node_type))
+        else:
+            projected = self.linear_up(node_feats).index_select(-1, self.factor_index)
+            scalars = projected[:, : self.num_hidden_channel]
+            weight = self.gate(torch.cat((scalars, self.embedding(node_type)), dim=-1))
+            factors = projected[:, self.num_hidden_channel :].reshape(
+                node_feats.shape[0], self.num_inputs, self.factor_dim
+            )
+            corr = factors[:, 0]
+            start, stop = self.gate_slices[0]
+            output = self.coefs[0](corr * weight[:, start:stop][:, self.gate_index_1])
+            for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
+                corr = product(corr, factors[:, index + 1 if self.asymmetric else 0])
+                start, stop = self.gate_slices[index + 1]
+                gate = weight[:, start:stop].index_select(
+                    -1, getattr(self, f"gate_index_{index + 2}")
+                )
+                output = output + linear(corr * gate)
+            output = self.linear(output)
         if hasattr(self, "stochastic_depth"):
             output = self.stochastic_depth(output, batch)
         return output if sc is None else output + sc

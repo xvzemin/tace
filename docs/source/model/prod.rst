@@ -54,6 +54,10 @@ Both modes retain only paths that are nonzero for symmetric products. There
 are no additional configuration options. Expert mixtures and
 ``product_basis.nonlinear`` are not used; leave the latter at ``null``.
 
+With ``TACE_USE_EQX=1``, CUDA execution fuses the Linear maps, coefficient
+generation and recursive products in bounded node tiles. Both representations
+retain their parameters and support force training. CPU execution uses PyTorch.
+
 .. autoclass:: tace.models.spherical.prod.NonlinearCgtpACE
    :no-members:
 

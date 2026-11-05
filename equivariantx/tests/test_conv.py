@@ -3326,7 +3326,9 @@ def test_direction_derivatives_on_axes(device):
 
 @pytest.mark.parametrize("owner", [0, 1])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_convolution_graph_order(owner, device):
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("stride", [1, 3])
+def test_convolution_graph_order(owner, device, dtype, stride):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx.backends.cuda.reduction import prepare_graph
@@ -3334,7 +3336,8 @@ def test_convolution_graph_order(owner, device):
     edges = torch.tensor(
         [[0, 0, 1, 0, 3, 0, 2, 0, 0], [2, 1, 2, 0, 2, 2, 1, 2, 2]],
         device=device,
-    )
+        dtype=dtype,
+    ).repeat_interleave(stride, dim=1)[:, ::stride]
     order = prepare_graph(edges[0], edges[1], owner)
     assert prepare_graph(edges[0], edges[1], owner) is order
     assert prepare_graph(edges[0].detach(), edges[1].detach(), owner) is order
@@ -3361,6 +3364,61 @@ def test_convolution_graph_order(owner, device):
     torch.testing.assert_close(permutation, updated)
     edges[owner, 0] = 6
     assert prepare_graph(edges[0], edges[1], owner, 7)[1] is not pointers
+    for nodes in (0, 7):
+        permutation, pointers = prepare_graph(edges[0, :0], edges[1, :0], owner, nodes)
+        assert permutation.numel() == 0
+        torch.testing.assert_close(
+            pointers, torch.zeros(nodes + 1, device=device, dtype=torch.int64)
+        )
+    if dtype == torch.int64:
+        extremes = edges.new_tensor([2**63 - 1, -(2**63), 0, 2**31, 3, -1])
+        extremes = extremes.repeat_interleave(2)[::2]
+        permutation, pointers = prepare_graph(extremes, extremes, owner, 7)
+        torch.testing.assert_close(permutation, extremes.argsort(stable=True))
+        torch.testing.assert_close(
+            pointers,
+            torch.searchsorted(extremes[permutation], torch.arange(8, device=device)),
+        )
+    if device != "cuda" or owner != 0 or stride != 3:
+        return
+    index = torch.randint(19, (514,), device="cuda", dtype=dtype)[::2]
+    producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
+    producer.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(producer):
+        order, pointers = prepare_graph(index, index, 0, 23)
+    with torch.cuda.stream(consumer):
+        cached = prepare_graph(index, index, 0, 23)
+        assert cached[0] is order and cached[1] is pointers
+        copied = tuple(value.clone() for value in cached)
+    consumer.synchronize()
+
+    def check(actual):
+        expected_order = index.argsort(stable=True)
+        expected_ptr = torch.searchsorted(
+            index[expected_order], torch.arange(24, device=index.device, dtype=dtype)
+        )
+        for value, expected in zip(actual, (expected_order, expected_ptr)):
+            torch.testing.assert_close(value, expected, rtol=0, atol=0)
+
+    check(copied)
+    producer.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=producer):
+        captured = prepare_graph(index, index, 0, 23)
+    graph.replay()
+    check(captured)
+    index.add_(3).remainder_(19)
+    graph.replay()
+    check(captured)
+    assert prepare_graph(index, index, 0, 23)[1] is not pointers
+
+    with torch.inference_mode():
+        index = index.clone()
+        before = prepare_graph(index, index, 0, 23)
+        index.add_(1).remainder_(19)
+        after = prepare_graph(index, index, 0, 23)
+        assert before[1] is not after[1]
+        check(after)
 
 
 @pytest.mark.parametrize("heads", [1, 3, 8])
@@ -4458,6 +4516,12 @@ def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     z = program.input(1, "edge", width)
     w = program.input(2, "shared", width * 4)
     b = program.input(3, "shared", 4)
+    # Shared products keep one row across tiles, including a shorter final tile.
+    b = program.product(
+        (b, program.constant(4, 0)),
+        (1, (4, 4), tuple(((i, i), 1.5) for i in range(4))),
+        1,
+    )
     value = program.binary("add", program.matmul(z, w, 1, width, 4), b)
     value = program.unary("silu", program.binary("mul", x, value))
     metadata = repr((tuple(program.nodes), ((value, 0, "target"),)))

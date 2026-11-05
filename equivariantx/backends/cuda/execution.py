@@ -11,6 +11,7 @@ from .edge_codegen import source as expression_source
 from .runtime import kernels, runtime
 
 TILE_BYTES = 64 << 20
+PRODUCT_TILE_BYTES = 512 << 20
 TILE_SIZE = 131072
 
 
@@ -79,6 +80,11 @@ def execution_plan(metadata):
                 children = ()
             elif node_projection(nodes, i):
                 children = (("value", args[1]),)
+            elif op == "product":
+                output = nodes[i][3][1]
+                children = tuple(
+                    ("value", j) for role, j in enumerate(args) if role != output
+                )
             elif op == "convolution":
                 output = nodes[i][3][2]
                 children = tuple(
@@ -145,15 +151,16 @@ def execution_plan(metadata):
 def uses_matrix_products(metadata):
     """Select tiled execution for dense maps and convolution expressions."""
     nodes, _ = parse_metadata(metadata)
+    dependent = []
+    for op, _, args, data in nodes:
+        dependent.append(
+            data[1] != "shared" if op == "input" else any(dependent[j] for j in args)
+        )
     return any(
         op in ("convolution", "normalize", "inv_norm", "mean", "rsqrt")
-        for op, _, _, _ in nodes
-    ) or any(
-        op == "matmul"
-        and data[0] == 1
-        and nodes[args[1]][0] == "input"
-        and nodes[args[1]][3][1] == "shared"
-        for op, _, args, data in nodes
+        or op == "matmul"
+        and not can_inline_matmul(nodes, i, dependent)
+        for i, (op, _, _, _) in enumerate(nodes)
     )
 
 
@@ -165,7 +172,7 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
         if i not in translated:
             op, size, args, data = nodes[i]
             if (
-                op in ("input", "convolution")
+                op in ("input", "convolution", "product")
                 or op == "matmul"
                 and not can_inline_matmul(nodes, i, dependent)
                 or not dependent[i]
@@ -309,6 +316,22 @@ class TiledProgram:
                 )
             elif op == "convolution":
                 x = self.convolution(i)
+            elif op == "product":
+                from .channel_product import channel_product
+
+                metadata, role, required = data
+                # The first operand supplies the tile size. The ignored output
+                # role is empty, so shared inputs do not reduce the output rows.
+                rows = self.end - self.begin if self.dependent[i] else 1
+                operands = [self.inputs[0].new_empty((rows, 0))]
+                operands.extend(
+                    self.inputs[0].new_empty((0, self.nodes[j][1]))
+                    if k == role
+                    else self.value(j)
+                    for k, j in enumerate(args)
+                )
+                terms = ((tuple(range(1, len(operands))), role, 0, required),)
+                x = channel_product(repr(metadata), repr(terms), operands)[0]
             elif op in ("normalize", "inv_norm") and not self.dependent[i]:
                 key = ("normalization", args[0], data)
                 if key not in self.values:
@@ -571,16 +594,133 @@ class TiledProgram:
             self.release("reduce", i)
 
 
+@lru_cache(maxsize=128)
+def tile_width(metadata):
+    """Estimate peak per-row storage using the tile's evaluation/release order."""
+    nodes, outputs, dependent, expressions, dependencies, counts = execution_plan(
+        metadata
+    )
+    uses, values, references = counts.copy(), {}, Counter()
+    resident = peak = 0
+    destinations = {root for root, _, kind in outputs if kind in ("source", "target")}
+
+    def release(key):
+        nonlocal resident
+        uses[key] -= 1
+        if not uses[key]:
+            owner = values.pop(key, None)
+            if owner is not None:
+                references[owner] -= 1
+                if not references[owner]:
+                    resident -= nodes[owner][1]
+
+    def evaluate(key):
+        nonlocal resident, peak
+        if key in values:
+            return
+        kind, i = key
+        op, _, args, data = nodes[i]
+        for child in dependencies[key]:
+            j = child[1]
+            if (
+                kind == "value"
+                and i in expressions
+                and (
+                    nodes[j][0] == "input"
+                    and nodes[j][3][1] in ("source", "target")
+                    or node_projection(nodes, j)
+                )
+            ):
+                # Fused expressions gather these directly, without a tile copy.
+                continue
+            evaluate(child)
+        owner = None
+        if kind == "value" and dependent[i]:
+            if op == "slice" and i not in expressions:
+                # A slice keeps its parent's allocation alive after release.
+                owner = values[dependencies[key][0]]
+            elif not (
+                op == "input"
+                and data[1] == "edge"
+                or op == "convolution"
+                and (data[2] == 2 or i in destinations)
+            ):
+                owner = i
+        values[key] = owner
+        if owner is not None:
+            if not references[owner]:
+                resident += nodes[owner][1]
+            references[owner] += 1
+        # Shared matrix adjoints are reduced by GEMM, not materialized per row.
+        # Its transposed left operand may need a temporary packed tile.
+        temporary = (
+            nodes[args[0]][1]
+            if kind == "reduce"
+            and op == "matmul"
+            and all(dependent[j] for j in args)
+            and data[0] > 1
+            else 0
+        )
+        peak = max(peak, resident + temporary)
+        for child in dependencies[key]:
+            release(child)
+
+    def accumulate(i):
+        op, _, args, _ = nodes[i]
+        if op in ("add", "unslice"):
+            for j in args:
+                accumulate(j)
+        else:
+            evaluate(("reduce", i))
+            release(("reduce", i))
+
+    for root, _, kind in outputs:
+        if kind == "shared":
+            accumulate(root)
+            continue
+        op, _, args, data = nodes[root]
+        key = "value", root
+        if (
+            kind in ("source", "target")
+            and op == "matmul"
+            and data[0] == 1
+            and not dependent[args[1]]
+            and counts[key] == 1
+        ):
+            # This map runs after node reduction, outside the tile workspace.
+            for child in dependencies[key]:
+                evaluate(child)
+            for child in dependencies[key]:
+                release(child)
+        else:
+            evaluate(key)
+        release(key)
+    return max(128, peak)
+
+
 def launch(metadata, inputs, source, target, outputs, tile_size=None):
     """Evaluate a program with bounded intermediate edge storage."""
     plan = execution_plan(metadata)
     if tile_size is None:
-        width = max(
-            (max(data[1:]) for op, _, _, data in plan[0] if op == "matmul"), default=128
+        node_product = any(op == "product" for op, _, _, _ in plan[0]) and not any(
+            op == "convolution" or op == "input" and data[1] in ("source", "target")
+            for op, _, _, data in plan[0]
         )
+        # Reusing node products amortizes the dense maps over larger tiles.
+        # Keep convolution scheduling unchanged; product storage is bounded by
+        # the live vectors, excluding already-reduced parameter outer products.
+        width = (
+            tile_width(metadata)
+            if node_product
+            else max(
+                (max(data[1:]) for op, _, _, data in plan[0] if op == "matmul"),
+                default=128,
+            )
+        )
+        budget = PRODUCT_TILE_BYTES if node_product else TILE_BYTES
         tile_size = max(
             256,
-            min(TILE_SIZE, TILE_BYTES // (max(1, width) * inputs[0].element_size())),
+            min(TILE_SIZE, budget // (max(1, width) * inputs[0].element_size())),
         )
     descriptions = plan[1]
     writes = Counter(slot for _, slot, _ in descriptions)
