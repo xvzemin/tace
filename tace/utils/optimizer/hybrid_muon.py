@@ -3,34 +3,20 @@
 """
 HybridMuon optimizer with Muon, Adam, and AdamW parameter updates.
 
-HybridMuon is a hybrid optimizer that automatically combines Muon and Adam.
-Routing is controlled by parameter dimensionality, parameter names, and
-``muon_mode``:
+Parameter groups control routing and decoupled weight decay independently:
 
-- Parameters whose final effective name segment contains ``bias``
-  or starts with ``adam_`` (case-insensitive): Adam.
-- Parameters whose final effective name segment starts with ``adamw_``
-  (case-insensitive): Adam with decoupled weight decay (AdamW-style).
-  The final effective segment means the last non-numeric segment in the full
-  parameter path (split by ``"."``), so trailing ParameterList indices are
-  ignored.
-- 1D parameters (biases, norms, scales): Adam (no weight decay).
-- ``muon_mode="2d"``:
-  - Matrix parameters with effective rank 2 (after dropping singleton dims)
-    use Muon.
-  - Effective rank >2 parameters use Adam with decoupled weight decay fallback.
-- ``muon_mode="flat"``:
-  - >=2D matrix parameters use flattened matrix-view routing:
-    ``(rows, cols) = (prod(effective_shape[:-1]), effective_shape[-1])``.
-- ``muon_mode="slice"``:
-  - Effective rank 2 matrix parameters: same as ``"2d"``.
-  - Effective rank >=3 matrix parameters: treat leading axes as batch and apply Muon
-    independently on each ``(..., m, n)`` slice (no cross-slice mixing).
-  - Routing shape is computed on effective shape (singleton dims removed).
-
-This is different from PyTorch's torch.optim.Muon, which ONLY supports 2D parameters
-and requires manual configuration of AdamW for 1D parameters. HybridMuon provides
-automatic routing based on parameter dimensionality.
+- Muon requires a non-degenerate matrix in ``muon_mode``. Module-specific
+  roles, such as embeddings and normalization gains, are assigned by the
+  caller's parameter grouping.
+- ``"2d"`` accepts only rank-two parameters. ``"flat"`` explicitly flattens
+  all axes except the last into rows. ``"slice"`` treats the original last
+  two axes as matrix dimensions and all leading axes as independent batches.
+- Singleton axes are never removed. Scalars, vectors, empty tensors, and
+  parameters with either trailing matrix dimension <= 1 fall back to Adam.
+- Names are diagnostic unless matched by an explicit ``adam_patterns`` rule,
+  which forces Adam. There are no implicit bias/scale/prefix naming rules.
+- Every route obeys its group's ``weight_decay``. Set it to zero explicitly
+  for biases, normalization gains, or other parameters that should not decay.
 
 Algorithm
 ---------
@@ -69,7 +55,8 @@ For Muon-routed parameters, the update is:
     4. Parameter update: theta -= lr * scale * orth(update)
 
 For Adam-routed parameters, standard Adam moments are used.
-AdamW behavior (decoupled weight decay) is applied only on >=2D Adam paths.
+AdamW behavior (decoupled weight decay) is applied whenever the group's
+``weight_decay`` is nonzero, regardless of parameter rank.
 
 Dtype Behavior
 --------------
@@ -129,6 +116,7 @@ if TYPE_CHECKING:
     from collections.abc import (
         Callable,
         Iterable,
+        Mapping,
         Sequence,
     )
 
@@ -168,10 +156,9 @@ NS_COEFF_POLISH: tuple[float, float, float] = (2.0, -1.5, 0.5)
 #   Normal gradients satisfy ||G||_F >> 1e-7, so this never bites in practice.
 # ADAM_EPS: Adam denominator ε in ``sqrt(v_hat) + ε``. DeepSeek-V4 uses
 #   ε=1e-20 so the Adam update is driven by the second-moment estimate rather
-#   than the floor ε. For MLIP training (SeZM) this matters for ``adam_``
-#   parameters whose gradient scale spans many orders of magnitude across
-#   training (e.g. ``adam_ffn_layer_scales`` starting at 1e-3 vs
-#   ``adam_type_embedding`` at O(1)).
+#   than the floor ε. For MLIP training this matters for Adam-routed
+#   parameters whose gradient scale spans many orders of magnitude, such as
+#   small layer scales and order-one type embeddings.
 NS_EPS: float = 1e-7
 ADAM_EPS: float = 1e-20
 # Polar Express coefficients with the safety scaling used in the reference repo
@@ -687,95 +674,71 @@ def _compute_muon_nesterov_updates(
     ]
 
 
-def get_adam_route(
-    param_name: str | None,
-) -> str:
+def validate_hybrid_muon_options(options: Mapping[str, Any]) -> None:
+    """Validate supplied optimizer options without mutating the mapping.
+
+    Accepts a full parameter group or partial constructor options. Unrelated
+    keys are ignored so callers can validate configuration before making
+    groups. Invalid values raise ``ValueError`` before optimizer updates.
     """
-    Determine the optimizer route for a parameter based on its name.
 
-    Parameters
-    ----------
-    param_name : str | None
-        Parameter name. If None, fallback behavior treats parameter as
-        matrix (Muon-eligible).
+    def scalar(name: str, value: Any) -> float:
+        if isinstance(value, (str, bytes, bool)):
+            raise ValueError(f"Invalid {name}: {value!r}; expected a finite scalar")
+        try:
+            result = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"Invalid {name}: {value!r}; expected a finite scalar"
+            ) from exc
+        if not math.isfinite(result):
+            raise ValueError(f"Invalid {name}: {value!r}; expected a finite scalar")
+        return result
 
-    Returns
-    -------
-    str
-        ``"muon"`` if this parameter is eligible as matrix weight by name,
-        ``"adam"`` for Adam path (no weight decay),
-        ``"adamw"`` for AdamW path (decoupled weight decay).
-
-    Notes
-    -----
-    Name-based routing rules (case-insensitive, applied to the final
-    effective name segment after stripping trailing numeric ParameterList
-    indices):
-
-    1. Contains ``"bias"`` -> ``"adam"`` (no weight decay).
-    2. Starts with ``"adam_"`` -> ``"adam"`` (no weight decay).
-       Typical: norm scales, radial frequencies.
-    3. Starts with ``"adamw_"`` -> ``"adamw"`` (decoupled weight decay).
-       Typical: LayerScale parameters.
-    4. Otherwise -> ``"muon"`` (eligible for Muon).
-    """
-    if param_name is None:
-        return "muon"
-    param_name_lower = param_name.lower()
-    name_segments = param_name_lower.split(".")
-    leaf_name_idx = len(name_segments) - 1
-    while leaf_name_idx > 0 and name_segments[leaf_name_idx].isdigit():
-        leaf_name_idx -= 1
-    leaf_name = name_segments[leaf_name_idx]
-    if "bias" in leaf_name:
-        return "adam"
-    if leaf_name.startswith("adam_"):
-        return "adam"
-    if leaf_name.startswith("adamw_"):
-        return "adamw"
-    if (
-        leaf_name.endswith("_norm")
-        or leaf_name in {"scale", "shift", "alpha", "beta"}
-        or "affine" in leaf_name
-    ):
-        return "adam"
-    return "muon"
+    for name in ("lr", "weight_decay", "lr_adjust_coeff"):
+        if name in options and scalar(name, options[name]) < 0.0:
+            raise ValueError(f"Invalid {name}: {options[name]!r}; must be >= 0")
+    if "lr_adjust" in options:
+        # Non-positive values intentionally select match-RMS scaling.
+        scalar("lr_adjust", options["lr_adjust"])
+    if "momentum" in options:
+        value = scalar("momentum", options["momentum"])
+        if not 0.0 <= value < 1.0:
+            raise ValueError(f"Invalid momentum: {value!r}; must be in [0, 1)")
+    if "adam_betas" in options:
+        betas = options["adam_betas"]
+        try:
+            if len(betas) != 2:
+                raise ValueError("expected two coefficients")
+            beta1, beta2 = betas
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "adam_betas must contain exactly two coefficients"
+            ) from exc
+        for index, beta in enumerate((beta1, beta2)):
+            value = scalar(f"adam_betas[{index}]", beta)
+            if not 0.0 <= value < 1.0:
+                raise ValueError(
+                    f"Invalid adam_betas[{index}]: {value!r}; must be in [0, 1)"
+                )
+    if "muon_mode" in options and options["muon_mode"] not in ("2d", "flat", "slice"):
+        raise ValueError(
+            f"Invalid muon_mode {options['muon_mode']!r}; use '2d', 'flat', or 'slice'"
+        )
 
 
-def get_effective_shape(
+def get_matrix_view_shape(
     shape: torch.Size | tuple[int, ...],
-) -> tuple[int, ...]:
+    muon_mode: str,
+) -> tuple[int, int, int] | None:
     """
-    Remove singleton dimensions from a tensor shape for routing decisions.
+    Derive a Muon matrix view without removing original tensor axes.
 
     Parameters
     ----------
     shape
-        Original tensor shape.
-
-    Returns
-    -------
-    tuple[int, ...]
-        Shape without dimensions equal to 1.
-        If all dims are 1, returns ``(1,)``.
-    """
-    effective = tuple(int(dim) for dim in shape if int(dim) != 1)
-    if len(effective) == 0:
-        return (1,)
-    return effective
-
-
-def get_matrix_view_shape(
-    effective_shape: tuple[int, ...],
-    muon_mode: str,
-) -> tuple[int, int, int] | None:
-    """
-    Derive Muon matrix-view shape from effective tensor shape.
-
-    Parameters
-    ----------
-    effective_shape
-        Shape with singleton dimensions removed.
+        Original parameter shape. Both trailing dimensions must exceed one;
+        degenerate matrix blocks are never combined with leading batch axes.
     muon_mode
         One of {"2d", "flat", "slice"}.
 
@@ -784,64 +747,41 @@ def get_matrix_view_shape(
     tuple[int, int, int] | None
         ``(batch_size, rows, cols)`` when Muon is applicable, otherwise ``None``.
     """
-    if len(effective_shape) < 2:
+    if muon_mode not in ("2d", "flat", "slice"):
+        raise ValueError(
+            f"Invalid muon_mode '{muon_mode}'. Use '2d', 'flat', or 'slice'."
+        )
+    if (
+        len(shape) < 2
+        or any(dim <= 0 for dim in shape)
+        or shape[-2] <= 1
+        or shape[-1] <= 1
+    ):
         return None
 
     if muon_mode == "2d":
-        if len(effective_shape) != 2:
+        if len(shape) != 2:
             return None
-        return (1, int(effective_shape[-2]), int(effective_shape[-1]))
+        return (1, int(shape[-2]), int(shape[-1]))
     if muon_mode == "flat":
-        rows = int(math.prod(effective_shape[:-1]))
-        cols = int(effective_shape[-1])
+        rows = int(math.prod(shape[:-1]))
+        cols = int(shape[-1])
         return (1, rows, cols)
-    if muon_mode == "slice":
-        if len(effective_shape) == 2:
-            return (1, int(effective_shape[-2]), int(effective_shape[-1]))
-        batch_size = int(math.prod(effective_shape[:-2]))
-        rows = int(effective_shape[-2])
-        cols = int(effective_shape[-1])
-        return (batch_size, rows, cols)
-    raise ValueError(f"Invalid muon_mode '{muon_mode}'. Use '2d', 'flat', or 'slice'.")
+    batch_size = int(math.prod(shape[:-2]))
+    rows = int(shape[-2])
+    cols = int(shape[-1])
+    return (batch_size, rows, cols)
 
 
 class HybridMuonOptimizer(Optimizer):
     """
-    HybridMuon optimizer with 1D Adam path and matrix Muon path.
+    Hybrid optimizer with explicit group policy and shape-safe matrix views.
 
-    This optimizer applies different update rules based on parameter dimensionality,
-    parameter names, and ``muon_mode``:
-    - Parameters with final effective name segment containing
-      ``bias``, or starting with ``adam_`` (case-insensitive): standard Adam
-      update.
-    - Parameters with final effective name segment starting with ``adamw_``
-      (case-insensitive): Adam with decoupled weight decay (AdamW-style).
-    - Matrix parameters whose full name contains one of ``adam_patterns``:
-      Adam with decoupled weight decay instead of Muon.
-    - 1D parameters: standard Adam update.
-    - Parameters are routed by effective shape (singleton dimensions removed).
-    - ``muon_mode="2d"``:
-      - effective rank 2 parameters use Muon.
-      - effective rank >2 parameters use Adam.
-    - ``muon_mode="flat"``:
-      - effective rank >=2 parameters use flattened matrix-view Muon.
-    - ``muon_mode="slice"``:
-      - effective rank 2 parameters use Muon.
-      - effective rank >=3 parameters apply Muon independently on each trailing
-        ``(m, n)`` slice.
-
-    Naming convention for explicit Adam routing:
-    - Parameters representing bias terms should include ``bias``
-      in their final effective name segment (case-insensitive).
-    - Parameters that are not semantic bias but should still use Adam should
-      use an ``adam_`` prefix in their final effective name segment
-      (case-insensitive).
-    - Parameters that should use Adam with decoupled weight decay should use
-      an ``adamw_`` prefix in their final effective name segment
-      (case-insensitive).
-
-    This hybrid approach is effective because Muon's orthogonalization is designed
-    for weight matrices, while Adam is more suitable for biases and normalization params.
+    Muon requires non-degenerate original matrix axes. Shape checks do not
+    identify a parameter's model-level role; model-specific exclusions are
+    assigned by the caller's parameter grouping. Set group-level
+    ``weight_decay=0`` for parameters that should not decay; tensor rank and
+    parameter names never disable decay implicitly.
 
     Update Rules
     ------------
@@ -854,27 +794,24 @@ class HybridMuonOptimizer(Optimizer):
 
     Adam:
         Standard Adam with bias correction, all computations in float32.
-        Decoupled weight decay is applied only to >=2D Adam-routed parameters.
+        Decoupled weight decay follows the group setting on every tensor rank.
 
     Parameters
     ----------
     params : iterable
-        Iterable of parameters to optimize.
+        Parameters or parameter groups. Groups may override optimizer defaults.
     lr : float
         Learning rate.
     momentum : float
         Momentum coefficient for Muon with default 0.95.
     weight_decay : float
         Weight decay coefficient with default 0.001.
-        Applied to Muon-routed parameters and >=2D Adam-routed parameters
-        with AdamW-style decoupled decay. Not applied to 1D Adam parameters.
+        Applied as decoupled decay to every active parameter in the group.
     adam_betas : tuple[float, float]
         Adam beta coefficients with default (0.9, 0.95).
     adam_patterns : Sequence[str]
-        Case-insensitive substrings of full parameter names. Matrix parameters
-        whose name contains one of them take the AdamW path (decoupled weight
-        decay) instead of Muon; vector parameters are on Adam regardless.
-        Empty by default; does not change automatic parameter routing.
+        Explicit case-insensitive substrings of full parameter names that
+        force Adam. Decay follows the group setting. Empty by default.
     lr_adjust : float
         Learning rate adjustment mode for Muon scaling and Adam learning rate.
         - If lr_adjust <= 0: use match-RMS scaling for Muon,
@@ -893,14 +830,12 @@ class HybridMuonOptimizer(Optimizer):
     muon_mode : str
         Muon routing mode with default ``"slice"``.
         - ``"2d"``: only 2D parameters are Muon candidates.
-        - ``"flat"``: >=2D parameters use flattened matrix-view routing.
-        - ``"slice"``: >=3D parameters use per-slice Muon routing on last two dims.
+        - ``"flat"``: explicitly flatten all but the last axis into rows.
+        - ``"slice"``: apply Muon independently on the original last two axes.
+        Every mode requires both original trailing dimensions to exceed one.
     named_parameters : iterable[tuple[str, torch.Tensor]] | None
-        Optional named parameter iterable used for name-based routing.
-        Parameters with final effective name segment containing
-        ``bias``, or starting with ``adam_`` (case-insensitive) are forced to
-        Adam (no weight decay). Parameters starting with ``adamw_`` are forced
-        to AdamW-style decoupled decay path.
+        Optional names for diagnostics and explicit ``adam_patterns`` rules.
+        Names alone do not change routing or weight decay.
     enable_gram : bool
         Enable the Gram Newton-Schulz path for rectangular Muon
         matrices. Square matrices continue to use the current standard
@@ -921,7 +856,11 @@ class HybridMuonOptimizer(Optimizer):
 
     Examples
     --------
-    >>> optimizer = HybridMuonOptimizer(model.parameters(), lr=5e-4)
+    >>> model = torch.nn.Linear(4, 8)
+    >>> optimizer = HybridMuonOptimizer(
+    ...     [{"params": [model.weight]}, {"params": [model.bias], "weight_decay": 0.0}],
+    ...     named_parameters=model.named_parameters(),
+    ... )
     >>> for epoch in range(epochs):
     ...     optimizer.zero_grad()
     ...     loss.backward()
@@ -945,14 +884,10 @@ class HybridMuonOptimizer(Optimizer):
         use_foreach: bool | None = None,
         adam_patterns: Sequence[str] = (),
     ) -> None:
-        # === Step 1. Validate routing mode ===
+        # === Step 1. Normalize the constructor routing mode ===
         muon_mode = str(muon_mode).lower()
-        if muon_mode not in {"2d", "flat", "slice"}:
-            raise ValueError(
-                f"Invalid muon_mode '{muon_mode}'. Use '2d', 'flat', or 'slice'."
-            )
 
-        # === Step 2. Register optimizer defaults ===
+        # === Step 2. Validate and register optimizer defaults ===
         defaults = {
             "lr": lr,
             "momentum": momentum,
@@ -964,6 +899,7 @@ class HybridMuonOptimizer(Optimizer):
             "enable_gram": bool(enable_gram),
             "magma_muon": bool(magma_muon),
         }
+        validate_hybrid_muon_options(defaults)
         super().__init__(params, defaults)
 
         # === Step 3. Build parameter id -> name mapping ===
@@ -1029,7 +965,7 @@ class HybridMuonOptimizer(Optimizer):
         self, named_parameters: Iterable[tuple[str, torch.Tensor]]
     ) -> None:
         """
-        Set runtime-only parameter names used for name-based routing.
+        Set runtime-only diagnostic names and explicit pattern-match inputs.
 
         The mapping intentionally stays outside optimizer defaults and
         ``param_groups`` so optimizer checkpoints do not persist full
@@ -1045,6 +981,7 @@ class HybridMuonOptimizer(Optimizer):
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         """Add a parameter group and invalidate cached routing and graphs."""
+        validate_hybrid_muon_options({**self.defaults, **param_group})
         super().add_param_group(param_group)
         self._routing_built = False
         if hasattr(self, "_graphs"):
@@ -1645,12 +1582,8 @@ class HybridMuonOptimizer(Optimizer):
         """
         Classify parameters into Muon, Adam, and AdamW routes (static routing).
 
-        Routing logic:
-        - name-based ``bias`` or ``adam_`` route → Adam (no decay)
-        - name-based ``adamw_`` prefix → AdamW (decoupled weight decay)
-        - effective shape rank <2 → Adam (no decay)
-        - non-matrix effective shape for current muon_mode → AdamW (decoupled)
-        - remaining eligible matrix params → Muon path
+        Explicit group/pattern exclusions and invalid original matrix shapes
+        use Adam. Its decay behavior depends only on group ``weight_decay``.
         """
         if self._routing_built:
             return
@@ -1663,38 +1596,22 @@ class HybridMuonOptimizer(Optimizer):
             adam_decay: list[dict[str, Any]] = []
 
             muon_mode = group["muon_mode"]
+            # Optional routing metadata supplied by model parameter grouping.
+            use_muon = group.get("use_muon")
+            adam_route = adam_decay if group["weight_decay"] > 0 else adam_no_decay
 
             for p in group["params"]:
                 param_name = self._param_name_map.get(id(p))
-
-                # === Step 1. Name-based explicit route ===
-                route = get_adam_route(param_name)
-                if route == "adam":
-                    adam_no_decay.append({"param": p, "name": param_name})
-                    continue
-                if route == "adamw":
-                    adam_decay.append({"param": p, "name": param_name})
-                    continue
-
-                # === Step 2. Effective <2D parameters → Adam ===
-                effective_shape = get_effective_shape(p.shape)
-                if len(effective_shape) < 2:
-                    adam_no_decay.append({"param": p, "name": param_name})
+                matrix_shape = get_matrix_view_shape(p.shape, muon_mode)
+                if (
+                    use_muon is False
+                    or matrix_shape is None
+                    or self._matches_adam_pattern(param_name)
+                ):
+                    adam_route.append({"param": p, "name": param_name})
                     continue
 
-                # === Step 3. Pattern-routed or non-matrix effective shape → AdamW-style ===
-                # A parameter whose full name contains one of ``adam_patterns``
-                # takes the Adam path with decoupled decay instead of Muon: the
-                # orthogonalized Muon step moves every row of a matrix at the
-                # same rate, including rows that only a small part of the data
-                # constrains, whereas Adam moves a row in proportion to its own
-                # gradient history.
-                matrix_shape = get_matrix_view_shape(effective_shape, muon_mode)
-                if matrix_shape is None or self._matches_adam_pattern(param_name):
-                    adam_decay.append({"param": p, "name": param_name})
-                    continue
-
-                # === Step 4. Eligible matrix params → Muon ===
+                # Original leading axes remain independent matrix batches.
                 batch_size, rows, cols = matrix_shape
                 muon_params.append(
                     {
@@ -1948,6 +1865,11 @@ class HybridMuonOptimizer(Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        # Schedulers and callers may change group options between steps.
+        # Validate every group before routing, state updates, or weight decay.
+        for group in self.param_groups:
+            validate_hybrid_muon_options(group)
+
         # Learning rates remain device scalars; other changed options require
         # recapture because their values are fixed in a captured graph.
         step_config = tuple(
@@ -1958,6 +1880,7 @@ class HybridMuonOptimizer(Optimizer):
                 group["lr_adjust"],
                 group["lr_adjust_coeff"],
                 group["muon_mode"],
+                group.get("use_muon"),
                 group["enable_gram"],
                 group["magma_muon"],
             )
@@ -2066,12 +1989,18 @@ class HybridMuonOptimizer(Optimizer):
     def _collect_gradients(
         self,
     ) -> tuple[_GradientSignature, tuple[torch.Tensor, ...]]:
-        """Collect live gradients and their stable parameter indices."""
+        """Validate all live gradients before any update, then collect them."""
         signature: list[int] = []
         grads: list[torch.Tensor] = []
         for index, param in enumerate(self._graph_params):
             if param.grad is None:
                 continue
+            if param.grad.layout != torch.strided:
+                name = self._param_name_map.get(id(param), f"parameter {index}")
+                raise RuntimeError(
+                    "HybridMuon does not support sparse gradients "
+                    f"({name}); use dense gradients or a sparse optimizer"
+                )
             signature.append(index)
             grads.append(param.grad)
         return tuple(signature), tuple(grads)

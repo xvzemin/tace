@@ -290,13 +290,23 @@ def test_balanced_element_weights_have_weighted_mean_one():
     )
 
 
-@pytest.mark.parametrize("optimizer_name", ["Adam", "AdamW", "SGD"])
+@pytest.mark.parametrize(
+    "optimizer_name", ["Adam", "AdamW", "SGD", "HybridMuonOptimizer"]
+)
 @pytest.mark.parametrize("matrix_weight", ["0", "1"])
-def test_optimizer_weight_decay(optimizer_name, matrix_weight):
+@pytest.mark.parametrize("weight_decay", [None, 0.1])
+def test_optimizer_weight_decay(optimizer_name, matrix_weight, weight_decay):
+    from e3nn.nn import BatchNorm
+
     from tace.lightning.lit_model import LightningWrapperModel
     from tace.models.blocks import ScaleShift
-    from tace.models.linear import e3nnLinear
-    from tace.models.radial import RadialBasis, ZBLBasis
+    from tace.models.linear import e3nnLinear, enable_lora
+    from tace.models.radial import (
+        RadialBasis,
+        ZBLBasis,
+        j0SphericalBesselBasis,
+        jnSphericalBesselBasis,
+    )
     from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
     from tace.models.spherical.scatter_norm import DensityScatterNorm
 
@@ -307,11 +317,16 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight):
             super().__init__()
             self.cfg = {
                 "optimizer": {
-                    "_target_": f"torch.optim.{optimizer_name}",
+                    "_target_": (
+                        "tace.utils.optimizer.HybridMuonOptimizer"
+                        if optimizer_name == "HybridMuonOptimizer"
+                        else f"torch.optim.{optimizer_name}"
+                    ),
                     "lr": 0.01,
-                    "weight_decay": 0.1,
                 }
             }
+            if weight_decay is not None:
+                self.cfg["optimizer"]["weight_decay"] = weight_decay
             self.linear = e3nnLinear(
                 "2x0e+2x1o",
                 "2x0e+2x1o",
@@ -322,8 +337,12 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight):
                 torch.nn.Linear(3, 3), torch.nn.SiLU(), torch.nn.Linear(3, 2)
             )
             self.norm = EquivariantMergeLayerNorm([0, 1], 2)
+            self.batch_norm = BatchNorm("2x0e+2x1o")
             self.density = DensityScatterNorm(2.0, 4, radial_bias=True)
+            enable_lora(self.density.edge_density.mlp[0], r=2, freeze_base=False)
             self.radial = RadialBasis(trainable=True)
+            self.j0 = j0SphericalBesselBasis(num_basis=2, trainable=True)
+            self.j1 = jnSphericalBesselBasis(order=1, num_basis=2, trainable=True)
             self.scale_shift = ScaleShift(
                 [1], [{1: 1.0}], [{1: 0.0}], True, True, all_atoms=True
             )
@@ -344,6 +363,9 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight):
 
     model = TrainingModel()
     optimizer = model.configure_optimizers()["optimizer"]
+    expected_decay = weight_decay
+    if expected_decay is None:
+        expected_decay = 0.001 if optimizer_name == "HybridMuonOptimizer" else 0.0
     params = [p for group in optimizer.param_groups for p in group["params"]]
     assert len(params) == len({id(p) for p in params})
     assert {id(p) for p in params} == {
@@ -360,7 +382,7 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight):
         expected = name.startswith("linear.weight") or (
             name.startswith("mlp.") and name.endswith("weight")
         )
-        assert decay[id(param)] == (0.1 if expected else 0.0), name
+        assert decay[id(param)] == (expected_decay if expected else 0.0), name
         with torch.no_grad():
             param.fill_(1.0)
         param.grad = torch.zeros_like(param)
@@ -370,6 +392,521 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight):
             assert torch.all(param < 1)
         else:
             torch.testing.assert_close(param, torch.ones_like(param), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("matrix_weight", ["0", "1"])
+def test_optimizer_weight_decay_parameter_roles(matrix_weight):
+    from e3nn import o3
+
+    from tace.lightning.optimizer import (
+        NO_WEIGHT_DECAY_NAMES,
+        get_optimizer_param_groups,
+    )
+    from tace.models.linear import enable_lora, switch_e3nn_weight_layout
+    from tace.models.spherical.edge import Element2EdgeUpdate
+    from tace.models.spherical.node import (
+        Element2NodeUpdate,
+        ElementNodeUpdate,
+        SphericalTensorNodeEmbedding,
+    )
+    from tace.models.spherical.readout import (
+        DirectHessianReadout,
+        EdgeReadOut,
+        ElementScalarReadOut,
+        ElementTensorReadOut,
+        ScalarReadOut,
+        TensorReadOut,
+    )
+    from tace.models.spherical.ue import (
+        UniversalEquivariantEmbedding,
+        UniversalInvariantEmbedding,
+    )
+
+    model = torch.nn.Module()
+    # Names do not make continuous feature maps into lookups or output heads.
+    for name in ("node_embedding", "source_embedding", "embedding", "energy_readout"):
+        model.add_module(name, torch.nn.Linear(3, 4))
+    model.initial = SphericalTensorNodeEmbedding(3, 4, 4, 1, 1, 2.0, bias=True)
+    model.endpoints = Element2EdgeUpdate(0, 1, 3, 4, 4, 4, bias=True)
+    model.node_update = ElementNodeUpdate(3, 4, 4, bias=True)
+    model.node_update_pair = Element2NodeUpdate(3, 4, 4, bias=True)
+    model.invariant = UniversalInvariantEmbedding(
+        4, {"energy": {}, "fidelity_idx": {"num_embeddings": 3}}, bias=True
+    )
+    model.equivariant = UniversalEquivariantEmbedding(
+        o3.Irreps("4x0e"),
+        4,
+        3,
+        {"electric_field": {"normalizer": 1.0}},
+        time_reversal=False,
+    )
+    model.lookup = torch.nn.Embedding(3, 4)
+    output_maps = []
+    for cls in (
+        ScalarReadOut,
+        ElementScalarReadOut,
+        TensorReadOut,
+        ElementTensorReadOut,
+    ):
+        for layer in (0, 1):
+            head = cls(
+                layer=layer,
+                num_layers=2,
+                hidden_channel=[4],
+                bias=True,
+                num_elements=3,
+                num_fidelities=1,
+                parity=True,
+                irreps_in="4x0e+4x1o",
+                irreps_out="0e" if issubclass(cls, ScalarReadOut) else "1o",
+            )
+            model.add_module(f"head_{cls.__name__}_{layer}", head)
+            output_maps.append(head.linear2[-1] if head.last_layer else head.linear1[0])
+    model.edge_head = EdgeReadOut("4x0e+4x1o", "4x0e+4x1o", "2x0e", bias=True)
+    model.pair_head = DirectHessianReadout(
+        "4x0e+4x1e+4x2e", "4x0e+4x1e+4x2e", 4, 1, bias=True
+    )
+    output_maps.extend(
+        (
+            model.edge_head.linear_nonlinearity,
+            model.pair_head.node_readout,
+            model.pair_head.edge_readout.linear_nonlinearity,
+        )
+    )
+    lookup_maps = (
+        model.initial.node_embedding,
+        model.endpoints.source_embedding,
+        model.endpoints.target_embedding,
+    )
+    switch_e3nn_weight_layout(model, "matrix" if matrix_weight == "1" else "flat")
+    # LoRA remains regularized even when the base is a lookup or final output map.
+    for module in (*output_maps, *lookup_maps):
+        enable_lora(module, r=2, freeze_base=False)
+
+    excluded = {id(p) for name, p in model.named_parameters() if name.endswith("bias")}
+    for module in (*output_maps, *lookup_maps):
+        weights = module.weight
+        if not isinstance(weights, torch.nn.ParameterList):
+            weights = (weights,)
+        excluded.update(id(p) for p in weights)
+    excluded.update(
+        id(p)
+        for module in model.modules()
+        if isinstance(module, torch.nn.Embedding)
+        for p in module.parameters()
+    )
+
+    # Inspect the same owners standalone, in the model, and through another wrapper.
+    wrapper = torch.nn.Module()
+    wrapper.block = model
+    assert not any(
+        "embedding" in pattern or "readout" in pattern
+        for pattern in NO_WEIGHT_DECAY_NAMES
+    )
+    for inspected in (*model.children(), model, wrapper):
+        groups = get_optimizer_param_groups(inspected, 0.1)
+        params = [p for group in groups for p in group["params"]]
+        assert len(params) == len({id(p) for p in params})
+        decay = {
+            id(p): group["weight_decay"] for group in groups for p in group["params"]
+        }
+        for name, param in inspected.named_parameters():
+            assert decay[id(param)] == (0.0 if id(param) in excluded else 0.1), name
+
+    optimizer = torch.optim.AdamW(get_optimizer_param_groups(model, 0.1), lr=0.01)
+    for param in model.parameters():
+        with torch.no_grad():
+            param.fill_(1.0)
+        param.grad = torch.zeros_like(param)
+    optimizer.step()
+    for name, param in model.named_parameters():
+        expected = 1.0 if id(param) in excluded else 0.999
+        torch.testing.assert_close(param, torch.full_like(param, expected), msg=name)
+
+
+@pytest.mark.parametrize("matrix_weight", ["0", "1"])
+@pytest.mark.parametrize("muon_mode", ["2d", "flat", "slice"])
+def test_optimizer_semantic_muon_groups(matrix_weight, muon_mode):
+    from e3nn import o3
+    from e3nn.nn import FullyConnectedNet
+
+    from tace.lightning.optimizer import get_optimizer_param_groups
+    from tace.models.cartesian.prod import NonlinearIctdACE
+    from tace.models.linear import (
+        e3nnElementLinear,
+        e3nnLinear,
+        e3nnMoEElementLinear,
+        enable_lora,
+        mlpLinear,
+        switch_e3nn_weight_layout,
+        torchLinear,
+    )
+    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
+    from tace.models.spherical.node import (
+        Element2NodeUpdate,
+        ElementNodeUpdate,
+        SphericalTensorNodeEmbedding,
+    )
+    from tace.models.spherical.prod import CgtpACE, MaceACE, NonlinearCgtpACE
+    from tace.models.spherical.readout import EdgeReadOut, ScalarReadOut
+    from tace.models.spherical.scatter_norm import DensityScatterNorm
+
+    model = torch.nn.Module()
+    model.dense = torch.nn.Linear(4, 6)
+    model.torch_dense = torchLinear(4, 6)
+    model.mlp_dense = mlpLinear(4, 6)
+    model.fully_connected = FullyConnectedNet([4, 6, 3], torch.nn.functional.silu)
+    model.equivariant = e3nnLinear(
+        "4x0e+4x1o", "6x0e+6x1o", use_matrix_weight=matrix_weight
+    )
+    model.element = e3nnElementLinear(
+        "4x0e+4x1o",
+        "6x0e+6x1o",
+        num_elements=3,
+        use_matrix_weight=matrix_weight,
+    )
+    model.experts = e3nnMoEElementLinear(
+        "4x0e+4x1o",
+        "6x0e+6x1o",
+        num_elements=3,
+        num_experts=2,
+        use_matrix_weight=matrix_weight,
+    )
+    model.singletons = torch.nn.ModuleList(
+        [
+            e3nnElementLinear(left, right, num_elements=3, use_matrix_weight="1")
+            for left, right in (("1x0e", "4x0e"), ("4x0e", "1x0e"))
+        ]
+        + [
+            e3nnMoEElementLinear(
+                "2x0e",
+                "8x0e",
+                num_elements=3,
+                num_experts=2,
+                use_matrix_weight="1",
+            )
+        ]
+    )
+    model.lookup = torch.nn.Embedding(3, 4)
+    model.norm = EquivariantMergeLayerNorm([0, 1], 4)
+    model.router = torch.nn.Linear(4, 4)
+    model.density = DensityScatterNorm(2.0, 4, radial_bias=True)
+    model.adapter = enable_lora(mlpLinear(4, 6), r=2, freeze_base=False)
+    model.initial = SphericalTensorNodeEmbedding(3, 4, 4, 1, 1, 2.0)
+    model.node_update = ElementNodeUpdate(3, 4, 6)
+    model.node_update_pair = Element2NodeUpdate(3, 4, 6)
+    model.head = ScalarReadOut(
+        layer=0,
+        num_layers=1,
+        hidden_channel=[4],
+        bias=True,
+        num_elements=3,
+        num_fidelities=1,
+        parity=True,
+        irreps_in="4x0e",
+        irreps_out="2x0e",
+    )
+    model.edge_head = EdgeReadOut("4x0e", "4x0e", "2x0e")
+    # Neutral module names ensure exclusion follows the owning module type.
+    for module in (
+        model.head,
+        model.edge_head,
+        model.initial,
+        model.node_update,
+        model.node_update_pair,
+    ):
+        switch_e3nn_weight_layout(module, "matrix")
+    product_kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=3,
+        Lmax=1,
+        lmax=1,
+        num_channel=4,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=o3.Irreps("4x0e+4x1o"),
+        correlation=[2],
+        l1l2=None,
+        bias=True,
+        nonlinear=None,
+        parity=True,
+    )
+    model.product = CgtpACE(**product_kwargs)
+    model.mace = MaceACE(**product_kwargs)
+    model.nonlinear_product = NonlinearCgtpACE(**product_kwargs)
+    model.nonlinear_cartesian = NonlinearIctdACE(**product_kwargs)
+    for module in (
+        model.product,
+        model.mace,
+        model.nonlinear_product,
+        model.nonlinear_cartesian,
+    ):
+        switch_e3nn_weight_layout(module, "matrix" if matrix_weight == "1" else "flat")
+    model.unknown_coefficients = torch.nn.Parameter(torch.ones(3, 4, 6))
+    model.frozen = torch.nn.Parameter(torch.ones(4, 6), requires_grad=False)
+
+    groups = get_optimizer_param_groups(model, 0.1, use_muon=True, muon_mode=muon_mode)
+    params = [p for group in groups for p in group["params"]]
+    assert len(params) == len({id(p) for p in params})
+    assert {id(p) for p in params} == {
+        id(p) for p in model.parameters() if p.requires_grad
+    }
+    by_param = {id(p): group for group in groups for p in group["params"]}
+    expected = {
+        id(module.weight)
+        for module in (model.dense, model.torch_dense, model.mlp_dense, model.adapter)
+    }
+    expected.update(id(p) for p in model.fully_connected.parameters())
+    expected.update(
+        id(module.weight)
+        for module in model.initial.edge_info.modules()
+        if isinstance(module, (torch.nn.Linear, mlpLinear, torchLinear))
+    )
+    for module in (
+        model.head.linear2[0],
+        model.edge_head.linear_down,
+        model.node_update.embedding,
+        model.node_update_pair.source_embedding,
+        model.node_update_pair.target_embedding,
+    ):
+        expected.update(id(p) for p in module.weight)
+    expected.add(id(model.mace.weight))
+    for product in (model.nonlinear_product, model.nonlinear_cartesian):
+        expected.add(id(product.gate[0].weight))
+    density_weight = model.density.edge_density.mlp[0].weight
+    expected.add(id(density_weight))
+    assert by_param[id(density_weight)]["weight_decay"] == 0.0
+    if matrix_weight == "1":
+        for module in (model.equivariant, model.product.linear, model.mace.linear):
+            expected.update(id(p) for p in module.weight)
+        for module in (model.element, model.experts, *model.product.coefs):
+            expected.update(id(p) for p in module.weight)
+        for product in (model.nonlinear_product, model.nonlinear_cartesian):
+            for module in (product.linear_up, *product.coefs, product.linear):
+                expected.update(id(p) for p in module.weight)
+    actual = {id(p) for group in groups if group["use_muon"] for p in group["params"]}
+    names = {id(p): name for name, p in model.named_parameters()}
+    assert {names[p] for p in actual} == {names[p] for p in expected}
+    assert by_param[id(model.mace.weight)]["weight_decay"] == 0.1
+    assert by_param[id(model.mace.weight)]["muon_mode"] == "slice"
+    for name, param in model.named_parameters():
+        if id(param) in expected and param.ndim > 2:
+            assert by_param[id(param)]["muon_mode"] == "slice", name
+    assert by_param[id(model.unknown_coefficients)]["weight_decay"] == 0.1
+
+    ordinary_groups = get_optimizer_param_groups(model, 0.1)
+    assert len(ordinary_groups) == 2
+    assert all("use_muon" not in group for group in ordinary_groups)
+    assert {
+        id(p): group["weight_decay"]
+        for group in ordinary_groups
+        for p in group["params"]
+    } == {key: group["weight_decay"] for key, group in by_param.items()}
+
+
+def test_optimizer_eqx_parameter_roles(caplog):
+    from e3nn import o3
+
+    from equivariantx import co2, co3, o2
+    from equivariantx import o3 as eqx_o3
+    from equivariantx.models.mace.product import SymmetricContraction
+    from tace.lightning.optimizer import get_optimizer_param_groups
+
+    class Contraction(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.correlation = 2
+            self.weights_max = torch.nn.Parameter(torch.randn(3, 2, 4))
+            self.weights = torch.nn.ParameterList(
+                [torch.nn.Parameter(torch.randn(3, 2, 4))]
+            )
+
+        def U_tensors(self, degree):
+            return torch.ones(*([1] * (degree + 1)), 2)
+
+    original = torch.nn.Module()
+    original.irreps_in = original.irreps_out = o3.Irreps("4x0e")
+    original.contractions = torch.nn.ModuleList([Contraction()])
+    model = torch.nn.Module()
+    model.product = SymmetricContraction(original, backend="torch")
+    model.norm = torch.nn.LayerNorm((4, 6))
+    model.o3_linear = o3.Linear("4x0e+4x1o", "6x0e+6x1o", biases=True)
+    model.o3_product = eqx_o3.TensorProduct(
+        "4x1o", "4x1o", "4x0e", [(0, 0, 0, "uuu", True)]
+    )
+    for name, space, vector in (
+        ("o2", o2, "1m"),
+        ("co2", co2, "1m"),
+        ("co3", co3, "1o"),
+    ):
+        model.add_module(
+            f"{name}_linear",
+            space.Linear(f"4x0e+4x{vector}", f"6x0e+6x{vector}", biases=True),
+        )
+        model.add_module(
+            f"{name}_product",
+            space.TensorProduct(
+                f"4x{vector}", f"4x{vector}", "4x0e", [(0, 0, 0, "uuu", True)]
+            ),
+        )
+    model.matrix_product = eqx_o3.MatrixTensorProduct("4x1o", "4x1o", "4x0e")
+    model.gaunt_product = eqx_o3.GauntTensorProduct("4x1o", "4x1o", "4x0e")
+    model.element = eqx_o3.ElementLinear(o3.Linear("4x0e", "6x0e"))
+    model.circular_element = o2.ElementLinear(o2.Linear("4x0e", "6x0e"))
+
+    groups = get_optimizer_param_groups(model, 0.1, use_muon=True)
+    by_param = {id(p): group for group in groups for p in group["params"]}
+    coefficients = {id(p) for p in model.product.parameters()}
+    assert len(by_param) == len(list(model.parameters()))
+    assert coefficients
+    for name, param in model.named_parameters():
+        assert by_param[id(param)]["use_muon"] == (id(param) in coefficients), name
+        expected_decay = (
+            0.0 if name.startswith("norm.") or name.endswith("bias") else 0.1
+        )
+        assert by_param[id(param)]["weight_decay"] == expected_decay, name
+    ordinary = get_optimizer_param_groups(model, 0.1)
+    assert {
+        id(param): group["weight_decay"]
+        for group in ordinary
+        for param in group["params"]
+    } == {key: group["weight_decay"] for key, group in by_param.items()}
+    assert all(by_param[p]["muon_mode"] == "slice" for p in coefficients)
+    assert "packed" in caplog.text.lower()
+
+
+@pytest.mark.parametrize("callable_rules", [False, True])
+def test_optimizer_external_parameter_rules(callable_rules, caplog):
+    from tace.lightning.optimizer import (
+        get_optimizer_param_groups,
+        get_weight_decay_exclusions,
+    )
+
+    class Channels(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.matrix = torch.nn.Parameter(torch.randn(4, 6))
+            self.independent = torch.nn.Parameter(torch.randn(3, 4, 6))
+            self.singleton = torch.nn.Parameter(torch.randn(3, 4, 1))
+            self.lookup = torch.nn.Parameter(torch.randn(3, 4))
+            self.packed = torch.nn.Parameter(torch.randn(3, 24))
+            self.gain = torch.nn.Parameter(torch.ones(4, 6))
+
+    roles = {
+        "matrix": "matrix",
+        "independent": "batched_matrix",
+        "singleton": "batched_matrix",
+        "lookup": "adam",
+        "packed": "packed",
+        "gain": "adam",
+    }
+    model = Channels()
+    model.unknown = torch.nn.Parameter(torch.ones(4, 6))
+    weight_decay_rules = {
+        f"{Channels.__module__}.{Channels.__qualname__}": (
+            (lambda module: ("gain",)) if callable_rules else ("gain",)
+        )
+    }
+    assert get_weight_decay_exclusions(model) == set()
+    assert get_weight_decay_exclusions(model, weight_decay_rules) == {"gain"}
+    assert get_weight_decay_exclusions(model) == set()
+    parameter_rules = {Channels: (lambda module: roles) if callable_rules else roles}
+    groups = get_optimizer_param_groups(
+        model,
+        0.1,
+        use_muon=True,
+        muon_mode="flat",
+        parameter_rules=parameter_rules,
+        weight_decay_rules=weight_decay_rules,
+    )
+    by_param = {id(p): group for group in groups for p in group["params"]}
+    assert len(by_param) == len(list(model.parameters()))
+    for name, param in model.named_parameters():
+        expected = name in ("matrix", "independent")
+        assert by_param[id(param)]["use_muon"] is expected, name
+        assert by_param[id(param)]["weight_decay"] == (0.0 if name == "gain" else 0.1)
+        if expected:
+            assert by_param[id(param)]["muon_mode"] == "slice"
+    ordinary = get_optimizer_param_groups(
+        model, 0.1, weight_decay_rules=weight_decay_rules
+    )
+    assert {
+        id(param): group["weight_decay"]
+        for group in ordinary
+        for param in group["params"]
+    } == {key: group["weight_decay"] for key, group in by_param.items()}
+    for patterns in ("gain", (1,), None):
+        with pytest.raises(TypeError, match="sequence of globs"):
+            get_weight_decay_exclusions(model, {Channels: lambda module: patterns})
+    assert "unknown" in caplog.text
+    optimizer = HybridMuonOptimizer(
+        groups, lr=0.01, muon_mode="flat", flash_muon=False, magma_muon=False
+    )
+    for param in model.parameters():
+        param.grad = torch.randn_like(param)
+    optimizer.step()
+    for name, param in model.named_parameters():
+        assert ("momentum_buffer" in optimizer.state[param]) == (
+            name in ("matrix", "independent")
+        ), name
+
+
+@pytest.mark.parametrize("excluded_first", [False, True])
+@pytest.mark.parametrize("alias_kind", ["embedding", "readout", "unknown"])
+def test_optimizer_shared_parameter_exclusions(excluded_first, alias_kind):
+    from tace.lightning.optimizer import (
+        get_optimizer_param_groups,
+        get_weight_decay_exclusions,
+    )
+
+    model = torch.nn.Module()
+    dense = torch.nn.Linear(4, 4, bias=False)
+    if alias_kind == "embedding":
+        excluded = torch.nn.Embedding(4, 4)
+        excluded.weight = dense.weight
+        excluded_name = "lookup"
+    elif alias_kind == "readout":
+        from tace.models.linear import switch_e3nn_weight_layout
+        from tace.models.spherical.readout import ScalarReadOut
+
+        excluded = ScalarReadOut(
+            layer=0,
+            num_layers=2,
+            hidden_channel=[4],
+            bias=False,
+            num_elements=3,
+            num_fidelities=1,
+            parity=True,
+            irreps_in="4x0e",
+            irreps_out="4x0e",
+        )
+        switch_e3nn_weight_layout(excluded, "matrix")
+        excluded.linear1[0].weight[0] = dense.weight
+        excluded_name = "energy_readout"
+    else:
+        excluded = torch.nn.Module()
+        excluded.coefficients = dense.weight
+        excluded_name = "unknown"
+    entries = [("hidden", dense), (excluded_name, excluded)]
+    for name, module in reversed(entries) if excluded_first else entries:
+        model.add_module(name, module)
+    assert get_weight_decay_exclusions(model) == (
+        set(dict(model.named_parameters(remove_duplicate=False)))
+        if alias_kind != "unknown"
+        else set()
+    )
+    groups = get_optimizer_param_groups(model, 0.1, use_muon=True)
+    nonempty = [group for group in groups if group["params"]]
+    assert len(nonempty) == 1
+    assert len(nonempty[0]["params"]) == 1
+    assert nonempty[0]["params"][0] is dense.weight
+    assert nonempty[0]["use_muon"] is False
+    assert nonempty[0]["weight_decay"] == (0.1 if alias_kind == "unknown" else 0.0)
+    zero_decay = get_optimizer_param_groups(model, 0.0)
+    assert [p for group in zero_decay for p in group["params"]] == [dense.weight]
+    assert all(group["weight_decay"] == 0 for group in zero_decay)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -428,16 +965,61 @@ assert not any(name == "triton" or name.startswith("triton.") for name in sys.mo
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_hybrid_muon_constructor_defaults():
+    from inspect import Parameter, signature
+
+    expected = {
+        "params": Parameter.empty,
+        "lr": 5e-4,
+        "momentum": 0.95,
+        "weight_decay": 0.001,
+        "adam_betas": (0.9, 0.95),
+        "lr_adjust": 0.0,
+        "lr_adjust_coeff": 0.18,
+        "muon_mode": "slice",
+        "named_parameters": None,
+        "enable_gram": True,
+        "flash_muon": True,
+        "magma_muon": True,
+        "use_foreach": None,
+        "adam_patterns": (),
+    }
+    parameters = signature(HybridMuonOptimizer).parameters
+    assert tuple(parameters) == tuple(expected)
+    for name, default in expected.items():
+        assert parameters[name].default == default
+        assert parameters[name].kind is Parameter.POSITIONAL_OR_KEYWORD
+
+    optimizer = HybridMuonOptimizer([torch.nn.Parameter(torch.ones(2, 3))])
+    assert optimizer.defaults == {
+        name: expected[name]
+        for name in (
+            "lr",
+            "momentum",
+            "weight_decay",
+            "adam_betas",
+            "lr_adjust",
+            "lr_adjust_coeff",
+            "muon_mode",
+            "enable_gram",
+            "magma_muon",
+        )
+    }
+    assert "use_muon" not in optimizer.param_groups[0]
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
 @pytest.mark.parametrize("use_foreach", [False, True])
 def test_hybrid_muon_checkpoint(dtype, use_foreach):
-    names = ("bias", "adamw_weight")
+    names = ("bias", "weight")
     params = [
         torch.nn.Parameter(torch.linspace(-0.3, 0.7, 3, dtype=dtype)),
         torch.nn.Parameter(torch.linspace(-0.8, 0.5, 6, dtype=dtype).reshape(2, 3)),
     ]
     optimizer = HybridMuonOptimizer(
-        params, named_parameters=zip(names, params), use_foreach=use_foreach
+        [{"params": params, "use_muon": False}],
+        named_parameters=zip(names, params),
+        use_foreach=use_foreach,
     )
     for step in range(4):
         for param in params:
@@ -446,7 +1028,7 @@ def test_hybrid_muon_checkpoint(dtype, use_foreach):
 
     restored_params = [torch.nn.Parameter(p.detach().clone()) for p in params]
     restored = HybridMuonOptimizer(
-        restored_params,
+        [{"params": restored_params, "use_muon": False}],
         named_parameters=zip(names, restored_params),
         use_foreach=use_foreach,
     )
@@ -489,21 +1071,136 @@ def test_hybrid_muon_parameter_groups():
         torch.testing.assert_close(param, value, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("adam_patterns", [(), ("weight",)])
+@pytest.mark.parametrize("weight_decay", [0.0, 0.2])
+def test_hybrid_muon_zero_gradient_decay(adam_patterns, weight_decay):
+    shapes = ((), (4,), (2, 3), (3, 1, 4), (3, 4, 1), (3, 2, 1, 4))
+    params = [torch.nn.Parameter(torch.ones(shape)) for shape in shapes]
+    names = [f"weight_{index}" for index in range(len(params))]
+    optimizer = HybridMuonOptimizer(
+        params,
+        lr=0.1,
+        weight_decay=weight_decay,
+        named_parameters=zip(names, params),
+        adam_patterns=adam_patterns,
+        enable_gram=False,
+        flash_muon=False,
+        magma_muon=False,
+    )
+    for param in params:
+        param.grad = torch.zeros_like(param)
+    optimizer.step()
+    for param in params:
+        torch.testing.assert_close(
+            param, torch.full_like(param, 1.0 - 0.1 * weight_decay)
+        )
+    for index in (0, 1, 3, 4, 5):
+        assert "exp_avg" in optimizer.state[params[index]]
+        assert "momentum_buffer" not in optimizer.state[params[index]]
+    assert ("momentum_buffer" in optimizer.state[params[2]]) == (not adam_patterns)
+
+
+def test_hybrid_muon_explicit_routes_and_patterns():
+    names = ("bias", "adam_weight", "adamw_weight", "adapter.weight", "weight")
+    params = [torch.nn.Parameter(torch.ones(2, 3)) for _ in names]
+    optimizer = HybridMuonOptimizer(
+        [{"params": params[:-1]}, {"params": params[-1:], "use_muon": False}],
+        named_parameters=zip(names, params),
+        adam_patterns=("adapter",),
+        enable_gram=False,
+        flash_muon=False,
+        magma_muon=False,
+    )
+    for param in params:
+        param.grad = torch.ones_like(param)
+    optimizer.step()
+    for index, param in enumerate(params):
+        assert ("momentum_buffer" in optimizer.state[param]) == (index < 3)
+        assert ("exp_avg" in optimizer.state[param]) == (index >= 3)
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [
+        ("lr", -0.1),
+        ("lr", float("nan")),
+        ("lr", float("inf")),
+        ("weight_decay", -0.1),
+        ("weight_decay", float("nan")),
+        ("momentum", -0.1),
+        ("momentum", 1.0),
+        ("adam_betas", (0.9, 1.0)),
+        ("adam_betas", (0.9,)),
+        ("adam_betas", (float("nan"), 0.9)),
+        ("lr_adjust", float("inf")),
+        ("lr_adjust_coeff", -0.1),
+        ("muon_mode", "unknown"),
+    ],
+)
+def test_hybrid_muon_invalid_options_are_atomic(option, value):
+    param = torch.nn.Parameter(torch.ones(2, 3))
+    invalid = {option: value}
+    with pytest.raises(ValueError):
+        HybridMuonOptimizer([param], **invalid)
+    optimizer = HybridMuonOptimizer(
+        [param], named_parameters=[("weight", param)], adam_patterns=("weight",)
+    )
+    other = torch.nn.Parameter(torch.ones(2, 3))
+    with pytest.raises(ValueError):
+        optimizer.add_param_group({"params": [other], **invalid})
+    assert len(optimizer.param_groups) == 1
+    optimizer.add_param_group({"params": [other], "use_muon": False})
+    optimizer.param_groups[-1].update(invalid)
+    for current in (param, other):
+        current.grad = torch.ones_like(current)
+    with pytest.raises(ValueError):
+        optimizer.step()
+    for current in (param, other):
+        torch.testing.assert_close(current, torch.ones_like(current), rtol=0, atol=0)
+    assert not optimizer.state
+
+
+def test_hybrid_muon_sparse_gradient_rejection_is_atomic():
+    params = [torch.nn.Parameter(torch.ones(2, 3)) for _ in range(2)]
+    optimizer = HybridMuonOptimizer(
+        [{"params": params[:1], "use_muon": False}, {"params": params[1:]}]
+    )
+    params[0].grad = torch.ones_like(params[0])
+    params[1].grad = torch.sparse_coo_tensor(
+        [[0], [1]], [2.0], (2, 3), check_invariants=True
+    )
+    with pytest.raises(RuntimeError, match="[Ss]parse|strided"):
+        optimizer.step()
+    for param in params:
+        torch.testing.assert_close(param, torch.ones_like(param), rtol=0, atol=0)
+    assert not optimizer.state
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("use_foreach", [False, True])
 def test_hybrid_muon_cuda_graph(dtype, use_foreach):
-    names = ("weight", "tensor_weight", "bias", "adamw_weight")
+    names = ("weight", "tensor_weight", "bias", "auxiliary_weight")
     params = [
         torch.nn.Parameter(torch.randn(shape, dtype=dtype, device="cuda"))
         for shape in ((4, 8), (2, 4, 8), (8,), (4, 8))
     ]
     eager_params = [torch.nn.Parameter(param.detach().clone()) for param in params]
     optimizer = HybridMuonOptimizer(
-        params, named_parameters=zip(names, params), use_foreach=use_foreach
+        [
+            {"params": params[:2], "use_muon": True},
+            {"params": params[2:], "use_muon": False},
+        ],
+        named_parameters=zip(names, params),
+        use_foreach=use_foreach,
     )
     eager = HybridMuonOptimizer(
-        eager_params, named_parameters=zip(names, eager_params), use_foreach=use_foreach
+        [
+            {"params": eager_params[:2], "use_muon": True},
+            {"params": eager_params[2:], "use_muon": False},
+        ],
+        named_parameters=zip(names, eager_params),
+        use_foreach=use_foreach,
     )
     eager._graph_enabled = False
 
@@ -515,11 +1212,12 @@ def test_hybrid_muon_cuda_graph(dtype, use_foreach):
             param.grad = grad
             eager_param.grad = None if grad is None else grad.clone()
         for current in (optimizer, eager):
-            current.param_groups[0]["lr"] = 5e-4 / (1 + step // 4)
-            if step == 20:
-                current.param_groups[0].update(
-                    momentum=0.9, weight_decay=0.005, adam_betas=(0.85, 0.97)
-                )
+            for group in current.param_groups:
+                group["lr"] = 5e-4 / (1 + step // 4)
+                if step == 20:
+                    group.update(
+                        momentum=0.9, weight_decay=0.005, adam_betas=(0.85, 0.97)
+                    )
             current.step()
         for param, eager_param in zip(params, eager_params):
             torch.testing.assert_close(param, eager_param, rtol=2e-6, atol=2e-6)

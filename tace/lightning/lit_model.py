@@ -5,10 +5,10 @@
 
 import copy
 import importlib
+import inspect
 import logging
 from collections import Counter
 from collections.abc import Mapping
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -30,9 +30,9 @@ from tace.utils.utils import torch_default_dtype
 from ..utils.loss.dens import add_gaussian_noise_to_position
 from .lora import to_lora_model
 from .loss_skip import LossSkipController
+from .optimizer import get_optimizer_param_groups
 from .torch_model import create_model
 from .u_shift import apply_u_shift
-from .weight_decay import NO_WEIGHT_DECAY_MODULES, NO_WEIGHT_DECAY_NAMES
 
 
 def get_class_from_cfg(cfg):
@@ -117,18 +117,6 @@ class LightningWrapperModel(L.LightningModule):
                 skip_nan=cfg["misc"]["LossSkipController"].get("skip_nan", True),
                 skip_large=cfg["misc"]["LossSkipController"].get("skip_large", True),
             )
-
-        # from tace.utils.optimizer.hybrid_muon import get_adam_route, get_effective_shape, get_matrix_view_shape
-        # for name, param in model.named_parameters():
-        #     route = get_adam_route(name)
-        #     eff_shape = get_effective_shape(param.shape)
-        #     if route == "muon":
-        #         mat_view = get_matrix_view_shape(eff_shape, muon_mode="slice")
-        #         logging.info(f"{name:40s} shape={str(param.shape):15s} -> Muon {mat_view}")
-        #     else:
-        #         logging.info(f"{name:40s} shape={str(param.shape):15s} -> {route}")
-        # import sys
-        # sys.exit()
 
     def _create_metrics(self, prefix):
         metric_collection = MetricCollection(build_metrics(prefix, self.loss_property))
@@ -363,60 +351,38 @@ class LightningWrapperModel(L.LightningModule):
         # if self.ema is not None:
         #     self.ema.to(self.device)
 
-    # def on_load_checkpoint(self, checkpoint):
-    #     for opt_state in checkpoint["optimizer_states"]:
-    #         for group in opt_state["param_groups"]:
-    #             print(group["weight_decay"])
-    #             if group["weight_decay"] != 0.0:
-    #                 group["weight_decay"] = 1e-8
-
     def configure_optimizers(self):
 
         optimizer_cfg = copy.deepcopy(self.cfg["optimizer"])
 
         optimizer_target = optimizer_cfg.pop("_target_")
-        weight_decay = float(optimizer_cfg.pop("weight_decay", 0.0))
 
         optimizer_cfg.pop("extra", None)
         optimizer_cfg.pop("params", None)
-
-        no_decay_ids = {
-            id(param)
-            for module in self.modules()
-            if isinstance(module, NO_WEIGHT_DECAY_MODULES)
-            for param in module.parameters()
-        }
-        # An exempt alias also exempts the shared parameter.
-        no_decay_ids.update(
-            id(param)
-            for name, param in self.named_parameters(remove_duplicate=False)
-            if any(fnmatchcase(name, pattern) for pattern in NO_WEIGHT_DECAY_NAMES)
-        )
-
-        all_named_params = [
-            (name, p) for name, p in self.named_parameters() if p.requires_grad
-        ]
-        decay_params = [p for _, p in all_named_params if id(p) not in no_decay_ids]
-        no_decay_params = [p for _, p in all_named_params if id(p) in no_decay_ids]
-        if weight_decay > 0:
-            logging.debug("Parameters excluded from weight decay:")
-            for name, param in all_named_params:
-                if id(param) in no_decay_ids:
-                    logging.debug("  %s", name)
-
-        param_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ]
 
         module_path, class_name = optimizer_target.rsplit(".", 1)
         module = importlib.import_module(module_path)
         OptimizerClass = getattr(module, class_name)
 
-        if optimizer_target == "tace.utils.optimizer.HybridMuonOptimizer":
+        hybrid_muon = OptimizerClass.__module__ == "tace.utils.optimizer.hybrid_muon"
+        default_weight_decay = (
+            inspect.signature(OptimizerClass).parameters["weight_decay"].default
+            if hybrid_muon
+            else 0.0
+        )
+        weight_decay = float(optimizer_cfg.pop("weight_decay", default_weight_decay))
+        param_groups = get_optimizer_param_groups(
+            self,
+            weight_decay,
+            use_muon=hybrid_muon,
+            muon_mode=optimizer_cfg.get("muon_mode", "slice"),
+        )
+        if hybrid_muon:
             optimizer = OptimizerClass(
                 params=param_groups,
-                named_parameters=all_named_params,
+                named_parameters=[
+                    (name, p) for name, p in self.named_parameters() if p.requires_grad
+                ],
                 **optimizer_cfg,
             )
         else:
