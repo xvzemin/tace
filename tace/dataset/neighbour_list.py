@@ -205,6 +205,7 @@ def get_neighborhood(
     Tuple[bool, bool, bool],
     np.ndarray,
 ]:
+    positions = np.asarray(positions, dtype=np.float64)
     if backend not in NL_BACKEND:
         raise ValueError(
             f"Unknown neighborlist backend '{backend}'. "

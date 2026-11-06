@@ -27,6 +27,7 @@ def convert_basis(model, basis="cartesian"):
     from tace.models.layout import LayoutTransform
     from tace.models.linear import switch_e3nn_weight_layout
     from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
+    from tace.utils.precision import configure_model_precision
     from tace.utils.utils import torch_default_dtype
 
     if not isinstance(model, TensorModel):
@@ -54,7 +55,9 @@ def convert_basis(model, basis="cartesian"):
             model.get_target_property(),
             model.get_embedding_property(),
         )
-    result.to(device=model.readout_fn.cutoff.device, dtype=model.get_model_dtype())
+    configure_model_precision(
+        result, model.get_model_dtype(), device=model.readout_fn.cutoff.device
+    )
     source_modules = dict(model.named_modules())
     for name, module in result.named_modules():
         original = source_modules.get(name)

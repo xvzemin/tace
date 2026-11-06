@@ -16,7 +16,12 @@ from tace.utils.torch_scatter import scatter_sum
 
 from ..angular import SphericalHarmonics
 from ..layout import LayoutTransform
-from ..linear import e3nnElementLinear, e3nnLinear, e3nnMoEElementLinear
+from ..linear import (
+    ElementEmbedding,
+    e3nnElementLinear,
+    e3nnLinear,
+    e3nnMoEElementLinear,
+)
 from ..spherical.basis_change import _SymmetricRankTwoBasisChange
 from ..spherical.fused import (
     O3TensorProductConv,
@@ -47,6 +52,8 @@ from .prod import NonlinearIctdACE
 
 class RankTwoReadout(torch.nn.Module):
     """Combine a scalar trace and an STF tensor into a Cartesian matrix."""
+
+    float64_buffers = ("zero",)
 
     def __init__(self):
         super().__init__()
@@ -219,6 +226,8 @@ def linear_layout(module):
 
 def cartesian_modules(module):
     """Construct Cartesian operators while retaining the model's parameters."""
+    if isinstance(module, ElementEmbedding):
+        return module
     if isinstance(module, MaceACE):
         raise NotImplementedError("MACE products currently require spherical storage.")
     if isinstance(module, UuO2TensorProductConv):

@@ -376,7 +376,7 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner.ndim not in (2, 3) or features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        matrices = self._rotation_matrices(wigner)
+        matrices = self._rotation_matrices(wigner.to(features))
         if not self._global_identity:
             features = _Permute.apply(
                 features, self._global_index, self._global_inverse
@@ -400,7 +400,7 @@ class LocalFrame(torch.nn.Module):
         features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
         if not self._local_identity:
             features = _Permute.apply(features, self._local_index, self._local_inverse)
-        return features * self._local_sign if self._has_signs else features
+        return features * self._local_sign.to(features) if self._has_signs else features
 
     def forward(
         self,
@@ -442,9 +442,9 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner_inv.ndim not in (2, 3) or features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        matrices = self._rotation_matrices(wigner_inv, inverse=True)
+        matrices = self._rotation_matrices(wigner_inv.to(features), inverse=True)
         if self._has_signs:
-            features = features * self._local_sign
+            features = features * self._local_sign.to(features)
         if not self._local_identity:
             features = _Permute.apply(features, self._local_inverse, self._local_index)
         outputs = []

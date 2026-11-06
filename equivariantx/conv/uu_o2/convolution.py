@@ -307,6 +307,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         """
         if (
             vectors is None
+            or vectors.dtype != features.dtype
             or self.backend == "torch"
             or not features.is_cuda
             or radial_network is not None
@@ -357,6 +358,11 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         radial_network=None,
     ):
         """Evaluate local order weights without constructing alignment matrices."""
+        if vectors.dtype != features.dtype:
+            return self.forward_wigner(
+                features, radial, projection, None, cutoff, edge_index, num_nodes,
+                vectors=vectors, radial_network=radial_network,
+            )
         if radial_network is not None and not projection.numel():
             raise ValueError(
                 "A streamed radial network requires its final linear weight "
@@ -429,6 +435,11 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         torch.Tensor
             Aggregated features, ``(num_nodes, irreps_out.dim)``, in ir_mul order.
         """
+        from ...ops.radial import cast_radial
+
+        radial = cast_radial(radial, features.dtype)
+        projection = projection.to(features)
+        cutoff = cutoff.to(features)
         if radial_network is not None and (
             self.backend != "cuda" or not features.is_cuda
         ):

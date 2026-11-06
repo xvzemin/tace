@@ -111,14 +111,23 @@ class ElementLinear(torch.nn.Module):
             shape = (self.weight_numel,)
         if tuple(weight.shape[axes:]) != shape:
             raise ValueError("Weights must have element, expert and path dimensions.")
-        if weight.dtype != features.dtype or weight.device != features.device:
-            raise ValueError("Features and weights must share their dtype and device.")
+        if weight.device != features.device:
+            raise ValueError("Features and weights must share their device.")
+        fused = features.is_cuda and self.backend == "cuda"
+        autocast = (
+            not fused
+            and torch.is_autocast_enabled(features.device.type)
+            and features.dtype in (torch.float32, torch.float16, torch.bfloat16)
+            and weight.dtype in (torch.float32, torch.float16, torch.bfloat16)
+        )
+        if weight.dtype != features.dtype and not autocast:
+            raise ValueError("Features and weights must share their dtype outside autocast.")
         if pair:
             node_type = node_type * weight.shape[1] + target_type
         weight = weight.reshape(
             math.prod(weight.shape[:axes]), self.num_experts, self.weight_numel
         )
-        if features.is_cuda and self.backend == "cuda":
+        if fused:
             return contract(
                 self.metadata,
                 2,

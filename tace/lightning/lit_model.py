@@ -21,10 +21,16 @@ from torchmetrics import MetricCollection
 from tace.dataset.quantity import get_embedding_property, get_target_property
 from tace.foundations import resolve_model_path
 from tace.models.adapter import TensorModel
-from tace.utils._global import DEVICE, DTYPE
-from tace.utils.env import get_tace_apply_u_shift, get_tace_use_dens, set_tf32
+from tace.utils.env import (
+    DEVICE,
+    DTYPE,
+    get_tace_apply_u_shift,
+    get_tace_use_dens,
+    set_tf32,
+)
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.metrics import build_metrics, update_metrics
+from tace.utils.precision import configure_model_precision, resolve_precision
 from tace.utils.utils import torch_default_dtype
 
 from ..utils.loss.dens import add_gaussian_noise_to_position
@@ -104,7 +110,6 @@ class LightningWrapperModel(L.LightningModule):
                 self._create_metrics(f"test_{i}")
 
         # === Misc ===
-        self.force_dtype = DTYPE[cfg.get("dataset", {}).get("force_dtype", None)]
         self.no_valid_set = cfg.get("dataset", {}).get("no_valid_set", False)
 
         self.skip_controller = None
@@ -123,6 +128,7 @@ class LightningWrapperModel(L.LightningModule):
         setattr(self, f"{prefix}_metrics", metric_collection)
 
     def _process_batch(self, batch):
+        batch = self.model.prepare_property_data(batch)
         output = self.model(batch)  # normalized predict value
 
         # # # normalize label value
@@ -154,11 +160,6 @@ class LightningWrapperModel(L.LightningModule):
         # if "stress" in batch:
         #     batch["direct_stress"] = batch["stress"]
         #     batch["direct_stress_weight"] = batch["stress_weight"]
-
-        if self.force_dtype is not None:
-            batch = batch.apply(
-                lambda x: x.to(self.force_dtype) if x.is_floating_point() else x
-            )
 
         # always use normalized value to caculate loss
         output, loss = self._process_batch(batch)
@@ -449,13 +450,9 @@ class LightningWrapperModel(L.LightningModule):
             map_location=map_location,
             weights_only=False,
         )
-        checkpoint_dtype = _dominant_floating_dtype(
-            value
-            for name, value in checkpoint["state_dict"].items()
-            if name.startswith("model.")
-        )
-        model_dtype = dtype or checkpoint_dtype
         cfg = checkpoint["hyper_parameters"]["cfg"]
+        checkpoint_dtype = getattr(torch, cfg["dtype"]["model"])
+        model_dtype = dtype or checkpoint_dtype
         target_property = get_target_property(cfg)
         embedding_property = get_embedding_property(cfg)
         statistics = checkpoint["hyper_parameters"]["statistics"]
@@ -485,7 +482,7 @@ class LightningWrapperModel(L.LightningModule):
             rebuild_constants=model_dtype != checkpoint_dtype,
         )
 
-        return model.to(device=map_location, dtype=model_dtype)
+        return configure_model_precision(model, model_dtype, device=map_location)
 
 
 def _dominant_floating_dtype(values) -> torch.dtype:
@@ -534,6 +531,7 @@ def load_tace(
     use_ema: bool = True,
     target_property: Optional[list[str]] = None,
     dtype: Union[str, int, torch.dtype, None] = None,
+    matmul: str | None = None,
     **kwargs: Any,
 ) -> TensorModel:
     """Load a model file, a registered foundation model, or a model instance.
@@ -542,7 +540,11 @@ def load_tace(
     support ``.pt``, ``.pth``, ``.ckpt``, and ``.pt2`` packages.
     Loading does not change the default PyTorch dtype.
     """
-    set_tf32()
+    set_tf32(matmul=matmul)
+    if isinstance(device, (str, torch.device)) and torch.device(device).type == "mps":
+        raise ValueError(
+            "TACE requires FP64 geometry; use CPU on macOS because MPS does not support float64."
+        )
     device = DEVICE[device]
     try:
         requested_dtype = DTYPE[dtype]
@@ -589,11 +591,19 @@ def load_tace(
             "Model must be a file path, foundation model name, or torch.nn.Module"
         )
 
-    model_dtype = (
-        _dominant_floating_dtype(model["state_dict"].values())
-        if isinstance(model, dict)
-        else model.get_model_dtype()
-    )
+    if isinstance(model, dict):
+        stored_dtype = model.get("dtype", {}).get("model")
+        model_dtype = (
+            DTYPE[stored_dtype]
+            if stored_dtype is not None
+            else _dominant_floating_dtype(
+                value
+                for name, value in model["state_dict"].items()
+                if name.endswith(("weight", "weight.0")) and value.is_floating_point()
+            )
+        )
+    else:
+        model_dtype = model.get_model_dtype()
     target_dtype = requested_dtype or model_dtype
     if is_aoti and target_dtype != model_dtype:
         raise ValueError(
@@ -641,7 +651,7 @@ def load_tace(
     if is_aoti:
         model = model.to(device=device)
     else:
-        model = model.to(device=device, dtype=target_dtype)
+        model = configure_model_precision(model, target_dtype, device=device)
 
     if target_property:
         model.reset_target_property(target_property)
@@ -729,7 +739,9 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
             config["embedding_property"],
             prune_removed_keys=True,
         )
-    converted.to(device=model.readout_fn.cutoff.device, dtype=model.get_model_dtype())
+    configure_model_precision(
+        converted, model.get_model_dtype(), device=model.readout_fn.cutoff.device
+    )
     parameters = dict(model.named_parameters())
     converted_parameters = dict(converted.named_parameters())
     if parameters.keys() != converted_parameters.keys() or any(
@@ -768,15 +780,14 @@ def export_tace(
             "target_property": model.get_target_property(),
             "embedding_property": model.get_embedding_property(),
             "statistics": model.readout_fn.statistics,
+            "dtype": {"model": str(model.get_model_dtype()).removeprefix("torch.")},
         },
         name if name.endswith(".pt") else name + ".pt",
     )
 
 
 def finetune(cfg: Dict) -> torch.nn.Module:
-
-    precision = cfg["trainer"]["precision"]
-    dtype = DTYPE.get(precision, torch.float64)
+    dtype = resolve_precision(cfg, training=True).torch_dtype
     model = load_tace(
         cfg["finetune_from_model"],
         device="cpu",

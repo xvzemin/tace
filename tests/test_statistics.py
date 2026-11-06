@@ -11,10 +11,109 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
 import tace.dataset.statistics as statistics_module
+from tace.dataset.cache import (
+    GRAPH_SCHEMA,
+    graph_cache_directories,
+    graph_cache_key,
+    write_cache_metadata,
+)
 from tace.dataset.dataloader import build_statistics_dataloader
+from tace.dataset.datamodule import GraphDatasetLMDB, create_graphs
 from tace.dataset.element import build_element_lookup
+from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KeySpecification
 from tace.models.blocks import ScaleShift
+
+
+@pytest.mark.parametrize("default_dtype", [torch.float32, torch.float64])
+def test_graph_data_precision_and_indices(default_dtype):
+    torch.set_default_dtype(default_dtype)
+    atoms = Atoms("Si2", positions=[[0.1234567890123, 0, 0], [2, 0, 0]])
+    atoms.info["energy"] = -100000.000123
+    graph = from_atoms(
+        build_element_lookup([14]),
+        atoms,
+        cutoff=3.0,
+        max_neighbors=None,
+        keyspec=KeySpecification.from_defaults(),
+        target_property=["energy"],
+        embedding_property=[],
+        neighborlist_backend="ase",
+    )
+    assert graph.energy.item() == atoms.info["energy"]
+    assert graph.positions[0, 0].item() == atoms.positions[0, 0]
+    assert "node_attrs" not in graph
+    assert "node_type" not in graph
+    assert graph.num_nodes == 2
+    for _, value in graph.items():
+        if torch.is_tensor(value) and value.is_floating_point():
+            assert value.dtype == torch.float64
+    for name in ("atomic_numbers", "edge_index", "edge_shifts", "fidelity_idx"):
+        assert graph[name].dtype == torch.int64
+    assert graph.pbc.dtype == torch.bool
+
+
+def test_graph_cache_precision_and_process_reuse(tmp_path):
+    atoms = Atoms("Si2", positions=[[0, 0, 0], [2, 0, 0]])
+    atoms.info["energy"] = -100000.000123
+    options = {
+        "cutoff": 3.0,
+        "max_neighbors": None,
+        "keyspec": KeySpecification.from_defaults(),
+        "target_property": ["energy"],
+        "embedding_property": [],
+        "neighborlist_backend": "ase",
+    }
+    element = build_element_lookup([14])
+    dataset = create_graphs([atoms], element, options, "train", [tmp_path])
+    expected = dataset[0].energy.clone()
+    torch.set_default_dtype(torch.float32)
+    copied = pickle.loads(pickle.dumps(dataset))
+    assert torch.equal(copied[0].energy, expected)
+    copied.close()
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        num_workers=1,
+        multiprocessing_context="spawn",
+        timeout=30,
+    )
+    assert torch.equal(next(iter(loader)).energy, expected)
+    reused = create_graphs(None, element, options, "train", [tmp_path])
+    assert torch.equal(reused[0].energy, expected)
+    reused.close()
+    dataset.close()
+
+
+def test_graph_cache_key_ignores_model_precision(tmp_path):
+    source = tmp_path / "train.xyz"
+    source.write_text("initial")
+    cfg = {
+        "dataset": {"train_file": str(source)},
+        "model": {"config": {"cutoff": 3.0}},
+    }
+    keyspec = KeySpecification.from_defaults()
+    key = graph_cache_key(cfg, ["energy"], [], keyspec)
+    cfg["dtype"] = {"model": "float64", "autocast": None, "matmul": "ieee"}
+    cfg["model"]["config"]["atomic_numbers"] = [1, 8, 14]
+    assert graph_cache_key(cfg, ["energy"], [], keyspec) == key
+    source.write_text("modified source")
+    assert graph_cache_key(cfg, ["energy"], [], keyspec) != key
+
+
+def test_graph_cache_rejects_lossy_data(tmp_path):
+    path = tmp_path / "train_shard0000.lmdb"
+    env = lmdb.open(str(path), map_size=1 << 20)
+    with env.begin(write=True) as txn:
+        txn.put(
+            b"000000000",
+            pickle.dumps(Data(positions=torch.zeros(1, 3, dtype=torch.float32))),
+        )
+    env.close()
+    dataset = GraphDatasetLMDB([path])
+    with pytest.raises(ValueError, match="casting cannot restore precision"):
+        dataset[0]
+    dataset.close()
 
 
 def test_missing_model_statistics_only_checks_requested_inputs():
@@ -70,7 +169,6 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     import tace.scripts.train as train_module
 
     monkeypatch.chdir(tmp_path)
-    element = build_element_lookup([1, 8])
     records = [([1, 1], 2.0, 0), ([8], 3.0, 0), ([1, 8], 4.0, 0), ([8], 5.0, 1)]
     graphs = []
     for numbers, energy, fidelity in records:
@@ -78,26 +176,18 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
         graphs.append(
             Data(
                 atomic_numbers=numbers,
-                node_attrs=element.z2onehot(numbers).double(),
                 num_nodes=len(numbers),
                 edge_index=torch.empty((2, 0), dtype=torch.long),
                 fidelity_idx=torch.tensor(fidelity),
                 energy=torch.tensor([energy], dtype=torch.float64),
-                energy_weight=torch.ones(1),
+                energy_weight=torch.ones(1, dtype=torch.float64),
                 forces=torch.ones(len(numbers), 3, dtype=torch.float64),
-                forces_weight=torch.ones(1),
-                direct_hessian=torch.ones(len(numbers) ** 2, 3, 3),
+                forces_weight=torch.ones(1, dtype=torch.float64),
+                direct_hessian=torch.ones(len(numbers) ** 2, 3, 3, dtype=torch.float64),
             )
         )
     cache = tmp_path / "graphs"
     cache.mkdir()
-    for stage, data in (("train", graphs), ("valid", [graphs[-1]])):
-        env = lmdb.open(str(cache / f"{stage}_shard0000.lmdb"), map_size=1 << 20)
-        with env.begin(write=True) as txn:
-            for idx, graph in enumerate(data):
-                txn.put(f"{idx:09d}".encode(), pickle.dumps(graph))
-        env.close()
-    contents = {p: p.read_bytes() for p in cache.rglob("*") if p.is_file()}
 
     def no_source_read(*args, **kwargs):
         raise AssertionError("Existing LMDB graphs must not read source files")
@@ -107,9 +197,11 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     monkeypatch.setattr(datamodule_module, "from_atoms", no_source_read)
     monkeypatch.setattr(train_module, "initialize", lambda cfg: cfg)
     monkeypatch.setattr(train_module, "create_model", lambda *args: None)
+    monkeypatch.setattr(train_module, "configure_model_precision", lambda *args: None)
     cfg = OmegaConf.create(
         {
             "misc": {"device": "cuda" if torch.cuda.is_available() else "cpu"},
+            "dtype": {"model": "float32", "autocast": None, "matmul": "ieee"},
             "loss": {"loss_property": targets},
             "model": {
                 "config": {
@@ -134,9 +226,27 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
             },
         }
     )
+    directories = graph_cache_directories(
+        OmegaConf.to_container(cfg, resolve=True),
+        targets,
+        [],
+        KeySpecification.from_defaults(),
+    )
+    directories[0].mkdir(parents=True)
+    for stage, data in (("train", graphs), ("valid", [graphs[-1]])):
+        filename = f"{stage}_shard0000.lmdb"
+        env = lmdb.open(str(directories[0] / filename), map_size=1 << 20)
+        with env.begin(write=True) as txn:
+            for idx, graph in enumerate(data):
+                txn.put(f"{idx:09d}".encode(), pickle.dumps(graph))
+        env.close()
+        write_cache_metadata(directories, stage, {filename: len(data)}, {1, 8})
+    contents = {p: p.read_bytes() for p in cache.rglob("*") if p.is_file()}
     _, statistics, _, _, _, datamodule = train_module.build(cfg)
     assert datamodule.threeAtomsList is None
     assert statistics[0]["atomic_numbers"] == [1, 8]
+    assert statistics[0]["data_schema"] == GRAPH_SCHEMA
+    assert statistics[0]["data_dtype"] == "float64"
     assert statistics[0]["num_graphs"] == 3
     assert statistics[1]["num_graphs"] == 1
     if "energy" in targets:
@@ -175,7 +285,6 @@ def test_statistics_dataloader_overrides_training_batch_size():
             edge_index=torch.empty((2, 0), dtype=torch.long),
             num_nodes=1,
             positions=torch.zeros(1, 3),
-            node_attrs=torch.ones(1, 1),
             energy=torch.ones(1),
             energy_weight=torch.ones(1),
         )
@@ -201,11 +310,10 @@ def test_statistics_dataloader_overrides_training_batch_size():
     assert loader.batch_size == 4
     assert loader.drop_last is False
     assert isinstance(loader.sampler, SequentialSampler)
-    assert set(loader.collate_fn.exclude_keys) == {"node_attrs", "positions"}
+    assert set(loader.collate_fn.exclude_keys) == {"positions"}
     batch = next(iter(loader))
     assert "energy" in batch
     assert "energy_weight" in batch
-    assert "node_attrs" not in batch
     assert "positions" not in batch
 
 

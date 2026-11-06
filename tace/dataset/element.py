@@ -6,7 +6,6 @@
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import torch
-import torch.nn.functional as F
 from ase.data import (  # reference_states, # stored lattice constant, bond length, etc.
     atomic_masses,
     atomic_names,
@@ -49,16 +48,7 @@ class TorchElement:
             self.lookup_table[z] = idx
 
     def z2idx(self, z: Tensor) -> Tensor:
-        return self.lookup_table[z]
-
-    def z2onehot(self, zs: Tensor) -> Tensor:
-        """
-        :param zs: shape (N,),
-        :return: shape (N, num_classes), one-hot
-        """
-        lookup_table = self.lookup_table.to(zs.device)
-        idxs = lookup_table[zs]  # shape (N,)
-        return F.one_hot(idxs, num_classes=self.num_elements)
+        return self.lookup_table.to(z.device)[z]
 
     def __len__(self) -> int:
         return len(self.zs)

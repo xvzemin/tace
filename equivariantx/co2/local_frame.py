@@ -145,6 +145,7 @@ class LocalFrame(torch.nn.Module):
         """Rotate every Cartesian index, retaining the full input layout."""
         if features.shape[-1] != self.input_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
+        rotation = rotation.to(features)
         shape = torch.broadcast_shapes(features.shape[:-1], rotation.shape[:-2])
         values = [
             transform_tensor(
@@ -170,6 +171,7 @@ class LocalFrame(torch.nn.Module):
         """
         if features.shape[-1] != self.input_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
+        rotation = rotation.to(features)
         direction = rotation[..., 1, :].unsqueeze(-2)
         axes = torch.stack((rotation[..., 2, :], rotation[..., 0, :]), -2).unsqueeze(-3)
         shape = torch.broadcast_shapes(features.shape[:-1], rotation.shape[:-2])
@@ -195,7 +197,7 @@ class LocalFrame(torch.nn.Module):
                     value = tensor.index_select(-1, getattr(self, f"indices_{l}_{m}"))
                 else:
                     value = transform_tensor(values[m], axes, m)
-                value = value @ getattr(self, f"basis_{l}_{m}").T
+                value = value @ getattr(self, f"basis_{l}_{m}").to(features).T
                 if odd and m and self.basis_change:
                     value = quarter_turn(value)
                 outputs[index].append(value)
@@ -209,6 +211,7 @@ class LocalFrame(torch.nn.Module):
         """Reconstruct global STF features from the retained planar orders."""
         if features.shape[-1] != self.output_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
+        rotation = rotation.to(features)
         direction = rotation[..., 1, :].unsqueeze(-2)
         axes = (
             torch.stack((rotation[..., 2, :], rotation[..., 0, :]), -2)
@@ -233,13 +236,13 @@ class LocalFrame(torch.nn.Module):
                 if odd and m and self.basis_change:
                     value = -quarter_turn(value)
                 if self.method == "projection":
-                    value = value @ getattr(self, f"basis_{l}_{m}")
+                    value = value @ getattr(self, f"basis_{l}_{m}").to(features)
                     value = transform_tensor(value, axes, m)
                 values.append(value)
             if self.method == "projection":
                 value = self.restrictions[str(l)].inverse(values, direction)
             else:
-                value = torch.cat(values, -1) @ getattr(self, f"synthesis_{l}").T
+                value = torch.cat(values, -1) @ getattr(self, f"synthesis_{l}").to(features).T
                 value = value.expand(*shape, mul, 3**l)
                 value = transform_tensor(
                     value, rotation.transpose(-1, -2).unsqueeze(-3), l

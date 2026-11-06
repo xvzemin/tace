@@ -11,6 +11,7 @@ from torch import Tensor
 from tace.dataset.element import TorchElement
 from tace.dataset.quantity import PROPERTIES, ComputeFlag
 from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
+from tace.utils.precision import DATA_DTYPE, apply_model_precision
 
 from .lammps import Graph
 from .utils import (
@@ -26,10 +27,18 @@ class TensorModel(torch.nn.Module):
     def __init__(self, readout_fn: torch.nn.Module):
         super().__init__()
         self.readout_fn = readout_fn
+        self.model_dtype = getattr(
+            readout_fn,
+            "model_dtype",
+            next((p.dtype for p in readout_fn.parameters()), torch.get_default_dtype()),
+        )
         self.num_fidelities = len(getattr(readout_fn, "fidelity", {})) or 1
         self._set_target_property()
         self._set_lammps_mliap()
         self.reset_fidelity_idx()
+
+    def _apply(self, fn, recurse=True):
+        return apply_model_precision(self, fn, recurse)
 
     def forward(
         self, data: Dict[str, torch.Tensor]
@@ -46,7 +55,39 @@ class TensorModel(torch.nn.Module):
     def prepare_property_data(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
-        """Prepare additional graph inputs required by the target properties."""
+        """Prepare element indices, FP64 physical inputs, and property-specific data."""
+        data = dict(data.items())
+        if "node_type" not in data:
+            numbers = self.readout_fn.atomic_numbers.to(data["atomic_numbers"].device)
+            indices = torch.searchsorted(numbers, data["atomic_numbers"])
+            torch._assert_async(
+                (
+                    (indices < numbers.numel())
+                    & (
+                        numbers[indices.clamp_max(numbers.numel() - 1)]
+                        == data["atomic_numbers"]
+                    )
+                ).all(),
+                "The structure contains an element not supported by this model.",
+            )
+            data["node_type"] = indices
+        else:
+            indices = data["node_type"]
+            if indices.dtype != torch.int64 or indices.ndim != 1:
+                raise TypeError("node_type must be a one-dimensional int64 tensor.")
+            torch._assert_async(
+                (
+                    (indices >= 0) & (indices < self.readout_fn.atomic_numbers.numel())
+                ).all(),
+                "node_type is outside the model element table.",
+            )
+        physical_fields = {"positions", "lattice", "edge_vector"} | set(
+            self.get_embedding_property()
+        )
+        for key in physical_fields:
+            value = data.get(key)
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                data[key] = value.to(dtype=DATA_DTYPE)
         if "direct_hessian" in self.get_target_property() and not self.lmp:
             data = prepare_direct_hessian_inputs(
                 data, self.readout_fn.pair_representation.cutoff
@@ -166,7 +207,7 @@ class TensorModel(torch.nn.Module):
                     data["edge_index"],
                     graph.lattice,
                     data["batch"],
-                    data["node_attrs"].size(0),
+                    data["node_type"].size(0),
                     self.flags.compute_atomic_virials,
                     self.flags.compute_atomic_stresses,
                     data.get("pbc"),
@@ -307,8 +348,8 @@ class TensorModel(torch.nn.Module):
                 for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                     if p != "forces":
                         data[requires_grad_p].requires_grad_(True)
-            dtype = data["node_attrs"].dtype
-            device = data["node_attrs"].device
+            dtype = DATA_DTYPE
+            device = data["node_type"].device
             nlocal, nghosts = data["natoms"][0], data["natoms"][1]
             num_graphs = 2
             displacement = None
@@ -340,8 +381,8 @@ class TensorModel(torch.nn.Module):
                     requires_grad_p_list.append(requires_grad_p)
                     if requires_grad_p != "edge_vector":
                         data[requires_grad_p].requires_grad_(True)
-            dtype = data["node_attrs"].dtype
-            device = data["node_attrs"].device
+            dtype = DATA_DTYPE
+            device = data["positions"].device
             positions = data["positions"]
             num_graphs = data["ptr"].numel() - 1
             if self.flags.compute_virials or self.flags.compute_stress:
@@ -360,7 +401,9 @@ class TensorModel(torch.nn.Module):
             edge_vector = (
                 data["positions"][target]
                 - data["positions"][source]
-                + torch.einsum("ni,nij->nj", data["edge_shifts"], edge_lattice)
+                + torch.einsum(
+                    "ni,nij->nj", data["edge_shifts"].to(dtype), edge_lattice
+                )
             )
             if "edge_vector" in requires_grad_p_list:
                 edge_vector.requires_grad_(True)
@@ -384,7 +427,7 @@ class TensorModel(torch.nn.Module):
             lattice=lattice,
             node_fidelity=node_fidelity,
             num_atoms_arange=num_atoms_arange,
-            node_type=data["node_attrs"].argmax(dim=-1),
+            node_type=data["node_type"],
         )
 
     def get_fidelity_idx(self) -> int:
@@ -402,7 +445,9 @@ class TensorModel(torch.nn.Module):
                 + PROPERTIES[target]["requires_grad_with"]
             )
             embedding_property.update(
-                p for p in required if p in PROPERTIES and PROPERTIES[p]["enable_embedding"]
+                p
+                for p in required
+                if p in PROPERTIES and PROPERTIES[p]["enable_embedding"]
             )
         atomic_basis = getattr(self.readout_fn, "model_config", {}).get(
             "atomic_basis", {}
@@ -449,7 +494,7 @@ class TensorModel(torch.nn.Module):
         self.lmp = enable
 
     def get_model_dtype(self) -> torch.dtype:
-        return self.readout_fn.cutoff.dtype
+        return self.model_dtype
 
     def get_max_neighbors(self) -> Union[int, None]:
         return self.readout_fn.max_neighbors

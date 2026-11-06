@@ -8,7 +8,7 @@ from e3nn import o3
 from ...backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...backends.torch.tensor_product import instruction_groups
 from ...ops.o3 import contraction
-from ...ops.radial import materialize
+from ...ops.radial import cast_radial, materialize
 
 
 class O3TensorProductConv(torch.nn.Module):
@@ -218,6 +218,8 @@ class O3TensorProductConv(torch.nn.Module):
             ``edge_attrs`` with spherical harmonics, and contract
             Cartesian derivatives directly without harmonic cotangents.
             The ``normalize`` and ``normalization`` settings apply here only.
+            Higher-precision vectors are encoded before casting the angular
+            features to the node-feature dtype.
         amplitudes : torch.Tensor, optional
             Harmonic amplitudes in irrep multiplicity order. Shape is
             ``(edges, irreps_in2.num_irreps)``; either dimension may be one.
@@ -241,6 +243,8 @@ class O3TensorProductConv(torch.nn.Module):
                 "Row-wise products require explicit attributes and weights."
             )
         count = edge_index.size(1) if indexed else features.size(0)
+        radial = cast_radial(radial, features.dtype)
+        projection = projection.to(features)
         if radial_network is not None and (
             self.backend != "cuda" or not features.is_cuda
         ):
@@ -259,6 +263,23 @@ class O3TensorProductConv(torch.nn.Module):
                 else amplitudes.expand(amplitudes.size(0), self.amplitude_dim)
             )
             edge_attrs = amplitudes
+            if vectors.dtype != features.dtype:
+                sections, offset = [], 0
+                for mul, degree in self.harmonic_entries:
+                    harmonic = o3.spherical_harmonics(
+                        degree, vectors, normalize=False,
+                        normalization=self.normalization,
+                    )
+                    sections.append(
+                        (
+                            harmonic.unsqueeze(-1)
+                            * amplitudes[:, None, offset : offset + mul]
+                        ).flatten(1)
+                    )
+                    offset += mul
+                edge_attrs = torch.cat(sections, dim=-1)
+                vectors = None
+        edge_attrs = edge_attrs.to(features)
         radial_values = radial[0][0] if isinstance(radial, tuple) else radial
         if any(
             value.ndim != 2
@@ -342,6 +363,7 @@ class O3TensorProductConv(torch.nn.Module):
                 )
                 offset += mul
             edge_attrs = torch.cat(sections, dim=-1)
+        edge_attrs = edge_attrs.to(features)
         result = self.reference(
             features, edge_attrs, radial, projection, edge_index, num_nodes
         )

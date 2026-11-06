@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from huggingface_hub import hf_hub_download
 
-from ..utils._global import CACHE_DIR
+from ..utils.env import CACHE_DIR
 
 OAM_SERIES = {
     "TACE-OMat24-L": "https://huggingface.co/xvzemin/tace-foundations/resolve/main/TACE-OMat24-L.pt",

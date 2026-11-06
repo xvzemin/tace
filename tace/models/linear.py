@@ -440,6 +440,42 @@ class e3nnLinear(torch.nn.Module):
         return repr(self.linear) + f"(bias={self.bias is not None})"
 
 
+class ElementEmbedding(e3nnLinear):
+    """Look up scalar features with the normalization of an e3nn Linear.
+
+    Parameters
+    ----------
+    num_elements : int
+        Number of element types.
+    num_channels : int
+        Number of scalar output channels.
+    bias : bool, optional
+        Add a shared scalar bias.
+
+    Examples
+    --------
+    >>> embedding = ElementEmbedding(3, 8)
+    >>> embedding(torch.tensor([0, 2])).shape
+    torch.Size([2, 8])
+    """
+
+    def __init__(self, num_elements: int, num_channels: int, bias: bool = True):
+        super().__init__(f"{num_elements}x0e", f"{num_channels}x0e", bias=bias)
+        self.num_embeddings = num_elements
+        self.num_channels = num_channels
+        self.path_weight = self.linear.instructions[0].path_weight
+
+    def forward(self, node_type: torch.Tensor) -> torch.Tensor:
+        weight = self.weight[0] if self.use_matrix_weight else self.weight
+        weight = weight.reshape(self.num_embeddings, self.num_channels)
+        if has_lora(self):
+            weight = weight + _lora_path_delta(self, 0).reshape_as(weight)
+        output = weight[node_type] * self.path_weight
+        if self.bias is not None:
+            output = output + self.bias
+        return output
+
+
 class e3nnElementLinear(torch.nn.Module):
     def __init__(
         self,
@@ -510,8 +546,7 @@ class e3nnElementLinear(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attrs: torch.Tensor,
-        node_type: torch.Tensor | None = None,
+        node_type: torch.Tensor,
     ) -> torch.Tensor:
 
         if self.use_matrix_weight:
@@ -538,14 +573,12 @@ class e3nnElementLinear(torch.nn.Module):
                 weight = weight + _flat_lora_delta(self)
             bias = self.bias
 
-        if node_type is None:
-            node_type = attrs.argmax(dim=-1)
         if x.is_cuda and acceleration_enabled("eqx", kernel="linear"):
             out = self.eqx_linear(x, weight, node_type)
         else:
             out = self.torch_linear(x, weight, node_type)
         if bias is not None:
-            bias = torch.einsum("bz,zi->bi", attrs, bias)
+            bias = bias[node_type]
             bias = bias.index_select(1, self._bias_index)
             out = out + bias * self._bias_mask
         return out
@@ -639,11 +672,8 @@ class e3nnMoEElementLinear(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attrs: torch.Tensor,
-        node_type: torch.Tensor | None = None,
+        node_type: torch.Tensor,
     ) -> torch.Tensor:
-        if node_type is None:
-            node_type = attrs.argmax(dim=-1)
         if self.use_matrix_weight:
             weight = torch.cat(
                 [

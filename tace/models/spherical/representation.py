@@ -71,6 +71,7 @@ class NodeRepresentation(torch.nn.Module):
         mlp_type: str = "mlp_v1",
     ):
         super().__init__()
+        self.model_dtype = torch.get_default_dtype()
         path_irreps = target_irreps if path_irreps is None else path_irreps
 
         self.num_elements = len(atomic_numbers)
@@ -232,6 +233,11 @@ class NodeRepresentation(torch.nn.Module):
             )
             if uses_co3_interaction else None
         )
+        for angular_basis in (
+            self.o2_angular_basis, self.o3_angular_basis, self.co3_angular_basis
+        ):
+            if angular_basis is not None:
+                angular_basis.geometry_precision = True
 
         # === node/edge embedding ===
         self.node_embedding = node_embedding_cls(
@@ -470,6 +476,11 @@ class NodeRepresentation(torch.nn.Module):
     def irreps_outs(self):
         return [prod.irreps_out for prod in self.products]
 
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        self.model_dtype = next(self.node_embedding.parameters()).dtype
+        return self
+
     @property
     def use_packed_wigner(self) -> bool:
         return (
@@ -488,22 +499,15 @@ class NodeRepresentation(torch.nn.Module):
 
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
 
-        node_attrs = data["node_attrs"]
         node_type = graph.node_type
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
-        node_attrs_local = (
-            node_attrs[: graph.lmp_natoms[0]] if graph.lmp else node_attrs
-        )
         node_type_local = node_type[: graph.lmp_natoms[0]] if graph.lmp else node_type
 
         # === edge initialize (radial) ===
         edge_radial_basis, edge_cutoff = self.radial_basis(
             graph.edge_length,
-            data["node_attrs"],
+            node_type,
             data["edge_index"],
             self.atomic_numbers,
-            node_type=node_type,
         )
 
         # === angular basis ===
@@ -547,6 +551,23 @@ class NodeRepresentation(torch.nn.Module):
             else None
         )
 
+        edge_radial_basis = edge_radial_basis.to(self.model_dtype)
+        edge_attrs = edge_attrs.to(self.model_dtype)
+        if edge_cutoff is not None:
+            edge_cutoff = edge_cutoff.to(self.model_dtype)
+        if cartesian_edge_attrs is not None:
+            cartesian_edge_attrs = cartesian_edge_attrs.to(self.model_dtype)
+        if isinstance(edge_wigner, dict):
+            edge_wigner = {
+                key: value.to(self.model_dtype) for key, value in edge_wigner.items()
+            }
+            edge_wigner_inv = {
+                key: value.to(self.model_dtype) for key, value in edge_wigner_inv.items()
+            }
+        elif edge_wigner is not None:
+            edge_wigner = edge_wigner.to(self.model_dtype)
+            edge_wigner_inv = edge_wigner_inv.to(self.model_dtype)
+
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
         magnetic_node_attrs = None
@@ -562,25 +583,27 @@ class NodeRepresentation(torch.nn.Module):
                 magnetic_edge_attrs,
             ) = self.magnetic_basis(
                 initial_noncollinear_magmoms,
-                data["node_attrs"],
+                node_type,
                 data["edge_index"],
                 node_fidelity=(
                     graph.node_fidelity[:1] if graph.lmp else graph.node_fidelity
                 ),
-                node_type=node_type,
                 compute_edge=getattr(self, "use_magnetic_edge_attrs", True),
             )
+            magnetic_radial_basis = magnetic_radial_basis.to(self.model_dtype)
+            magnetic_node_attrs = magnetic_node_attrs.to(self.model_dtype)
+            if magnetic_edge_attrs is not None:
+                magnetic_edge_attrs = magnetic_edge_attrs.to(self.model_dtype)
 
         # === node initialize ===
         node_feats = self.node_embedding(
-            data["node_attrs"],
+            node_type,
             edge_radial_basis,
             data["edge_index"],
             edge_attrs,
             edge_cutoff,
             edge_wigner,
             edge_wigner_inv,
-            node_type=node_type,
         )
         if hasattr(self, "uie_embedding"):
             uie_feats = self.uie_embedding(data)
@@ -590,7 +613,7 @@ class NodeRepresentation(torch.nn.Module):
 
         edge_feats = self.edge_embedding(
             node_feats,
-            data["node_attrs"],
+            node_type,
             edge_radial_basis,
             data["edge_index"],
             edge_cutoff,
@@ -609,44 +632,41 @@ class NodeRepresentation(torch.nn.Module):
         for idx, (edge_update, inter, prod) in enumerate(
             zip(self.edge_updates, self.interactions, self.products)
         ):
-            node_attrs_total = node_attrs
-            node_attrs_slice = node_attrs
+            node_types = node_type
+            local_node_type = node_type
             this_edge_feats = edge_update(
                 node_feats,
-                node_attrs_total,
+                node_types,
                 edge_feats,
                 data["edge_index"],
                 edge_cutoff,
-                node_type=node_type,
             )
             magnetic_node_info = (
                 self.node_updates[idx](
                     magnetic_radial_basis,
-                    node_attrs_total,
-                    node_type=node_type,
+                    node_types,
                 )
                 if self.node_updates is not None
                 else None
             )
             if graph.lmp and idx > 0:
-                node_attrs_slice = node_attrs_local
+                local_node_type = node_type_local
             magnetic_inputs = {}
             if isinstance(inter, O3MagneticWigner6jInteraction):
                 magnetic_inputs = {
                     "magnetic_node_attrs": magnetic_node_attrs,
                     "magnetic_edge_feats": self.magnetic_edge_updates[idx](
                         node_feats,
-                        node_attrs_total,
+                        node_types,
                         magnetic_node_info[0][data["edge_index"][0]],
                         data["edge_index"],
                         edge_cutoff,
-                        node_type=node_type,
                     ),
                 }
             node_feats, sc = inter(
                 node_feats,
-                node_attrs_total,
-                node_attrs_slice,
+                node_types,
+                local_node_type,
                 edge_radial_basis,
                 this_edge_feats,
                 cartesian_edge_attrs
@@ -663,19 +683,18 @@ class NodeRepresentation(torch.nn.Module):
                 **magnetic_inputs,
             )
             if graph.lmp and idx == 0:
-                node_attrs_slice = node_attrs_local
+                local_node_type = node_type_local
             if self.uee_embeddings is not None:
                 node_feats = self.uee_embeddings[idx](
-                    node_feats, node_attrs_slice, data, node_type=node_type_local
+                    node_feats, local_node_type, data
                 )
             if forces_embedding is not None and idx == 0:
                 node_feats = node_feats + forces_embedding
             node_feats = prod(
                 node_feats,
-                node_attrs_slice,
+                local_node_type,
                 sc,
                 data["batch"],
-                node_type=node_type_local,
             )
             if idx == self.num_layers - 1 and hasattr(self, "final_norm"):
                 node_feats = self.final_reshape.inverse(
@@ -693,10 +712,9 @@ class NodeRepresentation(torch.nn.Module):
         }
 
     def _generate_dens_data(self, data: Dict[str, torch.Tensor]):
-        num_atoms = data["node_attrs"].size(0)
+        num_atoms = data["node_type"].size(0)
         num_graphs = len(data["ptr"]) - 1
-        # dtype = data['node_attrs'].dtype
-        device = data["node_attrs"].device
+        device = data["node_type"].device
 
         if "direct_forces" in data:
             forces_data = data["direct_forces"]
@@ -729,7 +747,7 @@ class NodeRepresentation(torch.nn.Module):
         forces_norm = forces_data.norm(dim=-1, keepdim=True)
         forces_norm = forces_norm / math.sqrt(3.0)
         forces_embedding = forces_sh * forces_norm  # [node, 3]
-        forces_embedding = self.forces_embedding(forces_embedding)
+        forces_embedding = self.forces_embedding(forces_embedding.to(self.model_dtype))
         forces_embedding = forces_embedding * noise_mask
         return forces_embedding, noise_mask, dens_batch_mask
 
@@ -826,29 +844,37 @@ class PairRepresentation(torch.nn.Module):
                 if acceleration_enabled("eqx", kernel="conv")
                 else "recursive",
             )
+        for angular_basis in (self.o2_angular_basis, self.o3_angular_basis):
+            if angular_basis is not None:
+                angular_basis.geometry_precision = True
 
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         positions: torch.Tensor,
         edge_index: torch.Tensor,
         edge_shifts: torch.Tensor,
         lattice: torch.Tensor,
         batch: torch.Tensor,
     ) -> torch.Tensor:
+        model_dtype = node_feats.dtype
+        positions = positions.to(torch.float64)
+        lattice = lattice.to(torch.float64)
         source, target = edge_index
         edge_vector = (
             positions[target]
             - positions[source]
-            + torch.einsum("ei,eij->ej", edge_shifts, lattice[batch[source]])
+            + torch.einsum(
+                "ei,eij->ej", edge_shifts.to(lattice.dtype), lattice[batch[source]]
+            )
         )
         edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
         atomic_numbers = torch.tensor(
             self.atomic_numbers, dtype=torch.int64, device=edge_vector.device
         )
         edge_radial_basis, edge_cutoff = self.radial_basis(
-            edge_length, node_attrs, edge_index, atomic_numbers
+            edge_length, node_type, edge_index, atomic_numbers
         )
         edge_attrs = (
             self.o3_angular_basis(edge_vector)
@@ -860,10 +886,17 @@ class PairRepresentation(torch.nn.Module):
             if self.o2_angular_basis is not None
             else None
         )
-        edge_radial_basis = torch.cat(
-            (edge_radial_basis, node_attrs[source], node_attrs[target]), dim=-1
-        )
+        edge_radial_basis = edge_radial_basis.to(model_dtype)
+        if edge_attrs is not None:
+            edge_attrs = edge_attrs.to(model_dtype)
+        if edge_wigner is not None:
+            edge_wigner = edge_wigner.to(model_dtype)
         return self.interactions[0](
-            node_feats, edge_index, edge_radial_basis, edge_attrs, edge_cutoff,
+            node_feats,
+            edge_index,
+            edge_radial_basis,
+            edge_attrs,
+            edge_cutoff.to(model_dtype),
             edge_wigner,
+            node_type,
         )

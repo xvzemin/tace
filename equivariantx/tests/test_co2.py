@@ -133,7 +133,7 @@ def test_cartesian_frame_methods(dtype):
     irreps = co3.Irreps("1x0e+1x1o+2x3e+1x6e")
     features = irreps.randn(7, -1, device=DEVICE, dtype=dtype)
     vectors = torch.cat((torch.eye(3), -torch.eye(3), torch.ones(1, 3))).to(
-        DEVICE, dtype
+        DEVICE, torch.float64
     )
     rotation = o2.rotation_matrix_to_y_axis(vectors)
     outputs = []

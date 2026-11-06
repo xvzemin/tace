@@ -935,7 +935,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
             positions=torch.tensor(
                 [[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]], device=device
             ),
-            node_attrs=torch.ones(3, 1, device=device),
+            node_type=torch.zeros(3, dtype=torch.long, device=device),
             edge_index=torch.tensor(
                 [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device=device
             ),
@@ -1110,7 +1110,7 @@ def test_tace_model_force_training(
         positions=torch.tensor(
             [[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]], device="cuda"
         ),
-        node_attrs=torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], device="cuda"),
+        node_type=torch.tensor([0, 1, 0], device="cuda"),
         edge_index=torch.tensor(
             [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device="cuda"
         ),
@@ -1325,10 +1325,10 @@ def test_magnetic_info_is_independent_per_interaction(
 
         edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]])
         magnetic_radial_basis = torch.randn(3, num_mag_radial_basis, requires_grad=True)
-        node_attrs = torch.ones(3, 1)
+        node_type = torch.zeros(3, dtype=torch.long)
         magnetic_info = update(
             magnetic_radial_basis,
-            node_attrs,
+            node_type,
         )
         magnetic_edge_attrs = torch.randn(
             edge_index.size(1),
@@ -1357,7 +1357,7 @@ def test_magnetic_info_is_independent_per_interaction(
         assert torch.isfinite(magnetic_radial_basis.grad).all()
         for num_nodes in (0, 3):
             empty_edge_weights = interaction._magnetic_weights(
-                update(magnetic_radial_basis[:num_nodes], node_attrs[:num_nodes]),
+                update(magnetic_radial_basis[:num_nodes], node_type[:num_nodes]),
                 edge_index[:, :0],
             )
             assert empty_edge_weights.shape == (
@@ -1581,7 +1581,7 @@ def test_uu_o2_interaction_trains_forces_and_uses_external_weights(
 
     data = dict(
         positions=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]]),
-        node_attrs=torch.ones(3, 1),
+        node_type=torch.zeros(3, dtype=torch.long),
         edge_index=torch.tensor([[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]]),
         edge_shifts=torch.zeros(6, 3),
         lattice=torch.eye(3).unsqueeze(0) * 8,

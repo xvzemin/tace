@@ -8,7 +8,28 @@ from typing import Dict, List, Optional
 import torch
 import torch.distributed as dist
 
+from tace.utils.precision import DATA_DTYPE
 from tace.utils.torch_scatter import scatter_sum
+
+
+def loss_inputs(pred, label):
+    """Convert floating loss operands to FP64 without modifying the input mappings."""
+    pred = {
+        key: value.to(DATA_DTYPE)
+        if isinstance(value, torch.Tensor) and value.is_floating_point()
+        else value
+        for key, value in pred.items()
+    }
+    label = {
+        key: value.to(DATA_DTYPE)
+        if isinstance(value, torch.Tensor)
+        and value.is_floating_point()
+        # Geometric regularizers differentiate with respect to the original coordinates.
+        and key != "positions"
+        else value
+        for key, value in label.items()
+    }
+    return pred, label
 
 
 def apply_element_weights(
@@ -19,21 +40,12 @@ def apply_element_weights(
     if element_weights is None:
         return total_weight
 
-    node_attrs = label["node_attrs"]
-    # if node_attrs.ndim != 2:
-    #     raise ValueError("node_attrs must have shape (num_atoms, num_elements).")
-    if len(element_weights) != node_attrs.shape[-1]:
-        raise ValueError(
-            "element_weights must provide one weight for every element in "
-            f"node_attrs; expected {node_attrs.shape[-1]}, got "
-            f"{len(element_weights)}."
-        )
     weights = torch.as_tensor(
         list(element_weights),
         dtype=total_weight.dtype,
         device=total_weight.device,
     )
-    atom_weights = node_attrs @ weights
+    atom_weights = weights[label["node_type"]]
     shape = (atom_weights.shape[0],) + (1,) * (total_weight.ndim - 1)
     return total_weight * atom_weights.reshape(shape)
 
@@ -44,7 +56,9 @@ def num_atoms_per_graph(label: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 def has_valid_labels(label: Dict[str, torch.Tensor], key: str) -> torch.Tensor:
     """Return whether any rank has a positive-weight label."""
-    weight = label["entropy"].reshape(-1) * label[f"{key}_weight"].reshape(-1)
+    weight = label["entropy"].to(DATA_DTYPE).reshape(-1) * label[f"{key}_weight"].to(
+        DATA_DTYPE
+    ).reshape(-1)
     present = (weight > 0).any().long()
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(present, op=dist.ReduceOp.MAX)

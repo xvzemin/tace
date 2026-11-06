@@ -11,7 +11,7 @@ from e3nn import o3
 from tace.dataset.quantity import PROPERTIES
 from tace.utils.torch_scatter import scatter_sum
 
-from ..blocks import OneHotToAtomicEnergy, ScaleShift
+from ..blocks import AtomicEnergy, ScaleShift
 from ..radial import ZBLBasis
 from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps, stress_from_virials
@@ -30,6 +30,7 @@ from .representation import NodeRepresentation, PairRepresentation
 
 class SphericalTACE(torch.nn.Module):
     rank_two_dim = 5
+    float64_buffers = ("cutoff",)
 
     def __init__(
         self,
@@ -241,7 +242,7 @@ class SphericalTACE(torch.nn.Module):
                     ],
                     irreps_out="0e",
                 )[0]
-            self.atomic_energy_layer = OneHotToAtomicEnergy(
+            self.atomic_energy_layer = AtomicEnergy(
                 cfg["atomic_energies"], cfg["atomic_numbers"]
             )
             if cfg["scale_shift"]["enable"]:
@@ -336,8 +337,9 @@ class SphericalTACE(torch.nn.Module):
         #         cfg['normalizer'][p].get('rmsd', 1.0),
         #     )
 
-        # Constants are constructed in float64, then cast once for model execution.
-        self.to(dtype=torch.get_default_dtype())
+        from tace.utils.precision import configure_model_precision
+
+        configure_model_precision(self, torch.get_default_dtype())
 
     def readout_fn(
         self,
@@ -354,8 +356,8 @@ class SphericalTACE(torch.nn.Module):
         num_graphs = graph.num_graphs
         node_fidelity = graph.node_fidelity
         num_atoms_arange = graph.num_atoms_arange
-        dtype = data["node_attrs"].dtype
-        device = data["node_attrs"].device
+        dtype = torch.float64
+        device = graph.positions.device
 
         D_H = None
         if "direct_hessian" in self.target_property:
@@ -374,9 +376,7 @@ class SphericalTACE(torch.nn.Module):
         e_node = None
         e_base_graph = None
         if "energy" in self.target_property:
-            e_base_node = self.atomic_energy_layer(
-                data["node_attrs"], node_type=graph.node_type
-            )[
+            e_base_node = self.atomic_energy_layer(graph.node_type)[
                 num_atoms_arange, node_fidelity
             ]
             e_base_graph = scatter_sum(e_base_node, batch, dim=-1, dim_size=num_graphs)
@@ -389,15 +389,14 @@ class SphericalTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity
                     ]
                 )
-            e_node = torch.sum(torch.stack(e_list, dim=0), dim=0)
+            e_node = torch.stack(e_list, dim=0).to(torch.float64).sum(dim=0)
             # === ZBL ===
             if hasattr(self, "zbl"):
                 e_zbl_node = self.zbl(
                     graph.edge_length,
-                    data["node_attrs"],
+                    graph.node_type,
                     data["edge_index"],
                     self.atomic_numbers,
-                    node_type=graph.node_type,
                 )[num_atoms_arange]
                 if self.scale_zbl:
                     e_node = e_node + e_zbl_node
@@ -405,7 +404,7 @@ class SphericalTACE(torch.nn.Module):
             if hasattr(self, "scale_shift"):
                 e_node = self.scale_shift(
                     e_node,
-                    data["node_attrs"][num_atoms_arange],
+                    graph.node_type[num_atoms_arange],
                     data["ptr"],
                     data["edge_index"],
                     data["batch"],
@@ -424,7 +423,6 @@ class SphericalTACE(torch.nn.Module):
                         dim=-1,
                     ),
                     node_fidelity=node_fidelity,
-                    node_attrs=data["node_attrs"],
                     node_type=graph.node_type,
                 )[num_atoms_arange, node_fidelity]
             e_graph = scatter_sum(e_node, batch, dim=-1, dim_size=num_graphs)
@@ -447,7 +445,7 @@ class SphericalTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity, :
                     ]
                 )
-            D_F = torch.sum(torch.stack(d_f_list, dim=-1), dim=-1)
+            D_F = torch.stack(d_f_list, dim=-1).to(torch.float64).sum(dim=-1)
 
         # === Direct Dipole ===
         D = None
@@ -470,7 +468,7 @@ class SphericalTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity, :
                     ]
                 )
-            d_node = torch.sum(torch.stack(d_list, dim=-1), dim=-1)
+            d_node = torch.stack(d_list, dim=-1).to(torch.float64).sum(dim=-1)
             d_graph = scatter_sum(d_node, batch, dim=0, dim_size=num_graphs)
             D = d_base + d_graph
 
@@ -500,8 +498,8 @@ class SphericalTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity, :
                     ]
                 )
-            alpha0_node = torch.sum(torch.stack(alpha0_list, dim=-1), dim=-1)
-            alpha2_node = torch.sum(torch.stack(alpha2_list, dim=-1), dim=-1)
+            alpha0_node = torch.stack(alpha0_list, dim=-1).to(torch.float64).sum(dim=-1)
+            alpha2_node = torch.stack(alpha2_list, dim=-1).to(torch.float64).sum(dim=-1)
             alpha0_graph = scatter_sum(alpha0_node, batch, dim=0, dim_size=num_graphs)
             alpha2_graph = scatter_sum(alpha2_node, batch, dim=0, dim_size=num_graphs)
             ALPHA = self.direct_polarizability_basis_change(alpha0_graph, alpha2_graph)
@@ -532,8 +530,8 @@ class SphericalTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity, :
                     ]
                 )
-            d_v0_node = torch.sum(torch.stack(d_v0_list, dim=-1), dim=-1)
-            d_v2_node = torch.sum(torch.stack(d_v2_list, dim=-1), dim=-1)
+            d_v0_node = torch.stack(d_v0_list, dim=-1).to(torch.float64).sum(dim=-1)
+            d_v2_node = torch.stack(d_v2_list, dim=-1).to(torch.float64).sum(dim=-1)
             d_v0_graph = scatter_sum(d_v0_node, batch, dim=0, dim_size=num_graphs)
             d_v2_graph = scatter_sum(d_v2_node, batch, dim=0, dim_size=num_graphs)
             D_V = self.direct_virials_basis_change(d_v0_graph, d_v2_graph)
@@ -557,8 +555,8 @@ class SphericalTACE(torch.nn.Module):
                     eta_list.append(
                         eta_readout(descriptors[ii])[num_atoms_arange, node_fidelity]
                     )
-                chi_node = torch.sum(torch.stack(chi_list, dim=-1), dim=-1)
-                eta_node = torch.sum(torch.stack(eta_list, dim=-1), dim=-1)
+                chi_node = torch.stack(chi_list, dim=-1).to(torch.float64).sum(dim=-1)
+                eta_node = torch.stack(eta_list, dim=-1).to(torch.float64).sum(dim=-1)
                 eta_node = torch.hypot(
                     eta_node, torch.tensor(1e-6, device=device, dtype=dtype)
                 )
@@ -581,7 +579,7 @@ class SphericalTACE(torch.nn.Module):
                             num_atoms_arange, node_fidelity
                         ]
                     )
-                c_node = torch.sum(torch.stack(c_list, dim=-1), dim=-1)
+                c_node = torch.stack(c_list, dim=-1).to(torch.float64).sum(dim=-1)
                 c_graph = scatter_sum(c_node, batch, dim=-1, dim_size=num_graphs)
                 c_delta_node = (c_graph - data["total_charge"]) / (
                     data["ptr"][1:] - data["ptr"][:-1]
@@ -604,7 +602,7 @@ class SphericalTACE(torch.nn.Module):
                         ]
                     )
                 )
-            ABS_F_C_MAG = torch.sum(torch.stack(mag_list, dim=-1), dim=-1)
+            ABS_F_C_MAG = torch.stack(mag_list, dim=-1).to(torch.float64).sum(dim=-1)
 
         if hasattr(self, "les"):
             les_results = self.les(
@@ -656,7 +654,7 @@ class SphericalTACE(torch.nn.Module):
                         num_atoms_arange, node_fidelity, :
                     ]
                 )
-            dens_noise = torch.sum(torch.stack(noise_list, dim=-1), dim=-1)
+            dens_noise = torch.stack(noise_list, dim=-1).to(torch.float64).sum(dim=-1)
 
         return {
             "energy": E,
@@ -687,7 +685,7 @@ class SphericalTACE(torch.nn.Module):
         if "direct_hessian" in self.target_property:
             pair_rep = self.pair_representation(
                 rep["descriptors"][-1],
-                data["node_attrs"],
+                graph.node_type,
                 graph.positions,
                 data["direct_hessian_pair_index"][:, data["direct_hessian_edge_pairs"]],
                 data["direct_hessian_edge_shifts"],

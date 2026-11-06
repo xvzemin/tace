@@ -5,13 +5,17 @@ We support two major categories of loss functions, along with several
 additional custom losses. Users can also easily define and integrate
 their own loss functions when needed.
 
+Registered losses evaluate floating predictions, targets, and reductions in
+float64, independently of the network dtype or autocast setting. Gradients
+remain connected to the original predictions. No loss-precision option is needed.
+
 - For properties that are already *per-atom* quantities,  
   the ``per_atom`` suffix is not required and is not supported.
 - ``loss_function_kwargs`` supplies extra arameters for each loss function. 
   For example, use ``{huber_delta: 0.01}`` with a Huber loss. 
   Parameters are checked.
 - Every loss whose property has per-atom scope accepts ``element_weights``.
-  The list must contain one value for every element in ``node_attrs`` and must
+  The list must contain one value for every element in the model's element table and must
   follow increasing atomic-number order. Omitting ``element_weights`` is equivalent to
   assigning weight ``1.0`` to every element. During force-statistics calculation,
   TACE reports candidate lists under ``recommended_force_element_weights`` for
@@ -35,4 +39,3 @@ Example
 -------
 .. yaml-config:: ../../../../example/train/TACE/tace.yaml
    :path: loss
-

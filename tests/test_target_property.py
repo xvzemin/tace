@@ -28,6 +28,7 @@ from tace.utils.loss.common import hessian_loss
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.mask_metrics import MaskMAE, supports_weight_filter
+from tace.utils.precision import configure_model_precision
 from tace.utils.utils import torch_default_dtype
 
 DTYPE = torch.float64
@@ -96,6 +97,7 @@ def test_target_irreps(parity, hessian):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_graph_properties(dtype):
+    torch.set_default_dtype(dtype)
     atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 1]])
     keys = KeySpecification.from_defaults()
     keys.info_keys["energy"] = "reference_energy"
@@ -104,18 +106,18 @@ def test_graph_properties(dtype):
     atoms.info["forces_weight"] = 3.0
     atoms.arrays["reference_forces"] = np.ones((2, 3))
     properties = ["energy", "forces", "fidelity_idx"]
-    actual = read_properties(atoms, keys, properties, dtype, periodic_cell=False)
+    actual = read_properties(atoms, keys, properties, periodic_cell=False)
     assert actual["energy"].item() == 2.0
     assert actual["forces"].shape == (2, 3)
     assert actual["forces_weight"].item() == 3.0
-    assert actual["energy"].dtype == actual["forces"].dtype == dtype
+    assert actual["energy"].dtype == actual["forces"].dtype == torch.float64
     assert actual["fidelity_idx"].dtype == torch.int64
     for invalid in (np.nan, np.inf, -np.inf):
         atoms.arrays["reference_forces"][0, 0] = invalid
         with pytest.raises(RuntimeError, match="forces.*NaN or infinite"):
-            read_properties(atoms, keys, properties, dtype, periodic_cell=False)
+            read_properties(atoms, keys, properties, periodic_cell=False)
     del atoms.arrays["reference_forces"]
-    actual = read_properties(atoms, keys, properties, dtype, periodic_cell=False)
+    actual = read_properties(atoms, keys, properties, periodic_cell=False)
     assert actual["forces_weight"].item() == 0
     assert not actual["forces"].any()
     assert not any(name.endswith("_mask") for name in actual)
@@ -142,7 +144,6 @@ def test_graph_properties(dtype):
                     keys,
                     [key],
                     [],
-                    dtype=dtype,
                     neighborlist_backend="ase",
                 )
         atoms.pbc = [True, False, False]
@@ -155,7 +156,6 @@ def test_graph_properties(dtype):
             keys,
             [key],
             [],
-            dtype=dtype,
             neighborlist_backend="ase",
         )
         assert not any(name.endswith("_mask") for name in graph.keys())
@@ -170,7 +170,6 @@ def test_graph_properties(dtype):
             keys,
             [key],
             [],
-            dtype=dtype,
             neighborlist_backend="ase",
         )
         assert not graph[key].any()
@@ -179,6 +178,7 @@ def test_graph_properties(dtype):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_property_scopes(dtype, device):
+    torch.set_default_dtype(dtype)
     keys = KeySpecification.from_defaults()
     targets = ["edge_forces", "hessian", "direct_hessian"]
     assert PROPERTIES["edge_forces"]["scope"] == "per-edge"
@@ -201,7 +201,6 @@ def test_property_scopes(dtype, device):
                 keys,
                 targets,
                 [],
-                dtype=dtype,
                 neighborlist_backend="ase",
             )
 
@@ -219,7 +218,8 @@ def test_property_scopes(dtype, device):
             atoms.info[key] = np.eye(3 * len(atoms))
         graphs.append(graph())
         torch.testing.assert_close(
-            graphs[-1].edge_forces, torch.tensor(atoms.info["edge_forces"], dtype=dtype)
+            graphs[-1].edge_forces,
+            torch.tensor(atoms.info["edge_forces"], dtype=torch.float64),
         )
         atoms.info["edge_forces"] = np.zeros((len(atoms) ** 2, 3))
         with pytest.raises(RuntimeError, match="per-edge property requires"):
@@ -260,7 +260,6 @@ def test_property_scopes(dtype, device):
         keys,
         targets,
         [],
-        dtype=dtype,
         neighborlist_backend="ase",
     )
     assert graph.edge_forces.shape == (6, 3)
@@ -310,13 +309,12 @@ def check_hessian_data_roundtrip(tmp_path, key):
                 [key],
                 [],
                 neighborlist_backend="ase",
-                dtype=torch.float64,
             )
             torch.testing.assert_close(graph[key], expected)
             assert graph[key].is_contiguous()
 
 
-def make_graph(n, labeled=True, dtype=torch.float64, key="direct_hessian"):
+def make_graph(n, labeled=True, key="direct_hessian"):
     atoms = Atoms(numbers=[1] * n, positions=np.arange(n * 3).reshape(n, 3) * 0.2)
     if labeled:
         atoms.info["reference_hessian"] = np.eye(3 * n)
@@ -331,7 +329,6 @@ def make_graph(n, labeled=True, dtype=torch.float64, key="direct_hessian"):
         [key],
         [],
         neighborlist_backend="ase",
-        dtype=dtype,
     )
 
 
@@ -350,7 +347,7 @@ def check_hessian_batch(key):
     prediction = batch[key] + 1
     prediction[-1] = 100
     metric.update(prediction, batch[key], batch.to_dict())
-    torch.testing.assert_close(metric.compute(), torch.tensor(1.0))
+    torch.testing.assert_close(metric.compute(), torch.tensor(1.0, dtype=torch.float64))
 
 
 def check_direct_hessian_missing_uncertainty(device):
@@ -479,7 +476,7 @@ def direct_hessian_output(
     positions,
     ptr,
     batch,
-    node_attrs,
+    node_type,
     fidelity,
     lattice=None,
     pbc=None,
@@ -494,7 +491,7 @@ def direct_hessian_output(
     edge_index = data["direct_hessian_pair_index"][:, data["direct_hessian_edge_pairs"]]
     edge_feats = representation(
         features,
-        node_attrs,
+        node_type,
         positions,
         edge_index,
         data["direct_hessian_edge_shifts"],
@@ -538,10 +535,10 @@ def check_direct_hessian_readout_symmetries(device, interaction_type):
     )
     ptr = torch.tensor([0, 3, 4], device=device)
     batch = torch.tensor([0, 0, 0, 1], device=device)
-    node_attrs = torch.eye(2, dtype=torch.float64, device=device)[[0, 1, 0, 1]]
+    node_type = torch.tensor([0, 1, 0, 1], dtype=torch.long, device=device)
     fidelity = torch.tensor([0, 0, 0, 1], device=device)
     expected = direct_hessian_output(
-        head, representation, x, positions, ptr, batch, node_attrs, fidelity
+        head, representation, x, positions, ptr, batch, node_type, fidelity
     )
     blocks = expected[:9].reshape(3, 3, 3, 3)
     torch.testing.assert_close(blocks, blocks.permute(1, 0, 3, 2))
@@ -557,7 +554,7 @@ def check_direct_hessian_readout_symmetries(device, interaction_type):
             positions @ rotation.T + 1.7,
             ptr,
             batch,
-            node_attrs,
+            node_type,
             fidelity,
         )
         torch.testing.assert_close(
@@ -571,7 +568,7 @@ def check_direct_hessian_readout_symmetries(device, interaction_type):
         positions[permutation],
         ptr,
         batch,
-        node_attrs[permutation],
+        node_type[permutation],
         fidelity,
     )
     torch.testing.assert_close(
@@ -609,10 +606,10 @@ def check_direct_hessian_node_edge_readouts(device, interaction_type):
     positions = x.new_tensor([[0, 0, 0], [1, 0, 0], [0, 0, 1]])
     ptr = torch.tensor([0, 2, 3], device=device)
     batch = torch.tensor([0, 0, 1], device=device)
-    node_attrs = x.new_tensor([[1, 0], [0, 1], [1, 0]])
+    node_type = torch.tensor([0, 1, 0], dtype=torch.long, device=device)
     fidelity = torch.tensor([0, 0, 1], device=device)
     output = direct_hessian_output(
-        head, representation, x, positions, ptr, batch, node_attrs, fidelity
+        head, representation, x, positions, ptr, batch, node_type, fidelity
     )
     node_blocks = head.to_cartesian(head.node_readout(x), fidelity)
     torch.testing.assert_close(
@@ -622,7 +619,7 @@ def check_direct_hessian_node_edge_readouts(device, interaction_type):
     edge_index = torch.tensor([[0, 1], [1, 0]], device=device)
     edge_feats = representation(
         x,
-        node_attrs,
+        node_type,
         positions,
         edge_index,
         x.new_zeros((2, 3)),
@@ -643,12 +640,12 @@ def check_direct_hessian_node_edge_readouts(device, interaction_type):
         wraps=representation.forward,
     ) as call:
         direct_hessian_output(
-            head, representation, x, positions, ptr, batch, node_attrs, fidelity
+            head, representation, x, positions, ptr, batch, node_type, fidelity
         )
         torch.testing.assert_close(call.call_args.args[3], edge_index)
     positions[1, 0] = 4.1
     outside = direct_hessian_output(
-        head, representation, x, positions, ptr, batch, node_attrs, fidelity
+        head, representation, x, positions, ptr, batch, node_type, fidelity
     )
     assert not outside[[1, 2]].any()
     torch.testing.assert_close(outside[[0, 3, 4]], output[[0, 3, 4]])
@@ -662,7 +659,7 @@ def check_direct_hessian_node_edge_readouts(device, interaction_type):
     positions[1, 0] = 4.0 - 1e-3
     positions.requires_grad_()
     near = direct_hessian_output(
-        head, representation, x, positions, ptr, batch, node_attrs, fidelity
+        head, representation, x, positions, ptr, batch, node_type, fidelity
     )[1]
     first = torch.autograd.grad(near.sum(), positions, create_graph=True)[0]
     second = torch.autograd.grad(first[1, 0], positions)[0]
@@ -704,16 +701,12 @@ def small_model(
     ]
     with torch_default_dtype(dtype):
         model = create_model(config, statistics, targets, [])
-    return model.to(device=device, dtype=dtype)
+    return configure_model_precision(model, dtype, device=device)
 
 
 def check_direct_hessian_training(device, dtype, joint, loss_name, interaction_type):
     model = small_model(dtype, device, joint, interaction_type=interaction_type)
-    data = (
-        Batch.from_data_list([make_graph(2, dtype=dtype), make_graph(4, dtype=dtype)])
-        .to(device)
-        .to_dict()
-    )
+    data = Batch.from_data_list([make_graph(2), make_graph(4)]).to(device).to_dict()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     values = []
     for _ in range(12):
@@ -767,9 +760,14 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
         prepared["direct_hessian_pair_index"], hessian_pair_indices(data["ptr"])
     )
     with patch.object(model, "get_target_property", return_value=["energy"]):
-        assert model.prepare_property_data(data) is data
+        prepared_energy = model.prepare_property_data(data)
+        assert "direct_hessian_pair_index" not in prepared_energy
+        assert prepared_energy["node_type"].dtype == torch.int64
     with patch.object(model, "lmp", True):
-        assert model.prepare_property_data(data) is data
+        prepared_lmp = model.prepare_property_data(data)
+        assert "direct_hessian_pair_index" not in prepared_lmp
+        assert prepared_lmp["node_type"].dtype == torch.int64
+    assert "node_type" not in data
     core = model.readout_fn
     assert isinstance(core.pair_representation, PairRepresentation)
     assert core.pair_representation.irreps_out.lmax == 3
@@ -842,13 +840,10 @@ def check_direct_hessian_saved_model(device, tmp_path, interaction_type, parity)
     export_tace(model, str(path))
     for dtype in (torch.float32, torch.float64):
         loaded = load_tace(path, device=device, dtype=dtype).eval()
-        values = {
-            key: value.to(dtype) if value.is_floating_point() else value
-            for key, value in data.items()
-        }
+        values = deepcopy(data)
         with torch.inference_mode():
             actual = loaded(values)["direct_hessian"]
-        assert actual.dtype == dtype
+        assert actual.dtype == torch.float64
         torch.testing.assert_close(actual.double(), reference, atol=2e-5, rtol=2e-5)
     with torch.inference_mode():
         for sign in (1, -1):
@@ -891,7 +886,6 @@ def check_direct_hessian_periodic(device, dtype, interaction_type):
                         KeySpecification.from_defaults(),
                         ["energy", "forces", "direct_hessian"],
                         [],
-                        dtype=dtype,
                     )
                     for item in (structure, Atoms("H"))
                 ]
@@ -914,15 +908,15 @@ def check_direct_hessian_periodic(device, dtype, interaction_type):
         data["positions"],
         data["ptr"],
         data["batch"],
-        data["node_attrs"],
+        torch.zeros(data["positions"].shape[0], dtype=torch.long, device=device),
         fidelity,
         data["lattice"],
         data["pbc"],
     )
-    expected = features.new_zeros((5, 3, 3))
+    expected = actual.new_zeros((5, 3, 3))
     expected[[0, 3, 4]] = head.to_cartesian(head.node_readout(features), fidelity)
     # Independently enumerate images, including multiple images of the same pair.
-    shifts = torch.cartesian_prod(*[torch.arange(-3, 4, device=device)] * 3).to(dtype)
+    shifts = torch.cartesian_prod(*[torch.arange(-3, 4, device=device)] * 3).double()
     for source, target in ((0, 1), (1, 0)):
         vectors = (
             data["positions"][target]
@@ -936,7 +930,7 @@ def check_direct_hessian_periodic(device, dtype, interaction_type):
         )
         edge_feats = representation(
             features,
-            data["node_attrs"],
+            torch.zeros(data["positions"].shape[0], dtype=torch.long, device=device),
             data["positions"],
             edge_index,
             edge_shifts,
@@ -975,7 +969,7 @@ def check_direct_hessian_periodic(device, dtype, interaction_type):
     for key in model.get_target_property():
         torch.testing.assert_close(actual[key], expected[key], atol=2e-5, rtol=2e-5)
     for sign in (1, -1):
-        rotation = sign * o3.rand_matrix(dtype=dtype, device=device)
+        rotation = sign * o3.rand_matrix(dtype=torch.float64, device=device)
         rotated = atoms.copy()
         rotated.positions = atoms.positions @ rotation.cpu().numpy().T
         rotated.set_cell(atoms.cell.array @ rotation.cpu().numpy().T)
@@ -1064,7 +1058,6 @@ def test_eval_property_scopes(device, dtype, source, tmp_path, monkeypatch, caps
                         targets,
                         [],
                         neighborlist_backend="ase",
-                        dtype=torch.float64,
                     )
                     for name in targets:
                         graph[f"{name}_weight"].fill_(1)
@@ -1130,7 +1123,6 @@ def test_eval_property_scopes(device, dtype, source, tmp_path, monkeypatch, caps
             targets,
             [],
             training=False,
-            dtype=dtype,
             neighborlist_backend="ase",
         )
         prediction = model(Batch.from_data_list([graph]).to(device))
@@ -1161,9 +1153,7 @@ def test_hessian(device, tmp_path):
 
     for dtype in (torch.float32, torch.float64):
         data = (
-            Batch.from_data_list(
-                [make_graph(n, dtype=dtype, key="hessian") for n in (2, 3)]
-            )
+            Batch.from_data_list([make_graph(n, key="hessian") for n in (2, 3)])
             .to(device)
             .to_dict()
         )
@@ -1171,7 +1161,9 @@ def test_hessian(device, tmp_path):
         model.reset_target_property(["energy", "forces", "hessian"])
         actual = model(dict(data))["hessian"]
         assert actual.shape == data["hessian"].shape == (13, 3, 3)
-        assert actual.dtype == dtype and actual.device == data["positions"].device
+        assert (
+            actual.dtype == torch.float64 and actual.device == data["positions"].device
+        )
 
         model.reset_target_property(["energy"])
         reference = torch.autograd.functional.hessian(
@@ -1247,7 +1239,7 @@ def small_system(double_precision):
     data = dict(
         positions=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.3, 0.2], [0.4, 1.1, -0.2]]),
         lattice=4.0 * torch.eye(3).unsqueeze(0),
-        node_attrs=torch.ones(3, 1),
+        node_type=torch.zeros(3, dtype=torch.long),
         edge_index=torch.tensor([[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]]),
         edge_shifts=torch.tensor(
             [
@@ -1335,7 +1327,11 @@ def test_edge_forces_match_position_derivatives(small_system, training, empty_ed
         data["edge_index"] = data["edge_index"][:, :0]
         data["edge_shifts"] = data["edge_shifts"][:0]
     config["target_property"] = ["energy", "forces", "stress"]
-    model = TensorModel(SphericalTACE(**config)).to(data["positions"].device).train(training)
+    model = (
+        TensorModel(SphericalTACE(**config))
+        .to(data["positions"].device)
+        .train(training)
+    )
     reference = model({key: value.clone() for key, value in data.items()})
     model.reset_target_property(["energy", "edge_forces"])
     edge_data = {key: value.clone() for key, value in data.items()}
@@ -1404,7 +1400,8 @@ def test_tace_les_reads_out_latent_quantities_and_passes_them_to_upstream():
         use_alllayer=False,
         parity=True,
         irreps_in=[o3.Irreps("4x0e+3x1o+2x2e")],
-    ).to(dtype=torch.get_default_dtype())
+    )
+    configure_model_precision(model, torch.get_default_dtype())
     assert model.batch_external_field
     assert model.scale == {
         "latent_charges": 0.1,
@@ -1418,6 +1415,7 @@ def test_tace_les_reads_out_latent_quantities_and_passes_them_to_upstream():
 
     positions = torch.tensor(
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+        dtype=torch.float64,
         requires_grad=True,
     )
     descriptors = [torch.randn(4, 23, requires_grad=True)]
@@ -1428,10 +1426,10 @@ def test_tace_les_reads_out_latent_quantities_and_passes_them_to_upstream():
         node_fidelity=node_fidelity,
         num_atoms_arange=torch.arange(4),
         positions=positions,
-        lattice=torch.zeros(2, 3, 3),
+        lattice=torch.zeros(2, 3, 3, dtype=torch.float64),
         batch=torch.tensor([0, 0, 0, 1]),
         atomic_numbers=torch.tensor([1, 8, 1, 8]),
-        external_field=torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.2, 0.0]]),
+        external_field=positions.new_tensor([[0.1, 0.0, 0.0], [0.0, 0.2, 0.0]]),
         pbc=torch.zeros(2, 3, dtype=torch.bool),
     )
 
@@ -1503,7 +1501,7 @@ def test_periodic_graph_derivatives(num_graphs):
     data = dict(
         positions=positions,
         lattice=lattice,
-        node_attrs=torch.ones(3 * num_graphs, 1, dtype=DTYPE),
+        node_type=torch.zeros(3 * num_graphs, dtype=torch.long),
         edge_index=edges,
         edge_shifts=torch.randint(-1, 2, (edges.size(1), 3)).to(DTYPE),
         batch=torch.arange(num_graphs).repeat_interleave(3),
@@ -1517,7 +1515,7 @@ def test_periodic_graph_derivatives(num_graphs):
     )
     model.get_target_property.return_value = ["energy", "forces", "stress"]
     graph = TensorModel.prepare_graph(model, data)
-    torch.testing.assert_close(graph.node_type, data["node_attrs"].argmax(-1))
+    torch.testing.assert_close(graph.node_type, data["node_type"])
     source, target = edges
     reference = (
         data["positions"][target]

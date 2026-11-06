@@ -44,6 +44,7 @@ synchronized with the actual training configuration.
   defaults:
   resume_from_model: 
   finetune_from_model: 
+  dtype:
   misc: 
   logger:
   trainer:
@@ -76,6 +77,10 @@ Field Descriptions
 - **misc** 
   Miscellaneous options that control settings of the experiment.  
 
+- **dtype**
+  Selects network precision, optional autocast, and matrix multiplication mode.
+  Data, geometry, reference energies, and labels remain in float64.
+
 - **logger** 
   Specifies the logger to use, such as ``wandb`` or ``tensorboard``.  
   If you are already using the WandB logger added in the ``default field`` it has already been specified in the logger 
@@ -84,7 +89,8 @@ Field Descriptions
 - **trainer**
   This section directly corresponds to an instance of  
   `PyTorch Lightning's Trainer <https://lightning.ai/docs/pytorch/stable/common/trainer.html>`_.  
-  All arguments accepted by ``Trainer`` can be specified here.
+  Precision is controlled by ``dtype``; other ``Trainer`` arguments can be
+  specified here.
 
 - **callbacks**
   Functions executed during training, e.g., checkpointing, early stopping, learning rate monitoring, EMA, SWA, etc.
@@ -145,6 +151,33 @@ For large datasets, set ``dataset.storage_mode`` to ``lmdb``. ``tace-train``
 constructs and caches the graphs automatically, and later runs reuse compatible
 graphs from the configured shard directories.
 
+Precision
+~~~~~~~~~
+
+.. code-block:: yaml
+
+   dtype:
+     model: float32
+     autocast: null
+     matmul: null
+
+``model`` selects ``float32`` or ``float64`` for learned network parameters and
+features. ``autocast`` selects ``null``, ``bfloat16``, or ``float16`` for supported
+network operations; mixed precision requires ``model: float32``. Geometry and
+labels are not cast to the network dtype. Unsupported fused low-precision
+backends are rejected with a clear error; set ``autocast: null`` to use them.
+
+``matmul`` accepts ``ieee`` or ``tf32``. With ``null``, it resolves from
+``TACE_MATMUL_PRECISION`` or ``TACE_USE_TF32``; without either variable, training
+enables TF32 for FP32 operations and inference disables it. Explicit conflicting
+settings raise an error. Autocast and TF32 cannot be enabled together.
+Configure precision here rather than through ``trainer.precision``.
+
+Data loading, graph caches, and statistics use float64 regardless of these
+settings. Changing network precision therefore reuses the same graph cache.
+Lower-precision network arithmetic can still affect energies and derivatives;
+float64 geometry and output accumulation do not make the network itself FP64.
+
 Output Files
 ------------
 
@@ -164,17 +197,9 @@ During training, **TACE** automatically generates several directories and files 
   Stores statistical information about the training set, such as RMS information of forces.
   If you are using multi-head or multi-fidelity training, multiple statistics files will be generated for each computation fidelity_idx.
 
-  These statistics are computed before each training starting. However, if the file already exists in the current directory, 
-  the computation will be skipped and the existing file will be read instead. 
-  This means you can modify the statistical information manually if needed.
+  Compatible files are reused. The data schema, source fingerprint, elements,
+  and reference energies are checked before reuse; outdated statistics are
+  recomputed from the graph cache when available.
   
 - **_tace.yaml**  
   A full copy of the configuration file used for this run, which ensures reproducibility of the experiment.
-
-.. note::
-  Automatically reading the statistics is equivalent to running the dataloader once in advance, which may sometimes 
-  cause subtle effects, though in most cases these can be ignored.
-
-
-
-

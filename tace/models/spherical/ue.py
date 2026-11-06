@@ -41,7 +41,6 @@ class UniversalInvariantEmbedding(torch.nn.Module):
         mlp_type: str = "mlp_v1",
     ):
         super().__init__()
-
         self.uie = torch.nn.ModuleDict()
 
         total_dim = 0
@@ -75,7 +74,7 @@ class UniversalInvariantEmbedding(torch.nn.Module):
             if p_scope == "per-system":
                 attr = attr[batch]
             if p_type == "float":
-                attr = attr.unsqueeze(-1)
+                attr = attr.unsqueeze(-1).to(module.mlp[0].weight.dtype)
 
             embeddings.append(module(attr))
 
@@ -124,9 +123,8 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         data: dict[str, torch.Tensor],
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         node_feats = self.linear(node_feats)
@@ -135,12 +133,12 @@ class UniversalEquivariantEmbedding(torch.nn.Module):
         for p, e_linear in self.uee.items():
             scope = self.config[p]["scope"]
             normalizer = self.config[p]["normalizer"]
-            attr = data[p] * normalizer
+            attr = (data[p] * normalizer).to(node_feats.dtype)
             if scope == "per-system":
                 attr = attr[batch]
             if PROPERTIES[p]["rank"] == 0:
                 attr = attr.unsqueeze(-1)
-            uee_feats = e_linear(attr, node_attrs, node_type)
+            uee_feats = e_linear(attr, node_type)
             node_feats = node_feats + uee_feats
 
         return node_feats

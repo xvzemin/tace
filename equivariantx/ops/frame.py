@@ -9,8 +9,9 @@ def transform(frame, features, wigner, index, num_nodes, inverse):
     """Evaluate an indexed LocalFrame map using compact degree matrices."""
     if not features.is_cuda or features.dtype not in (torch.float32, torch.float64):
         raise TypeError("Frame kernels require CUDA float32 or float64 features.")
-    if wigner.device != features.device or wigner.dtype != features.dtype:
-        raise ValueError("Features and Wigner matrices must share dtype and device.")
+    if wigner.device != features.device:
+        raise ValueError("Features and Wigner matrices must share a device.")
+    wigner = wigner.to(dtype=features.dtype)
     if index.device != features.device or index.dtype != torch.int64 or index.ndim != 1:
         raise ValueError(
             "index must be a one-dimensional int64 tensor on the feature device."

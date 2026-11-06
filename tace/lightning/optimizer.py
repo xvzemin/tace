@@ -12,6 +12,7 @@ from e3nn.nn import BatchNorm
 
 from tace.models.blocks import ScaleShift
 from tace.models.linear import (
+    ElementEmbedding,
     e3nnElementLinear,
     e3nnLinear,
     e3nnMoEElementLinear,
@@ -27,10 +28,8 @@ from tace.models.radial import (
     jnSphericalBesselBasis,
 )
 from tace.models.spherical.base import ReadOut
-from tace.models.spherical.edge import Element2EdgeUpdate
 from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
 from tace.models.spherical.mtace import MagneticBasis
-from tace.models.spherical.node import SphericalTensorNodeEmbedding
 from tace.models.spherical.prod import MaceACE
 from tace.models.spherical.readout import DirectHessianReadout, EdgeReadOut
 from tace.models.spherical.scatter_norm import ScatterNorm
@@ -78,9 +77,10 @@ NO_WEIGHT_DECAY_NAMES = (
     "*.router.*",
 )
 
-# Relative names select output maps, one-hot lookups and physical parameters.
+# Relative names select output maps and physical parameters.
 # Qualified names keep external model packages optional.
 NO_WEIGHT_DECAY_PARAMETERS = {
+    ElementEmbedding: ("weight*",),
     ReadOut: lambda module: (
         f"linear2.{len(module.linear2) - 1}.weight*"
         if module.last_layer
@@ -88,8 +88,6 @@ NO_WEIGHT_DECAY_PARAMETERS = {
     ),
     EdgeReadOut: ("linear_nonlinearity.weight*",),
     DirectHessianReadout: ("node_readout.weight*",),
-    SphericalTensorNodeEmbedding: ("node_embedding.weight*",),
-    Element2EdgeUpdate: ("source_embedding.weight*", "target_embedding.weight*"),
     "equivariantx.models.sevennet.conversion.IrrepsConvolution": ("denominator",),
     "equivariantx.models.equflash.conversion.FullConv": ("denominator",),
     "sevenn.nn.convolution.IrrepsConvolution": ("denominator",),
@@ -129,6 +127,7 @@ NO_MUON_MODULES = (
     torch.nn.InstanceNorm3d,
     torch.nn.Embedding,
     torch.nn.EmbeddingBag,
+    ElementEmbedding,
     torch.nn.PReLU,
     BatchNorm,
     EquivariantMergeLayerNorm,
@@ -196,8 +195,6 @@ PARAMETER_RULES = {
     "e3nn.nn._fc._Layer": {"weight": "matrix"},
     "e3nn.o3._linear.Linear": {"weight": "packed", "bias": "adam"},
     "e3nn.o3._tensor_product._tensor_product.TensorProduct": {"weight": "packed"},
-    SphericalTensorNodeEmbedding: {"node_embedding.*": "adam"},
-    Element2EdgeUpdate: {"source_embedding.*": "adam", "target_embedding.*": "adam"},
     ReadOut: readout_parameter_roles,
     EdgeReadOut: {"linear_nonlinearity.*": "adam"},
     DirectHessianReadout: {"node_readout.*": "adam"},

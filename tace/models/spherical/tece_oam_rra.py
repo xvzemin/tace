@@ -636,7 +636,7 @@ class UvSO2Interaction(O3CgtpInteraction):
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
+        node_types: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
@@ -845,7 +845,7 @@ class BilinearMoEACE(Product):
         return (grouped + shared) * self.scale
 
     def _bilinear_coefficients(
-        self, kernel, coef, features, base, gates, attrs, node_type
+        self, kernel, coef, features, base, gates, node_type
     ):
         elements = getattr(coef, "num_elements", 1)
         experts = getattr(coef, "num_experts", 1)
@@ -885,7 +885,7 @@ class BilinearMoEACE(Product):
                 outputs[i] = outputs[i] + bias[:, :, start:end].unsqueeze(-1)
             return torch.cat([value.flatten(1) for value in outputs], dim=-1)
         bias = (
-            attrs @ coef.bias.reshape(elements, -1)
+            coef.bias.reshape(elements, -1)[node_type]
             if hasattr(coef, "num_elements")
             else coef.bias
         )
@@ -931,18 +931,15 @@ class BilinearMoEACE(Product):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         sc: torch.Tensor,
         batch: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         if self.agnostic:
             for_coefs = {}
         else:
-            if node_type is None:
-                node_type = node_attrs.argmax(dim=-1)
-            for_coefs = {"attrs": node_attrs, "node_type": node_type}
+            for_coefs = {"node_type": node_type}
 
         node_feats, base_feats, ace_weights = self._linear_up_features(node_feats)
 
@@ -973,7 +970,6 @@ class BilinearMoEACE(Product):
                     node_feats,
                     base_feats,
                     gates,
-                    node_attrs,
                     node_type,
                 )
                 continue

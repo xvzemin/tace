@@ -12,6 +12,7 @@ from equivariantx import o2
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models.layout import LayoutTransform
 from tace.models.linear import (
+    ElementEmbedding,
     e3nnElementLinear,
     e3nnLinear,
     e3nnMoEElementLinear,
@@ -271,15 +272,11 @@ def test_embedding_second_moment(num_elements):
     ).to(DEVICE)
     assert isinstance(model, NodeEmbedding)
     indices = torch.arange(num_elements, device=DEVICE)
-    attrs = torch.nn.functional.one_hot(indices, num_elements).to(
-        model.embedding.weight
-    )
     radial = torch.empty(0, 4, device=DEVICE)
     edges = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
     angular = torch.empty(0, 1, device=DEVICE)
-    args = (attrs, radial, edges, angular, None, None, None)
+    args = (indices, radial, edges, angular, None, None, None)
     output = model(*args)
-    torch.testing.assert_close(output, model(*args, node_type=indices), atol=0, rtol=0)
     assert 0.9 < output.square().mean().item() < 1.1
     torch.testing.assert_close(output, model.embedding.weight, atol=0, rtol=0)
     output.sum().backward()
@@ -308,13 +305,37 @@ def test_embedding_legacy_state_dict(matrix, dtype):
     indices = torch.tensor([6, 0, 2, 2, 4], device=DEVICE)
     attrs = torch.nn.functional.one_hot(indices, 7).to(dtype=dtype)
     expected = legacy.to(dtype=dtype)(attrs)
-    actual = model(attrs, None, None, None, None, None, None, node_type=indices)
+    actual = model(indices, None, None, None, None, None, None)
     torch.testing.assert_close(actual, expected)
     assert state.keys() == original.keys()
     for key in state:
         torch.testing.assert_close(state[key], original[key], atol=0, rtol=0)
     model.load_state_dict(model.state_dict(), strict=True)
     torch.testing.assert_close(model.embedding(indices), actual, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("lora", [False, True])
+def test_element_embedding(matrix, lora, monkeypatch):
+    monkeypatch.setenv("TACE_USE_MATRIX_WEIGHT", str(int(matrix)))
+    module = ElementEmbedding(3, 4, bias=True).to(DEVICE)
+    reference = e3nnLinear("3x0e", "4x0e", bias=True).to(DEVICE)
+    if lora:
+        enable_lora(module, r=2, freeze_base=False)
+        enable_lora(reference, r=2, freeze_base=False)
+        with torch.no_grad():
+            module.lora_B[0].normal_()
+    reference.load_state_dict(module.state_dict())
+    types = torch.tensor([2, 0, 1, 2], device=DEVICE)
+    attrs = torch.nn.functional.one_hot(types, 3).to(dtype=DTYPE)
+    output, expected = module(types), reference(attrs)
+    torch.testing.assert_close(output, expected)
+    actual_grad = torch.autograd.grad(output.square().sum(), tuple(module.parameters()))
+    expected_grad = torch.autograd.grad(
+        expected.square().sum(), tuple(reference.parameters())
+    )
+    for actual, target in zip(actual_grad, expected_grad):
+        torch.testing.assert_close(actual, target)
 
 
 @pytest.mark.parametrize("zero_elements", [False, True])
@@ -338,11 +359,8 @@ def test_element2_v2_projection_and_derivatives(zero_elements):
     types = torch.tensor([0, 1, 2, 0], device=DEVICE)
     edges = torch.tensor([[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE)
     radial = torch.randn(5, 4, device=DEVICE, requires_grad=True)
-    attrs = torch.nn.functional.one_hot(types, 3).to(radial)
     node_feats = torch.randn(4, 6, device=DEVICE)
-    parts = update(node_feats, attrs, radial, edges, None)
-    explicit = update(node_feats, attrs, radial, edges, None, node_type=types)
-    torch.testing.assert_close(parts, explicit, atol=0, rtol=0)
+    parts = update(node_feats, types, radial, edges, None)
     dense = torch.cat([x if index is None else x[index] for x, index in parts], dim=-1)
     actual, expected = model(parts), model(dense)
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
@@ -380,9 +398,6 @@ def test_element2_v2_second_moment_without_mlp(num_elements, num_channel):
         edge_embedding_channel=8,
     ).to(DEVICE)
     types = torch.arange(num_elements, device=DEVICE)
-    attrs = torch.nn.functional.one_hot(types, num_elements).to(
-        torch.get_default_dtype()
-    )
     edges = torch.randint(num_elements, (2, 4096), device=DEVICE)
     radial = torch.randn(4096, 8, device=DEVICE)
     nodes = torch.empty(num_elements, num_channel, device=DEVICE)
@@ -390,7 +405,7 @@ def test_element2_v2_second_moment_without_mlp(num_elements, num_channel):
     torch.nn.init.normal_(linear.weight, std=update.out_dim**-0.5)
 
     with torch.no_grad():
-        parts = update(nodes, attrs, radial, edges, None)
+        parts = update(nodes, types, radial, edges, None)
         dense = torch.cat(
             [x if index is None else x[index] for x, index in parts], dim=-1
         )
@@ -448,8 +463,7 @@ def test_readout_head_initialization_and_loading(monkeypatch, cls, irrep, matrix
     x = torch.randn(4, 512, device=DEVICE, requires_grad=True)
     fidelity = torch.arange(4, device=DEVICE)
     types = fidelity % 3
-    attrs = torch.nn.functional.one_hot(types, 3).to(x)
-    outputs = [module(x, fidelity, attrs, types) for module in (model, restored)]
+    outputs = [module(x, fidelity, types) for module in (model, restored)]
     torch.testing.assert_close(*outputs, atol=0, rtol=0)
     gradients = [torch.autograd.grad(y.square().sum(), x)[0] for y in outputs]
     torch.testing.assert_close(*gradients, atol=0, rtol=0)
@@ -499,7 +513,7 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
     )
     x = torch.randn(3, irreps.dim, dtype=dtype, device=device, requires_grad=True)
     positions = torch.randn(3, 3, dtype=dtype, device=device, requires_grad=True)
-    attrs = x.new_tensor([[1, 0], [0, 1], [1, 0]])
+    attrs = torch.tensor([0, 1, 0], device=x.device)
     edge_index = torch.tensor([[0, 1, 0, 2], [1, 0, 2, 0]], device=device)
     shifts = x.new_zeros((4, 3))
     lattice = x.new_zeros((1, 3, 3))
@@ -531,8 +545,13 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
             edge_index,
             torch.tensor(descriptor.atomic_numbers, dtype=torch.int64, device=device),
         )
+        attributes = torch.nn.functional.one_hot(
+            attrs, len(descriptor.atomic_numbers)
+        ).to(dtype)
         weights = interaction.edge_info(
-            torch.cat((edge_feats, attrs[source], attrs[target]), dim=-1)
+            torch.cat(
+                (edge_feats.to(dtype), attributes[source], attributes[target]), dim=-1
+            )
         )
         expected = interaction.rejector(
             interaction.linear_up(torch.cat((x[source], x[target]), dim=-1)),
@@ -542,9 +561,9 @@ def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
                 normalize=True,
                 normalization="component",
             ),
-            weights * cutoff,
+            weights * cutoff.to(dtype),
         )
-        torch.testing.assert_close(features, expected, atol=0, rtol=0)
+        torch.testing.assert_close(features, expected)
     torch.testing.assert_close(
         descriptor(x, attrs, positions + 1, edge_index, shifts, lattice, batch),
         features,
@@ -642,7 +661,7 @@ def test_pair_representation_bases(interaction_type):
     assert "atomic_numbers" not in descriptor.state_dict()
     x = torch.randn(3, irreps.dim, device=DEVICE, requires_grad=True)
     positions = torch.randn(3, 3, device=DEVICE, requires_grad=True)
-    attrs = x.new_tensor([[1, 0], [0, 1], [1, 0]])
+    attrs = torch.tensor([0, 1, 0], device=x.device)
     edges = torch.tensor([[0, 1, 0, 2], [1, 0, 2, 0]], device=DEVICE)
     shifts = x.new_tensor([[0, 0, 0], [0, 0, 0], [1, 0, 0], [-1, 0, 0]])
     lattice = torch.eye(3, device=DEVICE).unsqueeze(0).requires_grad_()
@@ -887,7 +906,7 @@ def test_legacy_scatter_norm_loading(
 
     data = dict(
         positions=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.2, 0.3]], device=DEVICE),
-        node_attrs=torch.ones(2, 1, device=DEVICE),
+        node_type=torch.zeros(2, dtype=torch.long, device=DEVICE),
         edge_index=torch.tensor([[0, 1], [1, 0]], device=DEVICE),
         edge_shifts=torch.zeros(2, 3, device=DEVICE),
         lattice=torch.eye(3, device=DEVICE).unsqueeze(0) * 8,
@@ -955,7 +974,7 @@ def test_element2_projects_nodes_before_gather(
         for name, parameter in (*module.named_parameters(), *mlp.named_parameters()):
             if name.endswith("bias"):
                 parameter.normal_()
-    attrs = torch.randn(5, 3, dtype=DTYPE, device=device, requires_grad=True)
+    attrs = torch.randint(3, (5,), device=device)
     edges = torch.randint(5, (2, num_edges), device=device)
     feats = torch.randn(num_edges, 6, dtype=DTYPE, device=device, requires_grad=True)
     source = module.source_embedding(attrs[edges[0]])
@@ -969,7 +988,7 @@ def test_element2_projects_nodes_before_gather(
     hook.remove()
     assert sizes == [attrs.size(0)]
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
-    inputs = (attrs, feats, *module.parameters(), *mlp.parameters())
+    inputs = (feats, *module.parameters(), *mlp.parameters())
     for _ in range(2):
         seed = torch.randn_like(actual)
         gradients = [
@@ -1014,11 +1033,7 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
         avg_num_neighbors=2.0,
         bias=False,
     ).to(DEVICE, DTYPE)
-    node_attrs = torch.tensor(
-        [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
-        dtype=DTYPE,
-        device=DEVICE,
-    )
+    node_type = torch.tensor([0, 1, 0], dtype=torch.long, device=DEVICE)
     edge_index = torch.tensor(
         [[0, 1, 2, 0], [1, 2, 0, 2]],
         device=DEVICE,
@@ -1029,7 +1044,7 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
     wigner_module = o2.WignerD(2, 2).to(DEVICE, DTYPE)
     wigner, wigner_inv = wigner_module(edge_vectors)
     output = embedding(
-        node_attrs,
+        node_type,
         edge_feats,
         edge_index,
         o3.spherical_harmonics(
@@ -1043,7 +1058,7 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
     rotation = determinant * o3.rand_matrix(dtype=DTYPE, device=DEVICE)
     rotated_wigner, rotated_wigner_inv = wigner_module(edge_vectors @ rotation.T)
     rotated_output = embedding(
-        node_attrs,
+        node_type,
         edge_feats,
         edge_index,
         o3.spherical_harmonics(
@@ -1057,7 +1072,7 @@ def test_tensor_node_embedding_is_equivariant(name, determinant, double_precisio
     assert embedding.irreps_out == o3.Irreps("3x0e+3x1o+3x2e")
     assert torch.isfinite(
         embedding(
-            node_attrs,
+            node_type,
             edge_feats,
             edge_index,
             o3.spherical_harmonics(
@@ -1095,7 +1110,7 @@ def test_tensor_embedding_constructions(
     positions = torch.randn(edges, 3, device=DEVICE, requires_grad=True)
     radial = torch.randn(edges, 4, device=DEVICE, requires_grad=True)
     index = torch.randint(3, (2, edges), device=DEVICE)
-    attrs = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]], device=DEVICE)
+    attrs = torch.tensor([0, 1, 0], device=DEVICE)
     rotation, inverse = o2.WignerD(mmax, 2).to(DEVICE)(positions)
     harmonics = o3.spherical_harmonics(
         list(range(3)), positions, True, normalization="component"
@@ -1204,27 +1219,23 @@ def test_node_update_returns_source_and_target_info(magnetic_type):
         num_channel=5,
     ).to(DEVICE, DTYPE)
     magnetic_radial_basis = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
-    node_attrs = torch.tensor(
-        [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]],
-        dtype=DTYPE,
-        device=DEVICE,
-    )
-    output = update(magnetic_radial_basis, node_attrs)
+    node_type = torch.tensor([0, 1, 0, 1], dtype=torch.long, device=DEVICE)
+    output = update(magnetic_radial_basis, node_type)
     if magnetic_type == "identity":
         source_info = target_info = magnetic_radial_basis
     elif magnetic_type == "element":
         source_info = target_info = update.embedding(
             magnetic_radial_basis,
-            node_attrs,
+            node_type,
         )
     else:
         source_info = update.source_embedding(
             magnetic_radial_basis,
-            node_attrs,
+            node_type,
         )
         target_info = update.target_embedding(
             magnetic_radial_basis,
-            node_attrs,
+            node_type,
         )
 
     assert output[0].shape == (magnetic_radial_basis.size(0), update.out_dim)
@@ -1369,12 +1380,10 @@ def test_tace_indexed_linear(
                 parameter.normal_()
     with torch.no_grad():
         module.bias.normal_()
-    attrs = torch.rand(5, 3, device=device, requires_grad=True)
     x = torch.randn(5, module.irreps_in.dim, device=device, requires_grad=True)
-    # A supplied element index takes precedence over attrs.argmax for weights.
     types = torch.tensor([2, 0, 1, 2, 1], device=device)
     outputs, derivatives = [], []
-    inputs = (x, attrs, *module.parameters())
+    inputs = (x, *module.parameters())
     for env, enabled in ((None, True), ("0", True), ("1", False), ("1", True)):
         if env is None:
             monkeypatch.delenv("TACE_USE_EQX", raising=False)
@@ -1389,7 +1398,7 @@ def test_tace_indexed_linear(
                 module.eqx_linear, "forward", wraps=module.eqx_linear.forward
             ) as cuda_forward,
         ):
-            output = module(x, attrs, types)
+            output = module(x, types)
             use_cuda = device == "cuda" and env == "1" and enabled
             assert cuda_forward.call_count == int(use_cuda)
             assert torch_forward.call_count == int(not use_cuda)
@@ -1415,11 +1424,11 @@ def test_tace_indexed_linear(
         compiled = torch.compile(
             module, backend="aot_eager", fullgraph=True, dynamic=True
         )
-        output = compiled(x, attrs, types)
+        output = compiled(x, types)
         torch.testing.assert_close(output, outputs[-1], atol=tol, rtol=tol)
         torch.testing.assert_close(
             torch.autograd.grad(output.square().mean(), x)[0],
-            torch.autograd.grad(module(x, attrs, types).square().mean(), x)[0],
+            torch.autograd.grad(module(x, types).square().mean(), x)[0],
             atol=tol,
             rtol=tol,
         )

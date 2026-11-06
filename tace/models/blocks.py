@@ -21,7 +21,25 @@ def format_list(obj, ndigits=4):
         return str(obj)
 
 
-class OneHotToAtomicEnergy(torch.nn.Module):
+class AtomicEnergy(torch.nn.Module):
+    """Look up element- and fidelity-dependent atomic reference energies.
+
+    Parameters
+    ----------
+    atomic_energies : list of dict
+        Atomic-number-to-energy mapping for each fidelity.
+    atomic_numbers : list of int
+        Atomic numbers in element-table order.
+
+    Examples
+    --------
+    >>> reference = AtomicEnergy([{1: -0.5, 8: -2.0}], [1, 8])
+    >>> reference(torch.tensor([1, 0])).shape
+    torch.Size([2, 1])
+    """
+
+    float64_buffers = ("atomic_energy",)
+
     def __init__(
         self,
         atomic_energies: List[Dict[int, float]],
@@ -43,11 +61,7 @@ class OneHotToAtomicEnergy(torch.nn.Module):
             ),
         )
 
-    def forward(
-        self, x: torch.Tensor, node_type: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        if node_type is None:
-            node_type = x.argmax(dim=-1)
+    def forward(self, node_type: torch.Tensor) -> torch.Tensor:
         # Indexing preserves reference energies regardless of matmul precision.
         return self.atomic_energy.T[node_type]
 
@@ -71,7 +85,7 @@ class ScaleShift(torch.nn.Module):
     Parameters
     ----------
     atomic_numbers : list of int
-        Atomic numbers in the order used by the node attributes.
+        Atomic numbers in element-table order.
     scale_dicts : list of dict, optional
         Atomic-number-to-scale mappings, one per fidelity. Missing elements
         use a scale of one. If omitted, scaling is disabled.
@@ -105,6 +119,9 @@ class ScaleShift(torch.nn.Module):
     validation or finetuning.
     """
 
+    float64_buffers = ("scale", "shift")
+    geometry_precision = True
+
     def __init__(
         self,
         atomic_numbers: List[int],
@@ -133,9 +150,7 @@ class ScaleShift(torch.nn.Module):
                 scale_list.append([d.get(z, 1.0) for z in atomic_numbers])
             scale_tensor = torch.tensor(scale_list, dtype=torch.float64)
             if scale_trainable:
-                self.scale = torch.nn.Parameter(
-                    scale_tensor.to(torch.get_default_dtype())
-                )
+                self.scale = torch.nn.Parameter(scale_tensor)
             else:
                 self.register_buffer("scale", scale_tensor)
 
@@ -145,13 +160,12 @@ class ScaleShift(torch.nn.Module):
                 shift_list.append([d.get(z, 0.0) for z in atomic_numbers])
             shift_tensor = torch.tensor(shift_list, dtype=torch.float64)
             if shift_trainable:
-                self.shift = torch.nn.Parameter(
-                    shift_tensor.to(torch.get_default_dtype())
-                )
+                self.shift = torch.nn.Parameter(shift_tensor)
             else:
                 self.register_buffer("shift", shift_tensor)
 
-    def forward(self, node_energy, node_attrs, ptr, edge_index, batch, node_fidelity):
+    def forward(self, node_energy, node_type, ptr, edge_index, batch, node_fidelity):
+        node_energy = node_energy.to(torch.float64)
         if not (self.has_scale or self.has_shift):
             return node_energy
 
@@ -160,11 +174,11 @@ class ScaleShift(torch.nn.Module):
 
         if self.all_atoms:
             if self.has_scale:
-                node_scale = (node_attrs * self.scale[node_fidelity]).sum(dim=-1)
+                node_scale = self.scale[node_fidelity, node_type].to(torch.float64)
                 node_energy = node_energy * node_scale
 
             if self.has_shift:
-                node_shift = (node_attrs * self.shift[node_fidelity]).sum(dim=-1)
+                node_shift = self.shift[node_fidelity, node_type].to(torch.float64)
                 node_energy = node_energy + node_shift
         else:
             if edge_index.numel() == 0:
@@ -183,7 +197,7 @@ class ScaleShift(torch.nn.Module):
             isolated_mask = (num_nodes == 1) & (num_edges == 0)
 
             if self.has_scale:
-                node_scale = (node_attrs * self.scale[node_fidelity]).sum(dim=-1)
+                node_scale = self.scale[node_fidelity, node_type].to(torch.float64)
                 isolated_nodes = isolated_mask[batch]
                 node_scale = torch.where(
                     isolated_nodes, torch.zeros_like(node_scale), node_scale
@@ -191,7 +205,7 @@ class ScaleShift(torch.nn.Module):
                 node_energy = node_energy * node_scale
 
             if self.has_shift:
-                node_shift = (node_attrs * self.shift[node_fidelity]).sum(dim=-1)
+                node_shift = self.shift[node_fidelity, node_type].to(torch.float64)
                 isolated_nodes = isolated_mask[batch]
                 node_shift = torch.where(
                     isolated_nodes, torch.zeros_like(node_shift), node_shift
@@ -200,12 +214,12 @@ class ScaleShift(torch.nn.Module):
 
         return node_energy
 
-    def apply_scale(self, node_energy, node_attrs, node_fidelity):
+    def apply_scale(self, node_energy, node_type, node_fidelity):
         """Apply the learned-energy scale without an additive shift."""
         if not self.has_scale:
             return node_energy
-        node_scale = (node_attrs * self.scale[node_fidelity]).sum(dim=-1)
-        return node_energy * node_scale
+        node_scale = self.scale[node_fidelity, node_type].to(torch.float64)
+        return node_energy.to(torch.float64) * node_scale
 
     def __repr__(self):
 

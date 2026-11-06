@@ -25,6 +25,8 @@ class CartesianHarmonics(torch.nn.Module):
         A single vector or axial-vector representation. Defaults to 1o.
     """
 
+    geometry_precision = True
+
     def __init__(self, irreps_out, normalize, normalization="integral", irreps_in=None):
         super().__init__()
         if normalization not in ("integral", "component", "norm"):
@@ -75,12 +77,12 @@ class CartesianHarmonics(torch.nn.Module):
                 scale *= math.sqrt((2 * l + 1) / (4 * math.pi))
             self.register_buffer(
                 f"basis_{l}",
-                matrix.to(torch.get_default_dtype()).clone(),
+                matrix.clone(),
                 persistent=False,
             )
             self.register_buffer(
                 f"scaled_basis_{l}",
-                (scale * matrix.T).to(torch.get_default_dtype()),
+                scale * matrix.T,
                 persistent=False,
             )
 
@@ -97,9 +99,9 @@ class CartesianHarmonics(torch.nn.Module):
             )
         values = []
         for mul, ir in self.irreps_out:
-            x = (powers[ir.l] @ getattr(self, f"basis_{ir.l}")) @ getattr(
+            x = (powers[ir.l] @ getattr(self, f"basis_{ir.l}").to(vectors)) @ getattr(
                 self, f"scaled_basis_{ir.l}"
-            )
+            ).to(vectors)
             values.extend([x] * mul)
         return torch.cat(values, dim=-1) if values else vectors[..., :0]
 

@@ -60,6 +60,7 @@ class TACELES(torch.nn.Module):
                 "LES repository: https://github.com/ChengUCB/les"
             ) from error
         self.les = Les(les_arguments=les_arguments)
+        self.les.geometry_precision = True
 
         readout_kwargs = {
             "num_layers": num_layers,
@@ -133,7 +134,7 @@ class TACELES(torch.nn.Module):
                 dtype=torch.int64,
             )
             values.append(local_output[local_indices, local_fidelity])
-        output = torch.stack(values, dim=0).sum(dim=0)
+        output = torch.stack(values, dim=0).to(torch.float64).sum(dim=0)
         return output.squeeze(-1) if irrep_dim == 1 else output
 
     def _readout_latent_quantities(

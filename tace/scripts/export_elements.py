@@ -13,7 +13,7 @@ import torch
 from tace.dataset.element import atomic_numbers, chemical_symbols
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models.adapter import TensorModel
-from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
+from tace.models.blocks import AtomicEnergy, ScaleShift
 from tace.models.linear import (
     e3nnElementLinear,
     e3nnLinear,
@@ -27,6 +27,7 @@ from tace.models.spherical.mtace import MagneticBasis
 from tace.models.spherical.prod import MaceACE, NonlinearCgtpACE
 from tace.models.spherical.symmetric_contraction import Contraction
 from tace.utils.env import enable_acceleration
+from tace.utils.precision import configure_model_precision
 from tace.utils.utils import torch_default_dtype
 
 
@@ -116,7 +117,8 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
             model.get_target_property(),
             model.get_embedding_property(),
             prune_removed_keys=True,
-        ).to(device=device, dtype=model.get_model_dtype())
+        )
+        configure_model_precision(selected, model.get_model_dtype(), device=device)
 
     # Identify element axes by the owning layer, not by coincidental tensor sizes.
     element_axes = {}
@@ -132,7 +134,7 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
                 element_axes[f"{name}.{key}"] = (0, 1.0)
         elif isinstance(module, MaceACE) and not module.agnostic:
             element_axes[f"{name}.weight"] = (0, 1.0)
-        elif isinstance(module, OneHotToAtomicEnergy):
+        elif isinstance(module, AtomicEnergy):
             element_axes[f"{name}.atomic_energy"] = (1, 1.0)
         elif isinstance(module, ScaleShift):
             for key in ("scale", "shift"):

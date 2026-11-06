@@ -10,6 +10,8 @@ import torch
 from omegaconf import ListConfig
 from torch import nn
 
+from tace.utils.precision import DATA_DTYPE
+
 from .common import has_valid_labels
 from .mse_fn import LOSS_FN
 from .registry import prepare_loss_function_kwargs
@@ -50,9 +52,7 @@ class UncertaintyLoss(nn.Module):
         )
         self.log_sigmas = nn.ParameterDict()
         for p, val in zip(loss_property, init_log_sigmas):
-            self.log_sigmas[p] = nn.Parameter(
-                torch.tensor(val, dtype=torch.get_default_dtype())
-            )
+            self.log_sigmas[p] = nn.Parameter(torch.tensor(val, dtype=DATA_DTYPE))
 
     def forward(self, pred, label):
         total_loss = 0.0
@@ -60,7 +60,7 @@ class UncertaintyLoss(nn.Module):
             zip(self.loss_property, self.loss_function_name)
         ):
             p_loss = LOSS_FN[fn_name](pred, label, **self.loss_function_kwargs[i])
-            log_sigma = self.log_sigmas[p]
+            log_sigma = self.log_sigmas[p].to(DATA_DTYPE)
             regularizer = log_sigma * has_valid_labels(label, p)
             total_loss += 0.5 * torch.exp(-log_sigma) * p_loss + regularizer
         return total_loss

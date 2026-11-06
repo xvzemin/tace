@@ -932,7 +932,8 @@ def get_embedding_property(cfg: Dict) -> List[str]:
             embedding_property.append(p)
     for target in get_target_property(cfg):
         required = (
-            PROPERTIES[target]["must_be_with"] + PROPERTIES[target]["requires_grad_with"]
+            PROPERTIES[target]["must_be_with"]
+            + PROPERTIES[target]["requires_grad_with"]
         )
         for p in required:
             if (

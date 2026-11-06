@@ -192,6 +192,11 @@ other form. Conversion returns a copy; recreate its optimizer before training.
 Precision and warmup
 --------------------
 
+Training precision is configured through ``dtype.model``, ``dtype.autocast``,
+and ``dtype.matmul``; see :doc:`training`. With ``dtype.matmul: null``,
+``TACE_MATMUL_PRECISION=ieee|tf32`` or ``TACE_USE_TF32=0|1`` selects the FP32
+matrix multiplication mode. Conflicting explicit settings are rejected.
+
 .. list-table:: Default TF32 for FP32 operations
    :header-rows: 1
    :widths: 40 30 30
@@ -210,7 +215,9 @@ Precision and warmup
      - Disabled
 
 Choose precision before compilation or export; changing the environment does
-not recompile an AOTI package.
+not recompile an AOTI package. Geometry, labels, and physical output reductions
+remain float64 independently of the network precision. Autocast and TF32 are
+alternative modes, not simultaneous settings.
 
 .. _tace-export-tutorial:
 

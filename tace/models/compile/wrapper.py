@@ -129,7 +129,7 @@ class CompileTensorModel(TensorModel):
     def _input_keys(self, data: Dict[str, torch.Tensor]) -> tuple[str, ...]:
         required = [
             "positions",
-            "node_attrs",
+            "node_type",
             "edge_index",
             "edge_shifts",
             "lattice",
@@ -275,7 +275,9 @@ class _FlatE3nnCompileModel(torch.nn.Module):
             data["positions"][target]
             - data["positions"][source]
             + torch.einsum(
-                "ni,nij->nj", data["edge_shifts"], data["lattice"][edge_batch]
+                "ni,nij->nj",
+                data["edge_shifts"].to(data["lattice"].dtype),
+                data["lattice"][edge_batch],
             )
         )
         edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
@@ -296,6 +298,7 @@ class _FlatE3nnCompileModel(torch.nn.Module):
             lattice=data["lattice"],
             node_fidelity=node_fidelity,
             num_atoms_arange=num_atoms_arange,
+            node_type=data["node_type"],
         )
 
     def _first_derivatives(
@@ -384,9 +387,9 @@ class _FlatE3nnLammpsCompileModel(torch.nn.Module):
             else torch.full_like(data["batch"], self.fidelity_idx, dtype=torch.int64)
         )
         nlocal = data["batch"].size(0)
-        nghosts = data["node_attrs"].size(0) - nlocal
-        dtype = data["node_attrs"].dtype
-        device = data["node_attrs"].device
+        nghosts = data["node_type"].size(0) - nlocal
+        dtype = data["edge_vector"].dtype
+        device = data["node_type"].device
         positions = torch.zeros((nlocal, 3), dtype=dtype, device=device)
         edge_vector = data["edge_vector"].requires_grad_(True)
         edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
@@ -402,4 +405,5 @@ class _FlatE3nnLammpsCompileModel(torch.nn.Module):
             lattice=torch.zeros((2, 3, 3), dtype=dtype, device=device),
             node_fidelity=node_fidelity,
             num_atoms_arange=torch.arange(nlocal, device=device, dtype=torch.int64),
+            node_type=data["node_type"],
         )

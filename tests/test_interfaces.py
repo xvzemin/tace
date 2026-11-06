@@ -56,6 +56,23 @@ def test_luna_acceleration_option(monkeypatch, interface, enabled, previous):
     assert os.environ.get("TACE_USE_LUNA") == ("1" if enabled else previous)
 
 
+@pytest.mark.parametrize("interface", ["ase", "torchsim"])
+@pytest.mark.parametrize("matmul", [None, "ieee", "tf32"])
+def test_matmul_precision_option(monkeypatch, interface, matmul):
+    if interface == "torchsim":
+        pytest.importorskip("torch_sim")
+        module = importlib.import_module("tace.interface.torchsim.torchsim")
+        factory = module.TACETorchSimCalc
+    else:
+        module = importlib.import_module("tace.interface.ase.calculator")
+        factory = module.TACEAseCalc
+    loader = Mock(side_effect=RuntimeError("model loading reached"))
+    monkeypatch.setattr(module, "load_tace", loader)
+    with pytest.raises(RuntimeError, match="model loading reached"):
+        factory("model.pt", device="cpu", matmul=matmul)
+    assert loader.call_args.kwargs["matmul"] == matmul
+
+
 @pytest.fixture(params=["TACE-OAM-7M", "TACE-OAM-L", "TECE-OAM-RRA-1.0"])
 def checkpoint(request):
     directory = os.environ.get("TACE_TEST_MODEL_DIR")
@@ -359,8 +376,9 @@ DTYPE = torch.float64
 
 
 class PairReadout(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, dtype=DTYPE):
         super().__init__()
+        self.model_dtype = dtype
         self.register_buffer("cutoff", torch.tensor(3.0, dtype=DTYPE))
         self.register_buffer("atomic_numbers", torch.tensor([13, 14]))
         self.target_property = ["energy", "forces", "stress"]
@@ -368,7 +386,7 @@ class PairReadout(torch.nn.Module):
         self.fidelity = {0: "first", 1: "second"}
 
     def forward(self, data, graph):
-        node_energy = data["node_attrs"][:, 1] + 3 * graph.node_fidelity
+        node_energy = (data["node_type"] == 1).to(torch.float64) + 3 * graph.node_fidelity
         node_energy = node_energy.index_add(
             0, data["edge_index"][0], graph.edge_vector.square().sum(-1)
         )
@@ -401,8 +419,9 @@ def torchsim_calculator():
     from tace.interface.torchsim import TACETorchSimCalc
 
     def create(**kwargs):
+        dtype = kwargs.pop("dtype", DTYPE)
         return TACETorchSimCalc(
-            TensorModel(PairReadout()), device=DEVICE, dtype=DTYPE, **kwargs
+            TensorModel(PairReadout(dtype)), device=DEVICE, dtype=dtype, **kwargs
         )
 
     return create
@@ -470,6 +489,26 @@ def test_torchsim_energy_only(torchsim_state, torchsim_calculator):
     actual = calc(torchsim_state)
     assert "forces" not in actual and "stress" not in actual
     assert not torchsim_state.positions.requires_grad
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_torchsim_geometry_precision(torchsim_state, torchsim_calculator, dtype):
+    calc = torchsim_calculator(dtype=dtype)
+    inputs = []
+    hook = calc.model.register_forward_pre_hook(
+        lambda module, args: inputs.append(args[0])
+    )
+    try:
+        output = calc(torchsim_state)
+    finally:
+        hook.remove()
+    assert calc.dtype == dtype
+    assert inputs[0]["positions"].dtype == torch.float64
+    assert inputs[0]["lattice"].dtype == torch.float64
+    assert inputs[0]["node_type"].dtype == torch.int64
+    assert inputs[0]["edge_shifts"].dtype == torch.int64
+    assert "node_attrs" not in inputs[0]
+    assert all(output[key].dtype == torch.float64 for key in ("energy", "forces", "stress"))
 
 
 @pytest.mark.parametrize("periodic", [False, True])

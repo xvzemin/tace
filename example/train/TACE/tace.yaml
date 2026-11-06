@@ -14,6 +14,11 @@ finetune_from_model: null
 
 finetune: null # this field equals ./finetune_config.yaml, auto read or write directly here
 
+dtype:
+  model: float32 # float32 or float64; graph data and geometry remain float64
+  autocast: null # null, bfloat16, or float16; requires model=float32
+  matmul: null # null: resolve environment/default; ieee or tf32: explicit selection
+
 misc:
   project_name: Example
   global_seed: 42
@@ -54,7 +59,6 @@ trainer:
   max_time: '90:00:00:00' # 90 days
   max_epochs: 20000
   min_epochs: 1        # null or int > 1
-  precision: 32        # only 32 or 64 are allowed, not allow bf16, fp16 ....
   strategy: auto # For single-GPU/multi-node training, use auto
   # strategy: # Recommended for single-node training.
   #   _target_: tace.utils.strategy.SimpleDDPStrategy
@@ -134,7 +138,6 @@ dataset:
   cache_size: 1024 # cache for faster load data from dataloader
   avg_graph_size_in_KB: 200 # in KB, the total disk usage equals the size of this multiplied by the total number of your structures.
   lmdb_wait_timeout: 86400 # in seconds; when training with multi-GPU, the maximum waiting time.
-  force_dtype: null # 32 or 64, if your data grapg saved in lmdb, but original float64, you can force to float32 for convenience
   keys: # all default value is the property name
     fidelity_idx_key: fidelity_idx
     energy_key: energy

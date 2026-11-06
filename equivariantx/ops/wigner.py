@@ -146,7 +146,7 @@ def wigner_D(frame, vectors, *, backend="cuda", method=None):
         return packed_wigner(
             vectors.detach(),
             frame.lmax,
-            [getattr(frame, f"cg_{l}") for l in range(2, frame.lmax + 1)],
+            [getattr(frame, f"cg_{l}").to(vectors) for l in range(2, frame.lmax + 1)],
         )
     aligned = alignment_cuda("None", [vectors])[0]
     matrices = [aligned.new_ones((vectors.size(0), 1))]
@@ -158,7 +158,7 @@ def wigner_D(frame, vectors, *, backend="cuda", method=None):
         )
         matrices.append(
             rotation(
-                getattr(frame, f"cg_{degree}"),
+                getattr(frame, f"cg_{degree}").to(aligned),
                 2,
                 [aligned, matrices[-1], placeholder],
             )

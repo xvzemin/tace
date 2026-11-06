@@ -58,11 +58,11 @@ def add_gaussian_noise_to_position(
     12. If `max_mean_force_norm` is not `None`, we skip denoising if the L2 norm of the sum of atomwise forces
         is greater than `max_mean_force_norm`.
     """
-    B = batch["node_attrs"].size(0)
+    B = batch["positions"].size(0)
     num_atoms = batch["ptr"][1:] - batch["ptr"][:-1]
     num_graphs = len(batch["ptr"]) - 1
-    dtype = batch["node_attrs"].dtype
-    device = batch["node_attrs"].device
+    dtype = batch["positions"].dtype
+    device = batch["positions"].device
     batch_index = batch["batch"]
 
     if not torch.rand(1).item() < prob:

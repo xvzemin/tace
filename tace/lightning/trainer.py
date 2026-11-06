@@ -16,11 +16,13 @@ from lightning.pytorch.callbacks import (
     StochasticWeightAveraging,
     TQDMProgressBar,
 )
+from lightning.pytorch.plugins.precision import MixedPrecision, Precision
 from torch_geometric.loader import DataLoader
 
 # from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from ..utils.callbacks import PrintMetricsCallback
-from ..utils.env import set_tf32
+from ..utils.env import acceleration_enabled
+from ..utils.precision import resolve_precision
 from ..utils.utils import log_parameters
 from .lit_model import LightningWrapperModel
 
@@ -157,15 +159,41 @@ def build_trainer(cfg: Dict, dataloader_valid: DataLoader = None) -> L.Trainer:
         trainer_cfg = cfg["trainer"]
         filter_trainer_cfg = {}
         for k, v in trainer_cfg.items():
-            filter_keys = ["logger", "callbacks"]
+            filter_keys = ["logger", "callbacks", "precision", "plugins"]
             if k not in filter_keys:
                 filter_trainer_cfg.update({k: v})
         num_batch = 2 if not cfg.get("dataset", {}).get("no_valid_set", False) else 0
         filter_trainer_cfg.update({"num_sanity_val_steps": num_batch})
+        policy = resolve_precision(cfg, training=True)
+        policy.apply()
+        if policy.autocast is not None:
+            if any(
+                acceleration_enabled(name)
+                for name in ("eqx", "oeq", "eqt", "cue", "luna")
+            ):
+                raise ValueError(
+                    "Autocast is not supported by the selected fused backend; disable it or set dtype.autocast=null."
+                )
+            import torch
+
+            plugin = MixedPrecision(
+                "bf16-mixed" if policy.autocast == "bfloat16" else "16-mixed",
+                device="cuda"
+                if torch.cuda.is_available() and trainer_cfg.get("accelerator") != "cpu"
+                else "cpu",
+            )
+        else:
+            plugin = Precision()
+            plugin.precision = "64-true" if policy.model == "float64" else "32-true"
+        plugins = [
+            instantiate(p) if isinstance(p, dict) else p
+            for p in trainer_cfg.get("plugins", []) or []
+        ]
         trainer = instantiate(
             filter_trainer_cfg,
             logger=logger_instance,
             callbacks=initialized_callbacks,
+            plugins=[*plugins, plugin],
             # _convert_="partial" # none, partial, all
         )
     except Exception as e:
@@ -190,7 +218,7 @@ def train(
     target_property,
     embedding_property: list[str] = [],
 ):
-    set_tf32(training=True)
+    resolve_precision(cfg, training=True).apply()
 
     # resume_ckpt = cfg.get("resume_from_model", None)
     # if resume_ckpt:

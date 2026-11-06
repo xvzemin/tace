@@ -9,7 +9,7 @@ from typing import Union
 import torch
 from e3nn.nn import Activation
 
-from ..linear import IndexedFeatures, e3nnLinear
+from ..linear import ElementEmbedding, IndexedFeatures, e3nnLinear
 from .base import EdgeEmbedding, EdgeUpdate
 
 
@@ -27,7 +27,7 @@ class IdentityEdgeEmbedding(EdgeEmbedding):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
@@ -61,7 +61,7 @@ class LinearEdgeEmbedding(EdgeEmbedding):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
@@ -98,7 +98,7 @@ class NonLinearEdgeEmbedding(EdgeEmbedding):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
@@ -121,11 +121,10 @@ class IdentityEdgeUpdate(EdgeUpdate):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         return edge_feats
@@ -143,14 +142,14 @@ class Element2EdgeUpdate(EdgeUpdate):
 
         self.out_dim = self.edge_embedding_channel + self.num_channel * 2
 
-        self.source_embedding = e3nnLinear(
-            f"{self.num_elements}x0e",
-            f"{self.num_channel}x0e",
+        self.source_embedding = ElementEmbedding(
+            self.num_elements,
+            self.num_channel,
             bias=self.use_bias,
         )
-        self.target_embedding = e3nnLinear(
-            f"{self.num_elements}x0e",
-            f"{self.num_channel}x0e",
+        self.target_embedding = ElementEmbedding(
+            self.num_elements,
+            self.num_channel,
             bias=self.use_bias,
         )
         if isinstance(self.source_embedding.weight, torch.Tensor):
@@ -163,16 +162,15 @@ class Element2EdgeUpdate(EdgeUpdate):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
-        node_type: torch.Tensor | None = None,
     ) -> IndexedFeatures:
         return (
             (edge_feats, None),
-            (self.target_embedding(node_attrs), edge_index[1]),
-            (self.source_embedding(node_attrs), edge_index[0]),
+            (self.target_embedding(node_type), edge_index[1]),
+            (self.source_embedding(node_type), edge_index[0]),
         )
 
 
@@ -199,15 +197,12 @@ class Element2EdgeUpdateV2(EdgeUpdate):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
-        node_type: torch.Tensor | None = None,
     ) -> IndexedFeatures:
 
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         return (
             (edge_feats * self.radial_scale, None),
             (self.target_embedding(node_type) * self.element_scale, edge_index[1]),

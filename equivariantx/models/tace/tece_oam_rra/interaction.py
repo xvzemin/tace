@@ -28,6 +28,17 @@ def stream(
     Other intermediates are recomputed in bounded tiles. CUDA frame arguments
     may contain dense matrices or packed degree blocks shared by both directions.
     """
+    from ....ops.radial import cast_radial
+
+    radial = cast_radial(radial, features.dtype)
+    projection = projection.to(features)
+    wigner = wigner.to(features)
+    wigner_inv = wigner_inv.to(features)
+    radial_basis = radial_basis.to(features)
+    if bias is not None:
+        bias = bias.to(features)
+    if cutoff is not None:
+        cutoff = cutoff.to(features)
     if bias is None:
         bias = projection.new_zeros(projection.shape[1])
     if cutoff is None:

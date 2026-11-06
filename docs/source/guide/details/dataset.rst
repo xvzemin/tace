@@ -3,7 +3,29 @@ dataset
 
 This field is used to store information about the sources of the train/valid/test set.
 It also controls whether the constructed graphs are saved locally, whether they are 
-loaded from specified files, and which keyscare used to read training labels from the input data.
+loaded from specified files, and which keys are used to read training labels from the input data.
+
+Graph precision and cache
+-------------------------
+
+Positions, cells, floating-point properties, and property weights are stored in
+float64. Atomic numbers, edge indices, periodic image indices, and fidelity
+indices are integers. Element features are constructed from indices in the
+model; graphs do not store one-hot element arrays.
+
+LMDB caches use versioned subdirectories under ``shard_dirs``. Source paths,
+file metadata, property keys, dataset splits, and neighbor-list settings select
+the cache. Network dtype and element ordering do not. Completed shard metadata
+allows loading and statistics without rereading source structures.
+
+Old caches are left untouched and rebuilt from source in the new namespace.
+Casting an old FP32 cache to FP64 cannot recover discarded precision. Incomplete
+caches are rejected; move them aside or select a new cache directory to rebuild.
+
+Augmentation creates sample-local tensors and does not overwrite cached data.
+
+Data augmentation
+-----------------
 
 ``augmentation`` is one symmetry-preserving transformation or a list of
 transformations applied only when training samples are read. ``null`` and an
@@ -112,8 +134,8 @@ key is selected by ``dataset.keys.fidelity_idx_key`` (default: ``fidelity_idx``)
 Without a source fidelity, existing metadata is preserved; unmarked structures
 still use head 0. These assignments do not modify the source files.
 
-Source checks run when raw data is read. If changing source fidelities with
-LMDB storage, use a new ``shard_dirs`` directory to rebuild the cached graphs.
+Source checks run when raw data is read. Changing configured source fidelities
+selects a new graph-cache namespace automatically.
 
 Example
 -------

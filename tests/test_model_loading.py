@@ -25,10 +25,32 @@ from tace.models.linear import switch_e3nn_weight_layout
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 from tace.models.spherical.tace import SphericalTACE
 from tace.scripts.export_elements import select_elements
+from tace.utils.precision import configure_model_precision
 from tace.utils.utils import torch_default_dtype
 
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def assert_model_precision(model, dtype):
+    geometry = {
+        id(child)
+        for module in model.modules()
+        if getattr(module, "geometry_precision", False)
+        for child in module.modules()
+    }
+    for module in model.modules():
+        for _, parameter in module.named_parameters(recurse=False):
+            assert parameter.dtype == (
+                torch.float64 if id(module) in geometry else dtype
+            )
+        for name, buffer in module.named_buffers(recurse=False):
+            if not buffer.is_floating_point():
+                continue
+            physical = id(module) in geometry or name in getattr(
+                module, "float64_buffers", ()
+            )
+            assert buffer.dtype == (torch.float64 if physical else dtype)
 
 
 def test_model_config_class_names():
@@ -89,12 +111,15 @@ def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, co
             models.compile if compiled else models, cls_name
         )
         assert restored.readout_fn.model_config["_target_"] == canonical
-        assert dict(restored.named_parameters()).keys() == dict(
-            reference.named_parameters()
-        ).keys()
+        assert (
+            dict(restored.named_parameters()).keys()
+            == dict(reference.named_parameters()).keys()
+        )
         actual = evaluate(restored)
         for key in ("energy", "forces", "stress"):
-            torch.testing.assert_close(actual[key], expected[key], atol=1e-10, rtol=1e-10)
+            torch.testing.assert_close(
+                actual[key], expected[key], atol=1e-10, rtol=1e-10
+            )
 
 
 @pytest.mark.parametrize(
@@ -151,7 +176,8 @@ def test_native_cartesian_model(
         config["product_basis"].update(type="nonlinear_cgtp", correlation=3)
     if interaction == "normalization":
         config["layer_norm"].update(
-            pre_norm_type="merge_layer_norm", final_norm_type="merge_rms_norm",
+            pre_norm_type="merge_layer_norm",
+            final_norm_type="merge_rms_norm",
             use_first_pre_norm=True,
         )
     if interaction in ("bilinear", "moe", "correlation3"):
@@ -221,7 +247,9 @@ def test_native_cartesian_model(
             isinstance(block, NonlinearIctdACE)
             for block in module.readout_fn.representation.products
         )
-        assert module.readout_fn.model_config["product_basis"]["type"] == "nonlinear_ictd"
+        assert (
+            module.readout_fn.model_config["product_basis"]["type"] == "nonlinear_ictd"
+        )
     if fused:
         for block in module.readout_fn.representation.interactions:
             assert block.use_eqx
@@ -234,7 +262,7 @@ def test_native_cartesian_model(
                     assert block.rejector.eqx_tp is not None
     data = dict(
         positions=torch.randn(3, 3, device=DEVICE),
-        node_attrs=torch.ones(3, 1, device=DEVICE),
+        node_type=torch.zeros(3, dtype=torch.long, device=DEVICE),
         edge_index=torch.tensor(
             [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device=DEVICE
         ),
@@ -304,7 +332,7 @@ def precision_model(request, monkeypatch):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch_default_dtype(request.param):
         model = create_model(config, statistics, ["energy", "forces", "stress"], [])
-    model.to(device=device, dtype=request.param).eval()
+    configure_model_precision(model, request.param, device=device).eval()
     # Saved physical state deliberately differs from the construction metadata.
     with torch.no_grad():
         model.readout_fn.atomic_energy_layer.atomic_energy.copy_(
@@ -334,7 +362,6 @@ def model_batch(model):
             embedding_property=[],
             training=False,
             neighborlist_backend="ase",
-            dtype=model.get_model_dtype(),
         )
         for atoms in structures
     ]
@@ -351,6 +378,11 @@ def save_checkpoint(model, path):
                 "cfg": {
                     "model": {"config": model.readout_fn.model_config},
                     "loss": {"loss_property": model.get_target_property()},
+                    "dtype": {
+                        "model": str(model.get_model_dtype()).split(".")[-1],
+                        "autocast": None,
+                        "matmul": "ieee",
+                    },
                 },
                 "statistics": model.readout_fn.statistics,
             },
@@ -366,12 +398,12 @@ def test_scale_shift_additivity(caplog, all_atoms):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     layer = ScaleShift([1], [{1: 2.0}], [{1: 0.5}], **options).to(device)
     energy = torch.full((2,), 3.0, device=device, dtype=torch.float64)
-    attrs = torch.ones(2, 1, device=device, dtype=torch.float64)
+    node_type = torch.zeros(2, device=device, dtype=torch.long)
     edges = torch.empty(2, 0, dtype=torch.long, device=device)
     fidelity = torch.zeros(2, dtype=torch.long, device=device)
     together = layer(
         energy,
-        attrs,
+        node_type,
         torch.tensor([0, 2], device=device),
         edges,
         torch.tensor([0, 0], device=device),
@@ -379,7 +411,7 @@ def test_scale_shift_additivity(caplog, all_atoms):
     )
     separate = layer(
         energy,
-        attrs,
+        node_type,
         torch.tensor([0, 1, 2], device=device),
         edges,
         torch.tensor([0, 1], device=device),
@@ -443,8 +475,7 @@ def test_model_precision_roundtrip(precision_model, tmp_path, dtype, format):
     loaded = load_tace(path, device=device, dtype=dtype).eval()
     assert torch.get_default_dtype() == default_dtype
     assert loaded.get_model_dtype() == dtype
-    assert all(p.dtype == dtype for p in loaded.parameters())
-    assert all(b.dtype == dtype for b in loaded.buffers() if b.is_floating_point())
+    assert_model_precision(loaded, dtype)
     for name, value in loaded.state_dict().items():
         if name.rsplit(".", 1)[-1].startswith(("_w3j_", "U_matrix_")):
             continue
@@ -452,11 +483,11 @@ def test_model_precision_roundtrip(precision_model, tmp_path, dtype, format):
             value, source.state_dict()[name].to(value), atol=0, rtol=0
         )
 
-    reference = deepcopy(source).to(dtype=dtype)
+    reference = configure_model_precision(deepcopy(source), dtype)
     expected = reference(model_batch(reference))
     actual = loaded(model_batch(loaded))
     for key in ("energy", "forces", "stress"):
-        assert actual[key].dtype == dtype
+        assert actual[key].dtype == torch.float64
         assert torch.isfinite(actual[key]).all()
         torch.testing.assert_close(actual[key], expected[key], atol=5e-6, rtol=5e-6)
 
@@ -473,9 +504,7 @@ def test_checkpoint_precision(precision_model, tmp_path, dtype):
     expected_dtype = dtype or precision_model.get_model_dtype()
     assert loaded.get_model_dtype() == expected_dtype
     assert torch.get_default_dtype() == default_dtype
-    assert all(
-        b.dtype == expected_dtype for b in loaded.buffers() if b.is_floating_point()
-    )
+    assert_model_precision(loaded, expected_dtype)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -555,7 +584,7 @@ def test_ase_mixed_precision_calculators(precision_model, tmp_path):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_graph_explicit_precision(dtype):
+def test_graph_precision_independent_of_network(dtype):
     from tace.dataset.element import TorchElement
 
     torch.set_default_dtype(torch.float64 if dtype == torch.float32 else torch.float32)
@@ -570,13 +599,19 @@ def test_graph_explicit_precision(dtype):
         embedding_property=[],
         training=True,
         neighborlist_backend="ase",
-        dtype=dtype,
     )
-    assert all(value.dtype == dtype for _, value in graph if value.is_floating_point())
+    assert all(
+        value.dtype == torch.float64
+        for _, value in graph
+        if torch.is_tensor(value) and value.is_floating_point()
+    )
     assert graph.edge_index.dtype == graph.atomic_numbers.dtype == torch.int64
     assert graph.pbc.dtype == torch.bool
     torch.testing.assert_close(
-        graph.positions, torch.tensor(atoms.positions, dtype=dtype), atol=0, rtol=0
+        graph.positions,
+        torch.tensor(atoms.positions, dtype=torch.float64),
+        atol=0,
+        rtol=0,
     )
 
 
@@ -634,7 +669,7 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
     model = create_model(config, statistics, ["energy", "forces", "stress"], [])
     if matrix:
         switch_e3nn_weight_layout(model, "matrix")
-    return model.to(device=DEVICE, dtype=torch.float64).eval()
+    return configure_model_precision(model, torch.float64, device=DEVICE).eval()
 
 
 def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
@@ -644,9 +679,7 @@ def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
                 [[0.0, 0.1, 0.0], [1.0, 0.0, 0.2], [0.1, 1.0, 0.0]],
                 device=DEVICE,
             ),
-            "node_attrs": model.get_torch_element()
-            .z2onehot(torch.tensor(numbers, device=DEVICE))
-            .to(torch.float64),
+            "atomic_numbers": torch.tensor(numbers, device=DEVICE),
             "edge_index": torch.tensor(
                 [[0, 1, 1, 2, 0, 2], [1, 0, 2, 1, 2, 0]], device=DEVICE
             ),
@@ -867,8 +900,7 @@ def test_cartesian_conversion(
         torch.testing.assert_close(p, parameters[name], rtol=0, atol=0)
     representation = module.readout_fn.representation
     assert all(
-        isinstance(block, O3IctdInteraction)
-        for block in representation.interactions
+        isinstance(block, O3IctdInteraction) for block in representation.interactions
     )
     assert representation.co3_angular_basis is not None
     assert representation.use_o3_angular_basis == (node_embedding == "spherical_tensor")
@@ -897,7 +929,7 @@ def test_cartesian_conversion(
             ],
             device=DEVICE,
         ),
-        node_attrs=torch.ones(5, 1, device=DEVICE),
+        node_type=torch.zeros(5, dtype=torch.long, device=DEVICE),
         edge_index=torch.tensor(
             [[0, 1, 0, 2, 1, 2, 3, 4], [1, 0, 2, 0, 2, 1, 4, 3]], device=DEVICE
         ),
@@ -1014,13 +1046,9 @@ def test_load_foundation_matches_file(foundation_model, dtype):
         embedding_property=[],
         training=False,
         neighborlist_backend="ase",
-        dtype=dtype,
     )
     data = Batch.from_data_list([graph]).to(device).to_dict()
-    results = [
-        model({key: value.clone() for key, value in data.items()})
-        for model in (reference, module)
-    ]
+    results = [model(deepcopy(data)) for model in (reference, module)]
     for key in ("energy", "forces"):
         torch.testing.assert_close(results[0][key], results[1][key])
     assert load_tace(module, device=device, target_property=["energy"]) is module
@@ -1246,7 +1274,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
                 [0.7, -0.3, 1.1],
             ]
         ),
-        node_attrs=torch.ones(5, 1),
+        node_type=torch.zeros(5, dtype=torch.long),
         edge_index=torch.tensor([[0, 1, 0, 2, 1, 2, 3, 4], [1, 0, 2, 0, 2, 1, 4, 3]]),
         edge_shifts=torch.zeros(8, 3),
         lattice=torch.eye(3).repeat(2, 1, 1) * 8,

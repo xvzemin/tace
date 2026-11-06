@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import lmdb
+import torch
 import torch.distributed as dist
 from hydra.utils import instantiate
 from lightning.pytorch import LightningDataModule
@@ -21,6 +22,11 @@ from lightning.pytorch.utilities.rank_zero import rank_zero_info, rank_zero_only
 from torch.utils.data import Dataset
 
 from .augmentation import AugmentedDataset, validate_augmentations
+from .cache import (
+    graph_cache_directories,
+    read_cache_metadata,
+    write_cache_metadata,
+)
 from .dataloader import build_statistics_dataloader
 from .element import TorchElement, build_element_lookup
 from .graph import from_atoms
@@ -47,6 +53,7 @@ class GraphDatasetLMDB(Dataset):
         self.cache = {}  # (shard_idx, local_idx) -> graph
         self.envs = [None] * len(self.lmdb_paths)
         self.txns = [None] * len(self.lmdb_paths)
+        self.validated = [False] * len(self.lmdb_paths)
         self.lengths = []
 
         if in_memory:
@@ -129,6 +136,20 @@ class GraphDatasetLMDB(Dataset):
             )
 
         graph = pickle.loads(value)
+        if not self.validated[shard_idx]:
+            if "node_attrs" in graph or "node_type" in graph:
+                raise ValueError(
+                    "The graph cache contains model-dependent element features. "
+                    "Rebuild it from the source structures using the current data schema."
+                )
+            for name, tensor in graph.items():
+                if torch.is_tensor(tensor) and tensor.is_floating_point():
+                    if tensor.dtype != torch.float64:
+                        raise ValueError(
+                            f"Cached {name} uses {tensor.dtype}, not float64. "
+                            "Rebuild the cache from source; casting cannot restore precision."
+                        )
+            self.validated[shard_idx] = True
 
         if self.cache_size > 0:
             if len(self.cache) >= self.cache_size:
@@ -239,11 +260,22 @@ def create_graphs(
         paths = []
         for directory in shard_dirs:
             paths.extend(sorted(directory.glob(f"{stage}_shard*.lmdb")))
-        return paths
+        return sorted(paths, key=lambda path: path.name)
 
     # if shards already exist, load them
     lmdb_paths = _collect_lmdb_paths()
-    if lmdb_paths:
+    metadata = read_cache_metadata(shard_dirs, stage)
+    cache_state = [bool(lmdb_paths and metadata), bool(lmdb_paths and metadata is None)]
+    if world_size > 1:
+        dist.broadcast_object_list(cache_state, src=0)
+    if cache_state[1]:
+        raise ValueError(
+            f"Incomplete or outdated {stage} graph cache in {shard_dirs}. "
+            "Choose a new cache directory or move these shards before rebuilding."
+        )
+    if cache_state[0]:
+        lmdb_paths = _collect_lmdb_paths()
+        metadata = read_cache_metadata(shard_dirs, stage)
         rank_zero_info(
             f"Found existing LMDB files for {stage}: {len(lmdb_paths)} shards"
         )
@@ -251,6 +283,7 @@ def create_graphs(
             lmdb_paths,
             in_memory=False,
             cache_size=cache_size,
+            shard_lengths=[metadata["shards"][path.name] for path in lmdb_paths],
         )
 
     # Only rank 0 will create LMDB shards (if atoms_list provided)
@@ -264,11 +297,14 @@ def create_graphs(
         n_atoms = len(atoms_list)
         # choose directory as round-robin across provided shard_dirs for distribution
         n_dirs = max(1, len(shard_dirs))
+        shard_lengths = {}
+        atomic_numbers = set()
         for d in shard_dirs:
             d.mkdir(parents=True, exist_ok=True)
 
         for idx, atoms in enumerate(atoms_list):
             graph = from_atoms(element, atoms, **for_dataset)
+            atomic_numbers.update(atoms.get_atomic_numbers().tolist())
             buffer.append(pickle.dumps(graph, protocol=pickle.HIGHEST_PROTOCOL))
 
             if len(buffer) >= shard_size or idx == n_atoms - 1:
@@ -278,7 +314,9 @@ def create_graphs(
                 if temp_path.exists():
                     shutil.rmtree(temp_path)
                 if lmdb_path.exists():
-                    shutil.rmtree(lmdb_path)
+                    raise FileExistsError(
+                        f"Refusing to overwrite graph cache: {lmdb_path}"
+                    )
 
                 serialized_graphs = buffer
                 avg_graph_size = avg_graph_size_in_KB * 1024
@@ -328,10 +366,12 @@ def create_graphs(
                         time.sleep(1)
 
                 rank_zero_info(f"Saved shard {lmdb_path} with {len(buffer)} graphs")
+                shard_lengths[lmdb_path.name] = len(buffer)
                 buffer.clear()
                 shard_idx += 1
                 gc.collect()
 
+        write_cache_metadata(shard_dirs, stage, shard_lengths, atomic_numbers)
         rank_zero_info(f"All {n_atoms} graphs saved successfully for stage={stage}")
         gc.collect()
 
@@ -343,11 +383,11 @@ def create_graphs(
             poll_interval = 1.0
             while waited < lmdb_wait_timeout:
                 lmdb_paths = _collect_lmdb_paths()
-                if lmdb_paths:
+                if read_cache_metadata(shard_dirs, stage) is not None:
                     break
                 time.sleep(poll_interval)
                 waited += poll_interval
-            if not lmdb_paths:
+            if read_cache_metadata(shard_dirs, stage) is None:
                 # after timeout, still no files -> error to avoid silent hang
                 raise RuntimeError(
                     f"Timeout: no LMDB files for stage={stage} found after {lmdb_wait_timeout}s"
@@ -361,10 +401,14 @@ def create_graphs(
         raise RuntimeError(f"No LMDB files found for {stage} after creation")
 
     rank_zero_info(f"Loaded {len(lmdb_paths)} LMDB shards for {stage}")
+    metadata = read_cache_metadata(shard_dirs, stage)
+    if metadata is None:
+        raise RuntimeError(f"Graph cache metadata is missing for {stage}")
     dataset = GraphDatasetLMDB(
         lmdb_paths,
         in_memory=False,
         cache_size=cache_size,
+        shard_lengths=[metadata["shards"][path.name] for path in lmdb_paths],
     )
     return dataset
 
@@ -396,9 +440,9 @@ class GraphDataModule(LightningDataModule):
         self.threeAtomsList = threeAtomsList
 
         self.storage_mode = cfg.get("dataset", {}).get("storage_mode", "memory")
-        self.shard_dirs = [
-            Path(p) for p in cfg.get("dataset", {}).get("shard_dirs", ["graphCache"])
-        ]
+        self.shard_dirs = graph_cache_directories(
+            cfg, target_property, embedding_property, keyspec
+        )
         test_pattern = re.compile(r"^test(\d+)_shard\d+\.lmdb$")
         test_ids = set()
         for shard_dir in self.shard_dirs:
@@ -406,7 +450,7 @@ class GraphDataModule(LightningDataModule):
                 continue
             for f in shard_dir.iterdir():
                 m = test_pattern.match(f.name)
-                if m:
+                if m and read_cache_metadata(self.shard_dirs, f"test{m.group(1)}"):
                     test_ids.add(int(m.group(1)))
         self.presave_test_sets = bool(test_ids)
         self.num_test_sets = len(test_ids)
@@ -434,9 +478,7 @@ class GraphDataModule(LightningDataModule):
         logging.info(f"Neighborlist backend is {self.neighborlist_backend}")
 
     def _stage_cache_exists(self, stage: str) -> bool:
-        return any(
-            any(directory.glob(f"{stage}_shard*.lmdb")) for directory in self.shard_dirs
-        )
+        return read_cache_metadata(self.shard_dirs, stage) is not None
 
     def _all_required_caches_exist(self) -> bool:
         required_stages = ["train"]
@@ -706,7 +748,9 @@ def load_cached_datamodule(
     dataset_config = cfg["dataset"]
     if dataset_config.get("storage_mode", "memory") != "lmdb":
         return None
-    directories = [Path(p) for p in dataset_config.get("shard_dirs", ["graphCache"])]
+    directories = graph_cache_directories(
+        cfg, target_property, embedding_property, keyspec
+    )
     stages = ["train"]
     if not dataset_config.get("no_valid_set", False):
         stages.append("valid")
@@ -714,72 +758,29 @@ def load_cached_datamodule(
     if test_files:
         num_test_sets = len(test_files) if isinstance(test_files, list) else 1
         stages.extend(f"test{idx}" for idx in range(num_test_sets))
-    paths = {
-        stage: [
-            path
-            for directory in directories
-            for path in sorted(directory.glob(f"{stage}_shard*.lmdb"))
-        ]
-        for stage in stages
-    }
-    if not all(paths.values()):
+    metadata = {stage: read_cache_metadata(directories, stage) for stage in stages}
+    if any(value is None for value in metadata.values()):
         return None
 
     model_config = cfg["model"]["config"]
+    present_elements = {
+        int(z)
+        for stage in ("train", "valid")
+        if stage in metadata
+        for z in metadata[stage]["atomic_numbers"]
+    }
     atomic_numbers = model_config.get("atomic_numbers")
-    if atomic_numbers is not None:
-        atomic_numbers = sorted(atomic_numbers)
-    else:
-        configured_elements = {
+    if atomic_numbers is not None and not present_elements.issubset(atomic_numbers):
+        raise ValueError("Configured elements do not include all cached atomic numbers")
+    element_mapping = sorted(
+        present_elements
+        | set(atomic_numbers or [])
+        | {
             int(z)
-            for fidelity in model_config["fidelity"]
+            for fidelity in model_config.get("fidelity", [])
             for z in (fidelity.get("atomic_energy") or {})
         }
-        atomic_numbers = sorted(configured_elements) or None
-
-    element_mapping = None
-    for stage in ("train", "valid"):
-        if stage not in paths:
-            continue
-        dataset = GraphDatasetLMDB(paths[stage], cache_size=0)
-        try:
-            for graph in dataset:
-                num_elements = graph["node_attrs"].shape[-1]
-                if element_mapping is None:
-                    if (
-                        atomic_numbers is not None
-                        and len(atomic_numbers) == num_elements
-                    ):
-                        element_mapping = list(atomic_numbers)
-                    else:
-                        element_mapping = [None] * num_elements
-                if len(element_mapping) != num_elements:
-                    raise ValueError("LMDB shards use inconsistent element mappings")
-                indices = graph["node_attrs"].argmax(dim=-1).tolist()
-                for index, z in zip(indices, graph["atomic_numbers"].tolist()):
-                    if element_mapping[index] not in (None, z):
-                        raise ValueError(
-                            "Configured elements do not match the LMDB cache"
-                        )
-                    element_mapping[index] = z
-                if None not in element_mapping:
-                    break
-        finally:
-            dataset.close()
-        if element_mapping is not None and None not in element_mapping:
-            break
-    if element_mapping is None or None in element_mapping:
-        raise ValueError(
-            "Cannot recover all elements from the LMDB cache. Set "
-            "model.config.atomic_numbers to the element list used to build it."
-        )
-    if element_mapping != sorted(set(element_mapping)):
-        raise ValueError("LMDB element mapping must be ordered by atomic number")
-    if (
-        model_config.get("atomic_numbers") is not None
-        and atomic_numbers != element_mapping
-    ):
-        raise ValueError("Configured elements do not match the LMDB cache")
+    )
 
     logging.info("Using existing LMDB graphs; skipping source-file reading")
     datamodule = build_datamodule(

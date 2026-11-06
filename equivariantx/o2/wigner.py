@@ -32,6 +32,8 @@ class WignerD(torch.nn.Module):
     [torch.Size([2, 1, 1]), torch.Size([2, 3, 3]), torch.Size([2, 5, 5])]
     """
 
+    geometry_precision = True
+
     def __init__(
         self,
         mmax: int,
@@ -57,7 +59,10 @@ class WignerD(torch.nn.Module):
         self.method = method
 
         for l in range(2, self.lmax + 1):
-            self.register_buffer(f"cg_{l}", o3.wigner_3j(1, l - 1, l), persistent=False)
+            self.register_buffer(
+                f"cg_{l}", o3.wigner_3j(1, l - 1, l, dtype=torch.float64),
+                persistent=False,
+            )
 
         local_indices = []
         inverse_scale = []
@@ -75,7 +80,7 @@ class WignerD(torch.nn.Module):
         )
         self.register_buffer(
             "inverse_scale",
-            torch.tensor(inverse_scale).view(1, 1, -1),
+            torch.tensor(inverse_scale, dtype=torch.float64).view(1, 1, -1),
             persistent=False,
         )
         local_rows = {index: row for row, index in enumerate(local_indices)}
@@ -130,7 +135,7 @@ class WignerD(torch.nn.Module):
         )
         wigner_inv = wigner.transpose(1, 2).contiguous()
         if self.mmax < self.lmax:
-            wigner_inv = wigner_inv * self.inverse_scale
+            wigner_inv = wigner_inv * self.inverse_scale.to(wigner_inv)
         return wigner, wigner_inv
 
     def forward_packed(self, vectors: torch.Tensor, *, method=None) -> torch.Tensor:
@@ -217,7 +222,7 @@ class WignerD(torch.nn.Module):
         if self.lmax >= 1:
             matrices.append(rotation)
         for l in range(2, self.lmax + 1):
-            cg = getattr(self, f"cg_{l}")
+            cg = getattr(self, f"cg_{l}").to(rotation)
             matrix = torch.einsum("abm,eac->ebmc", cg, rotation)
             matrix = torch.einsum("ebmc,ebd->emcd", matrix, matrices[-1])
             matrix = torch.einsum("emcd,cdn->emn", matrix, cg)

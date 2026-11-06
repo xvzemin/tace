@@ -6,6 +6,13 @@ from ..utils.metadata import parse_metadata
 from ..utils.program import Program
 
 
+def cast_radial(radial, dtype):
+    """Convert radial inputs to the network dtype without materializing gathers."""
+    if isinstance(radial, tuple):
+        return tuple((value.to(dtype=dtype), storage) for value, storage in radial)
+    return radial.to(dtype=dtype)
+
+
 def compose_radial(metadata, inputs, slot, network):
     """Replace an edge input by a tiled radial network evaluation."""
     from ..models.radial import radial_program

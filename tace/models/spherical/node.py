@@ -14,7 +14,7 @@ from equivariantx import o2
 
 from ...utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
-from ..linear import e3nnElementLinear, e3nnLinear
+from ..linear import ElementEmbedding, e3nnElementLinear, e3nnLinear
 from ..mlp import MLP
 from .base import NodeEmbedding, NodeUpdate
 
@@ -66,17 +66,14 @@ class LinearNodeEmbedding(NodeEmbedding):
 
     def forward(
         self,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attrs: torch.Tensor,
         cutoff: Union[torch.Tensor, None],
         wigner,
         wigner_inv: Union[torch.Tensor, None],
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         return self.embedding(node_type)
 
 
@@ -119,8 +116,8 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
                 for ell in range(min(self.Lmax, self.lmax) + 1)
             ]
         )
-        self.node_embedding = e3nnLinear(
-            f"{self.num_elements}x0e", f"{self.num_channel}x0e", bias=self.bias
+        self.node_embedding = ElementEmbedding(
+            self.num_elements, self.num_channel, bias=self.bias
         )
         input_dim = self.num_radial_basis + (
             2 * self.num_channel if self.element_dependent else 0
@@ -154,18 +151,17 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
 
     def forward(
         self,
-        node_attrs,
+        node_type,
         edge_feats,
         edge_index,
         edge_attrs,
         cutoff,
         wigner,
         wigner_inv,
-        node_type=None,
     ):
         """Return aggregated node features in flattened ``mul_ir`` layout."""
         source, target = edge_index
-        scalars = self.node_embedding(node_attrs)
+        scalars = self.node_embedding(node_type)
         if self.element_dependent:
             edge_feats = torch.cat(
                 (edge_feats, scalars[source], scalars[target]), dim=-1
@@ -190,7 +186,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         if cutoff is not None:
             message = message * cutoff
         node_feats = (
-            scatter_sum(message, target, dim=0, dim_size=node_attrs.shape[0])
+            scatter_sum(message, target, dim=0, dim_size=node_type.shape[0])
             / self.normalization
         )
         return self.reshape(node_feats)
@@ -227,8 +223,7 @@ class IdentityNodeUpdate(NodeUpdate):
     def forward(
         self,
         magnetic_radial_basis: torch.Tensor,
-        node_attrs: torch.Tensor,
-        node_type: torch.Tensor | None = None,
+        node_type: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return magnetic_radial_basis, magnetic_radial_basis
 
@@ -248,10 +243,9 @@ class ElementNodeUpdate(NodeUpdate):
     def forward(
         self,
         magnetic_radial_basis: torch.Tensor,
-        node_attrs: torch.Tensor,
-        node_type: torch.Tensor | None = None,
+        node_type: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        node_info = self.embedding(magnetic_radial_basis, node_attrs, node_type)
+        node_info = self.embedding(magnetic_radial_basis, node_type)
         return node_info, node_info
 
 
@@ -278,12 +272,11 @@ class Element2NodeUpdate(NodeUpdate):
     def forward(
         self,
         magnetic_radial_basis: torch.Tensor,
-        node_attrs: torch.Tensor,
-        node_type: torch.Tensor | None = None,
+        node_type: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return (
-            self.source_embedding(magnetic_radial_basis, node_attrs, node_type),
-            self.target_embedding(magnetic_radial_basis, node_attrs, node_type),
+            self.source_embedding(magnetic_radial_basis, node_type),
+            self.target_embedding(magnetic_radial_basis, node_type),
         )
 
 

@@ -19,7 +19,6 @@ def read_properties(
     atoms: ase.Atoms,
     keyspec: KeySpecification,
     property_names: List[str],
-    dtype: torch.dtype,
     periodic_cell: bool,
     num_edges: Optional[int] = None,
 ) -> dict[str, torch.Tensor]:
@@ -53,7 +52,7 @@ def read_properties(
                 )
                 weight = 0.0
             if kind == "float":
-                value = torch.tensor(value, dtype=dtype)
+                value = torch.tensor(value, dtype=torch.float64)
             elif kind == "int":
                 value = torch.tensor(np.round(value), dtype=torch.int64)
             else:
@@ -82,9 +81,9 @@ def read_properties(
 
             data[name] = value
             data[f"{name}_weight"] = (
-                torch.tensor(weight, dtype=dtype).reshape(1)
+                torch.tensor(weight, dtype=torch.float64).reshape(1)
                 if weight is not None
-                else torch.tensor(1.0, dtype=dtype)
+                else torch.tensor(1.0, dtype=torch.float64)
             )
         except (TypeError, ValueError, RuntimeError) as exc:
             raise RuntimeError(f"Failed to read property {name}: {exc}") from exc
@@ -101,21 +100,25 @@ def from_atoms(
     embedding_property: List[str],
     training: bool = True,
     neighborlist_backend: str = "matscipy",
-    dtype: Optional[torch.dtype] = None,
     **kwargs,
 ):
-    """Build a neighbor graph with requested labels and embedding properties."""
-    dtype = dtype or torch.get_default_dtype()
+    """Build a graph with float64 physical data and integer atom and edge indices."""
+    if "dtype" in kwargs:
+        raise TypeError(
+            "Graph data always use float64; set the model dtype separately."
+        )
     atomic_numbers = atoms.get_atomic_numbers()
     pbc = tuple(atoms.get_pbc())
-    lattice = np.array(atoms.get_cell())
+    lattice = np.array(atoms.get_cell(), dtype=np.float64)
     if not np.isfinite(lattice).all():
         raise ValueError("The cell must contain finite values.")
     volume = abs(np.linalg.det(lattice))
     if all(pbc) and volume == 0:
         raise ValueError("A fully periodic structure requires a non-singular cell.")
     periodic_cell = any(pbc) and volume > 0
-    positions = atoms.get_positions()
+    positions = np.asarray(atoms.get_positions(), dtype=np.float64)
+    if not np.isfinite(positions).all():
+        raise ValueError("Positions must contain finite values.")
     edge_index, edge_shifts, pbc, lattice = get_neighborhood(
         positions=positions,
         cutoff=cutoff,
@@ -126,14 +129,13 @@ def from_atoms(
     )
     atomic_numbers = torch.tensor(atomic_numbers, dtype=torch.int64)
     data_dict = {
-        "entropy": torch.tensor(atoms.info.get("entropy", 1.0), dtype=dtype),
+        "entropy": torch.tensor(atoms.info.get("entropy", 1.0), dtype=torch.float64),
         "atomic_numbers": atomic_numbers,
-        "lattice": torch.tensor(lattice, dtype=dtype).reshape(1, 3, 3),
+        "lattice": torch.tensor(lattice, dtype=torch.float64).reshape(1, 3, 3),
         "pbc": torch.tensor([pbc], dtype=torch.bool),
-        "positions": torch.tensor(positions, dtype=dtype),
-        "node_attrs": element.z2onehot(atomic_numbers).to(dtype=dtype),
+        "positions": torch.tensor(positions, dtype=torch.float64),
         "edge_index": torch.tensor(edge_index, dtype=torch.int64),
-        "edge_shifts": torch.tensor(edge_shifts, dtype=dtype),
+        "edge_shifts": torch.tensor(edge_shifts, dtype=torch.int64),
         "fidelity_idx": torch.tensor(
             atoms.info.get(keyspec.info_keys["fidelity_idx"], 0), dtype=torch.int64
         ),
@@ -143,10 +145,9 @@ def from_atoms(
             atoms,
             keyspec,
             get_need_property(target_property, embedding_property, training),
-            dtype,
             periodic_cell,
             num_edges=edge_index.shape[1],
         )
     )
 
-    return Data(**data_dict)
+    return Data(num_nodes=len(atoms), **data_dict)

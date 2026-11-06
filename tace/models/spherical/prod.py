@@ -105,17 +105,14 @@ class CgtpACE(Product):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         sc: torch.Tensor,
         batch: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.agnostic:
             for_coefs = {}
         else:
-            if node_type is None:
-                node_type = node_attrs.argmax(dim=-1)
-            for_coefs = {"attrs": node_attrs, "node_type": node_type}
+            for_coefs = {"node_type": node_type}
 
         node_feats = self.linear_up(node_feats)
         corr_feats = node_feats
@@ -149,7 +146,7 @@ class CgtpACE(Product):
                     bias = (
                         coef.bias
                         if self.agnostic
-                        else node_attrs @ coef.bias.reshape(self.num_elements, -1)
+                        else coef.bias.reshape(self.num_elements, -1)[node_type]
                     )
                     outs = (
                         outs + bias.index_select(-1, coef._bias_index) * coef._bias_mask
@@ -251,17 +248,14 @@ class MaceACE(Product):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         sc: torch.Tensor | None,
         batch: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.agnostic:
             node_type = torch.zeros(
                 node_feats.shape[0], dtype=torch.long, device=node_feats.device
             )
-        elif node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         features = self.reshape(self.linear_up(node_feats))
         output = self.linear(self.product(features, self.weight, node_type))
         if hasattr(self, "stochastic_depth"):
@@ -378,13 +372,10 @@ class NonlinearCgtpACE(Product):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         sc: torch.Tensor | None,
         batch: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         if (
             node_feats.is_cuda
             and node_feats.dtype in (torch.float32, torch.float64)

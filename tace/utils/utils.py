@@ -6,7 +6,7 @@
 import contextlib
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 import torch
@@ -15,7 +15,7 @@ from omegaconf import DictConfig, ListConfig
 from packaging import version
 from torch import Tensor
 
-from tace.utils.env import set_tf32
+from tace.utils.precision import log_precision, resolve_precision
 
 
 def set_global_seed(cfg: Dict) -> None:
@@ -32,24 +32,9 @@ def set_global_seed(cfg: Dict) -> None:
 
 
 def set_precision(cfg: Dict) -> None:
-    precision = cfg["trainer"]["precision"]
-    FLOAT64 = {"64-true", "64", 64}
-    FLOAT32 = {"32-true", "32", 32}
-    FLOAT16 = {"16-mixed", "16", 16}
-    BFLOAT16 = {"bf16-mixed", "bf16"}
-    ALLOWED_PRECISIONS = FLOAT64 | FLOAT32 | FLOAT16 | BFLOAT16
-    assert precision is not None and precision in ALLOWED_PRECISIONS, (
-        f"Invalid precision setting: {precision!r}. "
-        f"Must be one of: {ALLOWED_PRECISIONS}"
-    )
-    if precision in FLOAT64:
-        torch.set_default_dtype(torch.float64)
-    elif precision in FLOAT32:
-        torch.set_default_dtype(torch.float32)
-    elif precision in FLOAT16 or precision in BFLOAT16:
-        torch.set_default_dtype(torch.float32)
-
-    set_tf32(training=True)
+    policy = resolve_precision(cfg, training=True)
+    policy.apply()
+    log_precision(policy)
 
 
 def num_params(model) -> None:

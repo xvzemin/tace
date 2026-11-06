@@ -284,7 +284,7 @@ def test_constant_construction_precision():
     from e3nn import o3
 
     from tace.models.angular import CartesianHarmonics
-    from tace.models.blocks import OneHotToAtomicEnergy, ScaleShift
+    from tace.models.blocks import AtomicEnergy, ScaleShift
     from tace.models.linear import e3nnLinear
     from tace.models.radial import (
         AgnesiTransform,
@@ -318,7 +318,7 @@ def test_constant_construction_precision():
                 AgnesiTransform(),
                 SoftTransform(),
                 ZBLBasis("cosine"),
-                OneHotToAtomicEnergy([{1: -0.123456789}], [1]),
+                AtomicEnergy([{1: -0.123456789}], [1]),
                 ScaleShift([1], [{1: 0.123456789}], [{1: -0.123456789}]),
                 MagneticBasis([3.123456789], 4, 1, [1]),
                 CartesianHarmonics(3),
@@ -339,7 +339,10 @@ def test_constant_construction_precision():
         }
         assert buffers
         assert all(value.dtype == torch.float64 for value in buffers.values())
-        assert all(parameter.dtype == dtype for parameter in modules.parameters())
+        assert all(
+            parameter.dtype in (dtype, torch.float64)
+            for parameter in modules.parameters()
+        )
         constants.append(buffers)
 
     assert constants[0].keys() == constants[1].keys()
@@ -352,7 +355,7 @@ def test_constant_construction_precision():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("num_fidelities", [1, 2])
 def test_atomic_energy_lookup(dtype, num_fidelities):
-    from tace.models.blocks import OneHotToAtomicEnergy
+    from tace.models.blocks import AtomicEnergy
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     elements = list(range(1, 103))
@@ -360,27 +363,92 @@ def test_atomic_energy_lookup(dtype, num_fidelities):
         {z: -100_000.123456789 * z - fidelity for z in elements}
         for fidelity in range(num_fidelities)
     ]
-    module = OneHotToAtomicEnergy(energies, elements).to(device=device, dtype=dtype)
+    module = AtomicEnergy(energies, elements).to(device=device)
     node_type = torch.arange(8192, device=device) % len(elements)
-    features = torch.nn.functional.one_hot(node_type, len(elements)).to(dtype)
     expected = module.atomic_energy.T[node_type]
     allow_tf32 = torch.backends.cuda.matmul.allow_tf32
     try:
         torch.backends.cuda.matmul.allow_tf32 = True
         for n in (0, 1, 128, 3072, 8192):
-            for indices in (None, node_type[:n]):
-                torch.testing.assert_close(
-                    module(features[:n], node_type=indices),
-                    expected[:n],
-                    atol=0,
-                    rtol=0,
-                )
+            torch.testing.assert_close(
+                module(node_type[:n]), expected[:n], atol=0, rtol=0
+            )
         compiled = torch.compile(module, fullgraph=True)
-        torch.testing.assert_close(
-            compiled(features, node_type), expected, atol=0, rtol=0
-        )
+        torch.testing.assert_close(compiled(node_type), expected, atol=0, rtol=0)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+
+
+@pytest.mark.parametrize("space", ["spherical", "cartesian"])
+def test_model_dtype_conversion(space):
+    from tace.models.adapter import TensorModel
+    from tace.utils.precision import configure_model_precision
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        _target_=f"tace.models.{space.title()}TACE",
+        num_layers=1,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        cutoff=4.1234567890123,
+        max_neighbors=None,
+    )
+    config["radial_basis"].update(hidden=[4], trainable=True, apply_cutoff=False)
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    statistics = [
+        {
+            "atomic_numbers": [1],
+            "atomic_energy": {1: -100000.1234567890123},
+            "avg_num_neighbors": 2.0,
+        }
+    ]
+    model = create_model(config, statistics, ["energy", "forces"], [])
+    readout = model.readout_fn
+    atomic_energy = readout.atomic_energy_layer
+    atomic_energy.register_buffer("alias", atomic_energy.atomic_energy)
+    atomic_energy.float64_buffers = ("atomic_energy", "alias")
+    energy = atomic_energy.atomic_energy.clone()
+    cutoff = readout.cutoff.clone()
+    radial = next(
+        module for module in readout.modules() if type(module).__name__ == "RadialBasis"
+    )
+    physical = next(radial.parameters())
+    physical.grad = torch.full_like(physical, 0.1234567890123)
+    value, gradient = physical.detach().clone(), physical.grad.clone()
+    for wrapper in (TensorModel, CompileTensorModel):
+        model = wrapper(readout)
+        for dtype, convert in (
+            (torch.float32, lambda m: m.float()),
+            (torch.float64, lambda m: m.double()),
+            (torch.float32, lambda m: m.to(dtype=torch.float32)),
+            (torch.float64, lambda m: configure_model_precision(m, torch.float64)),
+        ):
+            if isinstance(model, CompileTensorModel):
+                model._compiled_cache["test"] = None
+            assert convert(model) is model
+            assert model.get_model_dtype() == dtype
+            assert readout.representation.model_dtype == dtype
+            assert (
+                next(readout.representation.node_embedding.parameters()).dtype == dtype
+            )
+            assert atomic_energy.atomic_energy is atomic_energy.alias
+            torch.testing.assert_close(
+                atomic_energy.atomic_energy, energy, atol=0, rtol=0
+            )
+            torch.testing.assert_close(readout.cutoff, cutoff, atol=0, rtol=0)
+            torch.testing.assert_close(physical, value, atol=0, rtol=0)
+            torch.testing.assert_close(physical.grad, gradient, atol=0, rtol=0)
+            if isinstance(model, CompileTensorModel):
+                assert not model._compiled_cache
+        with pytest.raises(ValueError, match="use autocast"):
+            model.bfloat16()
+        assert model.get_model_dtype() == torch.float64
+        assert (
+            next(readout.representation.node_embedding.parameters()).dtype
+            == torch.float64
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -413,7 +481,8 @@ def test_lightning_model_training_precision(dtype, interaction):
     ]
     model = create_model(config, statistics, ["energy", "forces"], [])
     assert all(p.dtype == dtype for p in model.parameters())
-    assert all(b.dtype == dtype for b in model.buffers() if b.is_floating_point())
+    assert model.readout_fn.cutoff.dtype == torch.float64
+    assert model.readout_fn.atomic_energy_layer.atomic_energy.dtype == torch.float64
     assert model.readout_fn.atomic_numbers.dtype == torch.int64
 
     class TrainingModel(L.LightningModule):
@@ -423,8 +492,8 @@ def test_lightning_model_training_precision(dtype, interaction):
 
         def training_step(self, batch, batch_idx):
             output = self.model(batch)
-            assert output["energy"].dtype == dtype
-            assert output["forces"].dtype == dtype
+            assert output["energy"].dtype == torch.float64
+            assert output["forces"].dtype == torch.float64
             loss = output["energy"].square().mean() + output["forces"].square().mean()
             assert torch.isfinite(loss)
             return loss
@@ -465,6 +534,29 @@ def test_foundation_aoti_output_keeps_version(monkeypatch, path_class):
     assert path_class(
         export_eval._default_aoti_output_path("models/TACE-OAM-7M.pt")
     ) == path_class("models/TACE-OAM-7M.pt2")
+
+
+def test_environment_constants():
+    from string import ascii_letters
+
+    from tace.foundations import download_link
+    from tace.lightning import lit_model
+    from tace.utils.env import BOOL, CACHE_DIR, DEVICE, DTYPE, LETTERS
+
+    assert CACHE_DIR == Path.home() / ".cache" / "tace"
+    assert CACHE_DIR.is_dir()
+    assert download_link.CACHE_DIR is CACHE_DIR
+    assert lit_model.DEVICE is DEVICE
+    assert lit_model.DTYPE is DTYPE
+    assert BOOL["false"] is False
+    assert BOOL["True"] is True
+    assert DTYPE["bf16-true"] is torch.bfloat16
+    assert DTYPE["16-mixed"] is torch.float32
+    assert DTYPE["transformer-engine-float16"] is torch.float16
+    assert DTYPE[torch.float64] is torch.float64
+    assert DEVICE[None] is None
+    assert DEVICE[31] == DEVICE["cuda:31"] == torch.device("cuda:31")
+    assert LETTERS == list(ascii_letters)[3:]
 
 
 @pytest.mark.parametrize("value", [None, "0", "1"])
@@ -786,7 +878,7 @@ def _magnetic_embedding_sample() -> dict[str, torch.Tensor]:
     return {
         "pbc": torch.ones(1, 3, dtype=torch.bool),
         "positions": torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
-        "node_attrs": torch.ones(3, 1),
+        "node_type": torch.zeros(3, dtype=torch.int64),
         "edge_index": torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),
         "edge_shifts": torch.zeros(4, 3),
         "lattice": torch.eye(3).unsqueeze(0) * 10.0,
@@ -977,3 +1069,79 @@ assert not cuda.runtime.cache_info().currsize
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_precision_policy(monkeypatch, training):
+    from tace.utils.precision import PrecisionPolicy, resolve_precision
+
+    monkeypatch.delenv("TACE_USE_TF32", raising=False)
+    monkeypatch.delenv("TACE_MATMUL_PRECISION", raising=False)
+    default_dtype = torch.get_default_dtype()
+    cfg = {"dtype": {"model": "float32", "autocast": None, "matmul": None}}
+    policy = resolve_precision(cfg, training=training)
+    assert policy.matmul == ("tf32" if training else "ieee")
+    assert policy.torch_dtype == torch.float32
+    assert torch.get_default_dtype() == default_dtype
+    assert cfg["dtype"]["matmul"] == policy.matmul
+
+    mixed = resolve_precision({"dtype": {"autocast": "bfloat16"}}, training=training)
+    assert mixed.matmul == "ieee"
+    for options in (
+        {"model": "bfloat16"},
+        {"model": "float64", "autocast": "bfloat16"},
+        {"autocast": "float16", "matmul": "tf32"},
+        {"matmul": "bf16x3"},
+    ):
+        with pytest.raises(ValueError):
+            PrecisionPolicy(**options)
+
+    monkeypatch.setenv("TACE_USE_TF32", "0")
+    assert resolve_precision({}, training=training).matmul == "ieee"
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve_precision({"dtype": {"matmul": "tf32"}}, training=training)
+    monkeypatch.setenv("TACE_MATMUL_PRECISION", "tf32")
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve_precision({}, training=training)
+
+
+def test_model_dtype_metadata(tmp_path, monkeypatch):
+    from tace.lightning import export_tace, load_tace
+
+    monkeypatch.setenv("TACE_USE_TF32", "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=1,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        cutoff=4.0,
+        max_neighbors=None,
+    )
+    config["radial_basis"]["hidden"] = [4]
+    config["readout_emlp"]["hidden"] = [4]
+    model = create_model(
+        model_config=config,
+        statistics=[
+            {
+                "atomic_numbers": [1],
+                "atomic_energy": {1: -1.23456789123},
+                "avg_num_neighbors": 2.0,
+                "rms_forces": {1: 1.0},
+            }
+        ],
+        target_property=["energy"],
+        embedding_property=[],
+    )
+    path = tmp_path / "model.pt"
+    export_tace(model, str(path))
+    package = torch.load(path, weights_only=False)
+    assert package["dtype"]["model"] == str(model.get_model_dtype()).removeprefix(
+        "torch."
+    )
+    restored = load_tace(path)
+    assert restored.get_model_dtype() == model.get_model_dtype()
+    assert restored.readout_fn.atomic_energy_layer.atomic_energy.dtype == torch.float64
+    with pytest.raises(ValueError, match="FP64 geometry"):
+        load_tace(path, device="mps")

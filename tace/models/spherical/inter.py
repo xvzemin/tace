@@ -168,7 +168,7 @@ class O3CgtpInteraction(Interaction):
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
+        node_types: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
@@ -202,8 +202,8 @@ class O3CgtpInteraction(Interaction):
     def forward(
         self,
         node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
-        node_attrs_slice: torch.Tensor,
+        node_types: torch.Tensor,
+        local_node_type: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
@@ -224,9 +224,6 @@ class O3CgtpInteraction(Interaction):
         lmp_data = graph.lmp_data
         lmp_natoms = graph.lmp_natoms
         nlocal = lmp_natoms[0] if lmp_data is not None else None
-        node_type = graph.node_type
-        if node_type is not None:
-            node_type = node_type[: node_attrs_slice.size(0)]
 
         # The reference last-layer path expects dense inputs; full streaming
         # retains the partitions until each edge tile is evaluated.
@@ -246,13 +243,13 @@ class O3CgtpInteraction(Interaction):
 
         if hasattr(self, "resnetBB"):
             if self.resnet_linear_type == "aware":
-                resBB = self.resnetBB(node_feats, node_attrs_slice, node_type)
+                resBB = self.resnetBB(node_feats, local_node_type)
             else:
                 resBB = self.resnetBB(node_feats)
 
         if hasattr(self, "resnetBA"):
             if self.resnet_linear_type == "aware":
-                resBA = self.resnetBA(node_feats, node_attrs_slice, node_type)
+                resBA = self.resnetBA(node_feats, local_node_type)
             else:
                 resBA = self.resnetBA(node_feats)
 
@@ -274,7 +271,7 @@ class O3CgtpInteraction(Interaction):
             self.truncate_ghosts(
                 self._compute_messages(
                     node_feats,
-                    node_attrs_total,
+                    node_types,
                     edge_radial_basis,
                     edge_feats,
                     edge_attrs,
@@ -292,7 +289,7 @@ class O3CgtpInteraction(Interaction):
         )
 
         m_i = self.scatter_norm(
-            m_i, edge_feats, edge_index, edge_cutoff, node_attrs_total.size(0)
+            m_i, edge_feats, edge_index, edge_cutoff, node_types.size(0)
         )
 
         m_i = self.linear_nonlinearity(self.nonlinearity(m_i))
@@ -304,7 +301,7 @@ class O3CgtpInteraction(Interaction):
 
         if hasattr(self, "resnetAB"):
             if self.resnet_linear_type == "aware":
-                resAB = self.resnetAB(m_i, node_attrs_slice, node_type)
+                resAB = self.resnetAB(m_i, local_node_type)
             else:
                 resAB = self.resnetAB(m_i)
 
@@ -370,7 +367,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
+        node_types: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
@@ -494,7 +491,7 @@ class UvO2Interaction(O3CgtpInteraction):
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
+        node_types: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,
@@ -561,7 +558,7 @@ class UuO2Interaction(O3CgtpInteraction):
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
-        node_attrs_total: torch.Tensor,
+        node_types: torch.Tensor,
         edge_radial_basis: torch.Tensor,
         edge_feats: torch.Tensor | IndexedFeatures,
         edge_attrs: torch.Tensor,

@@ -67,7 +67,7 @@ class TACELammpsCalc(MLIAPUnified):
         self.nparams = 1
         self.ndescriptors = 1
 
-        self.dtype = model.readout_fn.cutoff.dtype
+        self.dtype = model.get_model_dtype()
         self.device = torch.device("cpu")
         self.initialized = False
 
@@ -112,7 +112,7 @@ class TACELammpsCalc(MLIAPUnified):
 
     def _prepare_batch(self, data, nlocal, nghosts, species):
         if data.npairs:
-            edge_vector = torch.as_tensor(data.rij).to(self.device, self.dtype)
+            edge_vector = torch.as_tensor(data.rij).to(self.device, torch.float64)
             edge_index = torch.stack(
                 [
                     torch.as_tensor(data.pair_j, dtype=torch.int64).to(self.device),
@@ -122,14 +122,12 @@ class TACELammpsCalc(MLIAPUnified):
             )
         else:
             # ML-IAP exposes null edge arrays when there are no neighbors.
-            edge_vector = torch.empty(0, 3, dtype=self.dtype, device=self.device)
+            edge_vector = torch.empty(0, 3, dtype=torch.float64, device=self.device)
             edge_index = torch.empty(2, 0, dtype=torch.int64, device=self.device)
         edge_vector.requires_grad_(True)
         return {
             "edge_vector": edge_vector,
-            "node_attrs": torch.nn.functional.one_hot(
-                species.to(self.device), num_classes=self.num_species
-            ).to(self.dtype),
+            "node_type": species.to(self.device),
             "edge_index": edge_index,
             "batch": torch.zeros(nlocal, dtype=torch.int64, device=self.device),
             "ptr": torch.tensor([0, nlocal], dtype=torch.int64, device=self.device),

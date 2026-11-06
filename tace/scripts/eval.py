@@ -178,7 +178,6 @@ def main():
                 target_property=target_property,
                 embedding_property=embedding_property,
                 neighborlist_backend=args.nl_backend,
-                dtype=model.get_model_dtype(),
             )
             for atoms in check_keys(
                 atomsList, target_property, key_spec, embedding_property, training
@@ -206,16 +205,14 @@ def main():
                 )
             batch.apply(
                 lambda value: (
-                    value.to(dtype=model.get_model_dtype())
+                    value.to(dtype=torch.float64)
                     if isinstance(value, torch.Tensor) and value.is_floating_point()
                     else value
                 )
             )
         batch.to(args.device)
         if graph_input:
-            batch.node_attrs = element.z2onehot(batch.atomic_numbers).to(
-                dtype=model.get_model_dtype()
-            )
+            batch.node_type = element.z2idx(batch.atomic_numbers)
         for p in target_property:
             for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                 if requires_grad_p in batch:

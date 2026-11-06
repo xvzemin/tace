@@ -83,7 +83,7 @@ def mse_direct_forces_curl(
             create_graph=True,
         )[0].reshape(-1)
 
-        curl_ab = grad_a[b] - grad_b[a]
+        curl_ab = grad_a[b].double() - grad_b[a].double()
 
         losses.append(curl_ab**2)
 

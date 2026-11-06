@@ -8,6 +8,7 @@ from ...backends.torch.edge import evaluate_torch
 from ...backends.torch.linear import linear as linear_blocks
 from ...backends.torch.linear import linear_layout
 from ...o2.layout import irrep_layout
+from ...o2.wigner import WignerD
 from ...ops.edge import evaluate
 from ...ops.gate import gate_program
 from ...utils.frame_program import frame_description, rotate
@@ -147,6 +148,10 @@ class UvO2TensorProductConv(torch.nn.Module):
             frame_description(f) if f is not None else None
             for f in (frame_in, frame_edge, frame_out)
         )
+        degree = max(
+            f.lmax for f in (frame_in, frame_edge, frame_out) if f is not None
+        )
+        self.wigner = WignerD(degree, degree)
         self.transverse_frames = torch.nn.ModuleList(
             TransverseFrame(f, backend) if f is not None and f.basis_change else None
             for f in (frame_in, frame_edge, frame_out)
@@ -378,6 +383,24 @@ class UvO2TensorProductConv(torch.nn.Module):
             the global output representation declared by ``frame_out``.
         """
         source, target = edge_index[0], edge_index[1]
+        from ...ops.radial import cast_radial
+
+        conv_weights = cast_radial(conv_weights, features.dtype)
+        cutoff = cutoff.to(features)
+        if edge_features is not None:
+            edge_features = edge_features.to(features)
+        if radial_attention is not None:
+            radial_attention = radial_attention.to(features)
+        if vectors is not None and vectors.dtype != features.dtype:
+            wigner = self.wigner.forward_packed(
+                vectors, method="auto" if self.backend == "cuda" else "recursive"
+            ).to(features)
+            wigner_inv = None
+            vectors = None
+        if wigner is not None:
+            wigner = wigner.to(features)
+        if wigner_inv is not None:
+            wigner_inv = wigner_inv.to(features)
         transverse = vectors is not None
         fused = self.backend == "cuda" and features.is_cuda
         execute = evaluate if fused else evaluate_torch

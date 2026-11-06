@@ -58,13 +58,33 @@ class O3CgtpEdgeInteraction(EdgeInteraction):
         edge_attrs: torch.Tensor | None,
         edge_cutoff: torch.Tensor,
         edge_wigner: torch.Tensor | None = None,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source, target = edge_index
         edge_feats = self.linear_up(
             torch.cat((node_feats[source], node_feats[target]), dim=-1)
         )
-        weights = self.edge_info(edge_radial_basis)
+        weights = self.radial_weights(edge_radial_basis, node_type, edge_index)
         return self.rejector(edge_feats, edge_attrs, weights * edge_cutoff)
+
+    def radial_weights(self, radial, node_type, edge_index):
+        """Project radial features and element-table rows without one-hot inputs."""
+        linear = self.edge_info.mlp[0]
+        weight = linear.get_weight()
+        radial_width = self.radial_basis["num_radial_basis"]
+        source, target = edge_index
+        radial_weight, source_weight, target_weight = weight.split(
+            (radial_width, self.num_elements, self.num_elements), dim=0
+        )
+        output = radial @ radial_weight
+        output = (
+            output
+            + source_weight[node_type[source]]
+            + target_weight[node_type[target]]
+        )
+        if linear.bias is not None:
+            output = output + linear.bias
+        return self.edge_info.mlp[1:](output)
 
 
 class O2EdgeInteraction(O3CgtpEdgeInteraction):
@@ -88,11 +108,12 @@ class O2EdgeInteraction(O3CgtpEdgeInteraction):
         edge_attrs: torch.Tensor | None,
         edge_cutoff: torch.Tensor,
         edge_wigner: torch.Tensor | None = None,
+        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         node_feats = self.linear_up(node_feats)
         source, target = edge_index
         edge_feats = torch.cat((node_feats[source], node_feats[target]), dim=-1)
-        weights = self.edge_info(edge_radial_basis)
+        weights = self.radial_weights(edge_radial_basis, node_type, edge_index)
         return self.rejector(edge_feats, edge_wigner, weights * edge_cutoff)
 
 

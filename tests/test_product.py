@@ -191,8 +191,7 @@ def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
     actual.load_state_dict(reference.state_dict(), strict=True)
     assert actual.state_dict().keys() == reference.state_dict().keys()
     x = torch.randn(3, 8, device="cuda", dtype=torch.float64, requires_grad=True)
-    attrs = x.new_tensor([[0.8, 0.2], [0.1, 0.9], [0.7, 0.3]])
-    # Include nonzero biases, including the soft-attribute bias convention.
+    types = torch.tensor([0, 1, 0], device=x.device)
     with torch.no_grad():
         for a, b in zip(actual.coefs, reference.coefs):
             if a.bias is not None:
@@ -200,7 +199,7 @@ def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
                 b.bias.copy_(a.bias)
     predictions, derivatives = [], []
     for model in (actual, reference):
-        output = model(x, attrs, None, torch.zeros(3, device="cuda", dtype=torch.long))
+        output = model(x, types, None, torch.zeros(3, device="cuda", dtype=torch.long))
         first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
         second = torch.autograd.grad(
             first.square().sum(),
@@ -222,8 +221,8 @@ def test_fused_ace_cuda(monkeypatch, correlation, agnostic, matrix_weight):
 @pytest.mark.parametrize("moe", [False, True])
 @pytest.mark.parametrize("matrix_weight", ["0", "1"])
 @pytest.mark.parametrize("num_nodes", [0, 5])
-def test_precomputed_element_indices(moe, matrix_weight, num_nodes):
-    """Reuse element indices without changing soft-attribute bias or gradients."""
+def test_element_linear_indexed(moe, matrix_weight, num_nodes):
+    """Indexed and expanded element weights preserve derivatives."""
     cls = e3nnMoEElementLinear if moe else e3nnElementLinear
     module = cls(
         "4x0e+4x1o",
@@ -236,12 +235,13 @@ def test_precomputed_element_indices(moe, matrix_weight, num_nodes):
     with torch.no_grad():
         module.bias.normal_()
     x = torch.randn(num_nodes, 16, requires_grad=True)
-    attrs = torch.rand(num_nodes, 3, requires_grad=True)
-    node_type = attrs.argmax(-1)
-    expected = module(x, attrs)
-    actual = module(x, attrs, node_type)
+    node_type = torch.randint(3, (num_nodes,))
+    module.torch_linear.expand_weights = True
+    expected = module(x, node_type)
+    module.torch_linear.expand_weights = False
+    actual = module(x, node_type)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    inputs = (x, attrs, *module.parameters())
+    inputs = (x, *module.parameters())
     derivatives = [
         torch.autograd.grad(
             y.square().sum(), inputs, retain_graph=True, allow_unused=True
@@ -252,7 +252,7 @@ def test_precomputed_element_indices(moe, matrix_weight, num_nodes):
         if expected_grad is None:
             assert actual_grad is None
         else:
-            torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-12, atol=1e-12)
 
 
 def product_irreps(irreps_in1, irreps_in2, lmax):
@@ -406,7 +406,7 @@ def make_product(irreps, correlation, **kwargs):
     ).double()
 
 
-def fused_nonlinear_product(module, features, attrs, batch, types):
+def fused_nonlinear_product(module, features, types, batch):
     from torch.utils._python_dispatch import TorchDispatchMode
 
     class EdgeCalls(TorchDispatchMode):
@@ -418,7 +418,7 @@ def fused_nonlinear_product(module, features, attrs, batch, types):
             return func(*args, **(kwargs or {}))
 
     with EdgeCalls() as dispatch:
-        output = module(features, attrs, None, batch, types)
+        output = module(features, types, None, batch)
     assert dispatch.calls == int(features.is_cuda)
     return output
 
@@ -487,15 +487,14 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
 
     x = (0.2 * torch.randn(3, module.irreps_in.dim, device=device)).requires_grad_()
     types = torch.tensor([0, 1, 0], device=device)
-    attrs = torch.nn.functional.one_hot(types, 2).to(x)
     batch = torch.zeros(3, device=device, dtype=torch.long)
     values, gradients = [], []
     for product in (reference, module):
         monkeypatch.setenv("TACE_USE_EQX", "1" if product is module else "0")
         value = (
-            fused_nonlinear_product(product, x, attrs, batch, types)
+            fused_nonlinear_product(product, x, types, batch)
             if product is module
-            else product(x, attrs, None, batch, types)
+            else product(x, types, None, batch)
         )
         inputs = (x, *product.parameters())
         first = torch.autograd.grad(
@@ -518,7 +517,7 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
 
     rotation = -o3.rand_matrix()
     transformed = module(
-        x @ module.irreps_in.D_from_matrix(rotation).to(x).T, attrs, None, batch
+        x @ module.irreps_in.D_from_matrix(rotation).to(x).T, types, None, batch
     )
     torch.testing.assert_close(
         transformed,
@@ -527,7 +526,7 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
         rtol=tolerance,
     )
     residual = torch.randn_like(values[1])
-    torch.testing.assert_close(module(x, attrs, residual, batch), values[1] + residual)
+    torch.testing.assert_close(module(x, types, residual, batch), values[1] + residual)
 
     # Switching input symmetry does not add paths; identical factors agree.
     monkeypatch.setattr(cls, "asymmetric", not asymmetric)
@@ -555,10 +554,10 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
                 product.linear_up, "forward", lambda _, value=projected: value
             )
             patch.setattr(product.gate, "forward", lambda _: weight)
-            outputs.append(product(x, attrs, None, batch, types))
+            outputs.append(product(x, types, None, batch))
         torch.testing.assert_close(*outputs, atol=tolerance, rtol=tolerance)
     empty_x = x.detach()[:0].requires_grad_()
-    empty = module(empty_x, attrs[:0], None, batch[:0])
+    empty = module(empty_x, types[:0], None, batch[:0])
     assert empty.shape == (0, module.irreps_out.dim)
     empty_gradients = torch.autograd.grad(
         empty.sum(), (empty_x, *module.parameters()), allow_unused=True
@@ -569,7 +568,7 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
     )
     if correlation == 2 and asymmetric:
         compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
-        actual = compiled(x, attrs, None, batch)
+        actual = compiled(x, types, None, batch)
         torch.testing.assert_close(actual, values[0], atol=tolerance, rtol=tolerance)
         actual.square().sum().backward()
         assert module.embedding.weight.grad.abs().sum() > 0
@@ -580,9 +579,9 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
                 torch.testing.assert_close(
                     parameter.grad, expected, atol=tolerance, rtol=tolerance
                 )
-        exported = torch.export.export(module, (x, attrs, None, batch), strict=True)
+        exported = torch.export.export(module, (x, types, None, batch), strict=True)
         torch.testing.assert_close(
-            exported.module()(x, attrs, None, batch),
+            exported.module()(x, types, None, batch),
             values[0],
             atol=tolerance,
             rtol=tolerance,
@@ -592,7 +591,7 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
 
         with monkeypatch.context() as patch:
             patch.setattr(execution, "launch", partial(execution.launch, tile_size=2))
-            output = module(x, attrs, None, batch, types)
+            output = module(x, types, None, batch)
             inputs = (x, *module.parameters())
             first = torch.autograd.grad(
                 output.square().sum(), inputs, create_graph=True, allow_unused=True
@@ -691,13 +690,12 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
         0.2 * torch.randn(3, reference.irreps_in.dim, device=device, dtype=dtype)
     ).requires_grad_()
     types = torch.tensor([0, 1, 0], device=device)
-    attrs = torch.nn.functional.one_hot(types, 2).to(x)
     batch = torch.zeros(3, dtype=torch.long, device=device)
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    expected_output = reference(x, attrs, None, batch, types)
+    expected_output = reference(x, types, None, batch)
     monkeypatch.setenv("TACE_USE_EQX", "1")
     actual_output = to_spherical(
-        fused_nonlinear_product(module, to_cartesian(x), attrs, batch, types)
+        fused_nonlinear_product(module, to_cartesian(x), types, batch)
     )
     tolerance = 5e-5 if dtype == torch.float32 else 1e-10
     torch.testing.assert_close(
@@ -720,7 +718,7 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
             assert torch.isfinite(actual).all()
             torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
     empty_x = x.detach()[:0].requires_grad_()
-    empty = module(to_cartesian(empty_x), attrs[:0], None, batch[:0])
+    empty = module(to_cartesian(empty_x), types[:0], None, batch[:0])
     assert empty.shape == (0, module.irreps_out.dim)
     empty_gradients = torch.autograd.grad(
         empty.sum(), (empty_x, *module.parameters()), allow_unused=True
@@ -731,7 +729,7 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
     )
     if correlation == 2 and asymmetric:
         compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
-        output = to_spherical(compiled(to_cartesian(x), attrs, None, batch, types))
+        output = to_spherical(compiled(to_cartesian(x), types, None, batch))
         torch.testing.assert_close(
             output,
             expected_output,
@@ -747,7 +745,7 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
                 torch.testing.assert_close(
                     parameter.grad, expected, atol=tolerance, rtol=tolerance
                 )
-        args = (to_cartesian(x), attrs, None, batch, types)
+        args = (to_cartesian(x), types, None, batch)
         exported = torch.export.export(module, args, strict=True)
         torch.testing.assert_close(
             to_spherical(exported.module()(*args)),
@@ -819,13 +817,13 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden
     batch = torch.tensor([0, 0, 1, 1], device=device)
     elements = torch.ones_like(attrs[:, :1]) if agnostic else attrs
     expected = module.linear(dense(module.reshape(module.linear_up(x)), elements)) + sc
-    actual = module(x, attrs, sc, batch, types)
+    actual = module(x, types, sc, batch)
     tolerance = 3e-5 if dtype == torch.float32 else 1e-10
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    torch.testing.assert_close(module(x, attrs, sc, batch), actual, atol=0, rtol=0)
+    torch.testing.assert_close(module(x, types, sc, batch), actual, atol=0, rtol=0)
     derivatives = []
     for model in (reference, module):
-        output = model(x, attrs, sc, batch, types)
+        output = model(x, types, sc, batch)
         first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
         gradients = torch.autograd.grad(
             output.square().sum() + first.square().sum(),
@@ -840,12 +838,12 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden
         rotation_in = module.irreps_in.D_from_matrix(matrix).to(device)
         rotation_out = module.irreps_out.D_from_matrix(matrix).to(device)
         torch.testing.assert_close(
-            module(x @ rotation_in.T, attrs, sc @ rotation_out.T, batch, types),
-            module(x, attrs, sc, batch, types) @ rotation_out.T,
+            module(x @ rotation_in.T, types, sc @ rotation_out.T, batch),
+            module(x, types, sc, batch) @ rotation_out.T,
             atol=tolerance,
             rtol=tolerance,
         )
-    empty = module(x[:0], attrs[:0], sc[:0], batch[:0], types[:0])
+    empty = module(x[:0], types[:0], sc[:0], batch[:0])
     assert empty.shape == (0, module.irreps_out.dim)
     if correlation == 3 and not agnostic and dtype == torch.float64:
         torch.compiler.reset()
@@ -853,9 +851,9 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden
             module, backend="aot_eager", fullgraph=True, dynamic=True
         )
         torch.testing.assert_close(
-            compiled(x, attrs, sc, batch, types), module(x, attrs, sc, batch, types)
+            compiled(x, types, sc, batch), module(x, types, sc, batch)
         )
-        inputs = tuple(value.detach().cpu() for value in (x, attrs, sc, batch, types))
+        inputs = tuple(value.detach().cpu() for value in (x, types, sc, batch))
         torch.testing.assert_close(module.cpu()(*inputs), reference.cpu()(*inputs))
 
 
@@ -992,7 +990,7 @@ def test_standard_product_matches_extended_path(
         for model in (actual, reference):
             model.train(training)
             torch.manual_seed(7)
-            output = model(x, attrs, sc, batch, attrs.argmax(-1))
+            output = model(x, attrs.argmax(-1), sc, batch)
             outputs.append(output)
             first = torch.autograd.grad(output.square().sum(), x, create_graph=True)[0]
             gradients.append(
@@ -1017,7 +1015,7 @@ def test_product_supports_higher_correlation(monkeypatch, correlation):
     features = torch.randn(3, 6, dtype=torch.float64, requires_grad=True)
     out = model(
         features,
-        torch.ones(3, 1, dtype=torch.float64),
+        torch.zeros(3, dtype=torch.long),
         None,
         torch.zeros(3, dtype=torch.long),
     )
@@ -1041,7 +1039,7 @@ def test_eqt_without_polar_vectors_and_with_empty_paths(monkeypatch, irreps):
     features = torch.randn(3, model.irreps_in.dim, dtype=torch.float64)
     out = model(
         features,
-        torch.ones(3, 1, dtype=torch.float64),
+        torch.zeros(3, dtype=torch.long),
         None,
         torch.zeros(3, dtype=torch.long),
     )
@@ -1110,7 +1108,7 @@ def test_time_reversal_labels_preserved(monkeypatch):
         assert ace.instructions
         assert all(ir.t == (-1) ** nu for _, ir in ace.irreps_out)
     features = torch.randn(3, model.irreps_in.dim, requires_grad=True)
-    out = model(features, torch.ones(3, 1), None, torch.zeros(3, dtype=torch.long))
+    out = model(features, torch.zeros(3, dtype=torch.long), None, torch.zeros(3, dtype=torch.long))
     assert torch.isfinite(torch.autograd.grad(out.square().sum(), features)[0]).all()
 
 
@@ -1765,11 +1763,9 @@ def test_bilinear_product_integration(monkeypatch, matrix, experts, shared, agno
     reference = deepcopy(model)
     del reference.eqx_ace
     x = torch.randn(3, 16, device="cuda", dtype=torch.float64, requires_grad=True)
-    attrs = torch.tensor(
-        [[1.0, 0.0], [0.0, 1.0], [0.2, 0.8]], device="cuda", dtype=torch.float64
-    )
+    types = torch.tensor([0, 1, 1], device="cuda")
     batch = torch.zeros(3, device="cuda", dtype=torch.long)
-    actual, expected = [m(x, attrs, None, batch) for m in (model, reference)]
+    actual, expected = [m(x, types, None, batch) for m in (model, reference)]
     torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
     gradients = [
         torch.autograd.grad(y.square().sum(), (x, *m.parameters()), create_graph=True)

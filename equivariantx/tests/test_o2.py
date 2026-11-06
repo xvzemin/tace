@@ -103,6 +103,38 @@ def test_element_linear_parameters():
         o2.ElementLinear(o2.Linear("0e", "0e", biases=True))
 
 
+@pytest.mark.parametrize("mode", ["single", "pair"])
+def test_element_linear_autocast(mode, device):
+    linear = o2.Linear(
+        "3x0e+3x1m", "2x0e+2x1m", internal_weights=False, shared_weights=False
+    ).to(device=device, dtype=torch.float32)
+    layer = o2.ElementLinear(linear, backend="torch", element_mode=mode)
+    x = torch.randn(
+        9, linear.irreps_in.dim, device=device, dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    shape = (3, 3, linear.weight_numel) if mode == "pair" else (3, linear.weight_numel)
+    weight = torch.randn(*shape, device=device, dtype=torch.float32, requires_grad=True)
+    source = torch.arange(9, device=device) % 3
+    target = source.roll(1) if mode == "pair" else None
+    with pytest.raises(ValueError, match="dtype outside autocast"):
+        layer(x, weight, source, target)
+    with torch.autocast(torch.device(device).type, dtype=torch.bfloat16):
+        actual = layer(x, weight, source, target)
+        layer.expand_weights = True
+        expected = layer(x, weight, source, target)
+    torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
+    assert actual.dtype == torch.bfloat16 and weight.dtype == torch.float32
+    first = torch.autograd.grad(actual.float().square().sum(), (x, weight), create_graph=True)
+    second = torch.autograd.grad(sum(value.float().square().sum() for value in first), (x, weight))
+    assert all(torch.isfinite(value).all() for value in (*first, *second))
+    if x.is_cuda:
+        layer.backend = "cuda"
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            with pytest.raises(ValueError, match="dtype outside autocast"):
+                layer(x, weight, source, target)
+
+
 def test_wigner_invalid_method(device):
     wigner = o2.WignerD(lmax=2, mmax=2).to(device)
     vectors = torch.randn(3, 3, device=device)

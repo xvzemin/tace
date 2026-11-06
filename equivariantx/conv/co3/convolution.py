@@ -316,7 +316,12 @@ class CartesianTensorProductConv(O3TensorProductConv):
         features in flattened ``mul_ir`` layout and Cartesian dimensions.
         """
         fused = self.backend == "cuda" and features.is_cuda
-        packed_input = self.input_basis == "spherical" and vectors is not None and fused
+        fused_geometry = fused and (
+            vectors is None or vectors.dtype == features.dtype
+        )
+        packed_input = (
+            self.input_basis == "spherical" and vectors is not None and fused_geometry
+        )
         if self.input_basis == "spherical":
             if packed_input:
                 if features.size(-1) != self.to_cartesian.input_dim:
@@ -331,14 +336,14 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 features = torch.cat(values, -1) if values else features[:, :0]
             else:
                 features = self.to_cartesian(features)
-        if self.symmetric_inputs and (vectors is None or not fused):
+        if self.symmetric_inputs and (vectors is None or not fused_geometry):
             values = features.new_zeros(
                 (features.size(0), self.symmetric_dim)
             ).index_add(-1, self.symmetric_index, features)
             features = (values / self.symmetric_count).index_select(
                 -1, self.symmetric_index
             )
-        if vectors is not None and not fused:
+        if vectors is not None and not fused_geometry:
             vectors = (
                 torch.nn.functional.normalize(vectors, dim=-1)
                 if self.normalize

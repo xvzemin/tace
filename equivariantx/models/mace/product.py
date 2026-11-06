@@ -60,7 +60,7 @@ class SymmetricContraction(torch.nn.Module):
         self.num_channels = self.contraction.num_channels
         self.train(module.training)
 
-    def forward(self, features, node_attrs):
+    def forward(self, features, node_type):
         if self.indexed:
             weight = self.weight
             if self.projection is not None:
@@ -68,7 +68,6 @@ class SymmetricContraction(torch.nn.Module):
             features = features.reshape(
                 features.shape[0], self.contraction.input_dim, self.num_channels
             ).transpose(1, 2)
-            node_type = node_attrs
         else:
             weight = torch.cat(
                 [
@@ -78,5 +77,5 @@ class SymmetricContraction(torch.nn.Module):
                 ],
                 dim=1,
             )
-            node_type = node_attrs.argmax(dim=-1)
+            node_type = node_type.argmax(dim=-1)
         return self.contraction(features, weight, node_type)

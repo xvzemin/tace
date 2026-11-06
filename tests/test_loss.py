@@ -17,11 +17,88 @@ from tace.utils.loss.dens import (
     mse_dens_forces,
 )
 from tace.utils.loss.huber_fn import huber_forces
-from tace.utils.loss.mse_fn import mse_forces
+from tace.utils.loss.mse_fn import LOSS_FN, mse_forces
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.mask_metrics import MaskMAE, MaskRMSE
 from tace.utils.optimizer.hybrid_muon import HybridMuonOptimizer
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("kind", ["mse", "mae", "huber", "l2mae"])
+def test_loss_precision(kind, dtype):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    prediction = torch.tensor(
+        [[1.0e8, 2.0, 3.0]], dtype=dtype, device=device, requires_grad=True
+    )
+    label = {
+        "forces": torch.ones_like(prediction),
+        "forces_weight": torch.ones(1, dtype=dtype, device=device),
+        "entropy": torch.ones(1, dtype=dtype, device=device),
+        "batch": torch.zeros(1, dtype=torch.long, device=device),
+    }
+    original = dict(label)
+    error = prediction.double() - label["forces"].double()
+    reference = {
+        "mse": error.square().mean(),
+        "mae": error.abs().mean(),
+        "huber": torch.nn.functional.huber_loss(
+            error, torch.zeros_like(error), delta=0.01
+        ),
+        "l2mae": torch.linalg.vector_norm(error, dim=-1).mean(),
+    }[kind]
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        actual = LOSS_FN[f"{kind}_forces"]({"forces": prediction}, label)
+    assert actual.dtype == torch.float64
+    torch.testing.assert_close(actual, reference, atol=0, rtol=1e-14)
+    gradient = torch.autograd.grad(actual, prediction, create_graph=True)[0]
+    expected = torch.autograd.grad(reference, prediction, create_graph=True)[0]
+    assert gradient.dtype == dtype
+    torch.testing.assert_close(gradient, expected)
+    if kind == "mse":
+        second = torch.autograd.grad(gradient.sum(), prediction)[0]
+        torch.testing.assert_close(second, torch.full_like(prediction, 2 / 3))
+    assert all(label[key] is value for key, value in original.items())
+
+
+@pytest.mark.parametrize("loss_type", [NormalLoss, UncertaintyLoss])
+def test_loss_compiled_precision(loss_type):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    loss = loss_type(["energy"], ["mse_energy"], [1.0]).to(device)
+    prediction = torch.tensor(
+        [1.0e20], dtype=torch.float32, device=device, requires_grad=True
+    )
+    label = {
+        "energy": -prediction.detach(),
+        "energy_weight": torch.ones(1, dtype=torch.float32, device=device),
+        "entropy": torch.ones(1, dtype=torch.float32, device=device),
+    }
+    reference = (prediction.double() - label["energy"].double()).square().mean()
+    compiled = torch.compile(loss, backend="aot_eager", fullgraph=True)
+    actual = compiled({"energy": prediction}, label)
+    assert actual.dtype == torch.float64 and torch.isfinite(actual)
+    torch.testing.assert_close(actual, reference)
+    actual.backward()
+    torch.testing.assert_close(prediction.grad, 4 * prediction.detach())
+    if loss_type is UncertaintyLoss:
+        assert loss.log_sigmas["energy"].dtype == torch.float64
+        torch.testing.assert_close(
+            loss.log_sigmas["energy"].grad, 1 - reference.detach()
+        )
+
+
+def test_loss_coordinate_derivatives():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    positions = torch.ones(1, 3, dtype=torch.float32, device=device, requires_grad=True)
+    weight = torch.tensor(2.0, dtype=torch.float32, device=device, requires_grad=True)
+    forces = weight * positions.square().roll(1, dims=-1)
+    loss = LOSS_FN["mse_direct_forces_curl"](
+        {"direct_forces": forces}, {"positions": positions}
+    )
+    assert loss.dtype == torch.float64
+    loss.backward()
+    assert positions.grad is not None and torch.isfinite(positions.grad).all()
+    assert weight.grad is not None and torch.isfinite(weight.grad)
 
 
 @pytest.mark.parametrize("loss", ["mse", "mae", "huber", "l2mae"])
@@ -82,7 +159,35 @@ def test_stress_metric_missing_labels(metric_type):
     target[0] = 0
     label["stress_weight"][0] = 1
     metric.update(torch.ones_like(target), target, label)
-    torch.testing.assert_close(metric.compute(), torch.tensor(1.0))
+    torch.testing.assert_close(metric.compute(), torch.tensor(1.0, dtype=torch.float64))
+
+
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("squared", [False, True])
+def test_metric_accumulation_precision(masked, squared):
+    from tace.utils.metrics import MAE, RMSE
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    metric_cls = (
+        (MaskRMSE if squared else MaskMAE) if masked else (RMSE if squared else MAE)
+    )
+    metric = (metric_cls("energy", 1.0) if masked else metric_cls(1.0)).to(device)
+    for value in (1.0e8, 1.0, 1.0):
+        prediction = torch.tensor([value], dtype=torch.float32, device=device)
+        target = torch.zeros(1, dtype=torch.float64, device=device)
+        if masked:
+            metric.update(
+                prediction, target, {"energy_weight": torch.ones_like(target)}
+            )
+        else:
+            metric.update(prediction, target)
+    expected = torch.tensor([1.0e8, 1.0, 1.0], dtype=torch.float64, device=device)
+    expected = expected.square().mean().sqrt() if squared else expected.mean()
+    torch.testing.assert_close(metric.compute(), expected, atol=0, rtol=1e-15)
+    assert metric.compute().dtype == torch.float64
+    metric.reset()
+    state = metric.sum_squared_error if squared else metric.sum_abs_error
+    assert state.dtype == torch.float64 and not state.any()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -116,7 +221,9 @@ def test_uncertainty_labels(key, shape, dtype):
         log_sigma = loss.log_sigmas[key]
         torch.testing.assert_close(value, reference + log_sigma * present)
         value.backward()
-        torch.testing.assert_close(log_sigma.grad, float(present) - reference)
+        torch.testing.assert_close(
+            log_sigma.grad, (float(present) - reference).to(dtype)
+        )
         assert torch.isfinite(pred[key].grad).all()
         if not present:
             assert not pred[key].grad.any()
@@ -125,15 +232,24 @@ def test_uncertainty_labels(key, shape, dtype):
     label[key] = pred[key].detach().clone()
     loss.zero_grad()
     value = loss(pred, label)
-    torch.testing.assert_close(value, loss.log_sigmas[key])
+    torch.testing.assert_close(value, loss.log_sigmas[key].double())
     value.backward()
-    torch.testing.assert_close(loss.log_sigmas[key].grad, torch.ones_like(value))
+    torch.testing.assert_close(
+        loss.log_sigmas[key].grad, torch.ones_like(loss.log_sigmas[key])
+    )
 
 
 def test_valid_labels_weights_and_distributed_presence(monkeypatch):
     from tace.utils.loss import common
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    assert has_valid_labels(
+        {
+            "entropy": torch.tensor([1.0e-4], dtype=torch.float16, device=device),
+            "energy_weight": torch.tensor([1.0e-4], dtype=torch.float16, device=device),
+        },
+        "energy",
+    )
     for key, shape in (
         ("energy", (2,)),
         ("forces", (5, 3)),
@@ -166,7 +282,7 @@ def test_valid_labels_weights_and_distributed_presence(monkeypatch):
 def test_dens_masks_graphs_by_summed_forces():
     batch = {
         "positions": torch.zeros(3, 3),
-        "node_attrs": torch.ones(3, 1),
+        "node_type": torch.zeros(3, dtype=torch.long),
         "ptr": torch.tensor([0, 2, 3]),
         "batch": torch.tensor([0, 0, 1]),
         "forces": torch.tensor([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
@@ -203,7 +319,7 @@ def _element_weight_inputs():
     pred = {"forces": torch.tensor([[1.0, 0.0, 0.0]] * 3)}
     label = {
         "forces": torch.zeros(3, 3),
-        "node_attrs": torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]),
+        "node_type": torch.tensor([0, 1, 0]),
         "batch": torch.zeros(3, dtype=torch.long),
         "entropy": torch.ones(1),
         "forces_weight": torch.ones(1),
@@ -230,7 +346,7 @@ def test_dens_loss_ratio_scales_loss_linearly(
     ratio = 0.25
     actual = loss_fn(pred, label, dens_loss_ratio=ratio, **kwargs)
     expected = forces_loss + ratio * dens_loss
-    torch.testing.assert_close(actual, torch.tensor(expected))
+    torch.testing.assert_close(actual, torch.tensor(expected, dtype=torch.float64))
 
 
 @pytest.mark.parametrize(
@@ -249,10 +365,10 @@ def test_loss_function_kwargs_are_forwarded(loss_cls, loss_weight):
     torch.testing.assert_close(loss(pred, label), expected)
 
 
-def test_per_atom_element_weights_follow_node_attrs_order():
+def test_per_atom_element_weights_follow_node_type_order():
     pred, label = _element_weight_inputs()
     actual = mse_forces(pred, label, element_weights=[2.0, 4.0])
-    torch.testing.assert_close(actual, torch.tensor(8.0 / 9.0))
+    torch.testing.assert_close(actual, torch.tensor(8.0 / 9.0, dtype=torch.float64))
 
 
 def test_default_element_weights_are_one():
@@ -270,7 +386,7 @@ def test_huber_element_weights_scale_loss_not_residual():
         huber_delta=1.0,
         element_weights=[2.0, 4.0],
     )
-    torch.testing.assert_close(actual, torch.tensor(4.0 / 9.0))
+    torch.testing.assert_close(actual, torch.tensor(4.0 / 9.0, dtype=torch.float64))
 
 
 def test_balanced_element_weights_have_weighted_mean_one():

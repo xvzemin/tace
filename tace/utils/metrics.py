@@ -41,11 +41,15 @@ class MAE(Metric):
     def __init__(self, scale: float = SCALE):
         super().__init__()
         self.scale = scale
-        self.add_state("sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state(
+            "sum_abs_error",
+            default=torch.tensor(0.0, dtype=torch.float64),
+            dist_reduce_fx="sum",
+        )
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, targets: torch.Tensor):
-        abs_error = torch.abs(preds - targets)
+        abs_error = torch.abs(preds.to(torch.float64) - targets.to(torch.float64))
         self.sum_abs_error += abs_error.sum()
         self.count += targets.numel()
 
@@ -58,12 +62,14 @@ class RMSE(Metric):
         super().__init__()
         self.scale = scale
         self.add_state(
-            "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+            "sum_squared_error",
+            default=torch.tensor(0.0, dtype=torch.float64),
+            dist_reduce_fx="sum",
         )
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, targets: Tensor):
-        squared_error = (preds - targets) ** 2
+        squared_error = (preds.to(torch.float64) - targets.to(torch.float64)) ** 2
         self.sum_squared_error += squared_error.sum()
         self.count += targets.numel()
 
@@ -75,8 +81,8 @@ class PerAtomMAE(MAE):
     def update(self, preds: Tensor, targets: Tensor, ptr: Tensor):
         num_nodes = ptr[1:] - ptr[:-1]  # [B]
         num_nodes = expand_dims_to(num_nodes, preds.ndim, dim=-1)
-        preds_per_atom = preds / num_nodes
-        targets_per_atom = targets / num_nodes
+        preds_per_atom = preds.to(torch.float64) / num_nodes
+        targets_per_atom = targets.to(torch.float64) / num_nodes
         super().update(preds_per_atom, targets_per_atom)
 
 
@@ -84,8 +90,8 @@ class PerAtomRMSE(RMSE):
     def update(self, preds: Tensor, targets: Tensor, ptr: Tensor):
         num_nodes = ptr[1:] - ptr[:-1]  # [B]
         num_nodes = expand_dims_to(num_nodes, preds.ndim, dim=-1)
-        preds_per_atom = preds / num_nodes
-        targets_per_atom = targets / num_nodes
+        preds_per_atom = preds.to(torch.float64) / num_nodes
+        targets_per_atom = targets.to(torch.float64) / num_nodes
         super().update(preds_per_atom, targets_per_atom)
 
 
@@ -107,18 +113,22 @@ class PolarizationMetric(Metric):
 
         if self.metric_type == "mae":
             self.add_state(
-                "sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_abs_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
         else:  # rmse
             self.add_state(
-                "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_squared_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
 
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
-        lattice = label["lattice"]
-        error = preds - targets
+        lattice = label["lattice"].to(torch.float64)
+        error = preds.to(torch.float64) - targets.to(torch.float64)
 
         # Project to lattice basis
         error = torch.einsum("bi, bij -> bj", error, torch.linalg.inv(lattice))
@@ -163,11 +173,15 @@ class AbsFinalCollinearMagmomsMetric(Metric):
 
         if self.metric_type == "mae":
             self.add_state(
-                "sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_abs_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
         else:  # rmse
             self.add_state(
-                "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_squared_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
 
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
@@ -176,7 +190,10 @@ class AbsFinalCollinearMagmomsMetric(Metric):
         batch = label.batch
         total_weight = (label.entropy * label.abs_final_collinear_magmoms_weight)[batch]
         mask = total_weight != 0
-        error = pred["abs_final_collinear_magmoms"] - label.abs_final_collinear_magmoms
+        error = (
+            pred["abs_final_collinear_magmoms"].to(torch.float64)
+            - label.abs_final_collinear_magmoms.to(torch.float64)
+        )
         error = error * total_weight
         error = error[mask]
 
@@ -190,7 +207,7 @@ class AbsFinalCollinearMagmomsMetric(Metric):
 
     def compute(self):
         if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device)
+            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
 
         if self.metric_type == "mae":
             return self.sum_abs_error / self.count * self.scale
@@ -212,11 +229,15 @@ class DirectForcesMetric(Metric):
 
         if self.metric_type == "mae":
             self.add_state(
-                "sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_abs_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
         else:  # rmse
             self.add_state(
-                "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_squared_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
 
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
@@ -226,7 +247,7 @@ class DirectForcesMetric(Metric):
         key = "direct_forces"
         total_weight = (label["entropy"] * label[key + "_weight"])[batch]
         mask = total_weight != 0
-        error = pred[key] - label[key]
+        error = pred[key].to(torch.float64) - label[key].to(torch.float64)
         error = error * total_weight.unsqueeze(-1)
         error = error[mask]
 
@@ -240,7 +261,7 @@ class DirectForcesMetric(Metric):
 
     def compute(self):
         if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device)
+            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
 
         if self.metric_type == "mae":
             return self.sum_abs_error / self.count * self.scale
@@ -262,11 +283,15 @@ class ForcesMetric(Metric):
 
         if self.metric_type == "mae":
             self.add_state(
-                "sum_abs_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_abs_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
         else:  # rmse
             self.add_state(
-                "sum_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+                "sum_squared_error",
+                default=torch.tensor(0.0, dtype=torch.float64),
+                dist_reduce_fx="sum",
             )
 
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
@@ -276,7 +301,7 @@ class ForcesMetric(Metric):
         key = "forces"
         total_weight = (label["entropy"] * label[key + "_weight"])[batch]
         mask = total_weight != 0
-        error = pred[key] - label[key]
+        error = pred[key].to(torch.float64) - label[key].to(torch.float64)
 
         if "noise_mask" in label:
             noise_mask = label["noise_mask"].bool()
@@ -295,7 +320,7 @@ class ForcesMetric(Metric):
 
     def compute(self):
         if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device)
+            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
 
         if self.metric_type == "mae":
             return self.sum_abs_error / self.count * self.scale

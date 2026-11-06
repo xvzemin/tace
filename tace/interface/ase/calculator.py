@@ -24,8 +24,7 @@ from tace.dataset.quantity import (
     update_keyspec_from_kwargs,
 )
 from tace.lightning import load_tace
-from tace.utils._global import DEVICE
-from tace.utils.env import enable_acceleration
+from tace.utils.env import DEVICE, enable_acceleration
 
 
 class TACEAseCalc(Calculator):
@@ -42,6 +41,9 @@ class TACEAseCalc(Calculator):
         Files may end in .pt, .pth, .ckpt, or .pt2.
     dtype : str, optional
         Model dtype for computations, e.g., float32 or float64.
+    matmul : {"ieee", "tf32"}, optional
+        FP32 matrix multiplication precision. Uses the environment setting,
+        or "ieee" when unset.
     device : str, optional
         The device to run computations on, e.g., cpu or cuda.
         If None, the device is automatically inferred.
@@ -74,6 +76,7 @@ class TACEAseCalc(Calculator):
         model: str,
         *,
         dtype: Union[str, None] = None,
+        matmul: str | None = None,
         device: Union[str, None] = None,
         fidelity_idx: Union[int, None] = None,
         target_property: Union[list[str], None] = None,
@@ -106,6 +109,7 @@ class TACEAseCalc(Calculator):
             use_ema=True,
             target_property=target_property,
             dtype=dtype,
+            matmul=matmul,
         )
         model.eval()
         for param in model.parameters():
@@ -155,7 +159,6 @@ class TACEAseCalc(Calculator):
                 keyspec=self.keySpecification,
                 training=False,
                 neighborlist_backend=self.neighborlist_backend,
-                dtype=self.dtype,
             )
         ]
         dataloader = DataLoader(

@@ -9,9 +9,11 @@ import warnings
 from pathlib import Path
 
 import hydra
+import torch
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+from tace.dataset.cache import GRAPH_SCHEMA, statistics_cache_key
 from tace.dataset.dataloader import build_atomsList, compute_statistics
 from tace.dataset.datamodule import build_datamodule, load_cached_datamodule
 from tace.dataset.quantity import (
@@ -28,11 +30,13 @@ from tace.lightning.trainer import train
 from tace.utils.env import set_env
 from tace.utils.hydra_resolver import register_resolvers
 from tace.utils.logger import set_logger
+from tace.utils.precision import configure_model_precision
 from tace.utils.utils import (
     deep_convert,
     save_full_cfg,
     set_global_seed,
     set_precision,
+    torch_default_dtype,
 )
 
 register_resolvers()
@@ -49,10 +53,10 @@ def initialize(cfg):
             )
         except Exception:
             pass
-    save_full_cfg(cfg)
     set_env(cfg)
     set_global_seed(cfg)
     set_precision(cfg)
+    save_full_cfg(cfg)
     return cfg
 
 
@@ -95,6 +99,18 @@ def build(cfg: DictConfig):
                 target_property,
                 embedding_property,
             )
+            fingerprint = statistics_cache_key(
+                cfg, target_property, embedding_property, keyspec
+            )
+            if any(
+                s.get("data_schema") != GRAPH_SCHEMA
+                or s.get("data_dtype") != "float64"
+                or s.get("data_fingerprint") != fingerprint
+                for s in statistics
+            ):
+                missing_statistics = set(missing_statistics) | {
+                    "FP64 data cache metadata"
+                }
             if missing_statistics:
                 logging.info(
                     "Cached statistics are missing %s; recomputing statistics",
@@ -167,19 +183,21 @@ def build(cfg: DictConfig):
             device="cpu",
             strict=True,
             use_ema=True,
-            dtype=cfg["trainer"]["precision"],
+            dtype=cfg["dtype"]["model"],
         )
         statistics = model.readout_fn.statistics
         atomic_numbers = statistics[0]["atomic_numbers"]
         _restore_loaded_model_config(cfg, model)
         cfg["finetune"] = cfg.get("finetune", {})
     else:  # From scratch
-        model = create_model(
-            cfg["model"]["config"],
-            statistics,
-            target_property,
-            embedding_property,
-        )
+        with torch_default_dtype(getattr(torch, cfg["dtype"]["model"])):
+            model = create_model(
+                cfg["model"]["config"],
+                statistics,
+                target_property,
+                embedding_property,
+            )
+    configure_model_precision(model, getattr(torch, cfg["dtype"]["model"]))
 
     if datamodule is None:
         datamodule = build_datamodule(

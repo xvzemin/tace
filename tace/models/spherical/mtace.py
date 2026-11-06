@@ -109,6 +109,8 @@ class MagneticBasis(torch.nn.Module):
     torch.Size([1, 1])
     """
 
+    geometry_precision = True
+
     def __init__(
         self,
         magnetic_scale,
@@ -215,14 +217,11 @@ class MagneticBasis(torch.nn.Module):
     def forward(
         self,
         initial_noncollinear_magmoms: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_index: torch.Tensor,
         node_fidelity: torch.Tensor,
-        node_type: torch.Tensor | None = None,
         compute_edge: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         magnetic_scale = self.magnetic_scale[node_fidelity, node_type].unsqueeze(-1)
         scaled_magmoms = initial_noncollinear_magmoms / magnetic_scale
         squared_magnitude = scaled_magmoms.square().sum(dim=-1, keepdim=True)
@@ -675,7 +674,7 @@ class O3MagneticWigner6jInteraction(O3CgtpInteraction):
     def _compute_messages(
         self,
         node_feats,
-        node_attrs_total,
+        node_types,
         edge_radial_basis,
         edge_feats,
         edge_attrs,

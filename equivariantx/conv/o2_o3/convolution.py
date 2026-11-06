@@ -290,6 +290,8 @@ class O2O3TensorProductConv(torch.nn.Module):
         vectors : torch.Tensor, optional
             Nonzero frame directions, with shape ``(edges, 3)`` or ``(1, 3)``.
             Without vectors, matrices remain independent differentiable inputs.
+            Higher-precision directions use Wigner matrices constructed in
+            their own dtype before conversion to the feature dtype.
         method : str, optional
             Override the constructor's evaluation method for this call.
         radial_network : torch.nn.Module, optional
@@ -303,6 +305,11 @@ class O2O3TensorProductConv(torch.nn.Module):
             Target features of shape ``(num_nodes, irreps_out.dim)`` in the
             declared, unsimplified ``ir_mul`` layout.
         """
+        from ...ops.radial import cast_radial
+
+        radial = cast_radial(radial, features.dtype)
+        projection = projection.to(features)
+        amplitudes = amplitudes.to(features)
         if radial_network is not None and (
             self.backend != "cuda" or not features.is_cuda
         ):
@@ -326,6 +333,11 @@ class O2O3TensorProductConv(torch.nn.Module):
             )
         if vectors is None and method in ("generator", "recurrence", "cg"):
             raise ValueError(f"method={method!r} requires vectors.")
+        if vectors is not None and vectors.dtype != features.dtype:
+            wigner = self.frame.forward_packed(
+                vectors, method="auto" if self.backend == "cuda" else "recursive"
+            ).to(features)
+            vectors = None
         if vectors is not None:
             if method == "auto":
                 from .autotune import select_method
@@ -359,6 +371,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                 )
         if wigner is None:
             raise ValueError("Supply vectors or packed Wigner matrices.")
+        wigner = wigner.to(features)
         if self.backend == "torch" or not features.is_cuda:
             result = self.reference(
                 features, radial, projection, wigner, amplitudes, edge_index, num_nodes

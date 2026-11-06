@@ -115,17 +115,7 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         if not self._is_aoti:
             self.model.reset_target_property(["energy"])
 
-        atomic_numbers = model.get_atomic_numbers()
-        node_emb = torch.zeros(
-            max(atomic_numbers) + 1, len(atomic_numbers), dtype=torch.float64
-        )
-        for index, atomic_number in enumerate(atomic_numbers):
-            node_emb[atomic_number, index] = 1.0
-        self.register_buffer(
-            "_node_emb",
-            node_emb.to(device=self._model_device, dtype=self._model_dtype),
-            persistent=False,
-        )
+        self.element = model.get_torch_element()
 
         self.model_config = ModelConfig(
             outputs=frozenset({"energy", "forces", "stress"}),
@@ -166,19 +156,19 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             return torch.device(self.model.compile_device)
         return next(self.model.parameters()).device
 
-    def _node_attrs(self, atomic_numbers: torch.Tensor) -> torch.Tensor:
+    def _node_type(self, atomic_numbers: torch.Tensor) -> torch.Tensor:
         z = atomic_numbers.long()
-        invalid_range = (z < 0) | (z >= self._node_emb.shape[0])
+        invalid_range = (z < 0) | (z >= self.element.lookup_table.numel())
         if invalid_range.any():
             unsupported = torch.unique(z[invalid_range]).detach().cpu().tolist()
             raise ValueError(f"TACE does not support atomic numbers {unsupported}.")
 
-        node_attrs = self._node_emb.index_select(0, z)
-        unsupported_mask = node_attrs.sum(dim=-1) == 0
+        node_type = self.element.z2idx(z)
+        unsupported_mask = node_type < 0
         if unsupported_mask.any():
             unsupported = torch.unique(z[unsupported_mask]).detach().cpu().tolist()
             raise ValueError(f"TACE does not support atomic numbers {unsupported}.")
-        return node_attrs
+        return node_type
 
     def _prepare_input(
         self, data: AtomicData | Batch
@@ -187,14 +177,15 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             data = Batch.from_data_list([data])
 
         model_device = self._model_device
-        same_cuda_type = data.positions.device.type == model_device.type == "cuda"
-        if data.positions.device != model_device and not same_cuda_type:
+        if model_device.type == "cuda" and model_device.index is None:
+            model_device = torch.device("cuda", torch.cuda.current_device())
+        if data.positions.device != model_device:
             raise ValueError(
                 f"Input is on {data.positions.device}, but TACE is on "
                 f"{model_device}. Move the Batch to the model device."
             )
 
-        dtype = self._model_dtype
+        dtype = torch.float64
         device = data.positions.device
         num_graphs = data.num_graphs
         requested = self.output_data()
@@ -212,9 +203,9 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         num_edges = edge_index.shape[1]
         edge_shifts_raw = getattr(data, "neighbor_list_shifts", None)
         edge_shifts = (
-            torch.zeros(num_edges, 3, dtype=dtype, device=device)
+            torch.zeros(num_edges, 3, dtype=torch.int64, device=device)
             if edge_shifts_raw is None
-            else edge_shifts_raw.to(device=device, dtype=dtype)
+            else edge_shifts_raw.to(device=device, dtype=torch.int64)
         )
 
         cell_raw = getattr(data, "cell", None)
@@ -256,7 +247,7 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         model_input = {
             "positions": positions,
             "atomic_numbers": data.atomic_numbers.long(),
-            "node_attrs": self._node_attrs(data.atomic_numbers),
+            "node_type": self._node_type(data.atomic_numbers),
             "edge_index": edge_index,
             "edge_shifts": edge_shifts,
             "lattice": cell,

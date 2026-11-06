@@ -36,9 +36,7 @@ class j0SphericalBesselBasis(torch.nn.Module):
             )
         )
         if trainable:
-            self.bessel_weights = torch.nn.Parameter(
-                bessel_roots.to(torch.get_default_dtype())
-            )
+            self.bessel_weights = torch.nn.Parameter(bessel_roots)
         else:
             self.register_buffer("bessel_weights", bessel_roots)
 
@@ -51,7 +49,7 @@ class j0SphericalBesselBasis(torch.nn.Module):
         )
 
     def forward(
-        self, r: torch.Tensor, node_attrs: torch.Tensor, edge_index: torch.Tensor
+        self, r: torch.Tensor, node_type: torch.Tensor, edge_index: torch.Tensor
     ) -> torch.Tensor:  # [..., 1]
         basis = self.bessel_weights * torch.sinc((self.bessel_weights / math.pi) * r)
         return self.prefactor * basis
@@ -299,7 +297,7 @@ class jnSphericalBesselBasis(torch.nn.Module):
             np.concatenate(zeros), dtype=torch.float64
         ).unsqueeze(0)
         if trainable:
-            self.zeros = torch.nn.Parameter(zeros.to(torch.get_default_dtype()))
+            self.zeros = torch.nn.Parameter(zeros)
         else:
             self.register_buffer("zeros", zeros)
         self.register_buffer(
@@ -315,7 +313,7 @@ class jnSphericalBesselBasis(torch.nn.Module):
         )
 
     def forward(
-        self, r: torch.Tensor, node_attrs: torch.Tensor, edge_index: torch.Tensor
+        self, r: torch.Tensor, node_type: torch.Tensor, edge_index: torch.Tensor
     ) -> torch.Tensor:
         argument = self.zeros.to(torch.float64) * (
             r.to(torch.float64) / self.cutoff.to(torch.float64)
@@ -361,7 +359,7 @@ class GaussianBasis(torch.nn.Module):
         self.register_buffer("offset", offset, persistent=False)
 
     def forward(
-        self, r: torch.Tensor, node_attrs: torch.Tensor, edge_index: torch.Tensor
+        self, r: torch.Tensor, node_type: torch.Tensor, edge_index: torch.Tensor
     ) -> torch.Tensor:  # [..., 1]
         r = r - self.offset.view(1, -1)
         return torch.exp(self.coeff * torch.pow(r, 2))
@@ -649,9 +647,9 @@ class AgnesiTransform(torch.nn.Module):
             ),
         )
         if trainable:
-            self.a = torch.nn.Parameter(torch.tensor(a, requires_grad=True))
-            self.q = torch.nn.Parameter(torch.tensor(q, requires_grad=True))
-            self.p = torch.nn.Parameter(torch.tensor(p, requires_grad=True))
+            self.a = torch.nn.Parameter(torch.tensor(a, dtype=torch.float64))
+            self.q = torch.nn.Parameter(torch.tensor(q, dtype=torch.float64))
+            self.p = torch.nn.Parameter(torch.tensor(p, dtype=torch.float64))
         else:
             self.register_buffer("q", torch.tensor(q, dtype=torch.float64))
             self.register_buffer("p", torch.tensor(p, dtype=torch.float64))
@@ -660,15 +658,12 @@ class AgnesiTransform(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source = edge_index[0]
         target = edge_index[1]
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
@@ -704,8 +699,8 @@ class SoftTransform(torch.nn.Module):
             ),
         )
         if trainable:
-            self.a = torch.nn.Parameter(torch.tensor(a, requires_grad=True))
-            self.b = torch.nn.Parameter(torch.tensor(b, requires_grad=True))
+            self.a = torch.nn.Parameter(torch.tensor(a, dtype=torch.float64))
+            self.b = torch.nn.Parameter(torch.tensor(b, dtype=torch.float64))
         else:
             self.register_buffer("a", torch.tensor(a, dtype=torch.float64))
             self.register_buffer("b", torch.tensor(b, dtype=torch.float64))
@@ -713,15 +708,12 @@ class SoftTransform(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source = edge_index[0]
         target = edge_index[1]
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
@@ -746,6 +738,7 @@ class ZBLBasis(torch.nn.Module):
     """
 
     p: torch.Tensor
+    geometry_precision = True
 
     def __init__(self, cutoff_fn: str, trainable: bool = False, p: int = 5):
         super().__init__()
@@ -765,9 +758,9 @@ class ZBLBasis(torch.nn.Module):
             ),
         )
         if trainable:
-            self.a_exp = torch.nn.Parameter(torch.tensor(0.300, requires_grad=True))
+            self.a_exp = torch.nn.Parameter(torch.tensor(0.300, dtype=torch.float64))
             self.a_prefactor = torch.nn.Parameter(
-                torch.tensor(0.4543, requires_grad=True)
+                torch.tensor(0.4543, dtype=torch.float64)
             )
         else:
             self.register_buffer("a_exp", torch.tensor(0.300, dtype=torch.float64))
@@ -788,15 +781,12 @@ class ZBLBasis(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         source = edge_index[0]
         target = edge_index[1]
-        if node_type is None:
-            node_type = node_attrs.argmax(dim=-1)
         node_atomic_numbers = atomic_numbers[node_type].unsqueeze(-1)
         Z_u = node_atomic_numbers[source]
         Z_v = node_atomic_numbers[target]
@@ -821,7 +811,7 @@ class ZBLBasis(torch.nn.Module):
         else:
             envelope = self.cutoff_fn(x, r_max)
         v_edges = 0.5 * v_edges * envelope
-        V_ZBL = scatter_sum(v_edges, target, dim=0, dim_size=node_attrs.size(0))
+        V_ZBL = scatter_sum(v_edges, target, dim=0, dim_size=node_type.size(0))
         return V_ZBL.squeeze(-1)
 
     def __repr__(self):
@@ -829,6 +819,8 @@ class ZBLBasis(torch.nn.Module):
 
 
 class RadialBasis(torch.nn.Module):
+    geometry_precision = True
+
     def __init__(
         self,
         cutoff: float = 6.0,
@@ -900,18 +892,17 @@ class RadialBasis(torch.nn.Module):
     def forward(
         self,
         edge_length: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_type: torch.Tensor,
         edge_index: torch.Tensor,
         atomic_numbers: torch.Tensor,
-        node_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         cutoff = self.cutoff_fn(edge_length)
         if self.use_distance_transform:
             edge_length = self.distance_transform(
-                edge_length, node_attrs, edge_index, atomic_numbers, node_type
+                edge_length, node_type, edge_index, atomic_numbers
             )
 
-        radial = self.radial_fn(edge_length, node_attrs, edge_index)
+        radial = self.radial_fn(edge_length, node_type, edge_index)
 
         if self.apply_cutoff:
             return radial * cutoff, None

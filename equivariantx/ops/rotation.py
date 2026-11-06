@@ -7,6 +7,7 @@ from ..utils.outputs import rotation_output
 
 def rotate(features, matrix, metadata):
     """Multiply frames within matching degrees without dense angular work."""
+    matrix = matrix.to(features)
     empty = features.new_empty((0, matrix.shape[1], features.shape[2]))
     return contract(features, matrix, empty, metadata, 2)
 

@@ -12,6 +12,7 @@ import torch
 from torch_geometric.loader import DataLoader
 
 from ..utils.utils import log_statistics_to_yaml
+from .cache import GRAPH_SCHEMA
 from .element import TorchElement
 from .quantity import KeySpecification, get_need_property
 
@@ -297,6 +298,7 @@ def _compute_statistics(
     target_property: List[str],
     device: str = "cpu",
     num_fidelities: int = 1,
+    data_fingerprint: Optional[str] = None,
 ) -> List[Dict]:
     if num_fidelities < 1:
         raise ValueError("At least one fidelity must be configured")
@@ -309,6 +311,11 @@ def _compute_statistics(
         raise ValueError("One atomic-energy mapping is required for every fidelity")
 
     stats_device = torch.device(device)
+    if stats_device.type == "mps":
+        logging.info(
+            "Computing float64 dataset statistics on CPU; MPS has no float64 support"
+        )
+        stats_device = torch.device("cpu")
     num_elements = len(atomic_numbers)
     num_node_groups = num_fidelities * num_elements
     element_lookup = torch.full(
@@ -391,7 +398,7 @@ def _compute_statistics(
             if initial_noncollinear_magmoms is not None:
                 has_noncollinear_magmoms = True
                 initial_noncollinear_magmoms = initial_noncollinear_magmoms.to(
-                    stats_device, non_blocking=True
+                    device=stats_device, dtype=torch.float64, non_blocking=True
                 )
                 noncollinear_magmoms_norm = torch.linalg.vector_norm(
                     initial_noncollinear_magmoms, dim=-1
@@ -422,7 +429,9 @@ def _compute_statistics(
                     device=stats_device,
                 ).index_add_(0, batch, e0_node_energy)
                 batch_energy = (
-                    data["energy"].reshape(-1).to(stats_device, non_blocking=True)
+                    data["energy"]
+                    .reshape(-1)
+                    .to(device=stats_device, dtype=torch.float64, non_blocking=True)
                 )
                 energy_values = torch.stack(
                     (
@@ -451,7 +460,9 @@ def _compute_statistics(
                     raise KeyError(
                         "Force statistics requested but no forces were found"
                     )
-                forces = forces.to(stats_device, non_blocking=True)
+                forces = forces.to(
+                    device=stats_device, dtype=torch.float64, non_blocking=True
+                )
                 forces_weight = data.get("forces_weight")
                 if forces_weight is None and "direct_forces" in target_property:
                     forces_weight = data.get("direct_forces_weight")
@@ -533,6 +544,9 @@ def _compute_statistics(
     for level in range(num_fidelities):
         has_data = int(graph_counts[level]) > 0
         stats = {
+            "data_schema": GRAPH_SCHEMA,
+            "data_dtype": "float64",
+            "data_fingerprint": data_fingerprint,
             "fidelity_idx": level,
             "available": has_data,
             "num_graphs": int(graph_counts[level]),
@@ -608,8 +622,7 @@ def _compute_statistics(
                         mag_std_by_element[:, 3], atomic_numbers
                     ),
                     "rms_noncollinear_magmoms": {
-                        z: float(safe_rms_noncollinear_magmoms)
-                        for z in atomic_numbers
+                        z: float(safe_rms_noncollinear_magmoms) for z in atomic_numbers
                     },
                     "rms_noncollinear_magmoms_by_element": _by_element(
                         safe_rms_noncollinear_magmoms_by_element,

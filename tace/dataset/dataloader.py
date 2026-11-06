@@ -9,6 +9,7 @@ from typing import Dict, List, Sequence, Union
 from hydra.utils import instantiate
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
+from .cache import statistics_cache_key
 from .element import TorchElement, build_element_lookup
 from .graph import from_atoms
 from .quantity import KeySpecification
@@ -134,10 +135,8 @@ def build_atomsList(
             atomic_numbers_from_dataset | atomic_numbers_from_energy
         )
         element = build_element_lookup(atomic_numbers_from_dataset)
-        if datamodule is not None and element.zs != datamodule.element.zs:
-            raise ValueError(
-                "Configured atomic energies change the cached element mapping"
-            )
+        if datamodule is not None:
+            datamodule.element = element
 
         missing_energy = [
             idx
@@ -227,6 +226,9 @@ def compute_statistics(
         target_property=target_property,
         device=cfg.get("misc", {}).get("device", "cpu"),
         num_fidelities=len(fidelity),
+        data_fingerprint=statistics_cache_key(
+            cfg, target_property, embedding_property, keyspec
+        ),
     )
 
     return statistics

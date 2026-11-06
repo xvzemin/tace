@@ -52,6 +52,10 @@ class CartesianTACE(SphericalTACE):
             and self.pair_representation.o2_angular_basis is not None
         ):
             self.pair_representation.o2_angular_basis = RotationMatrices()
+        for name in ("o2_angular_basis", "o3_angular_basis", "co3_angular_basis"):
+            angular_basis = getattr(representation, name, None)
+            if angular_basis is not None:
+                angular_basis.geometry_precision = True
         self.model_config["_target_"] = "tace.models.CartesianTACE"
         kinds = self.model_config["product_basis"]["type"]
         self.model_config["product_basis"]["type"] = (
@@ -59,4 +63,6 @@ class CartesianTACE(SphericalTACE):
             if isinstance(kinds, list)
             else ("nonlinear_ictd" if kinds == "nonlinear_cgtp" else kinds)
         )
-        self.to(dtype=torch.get_default_dtype())
+        from tace.utils.precision import configure_model_precision
+
+        configure_model_precision(self, torch.get_default_dtype())

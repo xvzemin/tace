@@ -11,6 +11,8 @@ from ..ictd import ICTD
 class _SymmetricRankTwoBasisChange(torch.nn.Module):
     """Convert ``0e + 2e`` components to a Cartesian tensor."""
 
+    float64_buffers = ("zero", "two")
+
     def __init__(self) -> None:
         super().__init__()
         PS, DS, CS, SS = ICTD(2)
