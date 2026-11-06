@@ -1,0 +1,10 @@
+# TACE_USE_MATRIX_WEIGHT=1 tace-train -cn o3_muon.yaml
+
+defaults:
+  - o3
+  - _self_
+
+# Replace the inherited Adam options, including amsgrad.
+optimizer: >-
+  ${oc.create:{_target_: tace.utils.optimizer.HybridMuonOptimizer,
+  lr: 1e-3, weight_decay: 0.0, adam_betas: [0.9, 0.95], muon_mode: slice}}

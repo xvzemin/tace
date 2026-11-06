@@ -1,3 +1,9 @@
+import os
+import subprocess
+import sys
+from copy import deepcopy
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -15,6 +21,7 @@ from tace.utils.loss.mse_fn import mse_forces
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.mask_metrics import MaskMAE, MaskRMSE
+from tace.utils.optimizer.hybrid_muon import HybridMuonOptimizer
 
 
 @pytest.mark.parametrize("loss", ["mse", "mae", "huber", "l2mae"])
@@ -281,3 +288,245 @@ def test_balanced_element_weights_have_weighted_mean_one():
         balanced_element_weights(counts, mean_losses, alpha=0.0),
         torch.ones(4, dtype=torch.float64),
     )
+
+
+@pytest.mark.parametrize("optimizer_name", ["Adam", "AdamW", "SGD"])
+@pytest.mark.parametrize("matrix_weight", ["0", "1"])
+def test_optimizer_weight_decay(optimizer_name, matrix_weight):
+    from tace.lightning.lit_model import LightningWrapperModel
+    from tace.models.blocks import ScaleShift
+    from tace.models.linear import e3nnLinear
+    from tace.models.radial import RadialBasis, ZBLBasis
+    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
+    from tace.models.spherical.scatter_norm import DensityScatterNorm
+
+    class TrainingModel(torch.nn.Module):
+        configure_optimizers = LightningWrapperModel.configure_optimizers
+
+        def __init__(self):
+            super().__init__()
+            self.cfg = {
+                "optimizer": {
+                    "_target_": f"torch.optim.{optimizer_name}",
+                    "lr": 0.01,
+                    "weight_decay": 0.1,
+                }
+            }
+            self.linear = e3nnLinear(
+                "2x0e+2x1o",
+                "2x0e+2x1o",
+                bias=True,
+                use_matrix_weight=matrix_weight,
+            )
+            self.mlp = torch.nn.Sequential(
+                torch.nn.Linear(3, 3), torch.nn.SiLU(), torch.nn.Linear(3, 2)
+            )
+            self.norm = EquivariantMergeLayerNorm([0, 1], 2)
+            self.density = DensityScatterNorm(2.0, 4, radial_bias=True)
+            self.radial = RadialBasis(trainable=True)
+            self.scale_shift = ScaleShift(
+                [1], [{1: 1.0}], [{1: 0.0}], True, True, all_atoms=True
+            )
+            self.zbl = ZBLBasis("c2poly", trainable=True)
+            self.loss_fn = UncertaintyLoss(["energy"], ["mse_energy"], [1.0])
+            self.activation = torch.nn.PReLU(2)
+            self.temperature_logit = torch.nn.Parameter(torch.ones(2))
+            self.bias = torch.nn.ParameterDict(
+                {"energy": torch.nn.Parameter(torch.ones(2))}
+            )
+            self.biases = torch.nn.ParameterList([torch.nn.Parameter(torch.ones(2))])
+            self.tied = torch.nn.Linear(3, 3, bias=False)
+            self.embedding = torch.nn.Embedding(3, 3)
+            self.embedding.weight = self.tied.weight
+            self.alias = torch.nn.Linear(3, 3, bias=False)
+            self.alias.weight = self.tied.weight
+            self.frozen = torch.nn.Parameter(torch.ones(3), requires_grad=False)
+
+    model = TrainingModel()
+    optimizer = model.configure_optimizers()["optimizer"]
+    params = [p for group in optimizer.param_groups for p in group["params"]]
+    assert len(params) == len({id(p) for p in params})
+    assert {id(p) for p in params} == {
+        id(p) for p in model.parameters() if p.requires_grad
+    }
+    decay = {
+        id(p): group["weight_decay"]
+        for group in optimizer.param_groups
+        for p in group["params"]
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        expected = name.startswith("linear.weight") or (
+            name.startswith("mlp.") and name.endswith("weight")
+        )
+        assert decay[id(param)] == (0.1 if expected else 0.0), name
+        with torch.no_grad():
+            param.fill_(1.0)
+        param.grad = torch.zeros_like(param)
+    optimizer.step()
+    for param in params:
+        if decay[id(param)]:
+            assert torch.all(param < 1)
+        else:
+            torch.testing.assert_close(param, torch.ones_like(param), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_optimizer_without_triton(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    script = r"""
+import importlib.abc
+import importlib.util
+import sys
+
+class NoTriton(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "triton" or fullname.startswith("triton."):
+            raise ModuleNotFoundError("Triton is not installed", name=fullname)
+
+find_spec = importlib.util.find_spec
+importlib.util.find_spec = lambda name, *args, **kwargs: (
+    None if name == "triton" or name.startswith("triton.")
+    else find_spec(name, *args, **kwargs)
+)
+sys.meta_path.insert(0, NoTriton())
+
+import torch
+import tace.utils.optimizer as optimizers
+assert "tace.utils.optimizer.hybrid_muon" not in sys.modules
+torch.set_num_threads(2)
+device = sys.argv[1]
+if device == "cpu":
+    assert not torch.cuda.is_available()
+for optimizer_type in (torch.optim.Adam, torch.optim.AdamW, optimizers.HybridMuonOptimizer):
+    model = torch.nn.Linear(8, 4).to(device)
+    optimizer = optimizer_type(model.parameters(), lr=1e-3)
+    for step in range(4):
+        optimizer.zero_grad(set_to_none=True)
+        loss = model(torch.randn(2, 8, device=device)).square().mean()
+        loss.backward()
+        optimizer.step()
+        assert torch.isfinite(loss)
+    if optimizer_type is optimizers.HybridMuonOptimizer:
+        assert not optimizer._use_flash
+        assert bool(optimizer._graphs) == (device == "cuda")
+assert not any(name == "triton" or name.startswith("triton.") for name in sys.modules)
+"""
+    env = os.environ.copy()
+    if device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    result = subprocess.run(
+        [sys.executable, "-c", script, device],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
+@pytest.mark.parametrize("use_foreach", [False, True])
+def test_hybrid_muon_checkpoint(dtype, use_foreach):
+    names = ("bias", "adamw_weight")
+    params = [
+        torch.nn.Parameter(torch.linspace(-0.3, 0.7, 3, dtype=dtype)),
+        torch.nn.Parameter(torch.linspace(-0.8, 0.5, 6, dtype=dtype).reshape(2, 3)),
+    ]
+    optimizer = HybridMuonOptimizer(
+        params, named_parameters=zip(names, params), use_foreach=use_foreach
+    )
+    for step in range(4):
+        for param in params:
+            param.grad = torch.sin(param.detach() + step)
+        optimizer.step()
+
+    restored_params = [torch.nn.Parameter(p.detach().clone()) for p in params]
+    restored = HybridMuonOptimizer(
+        restored_params,
+        named_parameters=zip(names, restored_params),
+        use_foreach=use_foreach,
+    )
+    restored.load_state_dict(deepcopy(optimizer.state_dict()))
+    for param, restored_param in zip(params, restored_params):
+        for key in ("exp_avg", "exp_avg_sq"):
+            assert restored.state[restored_param][key].dtype == torch.float32
+            torch.testing.assert_close(
+                restored.state[restored_param][key],
+                optimizer.state[param][key],
+                rtol=0,
+                atol=0,
+            )
+
+    for step in range(4, 9):
+        for index, (param, restored_param) in enumerate(zip(params, restored_params)):
+            grad = None if index == 1 and step % 2 else torch.cos(param.detach() + step)
+            param.grad = grad
+            restored_param.grad = None if grad is None else grad.clone()
+        optimizer.step()
+        restored.step()
+        for param, restored_param in zip(params, restored_params):
+            torch.testing.assert_close(restored_param, param, rtol=0, atol=0)
+
+
+def test_hybrid_muon_parameter_groups():
+    optimizer = HybridMuonOptimizer([{"params": []}])
+    optimizer.step()
+    params = [torch.nn.Parameter(torch.ones(3)) for _ in range(2)]
+    for param in params:
+        optimizer.add_param_group({"params": [param]})
+        param.grad = torch.ones_like(param)
+        optimizer.step()
+        assert torch.all(param < 1)
+        assert "exp_avg" in optimizer.state[param]
+    expected = [param.detach().clone() for param in params]
+    optimizer.zero_grad(set_to_none=True)
+    optimizer.step()
+    for param, value in zip(params, expected):
+        torch.testing.assert_close(param, value, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("use_foreach", [False, True])
+def test_hybrid_muon_cuda_graph(dtype, use_foreach):
+    names = ("weight", "tensor_weight", "bias", "adamw_weight")
+    params = [
+        torch.nn.Parameter(torch.randn(shape, dtype=dtype, device="cuda"))
+        for shape in ((4, 8), (2, 4, 8), (8,), (4, 8))
+    ]
+    eager_params = [torch.nn.Parameter(param.detach().clone()) for param in params]
+    optimizer = HybridMuonOptimizer(
+        params, named_parameters=zip(names, params), use_foreach=use_foreach
+    )
+    eager = HybridMuonOptimizer(
+        eager_params, named_parameters=zip(names, eager_params), use_foreach=use_foreach
+    )
+    eager._graph_enabled = False
+
+    for step in range(26):
+        for index, (param, eager_param) in enumerate(zip(params, eager_params)):
+            grad = torch.sin(param.detach() + step)
+            if step >= 5 and step % 2 and index in (1, 3):
+                grad = None
+            param.grad = grad
+            eager_param.grad = None if grad is None else grad.clone()
+        for current in (optimizer, eager):
+            current.param_groups[0]["lr"] = 5e-4 / (1 + step // 4)
+            if step == 20:
+                current.param_groups[0].update(
+                    momentum=0.9, weight_decay=0.005, adam_betas=(0.85, 0.97)
+                )
+            current.step()
+        for param, eager_param in zip(params, eager_params):
+            torch.testing.assert_close(param, eager_param, rtol=2e-6, atol=2e-6)
+        if step == 11:
+            assert len(optimizer._graphs) == 2
+            optimizer.load_state_dict(deepcopy(optimizer.state_dict()))
+            assert not optimizer._graphs
+        if step == 20:
+            assert not optimizer._graphs
+    assert len(optimizer._graphs) == 2

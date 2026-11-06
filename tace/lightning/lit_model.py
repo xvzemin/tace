@@ -8,6 +8,7 @@ import importlib
 import logging
 from collections import Counter
 from collections.abc import Mapping
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -31,6 +32,7 @@ from .lora import to_lora_model
 from .loss_skip import LossSkipController
 from .torch_model import create_model
 from .u_shift import apply_u_shift
+from .weight_decay import NO_WEIGHT_DECAY_MODULES, NO_WEIGHT_DECAY_NAMES
 
 
 def get_class_from_cfg(cfg):
@@ -378,55 +380,29 @@ class LightningWrapperModel(L.LightningModule):
         optimizer_cfg.pop("extra", None)
         optimizer_cfg.pop("params", None)
 
-        decay_params = []
-        no_decay_params = []
-        no_decay_names = []
+        no_decay_ids = {
+            id(param)
+            for module in self.modules()
+            if isinstance(module, NO_WEIGHT_DECAY_MODULES)
+            for param in module.parameters()
+        }
+        # An exempt alias also exempts the shared parameter.
+        no_decay_ids.update(
+            id(param)
+            for name, param in self.named_parameters(remove_duplicate=False)
+            if any(fnmatchcase(name, pattern) for pattern in NO_WEIGHT_DECAY_NAMES)
+        )
 
-        all_named_params = []
-
-        for module_name, module in self.named_modules():
-            for param_name, param in module.named_parameters(recurse=False):
-                if not param.requires_grad:
-                    continue
-
-                full_name = f"{module_name}.{param_name}" if module_name else param_name
-                all_named_params.append((full_name, param))
-
-                if (
-                    param_name.endswith("bias")
-                    or "_readout" in full_name
-                    or "_readouts" in full_name
-                    or ".node_embedding." in full_name
-                    or ".source_embedding." in full_name
-                    or ".target_embedding." in full_name
-                    or ".uie." in full_name
-                    or ".uee." in full_name
-                    or ".embedding." in full_name
-                    or ".router." in full_name
-                    or ".radial_basis" in full_name
-                    or isinstance(module, torch.nn.LayerNorm)
-                    or isinstance(module, torch.nn.RMSNorm)
-                    or isinstance(module, torch.nn.Embedding)
-                ):
-                    no_decay_params.append(param)
-                    no_decay_names.append(full_name)
-                else:
-                    decay_params.append(param)
-
-        if weight_decay > 0 and len(no_decay_names) > 0:
+        all_named_params = [
+            (name, p) for name, p in self.named_parameters() if p.requires_grad
+        ]
+        decay_params = [p for _, p in all_named_params if id(p) not in no_decay_ids]
+        no_decay_params = [p for _, p in all_named_params if id(p) in no_decay_ids]
+        if weight_decay > 0:
             logging.debug("Parameters excluded from weight decay:")
-            for name in no_decay_names:
-                logging.debug(f"  {name}")
-        else:
-            logging.debug("All parameters use same weight decay")
-
-        decay_ids = set(map(id, decay_params))
-        no_decay_ids = set(map(id, no_decay_params))
-        overlap = decay_ids.intersection(no_decay_ids)
-        if len(overlap) > 0:
-            raise RuntimeError(
-                "Some parameters appear in both decay and no_decay groups"
-            )
+            for name, param in all_named_params:
+                if id(param) in no_decay_ids:
+                    logging.debug("  %s", name)
 
         param_groups = [
             {"params": decay_params, "weight_decay": weight_decay},
@@ -753,14 +729,17 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
     selected = [
         index
         for index, interaction in enumerate(interactions)
-        if type(interaction) in (
+        if type(interaction)
+        in (
             O3CgtpInteraction,
             O2CgtpInteraction,
             O3IctdInteraction,
         )
     ]
     if not selected:
-        raise ValueError("The model has no cgtp, o2_cgtp or co3 interactions to convert.")
+        raise ValueError(
+            "The model has no cgtp, o2_cgtp or co3 interactions to convert."
+        )
     for index in selected:
         to_o2 = (
             type(interactions[index]) is O3CgtpInteraction
