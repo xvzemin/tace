@@ -108,7 +108,18 @@ class AugmentedDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        data = copy(self.dataset[index])
+        return self.transform(self.dataset[index])
+
+    def __getitems__(self, indices):
+        graphs = (
+            self.dataset.__getitems__(indices)
+            if hasattr(self.dataset, "__getitems__")
+            else [self.dataset[index] for index in indices]
+        )
+        return [self.transform(graph) for graph in graphs]
+
+    def transform(self, graph):
+        data = copy(graph)
 
         if "spin_rotation" in self.augmentations:
             reference = _first_tensor(data, PROPERTIES)

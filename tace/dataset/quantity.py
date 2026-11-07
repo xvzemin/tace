@@ -612,7 +612,7 @@ PROPERTIES = {
         "requires_grad_with": ["initial_collinear_magmoms"],
     },
     "total_collinear_magmom": {
-        "ase_name": "magmoms",
+        "ase_name": "magmom",
         "type": "float",
         "scope": "per-system",
         "rank": 0,
@@ -696,7 +696,7 @@ PROPERTIES = {
         "requires_grad_with": ["initial_noncollinear_magmoms"],
     },
     "total_noncollinear_magmom": {
-        "ase_name": "magmoms",
+        "ase_name": "magmom",
         "type": "float",
         "scope": "per-system",
         "rank": 1,
@@ -930,7 +930,7 @@ def get_embedding_property(cfg: Dict) -> List[str]:
     for p, v in cfg["model"]["config"].get("universal_embedding", {}).items():
         if v["enable"]:
             embedding_property.append(p)
-    for target in get_target_property(cfg):
+    for target in get_need_property(get_target_property(cfg), training=True):
         required = (
             PROPERTIES[target]["must_be_with"]
             + PROPERTIES[target]["requires_grad_with"]
@@ -954,17 +954,34 @@ def get_embedding_property(cfg: Dict) -> List[str]:
 
 
 def get_need_property(
-    target_property: List[str] = [],
-    embedding_property: List[str] = [],
+    target_property: Optional[List[str]] = None,
+    embedding_property: Optional[List[str]] = None,
     training: bool = False,
 ) -> List[str]:
-    we_should_read = embedding_property
+    """Return the deterministic transitive closure of required properties."""
+    requested = list(embedding_property or [])
     if training:
-        we_should_read = we_should_read + target_property
-    joint_property = []
-    for name in we_should_read:
-        joint_property += PROPERTIES[name]["must_be_with"]
-    return list(set(joint_property + we_should_read))
+        requested.extend(target_property or [])
+    result, active = [], set()
+
+    def visit(name):
+        if name in result:
+            return
+        if name not in PROPERTIES:
+            raise ValueError(f"Unknown property: {name}")
+        if name in active:
+            raise ValueError(f"Cyclic property dependency involving {name}")
+        active.add(name)
+        config = PROPERTIES[name]
+        for dependency in config["must_be_with"] + config["requires_grad_with"]:
+            if dependency in PROPERTIES:
+                visit(dependency)
+        active.remove(name)
+        result.append(name)
+
+    for name in requested:
+        visit(name)
+    return result
 
 
 # For Metrics

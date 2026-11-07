@@ -144,9 +144,10 @@ class _GroupedMoments:
 
         count = self.count + batch_count
         delta = batch_mean - self.mean
-        self.mean += delta * (batch_count / count.clamp_min(1)).unsqueeze(-1)
+        denominator = count.clamp_min(1).to(torch.float64)
+        self.mean += delta * (batch_count / denominator).unsqueeze(-1)
         self.m2 += batch_m2 + delta.square() * (
-            self.count * batch_count / count.clamp_min(1)
+            self.count.to(torch.float64) * batch_count / denominator
         ).unsqueeze(-1)
         self.count = count
 
@@ -193,72 +194,107 @@ def _by_element(values: torch.Tensor, atomic_numbers: Sequence[int]) -> Dict:
     return dict(zip(atomic_numbers, values.tolist()))
 
 
+class AtomicEnergyFit:
+    """Bounded, FP64 least-squares fit using incremental QR factorization."""
+
+    def __init__(self, atomic_numbers, fidelity_indices):
+        self.atomic_numbers = list(atomic_numbers)
+        self.states = {int(index): [None, None, 0] for index in fidelity_indices}
+
+    def update(self, index, counts, energies):
+        counts = np.asarray(counts, dtype=np.float64).reshape(
+            -1, len(self.atomic_numbers)
+        )
+        energies = np.asarray(energies, dtype=np.float64).reshape(-1)
+        if len(counts) != len(energies):
+            raise ValueError("Composition and energy counts differ.")
+        if not len(counts):
+            return
+        previous_r, previous_target, count = self.states[index]
+        if previous_r is not None:
+            counts = np.concatenate((previous_r, counts), axis=0)
+            energies = np.concatenate((previous_target, energies))
+        q, r = np.linalg.qr(counts, mode="reduced")
+        self.states[index] = [
+            r,
+            q.T @ energies,
+            count
+            + len(energies)
+            - (0 if previous_target is None else len(previous_target)),
+        ]
+
+    def result(self):
+        results = {}
+        for index, (matrix, target, count) in self.states.items():
+            if matrix is None:
+                logging.warning(
+                    "No energy labels for fidelity %s; using atomic energy 0.0", index
+                )
+                results[index] = dict.fromkeys(self.atomic_numbers, 0.0)
+                continue
+            rcond = np.finfo(np.float64).eps * max(count, len(self.atomic_numbers))
+            solution, _, rank, _ = np.linalg.lstsq(matrix, target, rcond=rcond)
+            if rank < min(count, len(self.atomic_numbers)):
+                logging.warning(
+                    "Atomic-energy fit for fidelity %s is rank deficient; using the minimum-norm solution",
+                    index,
+                )
+            results[index] = dict(zip(self.atomic_numbers, map(float, solution)))
+        return results
+
+
 def compute_atomic_energies(
     atoms_list: Sequence[ase.Atoms],
     element: TorchElement,
     keyspec: KeySpecification,
     fidelity_indices: Sequence[int],
 ) -> Dict[int, Dict[int, float]]:
-    """Fit isolated atomic energies for several fidelities in one data pass."""
-    fidelity_indices = tuple(dict.fromkeys(int(idx) for idx in fidelity_indices))
-    fidelity_key = keyspec.info_keys["fidelity_idx"]
-    energy_key = keyspec.info_keys["energy"]
-    element_indices = np.full(max(element.zs) + 1, -1, dtype=np.int64)
-    element_indices[element.zs] = np.arange(len(element), dtype=np.int64)
-    compositions = {idx: [] for idx in fidelity_indices}
-    energies = {idx: [] for idx in fidelity_indices}
+    """Fit offsets using the same label resolution and masks as graph training."""
+    from .records import record_from_atoms, resolve_property, validate_fidelity
 
-    for atoms in atoms_list:
-        fidelity_idx = int(atoms.info.get(fidelity_key, 0))
-        if fidelity_idx not in compositions or energy_key not in atoms.info:
-            continue
-        composition = np.bincount(
-            element_indices[atoms.get_atomic_numbers()], minlength=len(element)
-        ).astype(np.float64, copy=False)
-        compositions[fidelity_idx].append(composition)
-        energies[fidelity_idx].append(float(atoms.info[energy_key]))
-
-    return fit_atomic_energies(compositions, energies, element.zs)
+    fit = AtomicEnergyFit(element.zs, fidelity_indices)
+    element_indices = {z: index for index, z in enumerate(element.zs)}
+    for start in range(0, len(atoms_list), 1024):
+        indices = range(start, min(start + 1024, len(atoms_list)))
+        records = (
+            atoms_list.get_records(indices)
+            if hasattr(atoms_list, "get_records")
+            else [record_from_atoms(atoms_list[index]) for index in indices]
+        )
+        counts = {index: [] for index in fit.states}
+        energies = {index: [] for index in fit.states}
+        for record in records:
+            value = resolve_property(record, "fidelity_idx", keyspec)
+            index = validate_fidelity(0 if value is None else value)
+            energy = resolve_property(record, "energy", keyspec)
+            weight = record.info.get(
+                "energy_weight", record.data.get("energy_weight", 1.0)
+            )
+            if index not in fit.states or energy is None or float(weight) <= 0:
+                continue
+            counts[index].append(
+                np.bincount(
+                    [element_indices[int(z)] for z in record.numbers],
+                    minlength=len(element),
+                )
+            )
+            energies[index].append(float(energy))
+        for index in fit.states:
+            fit.update(index, counts[index], energies[index])
+    return fit.result()
 
 
 def fit_atomic_energies(compositions, energies, atomic_numbers):
-    """Fit elemental energy offsets from composition counts and total energies."""
-    results = {}
-    for fidelity_idx in compositions:
-        if not compositions[fidelity_idx]:
-            logging.warning(
-                "No training structures found for fidelity %s; using atomic energy 0.0",
-                fidelity_idx,
+    """Fit elemental offsets without forming normal equations."""
+    fit = AtomicEnergyFit(atomic_numbers, compositions)
+    for index in compositions:
+        for start in range(0, len(compositions[index]), 1024):
+            fit.update(
+                index,
+                compositions[index][start : start + 1024],
+                energies[index][start : start + 1024],
             )
-            results[fidelity_idx] = {z: 0.0 for z in atomic_numbers}
-            continue
-
-        matrix = np.stack(compositions[fidelity_idx])
-        target = np.asarray(energies[fidelity_idx], dtype=np.float64)
-        try:
-            solution, _, rank, _ = np.linalg.lstsq(matrix, target, rcond=None)
-        except np.linalg.LinAlgError:
-            logging.warning(
-                "Failed to fit isolated atomic energies for fidelity %s; using "
-                "0.0 for every element",
-                fidelity_idx,
-            )
-            results[fidelity_idx] = {z: 0.0 for z in atomic_numbers}
-            continue
-
-        if rank < min(matrix.shape):
-            logging.warning(
-                "Atomic-energy composition matrix for fidelity %s is rank deficient "
-                "(%s < %s); unconstrained values use the least-squares "
-                "minimum-norm solution",
-                fidelity_idx,
-                rank,
-                min(matrix.shape),
-            )
-        results[fidelity_idx] = {
-            z: float(solution[idx]) for idx, z in enumerate(atomic_numbers)
-        }
-    return results
+    return fit.result()
 
 
 def compute_atomic_energies_from_graphs(
@@ -266,29 +302,29 @@ def compute_atomic_energies_from_graphs(
     element: TorchElement,
     fidelity_indices: Sequence[int],
 ) -> Dict[int, Dict[int, float]]:
-    """Fit elemental energy offsets from cached training graphs."""
-    fidelity_indices = tuple(dict.fromkeys(int(idx) for idx in fidelity_indices))
-    compositions = {idx: [] for idx in fidelity_indices}
-    energies = {idx: [] for idx in fidelity_indices}
+    """Fit elemental offsets in one bounded-memory pass over graph labels."""
+    fit = AtomicEnergyFit(element.zs, fidelity_indices)
     for data in dataloader:
         num_graphs = data.ptr.numel() - 1
         element_idx = element.z2idx(data["atomic_numbers"])
         counts = torch.bincount(
-            data.batch * len(element) + element_idx,
-            minlength=num_graphs * len(element),
+            data.batch * len(element) + element_idx, minlength=num_graphs * len(element)
         ).reshape(num_graphs, len(element))
         fidelity = data.get("fidelity_idx")
         if fidelity is None:
             fidelity = torch.zeros(num_graphs, dtype=torch.int64)
         fidelity = fidelity.reshape(-1)
         energy_weight = data.get("energy_weight")
-        for idx in fidelity_indices:
-            selected = fidelity == idx
+        for index in fit.states:
+            selected = fidelity == index
             if energy_weight is not None:
                 selected &= energy_weight.reshape(-1) > 0
-            compositions[idx].extend(counts[selected].numpy())
-            energies[idx].extend(data["energy"].reshape(-1)[selected].double().numpy())
-    return fit_atomic_energies(compositions, energies, element.zs)
+            fit.update(
+                index,
+                counts[selected].cpu().numpy(),
+                data["energy"].reshape(-1)[selected].double().cpu().numpy(),
+            )
+    return fit.result()
 
 
 def _compute_statistics(
@@ -388,10 +424,14 @@ def _compute_statistics(
             graph_counts += torch.bincount(fidelity_idx, minlength=num_fidelities)
             atom_counts += torch.bincount(node_fidelity, minlength=num_fidelities)
 
-            neighbor_counts = torch.bincount(
-                data.edge_index[0].to(stats_device, non_blocking=True),
-                minlength=batch.numel(),
-            )
+            neighbor_counts = data.get("num_neighbors")
+            if neighbor_counts is None:
+                neighbor_counts = torch.bincount(
+                    data.edge_index[0].to(stats_device, non_blocking=True),
+                    minlength=batch.numel(),
+                )
+            else:
+                neighbor_counts = neighbor_counts.to(stats_device, non_blocking=True)
             neighbor_moments.update(neighbor_counts, element_idx)
 
             initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")

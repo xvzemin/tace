@@ -5,14 +5,9 @@
 
 """Neighbor-list construction and backend behavior.
 
-``test/test_neighbour_list.py`` covers five system
-classes for each of ASE, Matscipy, Vesin, and AlchemiOps: nonperiodic without a
-cell, nonperiodic with a cell, 1D periodic, 2D periodic, and 3D periodic.
-
-Backend-specific handling:
-
-* Matscipy requires a complete, nonsingular cell.
-* AlchemiOps may add batch processing, in a future update.
+The single-system interface returns the physical lattice unchanged. The packed
+batch interface returns NumPy arrays and builds all AlchemiOps systems together,
+including systems with different cells and periodic boundary conditions.
 
 Missing cell vectors are completed only for backend computation; the physical
 lattice returned to the model is unchanged. Shift components along nonperiodic
@@ -20,6 +15,7 @@ directions are always normalized to zero, and only zero-shift self edges are
 removed.
 """
 
+import warnings
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -43,33 +39,6 @@ NV_CELL_LIST_THRESHOLD = 1024
 NV_NONPERIODIC_CELL_LIST_THRESHOLD = 4096
 NV_CPU_CELL_LIST_THRESHOLD = 128
 
-# # Disable max_neighbors
-# def filter_max_neighbors(source, target, shifts, distances, max_neighbors="inf"):
-
-#     if max_neighbors is None or max_neighbors == "inf":
-#         return source, target, shifts
-#     order = np.lexsort((distances, source))
-#     src_sorted = source[order]
-#     dst_sorted = target[order]
-#     shifts_sorted = shifts[order]
-
-#     unique_src, counts = np.unique(src_sorted, return_counts=True)
-#     cum_counts = np.cumsum(counts)  # [3, 2, 1] => [3, 5, 6]
-
-#     mask = np.zeros(len(src_sorted), dtype=bool)
-#     start_idx = 0
-#     for end_idx in cum_counts:
-#         count = end_idx - start_idx
-#         keep = min(max_neighbors, count)
-#         mask[start_idx : start_idx + keep] = True
-#         start_idx = end_idx
-
-#     return (
-#         src_sorted[mask],
-#         dst_sorted[mask],
-#         shifts_sorted[mask],
-#     )
-
 
 def _grow_search_capacity(capacity: int) -> int:
     return max(capacity + 1, (capacity * 5 + 3) // 4)
@@ -86,17 +55,20 @@ def _choose_nv_method(n_atoms: int, periodic: bool, device) -> str:
 
 
 def _get_nv_start_capacity(n_atoms: int, max_neighbors: Union[int, str, None]) -> int:
+    # A periodic atom can have many images of the same neighbor, even for N=1.
+    # This is an allocation hint, never a cap on the returned neighbor count.
     if max_neighbors is None or max_neighbors == "inf":
-        return max(1, min(max(n_atoms - 1, 1), 64))
+        return 128
     return max(1, int(max_neighbors))
 
 
-def _build_alchemiops_edges(
+def _build_alchemiops_batch(
     positions: np.ndarray,
+    ptr: np.ndarray,
     cutoff: float,
-    pbc: Tuple[bool, bool, bool],
-    lattice: Union[np.ndarray, None],
-    max_neighbors: Union[int, str, None],
+    pbc: np.ndarray,
+    lattice: np.ndarray,
+    device=None,
 ):
     try:
         import torch
@@ -107,33 +79,61 @@ def _build_alchemiops_edges(
             "`nvalchemi-toolkit-ops` from https://github.com/NVIDIA/nvalchemi-toolkit-ops."
         ) from exc
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = (
-        torch.float64 if np.asarray(positions).dtype == np.float64 else torch.float32
+    device = torch.device(
+        device if device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     )
+    if device.type not in {"cpu", "cuda"}:
+        raise NotImplementedError(f"AlchemiOps does not support device {device}")
+    dtype = torch.float64
     num_atoms = int(positions.shape[0])
-    periodic = any(pbc)
+    if num_atoms > np.iinfo(np.int32).max or len(ptr) - 1 > np.iinfo(np.int32).max:
+        raise NotImplementedError("AlchemiOps batch indices must fit in int32")
+    counts = np.diff(ptr)
+    periodic = bool(pbc.any())
 
     pos = torch.as_tensor(positions, dtype=dtype, device=device)
     if periodic:
-        cell = (
-            torch.as_tensor(lattice, dtype=dtype, device=device)
-            .reshape(1, 3, 3)
-            .contiguous()
+        # Nonperiodic systems need an invertible temporary cell when mixed with
+        # periodic systems. Their physical cells are never changed or returned.
+        neighbor_cells = np.stack(
+            [
+                complete_cell(c) if flags.any() else np.eye(3)
+                for c, flags in zip(lattice, pbc)
+            ]
         )
-        pbc_tensor = torch.tensor([pbc], dtype=torch.bool, device=device)
+        if not np.isfinite(neighbor_cells).all() or np.any(
+            np.linalg.det(neighbor_cells) == 0
+        ):
+            raise NotImplementedError("AlchemiOps requires nonsingular search cells")
+        cell = torch.as_tensor(neighbor_cells, dtype=dtype, device=device)
+        pbc_tensor = torch.as_tensor(pbc, dtype=torch.bool, device=device)
     else:
         cell = None
         pbc_tensor = None
 
-    batch_idx = torch.zeros(num_atoms, dtype=torch.int32, device=device)
-    batch_ptr = torch.tensor([0, num_atoms], dtype=torch.int32, device=device)
-    method = _choose_nv_method(num_atoms, periodic=periodic, device=device)
+    batch_idx = torch.as_tensor(
+        np.repeat(np.arange(len(counts), dtype=np.int32), counts), device=device
+    )
+    batch_ptr = torch.as_tensor(ptr, dtype=torch.int32, device=device)
+    max_atoms = int(counts.max())
+    method = _choose_nv_method(max_atoms, periodic=periodic, device=device)
+    if periodic:
+        # Naive explicitly enumerates all images, supports partial PBC, and
+        # corrects shifts for unwrapped atoms. Do not use cluster_tile (FP32).
+        # Keep cell-list selection to its ordinary fully periodic, positive-cell
+        # domain; mixed PBC and multiple images use the general naive path.
+        heights = 1.0 / np.linalg.norm(np.linalg.inv(neighbor_cells), axis=1)
+        if (
+            not pbc.all()
+            or np.any(np.linalg.det(neighbor_cells) <= 0)
+            or np.any(2 * cutoff >= heights)
+        ):
+            method = "batch_naive"
     extra_kwargs = {}
     if method == "batch_naive":
-        extra_kwargs["max_atoms_per_system"] = num_atoms
+        extra_kwargs["max_atoms_per_system"] = max_atoms
 
-    search_capacity = _get_nv_start_capacity(num_atoms, max_neighbors)
+    search_capacity = _get_nv_start_capacity(max_atoms, None)
     while True:
         result = nvidia_neighbor_list(
             pos,
@@ -168,27 +168,150 @@ def _build_alchemiops_edges(
     edge_slots = torch.nonzero(valid, as_tuple=False).flatten()
 
     if edge_slots.numel() == 0:
-        empty_index = np.empty((0,), dtype=np.int64)
-        empty_shifts = np.empty((0, 3), dtype=np.int64)
-        empty_distances = np.empty((0,), dtype=np.float64)
-        return empty_index, empty_index, empty_shifts, empty_distances
+        return np.empty((2, 0), dtype=np.int64), np.empty((0, 3), dtype=np.int64)
 
     center = (edge_slots // capacity).to(dtype=torch.long)
     neighbor = neighbor_matrix.reshape(-1).index_select(0, edge_slots).to(torch.long)
     shifts = shifts.reshape(-1, 3).index_select(0, edge_slots).to(torch.long)
 
-    source = center
-    target = neighbor
-    edge_vec = pos.index_select(0, target) - pos.index_select(0, source)
-    if periodic:
-        edge_vec = edge_vec + shifts.to(dtype=dtype) @ cell[0]
-    distances = torch.linalg.vector_norm(edge_vec, dim=1)
+    # Transfer the complete chunk once instead of each graph or tensor. Rows
+    # remain source-sorted, so edges belonging to each graph are contiguous.
+    packed = (
+        torch.cat((center[:, None], neighbor[:, None], shifts), dim=1).cpu().numpy()
+    )
+    edge_index = np.ascontiguousarray(packed[:, :2].T)
+    edge_shifts = np.ascontiguousarray(packed[:, 2:])
+    if np.any(edge_index < 0) or np.any(edge_index >= num_atoms):
+        raise RuntimeError("AlchemiOps returned an invalid atom index")
+    graph_indices = np.searchsorted(ptr, edge_index, side="right") - 1
+    if np.any(graph_indices[0] != graph_indices[1]):
+        raise RuntimeError("AlchemiOps returned a cross-system edge")
+    edge_shifts[~pbc[graph_indices[0]]] = 0
+    keep = (edge_index[0] != edge_index[1]) | np.any(edge_shifts != 0, axis=1)
+    return edge_index[:, keep], edge_shifts[keep]
 
+
+def _as_numpy(value):
+    """Accept NumPy-like values and detached CPU/CUDA Torch tensors."""
+    if hasattr(value, "detach"):
+        value = value.detach()
+        if value.is_floating_point():
+            value = value.double()
+        value = value.cpu().numpy()
+    return np.asarray(value)
+
+
+def get_neighborhood_batch(
+    positions,
+    ptr,
+    cutoff: float,
+    pbc=None,
+    lattice=None,
+    max_neighbors: Optional[int] = None,
+    backend: str = "matscipy",
+    device=None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build complete directed neighbor lists for a packed batch.
+
+    Inputs may be NumPy arrays or Torch tensors. ``positions`` has shape (N, 3)
+    and integer ``ptr`` has shape (B + 1,), starting at zero and ending at N.
+    Atoms of each system must be contiguous; empty systems are allowed. ``pbc``
+    is a shared bool/(3,) array or per-system (B, 3) flags. ``lattice`` is a
+    shared (3, 3) or per-system (B, 3, 3) row-vector cell, defaulting to zero.
+
+    Return NumPy int64 arrays ``edge_index`` (2, E), ``edge_shifts`` (E, 3), and
+    ``edge_ptr`` (B + 1,). Atom indices are global; graph b occupies edge slice
+    ``edge_ptr[b]:edge_ptr[b + 1]``. Shift vectors satisfy
+    ``r_ij = positions[j] - positions[i] + edge_shifts @ lattice[b]``.
+    Positions and search cells use FP64, physical input cells are not modified,
+    and nonzero-shift self images are retained. ``max_neighbors`` is accepted
+    for compatibility but never truncates edges.
+
+    CPU backends use the single-system implementation. AlchemiOps operates on
+    the whole chunk on ``device`` (default CUDA when available, otherwise CPU),
+    expanding its allocation and repeating the complete search on overflow.
+    Unsupported backend combinations warn and fall back to Matscipy; missing
+    dependencies and unexpected runtime failures are not silently suppressed.
+    """
+    if backend not in NL_BACKEND:
+        raise ValueError(
+            f"Unknown neighborlist backend {backend!r}; expected {NL_BACKEND}"
+        )
+    if not np.isfinite(cutoff) or cutoff <= 0:
+        raise ValueError("cutoff must be finite and positive")
+    positions = np.ascontiguousarray(_as_numpy(positions), dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("positions must have shape (N, 3)")
+    if not np.isfinite(positions).all():
+        raise ValueError("Positions must contain finite values")
+    ptr = _as_numpy(ptr)
+    if ptr.ndim != 1 or not ptr.size or not np.issubdtype(ptr.dtype, np.integer):
+        raise ValueError("ptr must be a nonempty one-dimensional integer array")
+    ptr = ptr.astype(np.int64, copy=False)
+    if ptr[0] != 0 or ptr[-1] != len(positions) or np.any(np.diff(ptr) < 0):
+        raise ValueError("ptr must start at zero, be nondecreasing, and end at N")
+    num_graphs = len(ptr) - 1
+    pbc = np.asarray(False if pbc is None else _as_numpy(pbc), dtype=bool)
+    if pbc.shape not in {(), (3,), (num_graphs, 3)}:
+        raise ValueError("pbc must be a bool, shape (3,), or shape (B, 3)")
+    pbc = np.broadcast_to(pbc, (num_graphs, 3)).copy()
+    if lattice is None:
+        lattice = np.zeros((num_graphs, 3, 3), dtype=np.float64)
+    else:
+        lattice = np.asarray(_as_numpy(lattice), dtype=np.float64)
+        if lattice.shape not in {(3, 3), (num_graphs, 3, 3)}:
+            raise ValueError("lattice must have shape (3, 3) or (B, 3, 3)")
+        lattice = np.broadcast_to(lattice, (num_graphs, 3, 3)).copy()
+    if not np.isfinite(lattice).all():
+        raise ValueError("The cell must contain finite values")
+    if np.any(pbc.any(axis=1) & np.all(np.isclose(lattice, 0), axis=(1, 2))):
+        raise ValueError("A periodic structure requires a nonzero lattice")
+    if np.any(pbc.all(axis=1) & (np.linalg.det(lattice) == 0)):
+        raise ValueError("A fully periodic structure requires a nonsingular cell")
+    edge_ptr = np.zeros(num_graphs + 1, dtype=np.int64)
+    if not len(positions):
+        return (
+            np.empty((2, 0), dtype=np.int64),
+            np.empty((0, 3), dtype=np.int64),
+            edge_ptr,
+        )
+
+    if backend == "alchemiops":
+        try:
+            edge_index, shifts = _build_alchemiops_batch(
+                positions, ptr, cutoff, pbc, lattice, device=device
+            )
+        except NotImplementedError as exc:
+            warnings.warn(
+                f"AlchemiOps batch unsupported ({exc}); falling back to Matscipy",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            backend = "matscipy"
+        else:
+            edge_ptr = np.searchsorted(edge_index[0], ptr).astype(np.int64)
+            return edge_index, shifts, edge_ptr
+
+    indices, all_shifts = [], []
+    for graph, (start, stop) in enumerate(zip(ptr[:-1], ptr[1:])):
+        if stop > start:
+            edges, shifts, _, _ = get_neighborhood(
+                positions[start:stop],
+                cutoff,
+                tuple(pbc[graph]),
+                lattice[graph],
+                max_neighbors=max_neighbors,
+                backend=backend,
+            )
+            indices.append(edges + start)
+            all_shifts.append(shifts)
+            edge_ptr[graph + 1] = edge_ptr[graph] + edges.shape[1]
+        else:
+            edge_ptr[graph + 1] = edge_ptr[graph]
     return (
-        source.cpu().numpy().astype(np.int64),
-        target.cpu().numpy().astype(np.int64),
-        shifts.cpu().numpy().astype(np.int64),
-        distances.cpu().numpy(),
+        np.concatenate(indices, axis=1).astype(np.int64, copy=False),
+        np.concatenate(all_shifts, axis=0).astype(np.int64, copy=False),
+        edge_ptr,
     )
 
 
@@ -269,19 +392,18 @@ def get_neighborhood(
             use_scaled_positions=False,
         )
     elif backend == "alchemiops":
-        edges = _build_alchemiops_edges(
-            positions=positions,
-            cutoff=cutoff,
+        edge_index, edge_shifts, _ = get_neighborhood_batch(
+            positions,
+            np.array([0, len(positions)]),
+            cutoff,
             pbc=pbc,
             lattice=neighbor_cell,
-            max_neighbors=None,
+            backend="alchemiops",
         )
+        edges = edge_index[0], edge_index[1], edge_shifts
 
     # max_neighbors is retained in model/config interfaces for compatibility,
     # but neighbor truncation is intentionally disabled.
-    # source, target, shifts = filter_max_neighbors(
-    #     *edges, max_neighbors=max_neighbors
-    # )
     source, target, shifts = edges[:3]
 
     real_self_loop = source == target

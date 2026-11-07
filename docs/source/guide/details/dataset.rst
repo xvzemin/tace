@@ -1,9 +1,94 @@
 dataset
 =======
 
-This field is used to store information about the sources of the train/valid/test set.
-It also controls whether the constructed graphs are saved locally, whether they are 
-loaded from specified files, and which keys are used to read training labels from the input data.
+Configure structure sources, property keys, graph storage, and data loaders here.
+
+Reading and training
+--------------------
+
+.. code-block:: text
+
+   ASE / ASE database / ASE-LMDB
+                |
+        indexed FP64 records
+                |
+      batched neighbor construction
+                |
+       immutable graph shards ------> projected statistics
+                |
+      batched loader + augmentation
+                |
+        model precision policy
+
+``memory`` constructs graphs once in RAM and suits small datasets.
+``lmdb`` constructs graphs once on disk and is recommended for large, repeated
+training. Source decoding and neighbor search are not repeated each epoch.
+``on_the_fly`` reads records and constructs neighbors for each requested batch;
+it saves graph storage, but may reduce training throughput. It is opt-in.
+
+ASE-LMDB and SQLite are opened read-only and read by index. XYZ and trajectory
+files also support random access. Other ASE formats are converted once to a
+typed record cache under ``shard_dirs[0]/records``. This cache is independent of
+graph cutoff and targets. ``record_cache_dir`` overrides its location; ``null``
+disables it. Original source files are never rewritten.
+
+.. code-block:: yaml
+
+   dataset:
+     type: aselmdb
+     train_file: /data/omat24/train
+     valid_file: /data/omat24/val
+     storage_mode: lmdb
+     shard_dirs: [graphCache]
+     graph_batch_size: 256
+     graph_workers: 0
+     neighborlist_backend: matscipy
+     cache_size: 0
+     train_dataloader:
+       _target_: torch_geometric.loader.DataLoader
+       batch_size: 32
+       shuffle: true
+       num_workers: 4
+       persistent_workers: true
+       pin_memory: true
+
+``matscipy`` remains the default CPU neighbor backend. ``graph_workers``
+controls CPU preprocessing threads, not training-loader workers.
+``alchemiops`` performs FP64 neighbor search for packed graph batches.
+For offline ``lmdb`` or ``memory`` construction, ``graph_device: null`` uses
+all visible CUDA devices, or CPU if none are available:
+
+.. code-block:: yaml
+
+   dataset:
+     neighborlist_backend: alchemiops
+     storage_mode: lmdb
+     graph_device: null  # all visible GPUs; CPU fallback
+     graph_batch_size: 256
+
+Use ``graph_device: [cuda:0, cuda:1]`` to select devices, ``cuda:0`` for one
+GPU, or ``cpu`` for CPU. Explicit ``all`` requires at least one visible GPU.
+Device indices follow ``CUDA_VISIBLE_DEVICES``; graph devices are independent
+of training devices and do not split individual structures across GPUs.
+
+With multiple GPUs and ``storage_mode: lmdb``, each GPU process independently
+reads records, constructs graphs, and writes its own LMDB shards. The parent
+assigns work and merges metadata without transferring or rewriting graphs.
+Sample order is preserved. Work partitions are balanced across GPUs and
+distributed across ``shard_dirs``. Each shard obeys ``shard_size`` and
+``shard_bytes``; graphs are constructed and encoded in bounded batches.
+``graph_batch_size`` is per GPU; ``graph_workers`` does not set GPU worker
+count. Completed caches load without starting GPU workers.
+
+More GPUs can increase preprocessing throughput, but source decoding, shared
+disk bandwidth, and process startup can limit scaling. Multi-rank DDP rejects
+multi-GPU ``memory`` preprocessing; use ``lmdb`` for rank-zero shared-cache
+construction, or select a single rank-local graph device.
+
+``on_the_fly`` remains single-device: ``null`` selects the current CUDA device
+or CPU, while ``all`` and device lists are not accepted. CUDA online
+construction requires ``num_workers: 0`` for training, validation, and
+statistics loaders. Benchmark online throughput before long training runs.
 
 Graph precision and cache
 -------------------------
@@ -16,7 +101,25 @@ model; graphs do not store one-hot element arrays.
 LMDB caches use versioned subdirectories under ``shard_dirs``. Source paths,
 file metadata, property keys, dataset splits, and neighbor-list settings select
 the cache. Network dtype and element ordering do not. Completed shard metadata
-allows loading and statistics without rereading source structures.
+allows loading and statistics without rereading source structures. Train,
+validation, and test caches are independent. Changing only the test set does
+not rebuild training graphs. Test graphs are prepared when testing begins.
+
+Shards contain typed arrays, not serialized Python/PyG objects. Loaders read
+several indices in one shard transaction; statistics decode only their input
+fields and use stored neighbor counts. Elemental energy fitting and moments
+accumulate in FP64 with bounded memory.
+
+``shard_size`` limits records per shard; ``shard_bytes`` additionally limits
+encoded bytes (default 2 GiB). ``transaction_bytes`` bounds each write batch
+(16 MiB), and ``max_buffer_bytes`` bounds buffered encoded records (64 MiB).
+An individual record exceeding that limit raises an error; increase the limit
+for very large pair properties. LMDB map capacity grows automatically.
+``cache_size`` controls optional decoded samples per worker (default zero);
+the operating-system page cache remains active.
+``max_open_shards`` limits open shards per dataset and process (default 32).
+Increase it for caches with many small shards to avoid reopening them during
+random training reads. Larger shards do not increase the write-buffer budget.
 
 Old caches are left untouched and rebuilt from source in the new namespace.
 Casting an old FP32 cache to FP64 cannot recover discarded precision. Incomplete
@@ -136,6 +239,20 @@ still use head 0. These assignments do not modify the source files.
 
 Source checks run when raw data is read. Changing configured source fidelities
 selects a new graph-cache namespace automatically.
+
+Sources also accept ``reader``, ``format``, and ``options`` for mixed formats:
+
+.. code-block:: yaml
+
+   train_file:
+     - {path: crystals.aselmdb, reader: aselmdb, fidelity_idx: 0}
+     - {path: molecules.xyz, reader: ase, format: extxyz, fidelity_idx: 1}
+
+Explicit property keys take precedence across ASE arrays, metadata, database
+data, and calculator results. Canonical names and ASE aliases are fallbacks;
+no calculator is executed. Malformed shapes, non-finite labels, negative
+weights, non-integer fidelities, and corrupt source files raise errors instead
+of silently dropping structures.
 
 Example
 -------

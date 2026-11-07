@@ -14,7 +14,8 @@ from torch_geometric.data import Batch
 
 from tace.dataset import quantity
 from tace.dataset.element import build_element_lookup
-from tace.dataset.graph import from_atoms, read_properties
+from tace.dataset.graph import from_atoms, from_records, read_properties
+from tace.dataset.neighbour_list import get_neighborhood_batch
 from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, KeySpecification
 from tace.dataset.read import ase_db_connect, ase_io_read
 from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
@@ -174,6 +175,242 @@ def test_graph_properties(dtype):
         )
         assert not graph[key].any()
         assert graph[f"{key}_weight"].item() == 0
+
+
+def _mixed_neighbor_structures():
+    """Overlapping coordinates must still belong to separate training graphs."""
+    return [
+        Atoms(),
+        Atoms("H2", positions=[[0, 0, 0], [0.7, 0, 0]]),
+        Atoms("H2", positions=[[0, 0, 0], [0.7, 0, 0]], cell=[2, 3, 4]),
+        Atoms(
+            "H2",
+            positions=[[0, 0, 0], [0.7, 0, 0]],
+            cell=[2, 0, 0],
+            pbc=[True, False, False],
+        ),
+        Atoms(
+            "H2",
+            positions=[[0, 0, 0], [0.7, 0, 0]],
+            cell=[2, 3, 0],
+            pbc=[True, True, False],
+        ),
+        Atoms("H", cell=[0.8, 0.9, 1.1], pbc=True),
+        Atoms(),
+        Atoms(
+            "H2",
+            positions=[[5, 0, 0], [-0.7, 0, 0]],
+            cell=[[2, 0, 0], [0.8, 3, 0], [0.6, 0.4, 4]],
+            pbc=True,
+        ),
+        Atoms(
+            "H2",
+            positions=[[5, 0, 6], [-0.7, 0, -6]],
+            cell=[[2, 0, 0], [0.8, 3, 0], [0, 0, 0]],
+            pbc=[True, True, False],
+        ),
+        Atoms("H", cell=[-2, 3, 4], pbc=True),
+        Atoms(),
+    ]
+
+
+def _neighbor_rows(graph):
+    """Compare multisets, including separate images of the same atom pair."""
+    return sorted(
+        map(tuple, torch.cat((graph.edge_index.T, graph.edge_shifts), dim=1).tolist())
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend", "search_device"),
+    [
+        ("matscipy", "cpu"),
+        ("ase", "cpu"),
+        ("alchemiops", "cpu"),
+        ("alchemiops", "cuda"),
+    ],
+)
+def test_packed_neighbor_training_batch(backend, search_device, monkeypatch):
+    if search_device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    calls = []
+    if backend == "alchemiops":
+        neighbors = pytest.importorskip("nvalchemiops.torch.neighbors")
+        original = neighbors.neighbor_list
+
+        def counted(positions, cutoff, **kwargs):
+            calls.append(
+                (
+                    positions.dtype,
+                    kwargs["batch_ptr"].numel() - 1,
+                    kwargs["max_neighbors"],
+                )
+            )
+            return original(positions, cutoff, **kwargs)
+
+        monkeypatch.setattr(neighbors, "neighbor_list", counted)
+
+    structures = _mixed_neighbor_structures()
+    for index, atoms in enumerate(structures):
+        atoms.info["energy"] = float(index)
+    cells = np.stack([atoms.cell.array.copy() for atoms in structures])
+    positions = [atoms.positions.copy() for atoms in structures]
+    element = build_element_lookup([1])
+    options = dict(
+        cutoff=3.1,
+        max_neighbors=1,
+        keyspec=KeySpecification.from_defaults(),
+        target_property=["energy", "forces"],
+        embedding_property=[],
+    )
+    expected = [from_atoms(element, atoms, **options) for atoms in structures]
+    with patch(
+        "tace.dataset.neighbour_list.get_neighborhood_batch",
+        wraps=get_neighborhood_batch,
+    ) as dispatch:
+        actual = from_records(
+            element,
+            structures,
+            neighborlist_backend=backend,
+            device=search_device,
+            **options,
+        )
+    assert dispatch.call_count == 1
+    assert len(actual) == len(structures)
+    for index, (reference, graph, atoms) in enumerate(
+        zip(expected, actual, structures)
+    ):
+        assert _neighbor_rows(graph) == _neighbor_rows(reference)
+        assert graph.positions.dtype == graph.lattice.dtype == torch.float64
+        assert graph.edge_index.dtype == graph.edge_shifts.dtype == torch.int64
+        assert graph.energy.item() == index
+        np.testing.assert_array_equal(graph.lattice[0].numpy(), cells[index])
+        np.testing.assert_array_equal(atoms.cell.array, cells[index])
+        np.testing.assert_array_equal(atoms.positions, positions[index])
+        assert not graph.edge_shifts[:, ~graph.pbc[0]].any()
+        source, target = graph.edge_index
+        assert not ((source == target) & (graph.edge_shifts == 0).all(dim=1)).any()
+    # N=1 still has more than the initial capacity's 128 periodic image edges.
+    assert actual[5].edge_index.shape[1] == 156
+    if backend == "alchemiops":
+        assert calls, "The GPU/CPU AlchemiOps test must not silently use Matscipy"
+        assert all(
+            dtype == torch.float64 and size == len(structures)
+            for dtype, size, _ in calls
+        )
+        assert len(calls) >= 2 and calls[-1][2] > calls[0][2]
+
+    batch = Batch.from_data_list(actual)
+    source, target = batch.edge_index
+    assert torch.equal(batch.batch[source], batch.batch[target])
+    assert batch.ptr.diff().tolist() == [len(atoms) for atoms in structures]
+    np.testing.assert_array_equal(batch.lattice.numpy(), cells)
+    assert batch.pbc.tolist() == [atoms.pbc.tolist() for atoms in structures]
+    for graph, reference in zip(batch.to_data_list(), expected):
+        assert _neighbor_rows(graph) == _neighbor_rows(reference)
+
+
+def test_multi_gpu_graph_batches(tmp_path, monkeypatch):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Two CUDA devices are required")
+    pytest.importorskip("nvalchemiops.torch.neighbors")
+    import tace.dataset.datamodule as datamodule
+
+    structures = _mixed_neighbor_structures()
+    for index, atoms in enumerate(structures):
+        atoms.info["energy"] = float(index)
+    options = dict(
+        cutoff=3.1,
+        max_neighbors=None,
+        keyspec=KeySpecification.from_defaults(),
+        target_property=["energy", "forces"],
+        embedding_property=[],
+    )
+    expected = from_records(None, structures, **options)
+    assigned = []
+    executor = datamodule.ProcessPoolExecutor
+
+    def record_worker(*args, **kwargs):
+        assigned.append(kwargs["initargs"][0])
+        return executor(*args, **kwargs)
+
+    monkeypatch.setattr(datamodule, "ProcessPoolExecutor", record_worker)
+
+    def no_parent_graph_work(*args, **kwargs):
+        raise AssertionError("Read and assemble graphs in GPU workers, not the parent")
+
+    monkeypatch.setattr(datamodule, "read_records", no_parent_graph_work)
+    monkeypatch.setattr(datamodule, "from_records", no_parent_graph_work)
+    directories = [tmp_path / "a", tmp_path / "b"]
+    dataset = datamodule.create_graphs(
+        structures,
+        None,
+        {**options, "neighborlist_backend": "alchemiops"},
+        "train",
+        directories,
+        batch_size=2,
+        device=None,
+    )
+    assert assigned == ["cuda:0", "cuda:1"]
+    assert len(dataset) == len(expected)
+    assert len(dataset.lmdb_paths) == 2
+    assert {path.parent for path in dataset.lmdb_paths} == set(directories)
+    assert all("_part_shard" in path.name for path in dataset.lmdb_paths)
+    np.testing.assert_array_equal(
+        dataset.get_sizes(), [(graph.num_nodes, graph.num_edges) for graph in expected]
+    )
+    for reference, actual in zip(expected, dataset):
+        assert _neighbor_rows(actual) == _neighbor_rows(reference)
+        for name in (
+            "energy",
+            "positions",
+            "lattice",
+            "pbc",
+            "atomic_numbers",
+            "num_neighbors",
+        ):
+            torch.testing.assert_close(actual[name], reference[name], rtol=0, atol=0)
+    dataset.close()
+
+    def no_workers(*args, **kwargs):
+        raise AssertionError("A complete cache must not start GPU workers")
+
+    monkeypatch.setattr(datamodule, "ProcessPoolExecutor", no_workers)
+    cached = datamodule.create_graphs(
+        None, None, options, "train", directories, device="all"
+    )
+    assert len(cached) == len(expected)
+    cached.close()
+
+
+def test_packed_neighbor_inputs_and_fallback():
+    positions = torch.tensor([[0, 0, 0], [0.5, 0, 0]], dtype=torch.float32)
+    edges, shifts, edge_ptr = get_neighborhood_batch(
+        positions, torch.tensor([0, 0, 2, 2]), 1.0
+    )
+    assert edges.dtype == shifts.dtype == edge_ptr.dtype == np.int64
+    assert edge_ptr.tolist() == [0, 0, 2, 2]
+    for ptr in ([0, 0, 0], [0]):
+        empty = get_neighborhood_batch(np.empty((0, 3)), ptr, 1.0)
+        assert [array.shape for array in empty] == [(2, 0), (0, 3), (len(ptr),)]
+    for ptr in ([1, 2], [0, 3], [0.0, 2.0], [0, 2, 1, 2]):
+        with pytest.raises(ValueError, match="ptr"):
+            get_neighborhood_batch(positions, ptr, 1.0)
+    for cutoff in (0, -1, np.nan, np.inf):
+        with pytest.raises(ValueError, match="cutoff"):
+            get_neighborhood_batch(positions, [0, 2], cutoff)
+    with pytest.raises(ValueError, match="nonsingular"):
+        get_neighborhood_batch(positions, [0, 2], 1.0, True, np.diag([1, 1, 0]))
+    with patch(
+        "tace.dataset.neighbour_list._build_alchemiops_batch",
+        side_effect=NotImplementedError("test unsupported combination"),
+    ):
+        with pytest.warns(RuntimeWarning, match="falling back to Matscipy"):
+            fallback = get_neighborhood_batch(
+                positions, [0, 0, 2, 2], 1.0, backend="alchemiops"
+            )
+    for expected, actual in zip((edges, shifts, edge_ptr), fallback):
+        np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -1036,9 +1273,9 @@ def test_eval_property_scopes(device, dtype, source, tmp_path, monkeypatch, caps
             else:
                 write(filename, structures, format="extxyz")
     else:
-        import pickle
-
         import lmdb
+
+        from tace.dataset.store import encode_graph
 
         shards = [structures] if source == "lmdb" else [structures[:2], structures[2:]]
         for i, shard in enumerate(shards):
@@ -1061,7 +1298,7 @@ def test_eval_property_scopes(device, dtype, source, tmp_path, monkeypatch, caps
                     )
                     for name in targets:
                         graph[f"{name}_weight"].fill_(1)
-                    txn.put(f"{j:09d}".encode(), pickle.dumps(graph))
+                    txn.put(f"{j:09d}".encode(), encode_graph(graph))
             env.close()
             cached_files[path / "data.mdb"] = (path / "data.mdb").read_bytes()
         filename = (

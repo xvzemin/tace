@@ -100,7 +100,9 @@ def parse_args():
 
 
 def iter_input_paths(path: Path):
-    if path.is_dir() and path.suffix not in {".lmdb",}:
+    if path.is_dir() and path.suffix not in {
+        ".lmdb",
+    }:
         for child in sorted(path.iterdir()):
             yield from iter_input_paths(child)
     else:
@@ -134,6 +136,15 @@ def main():
             backend = {".db": "ase_db", ".aselmdb": "fair_aselmdb"}.get(
                 path.suffix, "ase"
             )
+            if backend == "ase":
+                from ase.io.formats import UnknownFileTypeError, filetype, ioformats
+
+                try:
+                    detected = filetype(str(path))
+                except UnknownFileTypeError:
+                    continue
+                if detected not in ioformats:
+                    continue
             atomsList.extend(HOW_TO_READ[backend](str(path)))
         if not atomsList:
             raise ValueError(f"No readable structures found: {args.input}")

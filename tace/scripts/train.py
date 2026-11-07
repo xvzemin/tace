@@ -130,20 +130,15 @@ def build(cfg: DictConfig):
             datamodule = load_cached_datamodule(
                 cfg, target_property, embedding_property, keyspec
             )
+            if datamodule is None:
+                datamodule = build_datamodule(
+                    cfg, None, target_property, embedding_property, keyspec, None
+                )
+                datamodule.setup("fit")
             element, threeAtomsList, atomic_energies = build_atomsList(
                 cfg, target_property, embedding_property, keyspec, datamodule=datamodule
             )
             atomic_numbers = element.zs
-            if datamodule is None:
-                datamodule = build_datamodule(
-                    cfg,
-                    atomic_numbers,
-                    target_property,
-                    embedding_property,
-                    keyspec,
-                    threeAtomsList,
-                )
-                datamodule.setup("fit")
             statistics = compute_statistics(
                 cfg,
                 target_property,
@@ -208,6 +203,9 @@ def build(cfg: DictConfig):
             keyspec,
             threeAtomsList,
         )
+    # Build shared caches before Lightning initializes distributed collectives;
+    # large cold-cache preparation must not time out an idle NCCL rank.
+    datamodule.setup("fit")
     return cfg, statistics, target_property, embedding_property, model, datamodule
 
 

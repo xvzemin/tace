@@ -3,15 +3,64 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from collections.abc import Sequence as SequenceABC
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import numpy as np
 
 
+class IndexedSource(SequenceABC):
+    """A zero-copy subset retaining exactly the supplied sample order."""
+
+    def __init__(self, source, indices):
+        self.source = source
+        indices = np.asarray(list(indices))
+        if indices.size and (indices.ndim != 1 or indices.dtype.kind not in "iu"):
+            raise TypeError(
+                "Dataset split indices must be a one-dimensional integer sequence"
+            )
+        self.indices = indices.astype(np.int64)
+        if np.any(self.indices < 0) or np.any(self.indices >= len(source)):
+            raise IndexError("Dataset split contains out-of-range indices")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return IndexedSource(self.source, self.indices[index])
+        return self.source[int(self.indices[index])]
+
+    def getitems(self, indices):
+        indices = [int(self.indices[index]) for index in indices]
+        method = getattr(self.source, "getitems", None)
+        return method(indices) if method else [self.source[index] for index in indices]
+
+    __getitems__ = getitems
+
+    def get_records(self, indices):
+        from .records import record_from_atoms
+
+        indices = [int(self.indices[index]) for index in indices]
+        method = getattr(self.source, "get_records", None)
+        return (
+            method(indices)
+            if method
+            else [record_from_atoms(self.source[index]) for index in indices]
+        )
+
+    def get_record(self, index):
+        return self.get_records([index])[0]
+
+    def __iter__(self):
+        for start in range(0, len(self), 128):
+            yield from self.getitems(range(start, min(start + 128, len(self))))
+
+
 def random_split(
     train_list: Sequence, valid_ratio: float, seed: int
-) -> Tuple[List, List]:
+) -> Tuple[Sequence, Sequence]:
     """
     The reason why both indices need to be saved is that when I tried to
     reproduce my own results, I found that only loading the valid indices
@@ -36,6 +85,6 @@ def random_split(
             f.write(f"{idx}\n")
 
     return (
-        [train_list[i] for i in indices[:train_size]],
-        [train_list[i] for i in indices[train_size:]],
+        IndexedSource(train_list, indices[:train_size]),
+        IndexedSource(train_list, indices[train_size:]),
     )

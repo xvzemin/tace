@@ -1,7 +1,9 @@
 import math
+import multiprocessing
 import pickle
 
 import lmdb
+import numpy as np
 import pytest
 import torch
 from ase import Atoms
@@ -15,14 +17,601 @@ from tace.dataset.cache import (
     GRAPH_SCHEMA,
     graph_cache_directories,
     graph_cache_key,
-    write_cache_metadata,
+    read_cache_metadata,
+    source_cache_key,
+    statistics_cache_key,
 )
 from tace.dataset.dataloader import build_statistics_dataloader
 from tace.dataset.datamodule import GraphDatasetLMDB, create_graphs
 from tace.dataset.element import build_element_lookup
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KeySpecification
+from tace.dataset.store import (
+    build_graph_store,
+    decode_graph,
+    encode_graph,
+    write_graphs,
+)
 from tace.models.blocks import ScaleShift
+
+
+def test_graph_device_selection(monkeypatch):
+    from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert graph_devices(None, "ase") == [None]
+    assert graph_devices(None, "alchemiops") == ["cuda:0", "cuda:1"]
+    assert (
+        OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}).device
+        == "cuda"
+    )
+    assert graph_devices("cpu", "alchemiops") == ["cpu"]
+    assert graph_devices("all", "alchemiops") == ["cuda:0", "cuda:1"]
+    assert graph_devices(OmegaConf.create(["cuda:1", "cuda:0"]), "alchemiops") == [
+        "cuda:1",
+        "cuda:0",
+    ]
+    for invalid in ([], ["cuda:0", "cuda:0"], ["cuda", "cuda:1"], ["cuda:2"], ["cpu"]):
+        with pytest.raises(ValueError):
+            graph_devices(invalid, "alchemiops")
+    with pytest.raises(ValueError, match="alchemiops"):
+        graph_devices("all", "matscipy")
+    for devices in ("all", ["cuda:0", "cuda:1"]):
+        with pytest.raises(ValueError, match="one explicit device"):
+            OnTheFlyGraphDataset([], {}, devices)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+    with pytest.raises(ValueError, match="at least one CUDA"):
+        graph_devices("all", "alchemiops")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert graph_devices(None, "alchemiops") == ["cpu"]
+    assert (
+        OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}).device == "cpu"
+    )
+
+
+@pytest.mark.parametrize(
+    "cuda_available,device,expected_device,uses_thread_pool",
+    [
+        (True, None, "cuda:0", False),
+        (False, None, "cpu", True),
+        (True, "cpu", "cpu", True),
+        (True, "cuda:1", "cuda:1", False),
+    ],
+)
+def test_alchemiops_iterator_resolves_device_before_threading(
+    monkeypatch, cuda_available, device, expected_device, uses_thread_pool
+):
+    import tace.dataset.datamodule as module
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: int(cuda_available))
+    pool_calls, observed_devices = [], []
+    real_thread_pool = module.ThreadPoolExecutor
+
+    def thread_pool(*args, **kwargs):
+        pool_calls.append(True)
+        return real_thread_pool(*args, **kwargs)
+
+    def from_records(element, records, *, device, **options):
+        observed_devices.append(device)
+        return records
+
+    def no_gpu_processes(*args, **kwargs):
+        raise AssertionError("Single-device construction must not spawn GPU workers")
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", thread_pool)
+    monkeypatch.setattr(module, "from_records", from_records)
+    monkeypatch.setattr(module, "iter_gpu_graphs", no_gpu_processes)
+    monkeypatch.setattr(
+        module, "read_records", lambda source, indices: [source[i] for i in indices]
+    )
+    assert list(
+        module.iter_graphs(
+            [0, 1, 2],
+            None,
+            {"neighborlist_backend": "alchemiops"},
+            batch_size=2,
+            workers=2,
+            device=device,
+        )
+    ) == [0, 1, 2]
+    assert bool(pool_calls) == uses_thread_pool
+    assert observed_devices == [expected_device, expected_device]
+
+
+@pytest.mark.parametrize("device", [None, "all", ["cuda:0", "cuda:1"]])
+def test_distributed_memory_rejects_multiple_graph_gpus(monkeypatch, device):
+    import tace.dataset.datamodule as module
+
+    monkeypatch.setattr(module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(module.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(module.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def no_graph_work(*args, **kwargs):
+        raise AssertionError("Reject this configuration before starting graph work")
+
+    monkeypatch.setattr(module, "iter_graphs", no_graph_work)
+    with pytest.raises(ValueError, match="DDP memory-mode.*storage_mode='lmdb'"):
+        module.create_graphs(
+            [object()],
+            None,
+            {"neighborlist_backend": "alchemiops"},
+            "train",
+            [],
+            storage_mode="memory",
+            device=device,
+        )
+
+
+@pytest.mark.parametrize(
+    "initialized,world_size,device,visible_devices",
+    [
+        (True, 2, "cuda:0", 2),
+        (True, 2, ["cuda:0"], 2),
+        (True, 2, None, 1),
+        (True, 2, "cpu", 2),
+        (True, 2, "all", 1),
+        (True, 1, ["cuda:0", "cuda:1"], 2),
+        (False, 2, ["cuda:0", "cuda:1"], 2),
+    ],
+)
+def test_memory_graph_devices_preserve_supported_modes(
+    monkeypatch, initialized, world_size, device, visible_devices
+):
+    import tace.dataset.datamodule as module
+
+    monkeypatch.setattr(module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(module.dist, "is_initialized", lambda: initialized)
+    monkeypatch.setattr(module.dist, "get_world_size", lambda: world_size)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: visible_devices)
+    graph = Data(num_nodes=1)
+    monkeypatch.setattr(module, "iter_graphs", lambda *args, **kwargs: iter([graph]))
+    dataset = module.create_graphs(
+        [object()],
+        None,
+        {"neighborlist_backend": "alchemiops"},
+        "train",
+        [],
+        storage_mode="memory",
+        device=device,
+    )
+    assert len(dataset) == 1
+    assert dataset[0] is graph
+
+
+def test_reader_aliases_preserve_explicit_fields_and_validate_scope():
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    from tace.dataset.graph import read_properties
+    from tace.dataset.read import check_keys
+
+    atoms = Atoms("H2", cell=[4, 4, 4], pbc=True)
+    atoms.set_initial_magnetic_moments([1.0, -1.0])
+    atoms.calc = SinglePointCalculator(
+        atoms,
+        energy=3.0,
+        forces=np.zeros((2, 3)),
+        magmom=2.0,
+        stresses=np.arange(12.0).reshape(2, 6),
+    )
+    atoms.info["reference_energy"] = 7.0
+    # Real database producers put per-atom fields in info or row.data too.
+    atoms.info["reference_forces"] = np.ones((2, 3))
+    keys = KeySpecification.from_defaults()
+    keys.info_keys["energy"] = "reference_energy"
+    keys.arrays_keys["forces"] = "reference_forces"
+    names = [
+        "energy",
+        "forces",
+        "initial_collinear_magmoms",
+        "total_collinear_magmom",
+        "atomic_stresses",
+    ]
+    check_keys([atoms], names, keys)
+    assert atoms.info["reference_energy"] == 7.0
+    values = read_properties(atoms, keys, names, periodic_cell=True)
+    assert values["energy"].item() == 7.0
+    assert values["forces"].tolist() == [[1.0] * 3] * 2
+    assert values["initial_collinear_magmoms"].tolist() == [1.0, -1.0]
+    assert values["total_collinear_magmom"].item() == 2.0
+    assert values["atomic_stresses"].shape == (2, 3, 3)
+    assert values["atomic_stresses"][0].tolist() == [
+        [0.0, 5.0, 4.0],
+        [5.0, 1.0, 3.0],
+        [4.0, 3.0, 2.0],
+    ]
+    atoms.arrays["reference_forces"] = np.zeros((1, 3))
+    with pytest.raises(RuntimeError, match="per-atom property requires 2 entries"):
+        read_properties(atoms, keys, ["forces"], periodic_cell=True)
+
+
+@pytest.mark.parametrize("value", [-1, np.nan, [1.0, 2.0]])
+def test_reader_rejects_invalid_weights(value):
+    from tace.dataset.graph import read_properties
+
+    atoms = Atoms("H")
+    atoms.info.update(energy=1.0, energy_weight=value)
+    with pytest.raises(RuntimeError, match="energy_weight"):
+        read_properties(atoms, KeySpecification.from_defaults(), ["energy"], False)
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, np.nan])
+def test_graph_rejects_invalid_fidelity(value):
+    atoms = Atoms("H", info={"fidelity_idx": value})
+    with pytest.raises(ValueError, match="fidelity_idx"):
+        from_atoms(
+            None,
+            atoms,
+            2.0,
+            None,
+            KeySpecification.from_defaults(),
+            [],
+            [],
+            neighborlist_backend="ase",
+        )
+
+
+def test_property_dependencies_are_transitive(monkeypatch):
+    from tace.dataset.quantity import PROPERTIES, get_need_property
+
+    monkeypatch.setitem(PROPERTIES["energy"], "must_be_with", ["total_charge"])
+    assert get_need_property(["hessian"], [], True) == [
+        "total_charge",
+        "energy",
+        "forces",
+        "hessian",
+    ]
+
+
+def _write_reader_database(path):
+    from ase.db import connect
+
+    atoms_list = []
+    with connect(path) as database:
+        for index, symbols in enumerate(("H2", "O", "HO", "H2O")):
+            atoms = Atoms(symbols)
+            atoms.positions = np.arange(len(atoms) * 3).reshape(-1, 3) * 0.2
+            atoms.info["reference_energy"] = -float(
+                np.where(atoms.numbers == 1, 1, 2).sum()
+            )
+            atoms.arrays["reference_forces"] = np.full((len(atoms), 3), index * 0.1)
+            database.write(
+                atoms,
+                data={
+                    "reference_energy": atoms.info["reference_energy"],
+                    "reference_forces": atoms.arrays["reference_forces"],
+                },
+            )
+            atoms_list.append(atoms)
+    return atoms_list
+
+
+def _reader_keys():
+    keys = KeySpecification.from_defaults()
+    keys.info_keys["energy"] = "reference_energy"
+    keys.arrays_keys["forces"] = "reference_forces"
+    return keys
+
+
+def test_no_validation_takes_precedence_and_index_splits_do_not_overlap(
+    tmp_path, monkeypatch
+):
+    from tace.dataset.read import tace_read_all_files
+
+    monkeypatch.chdir(tmp_path)
+    filename = tmp_path / "structures.db"
+    _write_reader_database(filename)
+    cfg = {
+        "model": {"config": {"cutoff": 2.0}},
+        "dataset": {
+            "train_file": str(filename),
+            "type": "ase_db",
+            "no_valid_set": True,
+        },
+    }
+    keys = _reader_keys()
+    full_key = graph_cache_key(cfg, ["energy"], [], keys)
+    cfg["dataset"].update(valid_file="missing-validation.db", valid_from_index=True)
+    (tmp_path / "train.index").write_text("0\n1\n")
+    (tmp_path / "valid.index").write_text("1\n2\n")
+    source = tace_read_all_files(cfg, ["energy"], [], keys)
+    assert len(source.train) == 4 and source.valid is None
+    assert graph_cache_key(cfg, ["energy"], [], keys) == full_key
+    cfg["dataset"].pop("valid_file")
+    cfg["dataset"]["no_valid_set"] = False
+    with pytest.raises(ValueError, match="train.index and valid.index overlap"):
+        tace_read_all_files(cfg, ["energy"], [], keys)
+    (tmp_path / "valid.index").write_text("3\n2\n")
+    split = tace_read_all_files(cfg, ["energy"], [], keys)
+    assert [len(record) for record in split.valid.get_records([0, 1])] == [3, 2]
+
+
+@pytest.mark.parametrize("mode", ["memory", "lmdb", "on_the_fly"])
+def test_fit_defers_test_sources_until_test_stage(tmp_path, mode):
+    from tace.dataset.datamodule import build_datamodule
+
+    filename = tmp_path / "structures.db"
+    _write_reader_database(filename)
+    missing = tmp_path / "missing-test.db"
+    cfg = {
+        "model": {"config": {"cutoff": 2.0}},
+        "dataset": {
+            "train_file": str(filename),
+            "test_files": str(missing),
+            "type": "ase_db",
+            "no_valid_set": True,
+            "storage_mode": mode,
+            "neighborlist_backend": "ase",
+            "shard_dirs": [str(tmp_path / "cache")],
+        },
+    }
+    module = build_datamodule(cfg, None, ["energy"], [], _reader_keys())
+    module.setup("fit")
+    assert len(module.train_dataset) == 4
+    assert module._test_sources is None and not module.threeAtomsList.test
+    with pytest.raises(FileNotFoundError, match="missing-test.db"):
+        module.setup("test")
+    if hasattr(module.train_dataset, "close"):
+        module.train_dataset.close()
+
+    # A test-only setup also must not open an irrelevant training source.
+    empty_training_directory = tmp_path / "unused-training-directory"
+    empty_training_directory.mkdir()
+    cfg["dataset"].update(
+        train_file=str(empty_training_directory), test_files=str(filename)
+    )
+    test_only = build_datamodule(cfg, None, ["energy"], [], _reader_keys())
+    test_only.setup("test")
+    assert test_only.train_dataset is None and test_only.threeAtomsList is None
+    assert len(test_only.test_datasets) == 1 and len(test_only.test_datasets[0]) == 4
+    if hasattr(test_only.test_datasets[0], "close"):
+        test_only.test_datasets[0].close()
+
+
+@pytest.mark.parametrize(
+    "suffix,reader", [("db", "ase_db"), ("aselmdb", "fair_aselmdb")]
+)
+def test_database_readers_are_lazy_readonly_and_batched(
+    tmp_path, monkeypatch, suffix, reader
+):
+    from ase.db.row import AtomsRow
+
+    from tace.dataset.read import read_all_files
+
+    if suffix == "aselmdb":
+        pytest.importorskip("ase_db_backends.aselmdb")
+    path = tmp_path / f"structures.{suffix}"
+    _write_reader_database(path)
+    before = path.read_bytes()
+
+    def no_atoms(*args, **kwargs):
+        raise AssertionError("Record reads must not materialize ASE Atoms")
+
+    monkeypatch.setattr(AtomsRow, "toatoms", no_atoms)
+    source = read_all_files(
+        {
+            "path": path,
+            "fidelity_idx": 2,
+            "options": {"serial": True, "use_lock_file": False},
+        },
+        ["energy", "forces"],
+        _reader_keys(),
+        [],
+        backend=reader,
+    )
+    assert not isinstance(source, list)
+    assert len(source) == 4
+    records = source.get_records([3, 0, 3])
+    assert [len(record) for record in records] == [3, 2, 3]
+    assert [record.info["fidelity_idx"] for record in records] == [2, 2, 2]
+    assert records[0].data["reference_energy"] == -4.0
+    assert path.read_bytes() == before
+    restored = pickle.loads(pickle.dumps(source))
+    assert len(restored.get_record(-1)) == 3
+
+
+def test_generic_ase_raw_cache_and_reader_fingerprints(tmp_path, monkeypatch):
+    from ase.io import write
+
+    from tace.dataset.read import read_all_files
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    filename = source_dir / "structures.cif"
+    write(filename, [Atoms("Si", cell=[4, 4, 4], pbc=True)] * 2)
+    cfg = {
+        "dataset": {
+            "train_file": str(source_dir),
+            "format": "cif",
+            "options": {"store_tags": True},
+        }
+    }
+    key = source_cache_key(cfg)
+    source = read_all_files(
+        source_dir,
+        [],
+        _reader_keys(),
+        [],
+        format="cif",
+        options={"store_tags": True},
+        record_cache_dir=tmp_path / "cache",
+    )
+    assert len(source) == 2
+    assert source.get_record(0).info["spacegroup"].no == 1
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("Warm raw cache must not decode the original file")
+
+    monkeypatch.setattr("ase.io.iread", no_decode)
+    warm = read_all_files(
+        source_dir,
+        [],
+        _reader_keys(),
+        [],
+        format="cif",
+        options={"store_tags": True},
+        record_cache_dir=tmp_path / "cache",
+    )
+    assert len(warm.get_records([1, 0, 1])) == 3
+    cfg["dataset"]["options"]["store_tags"] = False
+    assert source_cache_key(cfg) != key
+    cfg["dataset"]["options"]["store_tags"] = True
+    filename.write_text(filename.read_text() + "\n# changed\n")
+    assert source_cache_key(cfg) != key
+    cfg["dataset"]["train_file"] = {
+        "path": str(filename),
+        "reader": "ase",
+        "format": "cif",
+        "options": {"store_tags": False},
+    }
+    mapped_key = source_cache_key(cfg)
+    cfg["dataset"]["train_file"]["options"]["store_tags"] = True
+    assert source_cache_key(cfg) != mapped_key
+
+
+def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
+    from tace.dataset.dataloader import build_atomsList, compute_statistics
+    from tace.dataset.datamodule import build_datamodule, load_cached_datamodule
+
+    pytest.importorskip("ase_db_backends.aselmdb")
+    monkeypatch.chdir(tmp_path)
+    filename = tmp_path / "structures.aselmdb"
+    atoms_list = _write_reader_database(filename)
+    keys = _reader_keys()
+    cfg = {
+        "misc": {"device": "cpu"},
+        "model": {
+            "config": {
+                "cutoff": 2.0,
+                "fidelity": [{"name": "DFT", "atomic_energy": None}],
+            }
+        },
+        "dataset": {
+            "type": "fair_aselmdb",
+            "train_file": str(filename),
+            "no_valid_set": True,
+            "shard_dirs": [str(tmp_path / "cache")],
+            "neighborlist_backend": "ase",
+            "graph_batch_size": 2,
+            "graph_workers": 1,
+            "train_dataloader": {
+                "_target_": "torch_geometric.loader.DataLoader",
+                "batch_size": 2,
+                "shuffle": False,
+                "num_workers": 0,
+            },
+            "statistics_dataloader": {"batch_size": 3},
+        },
+    }
+    options = dict(
+        cutoff=2.0,
+        max_neighbors=None,
+        keyspec=keys,
+        target_property=["energy", "forces"],
+        embedding_property=[],
+        neighborlist_backend="ase",
+    )
+    expected_graphs = [from_atoms(None, atoms, **options) for atoms in atoms_list]
+    statistics_by_mode = []
+    for mode in ("memory", "lmdb", "on_the_fly"):
+        cfg["dataset"]["storage_mode"] = mode
+        module = build_datamodule(cfg, None, ["energy", "forces"], [], keys)
+        module.prepare_data()
+        module.setup("fit")
+        element, raw, references = build_atomsList(
+            cfg, ["energy", "forces"], [], keys, datamodule=module
+        )
+        assert element.zs == [1, 8]
+        assert references[0] == pytest.approx({1: -1.0, 8: -2.0}, abs=1e-12)
+        statistics = compute_statistics(
+            cfg,
+            ["energy", "forces"],
+            [],
+            keys,
+            element,
+            raw,
+            cfg["model"]["config"]["fidelity"],
+            references,
+            dataloader_train=module.statistics_dataloader(),
+        )
+        assert statistics[0]["num_graphs"] == 4
+        assert statistics[0]["rms_forces"][1] == pytest.approx(
+            math.sqrt(0.045), abs=1e-12
+        )
+        statistics_by_mode.append(statistics[0])
+        graphs = [
+            graph
+            for batch in module.train_dataloader()
+            for graph in batch.to_data_list()
+        ]
+        for actual, expected in zip(graphs, expected_graphs):
+            for name, value in expected.items():
+                if torch.is_tensor(value):
+                    assert actual[name].dtype == value.dtype
+                    torch.testing.assert_close(
+                        actual[name].reshape(value.shape),
+                        value,
+                        rtol=0,
+                        atol=0,
+                        check_device=False,
+                    )
+        if hasattr(module.train_dataset, "close"):
+            module.train_dataset.close()
+    for key in ("rms_forces", "mean_energy", "avg_num_neighbors"):
+        assert all(
+            item[key] == statistics_by_mode[0][key] for item in statistics_by_mode
+        )
+
+    cfg["dataset"]["storage_mode"] = "lmdb"
+
+    def no_source(*args, **kwargs):
+        raise AssertionError("Warm training must not open sources or construct graphs")
+
+    monkeypatch.setattr("tace.dataset.datamodule.tace_read_all_files", no_source)
+    monkeypatch.setattr("tace.dataset.datamodule.from_records", no_source)
+    warm = load_cached_datamodule(cfg, ["energy", "forces"], [], keys)
+    assert warm is not None and warm.threeAtomsList is None
+    assert sum(batch.num_graphs for batch in warm.train_dataloader()) == 4
+    warm.train_dataset.close()
+
+
+@pytest.mark.parametrize("context", multiprocessing.get_all_start_methods())
+def test_aselmdb_online_loader_process_reuse(tmp_path, context):
+    from tace.dataset.datamodule import OnTheFlyGraphDataset
+    from tace.dataset.read import read_all_files
+
+    pytest.importorskip("ase_db_backends.aselmdb")
+    filename = tmp_path / "structures.aselmdb"
+    _write_reader_database(filename)
+    keys = _reader_keys()
+    source = read_all_files(
+        filename, ["energy", "forces"], keys, [], backend="fair_aselmdb"
+    )
+    options = dict(
+        cutoff=2.0,
+        max_neighbors=None,
+        keyspec=keys,
+        target_property=["energy", "forces"],
+        embedding_property=[],
+        neighborlist_backend="ase",
+    )
+    dataset = OnTheFlyGraphDataset(source, options)
+    expected = dataset[0].energy.clone()  # Open the environment before forking.
+    loader = DataLoader(
+        dataset,
+        batch_size=2,
+        num_workers=1,
+        multiprocessing_context=context,
+        timeout=30,
+    )
+    actual = next(iter(loader))
+    torch.testing.assert_close(actual.energy[:1], expected)
+    assert actual.energy.dtype == torch.float64
 
 
 @pytest.mark.parametrize("default_dtype", [torch.float32, torch.float64])
@@ -53,7 +642,8 @@ def test_graph_data_precision_and_indices(default_dtype):
     assert graph.pbc.dtype == torch.bool
 
 
-def test_graph_cache_precision_and_process_reuse(tmp_path):
+@pytest.mark.parametrize("context", multiprocessing.get_all_start_methods())
+def test_graph_cache_precision_and_process_reuse(tmp_path, context):
     atoms = Atoms("Si2", positions=[[0, 0, 0], [2, 0, 0]])
     atoms.info["energy"] = -100000.000123
     options = {
@@ -75,7 +665,7 @@ def test_graph_cache_precision_and_process_reuse(tmp_path):
         dataset,
         batch_size=1,
         num_workers=1,
-        multiprocessing_context="spawn",
+        multiprocessing_context=context,
         timeout=30,
     )
     assert torch.equal(next(iter(loader)).energy, expected)
@@ -102,6 +692,15 @@ def test_graph_cache_key_ignores_model_precision(tmp_path):
 
 
 def test_graph_cache_rejects_lossy_data(tmp_path):
+    graph = Data(num_nodes=1, positions=torch.zeros(1, 3, dtype=torch.float32))
+    with pytest.raises(ValueError, match="not float64"):
+        encode_graph(graph)
+    with pytest.raises(ValueError, match="not float64"):
+        write_graphs([graph], [tmp_path], "train")
+    assert read_cache_metadata([tmp_path], "train") is None
+
+
+def test_graph_cache_rejects_legacy_pickle(tmp_path):
     path = tmp_path / "train_shard0000.lmdb"
     env = lmdb.open(str(path), map_size=1 << 20)
     with env.begin(write=True) as txn:
@@ -111,9 +710,216 @@ def test_graph_cache_rejects_lossy_data(tmp_path):
         )
     env.close()
     dataset = GraphDatasetLMDB([path])
-    with pytest.raises(ValueError, match="casting cannot restore precision"):
+    with pytest.raises(ValueError, match="legacy pickle"):
         dataset[0]
     dataset.close()
+
+
+def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
+    graphs = [
+        Data(
+            num_nodes=2,
+            atomic_numbers=torch.tensor([1, 8]),
+            positions=torch.full((2, 3), float(index), dtype=torch.float64),
+            edge_index=torch.tensor([[0, 1], [1, 0]]),
+            edge_shifts=torch.zeros(2, 3, dtype=torch.int64),
+            energy=torch.tensor([float(index)], dtype=torch.float64),
+            fidelity_idx=torch.tensor(0),
+        )
+        for index in range(7)
+    ]
+    for graph in graphs:
+        decoded = decode_graph(encode_graph(graph))
+        for name, value in graph.items():
+            if torch.is_tensor(value):
+                assert torch.equal(decoded[name], value)
+                assert decoded[name].dtype == value.dtype
+            else:
+                assert decoded[name] == value
+    dataset = write_graphs(
+        iter(graphs),
+        [tmp_path / "a", tmp_path / "b"],
+        "train",
+        shard_size=2,
+        transaction_bytes=2000,
+        max_buffer_bytes=10000,
+    )
+    assert len(dataset.lmdb_paths) == 4
+    indices = [6, 0, -2, 6, 1]
+    assert [graph.energy.item() for graph in dataset.__getitems__(indices)] == [
+        6,
+        0,
+        5,
+        6,
+        1,
+    ]
+    assert dataset.get_sizes().tolist() == [[2, 2]] * 7
+    assert dataset.get_sizes(indices).tolist() == [[2, 2]] * 5
+    projected = dataset.project(["energy"])
+    saved = projected[0]
+    assert set(saved.keys()) == {"num_nodes", "energy"}
+    dataset.close()
+    assert projected[1].energy.item() == 1
+    projected.close()
+    assert saved.energy.item() == 0
+
+
+def test_store_failure_does_not_publish_completion(tmp_path):
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+    )
+
+    def interrupted():
+        yield graph
+        yield graph
+        raise RuntimeError("injected source failure")
+
+    with pytest.raises(RuntimeError, match="injected source failure"):
+        write_graphs(interrupted(), [tmp_path], "train", shard_size=1)
+    assert read_cache_metadata([tmp_path], "train") is None
+    assert (tmp_path / "train_failed.json").is_file()
+    assert not (tmp_path / "train.build.lock").exists()
+
+
+def test_independent_graph_stores_publish_in_input_order(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    graphs = [
+        Data(
+            num_nodes=index + 1,
+            atomic_numbers=torch.full((index + 1,), index + 1, dtype=torch.int64),
+            positions=torch.full((index + 1, 3), float(index), dtype=torch.float64),
+            edge_index=torch.empty((2, 0), dtype=torch.int64),
+            energy=torch.tensor([float(index)], dtype=torch.float64),
+        )
+        for index in range(7)
+    ]
+    directories = [tmp_path / "a", tmp_path / "b"]
+
+    def builder(directories, stage, options):
+        def partition(part):
+            dataset = write_graphs(
+                graphs[part * 3 : (part + 1) * 3],
+                directories,
+                f"{stage}_shard{part:06d}_part",
+                **options,
+            )
+            dataset.close()
+            return dataset.metadata
+
+        with ThreadPoolExecutor(max_workers=3) as workers:
+            return list(workers.map(partition, range(3)))
+
+    dataset = build_graph_store(builder, directories, "train", shard_size=2)
+    assert len(dataset) == len(graphs)
+    assert len(dataset.lmdb_paths) == 5
+    assert [graph.energy.item() for graph in dataset] == list(range(7))
+    assert dataset.get_sizes().tolist() == [[index + 1, 0] for index in range(7)]
+    assert dataset.metadata["num_nodes"] == 28
+    assert dataset.metadata["num_edges"] == 0
+    assert dataset.metadata["atomic_numbers"] == list(range(1, 8))
+    assert set(dataset.metadata["fields"]) == set(graphs[0].keys())
+    dataset.close()
+
+    def unused(*args):
+        pytest.fail("A completed graph store must not invoke its builder")
+
+    reused = build_graph_store(unused, directories, "train")
+    assert reused[-1].energy.item() == 6
+    reused.close()
+
+
+@pytest.mark.parametrize("failure", ["interrupted", "misordered", "length", "missing"])
+def test_independent_graph_store_failure_is_not_published(tmp_path, failure):
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+    )
+
+    def builder(directories, stage, options):
+        part = 1 if failure == "misordered" else 0
+        dataset = write_graphs(
+            [graph], directories, f"{stage}_shard{part:06d}_part", **options
+        )
+        dataset.close()
+        if failure == "interrupted":
+            raise RuntimeError("injected partition failure")
+        metadata = dataset.metadata
+        if failure == "length":
+            name = next(iter(metadata["shards"]))
+            metadata["shards"][name] += 1
+        elif failure == "missing":
+            (dataset.lmdb_paths[0] / "counts.bin").unlink()
+        return [metadata]
+
+    with pytest.raises((ValueError, RuntimeError)):
+        build_graph_store(builder, [tmp_path], "train")
+    assert read_cache_metadata([tmp_path], "train") is None
+    assert not (tmp_path / "train_metadata.json").exists()
+    assert (tmp_path / "train_failed.json").is_file()
+    assert not (tmp_path / "train.build.lock").exists()
+    with pytest.raises(ValueError, match="No completed"):
+        GraphDatasetLMDB.from_directories([tmp_path], "train")
+    with pytest.raises(RuntimeError, match="previous train cache writer failed"):
+        build_graph_store(
+            lambda *_: pytest.fail("Retried partial cache"), [tmp_path], "train"
+        )
+
+
+def test_independent_graph_store_uses_shared_writer_lock(tmp_path):
+    from filelock import FileLock
+
+    with FileLock(str(tmp_path / ".train.writer.lock")):
+        with pytest.raises(TimeoutError, match="waiting for train cache writer"):
+            build_graph_store(
+                lambda *_: pytest.fail("Builder ran without owning the cache lock"),
+                [tmp_path],
+                "train",
+                lock_timeout=0,
+            )
+    assert not (tmp_path / "train_metadata.json").exists()
+    assert not (tmp_path / "train_failed.json").exists()
+
+
+def test_cache_dependencies_are_separate_by_stage_and_layer(tmp_path):
+    source = tmp_path / "train.xyz"
+    source.write_text("source")
+    cfg = {
+        "dataset": {
+            "train_file": str(source),
+            "valid_ratio": 0.1,
+            "test_files": [str(tmp_path / "test-a.xyz")],
+        },
+        "model": {
+            "config": {
+                "cutoff": 3.0,
+                "fidelity": [{"name": "PBE", "atomic_energy": {1: 1.0}}],
+            }
+        },
+    }
+    keyspec = KeySpecification.from_defaults()
+    raw_key = source_cache_key(cfg, keyspec=keyspec)
+    graph_key = graph_cache_key(cfg, ["energy"], [], keyspec)
+    stats_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
+    test_key = graph_cache_key(cfg, ["energy"], [], keyspec, stage="test0")
+    cfg["dataset"]["test_files"] = [str(tmp_path / "test-b.xyz")]
+    assert graph_cache_key(cfg, ["energy"], [], keyspec) == graph_key
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
+    assert graph_cache_key(cfg, ["energy"], [], keyspec, stage="test0") != test_key
+    cfg["model"]["config"]["cutoff"] = 4.0
+    assert source_cache_key(cfg, keyspec=keyspec) == raw_key
+    assert graph_cache_key(cfg, ["energy"], [], keyspec) != graph_key
+    cfg["model"]["config"]["cutoff"] = 3.0
+    cfg["model"]["config"]["fidelity"][0]["name"] = "renamed"
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
+    cfg["model"]["config"]["fidelity"][0]["atomic_energy"][1] = 2.0
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) != stats_key
+    assert source_cache_key(cfg, keyspec=keyspec) == raw_key
 
 
 def test_missing_model_statistics_only_checks_requested_inputs():
@@ -164,7 +970,6 @@ def test_missing_model_statistics_only_checks_requested_inputs():
 
 @pytest.mark.parametrize("targets", [["energy", "forces"], ["direct_hessian"]])
 def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
-    import tace.dataset.dataloader as dataloader_module
     import tace.dataset.datamodule as datamodule_module
     import tace.scripts.train as train_module
 
@@ -192,9 +997,8 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     def no_source_read(*args, **kwargs):
         raise AssertionError("Existing LMDB graphs must not read source files")
 
-    monkeypatch.setattr(dataloader_module, "tace_read_all_files", no_source_read)
     monkeypatch.setattr(datamodule_module, "tace_read_all_files", no_source_read)
-    monkeypatch.setattr(datamodule_module, "from_atoms", no_source_read)
+    monkeypatch.setattr(datamodule_module, "from_records", no_source_read)
     monkeypatch.setattr(train_module, "initialize", lambda cfg: cfg)
     monkeypatch.setattr(train_module, "create_model", lambda *args: None)
     monkeypatch.setattr(train_module, "configure_model_precision", lambda *args: None)
@@ -226,21 +1030,16 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
             },
         }
     )
-    directories = graph_cache_directories(
-        OmegaConf.to_container(cfg, resolve=True),
-        targets,
-        [],
-        KeySpecification.from_defaults(),
-    )
-    directories[0].mkdir(parents=True)
     for stage, data in (("train", graphs), ("valid", [graphs[-1]])):
-        filename = f"{stage}_shard0000.lmdb"
-        env = lmdb.open(str(directories[0] / filename), map_size=1 << 20)
-        with env.begin(write=True) as txn:
-            for idx, graph in enumerate(data):
-                txn.put(f"{idx:09d}".encode(), pickle.dumps(graph))
-        env.close()
-        write_cache_metadata(directories, stage, {filename: len(data)}, {1, 8})
+        directories = graph_cache_directories(
+            OmegaConf.to_container(cfg, resolve=True),
+            targets,
+            [],
+            KeySpecification.from_defaults(),
+            stage=stage,
+        )
+        stored = write_graphs(data, directories, stage)
+        stored.close()
     contents = {p: p.read_bytes() for p in cache.rglob("*") if p.is_file()}
     _, statistics, _, _, _, datamodule = train_module.build(cfg)
     assert datamodule.threeAtomsList is None

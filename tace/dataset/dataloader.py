@@ -6,25 +6,37 @@
 import logging
 from typing import Dict, List, Sequence, Union
 
+import torch
 from hydra.utils import instantiate
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
 from .cache import statistics_cache_key
 from .element import TorchElement, build_element_lookup
-from .graph import from_atoms
 from .quantity import KeySpecification
-from .read import tace_read_all_files
 from .statistics import (
     _compute_statistics,
-    compute_atomic_energies,
     compute_atomic_energies_from_graphs,
 )
+
+
+def build_graph_dataloader(config, dataset):
+    """Build a loader without bypassing batched dataset reads."""
+    config = {key: value for key, value in config.items() if key != "extra"}
+    source = getattr(dataset, "dataset", dataset)
+    device = getattr(source, "device", None)
+    if (
+        device is not None
+        and torch.device(device).type == "cuda"
+        and config.get("num_workers", 0)
+    ):
+        raise ValueError("CUDA online graph construction requires num_workers=0.")
+    return instantiate(config, dataset=dataset)
 
 
 def build_statistics_dataloader(
     cfg: Dict,
     dataset,
     target_property: Sequence[str] = (),
+    neighbors: bool = True,
 ):
     """Build a large, deterministic loader containing only statistics inputs."""
     config = {
@@ -43,33 +55,31 @@ def build_statistics_dataloader(
 
     required_keys = {
         "atomic_numbers",
-        "edge_index",
         "fidelity_idx",
         "initial_noncollinear_magmoms",
         "num_nodes",
     }
+    if neighbors:
+        fields = (getattr(dataset, "metadata", None) or {}).get("fields", [])
+        required_keys.add(
+            "num_neighbors" if "num_neighbors" in fields else "edge_index"
+        )
     if "energy" in target_property:
         required_keys.update(("energy", "energy_weight"))
     if "forces" in target_property:
         required_keys.update(("forces", "forces_weight"))
     if "direct_forces" in target_property:
         required_keys.update(("direct_forces", "direct_forces_weight"))
-    if len(dataset):
+    if hasattr(dataset, "project"):
+        dataset = dataset.project(required_keys)
+        config.pop("exclude_keys", None)
+    elif len(dataset):
         excluded_keys = set(config.get("exclude_keys") or ())
         excluded_keys.update(set(dataset[0].keys()) - required_keys)
         config["exclude_keys"] = sorted(excluded_keys - required_keys)
-    return instantiate(config, dataset=dataset)
+    return build_graph_dataloader(config, dataset)
 
 
-@rank_zero_only
-def create_graphs_for_main_rank(atomsList, element, for_dataset, stage):
-    dataset = []
-    for atoms in atomsList:
-        dataset.append(from_atoms(element, atoms, **for_dataset))
-    return dataset
-
-
-@rank_zero_only
 def build_atomsList(
     cfg: Dict,
     target_property: List[str],
@@ -79,26 +89,13 @@ def build_atomsList(
 ):
     threeAtomsList = None
     if datamodule is None:
-        threeAtomsList = tace_read_all_files(
-            cfg, target_property, embedding_property, keyspec
+        from .datamodule import build_datamodule
+
+        datamodule = build_datamodule(
+            cfg, None, target_property, embedding_property, keyspec
         )
-    # ==== read atomic_numbers and atomic_energy from dataset and cfg ===
-    try:
-        if datamodule is not None:
-            atomic_numbers_from_dataset = set(datamodule.element.zs)
-        else:
-            atomsList = (
-                (threeAtomsList[0])
-                if threeAtomsList[1] is None
-                else threeAtomsList[0] + threeAtomsList[1]
-            )
-            atomic_numbers_from_dataset = set(
-                int(atomic_number)
-                for atoms in atomsList
-                for atomic_number in atoms.get_atomic_numbers()
-            )
-    except Exception as e:
-        raise RuntimeError(f"Failed to extract atomic numbers from dataset: {e}")
+        datamodule.setup("fit")
+    atomic_numbers_from_dataset = set(datamodule.element.zs)
 
     atomic_numbers = cfg["model"]["config"].get("atomic_numbers", None)
     if atomic_numbers is not None:
@@ -150,18 +147,13 @@ def build_atomsList(
             )
         computed_atomic_energies = {}
         if missing_energy:
-            if datamodule is None:
-                computed_atomic_energies = compute_atomic_energies(
-                    threeAtomsList[0], element, keyspec, missing_energy
-                )
-            else:
-                computed_atomic_energies = compute_atomic_energies_from_graphs(
-                    build_statistics_dataloader(
-                        cfg, datamodule.train_dataset, ["energy"]
-                    ),
-                    element,
-                    missing_energy,
-                )
+            computed_atomic_energies = compute_atomic_energies_from_graphs(
+                build_statistics_dataloader(
+                    cfg, datamodule.train_dataset, ["energy"], neighbors=False
+                ),
+                element,
+                missing_energy,
+            )
 
         atomic_energies = []
         for idx, atomic_energy_cfg in enumerate(atomic_energies_cfg):
@@ -188,7 +180,6 @@ def build_atomsList(
     return element, threeAtomsList, atomic_energies
 
 
-@rank_zero_only
 def compute_statistics(
     cfg: Dict,
     target_property: List[str],
@@ -202,22 +193,18 @@ def compute_statistics(
 ):
 
     if dataloader_train is None:
-        for_dataset = {
-            "cutoff": float(cfg["model"]["config"]["cutoff"]),
-            "max_neighbors": cfg["model"]["config"].get("max_neighbors", None),
-            "keyspec": keyspec,
-            "target_property": list(target_property),
-            "embedding_property": list(embedding_property),
-            "neighborlist_backend": cfg["dataset"].get(
-                "neighborlist_backend", "matscipy"
-            ),
-        }
-        dataset_train = create_graphs_for_main_rank(
-            threeAtomsList[0], element, for_dataset, "train"
+        from .datamodule import build_datamodule
+
+        datamodule = build_datamodule(
+            cfg,
+            element.zs,
+            target_property,
+            embedding_property,
+            keyspec,
+            threeAtomsList,
         )
-        dataloader_train = build_statistics_dataloader(
-            cfg, dataset_train, target_property
-        )
+        datamodule.setup("fit")
+        dataloader_train = datamodule.statistics_dataloader()
 
     statistics = _compute_statistics(
         dataloader_train,

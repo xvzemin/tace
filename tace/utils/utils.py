@@ -11,6 +11,7 @@ from typing import Dict
 import numpy as np
 import torch
 import yaml
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from omegaconf import DictConfig, ListConfig
 from packaging import version
 from torch import Tensor
@@ -65,6 +66,7 @@ def to_serializable(obj):
         return str(obj)
 
 
+@rank_zero_only
 def log_statistics_to_yaml(obj) -> None:
     if obj is not None:
         for idx, stat in enumerate(obj):
