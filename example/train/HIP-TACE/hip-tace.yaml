@@ -15,7 +15,6 @@ dataset:
     direct_hessian_key: direct_hessian
   storage_mode: lmdb
   shard_dirs: [graphCache_energy_forces_direct_hessian]
-  shard_size: 100000
 
   train_dataloader:
     batch_size: 256

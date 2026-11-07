@@ -1,8 +1,7 @@
-"""Versioned graph and statistics cache metadata."""
+"""Graph shard metadata and statistics cache keys."""
 
 import hashlib
 import json
-import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,7 +14,7 @@ STATISTICS_SCHEMA = 2
 ARRAY_CODEC = "typed-array-v1"
 
 
-def _digest(config):
+def digest(config):
     return hashlib.sha256(
         json.dumps(config, sort_keys=True, default=str).encode()
     ).hexdigest()[:20]
@@ -27,7 +26,7 @@ def validate_stage(stage):
     return stage
 
 
-def _stage_source(dataset, stage):
+def stage_source(dataset, stage):
     if stage == "train":
         return dataset.get("train_file")
     if stage == "valid":
@@ -51,7 +50,7 @@ def source_cache_key(cfg, stage="train", keyspec=None):
         if keyspec is not None
         else dataset.get("keys", {}).get("fidelity_idx_key", "fidelity_idx")
     )
-    return _digest(
+    return digest(
         {
             "schema": RECORD_SCHEMA,
             "codec": ARRAY_CODEC,
@@ -59,7 +58,7 @@ def source_cache_key(cfg, stage="train", keyspec=None):
             "format": dataset.get("format"),
             "options": dataset.get("options") or {},
             "source": source_signature(
-                _stage_source(dataset, stage),
+                stage_source(dataset, stage),
                 backend,
                 reader=dataset.get("reader"),
                 format=dataset.get("format"),
@@ -70,7 +69,7 @@ def source_cache_key(cfg, stage="train", keyspec=None):
     )
 
 
-def _split_signature(dataset, stage):
+def split_signature(dataset, stage):
     if stage.startswith("test"):
         return None
     if dataset.get("no_valid_set", False):
@@ -82,7 +81,7 @@ def _split_signature(dataset, stage):
             "mode": "indices",
             "stage": stage,
             "indices": {
-                str(path): path.read_text() if path.exists() else None
+                str(path): index_signature(path)
                 for path in (Path("train.index"), Path("valid.index"))
             },
         }
@@ -92,6 +91,21 @@ def _split_signature(dataset, stage):
         "valid_ratio": dataset.get("valid_ratio"),
         "split_seed": dataset.get("split_seed", 1),
     }
+
+
+def index_signature(path):
+    """Fingerprint ordered integer indices without retaining the index text."""
+    digest = hashlib.sha256()
+    count = 0
+    try:
+        with path.open() as stream:
+            for line in stream:
+                if line.strip():
+                    digest.update(f"{int(line)}\n".encode())
+                    count += 1
+    except FileNotFoundError:
+        return None
+    return {"count": count, "sha256": digest.hexdigest()}
 
 
 def source_signature(source, backend: str, *, reader=None, format=None, options=None):
@@ -172,164 +186,123 @@ def source_signature(source, backend: str, *, reader=None, format=None, options=
     return signature
 
 
-def graph_cache_key(
-    cfg, target_property, embedding_property, keyspec, stage="train"
-) -> str:
-    """Identify graph data independently of network precision and element ordering."""
-    dataset = cfg["dataset"]
-    model = cfg["model"]["config"]
-    config = {
-        "schema": GRAPH_SCHEMA,
-        "codec": ARRAY_CODEC,
-        "dtype": "float64",
-        "cutoff": float(model.get("cutoff", 6.0)),
-        "max_neighbors": model.get("max_neighbors"),
-        "neighborlist_backend": dataset.get("neighborlist_backend", "matscipy"),
-        "source": source_cache_key(cfg, stage, keyspec),
-        "split": _split_signature(dataset, stage),
-        "target_property": sorted(target_property),
-        "embedding_property": sorted(embedding_property),
-        "info_keys": keyspec.info_keys,
-        "arrays_keys": keyspec.arrays_keys,
-    }
-    return _digest(config)
-
-
 def statistics_cache_key(cfg, target_property, embedding_property, keyspec) -> str:
-    """Training statistics depend on labels, masks, topology, and references."""
+    """Return a key for the training labels, statistics options, and references."""
     from .quantity import get_need_property
 
     dataset = cfg["dataset"]
     model = cfg["model"]["config"]
-    needed = set(
+    names = set(
         get_need_property(list(target_property), list(embedding_property), True)
     )
-    names = needed & {
-        "energy",
-        "forces",
-        "direct_forces",
-        "initial_noncollinear_magmoms",
-    }
+    names &= {"energy", "forces", "direct_forces", "initial_noncollinear_magmoms"}
     config = {
         "schema": STATISTICS_SCHEMA,
-        "data_schema": GRAPH_SCHEMA,
-        "source": source_cache_key(cfg, "train", keyspec),
-        "split": _split_signature(dataset, "train"),
         "cutoff": float(model.get("cutoff", 6.0)),
         "max_neighbors": model.get("max_neighbors"),
-        "neighborlist_backend": dataset.get("neighborlist_backend", "matscipy"),
         "properties": sorted(names),
-        "info_keys": {k: v for k, v in keyspec.info_keys.items() if k in names},
-        "arrays_keys": {k: v for k, v in keyspec.arrays_keys.items() if k in names},
         "atomic_numbers": model.get("atomic_numbers"),
         "references": [item.get("atomic_energy") for item in model.get("fidelity", [])],
-        "weights": {
-            "policy": "positive-mask",
-            "keys": sorted(f"{p}_weight" for p in names),
-        },
     }
-    return _digest(config)
+    metadata = (
+        read_cache_metadata(graph_cache_directories(cfg), "train")
+        if dataset.get("storage_mode") == "lmdb"
+        else None
+    )
+    if metadata is not None:
+        config["graphs"] = metadata["shards"]
+        if not dataset.get("no_valid_set", False):
+            valid = read_cache_metadata(graph_cache_directories(cfg), "valid")
+            config["validation_elements"] = valid["atomic_numbers"] if valid else None
+    else:
+        config.update(
+            source=source_cache_key(cfg, "train", keyspec),
+            split=split_signature(dataset, "train"),
+            info_keys={k: v for k, v in keyspec.info_keys.items() if k in names},
+            arrays_keys={k: v for k, v in keyspec.arrays_keys.items() if k in names},
+            neighborlist_backend=dataset.get("neighborlist_backend", "matscipy"),
+        )
+    return digest(config)
 
 
-def graph_cache_directories(
-    cfg, target_property, embedding_property, keyspec, stage="train"
-):
-    """Return precision-independent versioned cache directories."""
-    key = graph_cache_key(cfg, target_property, embedding_property, keyspec, stage)
-    return [
-        Path(directory) / f"graphs-v{GRAPH_SCHEMA}-{key}"
-        for directory in cfg["dataset"].get("shard_dirs", ["graphCache"])
-    ]
+def graph_cache_directories(cfg):
+    """Return graph directories without inspecting the original structures."""
+    directories = cfg["dataset"].get("shard_dirs", ["graphCache"])
+    if isinstance(directories, (str, Path)):
+        directories = [directories]
+    return [Path(directory).expanduser() for directory in directories]
 
 
-def read_cache_metadata(directories, stage: str):
-    """Read completed shard metadata, or return None for an incomplete cache."""
+def read_cache_metadata(directories, stage: str, *, allow_building=False):
+    """Combine metadata from completed LMDB shards in the supplied directories."""
     validate_stage(stage)
     directories = list(map(Path, directories))
-    metadata = None
-    for directory in directories:
-        path = directory / f"{stage}_metadata.json"
-        if not path.is_file():
-            return None
-        try:
-            current = json.loads(path.read_text())
-        except (OSError, ValueError):
-            return None
-        if not isinstance(current, dict):
-            return None
-        kind = current.get("kind", "graphs")
-        if not isinstance(kind, str):
-            return None
-        schema = {"graphs": GRAPH_SCHEMA, "records": RECORD_SCHEMA}.get(kind)
-        if (
-            schema is None
-            or current.get("schema") != schema
-            or current.get("dtype") != "float64"
-            or current.get("codec") != ARRAY_CODEC
-        ):
-            return None
-        elements = current.get("atomic_numbers")
-        fields = current.get("fields", [])
-        if (
-            not isinstance(elements, list)
-            or any(type(z) is not int or z < 0 for z in elements)
-            or not isinstance(fields, list)
-            or any(not isinstance(name, str) for name in fields)
-            or not isinstance(current.get("shard_stats", {}), dict)
-        ):
-            return None
-        if metadata is not None and current != metadata:
-            return None
-        metadata = current
-    if metadata is None or not isinstance(metadata.get("shards"), dict):
-        return None
-    paths = [
-        path
+    if not allow_building and any(
+        (directory / f"{stage}.build.lock").exists()
+        or (directory / f"{stage}_failed.json").exists()
         for directory in directories
-        for path in directory.glob(f"{stage}_shard*.lmdb")
-    ]
-    names = [path.name for path in paths]
-    if len(set(names)) != len(names) or set(names) != set(metadata.get("shards", {})):
+    ):
         return None
+    paths = sorted(
+        (
+            path
+            for directory in directories
+            for path in directory.glob(f"{stage}_shard*.lmdb")
+        ),
+        key=lambda path: path.name,
+    )
+    if not paths:
+        return None
+    metadata = None
+    elements, fields = set(), None
+    shards, shard_stats = {}, {}
     for path in paths:
-        length = metadata["shards"][path.name]
-        if type(length) is not int or length < 0 or not (path / "data.mdb").is_file():
-            return None
-        shard_stats = metadata.get("shard_stats", {}).get(path.name, {})
-        if not isinstance(shard_stats, dict):
-            return None
-        if shard_stats.get("counts") == "counts.bin":
-            try:
-                if (path / "counts.bin").stat().st_size != length * 16:
-                    return None
-            except OSError:
-                return None
-    return metadata
-
-
-def write_cache_metadata(
-    directories, stage: str, lengths: dict, atomic_numbers: set, **extra
-):
-    """Atomically mark all shards of a graph dataset as complete."""
-    validate_stage(stage)
-    kind = extra.pop("kind", "graphs")
-    if kind not in {"graphs", "records"}:
-        raise ValueError(f"Unknown store kind: {kind}")
-    metadata = {
-        **extra,
-        "schema": GRAPH_SCHEMA if kind == "graphs" else RECORD_SCHEMA,
-        "kind": kind,
-        "codec": ARRAY_CODEC,
-        "dtype": "float64",
-        "atomic_numbers": sorted(atomic_numbers),
-        "shards": lengths,
-    }
-    for directory in map(Path, directories):
-        path = directory / f"{stage}_metadata.json"
-        temporary = directory / f"{stage}_metadata.json.tmp-{os.getpid()}"
-        with temporary.open("w") as stream:
-            json.dump(metadata, stream, sort_keys=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if path.name in shards:
+            raise ValueError(f"Duplicate graph shard: {path.name}")
+        try:
+            current = json.loads((path / "metadata.json").read_text())
+            kind = current["kind"]
+            expected = GRAPH_SCHEMA if kind == "graphs" else RECORD_SCHEMA
+            if (
+                kind not in {"graphs", "records"}
+                or current["schema"] != expected
+                or current["codec"] != ARRAY_CODEC
+                or current["dtype"] != "float64"
+                or current["length"] <= 0
+                or not (path / "data.mdb").is_file()
+                or (path / "counts.bin").stat().st_size != current["length"] * 16
+            ):
+                raise ValueError("Invalid shard format or incomplete data")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Cannot read graph shard {path}: {exc}") from exc
+        if metadata is None:
+            metadata = {
+                key: current[key] for key in ("schema", "kind", "codec", "dtype")
+            }
+            metadata["graph_config"] = current.get("graph_config")
+        elif any(
+            current[key] != metadata[key]
+            for key in ("schema", "kind", "codec", "dtype")
+        ):
+            raise ValueError(f"Incompatible shard format in {path}")
+        elif current.get("graph_config") != metadata["graph_config"]:
+            raise ValueError(f"Different cutoffs or neighbor limits in {path}")
+        shards[path.name] = current["length"]
+        shard_stats[path.name] = {
+            key: current[key] for key in ("counts", "num_nodes", "num_edges")
+        }
+        elements.update(current["atomic_numbers"])
+        fields = (
+            set(current["fields"])
+            if fields is None
+            else fields.intersection(current["fields"])
+        )
+    metadata.update(
+        shards=shards,
+        shard_stats=shard_stats,
+        atomic_numbers=sorted(elements),
+        fields=sorted(fields),
+        num_nodes=sum(item["num_nodes"] for item in shard_stats.values()),
+        num_edges=sum(item["num_edges"] for item in shard_stats.values()),
+    )
     return metadata

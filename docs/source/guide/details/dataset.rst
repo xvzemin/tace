@@ -75,14 +75,15 @@ With multiple GPUs and ``storage_mode: lmdb``, each GPU process independently
 reads records, constructs graphs, and writes its own LMDB shards. The parent
 assigns work and merges metadata without transferring or rewriting graphs.
 Sample order is preserved. Work partitions are balanced across GPUs and
-distributed across ``shard_dirs``. Each shard obeys ``shard_size`` and
-``shard_bytes``; graphs are constructed and encoded in bounded batches.
+distributed across ``shard_dirs``. Graphs are constructed and encoded in bounded
+batches; shard and write-buffer limits are internal constants.
 ``graph_batch_size`` is per GPU; ``graph_workers`` does not set GPU worker
 count. Completed caches load without starting GPU workers.
 
-Offline construction logs completed graphs, throughput, and estimated remaining
-time every ten seconds. LMDB progress counts committed records; multiple GPUs
-share one aggregate report. Completion is logged after publishing the cache.
+Offline construction shows one progress bar with exact completed/total graph
+counts, throughput, and estimated remaining time. LMDB counts committed records;
+multiple GPUs share one parent-process bar. Cache hits show no construction bar,
+and failed builds close it without advancing the count.
 
 More GPUs can increase preprocessing throughput, but source decoding, shared
 disk bandwidth, and process startup can limit scaling. Multi-rank DDP rejects
@@ -102,34 +103,99 @@ float64. Atomic numbers, edge indices, periodic image indices, and fidelity
 indices are integers. Element features are constructed from indices in the
 model; graphs do not store one-hot element arrays.
 
-LMDB caches use versioned subdirectories under ``shard_dirs``. Source paths,
-file metadata, property keys, dataset splits, and neighbor-list settings select
-the cache. Network dtype and element ordering do not. Completed shard metadata
-allows loading and statistics without rereading source structures. Train,
-validation, and test caches are independent. Changing only the test set does
-not rebuild training graphs. Test graphs are prepared when testing begins.
+Graphs are stored directly in ``shard_dirs``. Each ``train_shard*.lmdb``,
+``valid_shard*.lmdb``, or ``test0_shard*.lmdb`` directory contains its own
+metadata and graph counts. There is no configuration-hash directory.
 
-Shards contain typed arrays, not serialized Python/PyG objects. Loaders read
-several indices in one shard transaction; statistics decode only their input
-fields and use stored neighbor counts. Elemental energy fitting and moments
-accumulate in FP64 with bounded memory.
+To combine datasets, move their completed ``*.lmdb`` directories into the same
+directory, preserving their generated names:
 
-``shard_size`` limits records per shard; ``shard_bytes`` additionally limits
-encoded bytes (default 2 GiB). ``transaction_bytes`` bounds each write batch
-(16 MiB), and ``max_buffer_bytes`` bounds buffered encoded records (64 MiB).
-An individual record exceeding that limit raises an error; increase the limit
-for very large pair properties. LMDB map capacity grows automatically.
-``cache_size`` controls optional decoded samples per worker (default zero);
+.. code-block:: text
+
+   graphCache/
+     train_shard<unique-id>_000000.lmdb/
+     train_shard<another-id>_000000.lmdb/
+     valid_shard<unique-id>_000000.lmdb/
+
+.. code-block:: yaml
+
+   dataset:
+     storage_mode: lmdb
+     shard_dirs: [graphCache]
+
+Restarting reuses the saved graphs before opening source files, including when
+statistics were not finished. Sources can be moved or removed after graph
+construction. Train, validation, and test splits retain their saved assignments;
+changing source paths or split settings does not rebuild existing graphs.
+Use another directory to construct a new dataset.
+
+Only matching cutoffs, neighbor limits, and the required label fields are needed.
+Unused labels are omitted during decoding. Fidelity indices must have the same
+meaning in all combined datasets. Statistics are computed from the graphs and
+refreshed when shards are added or removed.
+
+Training uses batched LMDB reads without repeating neighbor search. Statistics
+read only the required fields and accumulate in FP64. LMDB capacity grows
+automatically; write buffers and open-shard limits are set in Python.
+``cache_size`` controls optional decoded samples per worker and defaults to zero;
 the operating-system page cache remains active.
-``max_open_shards`` limits open shards per dataset and process (default 32).
-Increase it for caches with many small shards to avoid reopening them during
-random training reads. Larger shards do not increase the write-buffer budget.
 
-Old caches are left untouched and rebuilt from source in the new namespace.
-Casting an old FP32 cache to FP64 cannot recover discarded precision. Incomplete
-caches are rejected; move them aside or select a new cache directory to rebuild.
+Incomplete builds are preserved and not reused as complete datasets.
+Augmentation creates sample-local tensors without modifying cached graphs.
 
-Augmentation creates sample-local tensors and does not overwrite cached data.
+Training epoch size
+-------------------
+
+``dataset.epoch_size: null`` preserves full-dataset training. Set an integer
+to choose the requested global number of training samples per epoch across all
+GPUs,
+or a float in ``(0, 1]`` to choose a fraction of the training dataset, rounded
+down with a minimum of one sample. The requested count must not exceed the
+dataset size; ``1`` requests one sample, while ``1.0`` requests a full pass,
+before batch alignment.
+
+.. code-block:: yaml
+
+   misc:
+     global_seed: 42
+   dataset:
+     epoch_size: 100000  # global samples, not samples per GPU
+     train_dataloader:
+       batch_size: 32  # per GPU
+       shuffle: true
+       drop_last: false
+
+With ``epoch_size`` enabled, epochs take consecutive windows from one repeating
+dataset order. ``shuffle: true`` selects a fixed permutation using
+``misc.global_seed``; ``false`` uses source order. Every full traversal visits
+each sample once before repeating the same order, even when an epoch crosses
+the traversal boundary. Statistics still use the full training dataset;
+validation and test loaders are unchanged.
+
+With ``drop_last: false``, the requested count is rounded up to a multiple of
+``world_size``, giving every rank the same sample count and retaining its final
+partial batch. With ``drop_last: true``, it is rounded up to a multiple of
+``world_size * batch_size``, so every batch is full. The actual count is logged
+when alignment changes it.
+
+Extra samples come from the continuing stream, not repeated padding from the
+current epoch. At the end of the complete dataset, sampling continues from the
+start of the next pass, without dropping the remaining structures. For example,
+with two GPUs, per-GPU batch size four and ``epoch_size: 11``, an epoch contains
+12 samples with ``drop_last: false`` or 16 with ``drop_last: true``. Repeats are
+possible within an epoch only if alignment makes it longer than the dataset.
+
+Resume through the usual top-level ``resume_from_model: /path/to/model.ckpt``
+using a full training checkpoint (``save_weights_only: false``). The saved
+position tracks completed training batches, not worker-prefetched samples.
+The checkpoint must have been saved with this sampler enabled.
+Keep the same dataset and ordering, requested epoch count, seed, shuffle setting,
+world size, per-rank batch size and ``drop_last`` when resuming. This restores
+sample order, not exact random augmentation or dropout state. Optional ``trainer.max_steps``
+and ``ModelCheckpoint.every_n_train_steps`` control step-based stopping and
+checkpoint intervals independently of the shortened epochs.
+Leave ``trainer.limit_train_batches`` at ``1.0`` and disable
+``trainer.overfit_batches``; use ``epoch_size`` to control the training subset.
 
 Data augmentation
 -----------------

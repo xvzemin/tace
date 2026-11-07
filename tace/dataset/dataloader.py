@@ -8,17 +8,57 @@ from typing import Dict, List, Sequence, Union
 
 import torch
 from hydra.utils import instantiate
+from torch_geometric.loader import DataLoader
 
 from .cache import statistics_cache_key
 from .element import TorchElement, build_element_lookup
 from .quantity import KeySpecification
+from .sampler import EpochSampler
 from .statistics import (
     _compute_statistics,
     compute_atomic_energies_from_graphs,
 )
 
 
-def build_graph_dataloader(config, dataset):
+class EpochDataLoader(DataLoader):
+    """Graph loader with checkpointable, consumed-sample progress.
+
+    Parameters
+    ----------
+    dataset : Dataset
+        Graph dataset.
+    sampler : EpochSampler
+        Training sampler.
+    **kwargs
+        Arguments to :class:`torch_geometric.loader.DataLoader`.
+    """
+
+    def __iter__(self):
+        # Lightning sets the epoch after constructing the loader iterator.
+        yield from super().__iter__()
+
+    def mark_batch_complete(self):
+        self.sampler.advance(
+            min(self.batch_size, self.sampler.num_samples - self.sampler.consumed)
+        )
+
+    def state_dict(self):
+        return {
+            "sampler": self.sampler.state_dict(),
+            "batch_size": self.batch_size,
+            "drop_last": self.drop_last,
+        }
+
+    def load_state_dict(self, state):
+        for name in ("batch_size", "drop_last"):
+            if state[name] != getattr(self, name):
+                raise ValueError(
+                    f"Cannot resume epoch sampling with a different {name}."
+                )
+        self.sampler.load_state_dict(state["sampler"])
+
+
+def build_graph_dataloader(config, dataset, *, epoch_size=None, seed=0):
     """Build a loader without bypassing batched dataset reads."""
     config = {key: value for key, value in config.items() if key != "extra"}
     source = getattr(dataset, "dataset", dataset)
@@ -29,6 +69,42 @@ def build_graph_dataloader(config, dataset):
         and config.get("num_workers", 0)
     ):
         raise ValueError("CUDA online graph construction requires num_workers=0.")
+    if epoch_size is not None:
+        if config.get("_target_") not in {
+            "torch_geometric.loader.DataLoader",
+            "torch_geometric.data.DataLoader",
+            "tace.dataset.dataloader.EpochDataLoader",
+        }:
+            raise ValueError("epoch_size requires a torch_geometric DataLoader.")
+        if config.get("sampler") is not None or config.get("batch_sampler") is not None:
+            raise ValueError("epoch_size cannot be combined with another sampler.")
+        if config.get("in_order", True) is not True:
+            raise ValueError(
+                "epoch_size requires in_order=True for checkpoint recovery."
+            )
+        sampler = EpochSampler(
+            dataset,
+            epoch_size,
+            shuffle=config.get("shuffle", False),
+            seed=seed,
+            batch_size=config.get("batch_size", 1),
+            drop_last=config.get("drop_last", False),
+        )
+        if sampler.rank == 0 and sampler.total_size != sampler.epoch_size:
+            logging.info(
+                "Training epoch size: requested %d, actual %d graphs "
+                "(%d ranks, batch_size=%d, drop_last=%s); continuing the data stream.",
+                sampler.epoch_size,
+                sampler.total_size,
+                sampler.num_replicas,
+                sampler.batch_size,
+                sampler.drop_last,
+            )
+        config.update(
+            _target_="tace.dataset.dataloader.EpochDataLoader",
+            sampler=sampler,
+            shuffle=False,
+        )
     return instantiate(config, dataset=dataset)
 
 

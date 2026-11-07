@@ -6,8 +6,38 @@
 import logging
 
 from lightning.pytorch.callbacks import Callback, TQDMProgressBar
+from lightning.pytorch.trainer.states import TrainerFn
 
 from .ema import ExponentialMovingAverage
+
+
+class EpochSamplerCallback(Callback):
+    """Commit consumed batches before checkpoint callbacks save loader state."""
+
+    def setup(self, trainer, pl_module, stage):
+        if stage != "fit":
+            return
+        if trainer.overfit_batches:
+            raise ValueError("epoch_size cannot be combined with overfit_batches.")
+        limit = trainer.limit_train_batches
+        if not isinstance(limit, float) or limit != 1.0:
+            raise ValueError(
+                "Use dataset.epoch_size instead of limit_train_batches; "
+                "limit_train_batches must remain 1.0."
+            )
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        trainer.train_dataloader.mark_batch_complete()
+
+    def on_load_checkpoint(self, trainer, pl_module, checkpoint):
+        if trainer.state.fn != TrainerFn.FITTING:
+            return
+        state = checkpoint.get(type(trainer.datamodule).__qualname__, {})
+        if state.get("epoch_dataloader") is None:
+            raise ValueError(
+                "The checkpoint has no epoch sampler progress. Resume with the "
+                "original sampling configuration, or start a new training run."
+            )
 
 
 # === Print Metriacs Callback ===

@@ -1,7 +1,11 @@
-"""Graph datasets with bounded preprocessing and optional online construction."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import logging
 import multiprocessing
+import re
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -12,29 +16,42 @@ from concurrent.futures import (
     wait,
 )
 from contextlib import ExitStack
-from datetime import timedelta
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
 from lightning.pytorch import LightningDataModule
+from lightning.pytorch.trainer.states import TrainerFn
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 from .augmentation import AugmentedDataset, validate_augmentations
-from .cache import graph_cache_directories, read_cache_metadata
+from .cache import (
+    graph_cache_directories,
+    read_cache_metadata,
+)
 from .dataloader import build_graph_dataloader, build_statistics_dataloader
 from .element import build_element_lookup
 from .graph import batch_geometry, from_records
 from .neighbour_list import get_neighborhood_batch
-from .quantity import KeySpecification
+from .quantity import KeySpecification, get_need_property
 from .read import tace_read_all_files
 from .records import record_from_atoms
 from .split import IndexedSource
-from .store import GraphDatasetLMDB, build_graph_store, write_graphs
+from .store import (
+    DEFAULT_MAX_BUFFER_BYTES,
+    DEFAULT_MAX_OPEN_SHARDS,
+    DEFAULT_SHARD_BYTES,
+    DEFAULT_SHARD_SIZE,
+    DEFAULT_TRANSACTION_BYTES,
+    GraphDatasetLMDB,
+    build_graph_store,
+    write_graphs,
+)
 
 
 class GraphProgress:
-    """Log graph counts, throughput, and remaining time every ten seconds.
+    """Show completed graph counts in one rank-zero progress bar.
 
     Parameters
     ----------
@@ -47,32 +64,26 @@ class GraphProgress:
     def __init__(self, total, stage):
         self.total, self.stage = total, stage
         self.count = 0
-        self.started = self.updated = time.monotonic()
+        self.bar = None
+        self.disabled = (
+            dist.is_available() and dist.is_initialized() and dist.get_rank() != 0
+        )
 
     def update(self, count, *, finished=False):
         self.count += count
-        now = time.monotonic()
-        if not finished and (now - self.updated < 10 or self.count >= self.total):
-            return
-        if not self.count or (
-            dist.is_available() and dist.is_initialized() and dist.get_rank() != 0
-        ):
-            return
-        elapsed = max(now - self.started, 1e-9)
-        rate = self.count / elapsed
-        remaining = max(0, self.total - self.count) / rate
-        logging.info(
-            "%s graphs: %d/%d (%.1f%%), %.1f graphs/s, elapsed %s, ETA %s%s",
-            self.stage,
-            self.count,
-            self.total,
-            100 * self.count / max(1, self.total),
-            rate,
-            timedelta(seconds=int(elapsed)),
-            timedelta(seconds=int(remaining)),
-            "; complete" if finished else "",
-        )
-        self.updated = now
+        if count and not self.disabled:
+            if self.bar is None:
+                self.bar = tqdm(
+                    total=self.total, desc=f"{self.stage} graphs", unit="graph"
+                )
+            self.bar.update(count)
+        if finished:
+            self.close()
+
+    def close(self):
+        """Close without advancing the count, including after failed builds."""
+        if self.bar is not None:
+            self.bar.close()
 
 
 def read_records(source, indices):
@@ -82,11 +93,28 @@ def read_records(source, indices):
     return [record_from_atoms(source[index]) for index in indices]
 
 
-def graph_devices(device, backend):
-    """Resolve a scalar device, CUDA device sequence, or ``'all'``."""
-    if device is None and backend == "alchemiops":
-        device = "all" if torch.cuda.is_available() else "cpu"
+def graph_devices(device, backend, *, single_device=False):
+    """Resolve graph devices using CUDA's visible, process-local indices.
+
+    Offline auto selection uses every visible GPU. Online auto selection keeps
+    ``cuda`` unindexed so it follows the current device of the training rank.
+    """
     multiple = isinstance(device, Sequence) and not isinstance(device, (str, bytes))
+    if single_device and (multiple or device == "all"):
+        raise ValueError(
+            "on_the_fly graph construction requires one explicit device; "
+            "use storage_mode='lmdb' or 'memory' for multi-GPU preprocessing."
+        )
+    if device is None and backend == "alchemiops":
+        # Match explicit-list discovery. is_available() can use a stale CUDA
+        # runtime probe while device_count() discovers GPUs through NVML; it
+        # must not gate discovery or silently divert a GPU build to CPU.
+        count = torch.cuda.device_count()
+        if not count:
+            return ["cpu"]
+        return ["cuda"] if single_device else [f"cuda:{i}" for i in range(count)]
+    if isinstance(device, int) and not isinstance(device, bool):
+        device = str(torch.device("cuda", device))
     if not multiple and device != "all":
         return [device]
     if backend != "alchemiops":
@@ -101,7 +129,11 @@ def graph_devices(device, backend):
         )
     resolved = []
     for value in devices:
-        item = torch.device(value)
+        item = (
+            torch.device("cuda", value)
+            if isinstance(value, int) and not isinstance(value, bool)
+            else torch.device(value)
+        )
         index = (
             torch.cuda.current_device()
             if item.type == "cuda" and item.index is None and count
@@ -179,7 +211,7 @@ def write_multi_gpu_graphs(
         raise ValueError("Graph batch_size must be positive.")
     progress = None
 
-    def build(directories, stage, writer_options):
+    def build(directories, build_stage, writer_options):
         nonlocal progress
         size = len(source)
         per_device = max(batch_size, (size + len(devices) - 1) // len(devices))
@@ -233,7 +265,7 @@ def write_multi_gpu_graphs(
                         device,
                         assigned,
                         directories,
-                        stage,
+                        build_stage,
                         batch_size,
                         writer_options,
                         sender,
@@ -252,10 +284,15 @@ def write_multi_gpu_graphs(
                     completed.extend(future.result())
         return [metadata for _, metadata in sorted(completed)]
 
-    dataset = build_graph_store(build, shard_dirs, stage, **writer_options)
-    if progress is not None:
-        progress.update(0, finished=True)
-    return dataset
+    try:
+        dataset = build_graph_store(build, shard_dirs, stage, **writer_options)
+        if progress is not None:
+            progress.update(0, finished=True)
+            logging.info("Published %s graph cache: %s", stage, shard_dirs)
+        return dataset
+    finally:
+        if progress is not None:
+            progress.close()
 
 
 def iter_gpu_graphs(source, element, options, chunks, devices):
@@ -354,18 +391,13 @@ class OnTheFlyGraphDataset(Dataset):
     """
 
     def __init__(self, source, options, device=None, fields=None):
-        if device == "all" or (
-            isinstance(device, Sequence) and not isinstance(device, (str, bytes))
-        ):
-            raise ValueError(
-                "on_the_fly graph construction requires one explicit device; "
-                "use storage_mode='lmdb' or 'memory' for multi-GPU preprocessing."
-            )
         self.source = source
         self.options = options
-        if device is None and options.get("neighborlist_backend") == "alchemiops":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = device
+        self.device = graph_devices(
+            device,
+            options.get("neighborlist_backend", "matscipy"),
+            single_device=True,
+        )[0]
         self.fields = None if fields is None else frozenset(fields)
 
     def __len__(self):
@@ -385,6 +417,8 @@ class OnTheFlyGraphDataset(Dataset):
         return self.__getitems__([index])[0]
 
     def project(self, fields):
+        if self.fields is not None:
+            fields = set(fields).intersection(self.fields)
         return type(self)(self.source, self.options, self.device, fields)
 
 
@@ -395,16 +429,17 @@ def create_graphs(
     stage,
     shard_dirs,
     storage_mode="lmdb",
-    shard_size=100000,
+    shard_size=DEFAULT_SHARD_SIZE,
     cache_size=0,
     existing_dataset=None,
     batch_size=256,
     workers=0,
     device=None,
-    transaction_bytes=16 * 1024**2,
-    shard_bytes=2 * 1024**3,
-    max_buffer_bytes=64 * 1024**2,
-    max_open_shards=32,
+    transaction_bytes=DEFAULT_TRANSACTION_BYTES,
+    shard_bytes=DEFAULT_SHARD_BYTES,
+    max_buffer_bytes=DEFAULT_MAX_BUFFER_BYTES,
+    max_open_shards=DEFAULT_MAX_OPEN_SHARDS,
+    graph_config=None,
 ):
     """Load complete graph shards or build them with bounded memory."""
     if existing_dataset is not None:
@@ -440,6 +475,7 @@ def create_graphs(
         cache_size=cache_size,
         max_buffer_bytes=max_buffer_bytes,
         max_open_shards=max_open_shards,
+        graph_config=graph_config,
     )
     if storage_mode == "lmdb" and len(devices) > 1:
         if workers < 0:
@@ -456,28 +492,34 @@ def create_graphs(
         )
     graphs = iter_graphs(atoms_list, element, for_dataset, batch_size, workers, device)
     progress = GraphProgress(len(atoms_list), stage)
-    if storage_mode == "memory":
-        dataset = GraphDatasetLMDB([], in_memory=True)
-        dataset.data_list = []
-        for graph in graphs:
-            dataset.data_list.append(graph)
-            if len(dataset.data_list) % batch_size == 0:
-                progress.update(batch_size)
-        dataset.length = len(dataset.data_list)
-        progress.update(dataset.length % batch_size, finished=True)
+    try:
+        if storage_mode == "memory":
+            dataset = GraphDatasetLMDB([], in_memory=True)
+            dataset.data_list = []
+            for graph in graphs:
+                dataset.data_list.append(graph)
+                progress.update(1)
+            dataset.length = len(dataset.data_list)
+        else:
+            logging.info(
+                "Building %d %s graphs in batches of %d",
+                len(atoms_list),
+                stage,
+                batch_size,
+            )
+            dataset = write_graphs(
+                graphs,
+                shard_dirs,
+                stage,
+                progress=progress.update,
+                **writer_options,
+            )
+        progress.update(0, finished=True)
+        if storage_mode == "lmdb":
+            logging.info("Published %s graph cache: %s", stage, shard_dirs)
         return dataset
-    logging.info(
-        "Building %d %s graphs in batches of %d", len(atoms_list), stage, batch_size
-    )
-    dataset = write_graphs(
-        graphs,
-        shard_dirs,
-        stage,
-        progress=progress.update,
-        **writer_options,
-    )
-    progress.update(0, finished=True)
-    return dataset
+    finally:
+        progress.close()
 
 
 class GraphDataModule(LightningDataModule):
@@ -520,6 +562,8 @@ class GraphDataModule(LightningDataModule):
             else None
         )
         self.train_dataset = self.val_dataset = self.test_datasets = None
+        self._epoch_dataloader = None
+        self._epoch_dataloader_state = None
         data = cfg["dataset"]
         self.storage_mode = data.get("storage_mode", "memory")
         self.no_valid_set = data.get("no_valid_set", False)
@@ -529,11 +573,6 @@ class GraphDataModule(LightningDataModule):
             batch_size=data.get("graph_batch_size", 256),
             workers=data.get("graph_workers", 0),
             device=data.get("graph_device"),
-            shard_size=data.get("shard_size", 100000),
-            transaction_bytes=data.get("transaction_bytes", 16 * 1024**2),
-            shard_bytes=data.get("shard_bytes", 2 * 1024**3),
-            max_buffer_bytes=data.get("max_buffer_bytes", 64 * 1024**2),
-            max_open_shards=data.get("max_open_shards", 32),
         )
         model = cfg["model"]["config"]
         self.graph_options = dict(
@@ -545,6 +584,9 @@ class GraphDataModule(LightningDataModule):
             universal_embedding=model.get("universal_embedding"),
             neighborlist_backend=data.get("neighborlist_backend", "matscipy"),
         )
+        self.graph_config = {
+            name: self.graph_options[name] for name in ("cutoff", "max_neighbors")
+        }
         if self.storage_mode not in {"lmdb", "memory", "on_the_fly"}:
             raise ValueError(f"Unknown storage_mode: {self.storage_mode!r}")
         if self.storage_mode == "on_the_fly":
@@ -552,19 +594,53 @@ class GraphDataModule(LightningDataModule):
                 "Online graph construction enabled; benchmark loader throughput before large-scale training."
             )
 
-    def cache_directories(self, stage):
-        return graph_cache_directories(
-            self.cfg,
-            self.target_property,
-            self.embedding_property,
-            self.keyspec,
-            stage=stage,
+    def cached_dataset(self, stage):
+        """Open canonical graph stores without reading their structure sources."""
+        if self.storage_mode != "lmdb":
+            return None
+        directories = self.shard_dirs
+        metadata = read_cache_metadata(directories, stage)
+        if metadata is None:
+            return None
+        if metadata["graph_config"] != self.graph_config:
+            raise ValueError(
+                "Cached graph cutoff or max_neighbors differs from the model; "
+                "use a different dataset.shard_dirs to rebuild."
+            )
+        properties = get_need_property(
+            self.target_property, self.embedding_property, True
         )
+        required = set(properties) | {f"{name}_weight" for name in properties}
+        missing = required - set(metadata["fields"])
+        if missing:
+            raise ValueError(f"Graph shards lack required fields: {sorted(missing)}")
+        # All stores are canonical graphs. Discard unrequested labels so PyG can
+        # collate stores built for different property sets without extra copies.
+        fields = {
+            "atomic_numbers",
+            "positions",
+            "lattice",
+            "pbc",
+            "edge_index",
+            "edge_shifts",
+            "num_neighbors",
+            "fidelity_idx",
+            "entropy",
+            "num_nodes",
+        }
+        fields.update(required)
+        dataset = GraphDatasetLMDB.from_directories(
+            directories,
+            stage,
+            cache_size=self.cache_size,
+        ).project(fields)
+        logging.info("Reusing %d %s graphs from %s", len(dataset), stage, directories)
+        return dataset
 
     @property
     def shard_dirs(self):
-        """Keep the training cache path available without indexing it at construction."""
-        return self.cache_directories("train")
+        """Graph directories, shared by training, validation, and test splits."""
+        return graph_cache_directories(self.cfg)
 
     def prepare_data(self):
         # Lightning may call this only on rank zero. setup opens independent,
@@ -573,13 +649,17 @@ class GraphDataModule(LightningDataModule):
 
     def sources(self):
         if self.threeAtomsList is None:
+            data = self.cfg["dataset"]
+            stages = (
+                ("train",) if data.get("valid_file") is not None else ("train", "valid")
+            )
             self.threeAtomsList = tace_read_all_files(
                 self.cfg,
                 self.target_property,
                 self.embedding_property,
                 self.keyspec,
                 in_datamodule=True,
-                stages=("train", "valid"),
+                stages=stages,
             )
         return self.threeAtomsList
 
@@ -587,6 +667,17 @@ class GraphDataModule(LightningDataModule):
         if stage == "train":
             return self.sources()[0]
         if stage == "valid":
+            if (
+                self.threeAtomsList is None or self.threeAtomsList[1] is None
+            ) and self.cfg["dataset"].get("valid_file") is not None:
+                return tace_read_all_files(
+                    self.cfg,
+                    self.target_property,
+                    self.embedding_property,
+                    self.keyspec,
+                    in_datamodule=True,
+                    stages=("valid",),
+                ).valid
             return self.sources()[1]
         if self._test_sources is None:
             self._test_sources = tace_read_all_files(
@@ -602,7 +693,7 @@ class GraphDataModule(LightningDataModule):
         return self._test_sources[int(stage[4:])]
 
     def dataset(self, stage):
-        directories = self.cache_directories(stage)
+        directories = self.shard_dirs
         distributed = dist.is_available() and dist.is_initialized()
         # Only rank zero writes shared caches. The writer uses a filesystem lock
         # as well, so independent jobs cannot publish over one another.
@@ -611,20 +702,24 @@ class GraphDataModule(LightningDataModule):
         error = None
         if self.storage_mode != "lmdb" or writer:
             try:
-                complete = (
-                    self.storage_mode == "lmdb"
-                    and read_cache_metadata(directories, stage) is not None
-                )
-                result = create_graphs(
-                    None if complete else self.source(stage),
-                    self.element,
-                    self.graph_options,
-                    stage,
-                    directories,
-                    storage_mode=self.storage_mode,
-                    cache_size=self.cache_size,
-                    **self.build_options,
-                )
+                result = self.cached_dataset(stage)
+                if result is None:
+                    result = create_graphs(
+                        self.source(stage),
+                        self.element,
+                        self.graph_options,
+                        stage,
+                        directories,
+                        storage_mode=self.storage_mode,
+                        cache_size=self.cache_size,
+                        graph_config=self.graph_config,
+                        **self.build_options,
+                    )
+                    if self.storage_mode == "lmdb":
+                        # Another job may have published while this one waited
+                        # for the writer lock. Validate that store as well.
+                        result.close()
+                        result = self.cached_dataset(stage)
             except Exception as exc:
                 if not distributed or self.storage_mode != "lmdb":
                     raise
@@ -635,12 +730,7 @@ class GraphDataModule(LightningDataModule):
             if status[0] is not None:
                 raise RuntimeError(f"Graph preparation failed for {stage}: {status[0]}")
             if not writer:
-                result = GraphDatasetLMDB.from_directories(
-                    directories,
-                    stage,
-                    cache_size=self.cache_size,
-                    max_open_shards=self.build_options["max_open_shards"],
-                )
+                result = self.cached_dataset(stage)
         logging.info(
             "%s dataset: %d structures (%s)", stage, len(result), self.storage_mode
         )
@@ -663,8 +753,15 @@ class GraphDataModule(LightningDataModule):
                 )
                 if self._test_sources is not None:
                     count = len(self._test_sources)
+                indices = set(range(count))
+                if self.storage_mode == "lmdb":
+                    for directory in self.shard_dirs:
+                        for path in directory.glob("test*_shard*.lmdb"):
+                            match = re.match(r"test(\d+)_shard", path.name)
+                            if match:
+                                indices.add(int(match[1]))
                 self.test_datasets = [
-                    self.dataset(f"test{index}") for index in range(count)
+                    self.dataset(f"test{index}") for index in sorted(indices)
                 ]
 
     def update_elements(self):
@@ -705,7 +802,46 @@ class GraphDataModule(LightningDataModule):
         dataset = self.train_dataset
         if self.augmentation:
             dataset = AugmentedDataset(dataset, self.augmentation)
-        return build_graph_dataloader(self.cfg["dataset"]["train_dataloader"], dataset)
+        loader = build_graph_dataloader(
+            self.cfg["dataset"]["train_dataloader"],
+            dataset,
+            epoch_size=self.cfg["dataset"].get("epoch_size"),
+            seed=self.cfg.get("misc", {}).get("global_seed", 42),
+        )
+        if self.cfg["dataset"].get("epoch_size") is not None:
+            state = (
+                self._epoch_dataloader.state_dict()
+                if self._epoch_dataloader is not None
+                else self._epoch_dataloader_state
+            )
+            if state is not None:
+                loader.load_state_dict(state)
+            self._epoch_dataloader = loader
+            self._epoch_dataloader_state = None
+        return loader
+
+    def state_dict(self):
+        """Save committed sampling progress, including completed partial epochs."""
+        state = (
+            self._epoch_dataloader.state_dict()
+            if self._epoch_dataloader is not None
+            else self._epoch_dataloader_state
+        )
+        return {"epoch_dataloader": state} if state is not None else {}
+
+    def load_state_dict(self, state):
+        """Restore sampling before Lightning constructs or prefetches the loader."""
+        if self.trainer is not None and self.trainer.state.fn != TrainerFn.FITTING:
+            return
+        loader_state = state.get("epoch_dataloader")
+        if loader_state is None:
+            return
+        if self.cfg["dataset"].get("epoch_size") is None:
+            raise ValueError("Cannot resume epoch sampling with epoch_size disabled.")
+        if self._epoch_dataloader is not None:
+            self._epoch_dataloader.load_state_dict(loader_state)
+        else:
+            self._epoch_dataloader_state = loader_state
 
     def statistics_dataloader(self):
         return build_statistics_dataloader(
@@ -751,10 +887,12 @@ def load_cached_datamodule(cfg, target_property, embedding_property, keyspec):
         cfg, None, target_property, embedding_property, keyspec
     )
     stages = ["train"] + ([] if datamodule.no_valid_set else ["valid"])
-    if any(
-        read_cache_metadata(datamodule.cache_directories(stage), stage) is None
-        for stage in stages
-    ):
-        return None
+    for stage in stages:
+        dataset = datamodule.cached_dataset(stage)
+        if dataset is None:
+            return None
+        setattr(
+            datamodule, "train_dataset" if stage == "train" else "val_dataset", dataset
+        )
     datamodule.setup("fit")
     return datamodule

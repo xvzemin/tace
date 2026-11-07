@@ -1,7 +1,7 @@
 resume_from_model
 =================
 
-The ``resume_from_checkpoint`` field does not contain any additional parameters.  
+The ``resume_from_model`` field does not contain any additional parameters.
 You only need to provide the path to a ``*.ckpt`` file to resume training.  
 If resuming training is not required, this field should be set to ``null``.
 

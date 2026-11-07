@@ -1,7 +1,9 @@
-"""Typed, immutable LMDB stores with bounded writes and batched reads."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import bisect
-import hashlib
 import json
 import math
 import operator
@@ -12,6 +14,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
+from uuid import uuid4
 
 import lmdb
 import numpy as np
@@ -23,9 +26,9 @@ from torch_geometric.data import Data
 from .cache import (
     ARRAY_CODEC,
     GRAPH_SCHEMA,
+    RECORD_SCHEMA,
     read_cache_metadata,
     validate_stage,
-    write_cache_metadata,
 )
 
 _MAGIC = b"TACEARR\0"
@@ -34,6 +37,13 @@ _COUNTS = struct.Struct("<qq")
 _FORBIDDEN = {"node_attrs", "node_type"}
 _INDEX_FIELDS = {"atomic_numbers", "edge_index", "edge_shifts", "fidelity_idx"}
 _MIB = 1024 * 1024
+DEFAULT_SHARD_SIZE = 100_000
+DEFAULT_SHARD_BYTES = 2048 * _MIB
+DEFAULT_MAX_BUFFER_BYTES = 64 * _MIB
+DEFAULT_TRANSACTION_BYTES = 16 * _MIB
+DEFAULT_MAP_SIZE = 64 * _MIB
+DEFAULT_CACHE_BYTES = 128 * _MIB
+DEFAULT_MAX_OPEN_SHARDS = 32
 
 
 def _check_record_bytes(size, maximum):
@@ -318,8 +328,8 @@ class GraphDatasetLMDB(Dataset):
         cache_size=0,
         shard_lengths=None,
         fields=None,
-        cache_bytes=128 * _MIB,
-        max_open_shards=32,
+        cache_bytes=DEFAULT_CACHE_BYTES,
+        max_open_shards=DEFAULT_MAX_OPEN_SHARDS,
         readahead=False,
     ):
         self.lmdb_paths = [Path(path).resolve() for path in lmdb_paths]
@@ -355,10 +365,12 @@ class GraphDatasetLMDB(Dataset):
         self._ends = np.cumsum(self.lengths, dtype=np.int64).tolist()
 
     @classmethod
-    def from_directories(cls, directories, stage, **kwargs):
+    def from_directories(cls, directories, stage, *, allow_building=False, **kwargs):
         directories = list(directories)
-        metadata = read_cache_metadata(directories, stage)
-        if metadata is None or metadata.get("kind", "graphs") != cls.kind:
+        metadata = read_cache_metadata(
+            directories, stage, allow_building=allow_building
+        )
+        if metadata is None or metadata["kind"] != cls.kind:
             raise ValueError(f"No completed {cls.kind} store for {stage}")
         paths = sorted(
             (
@@ -510,6 +522,8 @@ class GraphDatasetLMDB(Dataset):
         return output
 
     def project(self, fields):
+        if self.fields is not None:
+            fields = set(fields).intersection(self.fields)
         dataset = type(self)(
             self.lmdb_paths,
             in_memory=self.in_memory,
@@ -621,16 +635,16 @@ def _write_store_locked(
     stage,
     *,
     kind,
-    shard_size=100_000,
-    max_buffer_bytes=64 * _MIB,
-    transaction_bytes=16 * _MIB,
-    shard_bytes=2048 * _MIB,
+    shard_size=DEFAULT_SHARD_SIZE,
+    max_buffer_bytes=DEFAULT_MAX_BUFFER_BYTES,
+    transaction_bytes=DEFAULT_TRANSACTION_BYTES,
+    shard_bytes=DEFAULT_SHARD_BYTES,
     cache_size=0,
-    max_open_shards=32,
-    map_size=64 * _MIB,
+    max_open_shards=DEFAULT_MAX_OPEN_SHARDS,
+    map_size=DEFAULT_MAP_SIZE,
     progress=None,
+    graph_config=None,
 ):
-    validate_stage(stage)
     if (
         shard_size <= 0
         or max_buffer_bytes <= 0
@@ -638,19 +652,15 @@ def _write_store_locked(
         or shard_bytes <= 0
     ):
         raise ValueError("Store size and byte budgets must be positive")
-    directories = [Path(directory).resolve() for directory in shard_dirs]
-    if not directories or len(set(directories)) != len(directories):
-        raise ValueError("shard_dirs must contain distinct directories")
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
+    directories = shard_dirs
     env = counts_stream = None
     temporary = None
-    lengths, shard_stats, atomic_numbers, all_fields = {}, {}, set(), set()
+    build_id = uuid4().hex
+    atomic_numbers, all_fields = set(), set()
     transaction_bytes = min(transaction_bytes, max_buffer_bytes)
     buffer, buffered_bytes = [], 0
     shard_index = shard_length = shard_total_bytes = 0
     shard_nodes = shard_edges = 0
-    digest = hashlib.sha256()
 
     def flush():
         nonlocal buffer, buffered_bytes
@@ -673,9 +683,8 @@ def _write_store_locked(
                 if attempt == 15:
                     raise
                 env.set_mapsize(env.info()["map_size"] * 2)
-        for _, value, nodes, edges in buffer:
+        for _, _, nodes, edges in buffer:
             counts_stream.write(_COUNTS.pack(nodes, edges))
-            digest.update(value)
         written = len(buffer)
         buffer = []
         buffered_bytes = 0
@@ -684,7 +693,7 @@ def _write_store_locked(
 
     def finish_shard():
         nonlocal env, counts_stream, temporary, shard_index
-        nonlocal shard_length, shard_total_bytes, shard_nodes, shard_edges, digest
+        nonlocal shard_length, shard_total_bytes, shard_nodes, shard_edges
         if env is None:
             return
         flush()
@@ -695,25 +704,41 @@ def _write_store_locked(
         env.sync()
         env.close()
         env = None
+        metadata = {
+            "schema": GRAPH_SCHEMA if kind == "graphs" else RECORD_SCHEMA,
+            "kind": kind,
+            "codec": ARRAY_CODEC,
+            "dtype": "float64",
+            "stage": stage,
+            "length": shard_length,
+            "atomic_numbers": sorted(atomic_numbers),
+            "fields": sorted(all_fields),
+            "counts": "counts.bin",
+            "num_nodes": shard_nodes,
+            "num_edges": shard_edges,
+        }
+        if graph_config is not None:
+            metadata["graph_config"] = {
+                key: graph_config[key]
+                for key in ("cutoff", "max_neighbors")
+                if key in graph_config
+            }
+        with (temporary / "metadata.json").open("w") as stream:
+            json.dump(metadata, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
         destination = (
             directories[shard_index % len(directories)]
-            / f"{stage}_shard{shard_index:06d}.lmdb"
+            / f"{stage}_shard{build_id}_{shard_index:06d}.lmdb"
         )
         if destination.exists():
             raise FileExistsError(f"Refusing to replace existing shard {destination}")
         os.rename(temporary, destination)
         temporary = None
-        lengths[destination.name] = shard_length
-        shard_stats[destination.name] = {
-            "counts": "counts.bin",
-            "num_nodes": shard_nodes,
-            "num_edges": shard_edges,
-            "encoded_bytes": shard_total_bytes,
-            "sha256": digest.hexdigest(),
-        }
+        atomic_numbers.clear()
+        all_fields.clear()
         shard_index += 1
         shard_length = shard_total_bytes = shard_nodes = shard_edges = 0
-        digest = hashlib.sha256()
 
     try:
         for item in items:
@@ -721,16 +746,17 @@ def _write_store_locked(
                 value = encode_graph(item, max_bytes=max_buffer_bytes)
                 numbers = item["atomic_numbers"]
                 nodes, edges = int(item.num_nodes), int(item.num_edges)
-                all_fields.update(item.keys())
+                fields = set(item.keys()) | {"num_nodes"}
             else:
                 value = encode_record(item, max_bytes=max_buffer_bytes)
                 numbers = item.numbers
                 nodes, edges = len(item), 0
-                all_fields.update(item.to_dict())
-            if len(value) > max_buffer_bytes:
-                raise ValueError(
-                    f"A record requires {len(value)} bytes, exceeding max_buffer_bytes={max_buffer_bytes}"
-                )
+                fields = item.to_dict()
+            if env is not None and (
+                shard_length >= shard_size
+                or shard_total_bytes + len(value) > shard_bytes
+            ):
+                finish_shard()
             atomic_numbers.update(
                 int(number)
                 for number in np.unique(
@@ -739,16 +765,12 @@ def _write_store_locked(
                     else numbers
                 )
             )
-            if env is not None and (
-                shard_length >= shard_size
-                or shard_total_bytes + len(value) > shard_bytes
-            ):
-                finish_shard()
+            all_fields.update(fields)
             if env is None:
                 directory = directories[shard_index % len(directories)]
                 temporary = Path(
                     tempfile.mkdtemp(
-                        prefix=f".{stage}_shard{shard_index:06d}-",
+                        prefix=f".{stage}_shard{build_id}_{shard_index:06d}-",
                         suffix=".tmp",
                         dir=directory,
                     )
@@ -774,30 +796,21 @@ def _write_store_locked(
             if buffered_bytes >= transaction_bytes:
                 flush()
         finish_shard()
-        if not lengths:
+        if not shard_index:
             raise ValueError(f"Cannot write an empty {stage} store")
-        metadata = write_cache_metadata(
-            directories,
-            stage,
-            lengths,
-            atomic_numbers,
-            kind=kind,
-            shard_stats=shard_stats,
-            fields=sorted(all_fields),
-            num_nodes=sum(value["num_nodes"] for value in shard_stats.values()),
-            num_edges=sum(value["num_edges"] for value in shard_stats.values()),
-        )
     finally:
         if counts_stream is not None:
             counts_stream.close()
         if env is not None:
             env.close()
     dataset_class = GraphDatasetLMDB if kind == "graphs" else RecordDataset
-    dataset = dataset_class.from_directories(
-        directories, stage, cache_size=cache_size, max_open_shards=max_open_shards
+    return dataset_class.from_directories(
+        directories,
+        stage,
+        allow_building=True,
+        cache_size=cache_size,
+        max_open_shards=max_open_shards,
     )
-    dataset.metadata = metadata
-    return dataset
 
 
 def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwargs):
@@ -835,7 +848,7 @@ def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwar
         metadata = read_cache_metadata(directories, stage)
         dataset_class = GraphDatasetLMDB if kind == "graphs" else RecordDataset
         if metadata is not None:
-            if metadata.get("kind", "graphs") != kind:
+            if metadata["kind"] != kind:
                 raise ValueError(
                     f"Existing {stage} store contains {metadata.get('kind')}, not {kind}"
                 )
@@ -843,7 +856,7 @@ def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwar
                 directories,
                 stage,
                 cache_size=kwargs.get("cache_size", 0),
-                max_open_shards=kwargs.get("max_open_shards", 32),
+                max_open_shards=kwargs.get("max_open_shards", DEFAULT_MAX_OPEN_SHARDS),
             )
         if failure_path.exists():
             try:
@@ -866,12 +879,10 @@ def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwar
         remove_owner = False
         try:
             if any(
-                any(directory.glob(f"{stage}_shard*.lmdb"))
-                or (directory / f"{stage}_metadata.json").exists()
-                for directory in directories
+                any(directory.glob(f"{stage}_shard*.lmdb")) for directory in directories
             ):
                 raise FileExistsError(
-                    f"Existing {stage} shards or metadata must not be overwritten"
+                    f"Existing {stage} shards must not be overwritten"
                 )
             result = builder(directories, stage, kwargs)
             remove_owner = True
@@ -884,11 +895,6 @@ def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwar
                         {
                             "pid": os.getpid(),
                             "error": f"{type(exc).__name__}: {exc}",
-                            "completed_shards": sorted(
-                                path.name
-                                for directory in directories
-                                for path in directory.glob(f"{stage}_shard*.lmdb")
-                            ),
                         }
                     )
                 )
@@ -931,112 +937,25 @@ def write_records(records, shard_dirs, stage="source", **kwargs):
 
 
 def build_graph_store(builder, shard_dirs, stage, **kwargs):
-    """Publish independently written graph partitions under one cache index.
+    """Build independent, ordered partitions without a parent shard manifest.
 
-    Parameters
-    ----------
-    builder : callable
-        Called as ``builder(directories, stage, writer_options)`` under the
-        cache writer lock. Return partition metadata in input order, using
-        stages ``f"{stage}_shard{part:06d}_part"`` numbered from zero.
-    shard_dirs : sequence of path-like
-        Directories containing the independently written LMDB shards.
-    stage : str
-        Dataset stage.
-    **kwargs
-        Writer options passed to ``builder``. ``lock_timeout`` controls the
-        parent cache lock and is not forwarded.
-
-    Returns
-    -------
-    GraphDatasetLMDB
-        Completed cache. Existing caches do not invoke ``builder``.
+    ``builder(directories, build_stage, writer_options)`` writes partitions
+    using stages ``f"{build_stage}_shard{part:06d}_part"`` in source order.
+    A unique build prefix keeps that order when shards from different builds
+    are collected into the same directory. Existing stores skip the builder.
     """
 
     def publish(directories, stage, options):
-        partitions = list(builder(directories, stage, options))
-        paths = {}
-        for directory in directories:
-            for path in directory.glob(f"{stage}_shard*.lmdb"):
-                if path.name in paths:
-                    raise ValueError(f"Duplicate shard {path.name}")
-                paths[path.name] = path
-        lengths, shard_stats, atomic_numbers, fields = {}, {}, set(), set()
-        for part, metadata in enumerate(partitions):
-            part_stage = f"{stage}_shard{part:06d}_part"
-            if (
-                not isinstance(metadata, dict)
-                or metadata.get("kind") != "graphs"
-                or metadata.get("schema") != GRAPH_SCHEMA
-                or metadata.get("codec") != ARRAY_CODEC
-                or metadata.get("dtype") != "float64"
-                or not metadata.get("shards")
-            ):
-                raise ValueError(f"Incomplete or misordered graph partition {part}")
-            for directory in directories:
-                try:
-                    current = json.loads(
-                        (directory / f"{part_stage}_metadata.json").read_text()
-                    )
-                except (OSError, ValueError) as exc:
-                    raise ValueError(f"Incomplete graph partition {part}") from exc
-                if current != metadata:
-                    raise ValueError(f"Incomplete or misordered graph partition {part}")
-            names = sorted(metadata["shards"])
-            expected = [
-                f"{part_stage}_shard{index:06d}.lmdb" for index in range(len(names))
-            ]
-            if names != expected or set(names).intersection(lengths):
-                raise ValueError(f"Invalid shard order in graph partition {part}")
-            totals = {"num_nodes": 0, "num_edges": 0}
-            for name in names:
-                length = metadata["shards"][name]
-                stats = metadata.get("shard_stats", {}).get(name, {})
-                if (
-                    type(length) is not int
-                    or length <= 0
-                    or stats.get("counts") != "counts.bin"
-                    or name not in paths
-                    or not (paths[name] / "data.mdb").is_file()
-                ):
-                    raise ValueError(f"Invalid length or counts for shard {name}")
-                try:
-                    count_bytes = (paths[name] / "counts.bin").stat().st_size
-                except OSError as exc:
-                    raise ValueError(f"Missing counts for shard {name}") from exc
-                if count_bytes != length * _COUNTS.size:
-                    raise ValueError(f"Invalid counts length for shard {name}")
-                for key in totals:
-                    value = stats.get(key)
-                    if type(value) is not int or value < 0:
-                        raise ValueError(f"Invalid {key} for shard {name}")
-                    totals[key] += value
-                lengths[name] = length
-                shard_stats[name] = stats
-            if any(metadata.get(key) != value for key, value in totals.items()):
-                raise ValueError(f"Invalid graph counts for partition {part}")
-            atomic_numbers.update(metadata["atomic_numbers"])
-            fields.update(metadata["fields"])
-        if not lengths:
-            raise ValueError(f"Cannot write an empty {stage} store")
-        if paths.keys() != lengths.keys():
-            raise ValueError(f"Unindexed or duplicate shards in {stage} store")
-        write_cache_metadata(
-            directories,
-            stage,
-            lengths,
-            atomic_numbers,
-            kind="graphs",
-            shard_stats=shard_stats,
-            fields=sorted(fields),
-            num_nodes=sum(value["num_nodes"] for value in shard_stats.values()),
-            num_edges=sum(value["num_edges"] for value in shard_stats.values()),
-        )
+        completed = builder(directories, f"{stage}_shard{uuid4().hex}", options)
+        if completed is not None:
+            for _ in completed:
+                pass
         return GraphDatasetLMDB.from_directories(
             directories,
             stage,
+            allow_building=True,
             cache_size=options.get("cache_size", 0),
-            max_open_shards=options.get("max_open_shards", 32),
+            max_open_shards=options.get("max_open_shards", DEFAULT_MAX_OPEN_SHARDS),
         )
 
     return _build_store(publish, shard_dirs, stage, kind="graphs", **kwargs)

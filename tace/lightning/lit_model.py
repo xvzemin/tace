@@ -294,11 +294,12 @@ class LightningWrapperModel(L.LightningModule):
                         f"{k}: weight(log_sigma)|{0.5 * torch.exp(-v).item():.3f}({v.item():.3f})"
                     )
 
-    def on_train_epoch_start(self):
-        dataloader = self.trainer.train_dataloader
-        sampler = dataloader.sampler
-        if hasattr(sampler, "step_epoch"):
-            sampler.step_epoch(self.current_epoch)
+    def configure_callbacks(self):
+        if self.cfg.get("dataset", {}).get("epoch_size") is not None:
+            from tace.utils.callbacks import EpochSamplerCallback
+
+            return [EpochSamplerCallback()]
+        return []
 
     def on_validation_epoch_end(self):
         self.on_epoch_end("val")

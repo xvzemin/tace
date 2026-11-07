@@ -116,6 +116,7 @@ callbacks:
 
 dataset:
   type: ase # ase or ase-db
+  epoch_size: null # float: fraction; int: requested global samples; null: full dataset
   augmentation: [] # [spin_rotation, time_reversal], applied only to training samples
   split_seed: ${misc.global_seed} # this random seed is useful if auto split
   train_file: ../data/BaTiO3.xyz
@@ -132,7 +133,6 @@ dataset:
   storage_mode: memory # memory for small datasets; lmdb for large repeated training; on_the_fly is opt-in
   shard_dirs: # reusable graph and record caches; source files remain unchanged
     - graphCache
-  shard_size: 100000 # maximum structures per shard; a byte limit also bounds shard size
   cache_size: 0 # decoded samples per loader worker; OS page cache remains active
   graph_batch_size: 256 # structures per preprocessing/neighbor-search batch
   graph_workers: 0 # CPU preprocessing threads; independent of loader num_workers

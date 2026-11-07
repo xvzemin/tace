@@ -761,6 +761,13 @@ def tace_read_all_files(
     if stages - {"train", "valid", "test"}:
         raise ValueError(f"Unknown dataset stages: {sorted(stages)}")
     dataset = cfg["dataset"]
+    directories = dataset.get("shard_dirs", ["graphCache"])
+    record_directory = (
+        Path(
+            directories if isinstance(directories, (str, Path)) else directories[0]
+        ).expanduser()
+        / "records"
+    )
 
     def read(source):
         return read_all_files(
@@ -775,12 +782,16 @@ def tace_read_all_files(
             options=dataset.get("options"),
             record_cache_dir=dataset.get(
                 "record_cache_dir",
-                Path(dataset.get("shard_dirs", ["graphCache"])[0]) / "records",
+                record_directory,
             ),
         )
 
     train = valid = None
-    if stages & {"train", "valid"}:
+    if stages == {"valid"} and dataset.get("valid_file") is not None:
+        valid = read(dataset["valid_file"])
+        if len(valid) == 0:
+            raise ValueError("Validation set is empty !")
+    elif stages & {"train", "valid"}:
         train_file = dataset.get("train_file")
         if not train_file:
             raise ValueError(
@@ -791,7 +802,8 @@ def tace_read_all_files(
         if no_valid:
             pass
         elif dataset.get("valid_file") is not None:
-            valid = read(dataset["valid_file"])
+            if "valid" in stages:
+                valid = read(dataset["valid_file"])
         elif dataset.get("valid_from_index", False):
             valid_path, train_path = Path("valid.index"), Path("train.index")
             valid_indices = [
@@ -829,7 +841,7 @@ def tace_read_all_files(
             train, valid = random_split(train, ratio, dataset.get("split_seed", 1))
         if len(train) == 0:
             raise ValueError("Training set is empty !")
-        if not no_valid and (valid is None or len(valid) == 0):
+        if "valid" in stages and not no_valid and (valid is None or len(valid) == 0):
             raise ValueError("Validation set is empty !")
 
     test_files = dataset.get("test_files") if "test" in stages else None

@@ -221,6 +221,112 @@ def _neighbor_rows(graph):
     )
 
 
+@pytest.mark.parametrize("visible_devices", [0, 1, 3])
+def test_graph_device_auto_uses_visible_count(monkeypatch, visible_devices):
+    from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: visible_devices)
+
+    def no_runtime_probe():
+        raise AssertionError("Device discovery must not initialize the CUDA runtime")
+
+    monkeypatch.setattr(torch.cuda, "is_available", no_runtime_probe)
+    monkeypatch.setattr(torch.cuda, "current_device", no_runtime_probe)
+    assert graph_devices(None, "alchemiops") == (
+        [f"cuda:{index}" for index in range(visible_devices)]
+        if visible_devices
+        else ["cpu"]
+    )
+    dataset = OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"})
+    assert dataset.device == ("cuda" if visible_devices else "cpu")
+    assert graph_devices(None, "matscipy") == [None]
+
+
+def test_graph_device_numeric_identifiers(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+    def no_runtime_initialization():
+        raise AssertionError("Parsing an integer CUDA index must not initialize CUDA")
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", no_runtime_initialization)
+    for device in (0, 1):
+        expected = f"cuda:{device}"
+        assert graph_devices(device, "alchemiops") == [expected]
+        assert (
+            OnTheFlyGraphDataset(
+                [], {"neighborlist_backend": "alchemiops"}, device
+            ).device
+            == expected
+        )
+    for devices in ([1, 0], (1, 0), OmegaConf.create([1, 0])):
+        assert graph_devices(devices, "alchemiops") == ["cuda:1", "cuda:0"]
+    assert graph_devices([0, "cuda:1"], "alchemiops") == ["cuda:0", "cuda:1"]
+    with pytest.raises(ValueError, match="Duplicate"):
+        graph_devices([0, "cuda:0"], "alchemiops")
+    with pytest.raises(ValueError, match="not a visible CUDA device"):
+        graph_devices([2], "alchemiops")
+    with pytest.raises(ValueError, match="one explicit device"):
+        OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}, [0])
+
+
+def test_auto_graph_device_preserves_cuda_errors(monkeypatch):
+    import tace.dataset.datamodule as module
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(module, "read_records", lambda source, indices: [])
+
+    def cuda_failure(*args, **kwargs):
+        assert kwargs["device"] in ("cuda", "cuda:0")
+        raise RuntimeError("CUDA initialization failed")
+
+    monkeypatch.setattr(module, "from_records", cuda_failure)
+    options = {"neighborlist_backend": "alchemiops"}
+    with pytest.raises(RuntimeError, match="CUDA initialization failed"):
+        list(module.iter_graphs([object()], None, options, workers=2))
+    with pytest.raises(RuntimeError, match="CUDA initialization failed"):
+        module.OnTheFlyGraphDataset([object()], options)[0]
+
+
+@pytest.mark.parametrize("graph_device", [None, 0])
+def test_on_the_fly_auto_and_numeric_graph_device(monkeypatch, graph_device):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    neighbors = pytest.importorskip("nvalchemiops.torch.neighbors")
+    from tace.dataset.datamodule import OnTheFlyGraphDataset
+
+    structures = _mixed_neighbor_structures()
+    options = dict(
+        cutoff=3.1,
+        max_neighbors=None,
+        keyspec=KeySpecification.from_defaults(),
+        target_property=["energy", "forces"],
+        embedding_property=[],
+    )
+    expected = from_records(None, structures, **options)
+    observed_devices = []
+    original = neighbors.neighbor_list
+
+    def counted(positions, cutoff, **kwargs):
+        observed_devices.append(positions.device.index)
+        return original(positions, cutoff, **kwargs)
+
+    monkeypatch.setattr(neighbors, "neighbor_list", counted)
+    dataset = OnTheFlyGraphDataset(
+        structures, {**options, "neighborlist_backend": "alchemiops"}, graph_device
+    )
+    rank_device = torch.cuda.device_count() - 1
+    with torch.cuda.device(rank_device):
+        actual = dataset.__getitems__(range(len(structures)))
+    assert observed_devices
+    assert set(observed_devices) == {rank_device if graph_device is None else 0}
+    for reference, graph in zip(expected, actual):
+        assert _neighbor_rows(graph) == _neighbor_rows(reference)
+
+
 @pytest.mark.parametrize(
     ("backend", "search_device"),
     [
@@ -228,10 +334,12 @@ def _neighbor_rows(graph):
         ("ase", "cpu"),
         ("alchemiops", "cpu"),
         ("alchemiops", "cuda"),
+        ("alchemiops", None),
+        ("alchemiops", 0),
     ],
 )
 def test_packed_neighbor_training_batch(backend, search_device, monkeypatch):
-    if search_device == "cuda" and not torch.cuda.is_available():
+    if search_device in ("cuda", 0) and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     calls = []
     if backend == "alchemiops":
@@ -311,13 +419,15 @@ def test_packed_neighbor_training_batch(backend, search_device, monkeypatch):
 
 
 @pytest.mark.parametrize("shard_size", [2, 100_000])
-def test_multi_gpu_graph_batches(tmp_path, monkeypatch, caplog, shard_size):
+@pytest.mark.parametrize("graph_device", [None, [0, 1]])
+def test_multi_gpu_graph_batches(
+    tmp_path, monkeypatch, capfd, shard_size, graph_device
+):
     if torch.cuda.device_count() < 2:
         pytest.skip("Two CUDA devices are required")
     pytest.importorskip("nvalchemiops.torch.neighbors")
     import tace.dataset.datamodule as datamodule
 
-    caplog.set_level("INFO")
     structures = _mixed_neighbor_structures()
     for index, atoms in enumerate(structures):
         atoms.info["energy"] = float(index)
@@ -329,20 +439,31 @@ def test_multi_gpu_graph_batches(tmp_path, monkeypatch, caplog, shard_size):
         embedding_property=[],
     )
     expected = from_records(None, structures, **options)
-    assigned = []
+    assigned, reporters = [], []
     executor = datamodule.ProcessPoolExecutor
+    progress = datamodule.GraphProgress
 
     def record_worker(*args, **kwargs):
         assigned.append(kwargs["initargs"][0])
         return executor(*args, **kwargs)
 
+    def record_progress(*args, **kwargs):
+        reporter = progress(*args, **kwargs)
+        reporters.append(reporter)
+        return reporter
+
     monkeypatch.setattr(datamodule, "ProcessPoolExecutor", record_worker)
+    monkeypatch.setattr(datamodule, "GraphProgress", record_progress)
 
     def no_parent_graph_work(*args, **kwargs):
         raise AssertionError("Read and assemble graphs in GPU workers, not the parent")
 
     monkeypatch.setattr(datamodule, "read_records", no_parent_graph_work)
     monkeypatch.setattr(datamodule, "from_records", no_parent_graph_work)
+    # A stale runtime probe in the parent must not hide NVML-visible GPUs from
+    # either auto selection or explicit device lists. Spawned workers initialize
+    # independently and execute the real CUDA neighbor kernels below.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     directories = [tmp_path / "a", tmp_path / "b"]
     dataset = datamodule.create_graphs(
         structures,
@@ -352,12 +473,17 @@ def test_multi_gpu_graph_batches(tmp_path, monkeypatch, caplog, shard_size):
         directories,
         batch_size=2,
         shard_size=shard_size,
-        device=None,
+        device=graph_device,
     )
     assert assigned == ["cuda:0", "cuda:1"]
     assert len(dataset) == len(expected)
-    assert f"train graphs: {len(expected)}/{len(expected)} (100.0%)" in caplog.text
-    assert caplog.text.count("; complete") == 1
+    assert len(reporters) == 1
+    assert reporters[0].count == reporters[0].bar.n == len(expected)
+    assert reporters[0].bar.disable
+    output = capfd.readouterr().err
+    assert "train graphs:" in output
+    assert f"{len(expected)}/{len(expected)}" in output
+    assert "train_shard" not in output
     assert len(dataset.lmdb_paths) == (6 if shard_size == 2 else 2)
     assert {path.parent for path in dataset.lmdb_paths} == set(directories)
     assert all("_part_shard" in path.name for path in dataset.lmdb_paths)
@@ -381,12 +507,12 @@ def test_multi_gpu_graph_batches(tmp_path, monkeypatch, caplog, shard_size):
         raise AssertionError("A complete cache must not start GPU workers")
 
     monkeypatch.setattr(datamodule, "ProcessPoolExecutor", no_workers)
-    caplog.clear()
+    monkeypatch.setattr(datamodule, "GraphProgress", no_workers)
     cached = datamodule.create_graphs(
         None, None, options, "train", directories, device="all"
     )
     assert len(cached) == len(expected)
-    assert "graphs/s" not in caplog.text
+    assert not capfd.readouterr().err
     cached.close()
 
 
