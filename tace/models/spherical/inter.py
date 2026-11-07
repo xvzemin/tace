@@ -183,16 +183,25 @@ class O3CgtpInteraction(Interaction):
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
         if self.use_eqx:
-            radial = radial_features(edge_feats)
+            radial_network = self.edge_info.mlp[:-1]
+            # Expose hidden activations and their force-training derivatives to
+            # autograd/Inductor. Keep the wide final projection inside EQX.
+            if self.training and len(radial_network):
+                radial = radial_network(edge_feats)
+                radial_network = None
+            else:
+                radial = radial_features(edge_feats)
             last = self.edge_info.mlp[-1]
             projection = last.get_weight()
             if last.bias is not None:
                 projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
+                if radial_network is None:
+                    radial = torch.cat((radial, torch.ones_like(radial[:, :1])), dim=-1)
             return self.rejector.forward_stream(
                 node_feats, edge_attrs, radial, projection, edge_index, edge_cutoff,
                 edge_vector=graph.edge_vector / graph.edge_length.clamp_min(1e-12)
                 if graph is not None else None,
-                radial_network=self.edge_info.mlp[:-1],
+                radial_network=radial_network,
             )
         conv_weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:

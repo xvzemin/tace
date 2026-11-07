@@ -4719,6 +4719,71 @@ def test_convolution_radial_network(cls, num_edges, device, double_precision):
         torch.testing.assert_close(actual, expected)
 
 
+def test_row_product_cuda_graph(monkeypatch, double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from equivariantx.backends.cuda import graph
+    from equivariantx.backends.cuda.edge import product_graph_layout
+    from equivariantx.backends.torch.edge import evaluate_torch
+    from equivariantx.ops.edge import evaluate
+    from equivariantx.utils.program import Program
+
+    monkeypatch.delenv("EQX_USE_CUDA_GRAPH", raising=False)
+    monkeypatch.setattr(graph, "MIN_ROWS", 1)
+    monkeypatch.setattr(graph, "ROW_BUCKET", 8)
+    program = Program()
+    x = program.input(0, "edge", 2)
+    w = program.input(1, "shared", 4)
+    bias = program.input(2, "shared", 2)
+    hidden = program.unary(
+        "silu", program.binary("add", program.matmul(x, w, 1, 2, 2), bias)
+    )
+    value = program.product(
+        (hidden, hidden, program.constant(2, 0)),
+        (1, (2, 2, 2), (((0, 0, 0), 1.0), ((1, 1, 1), 0.7))), 2,
+    )
+    metadata = repr((tuple(program.nodes), ((value, 0, "edge"),)))
+    # A sum of biased primals is not safe to pad; adjoints with zero seeds are.
+    unsafe = repr((tuple(program.nodes), ((value, 0, "shared"),)))
+    assert product_graph_layout(unsafe) is None
+    assert product_graph_layout(metadata) is not None
+    assert graph.enabled("product") and not graph.enabled("o3")
+    graph._GRAPHS.clear()
+    try:
+        previous = None
+        for rows in (5, 7, 5, 9, 5, 0):
+            inputs = [
+                (torch.randn(shape, device="cuda") * 0.2).requires_grad_()
+                for shape in ((rows, 2), (1, 4), (1, 2))
+            ]
+            index = torch.arange(rows, device="cuda")
+            actual = evaluate(metadata, inputs, index, index, rows)[0]
+            expected = evaluate_torch(metadata, inputs, index, index, rows)[0]
+            torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+            if rows:
+                for order in range(3):
+                    # Exercise nonconsecutive output slots on the first adjoint.
+                    active = (inputs[0], inputs[2]) if order == 0 else inputs
+                    gradients = [
+                        torch.autograd.grad(y.sin().sum(), active, create_graph=True)
+                        for y in (actual, expected)
+                    ]
+                    actual, expected = [
+                        torch.cat([g.flatten() for g in grads]) for grads in gradients
+                    ]
+                    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+                captured = {key: entry[0] for key, entry in graph._GRAPHS.items()}
+                assert captured
+                if rows in (5, 7) and previous is not None:
+                    assert captured == previous
+                previous = captured
+        # Explicit opt-out keeps the ordinary CUDA implementation available.
+        monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "0")
+        assert not graph.enabled("product")
+    finally:
+        graph._GRAPHS.clear()
+
+
 @pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_product_and_convolution_compile(cls, device, double_precision):

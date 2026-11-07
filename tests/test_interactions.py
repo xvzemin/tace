@@ -874,10 +874,14 @@ def test_uu_o2_compile_and_empty_graph(double_precision):
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize(
-    "interaction,bias",
-    [("cgtp", False), ("cgtp", True), ("o2_cgtp", True), (["cgtp", "o2"], False)],
+    "interaction,bias,convert",
+    [
+        ("cgtp", False, False), ("cgtp", True, False),
+        ("cgtp", False, True), ("cgtp", True, True),
+        ("o2_cgtp", True, True), (["cgtp", "o2"], False, True),
+    ],
 )
-def test_streaming_force_training(monkeypatch, device, interaction, bias):
+def test_streaming_force_training(monkeypatch, device, interaction, bias, convert):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.lightning import convert_cgtp, load_tace
@@ -916,12 +920,16 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
         config["scale_shift"]["enable"] = False
         reference = TensorModel(SphericalTACE(**deepcopy(config))).train().to(device)
         monkeypatch.setenv("TACE_USE_EQX", "1")
-        model = convert_cgtp(reference, "o2")
+        if convert:
+            model = convert_cgtp(reference, "o2")
+        else:
+            model = TensorModel(SphericalTACE(**deepcopy(config))).train().to(device)
+            model.load_state_dict(reference.state_dict())
         representation = model.readout_fn.representation
         mixed = isinstance(interaction, list)
         assert representation.use_packed_wigner == mixed
         assert representation.use_local_frame == mixed
-        assert representation.use_o3_angular_basis == mixed
+        assert representation.use_o3_angular_basis == (mixed or not convert)
 
         def no_edge_message(*args, **kwargs):
             raise AssertionError("The streamed convolution must not call an edge TP")
@@ -966,7 +974,7 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias):
                 torch.testing.assert_close(
                     parameter.grad, expected, atol=2e-8, rtol=2e-7
                 )
-        if device == "cpu" and interaction == "cgtp" and not bias:
+        if device == "cpu" and interaction == "cgtp" and not bias and convert:
             next(reference.parameters()).requires_grad_(False)
             reference.retain_graph = True
             loaded = load_tace(reference, device="cpu")

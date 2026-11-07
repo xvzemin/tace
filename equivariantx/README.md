@@ -16,6 +16,11 @@ Requires PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
 For fused kernels, install `pip install './tace/equivariantx[cuda]'` and provide a CUDA
 toolkit. Kernels compile on first use and are cached.
 
+Eligible CUDA row-product programs automatically replay CUDA Graphs, including
+their registered derivatives. Shape buckets and shared temporary storage limit
+capture overhead for changing batch sizes. Set `EQX_USE_CUDA_GRAPH=0` to compare
+against ordinary CUDA execution; CPU execution is unchanged.
+
 Import the package as:
 
 ```python

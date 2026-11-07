@@ -191,7 +191,7 @@ def test_aoti_dependencies(tmp_path, monkeypatch, backend):
 
 
 @pytest.mark.parametrize(
-    "backend", ["native", "luna", "cartesian", "cartesian_eqx", "cartesian_o2"]
+    "backend", ["native", "eqx", "luna", "cartesian", "cartesian_eqx", "cartesian_o2"]
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_compiled_training_and_export(tmp_path, dtype, backend):
@@ -235,7 +235,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         config["_target_"] = "tace.models.CartesianTACE"
     enable_acceleration(
         enable_luna=use_luna,
-        enable_eqx=backend in ("cartesian_eqx", "cartesian_o2"),
+        enable_eqx=backend in ("eqx", "cartesian_eqx", "cartesian_o2"),
         enable_compile=True,
         force=True,
     )

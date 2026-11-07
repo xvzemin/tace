@@ -162,10 +162,22 @@ EQX in TACE
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx.models.tace.nonlinear_ace``
 
-By default, EQX streams the convolution's complete radial MLP in bounded edge
-tiles and recomputes nonlinear activations during backward, including force training.
-Edge embedding remains an ordinary PyTorch operation. Model parameters and
+During spherical ``cgtp`` training, the radial MLP's hidden layers use PyTorch,
+so Inductor can optimize their activations and force-training derivatives. The
+wide final projection and convolution stay fused in EQX. Evaluation and the
+other streamed convolutions retain the complete radial MLP in bounded edge
+tiles. Edge embedding remains a PyTorch operation. Model parameters and
 checkpoint layouts are unchanged.
+
+On CUDA, eligible nonlinear node products and their derivative programs use
+CUDA Graph replay automatically, including without ``torch.compile``. Row
+counts are bucketed only when zero padding provably preserves shared parameter
+reductions. Captures copy inputs and outputs, share temporary storage on the
+same stream, and use a bounded cache; changing a batch or updating weights does
+not reuse an old autograd graph. Unsupported expressions and small inputs use
+the ordinary CUDA path. ``EQX_USE_CUDA_GRAPH=0`` disables replay for comparison.
+The existing explicit value ``1`` also enables native convolution captures,
+which can be costly for frequently changing graph sizes.
 
 For fusion boundaries and standalone examples, see
 :ref:`equivariantx-api-convolutions`. To switch between equivalent CGTP forms

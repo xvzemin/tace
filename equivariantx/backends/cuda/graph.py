@@ -2,22 +2,32 @@
 
 import os
 from collections import OrderedDict
+from functools import lru_cache
 from threading import RLock
 
 import torch
 
-ENABLED = {"o3": True, "o2_o3": True, "ace": True}
+ENABLED = {"o3": True, "o2_o3": True, "ace": True, "product": True}
 EDGE_BUCKET = 2048
 MIN_EDGES = 1024
+ROW_BUCKET = 128
+MIN_ROWS = 64
 MAX_GRAPHS = 64
 MAX_BYTES = 4 << 30
 _GRAPHS = OrderedDict()
 _LOCK = RLock()
 
 
+@lru_cache(maxsize=64)
+def product_capture(device, stream):
+    """Share temporary storage only between serialized row-product replays."""
+    return torch.cuda.graph_pool_handle(), torch.cuda.Stream(device=device)
+
+
 def enabled(name):
     """Return whether native graph replay is enabled for this operator."""
-    return os.environ.get("EQX_USE_CUDA_GRAPH", "0") == "1" and ENABLED[name]
+    default = "1" if name == "product" else "0"
+    return os.environ.get("EQX_USE_CUDA_GRAPH", default) == "1" and ENABLED[name]
 
 
 def execute(name, key, function, inputs, outputs, shapes=None, fills=None, read=None):
@@ -81,7 +91,10 @@ def execute(name, key, function, inputs, outputs, shapes=None, fills=None, read=
                 value = value[: x.shape[0]]
             value.copy_(x)
         if cached is None:
-            capture_stream = torch.cuda.Stream(device=device)
+            if name == "product":
+                pool, capture_stream = product_capture(device, stream.cuda_stream)
+            else:
+                pool, capture_stream = None, torch.cuda.Stream(device=device)
             capture_stream.wait_stream(stream)
             with torch.cuda.stream(capture_stream):
                 # Compile and initialize every native phase before capture.
@@ -89,7 +102,11 @@ def execute(name, key, function, inputs, outputs, shapes=None, fills=None, read=
                 function(values, results)
             stream.wait_stream(capture_stream)
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=capture_stream):
+            # Product captures retain no tensors allocated inside the graph:
+            # all persistent inputs/results were allocated above and outputs
+            # are copied out. Temporary storage can therefore be reused even
+            # when shape buckets or derivative programs replay in a new order.
+            with torch.cuda.graph(graph, stream=capture_stream, pool=pool):
                 function(values, results)
             stream.wait_stream(capture_stream)
             size = max(estimated, torch.cuda.memory_allocated(device) - before)
@@ -167,4 +184,42 @@ def convolution(
         ),
         fills={0: nodes[0], 1: nodes[1]},
         read=read,
+    )
+
+
+def product(metadata, function, inputs, source, target, outputs, layout):
+    """Replay independent row products in bounded shape buckets.
+
+    The caller proves that zero rows contribute nothing to shared outputs.
+    Capture only the native evaluation; registered autograd programs still
+    build fresh derivative graphs around every invocation.
+    """
+    if layout is None or source.numel() < MIN_ROWS or not enabled("product"):
+        function((*inputs, source, target), outputs)
+        return
+    input_kinds, output_kinds = layout
+    if any(
+        kind == "edge" and inputs[i].shape[0] != source.numel()
+        for i, kind in input_kinds.items()
+    ):
+        function((*inputs, source, target), outputs)
+        return
+    capacity = (source.numel() + ROW_BUCKET - 1) // ROW_BUCKET * ROW_BUCKET
+    execute(
+        "product",
+        metadata,
+        function,
+        (*inputs, source, target),
+        outputs,
+        shapes=(
+            tuple(
+                (capacity, *value.shape[1:])
+                if input_kinds.get(i) == "edge" else value.shape
+                for i, value in enumerate(inputs)
+            ) + ((capacity,), (capacity,)),
+            tuple(
+                (capacity, *value.shape[1:]) if kind == "edge" else value.shape
+                for value, kind in zip(outputs, output_kinds)
+            ),
+        ),
     )

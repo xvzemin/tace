@@ -428,9 +428,13 @@ def fused_nonlinear_product(module, features, types, batch):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
     import tace.models.spherical.prod as prod
+    from equivariantx.backends.cuda import graph
     from tace.models.linear import e3nnLinear
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    monkeypatch.delenv("EQX_USE_CUDA_GRAPH", raising=False)
+    monkeypatch.setattr(graph, "MIN_ROWS", 1)
+    monkeypatch.setattr(graph, "ROW_BUCKET", 4)
     torch.set_default_dtype(dtype)
     cls = PRODUCT["nonlinear_cgtp"]
     monkeypatch.setattr(cls, "asymmetric", asymmetric)
