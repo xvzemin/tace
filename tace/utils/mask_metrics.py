@@ -73,18 +73,19 @@ def filter_error_by_property_weight(
 class MaskMAE(Metric):
     def __init__(self, property_name: str, scale: float):
         super().__init__()
+        self.set_dtype(torch.float64)
         self.property_name = property_name
         self.scale = scale
         self.add_state(
             "sum_abs_error",
-            default=torch.tensor(0.0, dtype=torch.float64),
+            default=torch.tensor(0.0, dtype=self.dtype),
             dist_reduce_fx="sum",
         )
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
         error = filter_error_by_property_weight(
-            preds.to(torch.float64) - targets.to(torch.float64),
+            preds.to(self.dtype) - targets.to(self.dtype),
             label,
             self.property_name,
         )
@@ -99,18 +100,19 @@ class MaskMAE(Metric):
 class MaskRMSE(Metric):
     def __init__(self, property_name: str, scale: float):
         super().__init__()
+        self.set_dtype(torch.float64)
         self.property_name = property_name
         self.scale = scale
         self.add_state(
             "sum_squared_error",
-            default=torch.tensor(0.0, dtype=torch.float64),
+            default=torch.tensor(0.0, dtype=self.dtype),
             dist_reduce_fx="sum",
         )
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
         error = filter_error_by_property_weight(
-            preds.to(torch.float64) - targets.to(torch.float64),
+            preds.to(self.dtype) - targets.to(self.dtype),
             label,
             self.property_name,
         )
@@ -135,8 +137,8 @@ class MaskPerAtomMAE(MaskMAE):
         num_nodes = ptr[1:] - ptr[:-1]
         num_nodes = expand_dims_to(num_nodes, preds.ndim, dim=-1)
         super().update(
-            preds.to(torch.float64) / num_nodes,
-            targets.to(torch.float64) / num_nodes,
+            preds.to(self.dtype) / num_nodes,
+            targets.to(self.dtype) / num_nodes,
             label,
         )
 
@@ -152,7 +154,7 @@ class MaskPerAtomRMSE(MaskRMSE):
         num_nodes = ptr[1:] - ptr[:-1]
         num_nodes = expand_dims_to(num_nodes, preds.ndim, dim=-1)
         super().update(
-            preds.to(torch.float64) / num_nodes,
-            targets.to(torch.float64) / num_nodes,
+            preds.to(self.dtype) / num_nodes,
+            targets.to(self.dtype) / num_nodes,
             label,
         )

@@ -192,7 +192,11 @@ def build(cfg: DictConfig):
                 target_property,
                 embedding_property,
             )
-    configure_model_precision(model, getattr(torch, cfg["dtype"]["model"]))
+    configure_model_precision(
+        model,
+        getattr(torch, cfg["dtype"]["model"]),
+        follow_model=cfg["dtype"]["follow_model"],
+    )
 
     if datamodule is None:
         datamodule = build_datamodule(

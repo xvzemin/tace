@@ -93,6 +93,7 @@ class DirectHessianReadout(torch.nn.Module):
     """
 
     float64_buffers = ("basis",)
+    physical_dtype = torch.float64
 
     def __init__(
         self,
@@ -150,8 +151,8 @@ class DirectHessianReadout(torch.nn.Module):
         row = torch.arange(coefficients.size(0), device=coefficients.device)
         return torch.einsum(
             "pk,abk->pab",
-            coefficients[row, fidelity].to(torch.float64),
-            self.basis.to(torch.float64),
+            coefficients[row, fidelity].to(self.physical_dtype),
+            self.basis.to(self.physical_dtype),
         )
 
     def forward(
@@ -170,7 +171,7 @@ class DirectHessianReadout(torch.nn.Module):
         node = torch.arange(features.size(0), device=features.device)
         diagonal = offsets[batch] + (node - ptr[batch]) * (counts[batch] + 1)
         blocks = torch.zeros(
-            (source.numel(), 3, 3), dtype=torch.float64, device=features.device
+            (source.numel(), 3, 3), dtype=self.physical_dtype, device=features.device
         ).index_copy(
             0, diagonal, self.to_cartesian(self.node_readout(features), node_fidelity)
         )

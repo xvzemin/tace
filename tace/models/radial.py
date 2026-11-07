@@ -239,7 +239,7 @@ def spherical_bessel_jn(n: int, x: torch.Tensor) -> torch.Tensor:
     n : int
         Nonnegative order.
     x : torch.Tensor
-        Real arguments in double precision.
+        Real arguments.
     """
     return SphericalBesselJn.apply(n, 0, x, ())
 
@@ -258,6 +258,8 @@ class jnSphericalBesselBasis(torch.nn.Module):
     trainable : bool
         Whether to optimize the zeros. Normalization retains its initial value.
     """
+
+    physical_dtype = torch.float64
 
     def __init__(
         self,
@@ -315,8 +317,8 @@ class jnSphericalBesselBasis(torch.nn.Module):
     def forward(
         self, r: torch.Tensor, node_type: torch.Tensor, edge_index: torch.Tensor
     ) -> torch.Tensor:
-        argument = self.zeros.to(torch.float64) * (
-            r.to(torch.float64) / self.cutoff.to(torch.float64)
+        argument = self.zeros.to(self.physical_dtype) * (
+            r.to(self.physical_dtype) / self.cutoff.to(self.physical_dtype)
         )
         if len(self.order) == 1:
             basis = SphericalBesselJn.apply(
@@ -334,7 +336,7 @@ class jnSphericalBesselBasis(torch.nn.Module):
                 ],
                 dim=-1,
             )
-        return (basis * self.normalizer.to(torch.float64)).to(r.dtype)
+        return (basis * self.normalizer.to(self.physical_dtype)).to(r.dtype)
 
     def extra_repr(self):
         return (

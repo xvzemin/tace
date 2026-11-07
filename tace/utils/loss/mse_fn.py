@@ -8,6 +8,8 @@ from typing import Callable, Dict, List, Optional
 
 import torch
 
+from tace.utils.precision import DATA_DTYPE
+
 from .common import (
     apply_element_weights,
     hessian_loss,
@@ -21,12 +23,12 @@ LOSS_FN: Dict[str, Callable] = {}
 
 
 def register_loss(func: Callable = None, *, key: str = None):
-    """Register a loss evaluated in FP64, independently of network precision."""
+    """Register a loss with FP64 operands unless another dtype is requested."""
 
     def decorator(f: Callable):
         @wraps(f)
-        def loss(pred, label, *args, **kwargs):
-            pred, label = loss_inputs(pred, label)
+        def loss(pred, label, *args, dtype=DATA_DTYPE, **kwargs):
+            pred, label = loss_inputs(pred, label, dtype)
             device = next(
                 value.device
                 for value in pred.values()

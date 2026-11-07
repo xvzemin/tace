@@ -71,10 +71,15 @@ class LightningWrapperModel(L.LightningModule):
     ):
         super().__init__()
         cfg = copy.deepcopy(cfg)
+        policy = resolve_precision(cfg, training=True)
         self.save_hyperparameters(ignore=["model"])
         self.cfg = cfg
         self.statistics = statistics
         self.model = to_lora_model(cfg.get("finetune", {}), model)
+        configure_model_precision(
+            self.model, policy.torch_dtype, follow_model=policy.follow_model
+        )
+        self.physical_dtype = policy.physical_dtype
         # self.normalizers = copy.deepcopy(self.model.readout_fn.normalizers)
 
         # === Loss ===
@@ -82,6 +87,8 @@ class LightningWrapperModel(L.LightningModule):
         self.loss_fn = loss_cls(
             **{k: v for k, v in loss_cfg.items() if k != "_target_"}
         )
+        self.loss_fn.physical_dtype = self.physical_dtype
+        self.loss_fn.to(dtype=self.physical_dtype)
         self.loss_property = target_property
 
         # === Metric ===
@@ -125,6 +132,7 @@ class LightningWrapperModel(L.LightningModule):
 
     def _create_metrics(self, prefix):
         metric_collection = MetricCollection(build_metrics(prefix, self.loss_property))
+        metric_collection.set_dtype(self.physical_dtype)
         setattr(self, f"{prefix}_metrics", metric_collection)
 
     def _process_batch(self, batch):
@@ -483,7 +491,12 @@ class LightningWrapperModel(L.LightningModule):
             rebuild_constants=model_dtype != checkpoint_dtype,
         )
 
-        return configure_model_precision(model, model_dtype, device=map_location)
+        return configure_model_precision(
+            model,
+            model_dtype,
+            device=map_location,
+            follow_model=cfg["dtype"].get("follow_model", False),
+        )
 
 
 def _dominant_floating_dtype(values) -> torch.dtype:
@@ -533,6 +546,7 @@ def load_tace(
     target_property: Optional[list[str]] = None,
     dtype: Union[str, int, torch.dtype, None] = None,
     matmul: str | None = None,
+    follow_model: bool | None = None,
     **kwargs: Any,
 ) -> TensorModel:
     """Load a model file, a registered foundation model, or a model instance.
@@ -540,6 +554,7 @@ def load_tace(
     Foundation model names are downloaded and cached automatically. File paths
     support ``.pt``, ``.pth``, ``.ckpt``, and ``.pt2`` packages.
     Loading does not change the default PyTorch dtype.
+    ``follow_model`` overrides the saved precision policy for physical operations.
     """
     set_tf32(matmul=matmul)
     if isinstance(device, (str, torch.device)) and torch.device(device).type == "mps":
@@ -593,6 +608,7 @@ def load_tace(
         )
 
     if isinstance(model, dict):
+        stored_follow_model = model.get("dtype", {}).get("follow_model", False)
         stored_dtype = model.get("dtype", {}).get("model")
         model_dtype = (
             DTYPE[stored_dtype]
@@ -604,12 +620,17 @@ def load_tace(
             )
         )
     else:
+        stored_follow_model = getattr(model, "follow_model", False)
         model_dtype = model.get_model_dtype()
+    if follow_model is None:
+        follow_model = stored_follow_model
+    if not isinstance(follow_model, bool):
+        raise TypeError("follow_model must be a boolean.")
     target_dtype = requested_dtype or model_dtype
-    if is_aoti and target_dtype != model_dtype:
+    if is_aoti and (target_dtype != model_dtype or follow_model != stored_follow_model):
         raise ValueError(
-            f"AOTI package dtype is fixed to {model_dtype}; "
-            f"requested {target_dtype}. Re-export the package with the target dtype."
+            f"AOTI package dtype is fixed to {model_dtype} with "
+            f"follow_model={stored_follow_model}. Re-export to change its precision."
         )
 
     training = None
@@ -652,7 +673,9 @@ def load_tace(
     if is_aoti:
         model = model.to(device=device)
     else:
-        model = configure_model_precision(model, target_dtype, device=device)
+        model = configure_model_precision(
+            model, target_dtype, device=device, follow_model=follow_model
+        )
 
     if target_property:
         model.reset_target_property(target_property)
@@ -741,7 +764,10 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
             prune_removed_keys=True,
         )
     configure_model_precision(
-        converted, model.get_model_dtype(), device=model.readout_fn.cutoff.device
+        converted,
+        model.get_model_dtype(),
+        device=model.readout_fn.cutoff.device,
+        follow_model=model.follow_model,
     )
     parameters = dict(model.named_parameters())
     converted_parameters = dict(converted.named_parameters())
@@ -781,7 +807,10 @@ def export_tace(
             "target_property": model.get_target_property(),
             "embedding_property": model.get_embedding_property(),
             "statistics": model.readout_fn.statistics,
-            "dtype": {"model": str(model.get_model_dtype()).removeprefix("torch.")},
+            "dtype": {
+                "model": str(model.get_model_dtype()).removeprefix("torch."),
+                "follow_model": model.follow_model,
+            },
         },
         name if name.endswith(".pt") else name + ".pt",
     )

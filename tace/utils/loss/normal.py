@@ -8,6 +8,8 @@ from typing import Any, List, Union
 import torch
 from omegaconf import ListConfig
 
+from tace.utils.precision import DATA_DTYPE
+
 from .mse_fn import LOSS_FN
 from .registry import prepare_loss_function_kwargs
 
@@ -22,6 +24,7 @@ class NormalLoss(torch.nn.Module):
         normalize: bool = False,
     ):
         super().__init__()
+        self.physical_dtype = DATA_DTYPE
         assert isinstance(loss_property, (list, ListConfig)), (
             f"cfg.loss.loss_property should be a list, got {type(loss_property)}"
         )
@@ -48,7 +51,7 @@ class NormalLoss(torch.nn.Module):
         total_loss = 0.0
         for i, func_name in enumerate(self.loss_function_name):
             loss = LOSS_FN[func_name](
-                pred, label, **self.loss_function_kwargs[i]
+                pred, label, dtype=self.physical_dtype, **self.loss_function_kwargs[i]
             )
             total_loss += loss * self.loss_property_weights[i]
         return total_loss

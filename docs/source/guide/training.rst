@@ -79,7 +79,8 @@ Field Descriptions
 
 - **dtype**
   Selects network precision, optional autocast, and matrix multiplication mode.
-  Data, geometry, reference energies, and labels remain in float64.
+  ``follow_model`` also applies the model dtype to geometry, physical reductions,
+  losses, and metrics. Graph data remain in float64.
 
 - **logger** 
   Specifies the logger to use, such as ``wandb`` or ``tensorboard``.  
@@ -158,13 +159,16 @@ Precision
 
    dtype:
      model: float32
+     follow_model: false
      autocast: null
      matmul: null
 
 ``model`` selects ``float32`` or ``float64`` for learned network parameters and
-features. ``autocast`` selects ``null``, ``bfloat16``, or ``float16`` for supported
-network operations; mixed precision requires ``model: float32``. Geometry and
-labels are not cast to the network dtype. Unsupported fused low-precision
+features. With ``follow_model: true``, geometry, physical constants, output
+reductions, losses, and metrics also use this dtype. With the default ``false``,
+these operations use float64. ``autocast`` selects ``null``, ``bfloat16``, or
+``float16`` for supported network operations; mixed precision requires
+``model: float32``. Unsupported fused low-precision
 backends are rejected with a clear error; set ``autocast: null`` to use them.
 
 ``matmul`` accepts ``ieee`` or ``tf32``. With ``null``, it resolves from
@@ -175,6 +179,8 @@ Configure precision here rather than through ``trainer.precision``.
 
 Data loading, graph caches, and statistics use float64 regardless of these
 settings. Changing network precision therefore reuses the same graph cache.
+Using ``follow_model: true`` with float32 also rounds atomic reference energies
+and large energy sums; check energy errors as well as training speed.
 Lower-precision network arithmetic can still affect energies and derivatives;
 float64 geometry and output accumulation do not make the network itself FP64.
 

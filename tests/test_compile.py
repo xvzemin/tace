@@ -155,10 +155,15 @@ def test_aoti_dependencies(tmp_path, monkeypatch, backend):
 
 
 @pytest.mark.parametrize(
-    "backend", ["native", "luna", "cartesian", "cartesian_eqx", "cartesian_o2"]
+    "backend,dtype,follow_model",
+    [
+        (backend, dtype, False)
+        for backend in ("native", "luna", "cartesian", "cartesian_eqx", "cartesian_o2")
+        for dtype in (torch.float32, torch.float64)
+    ]
+    + [("native", torch.float32, True)],
 )
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_compiled_training_and_export(tmp_path, dtype, backend):
+def test_compiled_training_and_export(tmp_path, dtype, backend, follow_model):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     use_luna = backend == "luna"
@@ -168,6 +173,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         pytest.importorskip("LunaEquivariance")
     from tace.models.compile.aot import export_aotinductor, load_aotinductor
     from tace.utils.env import enable_acceleration
+    from tace.utils.precision import configure_model_precision
 
     torch.set_default_dtype(dtype)
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -191,6 +197,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
     ]
     enable_acceleration(force=True)
     reference = create_model(config, statistics, targets, []).cuda()
+    configure_model_precision(reference, dtype, follow_model=follow_model)
     state = reference.state_dict()
     if backend.startswith("cartesian"):
         from tace.lightning import convert_basis
@@ -204,6 +211,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         force=True,
     )
     model = create_model(config, statistics, targets, []).cuda()
+    configure_model_precision(model, dtype, follow_model=follow_model)
     model.load_state_dict(state)
     sample = _synthetic_graph_sample(model)
     tolerance = 2e-4 if dtype == torch.float32 else 2e-9
@@ -217,6 +225,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         actual = model(dict(data))
         for key in targets:
             assert actual[key] is not None and expected[key] is not None
+            assert actual[key].dtype == (dtype if follow_model else torch.float64)
             torch.testing.assert_close(
                 actual[key], expected[key], atol=tolerance, rtol=tolerance
             )
@@ -241,6 +250,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
 
     path = export_aotinductor(model, tmp_path / "model.pt2", sample)
     loaded = load_aotinductor(path, "cuda")
+    assert loaded.physical_dtype == (dtype if follow_model else torch.float64)
     sample = data  # Use a different edge count from the export example.
     expected = reference.eval()(dict(sample))
     actual = loaded(dict(sample))
@@ -352,9 +362,8 @@ def test_constant_construction_precision():
         )
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("num_fidelities", [1, 2])
-def test_atomic_energy_lookup(dtype, num_fidelities):
+def test_atomic_energy_lookup(num_fidelities):
     from tace.models.blocks import AtomicEnergy
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -380,7 +389,8 @@ def test_atomic_energy_lookup(dtype, num_fidelities):
 
 
 @pytest.mark.parametrize("space", ["spherical", "cartesian"])
-def test_model_dtype_conversion(space):
+@pytest.mark.parametrize("follow_model", [False, True])
+def test_model_dtype_conversion(space, follow_model):
     from tace.models.adapter import TensorModel
     from tace.utils.precision import configure_model_precision
 
@@ -419,6 +429,7 @@ def test_model_dtype_conversion(space):
     value, gradient = physical.detach().clone(), physical.grad.clone()
     for wrapper in (TensorModel, CompileTensorModel):
         model = wrapper(readout)
+        model.follow_model = follow_model
         for dtype, convert in (
             (torch.float32, lambda m: m.float()),
             (torch.float64, lambda m: m.double()),
@@ -429,11 +440,17 @@ def test_model_dtype_conversion(space):
                 model._compiled_cache["test"] = None
             assert convert(model) is model
             assert model.get_model_dtype() == dtype
+            physical_dtype = dtype if follow_model else torch.float64
+            assert model.physical_dtype == physical_dtype
             assert readout.representation.model_dtype == dtype
             assert (
                 next(readout.representation.node_embedding.parameters()).dtype == dtype
             )
             assert atomic_energy.atomic_energy is atomic_energy.alias
+            energy = energy.to(physical_dtype)
+            cutoff = cutoff.to(physical_dtype)
+            value = value.to(physical_dtype)
+            gradient = gradient.to(physical_dtype)
             torch.testing.assert_close(
                 atomic_energy.atomic_energy, energy, atol=0, rtol=0
             )
@@ -453,11 +470,15 @@ def test_model_dtype_conversion(space):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("interaction", ["cgtp", "o2"])
-def test_lightning_model_training_precision(dtype, interaction):
+@pytest.mark.parametrize("follow_model", [False, True])
+def test_lightning_model_training_precision(dtype, interaction, follow_model):
     import lightning as L
     from torch.utils.data import DataLoader
 
     from tace.lightning import create_model
+    from tace.lightning.lit_model import LightningWrapperModel
+    from tace.utils.metrics import update_metrics
+    from tace.utils.precision import configure_model_precision
 
     torch.set_default_dtype(dtype)
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -480,22 +501,49 @@ def test_lightning_model_training_precision(dtype, interaction):
         {"atomic_numbers": [1], "atomic_energy": {1: 0.0}, "avg_num_neighbors": 2.0}
     ]
     model = create_model(config, statistics, ["energy", "forces"], [])
+    configure_model_precision(model, dtype, follow_model=follow_model)
+    physical_dtype = dtype if follow_model else torch.float64
     assert all(p.dtype == dtype for p in model.parameters())
-    assert model.readout_fn.cutoff.dtype == torch.float64
-    assert model.readout_fn.atomic_energy_layer.atomic_energy.dtype == torch.float64
+    assert model.readout_fn.cutoff.dtype == physical_dtype
+    assert model.readout_fn.atomic_energy_layer.atomic_energy.dtype == physical_dtype
     assert model.readout_fn.atomic_numbers.dtype == torch.int64
 
-    class TrainingModel(L.LightningModule):
+    class TrainingModel(LightningWrapperModel):
         def __init__(self):
-            super().__init__()
-            self.model = model
+            super().__init__(
+                {
+                    "dtype": {
+                        "model": str(dtype).removeprefix("torch."),
+                        "follow_model": follow_model,
+                        "matmul": "ieee",
+                    },
+                    "misc": {},
+                    "loss": {
+                        "_target_": "tace.utils.loss.NormalLoss",
+                        "loss_property": ["energy", "forces"],
+                        "loss_function_name": ["mse_energy", "mse_forces"],
+                        "loss_property_weights": [1.0, 1.0],
+                    },
+                },
+                model,
+                ["energy", "forces"],
+                [],
+                statistics,
+            )
 
         def training_step(self, batch, batch_idx):
-            output = self.model(batch)
-            assert output["energy"].dtype == torch.float64
-            assert output["forces"].dtype == torch.float64
-            loss = output["energy"].square().mean() + output["forces"].square().mean()
-            assert torch.isfinite(loss)
+            output, loss = self._process_batch(batch)
+            assert output["energy"].dtype == physical_dtype
+            assert output["forces"].dtype == physical_dtype
+            assert loss.dtype == physical_dtype and torch.isfinite(loss)
+            with torch.no_grad():
+                update_metrics(
+                    self.train_metrics, "train", output, batch, self.loss_property
+                )
+                assert all(
+                    value.dtype == physical_dtype
+                    for value in self.train_metrics.compute().values()
+                )
             return loss
 
         def on_after_backward(self):
@@ -517,7 +565,19 @@ def test_lightning_model_training_precision(dtype, interaction):
         enable_model_summary=False,
         num_sanity_val_steps=0,
     )
-    data = DataLoader([_magnetic_embedding_sample() for _ in range(2)], batch_size=None)
+    sample = _magnetic_embedding_sample()
+    sample = {
+        key: value.double() if value.is_floating_point() else value
+        for key, value in sample.items()
+    }
+    sample.update(
+        energy=torch.zeros(1, dtype=torch.float64),
+        forces=torch.zeros(3, 3, dtype=torch.float64),
+        energy_weight=torch.ones(1, dtype=torch.float64),
+        forces_weight=torch.ones(1, dtype=torch.float64),
+        entropy=torch.ones(1, dtype=torch.float64),
+    )
+    data = DataLoader([sample, deepcopy(sample)], batch_size=None)
     trainer.fit(TrainingModel(), train_dataloaders=data)
     assert trainer.global_step == 2
 
@@ -1072,8 +1132,8 @@ assert not cuda.runtime.cache_info().currsize
 
 
 @pytest.mark.parametrize("training", [False, True])
-def test_precision_policy(monkeypatch, training):
-    from tace.utils.precision import PrecisionPolicy, resolve_precision
+def test_precision_policy(monkeypatch, training, caplog):
+    from tace.utils.precision import PrecisionPolicy, log_precision, resolve_precision
 
     monkeypatch.delenv("TACE_USE_TF32", raising=False)
     monkeypatch.delenv("TACE_MATMUL_PRECISION", raising=False)
@@ -1082,11 +1142,37 @@ def test_precision_policy(monkeypatch, training):
     policy = resolve_precision(cfg, training=training)
     assert policy.matmul == ("tf32" if training else "ieee")
     assert policy.torch_dtype == torch.float32
+    assert policy.follow_model is False
     assert torch.get_default_dtype() == default_dtype
     assert cfg["dtype"]["matmul"] == policy.matmul
 
     mixed = resolve_precision({"dtype": {"autocast": "bfloat16"}}, training=training)
     assert mixed.matmul == "ieee"
+    unified = resolve_precision({"dtype": {"follow_model": True}}, training=training)
+    assert unified.follow_model is True
+    original_matmul = torch.backends.cuda.matmul.allow_tf32
+    original_cudnn = torch.backends.cudnn.allow_tf32
+    try:
+        for setting in (policy, unified, mixed, PrecisionPolicy(model="float64")):
+            caplog.clear()
+            setting.apply()
+            with caplog.at_level("INFO"):
+                log_precision(setting)
+            messages = [record.getMessage() for record in caplog.records]
+            physical = str(setting.physical_dtype).removeprefix("torch.")
+            assert (
+                f"dtype.follow_model={str(setting.follow_model).lower()}" in messages[0]
+            )
+            for component in ("Geometry /", "Loss", "Metrics /", "Forces /"):
+                assert any(component in msg and physical in msg for msg in messages)
+            assert "Data / graph cache / statistics" in caplog.text
+            assert "fixed" in caplog.text
+            assert ("Autocast: disabled" in caplog.text) == (setting.autocast is None)
+            tf32 = setting.model == "float32" and setting.matmul == "tf32"
+            assert f"matmul TF32={'allowed' if tf32 else 'disabled'}" in caplog.text
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = original_matmul
+        torch.backends.cudnn.allow_tf32 = original_cudnn
     for options in (
         {"model": "bfloat16"},
         {"model": "float64", "autocast": "bfloat16"},
@@ -1095,6 +1181,8 @@ def test_precision_policy(monkeypatch, training):
     ):
         with pytest.raises(ValueError):
             PrecisionPolicy(**options)
+    with pytest.raises(TypeError, match="boolean"):
+        PrecisionPolicy(follow_model="true")
 
     monkeypatch.setenv("TACE_USE_TF32", "0")
     assert resolve_precision({}, training=training).matmul == "ieee"
@@ -1105,8 +1193,10 @@ def test_precision_policy(monkeypatch, training):
         resolve_precision({}, training=training)
 
 
-def test_model_dtype_metadata(tmp_path, monkeypatch):
+@pytest.mark.parametrize("follow_model", [False, True])
+def test_model_dtype_metadata(tmp_path, monkeypatch, follow_model):
     from tace.lightning import export_tace, load_tace
+    from tace.utils.precision import configure_model_precision
 
     monkeypatch.setenv("TACE_USE_TF32", "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -1134,14 +1224,20 @@ def test_model_dtype_metadata(tmp_path, monkeypatch):
         target_property=["energy"],
         embedding_property=[],
     )
+    configure_model_precision(model, torch.float32, follow_model=follow_model)
     path = tmp_path / "model.pt"
     export_tace(model, str(path))
     package = torch.load(path, weights_only=False)
     assert package["dtype"]["model"] == str(model.get_model_dtype()).removeprefix(
         "torch."
     )
+    assert package["dtype"]["follow_model"] is follow_model
     restored = load_tace(path)
     assert restored.get_model_dtype() == model.get_model_dtype()
-    assert restored.readout_fn.atomic_energy_layer.atomic_energy.dtype == torch.float64
-    with pytest.raises(ValueError, match="FP64 geometry"):
-        load_tace(path, device="mps")
+    assert restored.follow_model is follow_model
+    assert restored.readout_fn.atomic_energy_layer.atomic_energy.dtype == (
+        torch.float32 if follow_model else torch.float64
+    )
+    if not follow_model:
+        with pytest.raises(ValueError, match="FP64 geometry"):
+            load_tace(path, device="mps")

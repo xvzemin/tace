@@ -56,7 +56,10 @@ def convert_basis(model, basis="cartesian"):
             model.get_embedding_property(),
         )
     configure_model_precision(
-        result, model.get_model_dtype(), device=model.readout_fn.cutoff.device
+        result,
+        model.get_model_dtype(),
+        device=model.readout_fn.cutoff.device,
+        follow_model=model.follow_model,
     )
     source_modules = dict(model.named_modules())
     for name, module in result.named_modules():

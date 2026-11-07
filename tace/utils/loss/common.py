@@ -12,16 +12,16 @@ from tace.utils.precision import DATA_DTYPE
 from tace.utils.torch_scatter import scatter_sum
 
 
-def loss_inputs(pred, label):
-    """Convert floating loss operands to FP64 without modifying the input mappings."""
+def loss_inputs(pred, label, dtype=DATA_DTYPE):
+    """Convert loss operands without modifying their input mappings."""
     pred = {
-        key: value.to(DATA_DTYPE)
+        key: value.to(dtype)
         if isinstance(value, torch.Tensor) and value.is_floating_point()
         else value
         for key, value in pred.items()
     }
     label = {
-        key: value.to(DATA_DTYPE)
+        key: value.to(dtype)
         if isinstance(value, torch.Tensor)
         and value.is_floating_point()
         # Geometric regularizers differentiate with respect to the original coordinates.
@@ -54,10 +54,12 @@ def num_atoms_per_graph(label: Dict[str, torch.Tensor]) -> torch.Tensor:
     return label["ptr"][1:] - label["ptr"][:-1]
 
 
-def has_valid_labels(label: Dict[str, torch.Tensor], key: str) -> torch.Tensor:
+def has_valid_labels(
+    label: Dict[str, torch.Tensor], key: str, dtype=DATA_DTYPE
+) -> torch.Tensor:
     """Return whether any rank has a positive-weight label."""
-    weight = label["entropy"].to(DATA_DTYPE).reshape(-1) * label[f"{key}_weight"].to(
-        DATA_DTYPE
+    weight = label["entropy"].to(dtype).reshape(-1) * label[f"{key}_weight"].to(
+        dtype
     ).reshape(-1)
     present = (weight > 0).any().long()
     if dist.is_available() and dist.is_initialized():

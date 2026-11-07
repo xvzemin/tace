@@ -121,6 +121,7 @@ class ScaleShift(torch.nn.Module):
 
     float64_buffers = ("scale", "shift")
     geometry_precision = True
+    physical_dtype = torch.float64
 
     def __init__(
         self,
@@ -165,7 +166,7 @@ class ScaleShift(torch.nn.Module):
                 self.register_buffer("shift", shift_tensor)
 
     def forward(self, node_energy, node_type, ptr, edge_index, batch, node_fidelity):
-        node_energy = node_energy.to(torch.float64)
+        node_energy = node_energy.to(self.physical_dtype)
         if not (self.has_scale or self.has_shift):
             return node_energy
 
@@ -174,11 +175,11 @@ class ScaleShift(torch.nn.Module):
 
         if self.all_atoms:
             if self.has_scale:
-                node_scale = self.scale[node_fidelity, node_type].to(torch.float64)
+                node_scale = self.scale[node_fidelity, node_type].to(self.physical_dtype)
                 node_energy = node_energy * node_scale
 
             if self.has_shift:
-                node_shift = self.shift[node_fidelity, node_type].to(torch.float64)
+                node_shift = self.shift[node_fidelity, node_type].to(self.physical_dtype)
                 node_energy = node_energy + node_shift
         else:
             if edge_index.numel() == 0:
@@ -197,7 +198,7 @@ class ScaleShift(torch.nn.Module):
             isolated_mask = (num_nodes == 1) & (num_edges == 0)
 
             if self.has_scale:
-                node_scale = self.scale[node_fidelity, node_type].to(torch.float64)
+                node_scale = self.scale[node_fidelity, node_type].to(self.physical_dtype)
                 isolated_nodes = isolated_mask[batch]
                 node_scale = torch.where(
                     isolated_nodes, torch.zeros_like(node_scale), node_scale
@@ -205,7 +206,7 @@ class ScaleShift(torch.nn.Module):
                 node_energy = node_energy * node_scale
 
             if self.has_shift:
-                node_shift = self.shift[node_fidelity, node_type].to(torch.float64)
+                node_shift = self.shift[node_fidelity, node_type].to(self.physical_dtype)
                 isolated_nodes = isolated_mask[batch]
                 node_shift = torch.where(
                     isolated_nodes, torch.zeros_like(node_shift), node_shift
@@ -218,8 +219,8 @@ class ScaleShift(torch.nn.Module):
         """Apply the learned-energy scale without an additive shift."""
         if not self.has_scale:
             return node_energy
-        node_scale = self.scale[node_fidelity, node_type].to(torch.float64)
-        return node_energy.to(torch.float64) * node_scale
+        node_scale = self.scale[node_fidelity, node_type].to(self.physical_dtype)
+        return node_energy.to(self.physical_dtype) * node_scale
 
     def __repr__(self):
 

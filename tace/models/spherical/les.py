@@ -28,6 +28,7 @@ class TACELES(torch.nn.Module):
 
     batch_external_field = True
     rank_two_dim = 5
+    physical_dtype = torch.float64
     scale = {
         "latent_charges": 0.1,
         "latent_dipoles": 0.1,
@@ -134,7 +135,7 @@ class TACELES(torch.nn.Module):
                 dtype=torch.int64,
             )
             values.append(local_output[local_indices, local_fidelity])
-        output = torch.stack(values, dim=0).to(torch.float64).sum(dim=0)
+        output = torch.stack(values, dim=0).to(self.physical_dtype).sum(dim=0)
         return output.squeeze(-1) if irrep_dim == 1 else output
 
     def _readout_latent_quantities(

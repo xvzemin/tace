@@ -32,6 +32,8 @@ class TensorModel(torch.nn.Module):
             "model_dtype",
             next((p.dtype for p in readout_fn.parameters()), torch.get_default_dtype()),
         )
+        self.follow_model = getattr(readout_fn, "follow_model", False)
+        self.physical_dtype = self.model_dtype if self.follow_model else DATA_DTYPE
         self.num_fidelities = len(getattr(readout_fn, "fidelity", {})) or 1
         self._set_target_property()
         self._set_lammps_mliap()
@@ -55,7 +57,7 @@ class TensorModel(torch.nn.Module):
     def prepare_property_data(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
-        """Prepare element indices, FP64 physical inputs, and property-specific data."""
+        """Prepare element indices, physical inputs, and property-specific data."""
         data = dict(data.items())
         if "node_type" not in data:
             numbers = self.readout_fn.atomic_numbers.to(data["atomic_numbers"].device)
@@ -81,13 +83,16 @@ class TensorModel(torch.nn.Module):
                 ).all(),
                 "node_type is outside the model element table.",
             )
-        physical_fields = {"positions", "lattice", "edge_vector"} | set(
-            self.get_embedding_property()
+        physical_fields = (
+            data.keys()
+            if self.follow_model
+            else {"positions", "lattice", "edge_vector"}
+            | set(self.get_embedding_property())
         )
         for key in physical_fields:
             value = data.get(key)
             if isinstance(value, torch.Tensor) and value.is_floating_point():
-                data[key] = value.to(dtype=DATA_DTYPE)
+                data[key] = value.to(dtype=self.physical_dtype)
         if "direct_hessian" in self.get_target_property() and not self.lmp:
             data = prepare_direct_hessian_inputs(
                 data, self.readout_fn.pair_representation.cutoff
@@ -348,7 +353,7 @@ class TensorModel(torch.nn.Module):
                 for requires_grad_p in PROPERTIES[p]["requires_grad_with"]:
                     if p != "forces":
                         data[requires_grad_p].requires_grad_(True)
-            dtype = DATA_DTYPE
+            dtype = self.physical_dtype
             device = data["node_type"].device
             nlocal, nghosts = data["natoms"][0], data["natoms"][1]
             num_graphs = 2
@@ -381,7 +386,7 @@ class TensorModel(torch.nn.Module):
                     requires_grad_p_list.append(requires_grad_p)
                     if requires_grad_p != "edge_vector":
                         data[requires_grad_p].requires_grad_(True)
-            dtype = DATA_DTYPE
+            dtype = self.physical_dtype
             device = data["positions"].device
             positions = data["positions"]
             num_graphs = data["ptr"].numel() - 1

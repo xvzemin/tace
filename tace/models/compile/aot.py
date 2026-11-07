@@ -81,6 +81,8 @@ class AOTICompiledTensorModel(torch.nn.Module):
         self.max_neighbors = _metadata_json(metadata, "tace_max_neighbors")
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
         self.model_dtype = _dtype_from_name(metadata["tace_dtype"])
+        self.physical_dtype = _dtype_from_name(metadata["tace_geometry_dtype"])
+        self.follow_model = metadata.get("tace_follow_model", "false") == "true"
         compile_device = metadata.get("AOTI_DEVICE_KEY") or device or "cpu"
         self.compile_device = torch.device(compile_device)
         self._check_device(device)
@@ -94,6 +96,7 @@ class AOTICompiledTensorModel(torch.nn.Module):
             self.fidelity_idx,
             self.direct_hessian_cutoff,
             atomic_numbers=self.atomic_numbers,
+            dtype=self.physical_dtype,
         )
         if self.direct_hessian_cutoff is not None and data["positions"].size(0) < 2:
             raise ValueError(
@@ -191,6 +194,8 @@ class AOTICompiledLammpsModel(torch.nn.Module):
         self.cutoff = float(metadata["tace_cutoff"])
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
         self.model_dtype = _dtype_from_name(metadata["tace_dtype"])
+        self.physical_dtype = _dtype_from_name(metadata["tace_geometry_dtype"])
+        self.follow_model = metadata.get("tace_follow_model", "false") == "true"
         compile_device = metadata.get("AOTI_DEVICE_KEY") or device or "cpu"
         self.compile_device = torch.device(compile_device)
         self._check_device(device)
@@ -199,7 +204,11 @@ class AOTICompiledLammpsModel(torch.nn.Module):
         self, data: Dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         data = _canonicalize_inputs(
-            data, self.input_keys, self.fidelity_idx, atomic_numbers=self.atomic_numbers
+            data,
+            self.input_keys,
+            self.fidelity_idx,
+            atomic_numbers=self.atomic_numbers,
+            dtype=self.physical_dtype,
         )
         missing = [key for key in self.input_keys if key not in data]
         if missing:
@@ -411,7 +420,7 @@ def _as_compile_tensor_model(model: torch.nn.Module) -> CompileTensorModel:
 
 
 def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
-    dtype = torch.float64
+    dtype = model.physical_dtype
     device = next(model.parameters()).device
     lattice = torch.eye(3, dtype=dtype, device=device).reshape(1, 3, 3)
     lattice = lattice.repeat(2, 1, 1) * max(model.get_cutoff() * 4.0, 1.0)
@@ -467,7 +476,7 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
 
 
 def _synthetic_lammps_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
-    dtype = torch.float64
+    dtype = model.physical_dtype
     device = next(model.parameters()).device
     edge_vector = torch.tensor(
         [
@@ -506,7 +515,7 @@ def _ensure_sample_inputs(
     model: CompileTensorModel,
 ) -> None:
     device = next(model.parameters()).device
-    dtype = torch.float64
+    dtype = model.physical_dtype
     for key, value in list(sample_data.items()):
         if not isinstance(value, torch.Tensor):
             continue
@@ -526,6 +535,7 @@ def _ensure_sample_inputs(
             model.get_fidelity_idx(),
             cutoff,
             atomic_numbers=model.get_atomic_numbers(),
+            dtype=dtype,
         )
     )
     missing = [key for key in input_keys if key not in sample_data]
@@ -628,7 +638,8 @@ def _export_metadata(
         "tace_max_neighbors": json.dumps(model.get_max_neighbors()),
         "tace_fidelity_idx": str(model.get_fidelity_idx()),
         "tace_dtype": str(model.get_model_dtype()).replace("torch.", ""),
-        "tace_geometry_dtype": "float64",
+        "tace_geometry_dtype": str(model.physical_dtype).removeprefix("torch."),
+        "tace_follow_model": str(model.follow_model).lower(),
         "tace_matmul": "tf32" if torch.backends.cuda.matmul.allow_tf32 else "ieee",
     }
     if export_num_graphs is not None:
@@ -668,6 +679,7 @@ def _canonicalize_inputs(
     direct_hessian_cutoff=None,
     *,
     atomic_numbers=None,
+    dtype: torch.dtype = torch.float64,
 ) -> Dict[str, torch.Tensor]:
     data = _as_tensor_dict(data)
     if "node_type" not in data and atomic_numbers is not None:
@@ -675,7 +687,7 @@ def _canonicalize_inputs(
     for key in input_keys:
         value = data.get(key)
         if isinstance(value, torch.Tensor) and value.is_floating_point():
-            data[key] = value.to(torch.float64)
+            data[key] = value.to(dtype)
     if "edge_shifts" in data:
         data["edge_shifts"] = data["edge_shifts"].to(torch.int64)
     if direct_hessian_cutoff is not None:

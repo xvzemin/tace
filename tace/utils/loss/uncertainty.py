@@ -32,6 +32,7 @@ class UncertaintyLoss(nn.Module):
         loss_function_kwargs: Optional[list[dict[str, Any]]] = None,
     ):
         super().__init__()
+        self.physical_dtype = DATA_DTYPE
         assert isinstance(loss_property, (list, ListConfig)), (
             f"cfg.loss.loss_property should be a list, got {type(loss_property)}"
         )
@@ -59,9 +60,11 @@ class UncertaintyLoss(nn.Module):
         for i, (p, fn_name) in enumerate(
             zip(self.loss_property, self.loss_function_name)
         ):
-            p_loss = LOSS_FN[fn_name](pred, label, **self.loss_function_kwargs[i])
-            log_sigma = self.log_sigmas[p].to(DATA_DTYPE)
-            regularizer = log_sigma * has_valid_labels(label, p)
+            p_loss = LOSS_FN[fn_name](
+                pred, label, dtype=self.physical_dtype, **self.loss_function_kwargs[i]
+            )
+            log_sigma = self.log_sigmas[p].to(self.physical_dtype)
+            regularizer = log_sigma * has_valid_labels(label, p, self.physical_dtype)
             total_loss += 0.5 * torch.exp(-log_sigma) * p_loss + regularizer
         return total_loss
 

@@ -26,19 +26,21 @@ from tace.utils.optimizer.hybrid_muon import HybridMuonOptimizer
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("kind", ["mse", "mae", "huber", "l2mae"])
-def test_loss_precision(kind, dtype):
+@pytest.mark.parametrize("follow_model", [False, True])
+def test_loss_precision(kind, dtype, follow_model):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     prediction = torch.tensor(
         [[1.0e8, 2.0, 3.0]], dtype=dtype, device=device, requires_grad=True
     )
     label = {
-        "forces": torch.ones_like(prediction),
-        "forces_weight": torch.ones(1, dtype=dtype, device=device),
-        "entropy": torch.ones(1, dtype=dtype, device=device),
+        "forces": torch.ones_like(prediction, dtype=torch.float64),
+        "forces_weight": torch.ones(1, dtype=torch.float64, device=device),
+        "entropy": torch.ones(1, dtype=torch.float64, device=device),
         "batch": torch.zeros(1, dtype=torch.long, device=device),
     }
     original = dict(label)
-    error = prediction.double() - label["forces"].double()
+    physical_dtype = dtype if follow_model else torch.float64
+    error = prediction.to(physical_dtype) - label["forces"].to(physical_dtype)
     reference = {
         "mse": error.square().mean(),
         "mae": error.abs().mean(),
@@ -48,9 +50,10 @@ def test_loss_precision(kind, dtype):
         "l2mae": torch.linalg.vector_norm(error, dim=-1).mean(),
     }[kind]
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-        actual = LOSS_FN[f"{kind}_forces"]({"forces": prediction}, label)
-    assert actual.dtype == torch.float64
-    torch.testing.assert_close(actual, reference, atol=0, rtol=1e-14)
+        kwargs = {"dtype": dtype} if follow_model else {}
+        actual = LOSS_FN[f"{kind}_forces"]({"forces": prediction}, label, **kwargs)
+    assert actual.dtype == physical_dtype
+    torch.testing.assert_close(actual, reference)
     gradient = torch.autograd.grad(actual, prediction, create_graph=True)[0]
     expected = torch.autograd.grad(reference, prediction, create_graph=True)[0]
     assert gradient.dtype == dtype
@@ -62,40 +65,46 @@ def test_loss_precision(kind, dtype):
 
 
 @pytest.mark.parametrize("loss_type", [NormalLoss, UncertaintyLoss])
-def test_loss_compiled_precision(loss_type):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_loss_compiled_precision(loss_type, dtype):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loss = loss_type(["energy"], ["mse_energy"], [1.0]).to(device)
+    loss = loss_type(["energy"], ["mse_energy"], [1.0]).to(device, dtype)
+    loss.physical_dtype = dtype
     prediction = torch.tensor(
-        [1.0e20], dtype=torch.float32, device=device, requires_grad=True
+        [1.0e4 if dtype == torch.float32 else 1.0e20],
+        dtype=torch.float32,
+        device=device,
+        requires_grad=True,
     )
     label = {
-        "energy": -prediction.detach(),
-        "energy_weight": torch.ones(1, dtype=torch.float32, device=device),
-        "entropy": torch.ones(1, dtype=torch.float32, device=device),
+        "energy": -prediction.detach().double(),
+        "energy_weight": torch.ones(1, dtype=torch.float64, device=device),
+        "entropy": torch.ones(1, dtype=torch.float64, device=device),
     }
-    reference = (prediction.double() - label["energy"].double()).square().mean()
+    reference = (prediction.to(dtype) - label["energy"].to(dtype)).square().mean()
     compiled = torch.compile(loss, backend="aot_eager", fullgraph=True)
     actual = compiled({"energy": prediction}, label)
-    assert actual.dtype == torch.float64 and torch.isfinite(actual)
+    assert actual.dtype == dtype and torch.isfinite(actual)
     torch.testing.assert_close(actual, reference)
     actual.backward()
     torch.testing.assert_close(prediction.grad, 4 * prediction.detach())
     if loss_type is UncertaintyLoss:
-        assert loss.log_sigmas["energy"].dtype == torch.float64
+        assert loss.log_sigmas["energy"].dtype == dtype
         torch.testing.assert_close(
             loss.log_sigmas["energy"].grad, 1 - reference.detach()
         )
 
 
-def test_loss_coordinate_derivatives():
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_loss_coordinate_derivatives(dtype):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     positions = torch.ones(1, 3, dtype=torch.float32, device=device, requires_grad=True)
     weight = torch.tensor(2.0, dtype=torch.float32, device=device, requires_grad=True)
     forces = weight * positions.square().roll(1, dims=-1)
     loss = LOSS_FN["mse_direct_forces_curl"](
-        {"direct_forces": forces}, {"positions": positions}
+        {"direct_forces": forces}, {"positions": positions}, dtype=dtype
     )
-    assert loss.dtype == torch.float64
+    assert loss.dtype == dtype
     loss.backward()
     assert positions.grad is not None and torch.isfinite(positions.grad).all()
     assert weight.grad is not None and torch.isfinite(weight.grad)
@@ -164,7 +173,8 @@ def test_stress_metric_missing_labels(metric_type):
 
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("squared", [False, True])
-def test_metric_accumulation_precision(masked, squared):
+@pytest.mark.parametrize("dtype", [None, torch.float32])
+def test_metric_accumulation_precision(masked, squared, dtype):
     from tace.utils.metrics import MAE, RMSE
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -172,6 +182,8 @@ def test_metric_accumulation_precision(masked, squared):
         (MaskRMSE if squared else MaskMAE) if masked else (RMSE if squared else MAE)
     )
     metric = (metric_cls("energy", 1.0) if masked else metric_cls(1.0)).to(device)
+    if dtype is not None:
+        metric.set_dtype(dtype)
     for value in (1.0e8, 1.0, 1.0):
         prediction = torch.tensor([value], dtype=torch.float32, device=device)
         target = torch.zeros(1, dtype=torch.float64, device=device)
@@ -181,13 +193,14 @@ def test_metric_accumulation_precision(masked, squared):
             )
         else:
             metric.update(prediction, target)
-    expected = torch.tensor([1.0e8, 1.0, 1.0], dtype=torch.float64, device=device)
+    physical_dtype = dtype or torch.float64
+    expected = torch.tensor([1.0e8, 1.0, 1.0], dtype=physical_dtype, device=device)
     expected = expected.square().mean().sqrt() if squared else expected.mean()
-    torch.testing.assert_close(metric.compute(), expected, atol=0, rtol=1e-15)
-    assert metric.compute().dtype == torch.float64
+    torch.testing.assert_close(metric.compute(), expected)
+    assert metric.compute().dtype == physical_dtype
     metric.reset()
     state = metric.sum_squared_error if squared else metric.sum_abs_error
-    assert state.dtype == torch.float64 and not state.any()
+    assert state.dtype == physical_dtype and not state.any()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])

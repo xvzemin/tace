@@ -15,7 +15,8 @@ finetune_from_model: null
 finetune: null # this field equals ./finetune_config.yaml, auto read or write directly here
 
 dtype:
-  model: float32 # float32 or float64; graph data and geometry remain float64
+  model: float32 # float32 or float64
+  follow_model: false # true: geometry, physical reductions, losses, and metrics use model dtype
   autocast: null # null, bfloat16, or float16; requires model=float32
   matmul: null # null: resolve environment/default; ieee or tf32: explicit selection
 

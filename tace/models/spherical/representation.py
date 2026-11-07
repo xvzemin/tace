@@ -782,6 +782,8 @@ class NodeRepresentation(torch.nn.Module):
 
 
 class PairRepresentation(torch.nn.Module):
+    physical_dtype = torch.float64
+
     def __init__(
         self,
         irreps_in: o3.Irreps | str,
@@ -859,8 +861,8 @@ class PairRepresentation(torch.nn.Module):
         batch: torch.Tensor,
     ) -> torch.Tensor:
         model_dtype = node_feats.dtype
-        positions = positions.to(torch.float64)
-        lattice = lattice.to(torch.float64)
+        positions = positions.to(self.physical_dtype)
+        lattice = lattice.to(self.physical_dtype)
         source, target = edge_index
         edge_vector = (
             positions[target]

@@ -117,7 +117,12 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
             model.get_embedding_property(),
             prune_removed_keys=True,
         )
-        configure_model_precision(selected, model.get_model_dtype(), device=device)
+        configure_model_precision(
+            selected,
+            model.get_model_dtype(),
+            device=device,
+            follow_model=model.follow_model,
+        )
 
     # Identify element axes by the owning layer, not by coincidental tensor sizes.
     element_axes = {}
