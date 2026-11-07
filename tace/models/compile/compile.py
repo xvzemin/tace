@@ -153,6 +153,9 @@ def _inductor_options() -> Dict[str, object]:
         "triton.cudagraphs": False,
         "max_fusion_size": 8,
         "triton.persistent_reductions": False,
+        # Mixed-order fusion guards on the workload size (e.g. 64 * edges
+        # crossing 5 Mi elements), recompiling force-training graphs per rank.
+        "triton.mix_order_reduction": False,
         "triton.max_tiles": 1,
     }
     try:

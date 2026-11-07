@@ -152,7 +152,7 @@ def test_tensor_loss_distributed_count(monkeypatch):
 @pytest.mark.parametrize("metric_type", [MaskMAE, MaskRMSE])
 def test_stress_metric_missing_labels(metric_type):
     metric = metric_type("stress", 1.0)
-    target = torch.zeros(2, 3, 3)
+    target = torch.full((2, 3, 3), float("nan"))
     label = {"stress": target, "stress_weight": torch.zeros(2)}
     metric.update(torch.ones_like(target), target, label)
     assert torch.isnan(metric.compute())
@@ -160,6 +160,98 @@ def test_stress_metric_missing_labels(metric_type):
     label["stress_weight"][0] = 1
     metric.update(torch.ones_like(target), target, label)
     torch.testing.assert_close(metric.compute(), torch.tensor(1.0, dtype=torch.float64))
+    assert metric.count == 9
+
+
+@pytest.mark.parametrize("metric_type", [MaskMAE, MaskRMSE])
+@pytest.mark.parametrize("key", ["energy", "forces", "stress", "edge_forces", "hessian"])
+def test_masked_metric_counts(metric_type, key):
+    shapes = {
+        "energy": (3,),
+        "forces": (5, 3),
+        "stress": (3, 3, 3),
+        "edge_forces": (4, 3),
+        "hessian": (13, 3, 3),
+    }
+    labels = {
+        f"{key}_weight": torch.tensor([2.0, 0.0, 0.0]),
+        "batch": torch.tensor([0, 0, 1, 1, 1]),
+        "ptr": torch.tensor([0, 2, 5, 5]),
+        "edge_index": torch.tensor([[2, 0, 3, 1], [3, 1, 4, 0]]),
+    }
+    valid = {
+        "energy": torch.tensor([True, False, False]),
+        "forces": torch.tensor([True, False, False, False, False]),
+        "stress": torch.tensor([True, False, False]),
+        "edge_forces": torch.tensor([False, True, False, True]),
+        "hessian": torch.tensor([True] * 4 + [False] * 9),
+    }[key]
+    if key == "forces":
+        labels["noise_mask"] = torch.tensor([False, True, False, False, False])
+    target = torch.zeros(shapes[key], dtype=torch.float64)
+    prediction = torch.arange(target.numel(), dtype=torch.float64).reshape_as(target)
+    # Missing and denoised labels may be non-finite and must not enter the sums.
+    prediction[~valid] = float("inf")
+    target[~valid] = float("nan")
+    reference = prediction[valid] - target[valid]
+    metric = metric_type(key, 1.0)
+    for _ in range(2):
+        metric.update(prediction, target, labels)
+    expected = (
+        reference.abs().mean()
+        if metric_type is MaskMAE
+        else reference.square().mean().sqrt()
+    )
+    torch.testing.assert_close(metric.compute(), expected)
+    assert metric.count == 2 * reference.numel()
+
+
+def test_training_metric_epoch_reductions():
+    from torchmetrics import MetricCollection
+
+    from tace.utils.metrics import build_metrics, update_metrics
+
+    properties = ["energy", "forces", "stress"]
+    labels = {
+        "ptr": torch.tensor([0, 2, 5]),
+        "batch": torch.tensor([0, 0, 1, 1, 1]),
+        "entropy": torch.tensor([2.0, 0.5]),
+        "energy": torch.zeros(2),
+        "forces": torch.zeros(5, 3),
+        "stress": torch.zeros(2, 3, 3),
+        "energy_weight": torch.tensor([1.0, 0.0]),
+        "forces_weight": torch.tensor([2.0, 0.0]),
+        "stress_weight": torch.tensor([0.0, 1.0]),
+        "noise_mask": torch.tensor([False, True, False, False, False]),
+    }
+    predictions = {
+        "energy": torch.tensor([2.0, float("nan")]),
+        "forces": torch.tensor([[1.0, 2.0, 3.0]] + [[float("nan")] * 3] * 4),
+        "stress": torch.stack(
+            (torch.full((3, 3), float("nan")), torch.full((3, 3), 2.0))
+        ),
+    }
+    expected = {
+        "train/energy_mae": 2000.0,
+        "train/energy_rmse": 2000.0,
+        "train/energy_per_atom_mae": 1000.0,
+        "train/energy_per_atom_rmse": 1000.0,
+        "train/forces_mae": 8000.0,
+        "train/forces_rmse": (224.0 / 3) ** 0.5 * 1000,
+        "train/stress_mae": 2000.0,
+        "train/stress_rmse": 2000.0,
+    }
+    metrics = MetricCollection(build_metrics("train", properties))
+    for _ in range(2):
+        for _ in range(3):
+            update_metrics(metrics, "train", predictions, labels, properties)
+        actual = metrics.compute()
+        assert actual.keys() == expected.keys()
+        for key, value in expected.items():
+            torch.testing.assert_close(
+                actual[key], torch.tensor(value, dtype=torch.float64)
+            )
+        metrics.reset()
 
 
 @pytest.mark.parametrize("masked", [False, True])

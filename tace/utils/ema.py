@@ -98,11 +98,18 @@ class ExponentialMovingAverage:
             decay = min(decay, (1 + self.num_updates) / (10 + self.num_updates))
         one_minus_decay = 1.0 - decay
         with torch.no_grad():
+            groups = {}
             for s_param, param in zip(self.shadow_params, parameters):
-                tmp = s_param - param
-                # tmp will be a new tensor so we can do in-place
-                tmp.mul_(one_minus_decay)
-                s_param.sub_(tmp)
+                key = (s_param.device, s_param.dtype, param.device, param.dtype)
+                shadows, values = groups.setdefault(key, ([], []))
+                shadows.append(s_param)
+                values.append(param)
+            for shadows, values in groups.values():
+                # Keep the original subtraction/multiplication order and rounding.
+                # Grouping avoids launching three kernels for every parameter.
+                tmp = torch._foreach_sub(shadows, values)
+                torch._foreach_mul_(tmp, one_minus_decay)
+                torch._foreach_sub_(shadows, tmp)
 
     def copy_to(
         self, parameters: Optional[Iterable[torch.nn.Parameter]] = None

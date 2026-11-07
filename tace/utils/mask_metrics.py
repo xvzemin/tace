@@ -43,7 +43,9 @@ def _property_weight_mask(
         mask = graph_mask[label["batch"][label["edge_index"][0]]]
     elif scope == "per-pair":
         counts = label["ptr"][1:] - label["ptr"][:-1]
-        mask = torch.repeat_interleave(graph_mask, counts.square())
+        mask = torch.repeat_interleave(
+            graph_mask, counts.square(), output_size=value.shape[0]
+        )
     else:
         raise ValueError(
             f"{property_name} has scope {scope}; only per-system, per-atom, "
@@ -70,6 +72,20 @@ def filter_error_by_property_weight(
     return error[mask]
 
 
+def _masked_error_and_count(
+    preds: Tensor,
+    targets: Tensor,
+    label: Dict[str, Tensor],
+    property_name: str,
+) -> tuple[Tensor, Tensor]:
+    error = preds.to(torch.float64) - targets.to(torch.float64)
+    mask = _property_weight_mask(label, property_name, error)
+    # Boolean indexing needs the selected size on the host, synchronizing CUDA
+    # once per metric. Keep the full shape and reduce the count on the device.
+    mask = expand_dims_to(mask, error.ndim).expand_as(error)
+    return torch.where(mask, error, 0), mask.sum()
+
+
 class MaskMAE(Metric):
     def __init__(self, property_name: str, scale: float):
         super().__init__()
@@ -83,13 +99,11 @@ class MaskMAE(Metric):
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
-        error = filter_error_by_property_weight(
-            preds.to(torch.float64) - targets.to(torch.float64),
-            label,
-            self.property_name,
+        error, count = _masked_error_and_count(
+            preds, targets, label, self.property_name
         )
         self.sum_abs_error += torch.abs(error).sum()
-        self.count += error.numel()
+        self.count += count
 
     def compute(self):
         value = self.sum_abs_error / self.count.clamp_min(1) * self.scale
@@ -109,13 +123,11 @@ class MaskRMSE(Metric):
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
-        error = filter_error_by_property_weight(
-            preds.to(torch.float64) - targets.to(torch.float64),
-            label,
-            self.property_name,
+        error, count = _masked_error_and_count(
+            preds, targets, label, self.property_name
         )
         self.sum_squared_error += torch.square(error).sum()
-        self.count += error.numel()
+        self.count += count
 
     def compute(self):
         value = (

@@ -85,6 +85,42 @@ def test_compiled_shared_state(double_precision):
             model.linear.scale.mul_(0.9)
 
 
+@pytest.mark.parametrize("supports_mixed_reduction", [False, True])
+def test_compile_avoids_size_dependent_reduction_fusion(
+    monkeypatch, supports_mixed_reduction
+):
+    from torch._inductor import config
+
+    key = "triton.mix_order_reduction"
+    supported = dict(config.get_config_copy())
+    if supports_mixed_reduction:
+        supported[key] = True
+    else:
+        supported.pop(key, None)
+    monkeypatch.setitem(vars(config), "get_config_copy", lambda: supported)
+    received = {}
+
+    def compile_graph(graph, **kwargs):
+        received.update(kwargs)
+        return graph
+
+    monkeypatch.setattr(torch, "compile", compile_graph)
+    model = torch.nn.Linear(3, 2)
+    inputs = (torch.randn(4, 3),)
+    compiled, parameters, buffers = trace_and_compile(
+        model, inputs, backend="inductor"
+    )
+    assert received["dynamic"] is True
+    assert received["fullgraph"] is True
+    if supports_mixed_reduction:
+        assert received["options"][key] is False
+    else:
+        assert key not in received["options"]
+    torch.testing.assert_close(
+        compiled_call(compiled, model, inputs, parameters, buffers), model(*inputs)
+    )
+
+
 @pytest.mark.parametrize(
     "backend", [None, "eqx", "openequivariance", "cuequivariance", "lunaequivariance"]
 )

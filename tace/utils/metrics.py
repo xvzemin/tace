@@ -3,8 +3,6 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-# TODO, refacotor all metric to allow missing property
-
 import logging
 from typing import Dict, List
 
@@ -195,7 +193,8 @@ class AbsFinalCollinearMagmomsMetric(Metric):
             - label.abs_final_collinear_magmoms.to(torch.float64)
         )
         error = error * total_weight
-        error = error[mask]
+        mask = expand_dims_to(mask, error.ndim).expand_as(error)
+        error = torch.where(mask, error, 0)
 
         if self.metric_type == "mae":
             abs_error = torch.abs(error)
@@ -203,7 +202,7 @@ class AbsFinalCollinearMagmomsMetric(Metric):
         else:  # rmse
             squared_error = error**2
             self.sum_squared_error += squared_error.sum()
-        self.count += error.numel()
+        self.count += mask.sum()
 
     def compute(self):
         if self.count == 0:
@@ -249,7 +248,8 @@ class DirectForcesMetric(Metric):
         mask = total_weight != 0
         error = pred[key].to(torch.float64) - label[key].to(torch.float64)
         error = error * total_weight.unsqueeze(-1)
-        error = error[mask]
+        mask = expand_dims_to(mask, error.ndim).expand_as(error)
+        error = torch.where(mask, error, 0)
 
         if self.metric_type == "mae":
             abs_error = torch.abs(error)
@@ -257,7 +257,7 @@ class DirectForcesMetric(Metric):
         else:  # rmse
             squared_error = error**2
             self.sum_squared_error += squared_error.sum()
-        self.count += error.numel()
+        self.count += mask.sum()
 
     def compute(self):
         if self.count == 0:
@@ -308,7 +308,8 @@ class ForcesMetric(Metric):
             mask = mask & (~noise_mask)
 
         error = error * total_weight.unsqueeze(-1)
-        error = error[mask]
+        mask = expand_dims_to(mask, error.ndim).expand_as(error)
+        error = torch.where(mask, error, 0)
 
         if self.metric_type == "mae":
             abs_error = torch.abs(error)
@@ -316,7 +317,7 @@ class ForcesMetric(Metric):
         else:  # rmse
             squared_error = error**2
             self.sum_squared_error += squared_error.sum()
-        self.count += error.numel()
+        self.count += mask.sum()
 
     def compute(self):
         if self.count == 0:
@@ -430,6 +431,8 @@ def build_metrics(prefix: str, loss_property: List[str]) -> Dict[str, Metric]:
 
 
 def update_metrics(metrics, prefix, pred, label, loss_property):
+    # Only epoch aggregates are consumed. Metric.forward also computes and
+    # discards a batch result, updating twice when full_state_update is unset.
     for p in loss_property:
         if p not in pred:
             continue
@@ -440,39 +443,43 @@ def update_metrics(metrics, prefix, pred, label, loss_property):
         weighted = use_weight_filter(p)
         if p in MAE_PROPERTIES:
             if weighted:
-                metrics[f"{prefix}/{p}_mae"](output_value, batch_value, label)
+                metrics[f"{prefix}/{p}_mae"].update(output_value, batch_value, label)
             else:
-                metrics[f"{prefix}/{p}_mae"](output_value, batch_value)
+                metrics[f"{prefix}/{p}_mae"].update(output_value, batch_value)
         if p in RMSE_PROPERTIES:
             if weighted:
-                metrics[f"{prefix}/{p}_rmse"](output_value, batch_value, label)
+                metrics[f"{prefix}/{p}_rmse"].update(output_value, batch_value, label)
             else:
-                metrics[f"{prefix}/{p}_rmse"](output_value, batch_value)
+                metrics[f"{prefix}/{p}_rmse"].update(output_value, batch_value)
         if p in MAE_PER_ATOM_PROPERTIES:
             if weighted:
-                metrics[f"{prefix}/{p}_per_atom_mae"](
+                metrics[f"{prefix}/{p}_per_atom_mae"].update(
                     output_value, batch_value, ptr, label
                 )
             else:
-                metrics[f"{prefix}/{p}_per_atom_mae"](output_value, batch_value, ptr)
+                metrics[f"{prefix}/{p}_per_atom_mae"].update(
+                    output_value, batch_value, ptr
+                )
         if p in RMSE_PER_ATOM_PROPERTIES:
             if weighted:
-                metrics[f"{prefix}/{p}_per_atom_rmse"](
+                metrics[f"{prefix}/{p}_per_atom_rmse"].update(
                     output_value, batch_value, ptr, label
                 )
             else:
-                metrics[f"{prefix}/{p}_per_atom_rmse"](output_value, batch_value, ptr)
+                metrics[f"{prefix}/{p}_per_atom_rmse"].update(
+                    output_value, batch_value, ptr
+                )
         if p == "polarization":
-            metrics[f"{prefix}/{p}_mae"](output_value, batch_value, label)
-            metrics[f"{prefix}/{p}_rmse"](output_value, batch_value, label)
-            metrics[f"{prefix}/{p}_per_atom_mae"](output_value, batch_value, label)
-            metrics[f"{prefix}/{p}_per_atom_rmse"](output_value, batch_value, label)
+            metrics[f"{prefix}/{p}_mae"].update(output_value, batch_value, label)
+            metrics[f"{prefix}/{p}_rmse"].update(output_value, batch_value, label)
+            metrics[f"{prefix}/{p}_per_atom_mae"].update(output_value, batch_value, label)
+            metrics[f"{prefix}/{p}_per_atom_rmse"].update(output_value, batch_value, label)
         if p == "abs_final_collinear_magmoms":
-            metrics[f"{prefix}/{p}_mae"](pred, label)
-            metrics[f"{prefix}/{p}_rmse"](pred, label)
+            metrics[f"{prefix}/{p}_mae"].update(pred, label)
+            metrics[f"{prefix}/{p}_rmse"].update(pred, label)
         if p == "direct_forces":
-            metrics[f"{prefix}/{p}_mae"](pred, label)
-            metrics[f"{prefix}/{p}_rmse"](pred, label)
+            metrics[f"{prefix}/{p}_mae"].update(pred, label)
+            metrics[f"{prefix}/{p}_rmse"].update(pred, label)
         if p == "forces":
-            metrics[f"{prefix}/{p}_mae"](pred, label)
-            metrics[f"{prefix}/{p}_rmse"](pred, label)
+            metrics[f"{prefix}/{p}_mae"].update(pred, label)
+            metrics[f"{prefix}/{p}_rmse"].update(pred, label)

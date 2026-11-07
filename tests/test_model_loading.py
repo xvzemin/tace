@@ -1406,3 +1406,99 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     actual = module({key: value.clone() for key, value in data.items()})
     for key in ("energy", "forces", "stress", "virials"):
         torch.testing.assert_close(actual[key], expected[key], atol=2e-9, rtol=2e-8)
+
+
+@pytest.mark.parametrize("use_num_updates", [False, True])
+@pytest.mark.parametrize("shadow_dtype", [None, torch.float32, torch.float64])
+def test_ema_update_mixed_precision(use_num_updates, shadow_dtype):
+    from tace.utils.ema import ExponentialMovingAverage
+
+    parameters = [
+        torch.nn.Parameter(
+            torch.linspace(-1.7, 1.9, 12, dtype=dtype).reshape(3, 4).T,
+            requires_grad=requires_grad,
+        )
+        for dtype in (torch.float32, torch.float64)
+        for requires_grad in (True, False)
+    ]
+    parameters.extend(
+        [torch.nn.Parameter(torch.tensor(0.7)), torch.nn.Parameter(torch.empty(0))]
+    )
+    ema = ExponentialMovingAverage(parameters, 0.999, use_num_updates)
+    ema.to(dtype=shadow_dtype)
+    expected = [value.clone() for value in ema.shadow_params]
+    shadow_refs = list(ema.state_dict()["shadow_params"])
+    for step in range(1, 9):
+        decay = min(0.999, (1 + step) / (10 + step)) if use_num_updates else 0.999
+        with torch.no_grad():
+            for reference, parameter in zip(expected, parameters):
+                parameter.add_(step * 0.037)
+                # Reference the previous per-parameter implementation, including
+                # intermediate rounding when shadow and model dtypes differ.
+                delta = reference - parameter
+                delta.mul_(1 - decay)
+                reference.sub_(delta)
+        ema.update(iter(parameters) if step % 2 else None)
+        for actual, reference, original in zip(
+            ema.shadow_params, expected, shadow_refs
+        ):
+            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+            assert actual is original
+            assert not actual.requires_grad
+        assert all(parameter.grad is None for parameter in parameters)
+    assert ema.num_updates == (8 if use_num_updates else None)
+    assert [parameter.requires_grad for parameter in parameters[:4]] == [
+        True,
+        False,
+        True,
+        False,
+    ]
+
+
+@pytest.mark.parametrize("use_num_updates", [False, True])
+def test_ema_checkpoint_resume_and_restore(tmp_path, use_num_updates):
+    from tace.utils.ema import ExponentialMovingAverage
+
+    parameters = [
+        torch.nn.Parameter(torch.tensor([0.2, -0.7], dtype=torch.float32)),
+        torch.nn.Parameter(
+            torch.tensor([1.1, -0.3], dtype=torch.float64), requires_grad=False
+        ),
+    ]
+    ema = ExponentialMovingAverage(parameters, 0.95, use_num_updates)
+    with torch.no_grad():
+        for parameter in parameters:
+            parameter.add_(0.13)
+    ema.update()
+    ema.store()
+    path = tmp_path / "ema.pt"
+    torch.save(ema.state_dict(), path)
+    restored_parameters = [
+        torch.nn.Parameter(parameter.detach().clone(), parameter.requires_grad)
+        for parameter in parameters
+    ]
+    restored = ExponentialMovingAverage(restored_parameters, 0.1)
+    restored.load_state_dict(torch.load(path, weights_only=True))
+    assert restored.decay == ema.decay
+    assert restored.num_updates == ema.num_updates
+    for actual, expected in zip(restored.collected_params, ema.collected_params):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        assert actual.data_ptr() != expected.data_ptr()
+    for _ in range(3):
+        with torch.no_grad():
+            for original, resumed in zip(parameters, restored_parameters):
+                original.mul_(0.73)
+                resumed.mul_(0.73)
+        ema.update()
+        restored.update()
+    for actual, expected in zip(restored.shadow_params, ema.shadow_params):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        assert actual.data_ptr() != expected.data_ptr()
+    originals = [parameter.detach().clone() for parameter in restored_parameters]
+    with pytest.raises(RuntimeError, match="validation failed"):
+        with restored.average_parameters():
+            for parameter, shadow in zip(restored_parameters, restored.shadow_params):
+                torch.testing.assert_close(parameter, shadow, atol=0, rtol=0)
+            raise RuntimeError("validation failed")
+    for parameter, original in zip(restored_parameters, originals):
+        torch.testing.assert_close(parameter, original, atol=0, rtol=0)
