@@ -1,3 +1,4 @@
+import hashlib
 import math
 import multiprocessing
 import pickle
@@ -167,6 +168,7 @@ def test_memory_graph_devices_preserve_supported_modes(
     monkeypatch.setattr(module.dist, "is_available", lambda: True)
     monkeypatch.setattr(module.dist, "is_initialized", lambda: initialized)
     monkeypatch.setattr(module.dist, "get_world_size", lambda: world_size)
+    monkeypatch.setattr(module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: visible_devices)
     graph = Data(num_nodes=1)
@@ -182,6 +184,156 @@ def test_memory_graph_devices_preserve_supported_modes(
     )
     assert len(dataset) == 1
     assert dataset[0] is graph
+
+
+@pytest.mark.parametrize("rank", [None, 0, 1])
+def test_graph_progress_throttles_updates_and_reports_only_on_rank_zero(
+    monkeypatch, caplog, rank
+):
+    import tace.dataset.datamodule as module
+
+    now = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module.dist, "is_available", lambda: True)
+    monkeypatch.setattr(module.dist, "is_initialized", lambda: rank is not None)
+    monkeypatch.setattr(module.dist, "get_rank", lambda: rank)
+    caplog.set_level("INFO")
+    progress = module.GraphProgress(10, "train")
+    now[0] = 1.0
+    progress.update(1)
+    assert not caplog.messages
+    now[0] = 10.0
+    progress.update(3)
+    if rank != 1:
+        assert len(caplog.messages) == 1
+        assert "train graphs: 4/10 (40.0%), 0.4 graphs/s" in caplog.messages[0]
+        assert "elapsed 0:00:10, ETA 0:00:15" in caplog.messages[0]
+    now[0] = 11.0
+    progress.update(1)
+    now[0] = 20.0
+    progress.update(5)
+    # Reaching the count is not completion until the caller publishes the cache.
+    assert len(caplog.messages) == (0 if rank == 1 else 1)
+    progress.update(0, finished=True)
+    assert progress.count == 10
+    if rank == 1:
+        assert not caplog.messages
+    else:
+        assert len(caplog.messages) == 2
+        assert "train graphs: 10/10 (100.0%)" in caplog.messages[-1]
+        assert caplog.messages[-1].endswith("ETA 0:00:00; complete")
+
+
+@pytest.mark.parametrize("mode", ["memory", "lmdb"])
+def test_create_graphs_reports_final_partial_batch_and_skips_warm_cache(
+    tmp_path, monkeypatch, caplog, mode
+):
+    import tace.dataset.datamodule as module
+
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+    )
+    monkeypatch.setattr(module, "iter_graphs", lambda *args: iter([graph] * 5))
+    caplog.set_level("INFO")
+    options = {"neighborlist_backend": "ase"}
+    dataset = module.create_graphs(
+        [object()] * 5,
+        None,
+        options,
+        "train",
+        [tmp_path],
+        storage_mode=mode,
+        batch_size=2,
+        transaction_bytes=2 * len(encode_graph(graph)),
+    )
+    assert len(dataset) == 5
+    messages = [message for message in caplog.messages if "train graphs:" in message]
+    assert len(messages) == 1
+    assert "5/5 (100.0%)" in messages[0] and messages[0].endswith("; complete")
+    dataset.close()
+
+    if mode == "lmdb":
+        caplog.clear()
+
+        def no_graph_work(*args, **kwargs):
+            pytest.fail("Warm cache must not construct graphs or progress reporters")
+
+        monkeypatch.setattr(module, "iter_graphs", no_graph_work)
+        monkeypatch.setattr(module, "GraphProgress", no_graph_work)
+        reused = module.create_graphs(None, None, options, "train", [tmp_path])
+        assert len(reused) == 5
+        assert not caplog.messages
+        reused.close()
+
+
+@pytest.mark.parametrize("mode", ["memory", "lmdb"])
+def test_interrupted_graph_build_does_not_report_completion(
+    tmp_path, monkeypatch, caplog, mode
+):
+    import tace.dataset.datamodule as module
+
+    now = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+    )
+
+    def interrupted(*args):
+        yield graph
+        now[0] = 11.0
+        yield graph
+        raise RuntimeError("injected source failure")
+
+    monkeypatch.setattr(module, "iter_graphs", interrupted)
+    caplog.set_level("INFO")
+    with pytest.raises(RuntimeError, match="injected source failure"):
+        module.create_graphs(
+            [object()] * 5,
+            None,
+            {"neighborlist_backend": "ase"},
+            "train",
+            [tmp_path],
+            storage_mode=mode,
+            batch_size=2,
+            transaction_bytes=1,
+        )
+    assert any("train graphs: 2/5" in message for message in caplog.messages)
+    assert not any("complete" in message for message in caplog.messages)
+    assert read_cache_metadata([tmp_path], "train") is None
+
+
+def test_graph_cache_publication_failure_does_not_report_completion(
+    tmp_path, monkeypatch, caplog
+):
+    import tace.dataset.datamodule as module
+    import tace.dataset.store as store_module
+
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+    )
+    monkeypatch.setattr(module, "iter_graphs", lambda *args: iter([graph]))
+
+    def no_publication(*args, **kwargs):
+        raise RuntimeError("injected publication failure")
+
+    monkeypatch.setattr(store_module, "write_cache_metadata", no_publication)
+    caplog.set_level("INFO")
+    with pytest.raises(RuntimeError, match="injected publication failure"):
+        module.create_graphs(
+            [object()], None, {"neighborlist_backend": "ase"}, "train", [tmp_path]
+        )
+    assert not any("complete" in message for message in caplog.messages)
+    assert not any("100.0%" in message for message in caplog.messages)
+    assert read_cache_metadata([tmp_path], "train") is None
 
 
 def test_reader_aliases_preserve_explicit_fields_and_validate_scope():
@@ -271,8 +423,20 @@ def test_property_dependencies_are_transitive(monkeypatch):
 def _write_reader_database(path):
     from ase.db import connect
 
+    open_lmdb = lmdb.open
+
+    def open_small_lmdb(*args, **kwargs):
+        kwargs["map_size"] = 1 << 20
+        return open_lmdb(*args, **kwargs)
+
+    # ASE-LMDB defaults to a 2 TiB map, which expands the file on Windows.
+    # Restrict only fixture creation; readers still use the real lmdb.open.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(lmdb, "open", open_small_lmdb)
+        database = connect(path)
+
     atoms_list = []
-    with connect(path) as database:
+    with database:
         for index, symbols in enumerate(("H2", "O", "HO", "H2O")):
             atoms = Atoms(symbols)
             atoms.positions = np.arange(len(atoms) * 3).reshape(-1, 3) * 0.2
@@ -289,6 +453,14 @@ def _write_reader_database(path):
             )
             atoms_list.append(atoms)
     return atoms_list
+
+
+def _file_digest(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.digest()
 
 
 def _reader_keys():
@@ -387,7 +559,7 @@ def test_database_readers_are_lazy_readonly_and_batched(
         pytest.importorskip("ase_db_backends.aselmdb")
     path = tmp_path / f"structures.{suffix}"
     _write_reader_database(path)
-    before = path.read_bytes()
+    before = _file_digest(path)
 
     def no_atoms(*args, **kwargs):
         raise AssertionError("Record reads must not materialize ASE Atoms")
@@ -410,7 +582,7 @@ def test_database_readers_are_lazy_readonly_and_batched(
     assert [len(record) for record in records] == [3, 2, 3]
     assert [record.info["fidelity_idx"] for record in records] == [2, 2, 2]
     assert records[0].data["reference_energy"] == -4.0
-    assert path.read_bytes() == before
+    assert _file_digest(path) == before
     restored = pickle.loads(pickle.dumps(source))
     assert len(restored.get_record(-1)) == 3
 
@@ -762,6 +934,73 @@ def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
     assert projected[1].energy.item() == 1
     projected.close()
     assert saved.energy.item() == 0
+
+
+def test_store_progress_counts_committed_batches_and_final_partial(tmp_path):
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+    )
+    written = []
+    dataset = write_graphs(
+        [graph] * 5,
+        [tmp_path],
+        "train",
+        transaction_bytes=2 * len(encode_graph(graph)),
+        progress=written.append,
+    )
+    assert written == [2, 2, 1]
+    assert sum(written) == len(dataset)
+    dataset.close()
+    written.clear()
+    reused = write_graphs(iter(()), [tmp_path], "train", progress=written.append)
+    assert len(reused) == 5 and not written
+    reused.close()
+
+
+def test_store_progress_does_not_double_count_map_full_retries(tmp_path, monkeypatch):
+    open_lmdb = lmdb.open
+    resized = []
+
+    class TrackingEnvironment:
+        def __init__(self, environment):
+            self.environment = environment
+
+        def __getattr__(self, name):
+            return getattr(self.environment, name)
+
+        def set_mapsize(self, size):
+            resized.append(size)
+            self.environment.set_mapsize(size)
+
+    def track_map_size(*args, **kwargs):
+        environment = open_lmdb(*args, **kwargs)
+        if kwargs.get("readonly"):
+            return environment
+        return TrackingEnvironment(environment)
+
+    monkeypatch.setattr(lmdb, "open", track_map_size)
+    graph = Data(
+        num_nodes=1,
+        atomic_numbers=torch.tensor([1]),
+        positions=torch.zeros(1, 3, dtype=torch.float64),
+        edge_index=torch.empty((2, 0), dtype=torch.int64),
+        payload=torch.zeros(300_000, dtype=torch.float64),
+    )
+    written = []
+    dataset = write_graphs(
+        [graph],
+        [tmp_path],
+        "train",
+        map_size=1 << 20,
+        progress=written.append,
+    )
+    assert resized == [2 << 20, 4 << 20]
+    assert written == [1]
+    assert torch.equal(dataset[0].payload, graph.payload)
+    dataset.close()
 
 
 def test_store_failure_does_not_publish_completion(tmp_path):

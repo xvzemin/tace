@@ -310,12 +310,14 @@ def test_packed_neighbor_training_batch(backend, search_device, monkeypatch):
         assert _neighbor_rows(graph) == _neighbor_rows(reference)
 
 
-def test_multi_gpu_graph_batches(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shard_size", [2, 100_000])
+def test_multi_gpu_graph_batches(tmp_path, monkeypatch, caplog, shard_size):
     if torch.cuda.device_count() < 2:
         pytest.skip("Two CUDA devices are required")
     pytest.importorskip("nvalchemiops.torch.neighbors")
     import tace.dataset.datamodule as datamodule
 
+    caplog.set_level("INFO")
     structures = _mixed_neighbor_structures()
     for index, atoms in enumerate(structures):
         atoms.info["energy"] = float(index)
@@ -349,11 +351,14 @@ def test_multi_gpu_graph_batches(tmp_path, monkeypatch):
         "train",
         directories,
         batch_size=2,
+        shard_size=shard_size,
         device=None,
     )
     assert assigned == ["cuda:0", "cuda:1"]
     assert len(dataset) == len(expected)
-    assert len(dataset.lmdb_paths) == 2
+    assert f"train graphs: {len(expected)}/{len(expected)} (100.0%)" in caplog.text
+    assert caplog.text.count("; complete") == 1
+    assert len(dataset.lmdb_paths) == (6 if shard_size == 2 else 2)
     assert {path.parent for path in dataset.lmdb_paths} == set(directories)
     assert all("_part_shard" in path.name for path in dataset.lmdb_paths)
     np.testing.assert_array_equal(
@@ -376,10 +381,12 @@ def test_multi_gpu_graph_batches(tmp_path, monkeypatch):
         raise AssertionError("A complete cache must not start GPU workers")
 
     monkeypatch.setattr(datamodule, "ProcessPoolExecutor", no_workers)
+    caplog.clear()
     cached = datamodule.create_graphs(
         None, None, options, "train", directories, device="all"
     )
     assert len(cached) == len(expected)
+    assert "graphs/s" not in caplog.text
     cached.close()
 
 

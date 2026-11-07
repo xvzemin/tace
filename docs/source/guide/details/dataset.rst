@@ -80,6 +80,10 @@ distributed across ``shard_dirs``. Each shard obeys ``shard_size`` and
 ``graph_batch_size`` is per GPU; ``graph_workers`` does not set GPU worker
 count. Completed caches load without starting GPU workers.
 
+Offline construction logs completed graphs, throughput, and estimated remaining
+time every ten seconds. LMDB progress counts committed records; multiple GPUs
+share one aggregate report. Completion is logged after publishing the cache.
+
 More GPUs can increase preprocessing throughput, but source decoding, shared
 disk bandwidth, and process startup can limit scaling. Multi-rank DDP rejects
 multi-GPU ``memory`` preprocessing; use ``lmdb`` for rank-zero shared-cache

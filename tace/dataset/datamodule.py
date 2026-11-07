@@ -2,10 +2,17 @@
 
 import logging
 import multiprocessing
+import time
 from collections import deque
 from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from contextlib import ExitStack
+from datetime import timedelta
 from pathlib import Path
 
 import torch
@@ -24,6 +31,48 @@ from .read import tace_read_all_files
 from .records import record_from_atoms
 from .split import IndexedSource
 from .store import GraphDatasetLMDB, build_graph_store, write_graphs
+
+
+class GraphProgress:
+    """Log graph counts, throughput, and remaining time every ten seconds.
+
+    Parameters
+    ----------
+    total : int
+        Number of structures to process.
+    stage : str
+        Dataset split name.
+    """
+
+    def __init__(self, total, stage):
+        self.total, self.stage = total, stage
+        self.count = 0
+        self.started = self.updated = time.monotonic()
+
+    def update(self, count, *, finished=False):
+        self.count += count
+        now = time.monotonic()
+        if not finished and (now - self.updated < 10 or self.count >= self.total):
+            return
+        if not self.count or (
+            dist.is_available() and dist.is_initialized() and dist.get_rank() != 0
+        ):
+            return
+        elapsed = max(now - self.started, 1e-9)
+        rate = self.count / elapsed
+        remaining = max(0, self.total - self.count) / rate
+        logging.info(
+            "%s graphs: %d/%d (%.1f%%), %.1f graphs/s, elapsed %s, ETA %s%s",
+            self.stage,
+            self.count,
+            self.total,
+            100 * self.count / max(1, self.total),
+            rate,
+            timedelta(seconds=int(elapsed)),
+            timedelta(seconds=int(remaining)),
+            "; complete" if finished else "",
+        )
+        self.updated = now
 
 
 def read_records(source, indices):
@@ -83,8 +132,20 @@ def write_gpu_graphs(
     stage,
     batch_size,
     writer_options,
+    progress_connection,
 ):
     """Read, construct, and write assigned graph partitions on one GPU."""
+    count = 0
+    updated = time.monotonic()
+
+    def progress(written):
+        nonlocal count, updated
+        count += written
+        now = time.monotonic()
+        if now - updated >= 1:
+            progress_connection.send(count)
+            updated = now
+
     completed = []
     for index, start, stop in partitions:
         offset = index % len(directories)
@@ -100,10 +161,13 @@ def write_gpu_graphs(
             graphs,
             part_directories,
             f"{stage}_shard{index:06d}_part",
+            progress=progress,
             **writer_options,
         )
         completed.append((index, dataset.metadata))
         dataset.close()
+    progress_connection.send(count)
+    progress_connection.close()
     return completed
 
 
@@ -113,8 +177,10 @@ def write_multi_gpu_graphs(
     """Build independent LMDB partitions and publish their ordered index."""
     if batch_size < 1:
         raise ValueError("Graph batch_size must be positive.")
+    progress = None
 
     def build(directories, stage, writer_options):
+        nonlocal progress
         size = len(source)
         per_device = max(batch_size, (size + len(devices) - 1) // len(devices))
         # Balance several partitions per GPU without creating many tiny LMDBs.
@@ -137,8 +203,10 @@ def write_multi_gpu_graphs(
         logging.info(
             "Reading, building, and writing %s graphs across %s", stage, devices
         )
+        progress = GraphProgress(size, stage)
+        context = multiprocessing.get_context("spawn")
         with ExitStack() as stack:
-            futures = []
+            futures, receivers, counts = [], [], []
             for slot, device in enumerate(devices):
                 assigned = partitions[slot :: len(devices)]
                 if not assigned:
@@ -146,11 +214,16 @@ def write_multi_gpu_graphs(
                 executor = stack.enter_context(
                     ProcessPoolExecutor(
                         max_workers=1,
-                        mp_context=multiprocessing.get_context("spawn"),
+                        mp_context=context,
                         initializer=initialize_graph_worker,
                         initargs=(device,),
                     )
                 )
+                receiver, sender = context.Pipe(duplex=False)
+                stack.enter_context(receiver)
+                stack.enter_context(sender)
+                receivers.append(receiver)
+                counts.append(0)
                 futures.append(
                     executor.submit(
                         write_gpu_graphs,
@@ -163,12 +236,26 @@ def write_multi_gpu_graphs(
                         stage,
                         batch_size,
                         writer_options,
+                        sender,
                     )
                 )
-            completed = [part for future in futures for part in future.result()]
+            completed, pending = [], set(futures)
+            while pending:
+                done, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                for slot, receiver in enumerate(receivers):
+                    count = counts[slot]
+                    while receiver.poll():
+                        count = receiver.recv()
+                    progress.update(count - counts[slot])
+                    counts[slot] = count
+                for future in done:
+                    completed.extend(future.result())
         return [metadata for _, metadata in sorted(completed)]
 
-    return build_graph_store(build, shard_dirs, stage, **writer_options)
+    dataset = build_graph_store(build, shard_dirs, stage, **writer_options)
+    if progress is not None:
+        progress.update(0, finished=True)
+    return dataset
 
 
 def iter_gpu_graphs(source, element, options, chunks, devices):
@@ -368,20 +455,29 @@ def create_graphs(
             **writer_options,
         )
     graphs = iter_graphs(atoms_list, element, for_dataset, batch_size, workers, device)
+    progress = GraphProgress(len(atoms_list), stage)
     if storage_mode == "memory":
         dataset = GraphDatasetLMDB([], in_memory=True)
-        dataset.data_list = list(graphs)
+        dataset.data_list = []
+        for graph in graphs:
+            dataset.data_list.append(graph)
+            if len(dataset.data_list) % batch_size == 0:
+                progress.update(batch_size)
         dataset.length = len(dataset.data_list)
+        progress.update(dataset.length % batch_size, finished=True)
         return dataset
     logging.info(
         "Building %d %s graphs in batches of %d", len(atoms_list), stage, batch_size
     )
-    return write_graphs(
+    dataset = write_graphs(
         graphs,
         shard_dirs,
         stage,
+        progress=progress.update,
         **writer_options,
     )
+    progress.update(0, finished=True)
+    return dataset
 
 
 class GraphDataModule(LightningDataModule):

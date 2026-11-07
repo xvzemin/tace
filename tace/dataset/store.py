@@ -628,6 +628,7 @@ def _write_store_locked(
     cache_size=0,
     max_open_shards=32,
     map_size=64 * _MIB,
+    progress=None,
 ):
     validate_stage(stage)
     if (
@@ -675,8 +676,11 @@ def _write_store_locked(
         for _, value, nodes, edges in buffer:
             counts_stream.write(_COUNTS.pack(nodes, edges))
             digest.update(value)
+        written = len(buffer)
         buffer = []
         buffered_bytes = 0
+        if progress is not None:
+            progress(written)
 
     def finish_shard():
         nonlocal env, counts_stream, temporary, shard_index
