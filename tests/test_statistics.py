@@ -4,15 +4,22 @@ import math
 import multiprocessing
 import os
 import pickle
+import sqlite3
+import time
+from collections import Counter
+from types import SimpleNamespace
 
 import lmdb
 import numpy as np
 import pytest
 import torch
 from ase import Atoms
+from ase.calculators.singlepoint import SinglePointCalculator
+from ase.db import connect
+from ase.io import write
 from omegaconf import OmegaConf
 from torch.utils.data import SequentialSampler
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 from torch_geometric.loader import DataLoader
 
 import tace.dataset.statistics as statistics_module
@@ -23,16 +30,32 @@ from tace.dataset.cache import (
     source_cache_key,
     statistics_cache_key,
 )
-from tace.dataset.dataloader import build_statistics_dataloader
-from tace.dataset.datamodule import GraphDatasetLMDB, create_graphs
+from tace.dataset.dataloader import (
+    StatisticsDataLoader,
+    build_statistics_dataloader,
+    collate_statistics,
+    statistics_devices,
+)
+from tace.dataset.datamodule import GraphDatasetLMDB, build_datamodule, create_graphs
 from tace.dataset.element import build_element_lookup
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KeySpecification
+from tace.dataset.read import (
+    ASEDatabaseSource,
+    ASEFileSource,
+    BoundSource,
+    ConcatSource,
+    RecordSource,
+    read_all_files,
+)
+from tace.dataset.records import record_from_atoms
+from tace.dataset.split import IndexedSource
 from tace.dataset.store import (
     build_graph_store,
     decode_graph,
     encode_graph,
     write_graphs,
+    write_records,
 )
 from tace.models.blocks import ScaleShift
 
@@ -201,6 +224,20 @@ def graph_progress(monkeypatch):
 
     monkeypatch.setattr(module, "GraphProgress", record)
     return reporters
+
+
+@pytest.fixture
+def statistics_progress(monkeypatch):
+    bars = []
+    original = statistics_module.tqdm
+
+    def record(*args, **kwargs):
+        bar = original(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(statistics_module, "tqdm", record)
+    return bars
 
 
 @pytest.mark.parametrize("rank", [None, 0, 1])
@@ -818,6 +855,279 @@ def test_aselmdb_online_loader_process_reuse(tmp_path, context):
     actual = next(iter(loader))
     torch.testing.assert_close(actual.energy[:1], expected)
     assert actual.energy.dtype == torch.float64
+
+
+@pytest.fixture
+def structures():
+    frames = []
+    for index, symbols in enumerate(("H2", "O", "HO", "H2O")):
+        atoms = Atoms(symbols)
+        atoms.positions = np.arange(len(atoms) * 3).reshape(-1, 3) * 0.2
+        atoms.calc = SinglePointCalculator(
+            atoms, energy=-float(index + 1), forces=np.zeros((len(atoms), 3))
+        )
+        frames.append(atoms)
+    return frames
+
+
+@pytest.fixture
+def sqlite_source(tmp_path, structures):
+    path = tmp_path / "structures.db"
+    with connect(path) as database:
+        for atoms in structures:
+            database.write(atoms)
+    return path
+
+
+def _track_connections(monkeypatch):
+    connections = []
+    real_connect = sqlite3.connect
+
+    def track(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", track)
+    return connections
+
+
+def _assert_closed(connections):
+    assert connections
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
+def _options():
+    return dict(
+        cutoff=2.0,
+        max_neighbors=None,
+        keyspec=KeySpecification.from_defaults(),
+        target_property=["energy", "forces"],
+        embedding_property=[],
+        neighborlist_backend="ase",
+    )
+
+
+def test_wrapped_sqlite_source_closes_and_reopens_readonly(sqlite_source, monkeypatch):
+    original = sqlite_source.read_bytes()
+    connections = _track_connections(monkeypatch)
+    source = read_all_files(
+        sqlite_source, ["energy", "forces"], _options()["keyspec"], backend="ase_db"
+    )
+    subset = IndexedSource(source, [3, 0, 3])
+    assert [len(record) for record in subset.get_records([0, 1, 2])] == [3, 2, 3]
+    subset.close()
+    subset.close()
+    _assert_closed(connections)
+
+    assert len(subset.get_record(1)) == 2
+    assert len(connections) == 2
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        connections[-1].execute("DELETE FROM systems")
+    subset.close()
+    _assert_closed(connections)
+    assert sqlite_source.read_bytes() == original
+    sqlite_source.unlink()
+
+
+@pytest.mark.parametrize("mode", ["memory", "lmdb"])
+def test_offline_graphs_release_raw_source_and_split_readers(
+    tmp_path, sqlite_source, monkeypatch, mode
+):
+    monkeypatch.chdir(tmp_path)
+    connections = _track_connections(monkeypatch)
+    loader = {
+        "_target_": "torch_geometric.loader.DataLoader",
+        "batch_size": 2,
+        "num_workers": 0,
+    }
+    cfg = {
+        "misc": {"device": "cpu", "seed": 42},
+        "model": {"config": {"cutoff": 2.0}},
+        "dataset": {
+            "type": "ase_db",
+            "train_file": str(sqlite_source),
+            "storage_mode": mode,
+            "shard_dirs": [str(tmp_path / "graphs")],
+            "neighborlist_backend": "ase",
+            "valid_ratio": 0.5,
+            "train_dataloader": loader,
+            "valid_dataloader": dict(loader),
+        },
+    }
+    module = build_datamodule(
+        cfg, None, ["energy", "forces"], [], _options()["keyspec"]
+    )
+    module.setup("fit")
+    assert len(connections) == 2  # Validation reopens the shared raw source.
+    _assert_closed(connections)
+    sqlite_source.unlink()
+    for dataset in (module.train_dataset, module.val_dataset):
+        assert len(dataset) == 2
+        assert len(dataset.__getitems__([0, 1])) == 2
+        dataset.close()
+
+    if mode == "lmdb":
+
+        def no_raw_source(*args, **kwargs):
+            pytest.fail("Completed graph caches must not reopen raw sources")
+
+        monkeypatch.setattr(
+            "tace.dataset.datamodule.tace_read_all_files", no_raw_source
+        )
+        warm = build_datamodule(
+            cfg, None, ["energy", "forces"], [], _options()["keyspec"]
+        )
+        warm.setup("fit")
+        assert warm.threeAtomsList is None
+        assert len(warm.train_dataset) == len(warm.val_dataset) == 2
+        warm.train_dataset.close()
+        warm.val_dataset.close()
+    _assert_closed(connections)
+
+
+@pytest.mark.parametrize("mode", ["memory", "lmdb", "multi_gpu"])
+def test_failed_offline_build_releases_source(
+    tmp_path, sqlite_source, monkeypatch, mode
+):
+    connections = _track_connections(monkeypatch)
+    source = read_all_files(
+        sqlite_source, ["energy", "forces"], _options()["keyspec"], backend="ase_db"
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected graph failure")
+
+    if mode == "multi_gpu":
+        monkeypatch.setattr(
+            "tace.dataset.datamodule.graph_devices", lambda *args: ["cuda:0", "cuda:1"]
+        )
+        monkeypatch.setattr("tace.dataset.datamodule.write_multi_gpu_graphs", fail)
+    else:
+        monkeypatch.setattr("tace.dataset.datamodule.from_records", fail)
+    with pytest.raises(RuntimeError, match="injected graph failure"):
+        create_graphs(
+            source,
+            None,
+            _options(),
+            "train",
+            [tmp_path / "graphs"],
+            storage_mode="lmdb" if mode == "multi_gpu" else mode,
+        )
+    _assert_closed(connections)
+    assert len(source.get_record(0)) == 2
+    source.close()
+    _assert_closed(connections)
+
+
+def test_online_graphs_keep_source_available_and_reopen_after_close(
+    tmp_path, sqlite_source, monkeypatch
+):
+    connections = _track_connections(monkeypatch)
+    source = ASEDatabaseSource(sqlite_source)
+    dataset = create_graphs(
+        source, None, _options(), "train", [tmp_path], storage_mode="on_the_fly"
+    )
+    assert connections == []
+    assert dataset[0].num_nodes == 2
+    assert len(connections) == 1
+    assert connections[0].execute("SELECT COUNT(*) FROM systems").fetchone() == (4,)
+    dataset.close()
+    _assert_closed(connections)
+    assert dataset[3].num_nodes == 3
+    assert len(connections) == 2
+    dataset.close()
+    _assert_closed(connections)
+
+
+def test_cache_hit_releases_an_already_open_raw_source(
+    tmp_path, sqlite_source, monkeypatch
+):
+    connections = _track_connections(monkeypatch)
+    source = ASEDatabaseSource(sqlite_source)
+    arguments = (source, None, _options(), "train", [tmp_path / "graphs"])
+    cold = create_graphs(*arguments)
+    cold.close()
+    _assert_closed(connections)
+    source.get_record(0)
+
+    def no_records(*args, **kwargs):
+        pytest.fail("A cache published after source discovery must not read raw rows")
+
+    monkeypatch.setattr(source, "get_records", no_records)
+    warm = create_graphs(*arguments)
+    assert len(warm) == 4
+    _assert_closed(connections)
+    warm.close()
+
+
+def test_trajectory_source_releases_real_file_and_reopens(tmp_path, structures):
+    path = tmp_path / "structures.traj"
+    write(path, structures)
+    source = ASEFileSource(path)
+    assert len(source.get_record(0)) == 2
+    reader = source._trajectory
+    source.close()
+    assert reader.backend._fd.closed
+    assert len(source.get_record(3)) == 3
+    source.close()
+    path.unlink()
+
+
+def test_record_cache_wrappers_release_store_and_reopen(tmp_path, structures):
+    dataset = write_records(
+        (record_from_atoms(atoms) for atoms in structures), [tmp_path / "records"]
+    )
+    source = IndexedSource(
+        ConcatSource(
+            [
+                BoundSource(
+                    RecordSource(dataset, "records"), _options()["keyspec"], [], []
+                )
+            ]
+        ),
+        [3, 0],
+    )
+    assert len(source.get_record(0)) == 3
+    assert dataset._opened
+    source.close()
+    assert not dataset._opened
+    assert len(source.get_record(1)) == 2
+    assert dataset._opened
+    source.close()
+
+
+def test_aselmdb_shared_readers_can_release_and_reopen(
+    tmp_path, structures, monkeypatch
+):
+    pytest.importorskip("ase_db_backends.aselmdb")
+    path = tmp_path / "structures.aselmdb"
+    real_open = lmdb.open
+
+    def small_open(*args, **kwargs):
+        kwargs["map_size"] = 1 << 20
+        return real_open(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lmdb, "open", small_open)
+        with connect(path) as database:
+            for atoms in structures:
+                database.write(atoms)
+    first = ASEDatabaseSource(path, lmdb=True)
+    second = ASEDatabaseSource(path, lmdb=True)
+    assert len(first.get_record(0)) == len(second.get_record(0)) == 2
+    shared = first._lmdb()
+    assert shared is second._lmdb()
+    first.close()
+    with pytest.raises(lmdb.Error):
+        shared.stat()
+    assert len(second.get_record(3)) == 3
+    assert len(first.get_record(1)) == 1
+    first.close()
+    second.close()
+    path.unlink()
 
 
 @pytest.mark.parametrize("default_dtype", [torch.float32, torch.float64])
@@ -1704,6 +2014,152 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     assert all(p.read_bytes() == value for p, value in contents.items())
 
 
+def _statistics_loader_graphs():
+    return [
+        Data(
+            num_nodes=n,
+            atomic_numbers=torch.ones(n, dtype=torch.int64),
+            edge_index=torch.stack((torch.arange(n), torch.arange(n))),
+            num_neighbors=torch.ones(n, dtype=torch.int64),
+            positions=torch.zeros(n, 3, dtype=torch.float64),
+            energy=torch.tensor([n * 0.1], dtype=torch.float64),
+            energy_weight=torch.ones(1, dtype=torch.float64),
+            forces=torch.arange(n * 3, dtype=torch.float64).reshape(n, 3),
+            forces_weight=torch.ones(1, dtype=torch.float64),
+            fidelity_idx=torch.tensor(n % 2),
+        )
+        for n in (2, 1, 4, 3, 1)
+    ]
+
+
+@pytest.mark.parametrize("as_dict", [False, True])
+def test_statistics_collation_matches_pyg_and_keeps_integer_indices(as_dict):
+    samples = _statistics_loader_graphs()
+    expected = Batch.from_data_list(samples)
+    actual = collate_statistics(
+        [sample.to_dict() for sample in samples] if as_dict else samples
+    )
+    assert actual.num_graphs == expected.num_graphs
+    assert actual.num_nodes == expected.num_nodes
+    assert set(actual.keys()) == set(expected.keys())
+    for key in expected.keys():
+        if key != "num_nodes":
+            torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+    assert actual.batch.dtype == actual.ptr.dtype == torch.int64
+
+
+def test_lmdb_statistics_projection_is_owned_and_readonly(tmp_path):
+    samples = _statistics_loader_graphs()
+    dataset = write_graphs(samples, [tmp_path], "train")
+    before = {p: _file_digest(p) for p in tmp_path.rglob("*") if p.is_file()}
+    cfg = {
+        "dataset": {
+            "train_dataloader": {
+                "_target_": "torch_geometric.loader.DataLoader",
+                "batch_size": 1,
+                "num_workers": 4,
+                "prefetch_factor": 2,
+                "persistent_workers": True,
+            },
+            "statistics_dataloader": {"batch_size": 3},
+        },
+    }
+    loader = build_statistics_dataloader(cfg, dataset, ["energy", "forces"])
+    assert isinstance(loader, StatisticsDataLoader)
+    assert loader.num_workers == 0
+    assert loader.prefetch_factor is None
+    assert not loader.persistent_workers
+    assert loader.batch_size == 3
+    batches = list(loader)
+    assert sum(b.num_graphs for b in batches) == len(samples)
+    assert "positions" not in batches[0]
+    assert "edge_index" not in batches[0]
+    assert batches[0].energy.dtype == torch.float64
+    # Returning dictionaries avoids one PyG object per graph. Mutating a decoded
+    # tensor must never change the mapped source bytes or subsequent reads.
+    decoded = loader.dataset[0]
+    assert isinstance(decoded, dict)
+    decoded["energy"].fill_(12345)
+    torch.testing.assert_close(loader.dataset[0]["energy"], samples[0].energy)
+    loader.dataset.close()
+    dataset.close()
+    assert all(_file_digest(p) == v for p, v in before.items())
+
+
+def test_explicit_statistics_workers_have_independent_prefetch_default():
+    cfg = {
+        "dataset": {
+            "train_dataloader": {
+                "_target_": "torch_geometric.loader.DataLoader",
+                "batch_size": 1,
+                "num_workers": 8,
+                "prefetch_factor": 4,
+            },
+            "statistics_dataloader": {"num_workers": 2},
+        }
+    }
+    loader = build_statistics_dataloader(cfg, _statistics_loader_graphs(), ["energy"])
+    assert loader.num_workers == 2
+    assert loader.prefetch_factor == 1
+    cfg["dataset"]["statistics_dataloader"]["prefetch_factor"] = 3
+    assert (
+        build_statistics_dataloader(cfg, _statistics_loader_graphs()).prefetch_factor
+        == 3
+    )
+
+
+def test_statistics_devices_respect_visibility_and_dataset_mode(tmp_path, monkeypatch):
+    dataset = write_graphs(_statistics_loader_graphs(), [tmp_path], "train")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 3)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    cfg = OmegaConf.create({"dataset": {}, "misc": {"device": "cuda"}})
+    assert statistics_devices(cfg, dataset) == ["cuda:0", "cuda:1", "cuda:2"]
+    assert statistics_devices(cfg, _statistics_loader_graphs()) == ["cuda"]
+    cfg.misc.device = "cuda:2"
+    assert statistics_devices(cfg, dataset) == ["cuda:2"]
+    cfg.misc.device = "cpu"
+    assert statistics_devices(cfg, dataset) == ["cpu"]
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    cfg.misc.device = "cuda"
+    assert statistics_devices(cfg, dataset) == ["cuda:0"]
+    dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("environment_size", "group_size", "local_rank", "expected"),
+    [
+        (4, None, 2, ["cuda:2"]),
+        (4, None, None, ["cuda"]),
+        (1, 4, None, ["cuda"]),
+        (1, 4, 1, ["cuda:1"]),
+    ],
+)
+def test_statistics_devices_do_not_expand_all_gpus_in_each_distributed_rank(
+    tmp_path, monkeypatch, environment_size, group_size, local_rank, expected
+):
+    dataset = write_graphs(_statistics_loader_graphs(), [tmp_path], "train")
+    monkeypatch.setenv("WORLD_SIZE", str(environment_size))
+    if local_rank is None:
+        monkeypatch.delenv("LOCAL_RANK", raising=False)
+    else:
+        monkeypatch.setenv("LOCAL_RANK", str(local_rank))
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch.distributed, "is_initialized", lambda: group_size is not None
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: group_size)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    try:
+        cfg = {"misc": {"device": "cuda"}}
+        assert statistics_devices(cfg, dataset) == expected
+        cfg["misc"]["device"] = "cuda:3"
+        assert statistics_devices(cfg, dataset) == ["cuda:3"]
+        cfg["misc"]["device"] = "cpu"
+        assert statistics_devices(cfg, dataset) == ["cpu"]
+    finally:
+        dataset.close()
+
+
 def test_statistics_dataloader_overrides_training_batch_size():
     dataset = [
         Data(
@@ -2069,3 +2525,394 @@ def test_noncollinear_magmoms_statistics_are_per_fidelity(monkeypatch):
 
     assert stats[0]["max_noncollinear_magmoms_norm_by_element"] == {26: 1.0}
     assert stats[1]["max_noncollinear_magmoms_norm_by_element"] == {26: 5.0}
+
+
+def _assert_statistics_equal(actual, expected):
+    if isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_statistics_equal(actual[key], expected[key])
+    elif isinstance(expected, (list, tuple)):
+        assert len(actual) == len(expected)
+        for value, reference in zip(actual, expected):
+            _assert_statistics_equal(value, reference)
+    elif isinstance(expected, float):
+        assert np.isfinite(actual)
+        assert actual == pytest.approx(expected, rel=2e-12, abs=2e-12)
+    else:
+        assert actual == expected
+
+
+@pytest.fixture
+def statistics_graphs():
+    generator = torch.Generator().manual_seed(71)
+    graphs = []
+    for index in range(11):
+        count = 1 + index % 4
+        energy = torch.randn(1, generator=generator, dtype=torch.float64) + 12
+        forces = torch.randn(count, 3, generator=generator, dtype=torch.float64)
+        valid_energy = index % 5 != 0
+        valid_forces = index % 4 != 0
+        if not valid_energy:
+            energy.fill_(float("nan"))
+        if not valid_forces:
+            forces.fill_(float("nan"))
+        magmoms = torch.randn(count, 3, generator=generator, dtype=torch.float64)
+        if index == 9:
+            magmoms[0] = torch.tensor([30.0, 40.0, 0.0], dtype=torch.float64)
+        graphs.append(
+            Data(
+                num_nodes=count,
+                atomic_numbers=torch.tensor(([1, 8] * count)[:count]),
+                num_neighbors=torch.arange(count) + index % 3,
+                edge_index=torch.empty((2, 0), dtype=torch.int64),
+                positions=torch.zeros(count, 3, dtype=torch.float64),
+                energy=energy,
+                energy_weight=torch.tensor([float(valid_energy)], dtype=torch.float64),
+                forces=forces,
+                forces_weight=torch.tensor([float(valid_forces)], dtype=torch.float64),
+                fidelity_idx=torch.tensor([index % 2]),
+                initial_noncollinear_magmoms=magmoms,
+            )
+        )
+    return graphs
+
+
+@pytest.fixture
+def statistics_options():
+    return {
+        "atomic_numbers": [1, 6, 8],
+        "atomic_energies": [{1: 1.5, 8: 2.5}, {1: 3.0, 8: 5.0}, {}],
+        "target_property": ["energy", "forces"],
+        "num_fidelities": 3,
+    }
+
+
+def _accumulator(graphs, options, batch_size=3):
+    accumulator = statistics_module._StatisticsAccumulator(**options)
+    for batch in DataLoader(graphs, batch_size=batch_size):
+        accumulator.update(batch)
+    return accumulator
+
+
+@pytest.mark.parametrize("mode", ["loader", "iterable", "callback"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_statistics_progress_counts_only_successful_batches(
+    monkeypatch,
+    capsys,
+    statistics_progress,
+    statistics_graphs,
+    statistics_options,
+    mode,
+    failure,
+):
+    loader = DataLoader(statistics_graphs, batch_size=4)
+    if mode == "iterable":
+        loader = list(loader)
+    accumulator = statistics_module._StatisticsAccumulator(**statistics_options)
+    update = accumulator.update
+    now = [0.0]
+    batches = 0
+
+    def consume(data):
+        nonlocal batches
+        if failure and batches:
+            raise RuntimeError("injected statistics failure")
+        update(data)
+        batches += 1
+        now[0] += 0.6
+
+    monkeypatch.setattr(accumulator, "update", consume)
+    monkeypatch.setattr(
+        statistics_module, "time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    reported = []
+    callback = reported.append if mode == "callback" else None
+    if failure:
+        with pytest.raises(RuntimeError, match="injected statistics failure"):
+            statistics_module._accumulate_statistics(loader, accumulator, callback)
+    else:
+        assert statistics_module._accumulate_statistics(
+            loader, accumulator, callback
+        ) == len(statistics_graphs)
+    output = capsys.readouterr().err
+    if mode == "callback":
+        # Workers report at most once a second, then flush the actual tail even
+        # after a failure. Only the coordinator owns a terminal progress bar.
+        assert reported == ([4] if failure else [8, 11])
+        assert not statistics_progress
+        assert "statistics:" not in output
+    else:
+        assert len(statistics_progress) == 1
+        progress = statistics_progress[0]
+        assert progress.total == (None if mode == "iterable" else 11)
+        assert progress.n == (4 if failure else 11)
+        assert progress.disable
+        assert "statistics:" in output
+
+
+@pytest.mark.parametrize("force_key", ["forces", "direct_forces"])
+def test_statistics_merge_preserves_masks_fidelities_and_element_table(
+    statistics_graphs, statistics_options, force_key
+):
+    graphs = statistics_graphs
+    options = statistics_options
+    if force_key == "direct_forces":
+        options["target_property"] = ["energy", force_key]
+        for graph in graphs:
+            graph[force_key] = graph.pop("forces")
+            graph[f"{force_key}_weight"] = graph.pop("forces_weight")
+
+    merged = statistics_module._StatisticsAccumulator(**options)
+    # Unequal partitions, including a neutral empty state, require weighted
+    # moment merging; averaging finalized standard deviations is incorrect.
+    for partition in ([], graphs[:1], graphs[1:7], graphs[7:]):
+        merged.merge(_accumulator(partition, options, batch_size=2).state())
+    result = merged.result("test-fingerprint")
+    _assert_statistics_equal(
+        result, _accumulator(graphs, options).result("test-fingerprint")
+    )
+
+    neighbors = torch.cat([graph.num_neighbors for graph in graphs]).double()
+    for fidelity in (0, 1):
+        local = [graph for graph in graphs if graph.fidelity_idx.item() == fidelity]
+        valid_energy = [graph for graph in local if graph.energy_weight.item() > 0]
+        energies = torch.cat([graph.energy for graph in valid_energy])
+        per_atom = torch.tensor(
+            [graph.energy.item() / graph.num_nodes for graph in valid_energy],
+            dtype=torch.float64,
+        )
+        valid_forces = [
+            graph for graph in local if graph[f"{force_key}_weight"].item() > 0
+        ]
+        forces = torch.cat([graph[force_key] for graph in valid_forces])
+        entry = result[fidelity]
+        assert entry["num_graphs"] == len(local)
+        assert entry["num_atoms"] == sum(graph.num_nodes for graph in local)
+        assert entry["avg_num_neighbors"] == pytest.approx(neighbors.mean().item())
+        assert entry["mean_energy"] == pytest.approx(energies.mean().item())
+        assert entry["std_energy"] == pytest.approx(energies.std().item())
+        assert entry["mean_energy_per_atom"][6] == pytest.approx(per_atom.mean().item())
+        assert entry["std_forces_xyz"] == pytest.approx(
+            forces.std(dim=0, correction=0).tolist()
+        )
+        assert entry["rms_forces_xyz"] == pytest.approx(
+            forces.square().mean(dim=0).sqrt().tolist()
+        )
+        for number in options["atomic_numbers"]:
+            assert entry["num_forces_by_element"][number] == sum(
+                int((graph.atomic_numbers == number).sum()) for graph in valid_forces
+            )
+            norms = [
+                graph.initial_noncollinear_magmoms[graph.atomic_numbers == number].norm(
+                    dim=-1
+                )
+                for graph in local
+            ]
+            norms = torch.cat(norms)
+            expected_max = norms.max().item() if norms.numel() else 0.0
+            assert entry["max_noncollinear_magmoms_norm_by_element"][number] == (
+                pytest.approx(expected_max)
+            )
+        assert entry["atomic_numbers"] == [1, 6, 8]
+        assert entry["data_dtype"] == "float64"
+        assert entry["data_fingerprint"] == "test-fingerprint"
+
+    assert result[1]["max_noncollinear_magmoms_norm_by_element"][1] == 50.0
+    assert result[2]["available"] is False
+    assert result[2]["num_graphs"] == result[2]["num_atoms"] == 0
+    assert result[2]["atomic_energy"] == {1: 0.0, 6: 0.0, 8: 0.0}
+    assert result[2]["rms_forces_by_element"] == {1: 1.0, 6: 1.0, 8: 1.0}
+
+
+def test_statistics_merge_retains_small_variance_on_large_energy_offset():
+    offset = float(2**40)
+    options = {
+        "atomic_numbers": [1, 8],
+        "atomic_energies": [{1: offset}],
+        "target_property": ["energy"],
+    }
+    graphs = [
+        Data(
+            num_nodes=1,
+            atomic_numbers=torch.tensor([1]),
+            num_neighbors=torch.tensor([0]),
+            energy=torch.tensor([offset + value], dtype=torch.float64),
+        )
+        for value in (-6.0, 0.0, 2.0, 4.0)
+    ]
+    merged = statistics_module._StatisticsAccumulator(**options)
+    for partition in (graphs[:1], graphs[1:]):
+        merged.merge(_accumulator(partition, options).state())
+    entry = merged.result()[0]
+    assert entry["mean_energy"] == offset
+    assert entry["std_energy"] == pytest.approx(np.sqrt(56.0 / 3.0), rel=1e-14)
+    assert entry["mean_delta_energy_per_atom"] == {1: 0.0, 8: 0.0}
+
+
+def _snapshot(directory):
+    return {
+        str(path.relative_to(directory)): (
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+            _file_digest(path),
+        )
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.fixture
+def statistics_store(tmp_path, statistics_graphs):
+    dataset = write_graphs(
+        iter(statistics_graphs), [tmp_path / "cache"], "train", shard_size=3
+    )
+    projected = dataset.project(
+        [
+            "atomic_numbers",
+            "num_neighbors",
+            "energy",
+            "energy_weight",
+            "forces",
+            "forces_weight",
+            "fidelity_idx",
+            "initial_noncollinear_magmoms",
+        ]
+    )
+    yield projected
+    projected.close()
+    dataset.close()
+
+
+@pytest.mark.parametrize("num_workers", [0, 1])
+def test_spawned_statistics_read_all_shards_once_without_changing_cache(
+    tmp_path,
+    statistics_progress,
+    statistics_store,
+    statistics_graphs,
+    statistics_options,
+    num_workers,
+):
+    loader_options = {"batch_size": 2, "num_workers": num_workers}
+    if num_workers:
+        loader_options["prefetch_factor"] = 1
+    loader = StatisticsDataLoader(statistics_store, **loader_options)
+    before = _snapshot(tmp_path)
+    children_before = {process.pid for process in multiprocessing.active_children()}
+    try:
+        tasks = statistics_module._statistics_tasks(
+            loader, **statistics_options, devices=[torch.device("cpu")] * 2
+        )
+        assigned_paths = [path for task in tasks for path in task["paths"]]
+        assert Counter(assigned_paths) == Counter(map(str, statistics_store.lmdb_paths))
+        assert sum(sum(task["lengths"]) for task in tasks) == len(statistics_graphs)
+        assert all(task["paths"] for task in tasks)
+        assert all(task["loader"]["num_workers"] == num_workers for task in tasks)
+        accumulator = statistics_module._StatisticsAccumulator(**statistics_options)
+        statistics_module._parallel_statistics(tasks, accumulator)
+        _assert_statistics_equal(
+            accumulator.result(),
+            _accumulator(statistics_graphs, statistics_options).result(),
+        )
+    finally:
+        loader.dataset.close()
+    assert _snapshot(tmp_path) == before
+    assert {process.pid for process in multiprocessing.active_children()} <= (
+        children_before
+    )
+    assert len(statistics_progress) == 1
+    progress = statistics_progress[0]
+    assert progress.total == len(statistics_graphs)
+    assert progress.n == len(statistics_graphs)
+    assert progress.disable
+
+
+def test_two_gpu_statistics_match_cpu_and_only_parent_writes_yaml(
+    tmp_path,
+    monkeypatch,
+    statistics_progress,
+    statistics_store,
+    statistics_graphs,
+    statistics_options,
+):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Two visible CUDA devices are required")
+    monkeypatch.chdir(tmp_path)
+    writes = []
+    monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", writes.append)
+    before = _snapshot(tmp_path)
+    loader = StatisticsDataLoader(statistics_store, batch_size=2, num_workers=0)
+    try:
+        result = statistics_module._compute_statistics(
+            loader, **statistics_options, devices=["cuda:0", "cuda:1"]
+        )
+    finally:
+        loader.dataset.close()
+    _assert_statistics_equal(
+        result, _accumulator(statistics_graphs, statistics_options).result()
+    )
+    assert writes == [result]
+    assert _snapshot(tmp_path) == before
+    assert len(statistics_progress) == 1
+    progress = statistics_progress[0]
+    assert progress.total == len(statistics_graphs)
+    assert progress.n == len(statistics_graphs)
+    assert progress.disable
+
+
+def _fail_or_wait(index, task, messages):
+    if index == 0:
+        messages.put(("progress", index, 1))
+        if task["failure"] == "exit":
+            messages.close()
+            messages.join_thread()
+            os._exit(7)
+        messages.put(("error", index, "deliberate statistics worker failure"))
+    # The coordinator must terminate a remaining worker after its peer fails.
+    time.sleep(30)
+
+
+@pytest.mark.parametrize("failure", ["error", "exit"])
+def test_parallel_statistics_reports_failure_and_reaps_its_workers(
+    monkeypatch, statistics_progress, failure, statistics_options
+):
+    context = multiprocessing.get_context("spawn")
+    processes = []
+
+    def record_process(**kwargs):
+        process = context.Process(**kwargs)
+        processes.append(process)
+        return process
+
+    recorded_context = SimpleNamespace(Queue=context.Queue, Process=record_process)
+    monkeypatch.setattr(
+        statistics_module,
+        "multiprocessing",
+        SimpleNamespace(get_context=lambda _: recorded_context),
+    )
+    monkeypatch.setattr(statistics_module, "_statistics_process", _fail_or_wait)
+    tasks = [
+        {
+            "device": "cpu",
+            "lengths": [2],
+            "loader": {"batch_size": 1},
+            "failure": failure,
+        }
+        for _ in range(2)
+    ]
+    expected = (
+        "deliberate statistics worker failure" if failure == "error" else "code 7"
+    )
+    with pytest.raises(RuntimeError, match=expected):
+        statistics_module._parallel_statistics(
+            tasks, statistics_module._StatisticsAccumulator(**statistics_options)
+        )
+    assert len(processes) == 2
+    assert all(not process.is_alive() for process in processes)
+    assert all(process.exitcode is not None for process in processes)
+    assert processes[1].exitcode != 0
+    assert len(statistics_progress) == 1
+    progress = statistics_progress[0]
+    assert progress.total == 4
+    assert progress.n == 1
+    assert progress.disable

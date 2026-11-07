@@ -172,9 +172,10 @@ dataset:
     drop_last: false
     num_workers: 4 # If the batch size is large, you need to set up multiple workers
 
-  # Increase this value as far as device memory permits.
+  # Per statistics device; benchmark host decoding as well as GPU memory.
   statistics_dataloader:
     batch_size: 256
+    num_workers: 0
 
   valid_dataloader:
     _target_: torch_geometric.loader.DataLoader

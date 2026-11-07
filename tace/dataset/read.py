@@ -76,6 +76,9 @@ class SourceSequence(Sequence):
 
     atomic_numbers = None  # Optional source metadata; never trigger a data scan.
 
+    def close(self):
+        """Release open readers while retaining indexes for lazy, read-only reuse."""
+
     def _index(self, index):
         if not isinstance(index, (int, np.integer)) or isinstance(
             index, (bool, np.bool_)
@@ -142,6 +145,12 @@ class ASEFileSource(SourceSequence):
         state.update(_trajectory=None, _pid=None)
         return state
 
+    def close(self):
+        if self._trajectory is not None:
+            self._trajectory.close()
+            self._trajectory = None
+        self._pid = None
+
     def _build_index(self):
         if self._length is not None:
             return
@@ -196,6 +205,7 @@ class ASEFileSource(SourceSequence):
         if self._trajectory is None or self._pid != os.getpid():
             from ase.io.trajectory import TrajectoryReader
 
+            self.close()
             self._trajectory = TrajectoryReader(self.path)
             self._pid = os.getpid()
         return self._trajectory
@@ -254,6 +264,9 @@ class RecordSource(SourceSequence):
 
     def _read_records(self, indices):
         return self.dataset.get_records(indices)
+
+    def close(self):
+        self.dataset.close()
 
 
 def _cached_random_source(source, directory):
@@ -327,6 +340,20 @@ class ASEDatabaseSource(SourceSequence):
         state.update(_sql_connection=None, _sql_db=None, _pid=None)
         return state
 
+    def close(self):
+        if self._sql_connection is not None:
+            self._sql_connection.close()
+            self._sql_connection = None
+        self._sql_db = None
+        self._pid = None
+        if self.lmdb:
+            # Transactions hold this lock, and every reader resolves the shared
+            # handle anew for each transaction. Other sources can reopen it.
+            with _LMDB_LOCK:
+                for key in list(_LMDB_HANDLES):
+                    if key[:2] == (os.getpid(), self.path):
+                        _LMDB_HANDLES.pop(key).close()
+
     def _lmdb(self):
         import lmdb
 
@@ -373,6 +400,7 @@ class ASEDatabaseSource(SourceSequence):
 
             from ase.db.sqlite import SQLite3Database
 
+            self.close()
             options = {
                 key: value for key, value in self.options.items() if key != "readonly"
             }
@@ -382,6 +410,11 @@ class ASEDatabaseSource(SourceSequence):
             self._sql_connection = sqlite3.connect(
                 f"file:{quote(self.path)}?mode=ro", uri=True
             )
+            # ASE row conversion queries external-table metadata through its
+            # managed connection. Reuse this reader instead of opening a new
+            # default (read/write) SQLite connection for every converted row.
+            self._sql_db.connection = self._sql_connection
+            self._sql_db.change_count = 0
             self._sql_db._initialize(self._sql_connection)
             self._pid = os.getpid()
         return self._sql_connection, self._sql_db
@@ -485,6 +518,9 @@ class BoundSource(SourceSequence):
     def __len__(self):
         return len(self.source)
 
+    def close(self):
+        self.source.close()
+
     def _read_records(self, indices):
         records = self.source.get_records(indices)
         for index, record in zip(indices, records):
@@ -519,6 +555,10 @@ class ConcatSource(SourceSequence):
 
     def __len__(self):
         return int(self._ends[-1]) if len(self._ends) else 0
+
+    def close(self):
+        for source in self.sources:
+            source.close()
 
     def _read_records(self, indices):
         groups = {}

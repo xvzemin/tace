@@ -27,6 +27,11 @@ class IndexedSource(SequenceABC):
     def __len__(self):
         return len(self.indices)
 
+    def close(self):
+        close = getattr(self.source, "close", None)
+        if close is not None:
+            close()
+
     def __getitem__(self, index):
         if isinstance(index, slice):
             return IndexedSource(self.source, self.indices[index])

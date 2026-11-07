@@ -4,10 +4,14 @@
 ################################################################################
 
 import logging
+import os
 from typing import Dict, List, Sequence, Union
 
+import numpy as np
 import torch
+import torch.distributed as dist
 from hydra.utils import instantiate
+from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
 from .cache import statistics_cache_key
@@ -18,6 +22,71 @@ from .statistics import (
     _compute_statistics,
     compute_atomic_energies_from_graphs,
 )
+from .store import GraphDatasetLMDB, _decode
+
+
+class _StatisticsDataset(GraphDatasetLMDB):
+    """Decode owned field tensors without constructing one PyG object per graph."""
+
+    def _decode(self, value):
+        return _decode(value, self.kind, self.fields)
+
+
+class StatisticsDataLoader(DataLoader):
+    """Collate projected statistics fields without graph reconstruction metadata.
+
+    The returned batches contain ``ptr`` and ``batch`` plus the selected graph
+    fields. They are intended for reductions, not ``Batch.to_data_list()``.
+    """
+
+    def __init__(self, dataset, **kwargs):
+        if (
+            isinstance(dataset, GraphDatasetLMDB)
+            and not dataset.in_memory
+            and not kwargs.get("follow_batch")
+            and not kwargs.get("exclude_keys")
+        ):
+            source = dataset
+            dataset = _StatisticsDataset(
+                source.lmdb_paths,
+                shard_lengths=source.lengths,
+                fields=source.fields,
+                cache_size=0,
+                max_open_shards=source.max_open_shards,
+                readahead=source.readahead,
+            )
+            dataset.metadata = source.metadata
+        super().__init__(dataset, **kwargs)
+        if not self.follow_batch and not self.exclude_keys:
+            self.collate_fn = collate_statistics
+
+
+def collate_statistics(graphs):
+    """Concatenate homogeneous, projected graph fields for FP64 statistics."""
+    counts = np.fromiter((graph["num_nodes"] for graph in graphs), dtype=np.int64)
+    ptr = np.concatenate((np.zeros(1, dtype=np.int64), counts.cumsum()))
+    batch = Batch(
+        num_nodes=int(ptr[-1]),
+        ptr=torch.from_numpy(ptr),
+        batch=torch.from_numpy(
+            np.repeat(np.arange(len(graphs), dtype=np.int64), counts)
+        ),
+    )
+    for key in graphs[0].keys():
+        if key == "num_nodes":
+            continue
+        values = [graph[key] for graph in graphs]
+        if key == "edge_index":
+            batch[key] = torch.cat(
+                [value + int(offset) for value, offset in zip(values, ptr[:-1])],
+                dim=1,
+            )
+        else:
+            batch[key] = torch.cat(
+                [value.reshape(1) if value.ndim == 0 else value for value in values],
+                dim=0,
+            )
+    return batch
 
 
 class EpochDataLoader(DataLoader):
@@ -120,8 +189,17 @@ def build_statistics_dataloader(
         for key, value in cfg["dataset"]["train_dataloader"].items()
         if key != "extra"
     }
-    config.update(cfg["dataset"].get("statistics_dataloader", {}))
+    statistics_config = cfg["dataset"].get("statistics_dataloader", {})
+    config.update(statistics_config)
     config.pop("extra", None)
+    # Large statistics batches should not inherit training-time prefetch queues.
+    config["num_workers"] = statistics_config.get("num_workers", 0)
+    if config["num_workers"]:
+        config["prefetch_factor"] = statistics_config.get("prefetch_factor", 1)
+    else:
+        config.pop("prefetch_factor", None)
+        config.pop("persistent_workers", None)
+        config.pop("multiprocessing_context", None)
     config["shuffle"] = False
     config["drop_last"] = False
     config.setdefault(
@@ -153,7 +231,40 @@ def build_statistics_dataloader(
         excluded_keys = set(config.get("exclude_keys") or ())
         excluded_keys.update(set(dataset[0].keys()) - required_keys)
         config["exclude_keys"] = sorted(excluded_keys - required_keys)
+    if isinstance(dataset, GraphDatasetLMDB) and config.get("_target_") in {
+        "torch_geometric.loader.DataLoader",
+        "torch_geometric.data.DataLoader",
+        "tace.dataset.dataloader.StatisticsDataLoader",
+    }:
+        config["_target_"] = "tace.dataset.dataloader.StatisticsDataLoader"
     return build_graph_dataloader(config, dataset)
+
+
+def statistics_devices(cfg, dataset):
+    """Use visible GPUs for disk LMDB statistics, or one device per DDP rank."""
+    device = torch.device(cfg.get("misc", {}).get("device", "cpu"))
+    if (
+        device.type == "cuda"
+        and device.index is None
+        and isinstance(dataset, GraphDatasetLMDB)
+        and not dataset.in_memory
+    ):
+        distributed = (
+            dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        ) or int(os.environ.get("WORLD_SIZE", "1")) > 1
+        if distributed:
+            # torchrun sets these before Lightning initializes its process group.
+            # A group initialized by the caller may already have set its device.
+            local_rank = os.environ.get("LOCAL_RANK")
+            return [
+                str(torch.device("cuda", int(local_rank)))
+                if local_rank is not None
+                else str(device)
+            ]
+        return [f"cuda:{index}" for index in range(torch.cuda.device_count())] or [
+            str(device)
+        ]
+    return [str(device)]
 
 
 def build_atomsList(
@@ -292,6 +403,7 @@ def compute_statistics(
         data_fingerprint=statistics_cache_key(
             cfg, target_property, embedding_property, keyspec
         ),
+        devices=statistics_devices(cfg, dataloader_train.dataset),
     )
 
     return statistics

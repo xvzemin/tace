@@ -140,6 +140,36 @@ automatically; write buffers and open-shard limits are set in Python.
 ``cache_size`` controls optional decoded samples per worker and defaults to zero;
 the operating-system page cache remains active.
 
+Statistics have an independent loader:
+
+.. code-block:: yaml
+
+   dataset:
+     statistics_dataloader:
+       batch_size: 16384
+       num_workers: 0
+
+For disk-backed LMDB graphs, ``misc.device: cuda`` uses all visible GPUs for
+statistics. Select visible GPUs with ``CUDA_VISIBLE_DEVICES`` or use an explicit
+device such as ``misc.device: cuda:0`` to use one GPU. CPU and other storage modes
+keep the configured single device. An externally launched distributed rank uses
+its own GPU instead of expanding to all visible devices again.
+Each statistics process reads its own graph shards; only small FP64 moment
+states are transferred to the parent and merged. Every training graph is
+included once, regardless of ``epoch_size``. The parent writes the statistics
+files after all processes finish.
+Statistics display their own progress bar showing completed structures,
+throughput, and estimated time remaining. Multi-GPU statistics readers update
+one statistics progress bar in the parent process.
+
+The statistics batch size is per device. Larger batches also require more
+host memory for decoding and collating graphs; benchmark throughput instead of
+selecting a batch solely from free GPU memory. Statistics loaders default to
+``num_workers: 0`` independently of training. Explicit loader workers use one
+prefetched batch by default, and their shared-memory demand is multiplied by
+the number of statistics devices. Adjust these values for the dataset and
+available memory.
+
 Incomplete builds are preserved and not reused as complete datasets.
 Augmentation creates sample-local tensors without modifying cached graphs.
 

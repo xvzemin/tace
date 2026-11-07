@@ -416,6 +416,11 @@ class OnTheFlyGraphDataset(Dataset):
     def __getitem__(self, index):
         return self.__getitems__([index])[0]
 
+    def close(self):
+        close = getattr(self.source, "close", None)
+        if close is not None:
+            close()
+
     def project(self, fields):
         if self.fields is not None:
             fields = set(fields).intersection(self.fields)
@@ -446,80 +451,103 @@ def create_graphs(
         return existing_dataset
     if storage_mode not in {"lmdb", "memory", "on_the_fly"}:
         raise ValueError(f"Unknown storage_mode: {storage_mode!r}")
-    if storage_mode == "lmdb" and read_cache_metadata(shard_dirs, stage) is not None:
-        return GraphDatasetLMDB.from_directories(
-            shard_dirs, stage, cache_size=cache_size, max_open_shards=max_open_shards
-        )
-    if atoms_list is None:
-        raise ValueError(f"No source or complete graph cache available for {stage}.")
     if storage_mode == "on_the_fly":
-        return OnTheFlyGraphDataset(atoms_list, for_dataset, device)
-    devices = graph_devices(device, for_dataset.get("neighborlist_backend", "matscipy"))
-    if (
-        storage_mode == "memory"
-        and dist.is_available()
-        and dist.is_initialized()
-        and dist.get_world_size() > 1
-        and len(devices) > 1
-    ):
-        raise ValueError(
-            "DDP memory-mode preprocessing cannot use multiple graph GPUs: "
-            "every rank would build the full dataset on all selected devices. "
-            "Use storage_mode='lmdb' for rank-zero multi-GPU preprocessing, "
-            "or select one rank-local graph_device."
-        )
-    writer_options = dict(
-        shard_size=shard_size,
-        transaction_bytes=transaction_bytes,
-        shard_bytes=shard_bytes,
-        cache_size=cache_size,
-        max_buffer_bytes=max_buffer_bytes,
-        max_open_shards=max_open_shards,
-        graph_config=graph_config,
-    )
-    if storage_mode == "lmdb" and len(devices) > 1:
-        if workers < 0:
-            raise ValueError("Graph workers must be non-negative.")
-        return write_multi_gpu_graphs(
-            atoms_list,
-            element,
-            for_dataset,
-            devices,
-            shard_dirs,
-            stage,
-            batch_size,
-            **writer_options,
-        )
-    graphs = iter_graphs(atoms_list, element, for_dataset, batch_size, workers, device)
-    progress = GraphProgress(len(atoms_list), stage)
-    try:
-        if storage_mode == "memory":
-            dataset = GraphDatasetLMDB([], in_memory=True)
-            dataset.data_list = []
-            for graph in graphs:
-                dataset.data_list.append(graph)
-                progress.update(1)
-            dataset.length = len(dataset.data_list)
-        else:
-            logging.info(
-                "Building %d %s graphs in batches of %d",
-                len(atoms_list),
-                stage,
-                batch_size,
+        if atoms_list is None:
+            raise ValueError(
+                f"No source or complete graph cache available for {stage}."
             )
-            dataset = write_graphs(
-                graphs,
+        return OnTheFlyGraphDataset(atoms_list, for_dataset, device)
+    # Offline datasets own complete graph records after construction. Keeping
+    # their raw readers open would pin SQLite/trajectory files on Windows and
+    # retain mappings for training that only reads the finished graph store.
+    with ExitStack() as cleanup:
+        close = getattr(atoms_list, "close", None)
+        if close is not None:
+            cleanup.callback(close)
+        if (
+            storage_mode == "lmdb"
+            and read_cache_metadata(shard_dirs, stage) is not None
+        ):
+            return GraphDatasetLMDB.from_directories(
                 shard_dirs,
                 stage,
-                progress=progress.update,
+                cache_size=cache_size,
+                max_open_shards=max_open_shards,
+            )
+        if atoms_list is None:
+            raise ValueError(
+                f"No source or complete graph cache available for {stage}."
+            )
+        devices = graph_devices(
+            device, for_dataset.get("neighborlist_backend", "matscipy")
+        )
+        if (
+            storage_mode == "memory"
+            and dist.is_available()
+            and dist.is_initialized()
+            and dist.get_world_size() > 1
+            and len(devices) > 1
+        ):
+            raise ValueError(
+                "DDP memory-mode preprocessing cannot use multiple graph GPUs: "
+                "every rank would build the full dataset on all selected devices. "
+                "Use storage_mode='lmdb' for rank-zero multi-GPU preprocessing, "
+                "or select one rank-local graph_device."
+            )
+        writer_options = dict(
+            shard_size=shard_size,
+            transaction_bytes=transaction_bytes,
+            shard_bytes=shard_bytes,
+            cache_size=cache_size,
+            max_buffer_bytes=max_buffer_bytes,
+            max_open_shards=max_open_shards,
+            graph_config=graph_config,
+        )
+        if storage_mode == "lmdb" and len(devices) > 1:
+            if workers < 0:
+                raise ValueError("Graph workers must be non-negative.")
+            return write_multi_gpu_graphs(
+                atoms_list,
+                element,
+                for_dataset,
+                devices,
+                shard_dirs,
+                stage,
+                batch_size,
                 **writer_options,
             )
-        progress.update(0, finished=True)
-        if storage_mode == "lmdb":
-            logging.info("Published %s graph cache: %s", stage, shard_dirs)
-        return dataset
-    finally:
-        progress.close()
+        graphs = iter_graphs(
+            atoms_list, element, for_dataset, batch_size, workers, device
+        )
+        progress = GraphProgress(len(atoms_list), stage)
+        try:
+            if storage_mode == "memory":
+                dataset = GraphDatasetLMDB([], in_memory=True)
+                dataset.data_list = []
+                for graph in graphs:
+                    dataset.data_list.append(graph)
+                    progress.update(1)
+                dataset.length = len(dataset.data_list)
+            else:
+                logging.info(
+                    "Building %d %s graphs in batches of %d",
+                    len(atoms_list),
+                    stage,
+                    batch_size,
+                )
+                dataset = write_graphs(
+                    graphs,
+                    shard_dirs,
+                    stage,
+                    progress=progress.update,
+                    **writer_options,
+                )
+            progress.update(0, finished=True)
+            if storage_mode == "lmdb":
+                logging.info("Published %s graph cache: %s", stage, shard_dirs)
+            return dataset
+        finally:
+            progress.close()
 
 
 class GraphDataModule(LightningDataModule):
