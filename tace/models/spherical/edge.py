@@ -9,7 +9,7 @@ from typing import Union
 import torch
 from e3nn.nn import Activation
 
-from ..linear import ElementEmbedding, IndexedFeatures, e3nnLinear
+from ..linear import IndexedFeatures, e3nnLinear
 from .base import EdgeEmbedding, EdgeUpdate
 
 
@@ -133,7 +133,7 @@ class IdentityEdgeUpdate(EdgeUpdate):
 class Element2EdgeUpdate(EdgeUpdate):
     """Return radial, target and source features for the edge MLP.
 
-    Node embeddings retain their node layout and carry gather indices.
+    Element lookup tables are evaluated once per node and carry gather indices.
     The first MLP linear map projects each input before gathering and adding
     the results, without materializing concatenated edge features.
     """
@@ -142,22 +142,54 @@ class Element2EdgeUpdate(EdgeUpdate):
 
         self.out_dim = self.edge_embedding_channel + self.num_channel * 2
 
-        self.source_embedding = ElementEmbedding(
-            self.num_elements,
-            self.num_channel,
-            bias=self.use_bias,
+        self.source_embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
+        self.target_embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
+        bound = 0.001 * self.num_elements**-0.5
+        torch.nn.init.uniform_(self.source_embedding.weight, -bound, bound)
+        torch.nn.init.uniform_(self.target_embedding.weight, -bound, bound)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        for name in ("source_embedding", "target_embedding"):
+            embedding = getattr(self, name)
+            key = prefix + name + "."
+            weight_key = key + "weight"
+            legacy_key = weight_key + ".0"
+            if legacy_key not in state_dict:
+                legacy_key = weight_key
+            weight = state_dict.get(legacy_key)
+            if weight is not None and (
+                legacy_key != weight_key
+                or weight.ndim == 1
+                or key + "linear.output_mask" in state_dict
+            ):
+                # Fold the one-hot linear normalization and bias into each row.
+                weight = state_dict.pop(legacy_key).to(embedding.weight)
+                weight = weight.reshape(self.num_elements, self.num_channel)
+                weight = weight * self.num_elements**-0.5
+                bias = state_dict.pop(key + "bias", None)
+                if bias is not None:
+                    weight = weight + bias.to(weight)
+                state_dict[weight_key] = weight
+                for field in ("linear.weight", "linear.bias", "linear.output_mask"):
+                    state_dict.pop(key + field, None)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
-        self.target_embedding = ElementEmbedding(
-            self.num_elements,
-            self.num_channel,
-            bias=self.use_bias,
-        )
-        if isinstance(self.source_embedding.weight, torch.Tensor):
-            torch.nn.init.uniform_(self.source_embedding.weight, a=-0.001, b=0.001)
-            torch.nn.init.uniform_(self.target_embedding.weight, a=-0.001, b=0.001)
-        else:
-            torch.nn.init.uniform_(self.source_embedding.weight[0], a=-0.001, b=0.001)
-            torch.nn.init.uniform_(self.target_embedding.weight[0], a=-0.001, b=0.001)
 
     def forward(
         self,

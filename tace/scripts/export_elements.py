@@ -21,8 +21,7 @@ from tace.models.linear import (
     has_lora,
     switch_e3nn_weight_layout,
 )
-from tace.models.spherical.base import NodeEmbedding
-from tace.models.spherical.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
+from tace.models.spherical.base import EdgeUpdate, NodeEmbedding
 from tace.models.spherical.mtace import MagneticBasis
 from tace.models.spherical.prod import MaceACE, NonlinearCgtpACE
 from tace.models.spherical.symmetric_contraction import Contraction
@@ -146,17 +145,13 @@ def select_elements(model: TensorModel, elements: Sequence[str | int]) -> Tensor
             parent_name, _, field = name.rpartition(".")
             if isinstance(
                 modules[parent_name],
-                (NodeEmbedding, Element2EdgeUpdateV2, NonlinearCgtpACE),
+                (NodeEmbedding, EdgeUpdate, NonlinearCgtpACE),
             ) and field in {"embedding", "source_embedding", "target_embedding"}:
                 element_axes[f"{name}.weight"] = (0, 1.0)
         elif isinstance(module, e3nnLinear):
             parent_name, _, field = name.rpartition(".")
             parent = modules[parent_name]
-            if isinstance(parent, (NodeEmbedding, Element2EdgeUpdate)) and field in {
-                "node_embedding",
-                "source_embedding",
-                "target_embedding",
-            }:
+            if isinstance(parent, NodeEmbedding) and field == "node_embedding":
                 old_paths = original.linear.instructions
                 new_paths = module.linear.instructions
                 if len(old_paths) != 1 or len(new_paths) != 1:

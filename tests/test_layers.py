@@ -27,7 +27,7 @@ from tace.models.spherical.base import (
     NodeEmbedding,
 )
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models.spherical.edge import Element2EdgeUpdateV2
+from tace.models.spherical.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
 from tace.models.spherical.fused import UvO2TensorProduct
 from tace.models.spherical.node import NODE_EMBEDDING, NODE_UPDATE, LinearNodeEmbedding
 from tace.models.spherical.readout import EdgeReadOut
@@ -336,6 +336,57 @@ def test_element_embedding(matrix, lora, monkeypatch):
     )
     for actual, target in zip(actual_grad, expected_grad):
         torch.testing.assert_close(actual, target)
+
+
+@pytest.mark.parametrize("matrix", [False, True])
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_element2_legacy_state_dict(matrix, bias, dtype):
+    from tace.models.linear import switch_e3nn_weight_layout
+
+    module = Element2EdgeUpdate(0, 2, 7, 4, 5, 4, bias=bias).to(DEVICE, dtype)
+    legacy = torch.nn.ModuleDict(
+        {
+            name: ElementEmbedding(7, 5, bias=bias)
+            for name in ("source_embedding", "target_embedding")
+        }
+    ).to(DEVICE, torch.float32)
+    switch_e3nn_weight_layout(legacy, "matrix" if matrix else "flat")
+    if bias:
+        with torch.no_grad():
+            for embedding in legacy.values():
+                embedding.bias.normal_()
+    state = {key: value.clone() for key, value in legacy.state_dict().items()}
+    original = {key: value.clone() for key, value in state.items()}
+    module.load_state_dict(state, strict=True)
+    legacy.to(dtype=dtype)
+    indices = torch.tensor([6, 0, 2, 2, 4], device=DEVICE)
+    edges = torch.tensor([[0, 1, 2, 3], [1, 0, 4, 2]], device=DEVICE)
+    radial = torch.randn(4, 4, device=DEVICE, dtype=dtype)
+    partitions = module(None, indices, radial, edges, None)
+    assert partitions[0][0] is radial
+    for name, (actual, index), expected_index in zip(
+        ("target_embedding", "source_embedding"), partitions[1:], edges.flip(0)
+    ):
+        embedding = getattr(module, name)
+        assert type(embedding) is torch.nn.Embedding
+        torch.testing.assert_close(index, expected_index)
+        expected = legacy[name](indices)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        gradient = torch.autograd.grad(actual.square().sum(), embedding.weight)[0]
+        legacy_weight = legacy[name].weight[0] if matrix else legacy[name].weight
+        legacy_gradient = torch.autograd.grad(expected.square().sum(), legacy_weight)[0]
+        torch.testing.assert_close(
+            gradient * 7**-0.5, legacy_gradient.reshape_as(gradient)
+        )
+    assert state.keys() == original.keys()
+    for key in state:
+        torch.testing.assert_close(state[key], original[key], atol=0, rtol=0)
+    saved = {key: value.clone() for key, value in module.state_dict().items()}
+    assert set(saved) == {"source_embedding.weight", "target_embedding.weight"}
+    module.load_state_dict(saved, strict=True)
+    for key, value in module.state_dict().items():
+        torch.testing.assert_close(value, saved[key], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("zero_elements", [False, True])
@@ -950,7 +1001,6 @@ def test_element2_projects_nodes_before_gather(
 ):
     from tace.models.linear import enable_lora
     from tace.models.mlp import MLP
-    from tace.models.spherical.edge import Element2EdgeUpdate
 
     if use_eqx and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -977,8 +1027,8 @@ def test_element2_projects_nodes_before_gather(
     attrs = torch.randint(3, (5,), device=device)
     edges = torch.randint(5, (2, num_edges), device=device)
     feats = torch.randn(num_edges, 6, dtype=DTYPE, device=device, requires_grad=True)
-    source = module.source_embedding(attrs[edges[0]])
-    target = module.target_embedding(attrs[edges[1]])
+    source = module.source_embedding.weight[attrs[edges[0]]]
+    target = module.target_embedding.weight[attrs[edges[1]]]
     expected = mlp(torch.cat((feats, target, source), -1))
     sizes = []
     hook = module.source_embedding.register_forward_pre_hook(

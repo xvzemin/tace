@@ -589,11 +589,7 @@ def test_optimizer_weight_decay_parameter_roles(matrix_weight):
             model.pair_head.edge_readout.linear_nonlinearity,
         )
     )
-    lookup_maps = (
-        model.initial.node_embedding,
-        model.endpoints.source_embedding,
-        model.endpoints.target_embedding,
-    )
+    lookup_maps = (model.initial.node_embedding,)
     switch_e3nn_weight_layout(model, "matrix" if matrix_weight == "1" else "flat")
     # LoRA remains regularized even when the base is a lookup or final output map.
     for module in (*output_maps, *lookup_maps):
