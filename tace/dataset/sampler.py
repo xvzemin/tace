@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import heapq
 from numbers import Integral, Real
 
 import numpy as np
@@ -43,6 +44,10 @@ class EpochSampler(DistributedSampler):
     drop_last : bool
         Require full batches. Additional samples are taken from the continuing
         stream, including the next dataset pass when necessary.
+    balance : {"atoms", "edges"}, pair of int, or None
+        Redistribute each global batch using cached graph sizes. Preserve its
+        samples and equal per-rank counts. Requires ``dataset.get_sizes()``.
+        A pair gives nonnegative atom and edge weights, respectively.
 
     Notes
     -----
@@ -82,6 +87,7 @@ class EpochSampler(DistributedSampler):
         seed=0,
         batch_size=1,
         drop_last=False,
+        balance=None,
     ):
         size = len(dataset)
         if not size:
@@ -114,6 +120,23 @@ class EpochSampler(DistributedSampler):
         batch_size = _integer(batch_size, "batch_size", 1)
         if not isinstance(drop_last, bool):
             raise TypeError("drop_last must be a bool")
+        if balance is not None and not isinstance(balance, str):
+            try:
+                balance = tuple(_integer(w, "balance weight", 0) for w in balance)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "balance weights must be two nonnegative integers"
+                ) from None
+            if len(balance) != 2 or not any(balance):
+                raise ValueError(
+                    "balance weights must be two integers with a positive sum"
+                )
+            if max(balance) > np.iinfo(np.int64).max:
+                raise ValueError("balance weights exceed the int64 range")
+        elif balance not in (None, "atoms", "edges"):
+            raise ValueError("balance must be None, 'atoms', 'edges' or two weights")
+        if balance is not None and not callable(getattr(dataset, "get_sizes", None)):
+            raise ValueError("Balanced sampling requires cached graph sizes")
         seed = _integer(seed, "seed")
         super().__init__(
             dataset,
@@ -127,6 +150,8 @@ class EpochSampler(DistributedSampler):
         self.dataset_fingerprint = getattr(dataset, "sample_fingerprint", None)
         self.epoch_size = count
         self.batch_size = batch_size
+        self.balance = balance
+        self._costs = None
         multiple = num_replicas * (batch_size if drop_last else 1)
         self.total_size = ((count + multiple - 1) // multiple) * multiple
         self.num_samples = self.total_size // num_replicas
@@ -151,6 +176,9 @@ class EpochSampler(DistributedSampler):
         return (left << self._half_bits) | right
 
     def _indices(self, start_position, consumed):
+        if self.balance is not None and self.num_replicas > 1:
+            yield from self._balanced_indices(start_position, consumed)
+            return
         base = start_position % self.dataset_size
         for start in range(consumed, self.num_samples, self._chunk_size):
             stop = min(start + self._chunk_size, self.num_samples)
@@ -166,6 +194,57 @@ class EpochSampler(DistributedSampler):
                     outside = positions >= self.dataset_size
             yield from map(int, positions)
 
+    def _balanced_indices(self, start_position, consumed):
+        if self._costs is None:
+            sizes = self.dataset.get_sizes()
+            if isinstance(self.balance, tuple):
+                maximum = sum(
+                    int(n) * w for n, w in zip(sizes.max(axis=0), self.balance)
+                )
+                if maximum > np.iinfo(np.int64).max:
+                    raise ValueError("Weighted graph sizes exceed the int64 range")
+                self._costs = sizes @ np.asarray(self.balance, dtype=np.int64)
+            else:
+                column = 0 if self.balance == "atoms" else 1
+                self._costs = sizes[:, column].copy()
+            del sizes
+        base = start_position % self.dataset_size
+        first = consumed // self.batch_size * self.batch_size
+        for start in range(first, self.num_samples, self.batch_size):
+            stop = min(start + self.batch_size, self.num_samples)
+            positions = np.arange(
+                start * self.num_replicas, stop * self.num_replicas, dtype=np.uint64
+            )
+            positions = (positions + base) % self.dataset_size
+            if self.shuffle:
+                positions = self._feistel(positions)
+                outside = positions >= self.dataset_size
+                while outside.any():
+                    positions[outside] = self._feistel(positions[outside])
+                    outside = positions >= self.dataset_size
+            costs = self._costs[positions]
+            bins = [[] for _ in range(self.num_replicas)]
+            rotation = (self.seed + start // self.batch_size) % self.num_replicas
+            heap = [
+                (0, 0, r, (r + rotation) % self.num_replicas)
+                for r in range(self.num_replicas)
+            ]
+            loads = [0] * self.num_replicas
+            for index in np.argsort(-costs, kind="stable"):
+                load, count, order, rank = heapq.heappop(heap)
+                bins[rank].append(int(index))
+                loads[rank] = load + int(costs[index])
+                if count + 1 < stop - start:
+                    heapq.heappush(heap, (loads[rank], count + 1, order, rank))
+            # Cardinality constraints can make greedy packing worse. Retain
+            # the original partition in that case.
+            original = costs.reshape(-1, self.num_replicas).sum(axis=0)
+            if max(loads) > original.max():
+                selected = positions[self.rank :: self.num_replicas]
+            else:
+                selected = positions[sorted(bins[self.rank])]
+            yield from map(int, selected[max(0, consumed - start) :])
+
     def __iter__(self):
         # Capture at iter(), not first next(), so later commits cannot skip work.
         return self._indices(self.start, self.consumed)
@@ -180,6 +259,16 @@ class EpochSampler(DistributedSampler):
         epoch = _integer(epoch, "epoch", 0)
         if epoch != self.epoch:
             if epoch == self.epoch + 1 and self.consumed:
+                if (
+                    self.balance is not None
+                    and self.num_replicas > 1
+                    and self.consumed % self.batch_size
+                    and self.consumed != self.num_samples
+                ):
+                    raise ValueError(
+                        "Finish the partially consumed balanced batch before "
+                        "advancing to the next epoch"
+                    )
                 self.start += self.consumed * self.num_replicas
             else:
                 self.start = epoch * self.total_size
@@ -204,6 +293,7 @@ class EpochSampler(DistributedSampler):
             "num_replicas": self.num_replicas,
             "batch_size": self.batch_size,
             "drop_last": self.drop_last,
+            "balance": self.balance,
             "epoch": self.epoch,
             "consumed": self.consumed,
             "start": self.start,
@@ -212,6 +302,8 @@ class EpochSampler(DistributedSampler):
     def load_state_dict(self, state):
         """Restore progress, rejecting changed dataset or sampling parameters."""
         current = self.state_dict()
+        if state.get("balance") != self.balance:
+            raise ValueError("Cannot restore EpochSampler with changed balance")
         if state.get("dataset_fingerprint") != self.dataset_fingerprint:
             raise ValueError(
                 "Cannot restore EpochSampler with changed dataset selection"

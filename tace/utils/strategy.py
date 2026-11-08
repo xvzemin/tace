@@ -1,4 +1,4 @@
-"""Copy from Nequip-v0.15.0, avoid some unnecessary synchronization operations in MLIPs"""
+"""Gradient synchronization for models with coordinate derivatives."""
 
 import torch
 from lightning.pytorch.strategies import DDPStrategy
@@ -25,36 +25,31 @@ class SimpleDDPStrategy(DDPStrategy):
         pass
 
     def post_backward(self, closure_loss: torch.Tensor) -> None:
-        """
-        Manual syncing of gradients after the backwards pass.
-        """
-        # cat all gradients into a single tensor for efficiency
-        grad_tensors = []
+        """Reduce coalesced gradients without wrapping the force forward pass."""
+        groups = {}
         for param in self.model.parameters():
             if param.requires_grad and param.grad is not None:
-                grad_tensors.append(param.grad.data.view(-1))
-
-        if grad_tensors:
-            # cat and reduce
-            flat_grads = torch.cat(grad_tensors)
-            # NOTE: averaging (i.e. summing and dividing by number of ranks) is consistent with PyTorch Lightning's `DDPStrategy`
-            # in the training loop, we account for this by multiplying the loss by the number of ranks before the backwards call
-            if torch.distributed.get_backend() == "gloo":
-                torch.distributed.all_reduce(
-                    flat_grads, op=torch.distributed.ReduceOp.SUM
-                )
-                flat_grads /= torch.distributed.get_world_size()
-            else:
-                torch.distributed.all_reduce(
-                    flat_grads, op=torch.distributed.ReduceOp.AVG
-                )
-
-            # copy reduced gradients back
-            offset = 0
-            for param in self.model.parameters():
-                if param.requires_grad and param.grad is not None:
-                    numel = param.grad.numel()
-                    param.grad.data.copy_(
-                        flat_grads[offset : offset + numel].view_as(param.grad.data)
-                    )
-                    offset += numel
+                grad = param.grad.detach()
+                groups.setdefault((grad.device, grad.dtype), []).append(grad)
+        if not groups:
+            return
+        summed = torch.distributed.get_backend() == "gloo"
+        pending = []
+        for gradients in groups.values():
+            flat = torch.cat([grad.reshape(-1) for grad in gradients])
+            work = torch.distributed.all_reduce(
+                flat,
+                op=torch.distributed.ReduceOp.SUM
+                if summed
+                else torch.distributed.ReduceOp.AVG,
+                async_op=True,
+            )
+            pending.append((work, flat, gradients))
+        for work, flat, gradients in pending:
+            work.wait()
+            if summed:
+                flat.div_(torch.distributed.get_world_size())
+            views = flat.split([grad.numel() for grad in gradients])
+            torch._foreach_copy_(
+                gradients, [view.view_as(grad) for view, grad in zip(views, gradients)]
+            )

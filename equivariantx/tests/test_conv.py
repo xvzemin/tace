@@ -86,6 +86,64 @@ def test_cuda_operand_precision_validation():
         validate_operands([torch.zeros(2, dtype=torch.bfloat16)])
 
 
+@pytest.mark.parametrize("kind", ["o3", "o2"])
+@pytest.mark.parametrize("width", [3, 129])
+def test_cuda_affine_projection_gradients(kind, width):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    args = (
+        "2x0e+2x1o",
+        "0e+1o",
+        "2x0e+2x1o",
+        [(0, 0, 0, "uvu", True), (1, 1, 0, "uvu", True), (0, 1, 1, "uvu", True)],
+    )
+    tp_cls = o3.TensorProduct if kind == "o3" else o2.O3TensorProduct
+    tp = tp_cls(*args, internal_weights=False, shared_weights=False).float().cuda()
+    conv_cls = (
+        eqx_conv.O3TensorProductConv if kind == "o3" else eqx_conv.O2O3TensorProductConv
+    )
+    module = conv_cls(tp, backend="cuda").cuda()
+    x = torch.randn(3, 8, device="cuda", dtype=torch.float32, requires_grad=True)
+    r = torch.randn(5, width, device="cuda", dtype=torch.float32, requires_grad=True)
+    p = (
+        torch.randn(width, tp.weight_numel, device="cuda", dtype=torch.float32)
+        / width**0.5
+    ).requires_grad_()
+    v = torch.randn(5, 3, device="cuda", dtype=torch.float64, requires_grad=True)
+    index = torch.tensor([[0, 1, 1, 2, 2], [1, 0, 2, 1, 0]], device="cuda")
+    amplitude = torch.ones(5, 2, device="cuda", dtype=torch.float32)
+
+    def evaluate(backend):
+        module.backend = backend
+        if kind == "o3":
+            return module(x, None, r, p, index, vectors=v, amplitudes=amplitude)
+        return module(x, r, p, None, amplitude, index, 3, vectors=v)
+
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        actual, expected = evaluate("cuda"), evaluate("torch")
+        for order in range(3):
+            torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
+            if order == 2:
+                break
+            actual, expected = (
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            value.square().sum(),
+                            (x, r, p, v),
+                            create_graph=True,
+                        )
+                    ]
+                )
+                for value in (actual, expected)
+            )
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_uv_convolution_geometry_precision(backend):
     if backend == "cuda" and not torch.cuda.is_available():
@@ -4751,7 +4809,8 @@ def test_convolution_radial_network(cls, num_edges, device, double_precision):
         torch.testing.assert_close(actual, expected)
 
 
-def test_row_product_cuda_graph(monkeypatch, double_precision):
+@pytest.mark.parametrize("background_loading", [False, True])
+def test_row_product_cuda_graph(monkeypatch, double_precision, background_loading):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx.backends.cuda import graph
@@ -4759,6 +4818,25 @@ def test_row_product_cuda_graph(monkeypatch, double_precision):
     from equivariantx.backends.torch.edge import evaluate_torch
     from equivariantx.ops.edge import evaluate
     from equivariantx.utils.program import Program
+
+    worker = None
+    pinned = []
+    if background_loading:
+        from concurrent.futures import ThreadPoolExecutor
+
+        worker = ThreadPoolExecutor(max_workers=1)
+        worker.submit(torch.empty, 1, pin_memory=True).result(timeout=15)
+        capture_begin = torch.cuda.CUDAGraph.capture_begin
+
+        def begin_with_loading(self, *args, **kwargs):
+            capture_begin(self, *args, **kwargs)
+            pinned.append(
+                worker.submit(
+                    torch.empty, 1 << 20, dtype=torch.uint8, pin_memory=True
+                ).result(timeout=15)
+            )
+
+        monkeypatch.setattr(torch.cuda.CUDAGraph, "capture_begin", begin_with_loading)
 
     monkeypatch.delenv("EQX_USE_CUDA_GRAPH", raising=False)
     monkeypatch.setattr(graph, "MIN_ROWS", 1)
@@ -4814,6 +4892,8 @@ def test_row_product_cuda_graph(monkeypatch, double_precision):
         assert not graph.enabled("product")
     finally:
         graph._GRAPHS.clear()
+        if worker is not None:
+            worker.shutdown()
 
 
 @pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))

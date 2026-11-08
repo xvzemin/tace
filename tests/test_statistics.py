@@ -5,8 +5,11 @@ import multiprocessing
 import os
 import pickle
 import sqlite3
+import struct
 import time
+import zlib
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import lmdb
@@ -24,7 +27,10 @@ from torch_geometric.loader import DataLoader
 
 import tace.dataset.statistics as statistics_module
 from tace.dataset.cache import (
+    ARRAY_CODEC,
+    COMPRESSED_ARRAY_CODEC,
     GRAPH_SCHEMA,
+    LMDB_MODES,
     graph_cache_directories,
     read_cache_metadata,
     source_cache_key,
@@ -52,6 +58,7 @@ from tace.dataset.read import (
 from tace.dataset.records import record_from_atoms
 from tace.dataset.split import IndexedSource
 from tace.dataset.store import (
+    _compress_array_record,
     build_graph_store,
     decode_graph,
     encode_graph,
@@ -293,7 +300,7 @@ def test_graph_progress_finish_preserves_actual_count(capsys, count):
         assert not output
 
 
-@pytest.mark.parametrize("mode", ["memory", "lmdb"])
+@pytest.mark.parametrize("mode", ["memory", *LMDB_MODES])
 def test_create_graphs_reports_final_partial_batch_and_skips_warm_cache(
     tmp_path, monkeypatch, capsys, graph_progress, mode
 ):
@@ -326,7 +333,10 @@ def test_create_graphs_reports_final_partial_batch_and_skips_warm_cache(
     assert "train graphs:" in output and "5/5" in output
     dataset.close()
 
-    if mode == "lmdb":
+    if mode in LMDB_MODES:
+        assert dataset.metadata["codec"] == (
+            COMPRESSED_ARRAY_CODEC if mode == "clmdb" else ARRAY_CODEC
+        )
 
         def no_graph_work(*args, **kwargs):
             pytest.fail("Warm cache must not construct graphs or progress reporters")
@@ -339,7 +349,7 @@ def test_create_graphs_reports_final_partial_batch_and_skips_warm_cache(
         reused.close()
 
 
-@pytest.mark.parametrize("mode", ["memory", "lmdb"])
+@pytest.mark.parametrize("mode", ["memory", *LMDB_MODES])
 @pytest.mark.parametrize("completed", [1, 3])
 def test_interrupted_graph_build_does_not_report_completion(
     tmp_path, monkeypatch, capsys, graph_progress, mode, completed
@@ -556,7 +566,7 @@ def test_no_validation_takes_precedence_and_index_splits_do_not_overlap(
         "model": {"config": {"cutoff": 2.0}},
         "dataset": {
             "train_file": str(filename),
-            "type": "ase_db",
+            "reader": "ase_db",
             "no_valid_set": True,
         },
     }
@@ -575,7 +585,7 @@ def test_no_validation_takes_precedence_and_index_splits_do_not_overlap(
     assert [len(record) for record in split.valid.get_records([0, 1])] == [3, 2]
 
 
-@pytest.mark.parametrize("mode", ["memory", "lmdb", "on_the_fly"])
+@pytest.mark.parametrize("mode", ["memory", *LMDB_MODES, "on_the_fly"])
 def test_fit_defers_test_sources_until_test_stage(tmp_path, mode):
     from tace.dataset.datamodule import build_datamodule
 
@@ -587,7 +597,7 @@ def test_fit_defers_test_sources_until_test_stage(tmp_path, mode):
         "dataset": {
             "train_file": str(filename),
             "test_files": str(missing),
-            "type": "ase_db",
+            "reader": "ase_db",
             "no_valid_set": True,
             "storage_mode": mode,
             "neighborlist_backend": "ase",
@@ -641,12 +651,11 @@ def test_database_readers_are_lazy_readonly_and_batched(
         {
             "path": path,
             "fidelity_idx": 2,
-            "options": {"serial": True, "use_lock_file": False},
         },
         ["energy", "forces"],
         _reader_keys(),
         [],
-        backend=reader,
+        reader=reader,
     )
     assert not isinstance(source, list)
     assert len(source) == 4
@@ -668,21 +677,13 @@ def test_generic_ase_raw_cache_and_reader_fingerprints(tmp_path, monkeypatch):
     source_dir.mkdir()
     filename = source_dir / "structures.cif"
     write(filename, [Atoms("Si", cell=[4, 4, 4], pbc=True)] * 2)
-    cfg = {
-        "dataset": {
-            "train_file": str(source_dir),
-            "format": "cif",
-            "options": {"store_tags": True},
-        }
-    }
+    cfg = {"dataset": {"reader": "ase", "train_file": str(source_dir)}}
     key = source_cache_key(cfg)
     source = read_all_files(
         source_dir,
         [],
         _reader_keys(),
         [],
-        format="cif",
-        options={"store_tags": True},
         record_cache_dir=tmp_path / "cache",
     )
     assert len(source) == 2
@@ -691,31 +692,201 @@ def test_generic_ase_raw_cache_and_reader_fingerprints(tmp_path, monkeypatch):
     def no_decode(*args, **kwargs):
         raise AssertionError("Warm raw cache must not decode the original file")
 
-    monkeypatch.setattr("ase.io.iread", no_decode)
-    warm = read_all_files(
-        source_dir,
-        [],
-        _reader_keys(),
-        [],
-        format="cif",
-        options={"store_tags": True},
-        record_cache_dir=tmp_path / "cache",
-    )
-    assert len(warm.get_records([1, 0, 1])) == 3
-    cfg["dataset"]["options"]["store_tags"] = False
+    with monkeypatch.context() as patch:
+        patch.setattr("ase.io.iread", no_decode)
+        warm = read_all_files(
+            source_dir,
+            [],
+            _reader_keys(),
+            [],
+            record_cache_dir=tmp_path / "cache",
+        )
+        assert len(warm.get_records([1, 0, 1])) == 3
+    cfg["dataset"]["train_file"] = {"path": str(filename)}
+    assert source_cache_key(cfg) == key
+    cfg["dataset"]["reader"] = "ase_db"
     assert source_cache_key(cfg) != key
-    cfg["dataset"]["options"]["store_tags"] = True
+    cfg["dataset"]["reader"] = "ase"
+    cfg["dataset"]["train_file"]["fidelity_idx"] = 1
+    assert source_cache_key(cfg) != key
+    del cfg["dataset"]["train_file"]["fidelity_idx"]
     filename.write_text(filename.read_text() + "\n# changed\n")
     assert source_cache_key(cfg) != key
-    cfg["dataset"]["train_file"] = {
-        "path": str(filename),
-        "reader": "ase",
-        "format": "cif",
-        "options": {"store_tags": False},
+    write(source_dir / "z-atoms.xyz", Atoms("He"))
+    mixed = read_all_files(
+        source_dir, [], _reader_keys(), record_cache_dir=tmp_path / "cache"
+    )
+    assert len(mixed) == 3
+    assert mixed.get_record(2).numbers.tolist() == [2]
+    source.close()
+    warm.close()
+    mixed.close()
+
+
+@pytest.mark.parametrize("selection", ["list", "omega", "fidelity"])
+def test_source_readers_follow_entries_before_sorting(tmp_path, selection):
+    from tace.dataset.cache import source_signature
+    from tace.dataset.read import discover_sources
+
+    database = tmp_path / "z-structures.db"
+    xyz = tmp_path / "a-atoms.xyz"
+    _write_reader_database(database)
+    write(xyz, Atoms("He"))
+    sources = [str(database), str(xyz)]
+    reader = ["ase_db", "ase"]
+    if selection == "omega":
+        reader = OmegaConf.create(reader)
+        sources = OmegaConf.create(sources)
+    elif selection == "fidelity":
+        sources = [
+            {"path": str(database), "fidelity_idx": 1},
+            {"path": str(xyz), "fidelity_idx": 2},
+        ]
+    specs = discover_sources(sources, reader)
+    assert [(Path(spec.path).name, spec.reader) for spec in specs] == [
+        (xyz.name, "ase"),
+        (database.name, "ase_db"),
+    ]
+    source = read_all_files(sources, [], _reader_keys(), reader=reader)
+    assert len(source) == 5
+    assert source.get_record(0).numbers.tolist() == [2]
+    assert len(source.get_record(1)) == 2
+    if selection == "fidelity":
+        assert source.get_record(0).info["fidelity_idx"] == 2
+        assert source.get_record(1).info["fidelity_idx"] == 1
+    source.close()
+    signature = source_signature(sources, reader)
+    assert [(Path(item["path"]).name, item["reader"]) for item in signature] == [
+        (xyz.name, "ase"),
+        (database.name, "ase_db"),
+    ]
+    if selection != "fidelity":
+        assert source_cache_key(
+            {"dataset": {"reader": reader, "train_file": sources}}
+        ) == source_cache_key(
+            {
+                "dataset": {
+                    "reader": ["ase_db", "ase"],
+                    "train_file": [
+                        {"path": str(database)},
+                        {"path": str(xyz)},
+                    ],
+                }
+            }
+        )
+    missing = tmp_path / "missing.xyz"
+    signature = source_signature([database, missing], ["ase_db", "ase"])
+    missing_item = next(item for item in signature if item["path"] == str(missing))
+    assert missing_item["reader"] == "ase"
+    assert missing_item["size"] is None
+
+
+def test_source_readers_match_seven_entries_with_a_directory(tmp_path):
+    from tace.dataset.cache import source_signature
+    from tace.dataset.read import discover_sources, stage_readers, tace_read_all_files
+
+    sources = []
+    for index in range(7):
+        if index == 5:
+            directory = tmp_path / "sixth-source"
+            (directory / "nested").mkdir(parents=True)
+            _write_reader_database(directory / "first.db")
+            _write_reader_database(directory / "nested" / "second.db")
+            sources.append(str(directory))
+        else:
+            path = tmp_path / f"source-{index}.xyz"
+            write(path, Atoms("He"))
+            sources.append(str(path))
+    readers = ["ase"] * 5 + ["ase_db", "ase"]
+    specs = discover_sources(sources, readers)
+    assert len(specs) == 8
+    database_specs = [
+        spec for spec in specs if Path(sources[5]) in Path(spec.path).parents
+    ]
+    assert len(database_specs) == 2
+    assert all(spec.reader == "ase_db" for spec in database_specs)
+    source = read_all_files(sources, [], _reader_keys(), reader=readers)
+    assert len(source) == 14
+    assert (
+        sum(
+            len(source.sources[index])
+            for index, spec in enumerate(specs)
+            if spec.reader == "ase_db"
+        )
+        == 8
+    )
+    source.close()
+    cfg = {
+        "dataset": {
+            "reader": readers,
+            "train_file": sources[:3],
+            "valid_file": sources[3:5],
+            "test_files": sources[5:],
+            "shard_dirs": [str(tmp_path / "graphs")],
+        }
     }
-    mapped_key = source_cache_key(cfg)
-    cfg["dataset"]["train_file"]["options"]["store_tags"] = True
-    assert source_cache_key(cfg) != mapped_key
+    assigned = stage_readers(cfg["dataset"])
+    assert assigned == {
+        "train": ["ase"] * 3,
+        "valid": ["ase"] * 2,
+        "test0": ["ase_db"],
+        "test1": ["ase"],
+    }
+    split = tace_read_all_files(cfg, [], [], _reader_keys())
+    assert len(split.train) == 3
+    assert len(split.valid) == 2
+    assert [len(part) for part in split.test] == [8, 1]
+    split.train.close()
+    split.valid.close()
+    for part in split.test:
+        part.close()
+    valid_only = tace_read_all_files(cfg, [], [], _reader_keys(), stages=("valid",))
+    assert valid_only.train is None and len(valid_only.valid) == 2
+    valid_only.valid.close()
+    test_only = tace_read_all_files(cfg, [], [], _reader_keys(), stages=("test",))
+    assert [len(part) for part in test_only.test] == [8, 1]
+    for part in test_only.test:
+        part.close()
+    signature = source_signature(sources[5], assigned["test0"])
+    assert len(signature) == 2 and all(item["reader"] == "ase_db" for item in signature)
+    assert source_cache_key(cfg, "test0") != source_cache_key(cfg, "test1")
+    for bad_readers in (readers[:-1], readers + ["ase"]):
+        cfg["dataset"]["reader"] = bad_readers
+        with pytest.raises(ValueError, match="expected 7"):
+            tace_read_all_files(cfg, [], [], _reader_keys(), stages=("train",))
+        with pytest.raises(ValueError, match="expected 7"):
+            source_cache_key(cfg, "test0")
+    cfg["dataset"]["reader"] = "ase_db"
+    assert set(stage_readers(cfg["dataset"]).values()) == {"ase_db"}
+    cfg["dataset"].update(reader=["ase"] * 3, valid_file=None, test_files=None)
+    assert stage_readers(cfg["dataset"])["valid"] == ["ase"] * 3
+
+
+def test_source_reader_selection_rejects_invalid_configuration(tmp_path):
+    from tace.dataset.read import discover_sources
+
+    filename = tmp_path / "atoms.xyz"
+    write(filename, Atoms("He"))
+    with pytest.raises(ValueError, match="one value per source entry"):
+        discover_sources([filename, filename], ["ase"])
+    for reader in (None, {}, 1):
+        with pytest.raises(ValueError, match="string or a list"):
+            discover_sources(filename, reader)
+    with pytest.raises(ValueError, match="Unknown dataset reader"):
+        discover_sources(filename, ["unknown"])
+    with pytest.raises(ValueError, match="conflicting source readers"):
+        discover_sources([filename, filename], ["ase", "ase_db"])
+    for key, value in (
+        ("format", "extxyz"),
+        ("options", {}),
+        ("type", "ase"),
+        ("reader", "ase"),
+    ):
+        entry = {"path": str(filename), key: value}
+        with pytest.raises(ValueError, match="path and optionally fidelity_idx"):
+            discover_sources(entry)
+        with pytest.raises(ValueError, match="path and optionally fidelity_idx"):
+            source_cache_key({"dataset": {"train_file": entry}})
 
 
 def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
@@ -736,7 +907,7 @@ def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
             }
         },
         "dataset": {
-            "type": "fair_aselmdb",
+            "reader": "fair_aselmdb",
             "train_file": str(filename),
             "no_valid_set": True,
             "shard_dirs": [str(tmp_path / "cache")],
@@ -762,11 +933,16 @@ def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
     )
     expected_graphs = [from_atoms(None, atoms, **options) for atoms in atoms_list]
     statistics_by_mode = []
-    for mode in ("memory", "lmdb", "on_the_fly"):
+    for mode in ("memory", *LMDB_MODES, "on_the_fly"):
         cfg["dataset"]["storage_mode"] = mode
+        cfg["dataset"]["shard_dirs"] = [str(tmp_path / f"cache-{mode}")]
         module = build_datamodule(cfg, None, ["energy", "forces"], [], keys)
         module.prepare_data()
         module.setup("fit")
+        if mode in LMDB_MODES:
+            assert module.train_dataset.metadata["codec"] == (
+                COMPRESSED_ARRAY_CODEC if mode == "clmdb" else ARRAY_CODEC
+            )
         element, raw, references = build_atomsList(
             cfg, ["energy", "forces"], [], keys, datamodule=module
         )
@@ -811,17 +987,19 @@ def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
             item[key] == statistics_by_mode[0][key] for item in statistics_by_mode
         )
 
-    cfg["dataset"]["storage_mode"] = "lmdb"
-
     def no_source(*args, **kwargs):
         raise AssertionError("Warm training must not open sources or construct graphs")
 
     monkeypatch.setattr("tace.dataset.datamodule.tace_read_all_files", no_source)
     monkeypatch.setattr("tace.dataset.datamodule.from_records", no_source)
-    warm = load_cached_datamodule(cfg, ["energy", "forces"], [], keys)
-    assert warm is not None and warm.threeAtomsList is None
-    assert sum(batch.num_graphs for batch in warm.train_dataloader()) == 4
-    warm.train_dataset.close()
+    for stored_mode in LMDB_MODES:
+        cfg["dataset"]["shard_dirs"] = [str(tmp_path / f"cache-{stored_mode}")]
+        for read_mode in LMDB_MODES:
+            cfg["dataset"]["storage_mode"] = read_mode
+            warm = load_cached_datamodule(cfg, ["energy", "forces"], [], keys)
+            assert warm is not None and warm.threeAtomsList is None
+            assert sum(batch.num_graphs for batch in warm.train_dataloader()) == 4
+            warm.train_dataset.close()
 
 
 @pytest.mark.parametrize("context", multiprocessing.get_all_start_methods())
@@ -834,7 +1012,7 @@ def test_aselmdb_online_loader_process_reuse(tmp_path, context):
     _write_reader_database(filename)
     keys = _reader_keys()
     source = read_all_files(
-        filename, ["energy", "forces"], keys, [], backend="fair_aselmdb"
+        filename, ["energy", "forces"], keys, [], reader="fair_aselmdb"
     )
     options = dict(
         cutoff=2.0,
@@ -915,7 +1093,7 @@ def test_wrapped_sqlite_source_closes_and_reopens_readonly(sqlite_source, monkey
     original = sqlite_source.read_bytes()
     connections = _track_connections(monkeypatch)
     source = read_all_files(
-        sqlite_source, ["energy", "forces"], _options()["keyspec"], backend="ase_db"
+        sqlite_source, ["energy", "forces"], _options()["keyspec"], reader="ase_db"
     )
     subset = IndexedSource(source, [3, 0, 3])
     assert [len(record) for record in subset.get_records([0, 1, 2])] == [3, 2, 3]
@@ -948,7 +1126,7 @@ def test_offline_graphs_release_raw_source_and_split_readers(
         "misc": {"device": "cpu", "seed": 42},
         "model": {"config": {"cutoff": 2.0}},
         "dataset": {
-            "type": "ase_db",
+            "reader": "ase_db",
             "train_file": str(sqlite_source),
             "storage_mode": mode,
             "shard_dirs": [str(tmp_path / "graphs")],
@@ -995,7 +1173,7 @@ def test_failed_offline_build_releases_source(
 ):
     connections = _track_connections(monkeypatch)
     source = read_all_files(
-        sqlite_source, ["energy", "forces"], _options()["keyspec"], backend="ase_db"
+        sqlite_source, ["energy", "forces"], _options()["keyspec"], reader="ase_db"
     )
 
     def fail(*args, **kwargs):
@@ -1081,6 +1259,7 @@ def test_record_cache_wrappers_release_store_and_reopen(tmp_path, structures):
     dataset = write_records(
         (record_from_atoms(atoms) for atoms in structures), [tmp_path / "records"]
     )
+    assert dataset.metadata["codec"] == COMPRESSED_ARRAY_CODEC
     source = IndexedSource(
         ConcatSource(
             [
@@ -1302,7 +1481,7 @@ def test_completed_graph_cache_survives_raw_source_changes(
             }
         },
         "dataset": {
-            "type": "ase_db",
+            "reader": "ase_db",
             "train_file": str(filename),
             "storage_mode": "lmdb",
             "shard_dirs": [str(tmp_path / "cache")],
@@ -1397,8 +1576,6 @@ def test_completed_graph_reuse_ignores_raw_configuration(tmp_path, monkeypatch):
         split_seed=19,
         neighborlist_backend="matscipy",
         reader="ase",
-        format="extxyz",
-        options={"index": ":"},
     )
     keyspec.info_keys["energy"] = "irrelevant_raw_energy"
     keyspec.info_keys["stress"] = "unused_stress"
@@ -1409,6 +1586,14 @@ def test_completed_graph_reuse_ignores_raw_configuration(tmp_path, monkeypatch):
     assert warm.train_dataset[0].energy.dtype == torch.float64
     assert warm.element.zs == [1, 8]
     warm.train_dataset.close()
+    for key, value in (("type", "ase"), ("format", "extxyz"), ("options", {})):
+        cfg["dataset"][key] = value
+        with pytest.raises(ValueError, match="Unsupported dataset settings"):
+            load_cached_datamodule(cfg, ["energy"], [], keyspec)
+        del cfg["dataset"][key]
+    cfg["dataset"]["reader"] = []
+    with pytest.raises(ValueError, match="dataset.reader has 0 values"):
+        load_cached_datamodule(cfg, ["energy"], [], keyspec)
 
 
 @pytest.mark.parametrize("move_shards", [False, True])
@@ -1533,13 +1718,28 @@ def test_combined_shards_reject_different_graph_configuration(tmp_path):
         read_cache_metadata([first, second], "train")
 
 
-def test_statistics_fingerprint_tracks_added_shards_but_not_moves(tmp_path):
+def _convert_test_shard(path, compressed):
+    with lmdb.open(str(path)) as env:
+        with env.begin(write=True) as txn:
+            for key, value in list(txn.cursor()):
+                if value[:8] == b"TACEZLB\0":
+                    value = zlib.decompress(value[16:])
+                txn.put(key, _compress_array_record(value) if compressed else value)
+    manifest = path / "metadata.json"
+    metadata = json.loads(manifest.read_text())
+    metadata["codec"] = COMPRESSED_ARRAY_CODEC if compressed else ARRAY_CODEC
+    manifest.write_text(json.dumps(metadata))
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_statistics_fingerprint_tracks_added_shards_but_not_moves(tmp_path, compressed):
     original_dir, moved_dir = tmp_path / "original", tmp_path / "moved"
     cfg, keyspec, first = _prebuilt_graph_store(original_dir, [1.0])
     key = statistics_cache_key(cfg, ["energy"], [], keyspec)
     moved_dir.mkdir()
     for path in first.lmdb_paths:
         path.rename(moved_dir / path.name)
+        _convert_test_shard(moved_dir / path.name, compressed)
     cfg["dataset"].update(
         shard_dirs=[str(moved_dir)],
         train_file="different-unavailable-source.xyz",
@@ -1547,7 +1747,9 @@ def test_statistics_fingerprint_tracks_added_shards_but_not_moves(tmp_path):
         split_seed=9,
     )
     keyspec.info_keys["energy"] = "different_raw_label"
-    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == key
+    for mode in LMDB_MODES:
+        cfg["dataset"]["storage_mode"] = mode
+        assert statistics_cache_key(cfg, ["energy"], [], keyspec) == key
     _, _, second = _prebuilt_graph_store(tmp_path / "second", [2.0])
     for path in second.lmdb_paths:
         path.rename(moved_dir / path.name)
@@ -1581,7 +1783,8 @@ def test_graph_cache_rejects_lossy_data(tmp_path):
     assert read_cache_metadata([tmp_path], "train") is None
 
 
-def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_typed_graph_store_batched_projection_and_size_index(tmp_path, compressed):
     graphs = [
         Data(
             num_nodes=2,
@@ -1590,12 +1793,17 @@ def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
             edge_index=torch.tensor([[0, 1], [1, 0]]),
             edge_shifts=torch.zeros(2, 3, dtype=torch.int64),
             energy=torch.tensor([float(index)], dtype=torch.float64),
+            forces=torch.arange(6, dtype=torch.float64).reshape(2, 3) / 7,
+            stress=torch.arange(9, dtype=torch.float64).reshape(1, 3, 3) / 11,
             fidelity_idx=torch.tensor(0),
         )
         for index in range(7)
     ]
     for graph in graphs:
-        decoded = decode_graph(encode_graph(graph))
+        encoded = encode_graph(graph)
+        decoded = decode_graph(
+            _compress_array_record(encoded) if compressed else encoded
+        )
         for name, value in graph.items():
             if torch.is_tensor(value):
                 assert torch.equal(decoded[name], value)
@@ -1609,8 +1817,18 @@ def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
         shard_size=2,
         transaction_bytes=2000,
         max_buffer_bytes=10000,
+        compressed=compressed,
     )
     assert len(dataset.lmdb_paths) == 4
+    assert dataset.metadata["codec"] == (
+        COMPRESSED_ARRAY_CODEC if compressed else ARRAY_CODEC
+    )
+    if compressed:
+        dataset.close()
+        for path in dataset.lmdb_paths[::2]:
+            _convert_test_shard(path, False)
+        metadata = read_cache_metadata([tmp_path / "a", tmp_path / "b"], "train")
+        assert sum(metadata["shards"].values()) == 7
     indices = [6, 0, -2, 6, 1]
     assert [graph.energy.item() for graph in dataset.__getitems__(indices)] == [
         6,
@@ -1628,6 +1846,40 @@ def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
     assert projected[1].energy.item() == 1
     projected.close()
     assert saved.energy.item() == 0
+
+    # Eviction and shared ownership must leave decoded tensors valid. With
+    # enough handles, a second random traversal reuses every transaction.
+    dataset.max_open_shards = 2
+    dataset.__getitems__([0, 2, 4, 6])
+    assert len(dataset._opened) == 2
+    dataset.close()
+    dataset.max_open_shards = 4
+    dataset.__getitems__([0, 2, 4, 6])
+    transactions = [dataset._transaction(i) for i in range(4)]
+    dataset.__getitems__([6, 4, 2, 0])
+    assert all(dataset._transaction(i) is txn for i, txn in enumerate(transactions))
+    dataset.close()
+    assert saved.energy.item() == 0
+
+
+def test_compressed_graph_records_reject_corruption():
+    raw = encode_graph(
+        Data(num_nodes=1, positions=torch.ones(1, 3, dtype=torch.float64))
+    )
+    value = _compress_array_record(raw)
+    for malformed in (
+        value[:15],
+        value[:-1],
+        value + b"trailing data",
+        value[:16] + bytes([value[16] ^ 255]) + value[17:],
+        value[:8] + struct.pack("<Q", len(raw) - 1) + value[16:],
+        value[:8] + struct.pack("<Q", len(raw) + 1) + value[16:],
+        value[:8] + struct.pack("<Q", (2 << 30) + 1) + value[16:],
+    ):
+        with pytest.raises(ValueError):
+            decode_graph(malformed)
+    with pytest.raises(ValueError, match="uncompressed"):
+        _compress_array_record(value)
 
 
 @pytest.mark.parametrize("in_memory", [False, True])
@@ -1766,7 +2018,10 @@ def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch
             tmp_path, [10, 20, 30, 40], targets=("energy",), stage=stage
         )
     cfg["dataset"]["no_valid_set"] = False
-    cfg["dataset"]["epoch_size"] = epoch_size
+    cfg["dataset"]["epoch_sampler"] = {
+        "epoch_size": epoch_size,
+        "balance_batches": "edges" if epoch_size is not None else None,
+    }
     cfg["model"]["config"]["fidelity"][0]["atomic_energy"] = None
     old_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
     cfg["dataset"]["filter"] = {
@@ -1789,6 +2044,7 @@ def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch
     assert isinstance(loader.sampler, EpochSampler) == (epoch_size is not None)
     if epoch_size is not None:
         assert loader.sampler.epoch_size == 1
+        assert loader.sampler.balance == "edges"
     expected = [-1] if epoch_size is not None else [-1, -9]
     assert torch.cat([batch.energy for batch in loader]).tolist() == expected
     with monkeypatch.context() as patch:
@@ -1865,10 +2121,11 @@ def test_store_progress_counts_committed_batches_and_final_partial(tmp_path):
         [graph] * 5,
         [tmp_path],
         "train",
-        transaction_bytes=2 * len(encode_graph(graph)),
+        transaction_bytes=2 * len(_compress_array_record(encode_graph(graph))),
         progress=written.append,
     )
     assert written == [2, 2, 1]
+    assert dataset.metadata["codec"] == COMPRESSED_ARRAY_CODEC
     assert sum(written) == len(dataset)
     dataset.close()
     written.clear()
@@ -1877,7 +2134,10 @@ def test_store_progress_counts_committed_batches_and_final_partial(tmp_path):
     reused.close()
 
 
-def test_store_progress_does_not_double_count_map_full_retries(tmp_path, monkeypatch):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_store_progress_does_not_double_count_map_full_retries(
+    tmp_path, monkeypatch, compressed
+):
     open_lmdb = lmdb.open
     resized = []
 
@@ -1904,7 +2164,9 @@ def test_store_progress_does_not_double_count_map_full_retries(tmp_path, monkeyp
         atomic_numbers=torch.tensor([1]),
         positions=torch.zeros(1, 3, dtype=torch.float64),
         edge_index=torch.empty((2, 0), dtype=torch.int64),
-        payload=torch.zeros(300_000, dtype=torch.float64),
+        payload=torch.randn(
+            300_000, dtype=torch.float64, generator=torch.Generator().manual_seed(7)
+        ),
     )
     written = []
     dataset = write_graphs(
@@ -1913,6 +2175,7 @@ def test_store_progress_does_not_double_count_map_full_retries(tmp_path, monkeyp
         "train",
         map_size=1 << 20,
         progress=written.append,
+        compressed=compressed,
     )
     assert resized == [2 << 20, 4 << 20]
     assert written == [1]
@@ -2408,7 +2671,7 @@ def test_statistics_dataloader_overrides_training_batch_size():
     loader = build_statistics_dataloader(
         {
             "dataset": {
-                "epoch_size": 1,
+                "epoch_sampler": {"epoch_size": 1},
                 "train_dataloader": {
                     "_target_": "torch_geometric.loader.DataLoader",
                     "batch_size": 2,

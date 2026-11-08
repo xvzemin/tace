@@ -320,6 +320,10 @@ class O2O3TensorProductConv(torch.nn.Module):
             if radial.shape[-1] + 1 == projection.shape[0]:
                 radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
             radial_network = None
+        if self.backend == "cuda" and radial_network is None:
+            from ...ops.radial import align_projection
+
+            radial, projection = align_projection(radial, projection)
         method = getattr(self, "method", "baseline") if method is None else method
         if method not in (
             "auto",

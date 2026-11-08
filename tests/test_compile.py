@@ -41,6 +41,54 @@ from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileMode
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
 
+@pytest.mark.parametrize("backend", ["gloo", "nccl"])
+def test_manual_gradient_sync_preserves_dtype_and_views(monkeypatch, backend):
+    from types import SimpleNamespace
+
+    from tace.utils.strategy import SimpleDDPStrategy
+
+    model = torch.nn.ParameterList(
+        [
+            torch.nn.Parameter(torch.zeros(2, 3, dtype=dtype))
+            for dtype in (torch.float32, torch.float64, torch.float32)
+        ]
+    )
+    for i, parameter in enumerate(model[:2]):
+        parameter.grad = torch.full((3, 2), float(i + 1), dtype=parameter.dtype).T
+    gradients = [parameter.grad for parameter in model]
+    seen = []
+
+    def reduce(flat, op, async_op):
+        assert async_op
+        expected = (
+            torch.distributed.ReduceOp.SUM
+            if backend == "gloo"
+            else torch.distributed.ReduceOp.AVG
+        )
+        assert op == expected
+        seen.append(flat.dtype)
+
+        # Complete the simulated collective only when its work is awaited.
+        def wait():
+            flat.add_(2)
+            if backend == "gloo":
+                flat.mul_(2)
+
+        return SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda: backend)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
+    SimpleDDPStrategy.post_backward(SimpleNamespace(model=model), None)
+    assert seen == [torch.float32, torch.float64]
+    for i, parameter in enumerate(model[:2]):
+        assert parameter.grad is gradients[i]
+        torch.testing.assert_close(
+            parameter.grad, torch.full_like(parameter.grad, i + 3)
+        )
+    assert model[2].grad is None
+
+
 def test_compiled_shared_state(double_precision):
     class Model(torch.nn.Module):
         def __init__(self):

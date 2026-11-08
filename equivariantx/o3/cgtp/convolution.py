@@ -310,6 +310,10 @@ class O3TensorProductConv(torch.nn.Module):
         num_nodes = features.size(0) if num_nodes is None else num_nodes
         if not indexed and num_nodes != features.size(0):
             raise ValueError("Row-wise products require one output row per input row.")
+        if self.backend == "cuda" and radial_network is None:
+            from ...ops.radial import align_projection
+
+            radial, projection = align_projection(radial, projection)
         operands = [
             features,
             radial,

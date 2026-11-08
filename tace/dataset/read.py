@@ -13,7 +13,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -125,16 +125,11 @@ class SourceSequence(Sequence):
 class ASEFileSource(SourceSequence):
     """XYZ byte offsets and trajectory random access; bounded generic ASE fallback."""
 
-    def __init__(self, path, format=None, options=None):
+    def __init__(self, path):
         from ase.io.formats import filetype
 
         self.path = str(Path(path).expanduser().resolve())
-        self.format = format or filetype(self.path)
-        self.options = dict(options or {})
-        if "index" in self.options or "format" in self.options:
-            raise ValueError("Reader options cannot override index or format")
-        if self.format == "traj" and self.options:
-            raise ValueError("ASE trajectory reading does not accept reader options")
+        self.format = filetype(self.path)
         self._offsets = None
         self._length = None
         self._trajectory = None
@@ -191,10 +186,7 @@ class ASEFileSource(SourceSequence):
                 from ase.io import iread
 
                 self._length = sum(
-                    1
-                    for _ in iread(
-                        self.path, index=":", format=self.format, **self.options
-                    )
+                    1 for _ in iread(self.path, index=":", format=self.format)
                 )
         except Exception as exc:
             raise RuntimeError(
@@ -225,18 +217,14 @@ class ASEFileSource(SourceSequence):
                     stream.seek(int(offset))
                     frame = io.StringIO(stream.read(int(length)).decode("utf-8"))
                     records.append(
-                        record_from_atoms(
-                            read(frame, index=0, format=self.format, **self.options)
-                        )
+                        record_from_atoms(read(frame, index=0, format=self.format))
                     )
             return records
         if self.format == "traj":
             trajectory = self._open_trajectory()
             return [record_from_atoms(trajectory[index]) for index in indices]
         return [
-            record_from_atoms(
-                read(self.path, index=index, format=self.format, **self.options)
-            )
+            record_from_atoms(read(self.path, index=index, format=self.format))
             for index in indices
         ]
 
@@ -251,7 +239,7 @@ class ASEFileSource(SourceSequence):
         """One sequential decoder pass for formats without an offset index."""
         from ase.io import iread
 
-        for atoms in iread(self.path, index=":", format=self.format, **self.options):
+        for atoms in iread(self.path, index=":", format=self.format):
             yield record_from_atoms(atoms)
 
 
@@ -287,7 +275,6 @@ def _cached_random_source(source, directory):
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
         "format": source.format,
-        "options": source.options,
     }
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[
         :24
@@ -324,12 +311,9 @@ if hasattr(os, "register_at_fork"):
 
 
 class ASEDatabaseSource(SourceSequence):
-    def __init__(self, path, *, lmdb=False, options=None):
+    def __init__(self, path, *, lmdb=False):
         self.path = str(Path(path).expanduser().resolve())
         self.lmdb = lmdb
-        self.options = dict(options or {})
-        if self.options.get("readonly", True) is not True:
-            raise ValueError("Training database sources must be readonly")
         self._ids = None
         self._sql_connection = None
         self._sql_db = None
@@ -351,27 +335,14 @@ class ASEDatabaseSource(SourceSequence):
             # handle anew for each transaction. Other sources can reopen it.
             with _LMDB_LOCK:
                 for key in list(_LMDB_HANDLES):
-                    if key[:2] == (os.getpid(), self.path):
+                    if key == (os.getpid(), self.path):
                         _LMDB_HANDLES.pop(key).close()
 
     def _lmdb(self):
         import lmdb
 
-        unknown = self.options.keys() - {
-            "readonly",
-            "readahead",
-            "create_indices",
-            "use_lock_file",
-            "serial",
-        }
-        if unknown:
-            raise ValueError(f"Unsupported ASE-LMDB reader options: {sorted(unknown)}")
-        readahead = bool(self.options.get("readahead", False))
-        key = (os.getpid(), self.path, readahead)
+        key = (os.getpid(), self.path)
         with _LMDB_LOCK:
-            for existing_key in _LMDB_HANDLES:
-                if existing_key[:2] == key[:2] and existing_key != key:
-                    raise ValueError(f"Conflicting LMDB reader options for {self.path}")
             if key not in _LMDB_HANDLES:
                 _LMDB_HANDLES[key] = lmdb.open(
                     self.path,
@@ -379,7 +350,7 @@ class ASEDatabaseSource(SourceSequence):
                     readonly=True,
                     lock=False,
                     meminit=False,
-                    readahead=readahead,
+                    readahead=False,
                 )
             _LMDB_HANDLES.move_to_end(key)
             while len(_LMDB_HANDLES) > 32:
@@ -401,12 +372,7 @@ class ASEDatabaseSource(SourceSequence):
             from ase.db.sqlite import SQLite3Database
 
             self.close()
-            options = {
-                key: value for key, value in self.options.items() if key != "readonly"
-            }
-            options.setdefault("use_lock_file", False)
-            options.setdefault("serial", True)
-            self._sql_db = SQLite3Database(self.path, **options)
+            self._sql_db = SQLite3Database(self.path, use_lock_file=False, serial=True)
             self._sql_connection = sqlite3.connect(
                 f"file:{quote(self.path)}?mode=ro", uri=True
             )
@@ -595,13 +561,10 @@ class ConcatSource(SourceSequence):
 class SourceSpec:
     path: str
     reader: str = "ase"
-    format: str | None = None
-    options: dict = field(default_factory=dict)
     fidelity_idx: int | None = None
 
 
 RGLOB = {
-    "ase": ["*.xyz", "*.extxyz", "*.traj"],
     "ase_db": ["*.db"],
     "fair_aselmdb": ["*.aselmdb"],
     "aselmdb": ["*.aselmdb"],
@@ -609,89 +572,134 @@ RGLOB = {
 }
 
 
-def discover_sources(
-    filename, backend="ase", *, format=None, reader=None, options=None
-):
-    """Resolve deterministic unique paths using explicit reader/format/options."""
-    sources = [filename] if isinstance(filename, (str, Path, Mapping)) else filename
-    found = {}
-    for entry in sources:
-        entry = dict(entry) if isinstance(entry, Mapping) else {"path": entry}
-        if "path" not in entry or entry.keys() - {
-            "path",
-            "fidelity_idx",
-            "reader",
-            "format",
-            "options",
-        }:
+def stage_readers(dataset):
+    """Assign readers in train, validation, then test source-entry order."""
+    removed = {"type", "format", "options"}.intersection(dataset)
+    if removed:
+        raise ValueError(
+            f"Unsupported dataset settings: {sorted(removed)}. "
+            "Use dataset.reader; file formats are detected automatically."
+        )
+    groups = {
+        "train": dataset.get("train_file"),
+        "valid": dataset.get("valid_file"),
+    }
+    tests = dataset.get("test_files")
+    if tests is not None:
+        tests = [tests] if isinstance(tests, (str, Path, Mapping)) else tests
+        groups.update((f"test{index}", source) for index, source in enumerate(tests))
+    counts = {}
+    for stage, source in groups.items():
+        if source is None:
+            counts[stage] = 0
+        elif isinstance(source, (str, Path, Mapping)):
+            counts[stage] = 1
+        else:
+            counts[stage] = len(source)
+    reader = dataset.get("reader", "ase")
+    if not isinstance(reader, Sequence):
+        raise ValueError("dataset.reader must be a string or a list of strings")
+    if isinstance(reader, str):
+        values = [reader]
+    else:
+        total = sum(counts.values())
+        if len(reader) != total:
             raise ValueError(
-                "Dataset entries require path and optionally fidelity_idx/reader/format/options"
+                f"dataset.reader has {len(reader)} values, expected {total} "
+                f"for train/valid/test source entries: {counts}"
             )
+        values = reader
+    for value in values:
+        if not isinstance(value, str) or value not in HOW_TO_READ:
+            raise ValueError(f"Unknown dataset reader: {value!r}")
+    if isinstance(reader, str):
+        return {stage: reader for stage in groups}
+    result = {}
+    offset = 0
+    for stage, count in counts.items():
+        result[stage] = list(reader[offset : offset + count])
+        offset += count
+    if dataset.get("valid_file") is None:
+        result["valid"] = result["train"]
+    return result
+
+
+def source_specs(filename, reader="ase"):
+    """Assign a reader to each source before directories are expanded or sorted."""
+    sources = (
+        [filename] if isinstance(filename, (str, Path, Mapping)) else list(filename)
+    )
+    if not isinstance(reader, Sequence):
+        raise ValueError("dataset.reader must be a string or a list of strings")
+    if not isinstance(reader, str) and len(reader) != len(sources):
+        raise ValueError("reader must have one value per source entry")
+    specs = []
+    for index, entry in enumerate(sources):
+        entry = dict(entry) if isinstance(entry, Mapping) else {"path": entry}
+        if "path" not in entry or entry.keys() - {"path", "fidelity_idx"}:
+            raise ValueError("Dataset entries require path and optionally fidelity_idx")
         path = Path(entry["path"]).expanduser().resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"Path does not exist: {path}")
-        source_reader = entry.get("reader", reader or backend)
-        source_format = entry.get("format", format)
-        source_options = {**(options or {}), **(entry.get("options") or {})}
+        source_reader = reader if isinstance(reader, str) else reader[index]
+        if not isinstance(source_reader, str) or source_reader not in HOW_TO_READ:
+            raise ValueError(f"Unknown dataset reader: {source_reader!r}")
         fidelity = entry.get("fidelity_idx")
         if fidelity is not None:
             fidelity = validate_fidelity(fidelity, context=f"{path}: fidelity_idx")
-        if source_reader not in HOW_TO_READ:
-            raise ValueError(f"Unknown dataset reader: {source_reader}")
+        specs.append(SourceSpec(str(path), source_reader, fidelity))
+    return specs
+
+
+def discover_sources(filename, reader="ase"):
+    """Resolve deterministic unique files with automatic ASE format detection."""
+    found = {}
+    for source in source_specs(filename, reader):
+        path = Path(source.path)
+        if not path.exists():
+            raise FileNotFoundError(f"Path does not exist: {path}")
         if path.is_file():
             files = [path]
         elif path.is_dir():
-            patterns = RGLOB.get(source_reader, [])
-            if source_format is not None and source_reader == "ase":
-                from ase.io.formats import ioformats
+            if source.reader == "ase":
+                from ase.io.formats import UnknownFileTypeError, filetype, ioformats
 
-                if source_format not in ioformats:
-                    raise ValueError(f"Unknown ASE format: {source_format}")
-                fmt = ioformats[source_format]
-                patterns = [f"*.{extension}" for extension in fmt.extensions] + list(
-                    fmt.globs
+                files = []
+                for file in path.rglob("*"):
+                    if not file.is_file():
+                        continue
+                    try:
+                        fmt = ioformats.get(filetype(str(file), read=False))
+                    except UnknownFileTypeError:
+                        continue
+                    if fmt is not None and fmt.can_read:
+                        files.append(file)
+                files.sort()
+            else:
+                files = sorted(
+                    {
+                        file
+                        for pattern in RGLOB[source.reader]
+                        for file in path.rglob(pattern)
+                        if file.is_file()
+                    }
                 )
-                if source_format in {"extxyz", "xyz"}:
-                    patterns = ["*.xyz", "*.extxyz"]
-                if not patterns:
-                    raise ValueError(
-                        f"ASE format {source_format!r} has no filename patterns; specify individual files"
-                    )
-            files = sorted(
-                {
-                    file
-                    for pattern in patterns
-                    for file in path.rglob(pattern)
-                    if file.is_file()
-                }
-            )
         else:
             raise ValueError(f"Unsupported path type: {path}")
         for file in files:
-            spec = SourceSpec(
-                str(file.resolve()),
-                source_reader,
-                source_format,
-                source_options,
-                fidelity,
-            )
+            spec = SourceSpec(str(file.resolve()), source.reader, source.fidelity_idx)
             previous = found.get(spec.path)
             if previous is not None:
-                if (previous.reader, previous.format, previous.options) != (
-                    spec.reader,
-                    spec.format,
-                    spec.options,
-                ):
-                    raise ValueError(f"{file}: conflicting reader, format or options")
+                if previous.reader != spec.reader:
+                    raise ValueError(f"{file}: conflicting source readers")
                 if (
                     previous.fidelity_idx is not None
-                    and fidelity is not None
-                    and previous.fidelity_idx != fidelity
+                    and spec.fidelity_idx is not None
+                    and previous.fidelity_idx != spec.fidelity_idx
                 ):
                     raise ValueError(
-                        f"{file}: conflicting source fidelity_idx values {previous.fidelity_idx} and {fidelity}"
+                        f"{file}: conflicting source fidelity_idx values "
+                        f"{previous.fidelity_idx} and {spec.fidelity_idx}"
                     )
-                if fidelity is None:
+                if spec.fidelity_idx is None:
                     continue
             found[spec.path] = spec
     if not found:
@@ -699,23 +707,19 @@ def discover_sources(
     return [found[path] for path in sorted(found)]
 
 
-def ase_io_read(filename, format=None, options=None):
-    return ASEFileSource(filename, format, options)
+def ase_io_read(filename):
+    return ASEFileSource(filename)
 
 
-def ase_db_connect(filename, format=None, options=None):
-    if format not in {None, "db", "sqlite", "sqlite3"}:
-        raise ValueError(f"Unsupported ASE database format: {format}")
-    return ASEDatabaseSource(filename, options=options)
+def ase_db_connect(filename):
+    return ASEDatabaseSource(filename)
 
 
-def fair_aselmdb(filename, format=None, options=None):
-    if format not in {None, "aselmdb"}:
-        raise ValueError(f"Unsupported ASE LMDB format: {format}")
-    return ASEDatabaseSource(filename, lmdb=True, options=options)
+def fair_aselmdb(filename):
+    return ASEDatabaseSource(filename, lmdb=True)
 
 
-def torchsim_h5(filename, format=None, options=None):
+def torchsim_h5(filename):
     raise NotImplementedError("torchsim_h5 is not yet implemented")
 
 
@@ -733,15 +737,12 @@ def read_single_file(
     target_property,
     keyspec,
     embedding_property=None,
-    backend="ase",
+    reader="ase",
     fidelity_idx=None,
     *,
-    format=None,
-    reader=None,
-    options=None,
     record_cache_dir=None,
 ):
-    source = HOW_TO_READ[reader or backend](str(fpath), format=format, options=options)
+    source = HOW_TO_READ[reader](str(fpath))
     source = _cached_random_source(source, record_cache_dir)
     return BoundSource(
         source, keyspec, target_property, embedding_property or [], fidelity_idx
@@ -754,16 +755,11 @@ def read_all_files(
     keyspec,
     embedding_property=None,
     num_workers=None,
-    backend="ase",
+    reader="ase",
     *,
-    format=None,
-    reader=None,
-    options=None,
     record_cache_dir=None,
 ):
-    specs = discover_sources(
-        filename, backend, format=format, reader=reader, options=options
-    )
+    specs = discover_sources(filename, reader)
     sources = [
         read_single_file(
             spec.path,
@@ -772,8 +768,6 @@ def read_all_files(
             embedding_property,
             spec.reader,
             spec.fidelity_idx,
-            format=spec.format,
-            options=spec.options,
             record_cache_dir=record_cache_dir,
         )
         for spec in specs
@@ -801,6 +795,7 @@ def tace_read_all_files(
     if stages - {"train", "valid", "test"}:
         raise ValueError(f"Unknown dataset stages: {sorted(stages)}")
     dataset = cfg["dataset"]
+    readers = stage_readers(dataset)
     directories = dataset.get("shard_dirs", ["graphCache"])
     record_directory = (
         Path(
@@ -809,17 +804,14 @@ def tace_read_all_files(
         / "records"
     )
 
-    def read(source):
+    def read(source, stage):
         return read_all_files(
             source,
             target_property,
             keyspec,
             embedding_property,
             dataset.get("num_workers"),
-            dataset.get("type", "ase"),
-            format=dataset.get("format"),
-            reader=dataset.get("reader"),
-            options=dataset.get("options"),
+            readers[stage],
             record_cache_dir=dataset.get(
                 "record_cache_dir",
                 record_directory,
@@ -828,7 +820,7 @@ def tace_read_all_files(
 
     train = valid = None
     if stages == {"valid"} and dataset.get("valid_file") is not None:
-        valid = read(dataset["valid_file"])
+        valid = read(dataset["valid_file"], "valid")
         if len(valid) == 0:
             raise ValueError("Validation set is empty !")
     elif stages & {"train", "valid"}:
@@ -837,13 +829,13 @@ def tace_read_all_files(
             raise ValueError(
                 "No valid training dataset provided. Please check cfg.dataset.train_file"
             )
-        train = read(train_file)
+        train = read(train_file, "train")
         no_valid = dataset.get("no_valid_set", False)
         if no_valid:
             pass
         elif dataset.get("valid_file") is not None:
             if "valid" in stages:
-                valid = read(dataset["valid_file"])
+                valid = read(dataset["valid_file"], "valid")
         elif dataset.get("valid_from_index", False):
             valid_path, train_path = Path("valid.index"), Path("train.index")
             valid_indices = [
@@ -889,8 +881,8 @@ def tace_read_all_files(
         None
         if test_files is None
         else [
-            read(source)
-            for source in (
+            read(source, f"test{index}")
+            for index, source in enumerate(
                 [test_files]
                 if isinstance(test_files, (str, Path, Mapping))
                 else test_files

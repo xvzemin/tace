@@ -49,7 +49,7 @@ graph cache. Each GPU call searches a packed batch of structures.
 
    dataset:
      neighborlist_backend: alchemiops
-     storage_mode: lmdb
+     storage_mode: clmdb
      shard_dirs: [graphCache]
      graph_device: null
      graph_batch_size: 256

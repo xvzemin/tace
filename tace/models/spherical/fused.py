@@ -421,7 +421,9 @@ class O3TensorProductConv(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = eqx_conv.O3TensorProductConv(self.tp, normalize=False)
+        self.eqx_tp = eqx_conv.O3TensorProductConv(
+            self.tp, normalize=False, batch_paths=True
+        )
         self.reshape_in = LayoutTransform(
             self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
         )

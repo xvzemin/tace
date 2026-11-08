@@ -12,8 +12,8 @@ EDGE_BUCKET = 2048
 MIN_EDGES = 1024
 ROW_BUCKET = 128
 MIN_ROWS = 64
-MAX_GRAPHS = 64
-MAX_BYTES = 4 << 30
+MAX_GRAPHS = 128
+MAX_BYTES = 12 << 30
 _GRAPHS = OrderedDict()
 _LOCK = RLock()
 
@@ -73,7 +73,10 @@ def execute(name, key, function, inputs, outputs, shapes=None, fills=None, read=
         torch.Size(shape).numel() * x.element_size()
         for shape, x in zip((*input_shapes, *output_shapes), (*inputs, *outputs))
     )
-    if estimated > MAX_BYTES // 2:
+    capacity = min(
+        MAX_BYTES, torch.cuda.get_device_properties(device).total_memory // 16
+    )
+    if estimated > capacity // 2:
         function(inputs, outputs)
         return
     with _LOCK, torch.cuda.device(device):
@@ -106,14 +109,18 @@ def execute(name, key, function, inputs, outputs, shapes=None, fills=None, read=
             # all persistent inputs/results were allocated above and outputs
             # are copied out. Temporary storage can therefore be reused even
             # when shape buckets or derivative programs replay in a new order.
-            with torch.cuda.graph(graph, stream=capture_stream, pool=pool):
+            # Loader threads can allocate unrelated pinned memory concurrently.
+            with torch.cuda.graph(
+                graph, stream=capture_stream, pool=pool,
+                capture_error_mode="thread_local",
+            ):
                 function(values, results)
             stream.wait_stream(capture_stream)
             size = max(estimated, torch.cuda.memory_allocated(device) - before)
             _GRAPHS[signature] = graph, values, results, size
             while len(_GRAPHS) > 1 and (
                 len(_GRAPHS) > MAX_GRAPHS
-                or sum(entry[3] for entry in _GRAPHS.values()) > MAX_BYTES
+                or sum(entry[3] for entry in _GRAPHS.values()) > capacity
             ):
                 _GRAPHS.popitem(last=False)
         _GRAPHS.move_to_end(signature)

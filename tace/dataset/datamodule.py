@@ -27,6 +27,7 @@ from tqdm import tqdm
 
 from .augmentation import AugmentedDataset, validate_augmentations
 from .cache import (
+    LMDB_MODES,
     graph_cache_directories,
     read_cache_metadata,
 )
@@ -36,7 +37,7 @@ from .filter import filter_graphs, filter_options
 from .graph import batch_geometry, from_records
 from .neighbour_list import get_neighborhood_batch
 from .quantity import KeySpecification, get_need_property
-from .read import tace_read_all_files
+from .read import stage_readers, tace_read_all_files
 from .records import record_from_atoms
 from .split import IndexedSource
 from .store import (
@@ -104,7 +105,8 @@ def graph_devices(device, backend, *, single_device=False):
     if single_device and (multiple or device == "all"):
         raise ValueError(
             "on_the_fly graph construction requires one explicit device; "
-            "use storage_mode='lmdb' or 'memory' for multi-GPU preprocessing."
+            "use storage_mode='lmdb', 'clmdb' or 'memory' "
+            "for multi-GPU preprocessing."
         )
     if device is None and backend == "alchemiops":
         # Match explicit-list discovery. is_available() can use a stale CUDA
@@ -434,7 +436,7 @@ def create_graphs(
     for_dataset,
     stage,
     shard_dirs,
-    storage_mode="lmdb",
+    storage_mode="clmdb",
     shard_size=DEFAULT_SHARD_SIZE,
     cache_size=0,
     existing_dataset=None,
@@ -450,7 +452,7 @@ def create_graphs(
     """Load complete graph shards or build them with bounded memory."""
     if existing_dataset is not None:
         return existing_dataset
-    if storage_mode not in {"lmdb", "memory", "on_the_fly"}:
+    if storage_mode not in (*LMDB_MODES, "memory", "on_the_fly"):
         raise ValueError(f"Unknown storage_mode: {storage_mode!r}")
     if storage_mode == "on_the_fly":
         if atoms_list is None:
@@ -466,7 +468,7 @@ def create_graphs(
         if close is not None:
             cleanup.callback(close)
         if (
-            storage_mode == "lmdb"
+            storage_mode in LMDB_MODES
             and read_cache_metadata(shard_dirs, stage) is not None
         ):
             return GraphDatasetLMDB.from_directories(
@@ -492,10 +494,12 @@ def create_graphs(
             raise ValueError(
                 "DDP memory-mode preprocessing cannot use multiple graph GPUs: "
                 "every rank would build the full dataset on all selected devices. "
-                "Use storage_mode='lmdb' for rank-zero multi-GPU preprocessing, "
+                "Use storage_mode='lmdb' or 'clmdb' for rank-zero "
+                "multi-GPU preprocessing, "
                 "or select one rank-local graph_device."
             )
         writer_options = dict(
+            compressed=storage_mode == "clmdb",
             shard_size=shard_size,
             transaction_bytes=transaction_bytes,
             shard_bytes=shard_bytes,
@@ -504,7 +508,7 @@ def create_graphs(
             max_open_shards=max_open_shards,
             graph_config=graph_config,
         )
-        if storage_mode == "lmdb" and len(devices) > 1:
+        if storage_mode in LMDB_MODES and len(devices) > 1:
             if workers < 0:
                 raise ValueError("Graph workers must be non-negative.")
             return write_multi_gpu_graphs(
@@ -544,7 +548,7 @@ def create_graphs(
                     **writer_options,
                 )
             progress.update(0, finished=True)
-            if storage_mode == "lmdb":
+            if storage_mode in LMDB_MODES:
                 logging.info("Published %s graph cache: %s", stage, shard_dirs)
             return dataset
         finally:
@@ -595,6 +599,11 @@ class GraphDataModule(LightningDataModule):
         self._epoch_dataloader = None
         self._epoch_dataloader_state = None
         data = cfg["dataset"]
+        if {"epoch_size", "balance_batches"}.intersection(data):
+            raise ValueError(
+                "Move epoch_size and balance_batches under dataset.epoch_sampler."
+            )
+        stage_readers(data)
         self.storage_mode = data.get("storage_mode", "memory")
         self.filter_options = filter_options(data.get("filter"))
         self.no_valid_set = data.get("no_valid_set", False)
@@ -618,7 +627,7 @@ class GraphDataModule(LightningDataModule):
         self.graph_config = {
             name: self.graph_options[name] for name in ("cutoff", "max_neighbors")
         }
-        if self.storage_mode not in {"lmdb", "memory", "on_the_fly"}:
+        if self.storage_mode not in (*LMDB_MODES, "memory", "on_the_fly"):
             raise ValueError(f"Unknown storage_mode: {self.storage_mode!r}")
         if self.storage_mode == "on_the_fly":
             logging.info(
@@ -627,7 +636,7 @@ class GraphDataModule(LightningDataModule):
 
     def cached_dataset(self, stage):
         """Open canonical graph stores without reading their structure sources."""
-        if self.storage_mode != "lmdb":
+        if self.storage_mode not in LMDB_MODES:
             return None
         directories = self.shard_dirs
         metadata = read_cache_metadata(directories, stage)
@@ -731,7 +740,7 @@ class GraphDataModule(LightningDataModule):
         writer = not distributed or dist.get_rank() == 0
         result = None
         error = None
-        if self.storage_mode != "lmdb" or writer:
+        if self.storage_mode not in LMDB_MODES or writer:
             try:
                 result = self.cached_dataset(stage)
                 if result is None:
@@ -746,16 +755,16 @@ class GraphDataModule(LightningDataModule):
                         graph_config=self.graph_config,
                         **self.build_options,
                     )
-                    if self.storage_mode == "lmdb":
+                    if self.storage_mode in LMDB_MODES:
                         # Another job may have published while this one waited
                         # for the writer lock. Validate that store as well.
                         result.close()
                         result = self.cached_dataset(stage)
             except Exception as exc:
-                if not distributed or self.storage_mode != "lmdb":
+                if not distributed or self.storage_mode not in LMDB_MODES:
                     raise
                 error = f"{type(exc).__name__}: {exc}"
-        if distributed and self.storage_mode == "lmdb":
+        if distributed and self.storage_mode in LMDB_MODES:
             status = [error]
             dist.broadcast_object_list(status, src=0)
             if status[0] is not None:
@@ -785,7 +794,7 @@ class GraphDataModule(LightningDataModule):
                 if self._test_sources is not None:
                     count = len(self._test_sources)
                 indices = set(range(count))
-                if self.storage_mode == "lmdb":
+                if self.storage_mode in LMDB_MODES:
                     for directory in self.shard_dirs:
                         for path in directory.glob("test*_shard*.lmdb"):
                             match = re.match(r"test(\d+)_shard", path.name)
@@ -839,13 +848,15 @@ class GraphDataModule(LightningDataModule):
         dataset = self._filtered_train_dataset
         if self.augmentation:
             dataset = AugmentedDataset(dataset, self.augmentation)
+        sampler_options = self.cfg["dataset"].get("epoch_sampler") or {}
         loader = build_graph_dataloader(
             self.cfg["dataset"]["train_dataloader"],
             dataset,
-            epoch_size=self.cfg["dataset"].get("epoch_size"),
+            epoch_size=sampler_options.get("epoch_size"),
             seed=self.cfg.get("misc", {}).get("global_seed", 42),
+            balance_batches=sampler_options.get("balance_batches"),
         )
-        if self.cfg["dataset"].get("epoch_size") is not None:
+        if sampler_options.get("epoch_size") is not None:
             state = (
                 self._epoch_dataloader.state_dict()
                 if self._epoch_dataloader is not None
@@ -873,8 +884,12 @@ class GraphDataModule(LightningDataModule):
         loader_state = state.get("epoch_dataloader")
         if loader_state is None:
             return
-        if self.cfg["dataset"].get("epoch_size") is None:
-            raise ValueError("Cannot resume epoch sampling with epoch_size disabled.")
+        sampler_options = self.cfg["dataset"].get("epoch_sampler") or {}
+        if sampler_options.get("epoch_size") is None:
+            raise ValueError(
+                "Cannot resume epoch sampling with "
+                "dataset.epoch_sampler.epoch_size disabled."
+            )
         if self._epoch_dataloader is not None:
             self._epoch_dataloader.load_state_dict(loader_state)
         else:
@@ -918,7 +933,7 @@ def build_datamodule(
 
 def load_cached_datamodule(cfg, target_property, embedding_property, keyspec):
     """Attach training caches without opening structure sources."""
-    if cfg["dataset"].get("storage_mode", "memory") != "lmdb":
+    if cfg["dataset"].get("storage_mode", "memory") not in LMDB_MODES:
         return None
     datamodule = build_datamodule(
         cfg, None, target_property, embedding_property, keyspec

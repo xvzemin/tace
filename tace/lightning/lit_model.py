@@ -295,7 +295,8 @@ class LightningWrapperModel(L.LightningModule):
                     )
 
     def configure_callbacks(self):
-        if self.cfg.get("dataset", {}).get("epoch_size") is not None:
+        sampler_options = self.cfg.get("dataset", {}).get("epoch_sampler") or {}
+        if sampler_options.get("epoch_size") is not None:
             from tace.utils.callbacks import EpochSamplerCallback
 
             return [EpochSamplerCallback()]

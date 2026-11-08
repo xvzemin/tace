@@ -3,15 +3,17 @@
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 
-from .read import HOW_TO_READ, SourceSpec, discover_sources
+from .read import discover_sources, source_specs, stage_readers
 
 GRAPH_SCHEMA = 3
 RECORD_SCHEMA = 1
 STATISTICS_SCHEMA = 2
 ARRAY_CODEC = "typed-array-v1"
+COMPRESSED_ARRAY_CODEC = "typed-array-zlib-v1"
+LMDB_MODES = ("lmdb", "clmdb")
 
 
 def digest(config):
@@ -33,7 +35,11 @@ def stage_source(dataset, stage):
         return dataset.get("valid_file") or dataset.get("train_file")
     if re.fullmatch(r"test\d+", stage):
         sources = dataset.get("test_files")
-        sources = sources if isinstance(sources, (list, tuple)) else [sources]
+        sources = (
+            sources
+            if isinstance(sources, Sequence) and not isinstance(sources, str)
+            else [sources]
+        )
         index = int(stage[4:])
         if index >= len(sources):
             raise ValueError(f"No source configured for {stage}")
@@ -44,7 +50,7 @@ def stage_source(dataset, stage):
 def source_cache_key(cfg, stage="train", keyspec=None):
     """Raw records are independent of splits, cutoffs, and requested labels."""
     dataset = cfg["dataset"]
-    backend = dataset.get("type", "ase")
+    reader = stage_readers(dataset)[stage]
     fidelity_key = (
         keyspec.info_keys.get("fidelity_idx", "fidelity_idx")
         if keyspec is not None
@@ -54,15 +60,9 @@ def source_cache_key(cfg, stage="train", keyspec=None):
         {
             "schema": RECORD_SCHEMA,
             "codec": ARRAY_CODEC,
-            "reader": dataset.get("reader") or backend,
-            "format": dataset.get("format"),
-            "options": dataset.get("options") or {},
             "source": source_signature(
                 stage_source(dataset, stage),
-                backend,
-                reader=dataset.get("reader"),
-                format=dataset.get("format"),
-                options=dataset.get("options"),
+                reader,
             ),
             "fidelity_key": fidelity_key,
         }
@@ -108,42 +108,25 @@ def index_signature(path):
     return {"count": count, "sha256": digest.hexdigest()}
 
 
-def source_signature(source, backend: str, *, reader=None, format=None, options=None):
-    """Fingerprint the same effective file set and options used by the reader."""
+def source_signature(source, reader="ase"):
+    """Fingerprint the effective files, readers, and source fidelities."""
     if source is None:
         return None
-    entries = source if isinstance(source, (list, tuple)) else [source]
     existing, missing = [], []
-    for item in entries:
-        entry = dict(item) if isinstance(item, Mapping) else {"path": item}
-        if "path" not in entry or entry.keys() - {
-            "path",
-            "reader",
-            "format",
-            "options",
-            "fidelity_idx",
-        }:
-            raise ValueError("Invalid dataset source configuration")
-        path = Path(entry["path"]).expanduser().resolve()
+    for spec in source_specs(source, reader):
+        path = Path(spec.path)
         if path.exists():
-            existing.append(entry)
+            existing.append(spec)
             continue
         # Missing explicit files remain representable for cache-only startup.
-        source_reader = entry.get("reader", reader or backend)
-        if source_reader not in HOW_TO_READ:
-            raise ValueError(f"Unknown dataset reader: {source_reader}")
-        missing.append(
-            SourceSpec(
-                str(path),
-                source_reader,
-                entry.get("format", format),
-                {**(options or {}), **(entry.get("options") or {})},
-                entry.get("fidelity_idx"),
-            )
-        )
+        missing.append(spec)
     specs = (
         discover_sources(
-            existing, backend, reader=reader, format=format, options=options
+            [
+                {"path": spec.path, "fidelity_idx": spec.fidelity_idx}
+                for spec in existing
+            ],
+            [spec.reader for spec in existing],
         )
         if existing
         else []
@@ -152,12 +135,8 @@ def source_signature(source, backend: str, *, reader=None, format=None, options=
     for spec in missing:
         previous = found.get(spec.path)
         if previous is not None:
-            if (previous.reader, previous.format, previous.options) != (
-                spec.reader,
-                spec.format,
-                spec.options,
-            ):
-                raise ValueError(f"{spec.path}: conflicting reader, format or options")
+            if previous.reader != spec.reader:
+                raise ValueError(f"{spec.path}: conflicting source readers")
             if previous.fidelity_idx is not None:
                 if (
                     spec.fidelity_idx is not None
@@ -176,8 +155,6 @@ def source_signature(source, backend: str, *, reader=None, format=None, options=
             {
                 "path": path,
                 "reader": spec.reader,
-                "format": spec.format,
-                "options": spec.options,
                 "fidelity_idx": spec.fidelity_idx,
                 "size": stat.st_size if stat else None,
                 "mtime_ns": stat.st_mtime_ns if stat else None,
@@ -206,7 +183,7 @@ def statistics_cache_key(cfg, target_property, embedding_property, keyspec) -> s
     }
     metadata = (
         read_cache_metadata(graph_cache_directories(cfg), "train")
-        if dataset.get("storage_mode") == "lmdb"
+        if dataset.get("storage_mode") in LMDB_MODES
         else None
     )
     if metadata is not None:
@@ -266,7 +243,7 @@ def read_cache_metadata(directories, stage: str, *, allow_building=False):
             if (
                 kind not in {"graphs", "records"}
                 or current["schema"] != expected
-                or current["codec"] != ARRAY_CODEC
+                or current["codec"] not in {ARRAY_CODEC, COMPRESSED_ARRAY_CODEC}
                 or current["dtype"] != "float64"
                 or current["length"] <= 0
                 or not (path / "data.mdb").is_file()
@@ -280,10 +257,7 @@ def read_cache_metadata(directories, stage: str, *, allow_building=False):
                 key: current[key] for key in ("schema", "kind", "codec", "dtype")
             }
             metadata["graph_config"] = current.get("graph_config")
-        elif any(
-            current[key] != metadata[key]
-            for key in ("schema", "kind", "codec", "dtype")
-        ):
+        elif any(current[key] != metadata[key] for key in ("schema", "kind", "dtype")):
             raise ValueError(f"Incompatible shard format in {path}")
         elif current.get("graph_config") != metadata["graph_config"]:
             raise ValueError(f"Different cutoffs or neighbor limits in {path}")

@@ -6,7 +6,7 @@ misc:
   project_name: TACE-DirectHessian
 
 dataset:
-  type: ase_db
+  reader: ase_db
   train_file: ${oc.env:HOME}/dataset/HORM/train.db
   valid_file: ${oc.env:HOME}/dataset/HORM/valid.db
   #test_files:

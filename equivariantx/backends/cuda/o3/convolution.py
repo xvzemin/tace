@@ -12,8 +12,8 @@ from ..reduction import prepare_graph
 from ..runtime import SOURCE_SIZE_LIMIT, kernels, runtime
 from .codegen import convolution_source, fused_source
 
-CHUNK_SIZE = 65536
-WORKSPACE_BYTES = 512 << 20
+CHUNK_SIZE = 131072
+WORKSPACE_BYTES = 4 << 30
 ROW_SIZE = 8
 REGISTER_LIMIT = 160
 PATH_BATCH_SIZE = 8
@@ -400,7 +400,10 @@ def contract(metadata, program, source, target, operands, results, batch_paths=F
                 complete=sum(p[3] * p[4] for p in paths if p[8] >= 0) == weight_numel,
                 output_role=4,
                 chunk_size=CHUNK_SIZE,
-                workspace_bytes=WORKSPACE_BYTES,
+                workspace_bytes=min(
+                    WORKSPACE_BYTES,
+                    torch.cuda.get_device_properties(device).total_memory // 32,
+                ),
             )
 
 

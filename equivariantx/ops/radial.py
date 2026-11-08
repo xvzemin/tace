@@ -13,6 +13,16 @@ def cast_radial(radial, dtype):
     return radial.to(dtype=dtype)
 
 
+def align_projection(radial, projection):
+    """Align CUDA FP32 matrix strides, including an appended affine bias."""
+    if projection.is_cuda and projection.dtype == torch.float32 and projection.numel():
+        extra = -projection.shape[0] % 8
+        if extra:
+            radial = torch.nn.functional.pad(radial, (0, extra))
+            projection = torch.nn.functional.pad(projection, (0, 0, 0, extra))
+    return radial, projection
+
+
 def compose_radial(metadata, inputs, slot, network):
     """Replace an edge input by a tiled radial network evaluation."""
     from ..models.radial import radial_program

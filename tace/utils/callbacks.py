@@ -22,7 +22,7 @@ class EpochSamplerCallback(Callback):
         limit = trainer.limit_train_batches
         if not isinstance(limit, float) or limit != 1.0:
             raise ValueError(
-                "Use dataset.epoch_size instead of limit_train_batches; "
+                "Use dataset.epoch_sampler.epoch_size instead of limit_train_batches; "
                 "limit_train_batches must remain 1.0."
             )
 

@@ -380,6 +380,10 @@ class NonlinearCgtpACE(Product):
             node_feats.is_cuda
             and node_feats.dtype in (torch.float32, torch.float64)
             and acceleration_enabled("eqx", kernel="product")
+            # Native autograd retains factors and gates for force derivatives;
+            # Inductor fuses their elementwise operations without recomputing
+            # the complete nonlinear product in each derivative program.
+            and not (self.training and acceleration_enabled("compile"))
             and not any(
                 has_lora(layer)
                 for layer in (self.linear_up, self.gate[0], *self.coefs, self.linear)

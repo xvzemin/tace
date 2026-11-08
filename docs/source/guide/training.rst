@@ -150,10 +150,11 @@ Now, we support:
 
 - **Fair aselmdb** (``.aselmdb``) created with `ase.db <https://docs.ase-lib.org/ase/db/db.html>`_.  
 
-For large datasets, set ``dataset.storage_mode`` to ``lmdb``. ``tace-train``
-constructs and caches the graphs automatically, and later runs reuse compatible
-graphs from the configured shard directories. See :doc:`neighbor_list` for
-backend selection and multi-GPU batch construction.
+For large datasets, set ``dataset.storage_mode`` to ``clmdb`` for
+lossless compression, or ``lmdb`` for ordinary storage. Both modes automatically
+read either format. ``tace-train`` constructs and caches the graphs, and later
+runs reuse compatible graphs from the configured shard directories.
+See :doc:`neighbor_list` for backend selection and multi-GPU batch construction.
 
 Precision
 ~~~~~~~~~

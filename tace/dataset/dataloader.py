@@ -129,9 +129,13 @@ class EpochDataLoader(DataLoader):
         self.sampler.load_state_dict(state["sampler"])
 
 
-def build_graph_dataloader(config, dataset, *, epoch_size=None, seed=0):
+def build_graph_dataloader(
+    config, dataset, *, epoch_size=None, seed=0, balance_batches=None
+):
     """Build a loader without bypassing batched dataset reads."""
     config = {key: value for key, value in config.items() if key != "extra"}
+    if balance_batches is not None and epoch_size is None:
+        raise ValueError("balance_batches requires epoch_size (use 1.0 for all graphs)")
     source = getattr(dataset, "dataset", dataset)
     device = getattr(source, "device", None)
     if (
@@ -160,6 +164,7 @@ def build_graph_dataloader(config, dataset, *, epoch_size=None, seed=0):
             seed=seed,
             batch_size=config.get("batch_size", 1),
             drop_last=config.get("drop_last", False),
+            balance=balance_batches,
         )
         if sampler.rank == 0 and sampler.total_size != sampler.epoch_size:
             logging.info(

@@ -1,4 +1,4 @@
-# support resolver like add, sub, mul, float, ceil, floor
+# Optional settings below are commented out; select them explicitly when needed.
 defaults:
   - _self_
   # # Specify the logger backlend
@@ -14,19 +14,42 @@ finetune_from_model: null
 
 finetune: null # this field equals ./finetune_config.yaml, auto read or write directly here
 
-dtype:
-  model: float32 # float32 or float64; graph data and geometry remain float64
-  autocast: null # null, bfloat16, or float16; requires model=float32
-  matmul: null # null: resolve environment/default; ieee or tf32: explicit selection
-
 misc:
   project_name: Example
   global_seed: 42
   device: cuda # cpu or cuda
   ignore_warning: true
   log_level: debug # info or debug
-  env: # You can specify here the environment variables that should always be used.
-    WANDB_MODE: offline # For the convenience of Chinese users
+  env: # Applied before model construction; overrides matching shell variables. Use strings.
+    WANDB_MODE: offline # offline or online logging
+    # Backend switches are independent of compilation. Unset means off, except EQT.
+    # TACE_USE_EQX: "1" # supported EquivariantX operators
+    # TACE_USE_COMPILE: "1" # torch.compile training/evaluation; not an exported AOTI package
+    # TACE_USE_LUNA: "1" # supported LunaEquivariance convolutions
+    # TACE_USE_OEQ: "1" # supported OpenEquivariance convolutions
+    # TACE_USE_EQT: "1" # EquiTorch ACE; unset enables selected correlation > 2 paths
+    # TACE_USE_CUE: "1" # supported cuEquivariance operators
+    # Per-operator priority: EQX > Luna > OEQ > EQT > CUEQ.
+    # TACE_MEMORY_FIRST: "0" # default/unset: final radial layer only; 1: full MLP + backward recomputation
+    # EQX_USE_CUDA_GRAPH: "1" # unset: eligible node products; 0: off; 1: all supported native captures
+    # Native EQX replay is independent of torch.compile and can retain extra capture memory.
+    # Prefer dtype.matmul; explicit environment values must agree with it and each other.
+    # TACE_MATMUL_PRECISION: "tf32" # ieee or tf32; unset uses the precision policy
+    # TACE_USE_TF32: "1" # alternative shorthand: 0=ieee, 1=tf32
+    # TACE_APPLY_U_SHIFT: "0" # default 0; 1 adds built-in element offsets to energy labels
+    # TACE_USE_DENS: "0" # default 0; 1 adds DeNS noise training and model parameters
+    # DeNS requires force labels, compatible DeNS losses, and readout_emlp.use_alllayer=false.
+    # U-shift and DeNS preprocessing also apply to validation/test batches.
+  # Set import-time/runtime options in the shell before starting Python:
+  # export TACE_USE_MATRIX_WEIGHT=1 # default 0; matrix-shaped Linear weights for e.g. Muon
+  # export CUDA_VISIBLE_DEVICES=0,1 # visible GPUs and their order; unset exposes available GPUs
+  # export OMP_NUM_THREADS=4 # example CPU threads per process; account for all ranks
+  # export MAX_JOBS=16 # EQX compiler pool defaults to min(16, CPU count)
+  # export TORCH_EXTENSIONS_DIR=/path/to/torch_extensions # PyTorch extension build cache
+  # export XDG_CACHE_HOME=/path/to/cache # EQX binaries: $XDG_CACHE_HOME/eqx/cuda; default ~/.cache/eqx/cuda
+  # export CUDA_HOME=/path/to/cuda # override automatic CUDA toolkit detection
+  # export PYTORCH_NVCC=/path/to/cuda/bin/nvcc # optional compiler override
+  # RANK, LOCAL_RANK and WORLD_SIZE come from the launcher, not this configuration.
   # Generally, there is no need to enable it. If training is unstable, prioritize using Layer Norm.
   LossSkipController:
     enable: false
@@ -52,6 +75,7 @@ misc:
 trainer:
   # As long as your system has NVIDIA GPUs, the following configuration will automatically detect and use all available GPUs for training.
   # If you wish to control which GPUs are visible, you can do so by setting the environment variable like export CUDA_VISIBLE_DEVICES=0,2.
+  # EpochSampler requires limit_train_batches=1.0 and overfit_batches=0 (the defaults).
   _target_: lightning.Trainer
   num_nodes: 1
   accelerator: auto
@@ -98,7 +122,7 @@ callbacks:
     save_last: true
     every_n_epochs: 10
     # mode: min
-    save_weights_only: false
+    save_weights_only: false # keep false to restore optimizer and EpochSampler state
     auto_insert_metric_name: false
     verbose: false
 
@@ -109,14 +133,20 @@ callbacks:
   #   filename: TACE-{${misc.project_name}-{epoch}-{step}
   #   save_top_k: -1
   #   save_last: false
-  #   every_n_train_steps: 10000
-  #   save_weights_only: false
+  #   every_n_train_steps: 10000 # optimizer steps between step checkpoints
+  #   save_weights_only: false # keep false to restore optimizer and EpochSampler state
   #   auto_insert_metric_name: false
   #   verbose: false
 
 dataset:
-  type: ase # ase or ase-db
-  epoch_size: null # float: fraction; int: requested global samples; null: full dataset
+  reader: ase # ase, ase_db, or aselmdb
+  # A string applies to every train/valid/test entry.
+  # A list matches all address entries in train -> valid -> test order; counts must match exactly.
+  epoch_sampler:
+    epoch_size: null # null: full dataset; float in (0,1]: fraction; int: global sample count
+    balance_batches: null # null, atoms, edges, or [atom_weight, edge_weight]; requires epoch_size
+    # Balancing redistributes the same global batch across ranks; [20, 1] is workload-specific.
+    # Resume with the same dataset/filter, sampler settings, world size and per-rank batch size.
   augmentation: [] # [spin_rotation, time_reversal], applied only to training samples
   split_seed: ${misc.global_seed} # this random seed is useful if auto split
   train_file: ../data/BaTiO3.xyz
@@ -130,17 +160,25 @@ dataset:
   valid_from_index: false # split train and val from train.index and valid.index in current directory
   no_valid_set: false # The prerequisite for enabling this is that you are using a learning rate scheduler that does not depend on the validation set.
   neighborlist_backend: matscipy # [ase, matscipy, vesin, alchemiops] recommend matscipy
-  storage_mode: memory # memory for small datasets; lmdb for large repeated training; on_the_fly is opt-in
-  filter: # training samples only; statistics, validation and test stay complete
+  storage_mode: clmdb # [memory, clmdb, lmdb, on_the_fly]
+  # Both LMDB modes automatically read either format, including mixed shards.
+  # Existing caches are reused, not converted; switching these modes preserves the statistics key.
+  # Compression level and LMDB transaction/shard limits are internal, not YAML options.
+  filter: # train only; statistics, validation and test use the complete data
     enabled: false
-    max_edges: null
-    max_atoms: null
-    max_forces: null 
-    max_energy_per_atom: null 
-    max_stress: null 
+    max_edges: null # inclusive edge limit; null disables; omitted default is 24000 when filtering is enabled
+    max_atoms: null # inclusive atom-count limit; null disables
+    max_forces: null # max per-atom force Euclidean norm; null disables
+    max_energy_per_atom: null # signed energy/atom upper bound, not absolute value; null disables
+    max_stress: null # stress tensor Frobenius-norm upper bound; null disables
   shard_dirs: # reusable graph and record caches; source files remain unchanged
     - graphCache
+  # Source-record cache for formats without random access; separate from graph shards.
+  # record_cache_dir: ${dataset.shard_dirs.0}/records # omitted: this path; null disables it
   cache_size: 0 # decoded samples per loader worker; OS page cache remains active
+  # Graph construction settings affect new graphs only, not reads from completed caches.
+  # dataset.num_workers is unused; select graph_workers or a dataloader.num_workers instead.
+  # dataset.shard_size is not consumed by the training entry point.
   graph_batch_size: 256 # structures per preprocessing/neighbor-search batch
   graph_workers: 0 # CPU preprocessing threads; independent of loader num_workers
   graph_device: null # alchemiops offline: all visible GPUs, CPU fallback; override with cpu, cuda:0, or [cuda:0, cuda:1]
@@ -155,6 +193,7 @@ dataset:
     direct_forces_key: forces
     direct_stress_key: stress
     direct_virials_key: virials
+    # direct_hessian_key: direct_hessian # for the direct-Hessian model/loss only
     polarization_key: polarization
     direct_dipole_key: dipole
     conservative_dipole_key: dipole
@@ -174,22 +213,29 @@ dataset:
 
   train_dataloader:
     _target_: torch_geometric.loader.DataLoader
-    batch_size: 4
+    batch_size: 4 # structures per rank/GPU
     shuffle: true # always true
     drop_last: false
-    num_workers: 4 # If the batch size is large, you need to set up multiple workers
+    num_workers: 4 # CPU reader processes per rank; independent of graph_workers
+    # pin_memory: true # default false; pinned memory for CPU-to-CUDA transfer
+    # persistent_workers: true # default false; reuse workers across epochs; requires num_workers > 0
+    # prefetch_factor: 2 # batches per worker; default 2; set only when num_workers > 0
 
   # Per statistics device; benchmark host decoding as well as GPU memory.
   statistics_dataloader:
-    batch_size: 256
-    num_workers: 0
+    batch_size: 256 # per statistics device; omitted: inherit train batch_size
+    num_workers: 0 # statistics reader processes per device; default 0, independent of train
+    # prefetch_factor: 1 # batches per worker; statistics default 1; ignored when num_workers=0
 
   valid_dataloader:
     _target_: torch_geometric.loader.DataLoader
-    batch_size: 2
+    batch_size: 2 # structures per rank/GPU
     shuffle: false
     drop_last: false
-    num_workers: 2 # If the batch size is large, you need to set up multiple workers
+    num_workers: 2 # CPU reader processes per rank; independent of graph_workers
+    # pin_memory: true # default false; pinned memory for CPU-to-CUDA transfer
+    # persistent_workers: true # default false; reuse workers across epochs; requires num_workers > 0
+    # prefetch_factor: 2 # batches per worker; default 2; set only when num_workers > 0
 
   test_dataloader: ${dataset.valid_dataloader}
 
@@ -244,6 +290,7 @@ scheduler:
   #   interval: step
   #   frequency: 1
 
+  # WSD phase lengths count optimizer steps; recalculate after batch/world-size/epoch-size changes.
   # _target_: tace.utils.lr_scheduler.WarmupStableDecay
   # num_warmup_steps: 19691
   # num_stable_steps: 177219
@@ -299,14 +346,15 @@ loss:
   #   - {huber_delta: 0.01, element_weights: [1.0, 2.0]}
   #   - {}
 
+dtype:
+  model: float32 # float32 or float64; graph data and geometry remain float64
+  autocast: null # null, bfloat16, or float16; requires model=float32
+  matmul: null # null: resolve environment/default; ieee or tf32: explicit selection
+  # Without an explicit override or autocast, FP32 training uses TF32. Geometry/reductions stay FP64.
 
 model:
-  # export TACE_USE_OEQ=1 to use openequivariance, 0 to disable
-  # export TACE_USE_CUE=1 to use cuequivariance, 0 to disable
-  # export TACE_USE_EQT=1 to use equitorch, 0 to disable for correlation > 2
-  # export TACE_USE_EQX=1 to stream o2_cgtp convolutions, including force training
-  # export TACE_USE_COMPILE=1 to use aoti, 0 to disable
-  
+  # Backend, compilation and radial-fusion options are listed under misc.env above.
+
   config:
 
     _target_: tace.models.SphericalTACE # [SphericalTACE]
@@ -340,7 +388,7 @@ model:
     Lmax: 2 # Truncation for node, 2 is recommended.
     lmax: 3 # Truncation for edge, 3 is recommended.
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
-    num_channel: 48 # (int), 48~64, 64's accuracy is enough to achieve SOTA, never use channel > 64
+    num_channel: 48 # multiplicity per irrep; larger widths increase compute and memory
     parity: null # null: natural + target/embedding irreps; false: natural only; true: all reachable O(3) parity
     mlp_type: mlp_v2 # [mlp_v1, mlp_v2]; shared by all scalar MLPs in the model
 
@@ -373,7 +421,10 @@ model:
       use_first_pre_norm: false
 
     atomic_basis:
-      type: cgtp # (str or list[str]) stable: [cgtp, so2], dev: [uv_o2, uv_rra_o2, uu_o2, uv_o2_mag, o2_cgtp]
+      # uv_o2 has no attention; uv_rra_o2 uses attention; uu_o2 is a separate UU interaction.
+      # Magnetic UV-O2 uses uv_o2_mag. Interaction choices can change the model architecture.
+      # use_radial_rotary_attention is only a migration flag for legacy o2/o2_mag names.
+      type: cgtp # str or per-layer list: cgtp, o2_cgtp, so2, uv_o2, uv_rra_o2, uu_o2, uv_o2_mag
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density]
       nonlinear: gate # [null, gate]
@@ -381,12 +432,12 @@ model:
       scalar_act: null # (str or list[str]), name for 0e, or [0e, 0o]
       tensor_act: null # name for tensor-irrep 0e gates
       use_asymmetric_contraction: false
-      num_head: 2 # so2 / uv_rra_o2; recommended 2~8, with >= 16 channels per head.
+      num_head: 2 # so2 / uv_rra_o2 attention heads; requires compatible channel count
       edge_ace_hidden: null # SO2 asymmetric-contraction width
       gate_m0: false # always use false, legacy option for whether gating m=0 
 
     product_basis:
-      type: cgtp  # (str or list[str]) [cgtp]
+      type: cgtp # str or per-layer list: cgtp, nonlinear_cgtp, mace
       l1l2: null  # [null, <=]
       correlation: 2 # (int) 3 is recommended for 2 layer, 2 is  is recommended for > 2 layer
       return_components: null # [null, list(int)], if not specify, last layer will only return target weight
@@ -447,7 +498,11 @@ model:
         enable: false
         normalizer: 1.0 # (float)
 
-    special: # this field can be thoroughly ignored if you only interested in E/F/S training
+    special: # optional heads; ordinary energy/forces/stress training does not need them
+      # Requires direct_hessian labels and a matching loss; see example/train/HIP-TACE.
+      # direct_hessian:
+      #   cutoff: 16.0 # Hessian edge cutoff
+      #   interaction_type: cgtp
 
       charges:
         method: lagrangian # [lagrangian, uniform_distribution]

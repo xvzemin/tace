@@ -170,6 +170,17 @@ hidden layers use PyTorch and can be optimized by Inductor. Set
 ``TACE_MEMORY_FIRST=1`` to fuse the complete radial MLP instead. See
 :ref:`tace-memory-first` for the supported convolutions and memory tradeoff.
 
+With ``TACE_USE_EQX=1 TACE_USE_COMPILE=1``, training ``nonlinear_cgtp`` retains
+its factors and gates through native autograd and lets Inductor fuse the
+elementwise operations. This avoids rebuilding the complete nonlinear product
+in each force-derivative program, at the cost of more saved node activations.
+EQX convolution fusion remains enabled. Eager training and evaluation retain
+the fused nonlinear product.
+
+The O(3) convolution aligns FP32 radial projections for tensor-core GEMM and
+batches compatible coupling paths. Its temporary radial workspace is bounded
+by the smaller of 4 GiB and one thirty-second of the device's total memory.
+
 For ``uv_o2`` and ``uv_o2_mag``, EQX evaluates local
 rotation, radial weighting, Linear--Gate--Linear, inverse rotation and node
 aggregation in one differentiable, tiled convolution. Channel maps use GEMM
@@ -185,6 +196,10 @@ reductions. Captures copy inputs and outputs, share temporary storage on the
 same stream, and use a bounded cache; changing a batch or updating weights does
 not reuse an old autograd graph. Unsupported expressions and small inputs use
 the ordinary CUDA path. ``EQX_USE_CUDA_GRAPH=0`` disables replay for comparison.
+The cache holds at most 128 captures and is limited to the smaller of 12 GiB
+and one sixteenth of device memory.
+Capture uses thread-local CUDA checks so unrelated allocations in a background
+DataLoader pinning thread do not invalidate the graph.
 The existing explicit value ``1`` also enables native convolution captures,
 which can be costly for frequently changing graph sizes.
 

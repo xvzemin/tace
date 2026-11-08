@@ -274,6 +274,10 @@ they are separate from the ``TACE_*`` model settings.
      - Limit build parallelism. EQX's kernel-compilation pool defaults to
        ``min(16, CPU count)`` workers and clamps the supplied integer between
        one and the CPU count. Set it before the CUDA runtime is imported.
+   * - ``OMP_NUM_THREADS``
+     - Set the OpenMP CPU thread count per process before Python starts.
+       Account for all training ranks when choosing it; this does not set
+       DataLoader worker count or GPU count.
    * - ``TORCH_EXTENSIONS_DIR``
      - Override PyTorch's extension build-cache root, including EQX's launcher.
        When unset, PyTorch chooses its standard user cache directory.

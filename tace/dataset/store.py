@@ -12,6 +12,7 @@ import os
 import struct
 import tempfile
 import threading
+import zlib
 from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,6 +27,7 @@ from torch_geometric.data import Data
 
 from .cache import (
     ARRAY_CODEC,
+    COMPRESSED_ARRAY_CODEC,
     GRAPH_SCHEMA,
     RECORD_SCHEMA,
     digest,
@@ -35,6 +37,9 @@ from .cache import (
 
 _MAGIC = b"TACEARR\0"
 _HEADER = struct.Struct("<8sII")
+_COMPRESSED_MAGIC = b"TACEZLB\0"
+_COMPRESSED_HEADER = struct.Struct("<8sQ")
+_MAX_COMPRESSED_RECORD_BYTES = 2 << 30
 _COUNTS = struct.Struct("<qq")
 _FORBIDDEN = {"node_attrs", "node_type"}
 _INDEX_FIELDS = {"atomic_numbers", "edge_index", "edge_shifts", "fidelity_idx"}
@@ -45,7 +50,19 @@ DEFAULT_MAX_BUFFER_BYTES = 64 * _MIB
 DEFAULT_TRANSACTION_BYTES = 16 * _MIB
 DEFAULT_MAP_SIZE = 64 * _MIB
 DEFAULT_CACHE_BYTES = 128 * _MIB
-DEFAULT_MAX_OPEN_SHARDS = 32
+DEFAULT_MAX_OPEN_SHARDS = 4096
+try:
+    import resource
+
+    _descriptor_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    if _descriptor_limit != resource.RLIM_INFINITY:
+        # Leave descriptors for other stores, worker queues and shared tensors.
+        DEFAULT_MAX_OPEN_SHARDS = min(
+            DEFAULT_MAX_OPEN_SHARDS, max(1, _descriptor_limit // 8)
+        )
+except ImportError:
+    # Windows has no POSIX descriptor limit; LMDB owns native file handles.
+    pass
 
 
 def _check_record_bytes(size, maximum):
@@ -161,10 +178,35 @@ def _encode(mapping, kind, max_bytes=None):
     return b"".join((_HEADER.pack(_MAGIC, 1, len(header)), header, *payloads))
 
 
+def _compress_array_record(value):
+    """Losslessly compress an encoded record with a bounded decoded length."""
+    view = memoryview(value)
+    if not _HEADER.size <= len(view) <= _MAX_COMPRESSED_RECORD_BYTES:
+        raise ValueError("Invalid typed-array record size for compression")
+    magic, version, _ = _HEADER.unpack_from(view)
+    if magic != _MAGIC or version != 1:
+        raise ValueError("Compression requires an uncompressed typed-array record")
+    return _COMPRESSED_HEADER.pack(_COMPRESSED_MAGIC, len(view)) + zlib.compress(
+        view, 1
+    )
+
+
 def _decode(value, kind, fields=None):
     view = memoryview(value)
     if len(view) < _HEADER.size:
         raise ValueError("Truncated typed-array record")
+    if view[:8] == _COMPRESSED_MAGIC:
+        _, size = _COMPRESSED_HEADER.unpack_from(view)
+        if not _HEADER.size <= size <= _MAX_COMPRESSED_RECORD_BYTES:
+            raise ValueError("Invalid compressed typed-array record size")
+        decoder = zlib.decompressobj()
+        try:
+            payload = decoder.decompress(view[_COMPRESSED_HEADER.size :], size + 1)
+        except zlib.error as exc:
+            raise ValueError("Invalid compressed typed-array record") from exc
+        if len(payload) != size or not decoder.eof or decoder.unused_data:
+            raise ValueError("Truncated or oversized compressed typed-array record")
+        view = memoryview(payload)
     magic, version, header_size = _HEADER.unpack_from(view)
     if magic != _MAGIC or version != 1:
         raise ValueError(
@@ -685,6 +727,7 @@ def _write_store_locked(
     stage,
     *,
     kind,
+    compressed=True,
     shard_size=DEFAULT_SHARD_SIZE,
     max_buffer_bytes=DEFAULT_MAX_BUFFER_BYTES,
     transaction_bytes=DEFAULT_TRANSACTION_BYTES,
@@ -757,7 +800,7 @@ def _write_store_locked(
         metadata = {
             "schema": GRAPH_SCHEMA if kind == "graphs" else RECORD_SCHEMA,
             "kind": kind,
-            "codec": ARRAY_CODEC,
+            "codec": COMPRESSED_ARRAY_CODEC if compressed else ARRAY_CODEC,
             "dtype": "float64",
             "stage": stage,
             "length": shard_length,
@@ -802,6 +845,9 @@ def _write_store_locked(
                 numbers = item.numbers
                 nodes, edges = len(item), 0
                 fields = item.to_dict()
+            if compressed:
+                value = _compress_array_record(value)
+                _check_record_bytes(len(value), max_buffer_bytes)
             if env is not None and (
                 shard_length >= shard_size
                 or shard_total_bytes + len(value) > shard_bytes
@@ -961,7 +1007,7 @@ def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwar
 
 
 def write_graphs(graphs, shard_dirs, stage, **kwargs):
-    """Stream graphs to bounded transactions and atomically publish each shard."""
+    """Write losslessly compressed graphs with bounded, atomic shard publication."""
     return _build_store(
         lambda directories, stage, options: _write_store_locked(
             graphs, directories, stage, kind="graphs", **options
@@ -974,7 +1020,7 @@ def write_graphs(graphs, shard_dirs, stage, **kwargs):
 
 
 def write_records(records, shard_dirs, stage="source", **kwargs):
-    """Store complete raw namespaces for reuse with different graph requests."""
+    """Compress complete raw namespaces for reuse with different graph requests."""
     return _build_store(
         lambda directories, stage, options: _write_store_locked(
             records, directories, stage, kind="records", **options

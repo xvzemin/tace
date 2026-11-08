@@ -119,7 +119,9 @@ def filter_graphs(dataset, options, stage="train"):
     if not options:
         return dataset
     if not isinstance(dataset, GraphDatasetLMDB):
-        raise ValueError("dataset.filter requires storage_mode='lmdb' or 'memory'")
+        raise ValueError(
+            "dataset.filter requires storage_mode='lmdb', 'clmdb' or 'memory'"
+        )
     bounds = {name: value for name, value in options.items() if name in _LABELS}
     fields = {_LABELS[name] for name in bounds}
     fields.update(f"{name}_weight" for name in tuple(fields))

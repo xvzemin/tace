@@ -122,6 +122,10 @@ class AugmentedDataset(Dataset):
         )
         return [self.transform(graph) for graph in graphs]
 
+    def get_sizes(self, indices=None):
+        """Return cached sizes; rotations and time reversal preserve topology."""
+        return self.dataset.get_sizes(indices)
+
     def transform(self, graph):
         data = copy(graph)
 

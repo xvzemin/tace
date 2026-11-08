@@ -23,24 +23,27 @@ Reading and training
         model precision policy
 
 ``memory`` constructs graphs once in RAM and suits small datasets.
-``lmdb`` constructs graphs once on disk and is recommended for large, repeated
-training. Source decoding and neighbor search are not repeated each epoch.
+``clmdb`` constructs losslessly compressed graphs once on disk and is
+recommended for large, repeated training. ``lmdb`` writes the uncompressed
+format. Both read existing compressed and uncompressed shards automatically;
+the mode controls new writes and does not convert completed caches.
+Source decoding and neighbor search are not repeated each epoch.
 ``on_the_fly`` reads records and constructs neighbors for each requested batch;
 it saves graph storage, but may reduce training throughput. It is opt-in.
 
 ASE-LMDB and SQLite are opened read-only and read by index. XYZ and trajectory
 files also support random access. Other ASE formats are converted once to a
-typed record cache under ``shard_dirs[0]/records``. This cache is independent of
-graph cutoff and targets. ``record_cache_dir`` overrides its location; ``null``
+losslessly compressed record cache under ``shard_dirs[0]/records``. This cache is
+independent of graph cutoff and targets. ``record_cache_dir`` overrides its location; ``null``
 disables it. Original source files are never rewritten.
 
 .. code-block:: yaml
 
    dataset:
-     type: aselmdb
+     reader: aselmdb
      train_file: /data/omat24/train
      valid_file: /data/omat24/val
-     storage_mode: lmdb
+     storage_mode: clmdb
      shard_dirs: [graphCache]
      graph_batch_size: 256
      graph_workers: 0
@@ -57,14 +60,14 @@ disables it. Original source files are never rewritten.
 ``matscipy`` remains the default CPU neighbor backend. ``graph_workers``
 controls CPU preprocessing threads, not training-loader workers.
 ``alchemiops`` performs FP64 neighbor search for packed graph batches.
-For offline ``lmdb`` or ``memory`` construction, ``graph_device: null`` uses
-all visible CUDA devices, or CPU if none are available:
+For offline ``lmdb``, ``clmdb`` or ``memory`` construction,
+``graph_device: null`` uses all visible CUDA devices, or CPU if none are available:
 
 .. code-block:: yaml
 
    dataset:
      neighborlist_backend: alchemiops
-     storage_mode: lmdb
+     storage_mode: clmdb
      graph_device: null  # all visible GPUs; CPU fallback
      graph_batch_size: 256
 
@@ -73,7 +76,7 @@ GPU, or ``cpu`` for CPU. Explicit ``all`` requires at least one visible GPU.
 Device indices follow ``CUDA_VISIBLE_DEVICES``; graph devices are independent
 of training devices and do not split individual structures across GPUs.
 
-With multiple GPUs and ``storage_mode: lmdb``, each GPU process independently
+With multiple GPUs and either LMDB storage mode, each GPU process independently
 reads records, constructs graphs, and writes its own LMDB shards. The parent
 assigns work and merges metadata without transferring or rewriting graphs.
 Sample order is preserved. Work partitions are balanced across GPUs and
@@ -89,7 +92,7 @@ and failed builds close it without advancing the count.
 
 More GPUs can increase preprocessing throughput, but source decoding, shared
 disk bandwidth, and process startup can limit scaling. Multi-rank DDP rejects
-multi-GPU ``memory`` preprocessing; use ``lmdb`` for rank-zero shared-cache
+multi-GPU ``memory`` preprocessing; use either LMDB mode for rank-zero shared-cache
 construction, or select a single rank-local graph device.
 
 ``on_the_fly`` remains single-device: ``null`` selects the current CUDA device
@@ -108,6 +111,17 @@ model; graphs do not store one-hot element arrays.
 Graphs are stored directly in ``shard_dirs``. Each ``train_shard*.lmdb``,
 ``valid_shard*.lmdb``, or ``test0_shard*.lmdb`` directory contains its own
 metadata and graph counts. There is no configuration-hash directory.
+
+The reader accepts ordinary ``typed-array-v1`` records and losslessly compressed
+``typed-array-zlib-v1`` records, including a mixture of the two shard formats.
+Compression preserves the encoded bytes, float64 values, integer indices and
+graph counts. Compressed copies must retain their shard names and ``counts.bin``;
+changing storage location or codec then leaves the statistics key unchanged.
+New compressed stores use per-record zlib compression with an internal fixed
+level. There is no separate compression switch or level in the training config.
+Loader workers decode records before collation; model inputs and precision are
+identical for both formats. The standalone graph and record writers default to
+compression, while ``storage_mode: lmdb`` explicitly selects ordinary graph writes.
 
 To combine datasets, move their completed ``*.lmdb`` directories into the same
 directory, preserving their generated names:
@@ -138,7 +152,10 @@ refreshed when shards are added or removed.
 
 Training uses batched LMDB reads without repeating neighbor search. Statistics
 read only the required fields and accumulate in FP64. LMDB capacity grows
-automatically; write buffers and open-shard limits are set in Python.
+automatically; write buffers and open-shard limits are set in Python. Each
+worker retains up to 4,096 read-only shard handles, reduced on POSIX systems
+to one eighth of the file-descriptor limit. This avoids reopening shards on
+every random batch; mapped files do not load the entire dataset into RAM.
 ``cache_size`` controls optional decoded samples per worker and defaults to zero;
 the operating-system page cache remains active.
 
@@ -239,7 +256,9 @@ model statistics.
 Training epoch size
 -------------------
 
-``dataset.epoch_size: null`` preserves full-dataset training. Set an integer
+``dataset.epoch_sampler`` groups ``epoch_size`` and ``balance_batches``.
+Omitting the group or setting ``epoch_size: null`` preserves ordinary
+full-dataset training. Set an integer
 to choose the requested global number of training samples per epoch across all
 GPUs,
 or a float in ``(0, 1]`` to choose a fraction of the training dataset, rounded
@@ -252,7 +271,9 @@ before batch alignment.
    misc:
      global_seed: 42
    dataset:
-     epoch_size: 100000  # global samples, not samples per GPU
+     epoch_sampler:
+       epoch_size: 100000  # global samples, not samples per GPU
+       balance_batches: null  # null, atoms, edges, or [atom_weight, edge_weight]
      train_dataloader:
        batch_size: 32  # per GPU
        shuffle: true
@@ -264,6 +285,23 @@ dataset order. ``shuffle: true`` selects a fixed permutation using
 each sample once before repeating the same order, even when an epoch crosses
 the traversal boundary. Statistics still use the full training dataset;
 validation and test loaders are unchanged.
+
+Set ``dataset.epoch_sampler.balance_batches: edges`` or ``atoms`` to redistribute each
+global batch across GPUs using cached edge or atom counts. The selected
+structures, global batch size and equal per-GPU structure counts are preserved;
+only their rank assignment changes. A largest-first partition is used unless
+the original partition has a smaller maximum load. This requires
+``epoch_size`` and cached graph sizes. The default ``null`` keeps strided
+assignment. Validation, test and statistics are unaffected.
+
+Alternatively, supply ``balance_batches: [20, 1]`` to use a weighted sum of
+atom and edge counts, here ``20 * atoms + edges``. Both weights must be
+nonnegative integers and at least one must be positive. Compare complete
+training steps on the intended model and hardware before choosing a cost;
+equal atom or edge counts alone do not guarantee equal execution time.
+
+Balancing reads the size sidecars once and retains one int64 cost per selected
+training structure in each rank's CPU memory. Graph records remain lazy.
 
 With ``drop_last: false``, the requested count is rounded up to a multiple of
 ``world_size``, giving every rank the same sample count and retaining its final
@@ -283,7 +321,7 @@ using a full training checkpoint (``save_weights_only: false``). The saved
 position tracks completed training batches, not worker-prefetched samples.
 The checkpoint must have been saved with this sampler enabled.
 Keep the same dataset and ordering, requested epoch count, seed, shuffle setting,
-world size, per-rank batch size and ``drop_last`` when resuming. This restores
+world size, per-rank batch size, ``drop_last`` and ``balance_batches`` when resuming. This restores
 sample order, not exact random augmentation or dropout state. Optional ``trainer.max_steps``
 and ``ModelCheckpoint.every_n_train_steps`` control step-based stopping and
 checkpoint intervals independently of the shortened epochs.
@@ -400,16 +438,33 @@ key is selected by ``dataset.keys.fidelity_idx_key`` (default: ``fidelity_idx``)
 Without a source fidelity, existing metadata is preserved; unmarked structures
 still use head 0. These assignments do not modify the source files.
 
-Source checks run when raw data is read. Changing configured source fidelities
-selects a new graph-cache namespace automatically.
+Source checks run when raw data is read. Completed graph caches retain their
+saved fidelity assignments; use a new graph directory to rebuild them with
+different assignments.
 
-Sources also accept ``reader``, ``format``, and ``options`` for mixed formats:
+``dataset.reader`` selects ``ase`` (default), ``ase_db``, or ``aselmdb``.
+A string applies uniformly to every training, validation, and test source.
+A list assigns one reader per configured address in ``train_file`` order,
+then ``valid_file`` order, then ``test_files`` order. Its length must exactly
+match the total address count, including when completed graph caches are reused.
+Directories count as one address; all their discovered files use that address's
+reader. Seven addresses therefore require seven values even when an address
+contains many files. File discovery and sorting preserve these assignments.
+When validation is split from training with ``valid_file: null``, it uses the
+training readers and requires no additional list entries.
+
+ASE formats are always detected from file names and contents. Directory
+discovery includes formats recognized by ASE's filename rules, such as XYZ,
+trajectory and CIF files. There are no ``dataset.type``, ``format``, or
+``options`` settings.
 
 .. code-block:: yaml
 
-   train_file:
-     - {path: crystals.aselmdb, reader: aselmdb, fidelity_idx: 0}
-     - {path: molecules.xyz, reader: ase, format: extxyz, fidelity_idx: 1}
+   dataset:
+     reader: [aselmdb, ase, ase_db, ase]
+     train_file: [crystal_databases, molecule_files]  # first two readers
+     valid_file: validation.db                     # third reader
+     test_files: [test.xyz]                        # fourth reader
 
 Explicit property keys take precedence across ASE arrays, metadata, database
 data, and calculator results. Canonical names and ASE aliases are fallbacks;

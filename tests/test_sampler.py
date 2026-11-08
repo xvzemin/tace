@@ -23,6 +23,112 @@ from tace.dataset.store import write_graphs
 from tace.utils.callbacks import EpochSamplerCallback
 
 
+class SizedGraphs:
+    def __init__(self, sizes):
+        self.sizes = np.asarray(sizes, dtype=np.int64)
+
+    def __len__(self):
+        return len(self.sizes)
+
+    def get_sizes(self, indices=None):
+        return self.sizes if indices is None else self.sizes[indices]
+
+
+@pytest.mark.parametrize(
+    "balance,column", [("atoms", 0), ("edges", 1), ((20, 1), None)]
+)
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("count,batch_size", [(64, 4), (37, 3), (5, 4)])
+def test_balanced_global_batches_and_resume(
+    balance, column, shuffle, count, batch_size
+):
+    rng = np.random.default_rng(41)
+    dataset = SizedGraphs(rng.integers(1, 2000, size=(73, 2)))
+    costs = dataset.sizes @ balance if column is None else dataset.sizes[:, column]
+    world = 4
+    samplers = [
+        EpochSampler(
+            dataset,
+            count,
+            num_replicas=world,
+            rank=r,
+            seed=7,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            balance=balance,
+        )
+        for r in range(world)
+    ]
+    reference = [
+        EpochSampler(
+            dataset,
+            count,
+            num_replicas=world,
+            rank=r,
+            seed=7,
+            batch_size=batch_size,
+            shuffle=shuffle,
+        )
+        for r in range(world)
+    ]
+    for epoch in range(4):
+        for sampler in samplers + reference:
+            sampler.set_epoch(epoch)
+        actual = [list(s) for s in samplers]
+        expected = [list(s) for s in reference]
+        for start in range(0, len(samplers[0]), batch_size):
+            a = [ids[start : start + batch_size] for ids in actual]
+            b = [ids[start : start + batch_size] for ids in expected]
+            assert sorted(sum(a, [])) == sorted(sum(b, []))
+            assert len(set(map(len, a))) == 1
+            assert max(costs[ids].sum() for ids in a) <= max(
+                costs[ids].sum() for ids in b
+            )
+        # Checkpoint a partially consumed batch as well as whole batches.
+        for consumed in sorted({0, 1, min(batch_size, len(samplers[0]))}):
+            for rank, sampler in enumerate(samplers):
+                state = sampler.state_dict()
+                state["consumed"] = consumed
+                restored = EpochSampler(
+                    dataset,
+                    count,
+                    num_replicas=world,
+                    rank=rank,
+                    seed=7,
+                    batch_size=batch_size,
+                    shuffle=shuffle,
+                    balance=balance,
+                )
+                restored.load_state_dict(state)
+                assert list(restored) == actual[rank][consumed:]
+
+
+def test_balanced_sampling_rejects_changed_partition():
+    dataset = SizedGraphs([(1, 50), (10, 12), (3, 30), (20, 2)])
+    sampler = EpochSampler(dataset, balance="edges")
+    state = sampler.state_dict()
+    state["balance"] = "atoms"
+    with pytest.raises(ValueError, match="changed balance"):
+        sampler.load_state_dict(state)
+    with pytest.raises(ValueError, match="cached graph sizes"):
+        EpochSampler(range(4), balance="edges")
+    for invalid in ([0, 0], [-1, 1], [0.5, 1], [1], True, [2**64, 1]):
+        with pytest.raises(ValueError, match="balance"):
+            EpochSampler(dataset, balance=invalid)
+    assert EpochSampler(dataset, balance=[20, 1]).balance == (20, 1)
+
+    sampler = EpochSampler(
+        dataset, num_replicas=2, rank=0, batch_size=2, balance="edges"
+    )
+    sampler.advance(1)
+    state = sampler.state_dict()
+    with pytest.raises(ValueError, match="partially consumed balanced batch"):
+        sampler.set_epoch(1)
+    assert sampler.state_dict() == state
+    sampler.advance(1)
+    sampler.set_epoch(1)
+
+
 @pytest.mark.parametrize("size", list(range(1, 70)) + [127, 128, 129, 1023, 4097])
 @pytest.mark.parametrize("seed", [0, 17, -3])
 def test_permutation(size, seed):
@@ -432,7 +538,8 @@ def test_loader_validates_resume_batch_shape():
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
-def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle):
+@pytest.mark.parametrize("balance", [None, "atoms", "edges", (20, 1)])
+def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle, balance):
     graphs = [
         Data(
             num_nodes=1 + i % 3,
@@ -449,7 +556,16 @@ def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle):
     assert len(dataset) == len(expected)
     reference = EpochSampler(dataset, 0.5, shuffle=shuffle, seed=41)
     ranks = [
-        EpochSampler(dataset, 0.5, num_replicas=2, rank=rank, shuffle=shuffle, seed=41)
+        EpochSampler(
+            dataset,
+            0.5,
+            num_replicas=2,
+            rank=rank,
+            shuffle=shuffle,
+            seed=41,
+            batch_size=2,
+            balance=balance,
+        )
         for rank in range(2)
     ]
     stream = []
@@ -458,7 +574,9 @@ def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle):
         for sampler in ranks:
             sampler.set_epoch(epoch)
         indices = list(itertools.chain.from_iterable(zip(*(list(s) for s in ranks))))
-        assert indices == list(reference)
+        assert sorted(indices) == sorted(reference)
+        if balance is None:
+            assert indices == list(reference)
         stream.extend(int(graph.x.item()) for graph in dataset.__getitems__(indices))
         for sampler in ranks:
             sampler.advance(len(sampler))
@@ -470,20 +588,29 @@ def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle):
         "num_workers": 1,
         "multiprocessing_context": "spawn",
     }
-    loader = build_graph_dataloader(config, dataset, epoch_size=0.5, seed=41)
+    loader = build_graph_dataloader(
+        config, dataset, epoch_size=0.5, seed=41, balance_batches=balance
+    )
+    assert loader.sampler.balance == balance
     iterator = iter(loader)
     first = next(iterator).x.flatten().tolist()
     loader.mark_batch_complete()
     state = loader.state_dict()
     rest = [batch.x.flatten().tolist() for batch in iterator]
-    resumed = build_graph_dataloader(config, dataset, epoch_size=0.5, seed=41)
+    resumed = build_graph_dataloader(
+        config, dataset, epoch_size=0.5, seed=41, balance_batches=balance
+    )
     resumed.load_state_dict(state)
     assert [batch.x.flatten().tolist() for batch in resumed] == rest
     assert len(set(first + list(itertools.chain.from_iterable(rest)))) == 4
     different = source.select([0, 1, 2, 3, 4, 6, 7, 9])
     assert len(different) == len(selected)
     changed = build_graph_dataloader(
-        config, AugmentedDataset(different, []), epoch_size=0.5, seed=41
+        config,
+        AugmentedDataset(different, []),
+        epoch_size=0.5,
+        seed=41,
+        balance_batches=balance,
     )
     with pytest.raises(ValueError, match="dataset selection"):
         changed.load_state_dict(state)
@@ -499,7 +626,7 @@ class SamplingModel(pl.LightningModule):
         self.weight = torch.nn.Parameter(torch.tensor(0.2))
         self.output_dir = output_dir
         self.seen = []
-        self.cfg = {"dataset": {"epoch_size": 10}}
+        self.cfg = {"dataset": {"epoch_sampler": {"epoch_size": 10}}}
 
     def configure_callbacks(self):
         from tace.lightning.lit_model import LightningWrapperModel
@@ -539,7 +666,7 @@ def sampling_data(
     data = GraphDataModule(
         {
             "dataset": {
-                "epoch_size": epoch_size,
+                "epoch_sampler": {"epoch_size": epoch_size},
                 "train_dataloader": loader,
                 "valid_dataloader": dict(loader, shuffle=False, drop_last=False),
                 "no_valid_set": not validation,
@@ -572,6 +699,23 @@ def test_default_loader_and_checkpoint_origin():
         LightningWrapperModel.configure_callbacks(SimpleNamespace(cfg=ordinary.cfg))
         == []
     )
+    for key, value in (("epoch_size", 10), ("balance_batches", "edges")):
+        invalid = {
+            **ordinary.cfg,
+            "dataset": {**ordinary.cfg["dataset"], key: value},
+        }
+        with pytest.raises(ValueError, match="dataset.epoch_sampler"):
+            GraphDataModule(invalid, None, [], KeySpecification.from_defaults(), [])
+    ordinary.cfg["dataset"].pop("epoch_sampler")
+    assert not isinstance(ordinary.train_dataloader().sampler, EpochSampler)
+    assert (
+        LightningWrapperModel.configure_callbacks(SimpleNamespace(cfg=ordinary.cfg))
+        == []
+    )
+    ordinary.cfg["dataset"]["epoch_sampler"] = {"balance_batches": "edges"}
+    with pytest.raises(ValueError, match="balance_batches requires epoch_size"):
+        ordinary.train_dataloader()
+    ordinary.cfg["dataset"]["epoch_sampler"] = None
 
     data = sampling_data()
     data.train_dataloader().mark_batch_complete()

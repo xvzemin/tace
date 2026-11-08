@@ -406,7 +406,7 @@ def make_product(irreps, correlation, **kwargs):
     ).double()
 
 
-def fused_nonlinear_product(module, features, types, batch):
+def fused_nonlinear_product(module, features, types, batch, *, fused=True):
     from torch.utils._python_dispatch import TorchDispatchMode
 
     class EdgeCalls(TorchDispatchMode):
@@ -419,14 +419,17 @@ def fused_nonlinear_product(module, features, types, batch):
 
     with EdgeCalls() as dispatch:
         output = module(features, types, None, batch)
-    assert dispatch.calls == int(features.is_cuda)
+    assert dispatch.calls == int(features.is_cuda and fused)
     return output
 
 
 @pytest.mark.parametrize("asymmetric", [False, True])
 @pytest.mark.parametrize("correlation", [1, 2, 3])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
+@pytest.mark.parametrize("compiled_training", [False, True])
+def test_nonlinear_product(
+    monkeypatch, asymmetric, correlation, dtype, compiled_training
+):
     import tace.models.spherical.prod as prod
     from equivariantx.backends.cuda import graph
     from tace.models.linear import e3nnLinear
@@ -439,6 +442,7 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
     cls = PRODUCT["nonlinear_cgtp"]
     monkeypatch.setattr(cls, "asymmetric", asymmetric)
     monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setenv("TACE_USE_COMPILE", "1" if compiled_training else "0")
     monkeypatch.setattr(
         prod,
         "e3nnLinear",
@@ -496,7 +500,9 @@ def test_nonlinear_product(monkeypatch, asymmetric, correlation, dtype):
     for product in (reference, module):
         monkeypatch.setenv("TACE_USE_EQX", "1" if product is module else "0")
         value = (
-            fused_nonlinear_product(product, x, types, batch)
+            fused_nonlinear_product(
+                product, x, types, batch, fused=not compiled_training
+            )
             if product is module
             else product(x, types, None, batch)
         )
