@@ -31,6 +31,16 @@ Train with EQX operators and compile the model:
 
    TACE_USE_EQX=1 TACE_USE_COMPILE=1 tace-train -cn tace.yaml
 
+Compiled training evaluates predictions, loss, and parameter gradients in one
+Inductor program. The training loop handles gradient accumulation, clipping,
+optimizer updates, and communication. Node and edge counts are dynamic; a different
+number of structures, such as the last partial batch, uses a separate graph.
+Measure steady-state steps after the first compilation.
+
+Joint training uses ``NormalLoss`` or ``UncertaintyLoss``, without autocast.
+It requires PyTorch's explicit dynamic-shape and standalone Inductor APIs.
+Unsupported settings raise an error.
+
 Inference
 ~~~~~~~~~
 
@@ -170,16 +180,10 @@ hidden layers use PyTorch and can be optimized by Inductor. Set
 ``TACE_MEMORY_FIRST=1`` to fuse the complete radial MLP instead. See
 :ref:`tace-memory-first` for the supported convolutions and memory tradeoff.
 
-With ``TACE_USE_EQX=1 TACE_USE_COMPILE=1``, training ``nonlinear_cgtp`` retains
-its factors and gates through native autograd and lets Inductor fuse the
-elementwise operations. This avoids rebuilding the complete nonlinear product
-in each force-derivative program, at the cost of more saved node activations.
-EQX convolution fusion remains enabled. Eager training and evaluation retain
-the fused nonlinear product.
-
-The O(3) convolution aligns FP32 radial projections for tensor-core GEMM and
-batches compatible coupling paths. Its temporary radial workspace is bounded
-by the smaller of 4 GiB and one thirty-second of the device's total memory.
+Compiled ``nonlinear_cgtp`` training evaluates EQX bilinear products directly in
+the model's ``mul_ir`` layout.
+Inductor reuses native projections and gates across force derivatives.
+Convolutions retain EQX fusion.
 
 For ``uv_o2`` and ``uv_o2_mag``, EQX evaluates local
 rotation, radial weighting, Linear--Gate--Linear, inverse rotation and node
@@ -189,19 +193,10 @@ instead of being saved by autograd. This path is enabled by ``TACE_USE_EQX=1``
 and does not require ``torch.compile`` or ``TACE_MEMORY_FIRST=1``. RRA uses a
 separate path with query/key projections and graph softmax.
 
-On CUDA, eligible nonlinear node products and their derivative programs use
-CUDA Graph replay automatically, including without ``torch.compile``. Row
-counts are bucketed only when zero padding provably preserves shared parameter
-reductions. Captures copy inputs and outputs, share temporary storage on the
-same stream, and use a bounded cache; changing a batch or updating weights does
-not reuse an old autograd graph. Unsupported expressions and small inputs use
-the ordinary CUDA path. ``EQX_USE_CUDA_GRAPH=0`` disables replay for comparison.
-The cache holds at most 128 captures and is limited to the smaller of 12 GiB
-and one sixteenth of device memory.
-Capture uses thread-local CUDA checks so unrelated allocations in a background
-DataLoader pinning thread do not invalidate the graph.
-The existing explicit value ``1`` also enables native convolution captures,
-which can be costly for frequently changing graph sizes.
+EQX uses bounded CUDA Graph replay for eligible node products, independently
+of ``torch.compile``. ``EQX_USE_CUDA_GRAPH=0`` disables replay;
+``1`` also enables supported convolution captures. See
+:ref:`environment-variables` for defaults and memory tradeoffs.
 
 For fusion boundaries and standalone examples, see
 :ref:`equivariantx-api-convolutions`. To switch between equivalent CGTP forms

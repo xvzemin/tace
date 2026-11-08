@@ -92,8 +92,9 @@ Operator backends and compilation
        contractions.
    * - ``TACE_USE_COMPILE``
      - Eager model path
-     - Select the compiled model path for supported training and in-process
-       evaluation. It is independent of the operator backend flags.
+     - Jointly compile training predictions, loss, and parameter gradients;
+       compile predictions for evaluation. Independent of operator backends.
+       See :doc:`acceleration` for supported training settings.
 
 When multiple backends are enabled, each operator selects the first supported
 one in **EQX > Luna > OEQ > EQT > CUEQ** order. Install the dependencies for the

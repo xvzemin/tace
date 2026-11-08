@@ -56,6 +56,8 @@ def num_atoms_per_graph(label: Dict[str, torch.Tensor]) -> torch.Tensor:
 
 def has_valid_labels(label: Dict[str, torch.Tensor], key: str) -> torch.Tensor:
     """Return whether any rank has a positive-weight label."""
+    if f"_valid_{key}_count" in label:
+        return (label[f"_valid_{key}_count"] > 0).long()
     weight = label["entropy"].to(DATA_DTYPE).reshape(-1) * label[f"{key}_weight"].to(
         DATA_DTYPE
     ).reshape(-1)
@@ -83,6 +85,34 @@ def polarization_error_per_atom(
 
 def voigt6_stress(stress: torch.Tensor) -> torch.Tensor:
     return stress.reshape(-1, 9)[:, [0, 4, 8, 5, 2, 1]]
+
+
+def prepare_tensor_loss_counts(label, properties):
+    """Reduce valid structure counts before entering a compiled training graph."""
+    label = dict(label.items())
+    keys = tuple(dict.fromkeys(properties))
+    if not keys:
+        return label
+    names, values = [], []
+    for key in keys:
+        valid = (
+            label["entropy"].to(DATA_DTYPE).reshape(-1)
+            * label[f"{key}_weight"].to(DATA_DTYPE).reshape(-1)
+            > 0
+        )
+        names.append(f"_valid_{key}_count")
+        values.append(valid.sum())
+        if key == "direct_hessian":
+            names.append(f"_valid_{key}_pair_count")
+            values.append((valid * num_atoms_per_graph(label).square()).sum())
+    counts = torch.stack(values)
+    world_size = 1
+    if dist.is_available() and dist.is_initialized():
+        world_size = dist.get_world_size()
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+    label.update(zip(names, counts))
+    label["_loss_world_size"] = counts.new_tensor(world_size)
+    return label
 
 
 def tensor_loss(
@@ -126,11 +156,17 @@ def tensor_loss(
     else:
         raise ValueError(f"Unknown tensor loss: {loss}")
 
-    count = mask.sum()
-    world_size = 1
-    if dist.is_available() and dist.is_initialized():
-        world_size = dist.get_world_size()
-        dist.all_reduce(count, op=dist.ReduceOp.SUM)
+    if f"_valid_{key}_count" in label:
+        count = label[f"_valid_{key}_count"] * (
+            1 if loss == "l2mae" else 6 if voigt else 9
+        )
+        world_size = label["_loss_world_size"]
+    else:
+        count = mask.sum()
+        world_size = 1
+        if dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+            dist.all_reduce(count, op=dist.ReduceOp.SUM)
     return (values * weight).sum() * world_size / count.clamp_min(1)
 
 
@@ -156,7 +192,9 @@ def hessian_loss(pred, label, key, loss, reduction="structure", huber_delta=0.01
         raise ValueError("Hessian predictions and labels must have the same shape.")
     counts = label["ptr"][1:] - label["ptr"][:-1]
     graph = torch.repeat_interleave(
-        torch.arange(counts.numel(), device=counts.device), counts.square()
+        torch.arange(counts.numel(), device=counts.device),
+        counts.square(),
+        output_size=target.shape[0],
     )
     weight = (label["entropy"] * label[f"{key}_weight"]).reshape(-1)
     mask = (weight[graph, None, None] > 0).expand_as(target)
@@ -186,8 +224,16 @@ def hessian_loss(pred, label, key, loss, reduction="structure", huber_delta=0.01
         denominator = valid.sum()
     else:
         raise ValueError("reduction must be 'structure' or 'component'.")
-    world_size = 1
-    if dist.is_available() and dist.is_initialized():
-        world_size = dist.get_world_size()
-        dist.all_reduce(denominator, op=dist.ReduceOp.SUM)
+    if f"_valid_{key}_count" in label:
+        world_size = label["_loss_world_size"]
+        denominator = (
+            label[f"_valid_{key}_count"]
+            if reduction == "structure"
+            else label[f"_valid_{key}_pair_count"] * (1 if loss == "l2mae" else 9)
+        )
+    else:
+        world_size = 1
+        if dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+            dist.all_reduce(denominator, op=dist.ReduceOp.SUM)
     return numerator * world_size / denominator.clamp_min(1)

@@ -4,29 +4,12 @@
 ################################################################################
 
 import importlib
-import logging
 from typing import Any, Dict, List
 
 import torch
 
 from tace.utils.env import acceleration_enabled
 from tace.utils.utils import deep_convert
-
-
-def _should_warn_without_aoti(target_property: List[str]) -> bool:
-    aoti_properties = {
-        "energy",
-        "forces",
-        "stress",
-        "virials",
-        "direct_forces",
-        "direct_stress",
-        "direct_virials",
-        "noncollinear_magnetic_forces",
-        "charges",
-        "direct_hessian",
-    }
-    return bool(target_property) and set(target_property).issubset(aoti_properties)
 
 
 def _prune_removed_keys(model_config: Dict) -> Dict:
@@ -83,10 +66,10 @@ def create_model(
     wrapper_config = model_config.get("wrapper") or {}
     wrapper_path = wrapper_config.get("_target_", "tace.models.TensorModel")
 
-    use_aoti = acceleration_enabled("compile") and (
+    use_compile = acceleration_enabled("compile") and (
         is_spherical_model or is_cartesian_model
     )
-    if use_aoti:
+    if use_compile:
         model_path = (
             "tace.models.compile.CartesianTACE"
             if is_cartesian_model
@@ -95,15 +78,6 @@ def create_model(
         MODEL_CLS = select_wrapper(model_path)
         if wrapper_path == "tace.models.TensorModel":
             wrapper_path = "tace.models.CompileTensorModel"
-    elif _should_warn_without_aoti(
-        model_config.get("target_property") or target_property
-    ):
-        logging.warning(
-            "AOTI is not enabled for energy, forces, stress, virials, charges, direct_hessian "
-            "or noncollinear magnetic forces outputs. \n"
-            "For acceleration options, see "
-            "https://tace.readthedocs.io/en/latest/guide/acceleration.html"
-        )
 
     # === wrapper cls ===
     WRAPPER_CLS = select_wrapper(wrapper_path)

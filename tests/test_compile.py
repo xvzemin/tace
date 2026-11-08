@@ -19,7 +19,6 @@ from tace.dataset.quantity import (
 )
 from tace.lightning.torch_model import (
     _prune_removed_keys,
-    _should_warn_without_aoti,
     create_model,
 )
 from tace.models.compile.aot import (
@@ -89,6 +88,141 @@ def test_manual_gradient_sync_preserves_dtype_and_views(monkeypatch, backend):
     assert model[2].grad is None
 
 
+@pytest.mark.parametrize(
+    "backend,device", [("eager", "cpu"), ("inductor", "cpu"), ("inductor", "cuda")]
+)
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("uncertainty", [False, True])
+def test_joint_training_gradients(monkeypatch, backend, device, dtype, uncertainty):
+    import inspect
+
+    from tace.models.adapter import TensorModel
+    from tace.utils.loss.normal import NormalLoss
+    from tace.utils.loss.uncertainty import UncertaintyLoss
+
+    if "dynamic_shapes" not in inspect.signature(torch.compile).parameters:
+        pytest.skip("Joint training requires explicit dynamic shapes")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    torch.set_default_dtype(dtype)
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=2,
+        num_channel=2,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        cutoff=4.0,
+        max_neighbors=None,
+    )
+    config["radial_basis"].update(hidden=[4], apply_cutoff=False)
+    config["product_basis"]["type"] = "nonlinear_cgtp"
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    targets = ["energy", "forces", "stress"]
+    config["target_property"] = targets
+    stats = [dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)]
+    model = create_model(config, stats, targets, [])
+    model.readout_fn.compile_backend = backend
+    model = model.to(device)
+    next(model.parameters()).requires_grad_(False)
+    model.readout_fn.register_parameter(
+        "unused", torch.nn.Parameter(next(model.parameters()).new_ones(2))
+    )
+    loss_fn = (UncertaintyLoss if uncertainty else NormalLoss)(
+        targets,
+        ["mae_energy_per_atom", "l2mae_forces", "mae_voigt_stress"],
+        [1.0, 2.0, 3.0],
+    )
+    loss_fn.to(next(model.parameters()).device)
+    parameters = tuple(
+        p for p in (*model.parameters(), *loss_fn.parameters()) if p.requires_grad
+    )
+    data = _synthetic_graph_sample(model)
+    data["entropy"] = data["positions"].new_ones(2)
+    for key, shape in (("energy", (2,)), ("forces", (4, 3)), ("stress", (2, 3, 3))):
+        data[key] = data["positions"].new_full(shape, 0.1)
+        data[f"{key}_weight"] = data["entropy"].clone()
+    data["stress_weight"][1] = 0
+    data["stress"][1] = float("nan")
+    accumulated = [None] * len(parameters)
+    for step in range(2):
+        batch = {key: value.clone() for key, value in data.items()}
+        batch["positions"] *= 1 + step * 0.1
+        if step:
+            batch["edge_index"] = batch["edge_index"][:, :3]
+            batch["edge_shifts"] = batch["edge_shifts"][:3]
+            batch["stress_weight"].zero_()
+        expected = TensorModel.forward(model, dict(batch))
+        reference = loss_fn(expected, batch)
+        gradients = torch.autograd.grad(reference, parameters, allow_unused=True)
+        state = (*model.parameters(), *model.buffers(), *loss_fn.parameters())
+        values = [value.detach().clone() for value in state]
+        input_values = {key: value.detach().clone() for key, value in batch.items()}
+        actual, loss = model.forward_loss(batch, loss_fn)
+        current = (*model.parameters(), *model.buffers(), *loss_fn.parameters())
+        assert len(current) == len(state)
+        for original, value, saved in zip(state, current, values):
+            assert original is value
+            torch.testing.assert_close(value, saved, atol=0, rtol=0)
+        for key, value in input_values.items():
+            torch.testing.assert_close(
+                batch[key], value, atol=0, rtol=0, equal_nan=True
+            )
+        tolerance = 2e-4 if dtype == torch.float32 else 2e-9
+        torch.testing.assert_close(loss, reference, atol=tolerance, rtol=tolerance)
+        for key in targets:
+            torch.testing.assert_close(
+                actual[key], expected[key], atol=tolerance, rtol=tolerance
+            )
+        (loss / 2).backward()
+        for i, (parameter, grad) in enumerate(zip(parameters, gradients)):
+            if grad is None:
+                assert parameter.grad is None
+            else:
+                accumulated[i] = (
+                    grad / 2 if accumulated[i] is None else accumulated[i] + grad / 2
+                )
+                torch.testing.assert_close(
+                    parameter.grad, accumulated[i], atol=tolerance, rtol=tolerance
+                )
+        assert not any(
+            value.grad is not None for value in batch.values() if value.is_leaf
+        )
+        with torch.no_grad():
+            for parameter in parameters:
+                parameter.mul_(0.99)
+    assert len(model._compiled_cache) == 1
+    expected_parameters = [torch.nn.Parameter(p.detach().clone()) for p in parameters]
+    for parameter, gradient in zip(expected_parameters, accumulated):
+        parameter.grad = gradient
+    for values in (parameters, expected_parameters):
+        torch.nn.utils.clip_grad_norm_(values, 1.0)
+        torch.optim.AdamW(values, lr=1e-3).step()
+    for actual, expected in zip(parameters, expected_parameters):
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_joint_loss_aliases_and_scaling(device):
+    from tace.models.compile.joint import ParameterLoss
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    a, b = (torch.nn.Parameter(torch.ones(3, device=device)) for _ in range(2))
+    shared = torch.ones(3, device=device)
+    loss = ParameterLoss.apply(shared.new_tensor(1.0), (shared, shared), a, b)
+    (loss * 4).backward(retain_graph=True)
+    assert a.grad.data_ptr() != b.grad.data_ptr()
+    a.grad.zero_()
+    loss.backward()
+    torch.testing.assert_close(a.grad, torch.ones_like(shared))
+    torch.testing.assert_close(b.grad, torch.full_like(shared, 5.0))
+    torch.testing.assert_close(shared, torch.ones_like(shared))
+
+
 def test_compiled_shared_state(double_precision):
     class Model(torch.nn.Module):
         def __init__(self):
@@ -155,9 +289,7 @@ def test_compile_avoids_size_dependent_reduction_fusion(
     monkeypatch.setattr(torch, "compile", compile_graph)
     model = torch.nn.Linear(3, 2)
     inputs = (torch.randn(4, 3),)
-    compiled, parameters, buffers = trace_and_compile(
-        model, inputs, backend="inductor"
-    )
+    compiled, parameters, buffers = trace_and_compile(model, inputs, backend="inductor")
     assert received["dynamic"] is True
     assert received["fullgraph"] is True
     if supports_mixed_reduction:
@@ -264,7 +396,9 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         cutoff=4.0,
         max_neighbors=None,
     )
-    config["atomic_basis"]["type"] = "uv_rra_o2" if backend == "cartesian_o2" else "cgtp"
+    config["atomic_basis"]["type"] = (
+        "uv_rra_o2" if backend == "cartesian_o2" else "cgtp"
+    )
     config["radial_basis"].update(hidden=[4], apply_cutoff=False)
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
@@ -536,12 +670,31 @@ def test_model_dtype_conversion(space):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2", "uv_rra_o2"])
-def test_lightning_model_training_precision(dtype, interaction):
+@pytest.mark.parametrize(
+    "interaction,compiled,skip",
+    [
+        ("cgtp", False, False),
+        ("uv_o2", False, False),
+        ("uv_rra_o2", False, False),
+        ("cgtp", True, False),
+        ("cgtp", True, True),
+    ],
+)
+def test_lightning_model_training_precision(
+    monkeypatch, dtype, interaction, compiled, skip
+):
+    import inspect
+
     import lightning as L
     from torch.utils.data import DataLoader
 
     from tace.lightning import create_model
+    from tace.lightning.lit_model import LightningWrapperModel
+
+    if compiled:
+        if "dynamic_shapes" not in inspect.signature(torch.compile).parameters:
+            pytest.skip("Joint training requires explicit dynamic shapes")
+        monkeypatch.setenv("TACE_USE_COMPILE", "1")
 
     torch.set_default_dtype(dtype)
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -564,45 +717,72 @@ def test_lightning_model_training_precision(dtype, interaction):
         {"atomic_numbers": [1], "atomic_energy": {1: 0.0}, "avg_num_neighbors": 2.0}
     ]
     model = create_model(config, statistics, ["energy", "forces"], [])
+    model.readout_fn.compile_backend = "eager"
     assert all(p.dtype == dtype for p in model.parameters())
     assert model.readout_fn.cutoff.dtype == torch.float64
     assert model.readout_fn.atomic_energy_layer.atomic_energy.dtype == torch.float64
     assert model.readout_fn.atomic_numbers.dtype == torch.int64
 
-    class TrainingModel(L.LightningModule):
-        def __init__(self):
-            super().__init__()
-            self.model = model
-
+    class TrainingModel(LightningWrapperModel):
         def training_step(self, batch, batch_idx):
-            output = self.model(batch)
-            assert output["energy"].dtype == torch.float64
-            assert output["forces"].dtype == torch.float64
-            loss = output["energy"].square().mean() + output["forces"].square().mean()
-            assert torch.isfinite(loss)
+            loss = super().training_step(batch, batch_idx)
+            assert loss.dtype == torch.float64 and torch.isfinite(loss)
+            if compiled:
+                assert len(self.model._compiled_cache) == 1
             return loss
 
         def on_after_backward(self):
             gradients = [p.grad for p in self.parameters() if p.grad is not None]
             assert gradients
             assert all(g.dtype == dtype and torch.isfinite(g).all() for g in gradients)
-
-        def configure_optimizers(self):
-            return torch.optim.SGD(self.parameters(), lr=1e-3)
+            if skip:
+                assert all(torch.count_nonzero(g) == 0 for g in gradients)
 
     trainer = L.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         precision="32-true" if dtype == torch.float32 else "64-true",
         max_steps=2,
+        accumulate_grad_batches=2,
+        gradient_clip_val=1.0,
         logger=False,
         enable_checkpointing=False,
         enable_progress_bar=False,
         enable_model_summary=False,
         num_sanity_val_steps=0,
     )
-    data = DataLoader([_magnetic_embedding_sample() for _ in range(2)], batch_size=None)
-    trainer.fit(TrainingModel(), train_dataloaders=data)
+    batches = []
+    for _ in range(4):
+        batch = _magnetic_embedding_sample()
+        batch.pop("initial_noncollinear_magmoms")
+        batch.update(
+            energy=torch.ones(1),
+            forces=torch.ones(3, 3),
+            entropy=torch.ones(1),
+            energy_weight=torch.ones(1),
+            forces_weight=torch.ones(1),
+        )
+        batches.append(batch)
+    cfg = dict(
+        loss=dict(
+            _target_="tace.utils.loss.NormalLoss",
+            loss_property=["energy", "forces"],
+            loss_function_name=["mse_energy", "mse_forces"],
+            loss_property_weights=[1.0, 1.0],
+        ),
+        optimizer=dict(_target_="torch.optim.SGD", lr=1e-3),
+        misc=dict(
+            LossSkipController=dict(
+                enable=skip,
+                manual_threshold=0.0,
+                start_step=0,
+                ema_window=10,
+                multiplier=2.0,
+            )
+        ),
+    )
+    module = TrainingModel(cfg, model, ["energy", "forces"], [], statistics)
+    trainer.fit(module, train_dataloaders=DataLoader(batches, batch_size=None))
     assert trainer.global_step == 2
 
 
@@ -618,29 +798,6 @@ def test_foundation_aoti_output_keeps_version(monkeypatch, path_class):
     assert path_class(
         export_eval._default_aoti_output_path("models/TACE-OAM-7M.pt")
     ) == path_class("models/TACE-OAM-7M.pt2")
-
-
-def test_environment_constants():
-    from string import ascii_letters
-
-    from tace.foundations import download_link
-    from tace.lightning import lit_model
-    from tace.utils.env import BOOL, CACHE_DIR, DEVICE, DTYPE, LETTERS
-
-    assert CACHE_DIR == Path.home() / ".cache" / "tace"
-    assert CACHE_DIR.is_dir()
-    assert download_link.CACHE_DIR is CACHE_DIR
-    assert lit_model.DEVICE is DEVICE
-    assert lit_model.DTYPE is DTYPE
-    assert BOOL["false"] is False
-    assert BOOL["True"] is True
-    assert DTYPE["bf16-true"] is torch.bfloat16
-    assert DTYPE["16-mixed"] is torch.float32
-    assert DTYPE["transformer-engine-float16"] is torch.float16
-    assert DTYPE[torch.float64] is torch.float64
-    assert DEVICE[None] is None
-    assert DEVICE[31] == DEVICE["cuda:31"] == torch.device("cuda:31")
-    assert LETTERS == list(ascii_letters)[3:]
 
 
 @pytest.mark.parametrize("value", [None, "0", "1"])
@@ -759,25 +916,6 @@ def test_model_loading_prunes_removed_architecture_keys():
     assert "removed_product_option" in config["product_basis"]
 
 
-@pytest.mark.parametrize(
-    ("target_property", "expected"),
-    [
-        (["energy", "forces"], True),
-        (["noncollinear_magnetic_forces"], True),
-        (["charges"], True),
-        (["direct_hessian"], True),
-        (["energy", "dipole"], False),
-        (["dipole"], False),
-        ([], False),
-    ],
-)
-def test_should_warn_without_aoti_requires_supported_target_subset(
-    target_property,
-    expected,
-):
-    assert _should_warn_without_aoti(target_property) is expected
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("interaction_type", ["cgtp", "o2"])
 def test_compile_direct_hessian(dtype, interaction_type):
@@ -829,6 +967,20 @@ def test_compile_direct_hessian(dtype, interaction_type):
             assert actual_grad is None
         else:
             torch.testing.assert_close(actual_grad, expected_grad)
+
+    from tace.utils.loss.normal import NormalLoss
+
+    training_data = model.prepare_property_data(dict(sample))
+    training_data.update(
+        direct_hessian=torch.zeros_like(actual["direct_hessian"]),
+        entropy=torch.ones(2, device=device),
+        direct_hessian_weight=torch.ones(2, device=device),
+    )
+    check_joint_property_loss(
+        model,
+        training_data,
+        NormalLoss(["direct_hessian"], ["mse_direct_hessian"], [1.0]),
+    )
 
     model.eval()
     eager.eval()
@@ -955,7 +1107,10 @@ class _ChargeReadout(torch.nn.Module):
         )
         num_atoms = data["ptr"][1:] - data["ptr"][:-1]
         correction = (data["total_charge"] - graph_charges) / num_atoms
-        return {"charges": raw_charges + correction[data["batch"]]}
+        return {
+            "energy": graph_charges,
+            "charges": raw_charges + correction[data["batch"]],
+        }
 
 
 def _magnetic_embedding_sample() -> dict[str, torch.Tensor]:
@@ -976,6 +1131,8 @@ def _magnetic_embedding_sample() -> dict[str, torch.Tensor]:
 
 
 def test_aoti_charges_requires_total_charge_input():
+    import inspect
+
     model = CompileTensorModel(_ChargeReadout()).eval()
     sample = _magnetic_embedding_sample()
     sample.pop("initial_noncollinear_magmoms")
@@ -1007,17 +1164,59 @@ def test_aoti_charges_requires_total_charge_input():
     assert "total_charge" in json.loads(metadata["tace_embedding_property"])
     assert json.loads(metadata["tace_output_keys"]) == ["charges"]
 
+    from tace.utils.loss.normal import NormalLoss
 
-@pytest.mark.parametrize(
-    ("training", "grad_enabled"),
-    [(False, False), (True, True)],
-)
-def test_compiled_call_uses_grad_only_during_training(
-    monkeypatch,
-    training,
-    grad_enabled,
-):
-    model = CompileTensorModel(_ChargeReadout()).train(training)
+    model.readout_fn.scale.requires_grad_(True)
+    loss_fn = NormalLoss(["charges"], ["mse_charges"], [1.0])
+    for n in (3, 5, 1):
+        sample.update(
+            positions=torch.randn(n, 3),
+            node_type=torch.zeros(n, dtype=torch.long),
+            batch=torch.zeros(n, dtype=torch.long),
+            ptr=torch.tensor([0, n]),
+            charges=torch.zeros(n),
+            entropy=torch.ones(1),
+            charges_weight=torch.ones(1),
+        )
+        if n == 1:
+            sample.update(
+                edge_index=torch.empty(2, 0, dtype=torch.long),
+                edge_shifts=torch.empty(0, 3),
+            )
+        check_joint_property_loss(model, sample, loss_fn)
+        if "dynamic_shapes" in inspect.signature(torch.compile).parameters:
+            assert len(model._compiled_cache) == (2 if n == 1 else 1)
+
+
+def check_joint_property_loss(model, data, loss_fn):
+    import inspect
+
+    from tace.models.adapter import TensorModel
+
+    if "dynamic_shapes" not in inspect.signature(torch.compile).parameters:
+        return
+    training = model.training
+    backend = getattr(model.readout_fn, "compile_backend", "inductor")
+    model.train()
+    model.readout_fn.compile_backend = "eager"
+    parameters = tuple(p for p in model.parameters() if p.requires_grad)
+    expected = TensorModel.forward(model, dict(data))
+    expected_loss = loss_fn(expected, data)
+    expected_grads = torch.autograd.grad(expected_loss, parameters, allow_unused=True)
+    _, loss = model.forward_loss(dict(data), loss_fn)
+    gradients = torch.autograd.grad(loss, parameters, allow_unused=True)
+    torch.testing.assert_close(loss, expected_loss)
+    for actual, expected in zip(gradients, expected_grads):
+        if expected is None:
+            assert actual is None
+        else:
+            torch.testing.assert_close(actual, expected)
+    model.train(training)
+    model.readout_fn.compile_backend = backend
+
+
+def test_compiled_evaluation_disables_autograd(monkeypatch):
+    model = CompileTensorModel(_ChargeReadout()).eval()
     sample = _magnetic_embedding_sample()
     sample.pop("initial_noncollinear_magmoms")
     sample["total_charge"] = torch.tensor([1.5])
@@ -1038,7 +1237,7 @@ def test_compiled_call_uses_grad_only_during_training(
     with torch.enable_grad():
         model._compiled_forward(sample)
 
-    assert observed == [grad_enabled]
+    assert observed == [False]
 
 
 def _slice_update(x: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
@@ -1119,6 +1318,25 @@ def test_aoti_keeps_magnetic_embedding_without_magnetic_force_target(
     )
     assert "noncollinear_magnetic_forces" not in json.loads(
         metadata["tace_output_keys"]
+    )
+
+    from tace.utils.loss.normal import NormalLoss
+
+    model.readout_fn.scale.requires_grad_(True)
+    model.reset_target_property(["energy", "noncollinear_magnetic_forces"])
+    sample.update(
+        noncollinear_magnetic_forces=torch.zeros(3, 3),
+        entropy=torch.ones(1),
+        noncollinear_magnetic_forces_weight=torch.ones(1),
+    )
+    check_joint_property_loss(
+        model,
+        sample,
+        NormalLoss(
+            ["noncollinear_magnetic_forces"],
+            ["mse_noncollinear_magnetic_forces"],
+            [1.0],
+        ),
     )
 
 

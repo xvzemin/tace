@@ -412,9 +412,13 @@ class O3TensorProductConv(torch.nn.Module):
                     w = weights[:, weight : weight + mul1 * mul2].reshape(
                         edges, mul1, mul2
                     )
-                    value = torch.einsum("abc,eau,ebv,euv->ecu", cg, x, y, w)
+                    angular_value = torch.bmm(y, w.transpose(1, 2)).transpose(1, 2)
                 else:
-                    value = torch.einsum("abc,eau,ebv->ecu", cg, x, y)
+                    angular_value = y.sum(-1).unsqueeze(1)
+                coupled = (x.transpose(1, 2) @ cg.flatten(1)).reshape(
+                    edges, mul1, dim2, dim_out
+                )
+                value = (coupled * angular_value.unsqueeze(-1)).sum(2).transpose(1, 2)
                 value = (factor * value).flatten(1)
                 outputs[end] = value if end not in outputs else outputs[end] + value
             blocks = [
@@ -437,7 +441,7 @@ class O3TensorProductConv(torch.nn.Module):
     def couple(self, x, y, l1, l2, l3):
         """Contract angular indices while retaining independent channels."""
         cg = getattr(self, f"reference_cg_{l1}_{l2}_{l3}").to(x)
-        return torch.einsum("...a,...b,abc->...c", x, y, cg)
+        return torch.einsum("...ab,abc->...c", x.unsqueeze(-1) * y.unsqueeze(-2), cg)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

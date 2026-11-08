@@ -365,9 +365,13 @@ class NonlinearCgtpACE(Product):
 
     def build_eqx(self) -> None:
         """Build the fused product from its operators and parameters."""
-        from equivariantx.models.tace.nonlinear_ace import build
+        from equivariantx.models.tace.nonlinear_ace import build, build_product
 
         self.eqx_metadata, self.eqx_bindings = build(self)
+        self.eqx_products = tuple(
+            (build_product(product.tp), product.irreps_out.dim)
+            for product in self.aces
+        )
 
     def forward(
         self,
@@ -380,9 +384,7 @@ class NonlinearCgtpACE(Product):
             node_feats.is_cuda
             and node_feats.dtype in (torch.float32, torch.float64)
             and acceleration_enabled("eqx", kernel="product")
-            # Native autograd retains factors and gates for force derivatives;
-            # Inductor fuses their elementwise operations without recomputing
-            # the complete nonlinear product in each derivative program.
+            # Inductor reuses the native factors across force derivatives.
             and not (self.training and acceleration_enabled("compile"))
             and not any(
                 has_lora(layer)
@@ -402,8 +404,26 @@ class NonlinearCgtpACE(Product):
             corr = factors[:, 0]
             start, stop = self.gate_slices[0]
             output = self.coefs[0](corr * weight[:, start:stop][:, self.gate_index_1])
+            fused_products = (
+                node_feats.is_cuda
+                and node_feats.dtype in (torch.float32, torch.float64)
+                and acceleration_enabled("eqx", kernel="product")
+                and self.training
+                and acceleration_enabled("compile")
+            )
+            if fused_products:
+                from equivariantx.ops.channel_product import channel_product
             for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
-                corr = product(corr, factors[:, index + 1 if self.asymmetric else 0])
+                factor = factors[:, index + 1 if self.asymmetric else 0]
+                if fused_products:
+                    metadata, output_dim = self.eqx_products[index]
+                    corr = channel_product(
+                        metadata,
+                        repr((((0, 1, 2), 2, 0, 0),)),
+                        [corr, factor, corr.new_empty((0, output_dim))],
+                    )[0]
+                else:
+                    corr = product(corr, factor)
                 start, stop = self.gate_slices[index + 1]
                 gate = weight[:, start:stop].index_select(
                     -1, getattr(self, f"gate_index_{index + 2}")

@@ -406,20 +406,20 @@ def make_product(irreps, correlation, **kwargs):
     ).double()
 
 
-def fused_nonlinear_product(module, features, types, batch, *, fused=True):
+def fused_nonlinear_product(module, features, types, batch, *, programs=1):
     from torch.utils._python_dispatch import TorchDispatchMode
 
     class EdgeCalls(TorchDispatchMode):
         calls = 0
 
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-            if func is torch.ops.eqx.edge_program.default:
+            if str(func) in ("eqx.edge_program.default", "eqx.local_channel_product.default"):
                 self.calls += 1
             return func(*args, **(kwargs or {}))
 
     with EdgeCalls() as dispatch:
         output = module(features, types, None, batch)
-    assert dispatch.calls == int(features.is_cuda and fused)
+    assert dispatch.calls == (programs if features.is_cuda else 0)
     return output
 
 
@@ -501,7 +501,8 @@ def test_nonlinear_product(
         monkeypatch.setenv("TACE_USE_EQX", "1" if product is module else "0")
         value = (
             fused_nonlinear_product(
-                product, x, types, batch, fused=not compiled_training
+                product, x, types, batch,
+                programs=correlation - 1 if compiled_training else 1,
             )
             if product is module
             else product(x, types, None, batch)

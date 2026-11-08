@@ -211,7 +211,10 @@ def product(metadata, function, inputs, source, target, outputs, layout):
     ):
         function((*inputs, source, target), outputs)
         return
-    capacity = (source.numel() + ROW_BUCKET - 1) // ROW_BUCKET * ROW_BUCKET
+    rows = source.numel()
+    # Limit captures as batch sizes grow without padding small batches heavily.
+    bucket = max(ROW_BUCKET, 1 << max(0, rows.bit_length() - 4))
+    capacity = (rows + bucket - 1) // bucket * bucket
     execute(
         "product",
         metadata,

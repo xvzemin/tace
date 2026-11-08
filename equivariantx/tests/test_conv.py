@@ -265,9 +265,7 @@ def test_convolution_time_reversal(kind, backend, device, double_precision):
 @pytest.mark.parametrize("rows", [0, 1, 9])
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("copies", [2, 4])
-def test_o3_rowwise_tensor_product(rows, shared, copies, double_precision):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
+def test_o3_rowwise_tensor_product(rows, shared, copies, device, double_precision):
     tp = o3.TensorProduct(
         "+".join(["3x1o"] * copies + ["2x0e"]),
         "2x1o+0e",
@@ -276,10 +274,10 @@ def test_o3_rowwise_tensor_product(rows, shared, copies, double_precision):
         + [(copies, 0, 3, "uvu", True)],
         internal_weights=False,
         shared_weights=False,
-    ).cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, batch_paths=True).cuda()
+    ).to(device)
+    conv = eqx_conv.O3TensorProductConv(tp, batch_paths=True).to(device)
     inputs = [
-        torch.randn(*shape, device="cuda", requires_grad=True)
+        torch.randn(*shape, device=device, requires_grad=True)
         for shape in (
             (rows, tp.irreps_in1.dim),
             (1 if shared else rows, tp.irreps_in2.dim),
@@ -321,7 +319,7 @@ def test_partitioned_paths(monkeypatch, double_precision, implementation):
     convolution.execution_plan.cache_clear()
     try:
         if implementation == "o3":
-            test_o3_rowwise_tensor_product(9, False, 4, double_precision)
+            test_o3_rowwise_tensor_product(9, False, 4, "cuda", double_precision)
         else:
             test_streaming_projected_tiles(monkeypatch, 1, 35)
     finally:
@@ -4810,7 +4808,8 @@ def test_convolution_radial_network(cls, num_edges, device, double_precision):
 
 
 @pytest.mark.parametrize("background_loading", [False, True])
-def test_row_product_cuda_graph(monkeypatch, double_precision, background_loading):
+@pytest.mark.parametrize("dense", [False, True])
+def test_row_product_cuda_graph(monkeypatch, double_precision, background_loading, dense):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx.backends.cuda import graph
@@ -4845,9 +4844,12 @@ def test_row_product_cuda_graph(monkeypatch, double_precision, background_loadin
     x = program.input(0, "edge", 2)
     w = program.input(1, "shared", 4)
     bias = program.input(2, "shared", 2)
-    hidden = program.unary(
-        "silu", program.binary("add", program.matmul(x, w, 1, 2, 2), bias)
+    projected = (
+        program.matmul(x, w, 1, 2, 2)
+        if dense
+        else program.binary("mul", x, program.slice(w, 0, 2))
     )
+    hidden = program.unary("silu", program.binary("add", projected, bias))
     value = program.product(
         (hidden, hidden, program.constant(2, 0)),
         (1, (2, 2, 2), (((0, 0, 0), 1.0), ((1, 1, 1), 0.7))), 2,
@@ -4857,11 +4859,14 @@ def test_row_product_cuda_graph(monkeypatch, double_precision, background_loadin
     unsafe = repr((tuple(program.nodes), ((value, 0, "shared"),)))
     assert product_graph_layout(unsafe) is None
     assert product_graph_layout(metadata) is not None
+    from equivariantx.backends.cuda.execution import uses_matrix_products
+
+    assert uses_matrix_products(metadata)
     assert graph.enabled("product") and not graph.enabled("o3")
     graph._GRAPHS.clear()
     try:
         previous = None
-        for rows in (5, 7, 5, 9, 5, 0):
+        for rows in (5, 7, 5, 9, 5, 0, 129, 137, 129):
             inputs = [
                 (torch.randn(shape, device="cuda") * 0.2).requires_grad_()
                 for shape in ((rows, 2), (1, 4), (1, 2))
@@ -4884,7 +4889,7 @@ def test_row_product_cuda_graph(monkeypatch, double_precision, background_loadin
                     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
                 captured = {key: entry[0] for key, entry in graph._GRAPHS.items()}
                 assert captured
-                if rows in (5, 7) and previous is not None:
+                if rows in (5, 7, 137) and previous is not None:
                     assert captured == previous
                 previous = captured
         # Explicit opt-out keeps the ordinary CUDA implementation available.

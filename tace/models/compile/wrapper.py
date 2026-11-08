@@ -41,6 +41,29 @@ class CompileTensorModel(TensorModel):
             return self._compiled_forward(data)
         return super().forward(data)
 
+    def forward_loss(self, data, loss_fn):
+        """Return predictions and a loss connected to the trainable parameters.
+
+        Parameters
+        ----------
+        data : dict
+            Batched graph inputs and labels.
+        loss_fn : NormalLoss or UncertaintyLoss
+            Training loss, including property weights.
+
+        Examples
+        --------
+        >>> predictions, loss = model.forward_loss(batch, loss_fn)
+        >>> loss.backward()
+        """
+        from .joint import joint_training
+
+        data = self.prepare_property_data(data)
+        if self.training:
+            return joint_training(self, loss_fn, data)
+        output = self(data)
+        return output, loss_fn(output, data)
+
     def reset_target_property(self, target_property: list[str]) -> None:
         self._validate_target_property(target_property)
         self._compiled_cache.clear()

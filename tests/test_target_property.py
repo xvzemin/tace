@@ -25,7 +25,7 @@ from tace.models.spherical.les import TACELES, required_les_irreps
 from tace.models.spherical.readout import DirectHessianReadout
 from tace.models.spherical.representation import PairRepresentation
 from tace.models.utils import get_target_irreps, prepare_direct_hessian_inputs
-from tace.utils.loss.common import hessian_loss
+from tace.utils.loss.common import hessian_loss, prepare_tensor_loss_counts
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.mask_metrics import MaskMAE, supports_weight_filter
@@ -770,6 +770,15 @@ def check_direct_hessian_loss(device, loss, reduction):
         [{"reduction": reduction}],
     )
     value = fn({"direct_hessian": prediction}, label)
+    prepared_value = fn(
+        {"direct_hessian": prediction},
+        prepare_tensor_loss_counts(label, ["direct_hessian"]),
+    )
+    torch.testing.assert_close(prepared_value, value)
+    torch.testing.assert_close(
+        torch.autograd.grad(prepared_value, prediction)[0],
+        torch.autograd.grad(value, prediction, retain_graph=True)[0],
+    )
     a, b = {
         "mse": (1, 4),
         "mae": (1, 2),
@@ -783,6 +792,11 @@ def check_direct_hessian_loss(device, loss, reduction):
     label["direct_hessian_weight"].zero_()
     prediction.grad = None
     value = fn({"direct_hessian": prediction}, label)
+    prepared_value = fn(
+        {"direct_hessian": prediction},
+        prepare_tensor_loss_counts(label, ["direct_hessian"]),
+    )
+    torch.testing.assert_close(prepared_value, value)
     value.backward()
     assert value == 0 and not prediction.grad.any()
 

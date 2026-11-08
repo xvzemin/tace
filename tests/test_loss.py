@@ -8,7 +8,11 @@ import pytest
 import torch
 
 from tace.dataset.statistics import balanced_element_weights
-from tace.utils.loss.common import has_valid_labels, tensor_loss
+from tace.utils.loss.common import (
+    has_valid_labels,
+    prepare_tensor_loss_counts,
+    tensor_loss,
+)
 from tace.utils.loss.dens import (
     add_gaussian_noise_to_position,
     huber_dens_forces,
@@ -103,10 +107,11 @@ def test_loss_coordinate_derivatives():
 
 @pytest.mark.parametrize("loss", ["mse", "mae", "huber", "l2mae"])
 @pytest.mark.parametrize("voigt", [False, True])
+@pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize(
     "key", ["stress", "virials", "direct_stress", "direct_virials"]
 )
-def test_tensor_loss_missing_labels(loss, voigt, key):
+def test_tensor_loss_missing_labels(loss, voigt, key, prepared):
     reference = torch.arange(1.0, 10.0).reshape(1, 3, 3)
     target = torch.zeros_like(reference)
     pred = torch.cat([reference, 100 * reference]).requires_grad_()
@@ -115,7 +120,13 @@ def test_tensor_loss_missing_labels(loss, voigt, key):
         f"{key}_weight": torch.tensor([1.0, 0.0]),
         "entropy": torch.ones(2),
     }
-    actual = tensor_loss({key: pred}, labels, key, loss, voigt=voigt)
+    actual = tensor_loss(
+        {key: pred},
+        prepare_tensor_loss_counts(labels, [key]) if prepared else labels,
+        key,
+        loss,
+        voigt=voigt,
+    )
     expected = tensor_loss(
         {key: reference}, {k: v[:1] for k, v in labels.items()}, key, loss, voigt=voigt
     )
@@ -124,12 +135,19 @@ def test_tensor_loss_missing_labels(loss, voigt, key):
     assert torch.isfinite(pred.grad).all() and not pred.grad[1].any()
     labels[f"{key}_weight"].zero_()
     pred.grad = None
-    empty = tensor_loss({key: pred}, labels, key, loss, voigt=voigt)
+    empty = tensor_loss(
+        {key: pred},
+        prepare_tensor_loss_counts(labels, [key]) if prepared else labels,
+        key,
+        loss,
+        voigt=voigt,
+    )
     empty.backward()
     assert empty == 0 and not pred.grad.any()
 
 
-def test_tensor_loss_distributed_count(monkeypatch):
+@pytest.mark.parametrize("prepared", [False, True])
+def test_tensor_loss_distributed_count(monkeypatch, prepared):
     from tace.utils.loss import common
 
     pred = {"stress": torch.ones(2, 3, 3, requires_grad=True)}
@@ -143,9 +161,13 @@ def test_tensor_loss_distributed_count(monkeypatch):
     )
     monkeypatch.setattr(common.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(common.dist, "get_world_size", lambda: 2)
-    monkeypatch.setattr(common.dist, "all_reduce", lambda count, op: count.add_(4))
+    monkeypatch.setattr(
+        common.dist, "all_reduce", lambda count, op: count.add_(2 if prepared else 18)
+    )
+    if prepared:
+        label = prepare_tensor_loss_counts(label, ["stress"])
     torch.testing.assert_close(
-        tensor_loss(pred, label, "stress", "mse"), torch.tensor(36.0 / 13.0)
+        tensor_loss(pred, label, "stress", "mse"), torch.tensor(36.0 / 27.0)
     )
 
 
@@ -164,7 +186,9 @@ def test_stress_metric_missing_labels(metric_type):
 
 
 @pytest.mark.parametrize("metric_type", [MaskMAE, MaskRMSE])
-@pytest.mark.parametrize("key", ["energy", "forces", "stress", "edge_forces", "hessian"])
+@pytest.mark.parametrize(
+    "key", ["energy", "forces", "stress", "edge_forces", "hessian"]
+)
 def test_masked_metric_counts(metric_type, key):
     shapes = {
         "energy": (3,),
@@ -283,6 +307,7 @@ def test_metric_accumulation_precision(masked, squared):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize(
     "key, shape",
     [
@@ -292,7 +317,7 @@ def test_metric_accumulation_precision(masked, squared):
         ("direct_hessian", (13, 3, 3)),
     ],
 )
-def test_uncertainty_labels(key, shape, dtype):
+def test_uncertainty_labels(key, shape, dtype, prepared):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss = UncertaintyLoss([key], [f"mse_{key}"], [1.0]).to(device, dtype)
     normal = NormalLoss([key], [f"mse_{key}"], [1.0])
@@ -309,7 +334,9 @@ def test_uncertainty_labels(key, shape, dtype):
         loss.zero_grad()
         pred[key].grad = None
         reference = normal(pred, label).detach()
-        value = loss(pred, label)
+        value = loss(
+            pred, prepare_tensor_loss_counts(label, [key]) if prepared else label
+        )
         log_sigma = loss.log_sigmas[key]
         torch.testing.assert_close(value, reference + log_sigma * present)
         value.backward()

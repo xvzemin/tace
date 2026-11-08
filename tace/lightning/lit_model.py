@@ -75,7 +75,6 @@ class LightningWrapperModel(L.LightningModule):
         self.cfg = cfg
         self.statistics = statistics
         self.model = to_lora_model(cfg.get("finetune", {}), model)
-        # self.normalizers = copy.deepcopy(self.model.readout_fn.normalizers)
 
         # === Loss ===
         loss_cls, loss_cfg = get_class_from_cfg(cfg["loss"])
@@ -128,22 +127,23 @@ class LightningWrapperModel(L.LightningModule):
         setattr(self, f"{prefix}_metrics", metric_collection)
 
     def _process_batch(self, batch):
+        if self.training and hasattr(self.model, "forward_loss"):
+            return self.model.forward_loss(batch, self.loss_fn)
         batch = self.model.prepare_property_data(batch)
-        output = self.model(batch)  # normalized predict value
-
-        # # # normalize label value
-        # with torch.no_grad():
-        #     normalizerd_batch = copy.copy(batch)
-        #     for k, v in self.normalizers.items():
-        #         if k == 'energy':
-        #             normalizerd_batch[k] = v.norm(normalizerd_batch[k] - output['e_base_graph'].detach())
-        #         else:
-        #             normalizerd_batch[k] = v.norm(normalizerd_batch[k])
-        # loss = self.loss_fn(output, normalizerd_batch)
+        output = self.model(batch)
         loss = self.loss_fn(output, batch)
         return output, loss
 
-    # def on_before_optimizer_step(self, optimizer):
+    def backward(self, loss, *args, **kwargs):
+        """Accumulate parameter gradients without differentiating input labels."""
+        if not isinstance(
+            getattr(self._trainer, "model", None),
+            torch.nn.parallel.DistributedDataParallel,
+        ):
+            kwargs.setdefault(
+                "inputs", tuple(p for p in self.parameters() if p.requires_grad)
+            )
+        super().backward(loss, *args, **kwargs)
 
     def _shared_step(self, batch, batch_idx, prefix):
 
@@ -154,22 +154,12 @@ class LightningWrapperModel(L.LightningModule):
             if get_tace_use_dens() == "1":
                 batch = add_gaussian_noise_to_position(batch)
 
-        # if "forces" in batch:
-        #     batch["direct_forces"] = batch["forces"]
-        #     batch["direct_forces_weight"] = batch["forces_weight"]
-        # if "stress" in batch:
-        #     batch["direct_stress"] = batch["stress"]
-        #     batch["direct_stress_weight"] = batch["stress_weight"]
-
-        # always use normalized value to caculate loss
         output, loss = self._process_batch(batch)
 
         if prefix == "train" and self.skip_controller is not None:
             skip, reason_code, threshold = self.skip_controller.check(
                 loss, self.global_step
             )
-            # if self.global_step % 5000 == 0:
-            #     self.skip_controller.log_status(self.global_step)
             if skip:
                 if (not dist.is_initialized()) or dist.get_rank() == 0:
                     if reason_code == 1:
@@ -225,16 +215,6 @@ class LightningWrapperModel(L.LightningModule):
             )
 
         metrics = getattr(self, f"{prefix}_metrics")
-        # with torch.no_grad():
-        #     unnormalizerd_output = copy.copy(output)
-        #     if self.model.training:
-        #         for k, v in self.normalizers.items():
-        #             unnormalizerd_output[k] = v.denorm(unnormalizerd_output[k])
-        #         if unnormalizerd_output['e_base_graph'] is not None:
-        #             unnormalizerd_output['energy'] += unnormalizerd_output['e_base_graph']
-        #         update_metrics(metrics, prefix, unnormalizerd_output, batch, self.loss_property)
-        #     else:
-        #         update_metrics(metrics, prefix, output, batch, self.loss_property)
         with torch.no_grad():
             update_metrics(metrics, prefix, output, batch, self.loss_property)
         return loss
@@ -333,26 +313,11 @@ class LightningWrapperModel(L.LightningModule):
                         f"{k}: weight(log_sigma)|{0.5 * torch.exp(-v).item():.3f}({v.item():.3f})"
                     )
 
-    # # Used for check unused params
-    # def on_after_backward(self):
-
-    #     for name, p in self.named_parameters():
-    #         if not p.requires_grad:
-    #             continue
-    #         if p.grad is None:
-    #             logging.warning(f"[NO_GRAD] {name}")
-    #         else:
-    #             grad_norm = p.grad.norm().item()
-    #             if grad_norm == 0:
-    #                 logging.warning(f"[ZERO_GRAD] {name}")
-
     def setup(self, stage: Union[str, None] = None):
         if self.trainer.world_size > 1:
             self.sync_dist = True
         else:
             self.sync_dist = False
-        # if self.ema is not None:
-        #     self.ema.to(self.device)
 
     def configure_optimizers(self):
 

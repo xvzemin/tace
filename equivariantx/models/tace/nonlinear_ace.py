@@ -27,7 +27,8 @@ def angular_layout(program, value, irreps, inverse=False):
     return program.concatenate(blocks)
 
 
-def tensor_product(program, product, left, right):
+def product_metadata(product):
+    """Return channel-wise coupling paths in angular-major layout."""
     irreps = product.irreps_in1, product.irreps_in2, product.irreps_out
     widths = {mul for entries in irreps for mul, _ in entries}
     if len(widths) != 1 or any(
@@ -65,16 +66,23 @@ def tensor_product(program, product, left, right):
             ((starts[0] + a, starts[1] + b, starts[2] + c), coefficient)
             for a, b, c, coefficient in entries
         )
+    return width, dimensions, tuple(paths)
+
+
+def tensor_product(program, product, left, right):
+    irreps = product.irreps_in1, product.irreps_in2, product.irreps_out
+    metadata = product_metadata(product)
+    width, dimensions, _ = metadata
     values = (
         angular_layout(program, left, irreps[0]),
         angular_layout(program, right, irreps[1]),
         program.constant(width * dimensions[2], 0),
     )
-    result = program.product(values, (width, dimensions, tuple(paths)), 2)
-    if cartesian and product.project and product.projection_indices:
+    result = program.product(values, metadata, 2)
+    if hasattr(product, "path_factors") and product.project and product.projection_indices:
         paths = []
         for index, (_, ir) in enumerate(irreps[2]):
-            start = offsets[2][index]
+            start = irreps[2].slices()[index].start // width
             if index in product.projection_indices:
                 matrix = projector_matrix(ir.l)
                 paths.extend(
@@ -89,6 +97,30 @@ def tensor_product(program, product, left, right):
             1,
         )
     return angular_layout(program, result, irreps[2], inverse=True)
+
+
+def build_product(product):
+    """Build a spherical CGTP in its native ``mul_ir`` layout."""
+    width, _, paths = product_metadata(product)
+    irreps = product.irreps_in1, product.irreps_in2, product.irreps_out
+    layouts = [
+        tuple(
+            (section.start + angular, ir.dim)
+            for (_, ir), section in zip(entries, entries.slices())
+            for angular in range(ir.dim)
+        )
+        for entries in irreps
+    ]
+    rows = tuple(
+        (
+            tuple(layouts[role][index][0] for role, index in enumerate(indices)),
+            coefficient,
+            width,
+            tuple(layouts[role][index][1] for role, index in enumerate(indices)),
+        )
+        for indices, coefficient in paths
+    )
+    return repr((0, tuple(entries.dim for entries in irreps), rows))
 
 
 def build(module):

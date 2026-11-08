@@ -5,18 +5,18 @@ from lightning.pytorch.strategies import DDPStrategy
 
 
 class SimpleDDPStrategy(DDPStrategy):
-    """
-    Copy from Nequip-v0.15.0, avoid some unnecessary synchronization operations in MLIPs
-    Effectively Lightning's :class:`~lightning.pytorch.strategies.DDPStrategy`,
-    but doing manual gradient syncs instead of using PyTorch's :class:`~torch.nn.parallel.DistributedDataParallel` wrapper.
+    """Average parameter gradients after backward without wrapping the model.
 
-    Example use in the config file:
+    Gradients are grouped by device and dtype for asynchronous reduction.
+    Based on NequIP 0.15.0's manual synchronization strategy.
+
+    Examples
+    --------
 
     .. code-block:: yaml
 
       trainer:
         _target_: lightning.Trainer
-        # other trainer arguments
         strategy:
           _target_: tace.utils.strategy.SimpleDDPStrategy
     """

@@ -159,7 +159,7 @@ def execution_plan(metadata):
 
 @lru_cache(maxsize=128)
 def uses_matrix_products(metadata):
-    """Select tiled execution for dense maps and convolution expressions."""
+    """Select tiled execution for contractions and normalization expressions."""
     nodes, _ = parse_metadata(metadata)
     dependent = []
     for op, _, args, data in nodes:
@@ -167,7 +167,7 @@ def uses_matrix_products(metadata):
             data[1] != "shared" if op == "input" else any(dependent[j] for j in args)
         )
     return any(
-        op in ("convolution", "frame", "normalize", "inv_norm", "mean", "rsqrt")
+        op in ("convolution", "product", "frame", "normalize", "inv_norm", "mean", "rsqrt")
         or op == "matmul"
         and not can_inline_matmul(nodes, i, dependent)
         for i, (op, _, _, _) in enumerate(nodes)
