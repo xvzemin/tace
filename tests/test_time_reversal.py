@@ -394,7 +394,7 @@ def test_magnetic_field_uses_time_odd_equivariant_embedding():
 def test_parity_selects_natural_or_complete_magnetic_paths():
     config = _model_config()
     config["parity"] = False
-    config["atomic_basis"]["type"] = "o2_mag"
+    config["atomic_basis"]["type"] = "uv_o2_mag"
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["fidelity"][0]["magnetic_scale"] = 2.0
     config["mmax"] = 1
@@ -435,7 +435,7 @@ def test_parity_selects_natural_or_complete_magnetic_paths():
 @pytest.mark.parametrize("num_fidelities", [1, 2])
 def test_magnetic_representation_uses_node_fidelity(num_fidelities):
     config = _model_config()
-    config["atomic_basis"]["type"] = "o2_mag"
+    config["atomic_basis"]["type"] = "uv_o2_mag"
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["radial_basis"]["apply_cutoff"] = False
     config["mmax"] = 1
@@ -502,10 +502,9 @@ def test_o2_magnetic_interactions_keep_complete_soc_irreps():
         use_spin_orbit_coupling=True,
     )
     config["atomic_basis"].update(
-        type="o2_mag",
+        type="uv_o2_mag",
         nonlinear="gate",
         edge_nonlinear="gate",
-        use_radial_rotary_attention=False,
     )
     config["product_basis"].update(type="cgtp", correlation=2)
     model = SphericalTACE(**config)
@@ -580,7 +579,7 @@ def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
         monkeypatch.delenv(name, raising=False)
     config = _time_reversal_model_config() if time_reversal else _model_config()
     config["mmax"] = 1
-    config["atomic_basis"]["type"] = ["o2"]
+    config["atomic_basis"]["type"] = ["uv_rra_o2"]
     config["atomic_basis"]["edge_nonlinear"] = ["silu"]
     model = SphericalTACE(**config)
 

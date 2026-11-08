@@ -8,12 +8,12 @@ TACE. ``atomic_basis.type: cgtp`` uses Cartesian contractions based on the
 The node product block also uses Cartesian tensors. Weights, biases, and
 coupling paths are unchanged.
 
-``o2`` and ``uu_o2`` use direct Cartesian plane restriction and ``equivariantx.co2``
-operators. Each local order stores ``2**m`` Cartesian entries per channel,
+``uv_o2``, ``uv_rra_o2`` and ``uu_o2`` use direct Cartesian plane restriction
+and ``equivariantx.co2`` operators. Each local order stores ``2**m`` Cartesian entries per channel,
 without first constructing ``3**m`` transverse tensors. UV attention evaluates
 Frobenius inner products in the same Cartesian storage.
 The existing ``so2`` architecture retains its compact RRA operations between
-Cartesian restriction and reconstruction. ``o2_mag`` supports SOC and non-SOC
+Cartesian restriction and reconstruction. ``uv_o2_mag`` supports SOC and non-SOC
 models, including time-reversal labels and magnetic forces. ``w6j_mag`` uses
 Cartesian node recoupling followed by the edge convolution.
 

@@ -78,11 +78,14 @@ def test_model_config_class_names():
 
 @pytest.mark.parametrize("basis", ["spherical", "cartesian"])
 @pytest.mark.parametrize("compiled", [False, True])
-def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, compiled):
+@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2", "uv_rra_o2", "uv_o2_mag"])
+def test_model_target_aliases(
+    tmp_path, monkeypatch, double_precision, basis, compiled, interaction
+):
     from tace import models
     from tace.lightning import convert_basis
 
-    reference = make_model()
+    reference = make_model(interaction)
     if basis == "cartesian":
         reference = convert_basis(reference)
     expected = evaluate(reference)
@@ -94,6 +97,11 @@ def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, co
     path = tmp_path / "model.pt"
     export_tace(reference, str(path))
     saved = torch.load(path, weights_only=False)
+    if interaction != "cgtp":
+        saved["cfg"]["atomic_basis"].update(
+            type=["cgtp", "o2_mag" if interaction == "uv_o2_mag" else "o2"],
+            use_radial_rotary_attention=interaction == "uv_rra_o2",
+        )
     names = [f"tace.models.{old_package}.tace.{old_name}"]
     if basis == "spherical":
         names.append(None)
@@ -112,6 +120,13 @@ def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, co
         )
         assert restored.readout_fn.model_config["_target_"] == canonical
         assert (
+            restored.readout_fn.model_config["atomic_basis"]
+            == reference.readout_fn.model_config["atomic_basis"]
+        )
+        assert "use_radial_rotary_attention" not in (
+            restored.readout_fn.model_config["atomic_basis"]
+        )
+        assert (
             dict(restored.named_parameters()).keys()
             == dict(reference.named_parameters()).keys()
         )
@@ -128,7 +143,8 @@ def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, co
         "cgtp",
         "co3",
         "o2_cgtp",
-        "o2",
+        "uv_o2",
+        "uv_rra_o2",
         "uu_o2",
         "so2",
         "spherical_tensor",
@@ -136,8 +152,8 @@ def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, co
         "hessian",
         "hessian_o2",
         "tensor_readouts",
-        "o2_mag",
-        "o2_mag_non_soc",
+        "uv_o2_mag",
+        "uv_o2_mag_non_soc",
         "w6j_mag",
         "bilinear",
         "moe",
@@ -192,11 +208,11 @@ def test_native_cartesian_model(
             )
     if "mag" in interaction:
         config["atomic_basis"]["type"] = (
-            "w6j_mag" if interaction == "w6j_mag" else "o2_mag"
+            "w6j_mag" if interaction == "w6j_mag" else "uv_o2_mag"
         )
         config["fidelity"]["magnetic_scale"] = 3.0
         config["angular_basis"].update(
-            magnetic_Lmax=1, use_spin_orbit_coupling=interaction != "o2_mag_non_soc"
+            magnetic_Lmax=1, use_spin_orbit_coupling=interaction != "uv_o2_mag_non_soc"
         )
         config["target_property"].append("noncollinear_magnetic_forces")
     if interaction in ("spherical_tensor", "wigner_tensor", "so2"):
@@ -228,9 +244,7 @@ def test_native_cartesian_model(
         config["fidelity"] = [{"name": "first"}, {"name": "second"}]
         config["statistics"] *= 2
     if interaction == "uu_o2":
-        config["atomic_basis"].update(
-            use_radial_rotary_attention=False, edge_nonlinear=None
-        )
+        config["atomic_basis"].update(edge_nonlinear=None)
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
     config["scale_shift"]["enable"] = False
@@ -254,7 +268,9 @@ def test_native_cartesian_model(
         for block in module.readout_fn.representation.interactions:
             assert block.use_eqx
             if hasattr(block.rejector, "eqx_tp"):
-                if interaction in ("o2", "uu_o2", "o2_mag", "o2_mag_non_soc"):
+                if interaction in (
+                    "uv_o2", "uv_rra_o2", "uu_o2", "uv_o2_mag", "uv_o2_mag_non_soc"
+                ):
                     assert block.rejector.eqx_tp is None
                     assert block.rejector.local_frame_in.method == "direct"
                     assert not hasattr(block.rejector, "to_spherical")
@@ -650,7 +666,7 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
     config["fidelity"] = [{"name": "a"}, {"name": "b"}]
     if interaction == "so2":
         config["product_basis"].update(num_expert=2, num_channel_per_expert=2)
-    elif interaction == "o2_mag":
+    elif interaction == "uv_o2_mag":
         config["parity"] = True
         config["node_update"]["magnetic_type"] = "element2"
         config["angular_basis"]["magnetic_Lmax"] = 1
@@ -713,7 +729,10 @@ def test_nonlinear_product_loading(tmp_path, double_precision, product):
 
 @pytest.mark.parametrize(
     "interaction",
-    ["cgtp", "so2", "o2", "o2_mag", "mace", "nonlinear_cgtp", "nonlinear_ictd"],
+    [
+        "cgtp", "so2", "uv_o2", "uv_rra_o2", "uv_o2_mag", "mace",
+        "nonlinear_cgtp", "nonlinear_ictd",
+    ],
 )
 @pytest.mark.parametrize("elements", [["O", "H"], [14, 8, 6, 1], ["H", "O", "Si"]])
 def test_select_elements(interaction, elements, tmp_path, double_precision):

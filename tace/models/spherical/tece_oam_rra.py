@@ -36,7 +36,7 @@ from .paths import SymmetricProductPaths
 
 
 class Convolution(torch.nn.Module):
-    """Channel-mixing local convolution with optional ECE and rotary attention.
+    """Channel-mixing local convolution with rotary attention and optional ECE.
 
     Parameters
     ----------
@@ -50,8 +50,8 @@ class Convolution(torch.nn.Module):
         Input width of the rotary phase and bias projection.
     gate_m0 : bool
         Gate order-zero features instead of activating them directly.
-    use_asymmetric_contraction, use_radial_rotary_attention : bool
-        Enable the edge product expansion and rotary attention, respectively.
+    use_asymmetric_contraction : bool
+        Enable the edge product expansion.
     reshape_in, reshape_out : torch.nn.Module
         Node layout transforms. The output transform provides ``inverse``.
     scalar_act, tensor_act : torch.nn.Module
@@ -65,6 +65,8 @@ class Convolution(torch.nn.Module):
     original SO(2) model; this is not an O(3)-equivariant replacement for RRA.
     """
 
+    use_radial_rotary_attention = True
+
     def __init__(
         self,
         mmax,
@@ -75,7 +77,6 @@ class Convolution(torch.nn.Module):
         num_radial_basis,
         gate_m0,
         use_asymmetric_contraction,
-        use_radial_rotary_attention,
         reshape_in,
         reshape_out,
         scalar_act,
@@ -89,7 +90,6 @@ class Convolution(torch.nn.Module):
             raise ValueError("num_head must divide num_channel.")
         self.num_channel_per_head = num_channel // num_head
         self.use_asymmetric_contraction = use_asymmetric_contraction
-        self.use_radial_rotary_attention = use_radial_rotary_attention
         self.gate_m0 = gate_m0
         self.reshape_in, self.reshape_out = reshape_in, reshape_out
         self.scalar_act, self.tensor_act = scalar_act, tensor_act
@@ -278,7 +278,7 @@ class Convolution(torch.nn.Module):
                 )
             )
 
-        if use_radial_rotary_attention:
+        if self.use_radial_rotary_attention:
             self.query_proj = o2.Linear(node_irreps, node_irreps, biases=True)
             self.key_proj = o2.Linear(node_irreps, node_irreps, biases=True)
             self.radial_proj = o2.Linear(
@@ -569,6 +569,8 @@ class UvSO2Interaction(O3CgtpInteraction):
     This interaction block add nonlinearity to the message.
     """
 
+    use_radial_rotary_attention = True
+
     @property
     def use_eqx(self) -> bool:
         return self.rejector._eqx_metadata is not None and bool(
@@ -620,7 +622,6 @@ class UvSO2Interaction(O3CgtpInteraction):
             edge_ace_hidden=self.edge_ace_hidden,
             gate_m0=False,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
-            use_radial_rotary_attention=self.use_radial_rotary_attention,
             reshape_in=LayoutTransform(self.irreps_in),
             reshape_out=LayoutTransform(
                 o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])

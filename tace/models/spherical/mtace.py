@@ -25,7 +25,7 @@ from ..time_reversal import make_irrep, spherical_harmonics_irreps
 from ..utils import repr_without
 from .fused import UuuTensorProduct, Wigner6jTensorProductConv
 from .inter import O3CgtpInteraction, UvO2Interaction
-from .o2 import RadialRotaryComplexAttention, uv_convolution, uv_kernel
+from .o2 import uv_convolution, uv_kernel
 from .paths import to_possible_tp_irreps
 
 
@@ -295,20 +295,13 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
     even_scalar_act, odd_scalar_act, tensor_act : torch.nn.Module
         Even-scalar, odd-scalar and gate activations. An odd-scalar activation
         of ``None`` gates odd scalars instead.
-    num_head : int
-        Number of attention heads.
-    num_radial_basis : int
-        Radial feature width for attention.
-    use_radial_rotary_attention : bool
-        Enable radial attention.
 
     Examples
     --------
     >>> conv = MagneticUvO2TensorProductConv(
     ...     "2x0e", "2x0e", "2x0e", num_channel=2, mmax=0,
     ...     even_scalar_act=torch.nn.SiLU(), odd_scalar_act=torch.nn.Tanh(),
-    ...     tensor_act=torch.nn.Sigmoid(), num_head=1, num_radial_basis=4,
-    ...     use_radial_rotary_attention=False,
+    ...     tensor_act=torch.nn.Sigmoid(),
     ... )
     >>> conv.weight_numel
     6
@@ -325,9 +318,6 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
         even_scalar_act: torch.nn.Module,
         odd_scalar_act: Optional[torch.nn.Module],
         tensor_act: torch.nn.Module,
-        num_head: int,
-        num_radial_basis: int,
-        use_radial_rotary_attention: bool,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
@@ -338,7 +328,6 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
             max(self.irreps_in.lmax, self.magnetic_edge_irreps.lmax),
             mmax,
         )
-        self.num_head = num_head
         if any(entry.mul != num_channel for entry in self.irreps_in + self.irreps_out):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
         if any(entry.mul != num_channel for entry in self.magnetic_edge_irreps):
@@ -444,19 +433,7 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
             biases=True,
         )
         self.weight_numel = self.local_irreps_in.num_irreps
-        self.use_radial_rotary_attention = (
-            use_radial_rotary_attention and self.node_irreps.mmax > 0
-        )
-        self.attention = (
-            RadialRotaryComplexAttention(
-                self.node_irreps,
-                self.local_irreps_out,
-                num_head,
-                num_radial_basis,
-            )
-            if self.use_radial_rotary_attention
-            else None
-        )
+        self.attention = None
         self.eqx_tp = uv_kernel(self)
 
     def __repr__(self) -> str:
@@ -523,20 +500,6 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
         projected = self.linear_up(torch.cat(weighted, dim=-1))
         hidden = self.nonlinearity(projected)
         message = self.linear_down(hidden)
-        if self.attention is not None:
-            if edge_radial_basis is None:
-                raise ValueError(
-                    "O2 radial rotary attention requires edge_radial_basis."
-                )
-            message = self.attention(
-                message,
-                source_features,
-                target_features,
-                edge_radial_basis,
-                edge_index,
-                edge_cutoff,
-                num_nodes,
-            )
         return message
 
     def _to_global(
@@ -548,8 +511,7 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
         num_nodes: int,
     ) -> torch.Tensor:
         message = self.local_frame_out.to_global(message, wigner_inv)
-        if self.attention is None:
-            message = message * edge_cutoff
+        message = message * edge_cutoff
         message = scatter_sum(message, edge_index[1], dim=0, dim_size=num_nodes)
         return self.reshape_out.inverse(message)
 
@@ -714,7 +676,7 @@ class O2MagneticInteraction(UvO2Interaction):
 
     def _prepare_setup(self) -> None:
         if self.magnetic_edge_irreps is None:
-            raise ValueError("o2_mag requires magnetic_edge_irreps.")
+            raise ValueError("uv_o2_mag requires magnetic_edge_irreps.")
         if not 0 <= self.magnetic_edge_irreps.lmax <= self.Lmax:
             raise ValueError("magnetic edge irreps must satisfy 0 <= lmax <= Lmax.")
         self.magnetic_edge_irreps_out = o3.Irreps(
@@ -787,12 +749,7 @@ class O2MagneticInteraction(UvO2Interaction):
             tensor_act=ACTIVATION[
                 (self.tensor_act or "sigmoid").removeprefix("scaled_")
             ](),
-            num_head=self.num_head,
-            num_radial_basis=self.num_radial_basis,
-            use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
-        if rejector.attention is not None:
-            self.scatter_norm_type = None
         return rejector
 
     def _setup_additional_modules(self) -> None:

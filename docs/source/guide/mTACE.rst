@@ -15,7 +15,7 @@ For SOC models with explicit time-reversal symmetry, install time-reversal e3nn:
      "e3nn @ git+https://github.com/xvzemin/e3nn.git@time-reversal"
    python -c "from e3nn import o3; print(o3.Irrep('1eo'))"
 
-``o2_mag`` and ``w6j_mag`` detect time-reversal support automatically.
+``uv_o2_mag`` and ``w6j_mag`` detect time-reversal support automatically.
 Non-SOC models also support standard e3nn. Disable incompatible backends for
 time-reversal SOC models:
 

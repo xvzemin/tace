@@ -6,4 +6,3 @@ model:
   config:
     atomic_basis:
       type: w6j_mag
-      use_radial_rotary_attention: false

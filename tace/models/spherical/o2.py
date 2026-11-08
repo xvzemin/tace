@@ -158,6 +158,32 @@ def uv_kernel(module):
 
 
 class UvO2TensorProductConv(torch.nn.Module):
+    """Local O(2) Linear → Gate → Linear convolution.
+
+    Parameters
+    ----------
+    irreps_in, irreps_out : e3nn.o3.Irreps
+        Input and output representations.
+    num_channel : int
+        Multiplicity of each representation.
+    mmax : int
+        Maximum local order.
+    even_scalar_act, odd_scalar_act, tensor_act : torch.nn.Module
+        Even-scalar, odd-scalar and gate activations. ``None`` gates odd scalars.
+    num_head, num_radial_basis : int
+        Attention heads and radial width used by :class:`UvRraO2TensorProductConv`.
+
+    Examples
+    --------
+    >>> conv = UvO2TensorProductConv(
+    ...     "2x0e", "2x0e", num_channel=2, mmax=0,
+    ...     even_scalar_act=torch.nn.SiLU(), odd_scalar_act=torch.nn.Tanh(),
+    ...     tensor_act=torch.nn.Sigmoid(), num_head=1, num_radial_basis=4,
+    ... )
+    >>> conv.weight_numel
+    4
+    """
+
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -170,7 +196,6 @@ class UvO2TensorProductConv(torch.nn.Module):
         tensor_act: torch.nn.Module,
         num_head: int,
         num_radial_basis: int,
-        use_radial_rotary_attention: bool,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
@@ -237,20 +262,11 @@ class UvO2TensorProductConv(torch.nn.Module):
         )
         self.weight_numel = self.local_irreps_in.num_irreps
 
-        self.use_radial_rotary_attention = (
-            use_radial_rotary_attention and self.node_irreps.mmax > 0
-        )
-        self.attention = (
-            RadialRotaryComplexAttention(
-                self.node_irreps,
-                self.local_irreps_out,
-                num_head,
-                num_radial_basis,
-            )
-            if self.use_radial_rotary_attention
-            else None
-        )
+        self.attention = self._build_attention(num_head, num_radial_basis)
         self.eqx_tp = uv_kernel(self)
+
+    def _build_attention(self, num_head, num_radial_basis):
+        return None
 
     def __repr__(self) -> str:
         return repr_without(self, "reshape_in", "reshape_out")
@@ -385,4 +401,30 @@ class UvO2TensorProductConv(torch.nn.Module):
             wigner_inv,
             edge_cutoff,
             node_features.size(0),
+        )
+
+
+class UvRraO2TensorProductConv(UvO2TensorProductConv):
+    """Local O(2) UV convolution with radial rotary attention.
+
+    Parameters are those of :class:`UvO2TensorProductConv`. Attention uses
+    ``num_head`` heads and ``num_radial_basis`` radial features. Scalar-only
+    inputs retain the ordinary UV convolution.
+
+    Examples
+    --------
+    >>> conv = UvRraO2TensorProductConv(
+    ...     "2x0e+2x1o", "2x0e+2x1o", num_channel=2, mmax=1,
+    ...     even_scalar_act=torch.nn.SiLU(), odd_scalar_act=torch.nn.Tanh(),
+    ...     tensor_act=torch.nn.Sigmoid(), num_head=1, num_radial_basis=4,
+    ... )
+    >>> isinstance(conv.attention, RadialRotaryComplexAttention)
+    True
+    """
+
+    def _build_attention(self, num_head, num_radial_basis):
+        if self.node_irreps.mmax == 0:
+            return None
+        return RadialRotaryComplexAttention(
+            self.node_irreps, self.local_irreps_out, num_head, num_radial_basis
         )

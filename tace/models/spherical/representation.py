@@ -355,7 +355,6 @@ class NodeRepresentation(torch.nn.Module):
             "stochastic_depth": dropout["stochastic_depth"],
             "num_head": atomic_basis["num_head"],
             "use_asymmetric_contraction": atomic_basis["use_asymmetric_contraction"],
-            "use_radial_rotary_attention": atomic_basis["use_radial_rotary_attention"],
             "gate_m0": atomic_basis["gate_m0"],
             "scalar_act": atomic_basis["scalar_act"],
             "tensor_act": atomic_basis["tensor_act"],

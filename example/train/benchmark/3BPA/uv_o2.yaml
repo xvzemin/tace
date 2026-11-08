@@ -1,4 +1,5 @@
 # Use the 3BPA CGTP training setup with a local O(2) interaction.
+# Select model.config.atomic_basis.type=uv_rra_o2 for radial rotary attention.
 defaults:
   - o3@_global_
   - _self_
@@ -7,6 +8,6 @@ model:
   config:
     mmax: 3
     atomic_basis:
-      type: o2
+      type: uv_o2
       edge_nonlinear: gate
       scalar_act: [silu, tanh]

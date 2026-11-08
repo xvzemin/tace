@@ -16,7 +16,7 @@ from ..radial import ZBLBasis
 from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps, stress_from_virials
 from .basis_change import DirectPolarizability, DirectVirials
-from .default import check_model_config
+from .default import check_model_config, normalize_atomic_basis
 from .les import TACELES, required_les_irreps
 from .paths import to_possible_tp_irreps
 from .readout import (
@@ -67,6 +67,7 @@ class SphericalTACE(torch.nn.Module):
         mlp_type: str = "mlp_v1",
         **kwargs,
     ):
+        atomic_basis = normalize_atomic_basis(atomic_basis)
         cfg = {
             k: v
             for k, v in locals().items()
@@ -120,7 +121,7 @@ class SphericalTACE(torch.nn.Module):
         path_irreps = self.target_irreps
         path_properties = cfg["embedding_property"] + self.embedding_property
         if any(
-            name in ("o2_mag", "w6j_mag") for name in cfg["atomic_basis"]["type"]
+            name in ("uv_o2_mag", "w6j_mag") for name in cfg["atomic_basis"]["type"]
         ):
             path_properties.append("initial_noncollinear_magmoms")
         for name in path_properties:

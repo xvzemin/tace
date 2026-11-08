@@ -156,7 +156,7 @@ EQX in TACE
      - ``equivariantx.conv.UuO2TensorProductConv``
    * - ``w6j_mag``
      - ``equivariantx.conv.Wigner6jTensorProductConv``
-   * - ``o2`` / ``o2_mag``
+   * - ``uv_o2`` / ``uv_rra_o2`` / ``uv_o2_mag``
      - ``equivariantx.conv.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
      - ``equivariantx.models.tace.tece_oam_rra``
@@ -170,7 +170,7 @@ hidden layers use PyTorch and can be optimized by Inductor. Set
 ``TACE_MEMORY_FIRST=1`` to fuse the complete radial MLP instead. See
 :ref:`tace-memory-first` for the supported convolutions and memory tradeoff.
 
-For ``o2`` and ``o2_mag`` without radial rotary attention, EQX evaluates local
+For ``uv_o2`` and ``uv_o2_mag``, EQX evaluates local
 rotation, radial weighting, Linear--Gate--Linear, inverse rotation and node
 aggregation in one differentiable, tiled convolution. Channel maps use GEMM
 within each tile; full-edge hidden features are recomputed for force training

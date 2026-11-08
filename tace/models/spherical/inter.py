@@ -23,7 +23,7 @@ from .fused import (
 )
 from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
-from .o2 import UvO2TensorProductConv
+from .o2 import UvO2TensorProductConv, UvRraO2TensorProductConv
 from .residual import get_resnet_layer
 from .scatter_norm import get_scatter_norm_layer
 
@@ -412,12 +412,13 @@ class UvO2Interaction(O3CgtpInteraction):
     """Global O3 interaction evaluated through local O2 irreps.
 
     The interaction concatenates source and target node features and applies
-    ``linear -> gate -> linear`` before inverse rotation and scatter. Optional
-    radial rotary attention uses radial basis as scale and shift.
+    ``linear -> gate -> linear`` before inverse rotation and scatter.
     """
 
+    convolution_cls = UvO2TensorProductConv
+
     def _build_rejector(self) -> torch.nn.Module:
-        rejector = UvO2TensorProductConv(
+        rejector = self.convolution_cls(
             self.irreps_in,
             self.irreps_out,
             num_channel=self.num_channel,
@@ -441,7 +442,6 @@ class UvO2Interaction(O3CgtpInteraction):
             ](),
             num_head=self.num_head,
             num_radial_basis=self.num_radial_basis,
-            use_radial_rotary_attention=self.use_radial_rotary_attention,
         )
         if rejector.attention is not None:
             self.scatter_norm_type = None
@@ -528,6 +528,17 @@ class UvO2Interaction(O3CgtpInteraction):
         )
 
 
+class UvRraO2Interaction(UvO2Interaction):
+    """Local O(2) UV interaction with radial rotary attention.
+
+    Radial features modulate attention scores before neighborhood softmax.
+    Attention replaces scatter normalization when local orders above zero
+    are present.
+    """
+
+    convolution_cls = UvRraO2TensorProductConv
+
+
 class UuO2Interaction(O3CgtpInteraction):
     """Global O(3) interaction with an externally weighted O(2) UuLinear.
 
@@ -541,8 +552,6 @@ class UuO2Interaction(O3CgtpInteraction):
     """
 
     def _prepare_setup(self) -> None:
-        if self.use_radial_rotary_attention:
-            raise ValueError("uu_o2 does not support radial rotary attention.")
         if not 0 <= self.mmax <= max(self.Lmax, self.lmax):
             raise ValueError("uu_o2 requires 0 <= mmax <= max(Lmax, lmax).")
 
@@ -600,9 +609,10 @@ INTERACTION: Dict[str, type[Interaction]] = {
     "co3": O3IctdInteraction,
     "o2_cgtp": O2CgtpInteraction,
     "so2": UvSO2Interaction,
-    "o2": UvO2Interaction,
+    "uv_o2": UvO2Interaction,
+    "uv_rra_o2": UvRraO2Interaction,
     "uu_o2": UuO2Interaction,
-    "o2_mag": O2MagneticInteraction,
+    "uv_o2_mag": O2MagneticInteraction,
     "w6j_mag": O3MagneticWigner6jInteraction,
 }
 

@@ -70,7 +70,7 @@ The same automatic conversion is available from the command line:
 This writes ``TACE-OAM-7M-converted.pt`` beside the original model.
 
 This is an equivalent implementation of CGTP, not the different
-``o2`` Linear--Gate--Linear architecture. By default it uses PyTorch sparse
+``uv_o2`` Linear--Gate--Linear architecture. By default it uses PyTorch sparse
 reductions. ``TACE_USE_EQX=1`` selects the streamed CUDA implementation for
 ``o2_cgtp``, without changing its learned parameters or model-loading behavior.
 See :ref:`eqx-streaming` for training support and requirements.
@@ -134,17 +134,33 @@ See :ref:`equivariantx-api-co3` for layout and normalization conventions.
 O(2) Linear
 -----------
 
-``TACE_USE_EQX=1`` enables CUDA fusion for ``o2`` and ``o2_mag`` on float32
-and float64 inputs. Both use ``equivariantx.conv.UvO2TensorProductConv``: gather,
-frame rotation, basis changes and radial multiplication are fused, as are
-gates, attention scores and inverse rotation with scatter. Channel maps remain
-batched GEMMs. Radial weights and local GEMM operands are still materialized;
-global edge messages are not. Magnetic edge preparation, node operations and
-checkpoint parameters are unchanged. CPU and unsupported activations retain
-the native PyTorch implementation. Derivatives include force training and
-recursive higher orders.
+Set ``atomic_basis.type`` to select the UV interaction:
+
+* ``uv_o2``: Linear--Gate--Linear without attention.
+* ``uv_rra_o2``: Linear--Gate--Linear with radial rotary attention.
+* ``uv_o2_mag``: magnetic Linear--Gate--Linear without attention, supporting
+  SOC and non-SOC features.
+
+``uv_rra_o2`` uses attention normalization for local orders above zero;
+scalar-only inputs retain the UV convolution. ``uv_o2`` and ``uv_o2_mag`` use
+``atomic_basis.scatter_norm``. ``so2`` always enables radial rotary attention.
+There is no attention switch in the model configuration.
+
+``TACE_USE_EQX=1`` enables CUDA fusion on float32 and float64 inputs.
+``uv_o2`` and ``uv_o2_mag`` fuse rotation, radial weighting,
+Linear--Gate--Linear, inverse rotation and scatter in a tiled convolution.
+``uv_rra_o2`` uses a separate path with query/key projections and graph softmax.
+CPU and unsupported activations use PyTorch. Both paths support force training
+and recursive higher derivatives.
+
+Previous ``o2`` configurations are resolved to ``uv_o2`` or ``uv_rra_o2`` using
+their saved attention setting; the former default was attention enabled.
+Previous magnetic configurations with attention disabled map to ``uv_o2_mag``.
+Magnetic attention models are no longer supported.
 
 .. autoclass:: tace.models.spherical.inter.UvO2Interaction
+
+.. autoclass:: tace.models.spherical.inter.UvRraO2Interaction
 
 .. autoclass:: tace.models.spherical.mtace.O2MagneticInteraction
    :no-members:
@@ -161,10 +177,9 @@ separate weight for each path and channel. These weights are used directly,
 without an additional activation or a separate radial multiplication.
 
 The rejector contains a single UuLinear, with no Gate or channel-mixing Linear.
-Radial rotary attention is not supported: set
-``use_radial_rotary_attention: false``. The node-level linear maps, frame
+The node-level linear maps, frame
 transformations, cutoff, and scatter retain their usual behavior.
-``edge_nonlinear`` is not used by this interaction. As with ``o2``, keep
+``edge_nonlinear`` is not used by this interaction. As with ``uv_o2``, keep
 ``radial_basis.apply_cutoff: false`` so the cutoff is applied to messages.
 
 .. code-block:: yaml
@@ -172,7 +187,6 @@ transformations, cutoff, and scatter retain their usual behavior.
    atomic_basis:
      type: uu_o2
      edge_nonlinear: null
-     use_radial_rotary_attention: false
    radial_basis:
      apply_cutoff: false
 

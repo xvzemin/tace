@@ -123,7 +123,7 @@ def test_magnetic_mlp_configuration(mlp_type):
         ],
     )
     config["fidelity"]["magnetic_scale"] = 2.0
-    config["atomic_basis"].update(type="o2_mag", use_radial_rotary_attention=False)
+    config["atomic_basis"].update(type="uv_o2_mag")
     config["angular_basis"].update(magnetic_Lmax=1, use_spin_orbit_coupling=False)
     config["mlp_type"] = mlp_type
     config["radial_basis"]["hidden"] = [4]
@@ -887,9 +887,8 @@ def small_model():
             max_neighbors=None,
         )
         config["atomic_basis"].update(
-            type="o2" if attention else "cgtp",
+            type="uv_rra_o2" if attention else "cgtp",
             scatter_norm=key,
-            use_radial_rotary_attention=attention,
             num_head=1,
         )
         config["edge_update"]["type"] = "element2"

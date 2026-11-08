@@ -69,8 +69,7 @@ model:
       use_spin_orbit_coupling: true
 
     atomic_basis:
-      type: o2_mag
-      use_radial_rotary_attention: true
+      type: uv_o2_mag
 
     readout_emlp:
       use_one_body_magmoms: true

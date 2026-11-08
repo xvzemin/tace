@@ -216,7 +216,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         cutoff=4.0,
         max_neighbors=None,
     )
-    config["atomic_basis"]["type"] = "o2" if backend == "cartesian_o2" else "cgtp"
+    config["atomic_basis"]["type"] = "uv_rra_o2" if backend == "cartesian_o2" else "cgtp"
     config["radial_basis"].update(hidden=[4], apply_cutoff=False)
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
@@ -488,7 +488,7 @@ def test_model_dtype_conversion(space):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("interaction", ["cgtp", "o2"])
+@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2", "uv_rra_o2"])
 def test_lightning_model_training_precision(dtype, interaction):
     import lightning as L
     from torch.utils.data import DataLoader
@@ -1019,7 +1019,7 @@ def test_trace_to_fx_removes_full_dynamic_slice_scatter():
 @pytest.mark.parametrize(
     ("embedding_property", "atomic_basis_type"),
     [
-        pytest.param([], "o2_mag", id="o2-magnetic"),
+        pytest.param([], "uv_o2_mag", id="o2-magnetic"),
         pytest.param(
             ["initial_noncollinear_magmoms"],
             "cgtp",
