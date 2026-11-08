@@ -38,6 +38,23 @@ For optimization, molecular dynamics, and other examples, see the
     atoms.calc = calc
 
 
+.. _ase-neighbor-lists:
+
+Neighbor lists
+--------------
+
+Set ``neighborlist_backend`` on either ``TACEAseCalc`` or
+``GeneralTACEAseCalc``; the default is ``matscipy``. See
+:doc:`neighbor_list` for backends and installation.
+
+Examples
+~~~~~~~~
+
+>>> from tace.interface.ase import TACEAseCalc
+>>> calc = TACEAseCalc(
+...     "model.pt", device="cuda", neighborlist_backend="alchemiops"
+... )
+
 Models with additional inputs
 -----------------------------
 
@@ -65,6 +82,7 @@ For an mTACE model whose non-collinear magnetic moments are stored as ``spin``:
    atoms.calc = GeneralTACEAseCalc(
        model="mtace.ckpt",
        keys={"initial_noncollinear_magmoms": "spin"},
+       neighborlist_backend="matscipy",
    )
 
 Multiple additional inputs can be mapped in the same ``keys`` dictionary.  Use

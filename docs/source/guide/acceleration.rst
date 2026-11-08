@@ -6,6 +6,8 @@ Acceleration
 The standard NVIDIA GPU workflow combines EQX operators with compilation for training
 and AOTI export for inference. Set environment variables before constructing,
 loading, or exporting the model.
+The complete variable reference, defaults, and setting examples are in
+:doc:`environment_variables`.
 
 Standard workflow
 -----------------
@@ -91,8 +93,9 @@ inference.
 
 If several flags are enabled, each operator selects the highest-priority
 backend it supports: **EQX > Luna > OEQ > EQT > CUEQ**. Different operators may therefore
-use different backends. Without an enabled, supported backend, an operator
-uses its reference PyTorch implementation.
+use different backends. CGTP ACE can select EquiTorch automatically when its
+correlation exceeds two; ``TACE_USE_EQT=0`` disables this default. Other
+operators use their PyTorch reference when no supported backend is enabled.
 
 For example, replace EQX with OEQ while keeping the same workflow:
 
@@ -162,12 +165,18 @@ EQX in TACE
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx.models.tace.nonlinear_ace``
 
-During spherical ``cgtp`` training, the radial MLP's hidden layers use PyTorch,
-so Inductor can optimize their activations and force-training derivatives. The
-wide final projection and convolution stay fused in EQX. Evaluation and the
-other streamed convolutions retain the complete radial MLP in bounded edge
-tiles. Edge embedding remains a PyTorch operation. Model parameters and
-checkpoint layouts are unchanged.
+By default, EQX-backed convolutions fuse only the final radial MLP projection;
+hidden layers use PyTorch and can be optimized by Inductor. Set
+``TACE_MEMORY_FIRST=1`` to fuse the complete radial MLP instead. See
+:ref:`tace-memory-first` for the supported convolutions and memory tradeoff.
+
+For ``o2`` and ``o2_mag`` without radial rotary attention, EQX evaluates local
+rotation, radial weighting, Linear--Gate--Linear, inverse rotation and node
+aggregation in one differentiable, tiled convolution. Channel maps use GEMM
+within each tile; full-edge hidden features are recomputed for force training
+instead of being saved by autograd. This path is enabled by ``TACE_USE_EQX=1``
+and does not require ``torch.compile`` or ``TACE_MEMORY_FIRST=1``. RRA uses a
+separate path with query/key projections and graph softmax.
 
 On CUDA, eligible nonlinear node products and their derivative programs use
 CUDA Graph replay automatically, including without ``torch.compile``. Row

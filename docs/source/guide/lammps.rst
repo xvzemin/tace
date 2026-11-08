@@ -136,6 +136,10 @@ atoms. TACE instead exchanges ghost features after each interaction layer.
 Keep ``newton on``; it is required by ML-IAP. The element order in
 ``pair_coeff`` must match the LAMMPS atom types.
 
+LAMMPS supplies the neighbor list. Configure it with ``neighbor`` and
+``neigh_modify`` in the LAMMPS input; TACE's ``neighborlist_backend`` setting
+does not apply. See :doc:`neighbor_list` for the other interfaces.
+
 Single GPU
 ----------
 

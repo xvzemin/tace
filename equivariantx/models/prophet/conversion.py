@@ -17,7 +17,7 @@ class TensorProductConvolution(Convolution):
 
 
 def convert_prophet_to_eqx(
-    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=True
+    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=False
 ):
     """Replace Prophet spatial convolutions, retaining cutoff branches.
 
@@ -32,8 +32,8 @@ def convert_prophet_to_eqx(
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
     stream_radial : bool, optional
-        Stream the full radial MLP. If False, fuse only its final projection.
-        Defaults to True.
+        Fuse the complete radial MLP when True. Defaults to False: evaluate
+        hidden layers with PyTorch and fuse only the final projection.
 
     Returns
     -------
@@ -45,6 +45,16 @@ def convert_prophet_to_eqx(
     -----
     Prophet-Spin is not supported. KairosCalculator produces float32 graph
     inputs, so its model must also use float32.
+
+    Examples
+    --------
+    Convert a spatial Prophet model loaded with ``use_kernel=False``:
+
+    .. code-block:: python
+
+        from equivariantx.models.prophet import convert_prophet_to_eqx
+
+        model = convert_prophet_to_eqx(model, implementation="o3")
     """
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(

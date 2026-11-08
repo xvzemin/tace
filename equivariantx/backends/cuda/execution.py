@@ -11,6 +11,7 @@ from .edge_codegen import source as expression_source
 from .runtime import kernels, runtime
 
 TILE_BYTES = 64 << 20
+FRAME_TILE_BYTES = 256 << 20
 PRODUCT_TILE_BYTES = 512 << 20
 TILE_SIZE = 131072
 
@@ -85,6 +86,15 @@ def execution_plan(metadata):
                 children = tuple(
                     ("value", j) for role, j in enumerate(args) if role != output
                 )
+            elif op == "frame":
+                children = tuple(
+                    ("value", j) for role, j in enumerate(args)
+                    if role != nodes[i][3][1]
+                    and not (
+                        role == 0 and nodes[j][0] == "input"
+                        and nodes[j][3][1] in ("source", "target")
+                    )
+                )
             elif op == "convolution":
                 output = nodes[i][3][2]
                 children = tuple(
@@ -109,7 +119,7 @@ def execution_plan(metadata):
                 children = tuple(("value", j) for j in expressions[i][1])
         elif not result[i]:
             children = (("value", i),)
-        elif op == "convolution":
+        elif op in ("convolution", "frame"):
             children = (("value", i),)
         elif op == "matmul" and all(result[j] for j in args):
             children = tuple(("value", j) for j in args)
@@ -157,7 +167,7 @@ def uses_matrix_products(metadata):
             data[1] != "shared" if op == "input" else any(dependent[j] for j in args)
         )
     return any(
-        op in ("convolution", "normalize", "inv_norm", "mean", "rsqrt")
+        op in ("convolution", "frame", "normalize", "inv_norm", "mean", "rsqrt")
         or op == "matmul"
         and not can_inline_matmul(nodes, i, dependent)
         for i, (op, _, _, _) in enumerate(nodes)
@@ -172,7 +182,7 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
         if i not in translated:
             op, size, args, data = nodes[i]
             if (
-                op in ("input", "convolution", "product")
+                op in ("input", "convolution", "product", "frame")
                 or op == "matmul"
                 and not can_inline_matmul(nodes, i, dependent)
                 or not dependent[i]
@@ -316,6 +326,8 @@ class TiledProgram:
                 )
             elif op == "convolution":
                 x = self.convolution(i)
+            elif op == "frame":
+                x = self.frame(i)
             elif op == "product":
                 from .channel_product import channel_product
 
@@ -410,6 +422,31 @@ class TiledProgram:
                     self.release(*child)
         return cache[i]
 
+    def frame(self, i):
+        """Run the frame and its adjoints without saving full-edge rotations."""
+        from .frame import contract
+
+        _, _, args, (layout, role) = self.nodes[i]
+        rows = self.end - self.begin
+        index, count = self.source, rows
+        values = []
+        for k, j in enumerate(args):
+            op, _, _, data = self.nodes[j]
+            if k == role:
+                value = self.inputs[0].new_empty((rows, 0))
+            elif k == 0 and op == "input" and data[1] in ("source", "target"):
+                value = self.inputs[data[0]].flatten(1)
+                index = self.source if data[1] == "source" else self.target
+                count = value.shape[0]
+            else:
+                value = self.value(j).expand(rows, -1)
+                if k == 0:
+                    if self.local is None:
+                        self.local = torch.arange(rows, device=self.source.device)
+                    index = self.local
+            values.append(value)
+        return contract(*values, index, count, layout, role, rowwise=role == 0)
+
     def convolution(self, i, destination=None):
         """Dispatch a tensor-product tile without gathering node features."""
         if i in self.values:
@@ -492,6 +529,13 @@ class TiledProgram:
                     value = self.inputs[0].new_empty(shape)
                 elif destination is not None:
                     value = destination
+                    op, _, _, storage = self.nodes[j]
+                    if op == "input" and storage[1] in ("source", "target"):
+                        index = self.source if storage[1] == "source" else self.target
+                        if k == 0:
+                            source = index
+                        elif k == output_role:
+                            target = index
                 else:
                     value = self.inputs[0].new_empty((rows, size))
                     if k in (0, output_role):
@@ -506,6 +550,10 @@ class TiledProgram:
             op, width, _, data = self.nodes[j]
             if op == "input" and data[1] in ("source", "target"):
                 value = self.inputs[data[0]].flatten(1)
+                if k == 0:
+                    source = self.source if data[1] == "source" else self.target
+                elif k == output_role:
+                    target = self.source if data[1] == "source" else self.target
             else:
                 value = self.value(j)
                 if k not in (0, 2, output_role) and not self.dependent[j]:
@@ -717,7 +765,16 @@ def launch(metadata, inputs, source, target, outputs, tile_size=None):
                 default=128,
             )
         )
-        budget = PRODUCT_TILE_BYTES if node_product else TILE_BYTES
+        channel_frame = any(op == "frame" for op, _, _, _ in plan[0]) and any(
+            op == "matmul" and data[0] > 1 and not plan[2][args[1]]
+            for op, _, args, data in plan[0]
+        )
+        # Dense O(2) channel maps need larger GEMM batches than radial-only
+        # projections. Their complete forward and adjoint still share a tile.
+        budget = (
+            PRODUCT_TILE_BYTES if node_product else
+            FRAME_TILE_BYTES if channel_frame else TILE_BYTES
+        )
         tile_size = max(
             256,
             min(TILE_SIZE, budget // (max(1, width) * inputs[0].element_size())),

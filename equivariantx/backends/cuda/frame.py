@@ -10,7 +10,7 @@ from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
-def source(dtype, layout, role):
+def source(dtype, layout, role, rowwise=False):
     """Generate node, compact-matrix or edge contractions for a frame map."""
     ni, no, nw, entries = parse_metadata(layout)
     scalar = "double" if dtype == torch.float64 else "float"
@@ -41,31 +41,38 @@ def source(dtype, layout, role):
                 f" * edges[e * {no} + {local} + c];"
                 for local, row, sign in rows
             )
+            reduction = (
+                terms if rowwise else f"""
+                for (int64_t j = bounds[0]; j < bounds[1]; ++j) {{
+                    const int64_t e = order[j];
+                    {terms}
+                }}"""
+            )
             branches.append(f"""
             if (col >= {start} && col < {start + dim * mul}) {{
                 const int k = (col - {start}) / {mul}, c = (col - {start}) % {mul};
                 scalar value = 0;
-                for (int64_t j = bounds[0]; j < bounds[1]; ++j) {{
-                    const int64_t e = order[j];
-                    {terms}
-                }}
+                {reduction}
                 output[n * {ni} + col] = value;
                 return;
             }}""")
-        body = f"""
-        const int64_t n = blockIdx.x;
+        bounds = "const int64_t e = n;" if rowwise else """
         __shared__ int64_t bounds[2];
-        if (threadIdx.x < 2) {{
+        if (threadIdx.x < 2) {
             int64_t lo = 0, hi = num_edges;
             const int64_t node = n + threadIdx.x;
-            while (lo < hi) {{
+            while (lo < hi) {
                 const int64_t mid = lo + (hi - lo) / 2;
                 if (index[order[mid]] < node) lo = mid + 1;
                 else hi = mid;
-            }}
+            }
             bounds[threadIdx.x] = lo;
-        }}
+        }
         __syncthreads();
+        """
+        body = f"""
+        const int64_t n = blockIdx.x;
+        {bounds}
         const int col = blockIdx.y * blockDim.x + threadIdx.x;
         if (col >= {ni}) return;
         {"".join(branches)}
@@ -116,6 +123,8 @@ def contract(
     num_nodes: int,
     layout: str,
     role: int,
+    *,
+    rowwise: bool = False,
 ) -> torch.Tensor:
     """Contract the two factors other than ``role`` in the trilinear pairing.
 
@@ -133,11 +142,11 @@ def contract(
     if not index.numel():
         return output.zero_()
     order = index
-    if role == NODE:
+    if role == NODE and not rowwise:
         from .reduction import prepare_graph
 
         order = prepare_graph(index, index, 0)
-    code = source(nodes.dtype, layout, role)
+    code = source(nodes.dtype, layout, role, rowwise)
     kernel = kernels([code], nodes.device)[code]
     width = (ni, nw, no)[role]
     columns = 4 if role == MATRIX else 128

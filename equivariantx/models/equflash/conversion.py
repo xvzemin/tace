@@ -122,7 +122,7 @@ def convert_equflash_to_eqx(
     implementation="o3",
     inplace=False,
     backend="cuda",
-    stream_radial=True,
+    stream_radial=False,
 ):
     """Replace EquFlash FullConv interactions with EQX convolutions.
 
@@ -137,8 +137,8 @@ def convert_equflash_to_eqx(
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
     stream_radial : bool, optional
-        Stream the full radial MLP. If False, fuse only its final projection.
-        Defaults to True.
+        Fuse the complete radial MLP when True. Defaults to False: evaluate
+        hidden layers with PyTorch and fuse only the final projection.
 
     Returns
     -------
@@ -151,6 +151,16 @@ def convert_equflash_to_eqx(
     Supports uniform-channel FullConv interactions in EquFlashV2. EfficientConv
     and distributed ghost-atom exchange are not supported. With UCalculator,
     use ``inplace=True`` to preserve its EMA parameter references.
+
+    Examples
+    --------
+    Convert a loaded EquFlashV2 model with FullConv interactions:
+
+    .. code-block:: python
+
+        from equivariantx.models.equflash import convert_equflash_to_eqx
+
+        model = convert_equflash_to_eqx(model, implementation="o3")
     """
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(

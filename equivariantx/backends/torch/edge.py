@@ -76,6 +76,34 @@ def evaluate_torch(metadata, inputs, source, target, num_nodes):
                 operands[0].reshape(edges, rows, width),
                 operands[1].reshape(edges, width, columns),
             ).flatten(1)
+        elif op == "frame":
+            layout, role = data
+            ni, no, nw, entries = parse_metadata(layout)
+            value = inputs[0].new_zeros((edges, (ni, nw, no)[role]))
+            for start, mul, dim, offset, rows in entries:
+                for local, row, sign in rows:
+                    matrix_slice = slice(offset + row * dim, offset + (row + 1) * dim)
+                    node_slice = slice(start, start + dim * mul)
+                    edge_slice = slice(local, local + mul)
+                    if role == 2:
+                        term = (
+                            operands[1][:, matrix_slice, None]
+                            * operands[0][:, node_slice].reshape(edges, dim, mul)
+                        ).sum(1)
+                        section = edge_slice
+                    elif role == 0:
+                        term = (
+                            operands[1][:, matrix_slice, None]
+                            * operands[2][:, None, edge_slice]
+                        ).flatten(1)
+                        section = node_slice
+                    else:
+                        term = (
+                            operands[0][:, node_slice].reshape(edges, dim, mul)
+                            * operands[2][:, None, edge_slice]
+                        ).sum(-1)
+                        section = matrix_slice
+                    value[:, section] = value[:, section] + sign * term
         elif op == "product":
             (width, dims, paths), role, required = data
             parts = [[] for _ in range(dims[role])]

@@ -31,10 +31,11 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
 
     Examples
     --------
-    >>> from equivariantx import conv, o2
-    >>> frame = o2.LocalFrame("2x0e + 2x1o")
-    >>> linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, num_channel=2)
-    >>> layer = conv.UuO2TensorProductConv(frame, linear, frame, backend="torch")
+    >>> import torch
+    >>> import equivariantx as eqx
+    >>> frame = eqx.o2.LocalFrame("2x0e + 2x1o")
+    >>> linear = eqx.o2.UuLinear(frame.irreps_out, frame.irreps_out, num_channel=2)
+    >>> layer = eqx.conv.UuO2TensorProductConv(frame, linear, frame, backend="torch")
     >>> features = torch.randn(3, frame.input_dim)
     >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
     >>> vectors = torch.randn(4, 3)

@@ -26,9 +26,8 @@ from ..linear import (
     e3nnLinear,
     e3nnMoEElementLinear,
     has_lora,
-    radial_features,
 )
-from ..mlp import ACTIVATION, get_scaled_activation
+from ..mlp import ACTIVATION, convolution_radial, get_scaled_activation
 from .base import Product
 from .dropout import GraphDropPath
 from .fused import UuuTensorProduct
@@ -658,8 +657,8 @@ class UvSO2Interaction(O3CgtpInteraction):
         ):
             from equivariantx.models.tace.tece_oam_rra.interaction import stream
 
-            radial = radial_features(edge_feats)
-            last = self.edge_info.mlp[-1]
+            radial, layers = convolution_radial(self.edge_info, edge_feats)
+            last = layers[-1]
             return stream(
                 self.rejector,
                 node_feats,
@@ -671,7 +670,9 @@ class UvSO2Interaction(O3CgtpInteraction):
                 edge_wigner,
                 edge_wigner_inv,
                 edge_radial_basis,
-                radial_network=self.edge_info.mlp[:-1],
+                radial_network=(
+                    layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
+                ),
             )
         return self.rejector(
             node_feats,

@@ -56,6 +56,8 @@ class StatisticsDataLoader(DataLoader):
                 readahead=source.readahead,
             )
             dataset.metadata = source.metadata
+            dataset.indices = source.indices
+            dataset.sample_fingerprint = source.sample_fingerprint
         super().__init__(dataset, **kwargs)
         if not self.follow_batch and not self.exclude_keys:
             self.collate_fn = collate_statistics

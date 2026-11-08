@@ -21,7 +21,7 @@ class TensorProductScatter(Convolution):
 
 
 def convert_nequip_to_eqx(
-    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=True
+    model, *, implementation="o3", inplace=False, backend="cuda", stream_radial=False
 ):
     """Replace NequIP interactions with streamed radial convolutions.
 
@@ -36,8 +36,8 @@ def convert_nequip_to_eqx(
     backend : {"cuda", "torch"}, optional
         Convolution backend. Defaults to CUDA, with PyTorch on CPU.
     stream_radial : bool, optional
-        Stream the full radial MLP. If False, fuse only its final projection.
-        Defaults to True.
+        Fuse the complete radial MLP when True. Defaults to False: evaluate
+        hidden layers with PyTorch and fuse only the final projection.
 
     Returns
     -------
@@ -45,6 +45,16 @@ def convert_nequip_to_eqx(
         Model with the same graph interface and differentiable parameters.
         Convert before constructing the optimizer. Load original checkpoints
         before conversion; converted state dictionaries use adapted names.
+
+    Examples
+    --------
+    Convert a loaded NequIP model:
+
+    .. code-block:: python
+
+        from equivariantx.models.nequip import convert_nequip_to_eqx
+
+        model = convert_nequip_to_eqx(model, implementation="o3")
     """
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(

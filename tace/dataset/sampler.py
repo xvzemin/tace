@@ -124,6 +124,7 @@ class EpochSampler(DistributedSampler):
             drop_last=drop_last,
         )
         self.dataset_size = size
+        self.dataset_fingerprint = getattr(dataset, "sample_fingerprint", None)
         self.epoch_size = count
         self.batch_size = batch_size
         multiple = num_replicas * (batch_size if drop_last else 1)
@@ -196,6 +197,7 @@ class EpochSampler(DistributedSampler):
         """Return rank-independent state suitable for a rank-zero checkpoint."""
         return {
             "dataset_size": self.dataset_size,
+            "dataset_fingerprint": self.dataset_fingerprint,
             "epoch_size": self.epoch_size,
             "seed": self.seed,
             "shuffle": self.shuffle,
@@ -210,6 +212,10 @@ class EpochSampler(DistributedSampler):
     def load_state_dict(self, state):
         """Restore progress, rejecting changed dataset or sampling parameters."""
         current = self.state_dict()
+        if state.get("dataset_fingerprint") != self.dataset_fingerprint:
+            raise ValueError(
+                "Cannot restore EpochSampler with changed dataset selection"
+            )
         for name in (
             "dataset_size",
             "epoch_size",

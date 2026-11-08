@@ -4,6 +4,7 @@
 ################################################################################
 
 import bisect
+import hashlib
 import json
 import math
 import operator
@@ -27,6 +28,7 @@ from .cache import (
     ARRAY_CODEC,
     GRAPH_SCHEMA,
     RECORD_SCHEMA,
+    digest,
     read_cache_metadata,
     validate_stage,
 )
@@ -344,6 +346,8 @@ class GraphDatasetLMDB(Dataset):
         self._opened = OrderedDict()
         self._pid = os.getpid()
         self.metadata = None
+        self.indices = None
+        self.sample_fingerprint = None
         self.data_list = []
         self.lengths = []
         self.length = 0
@@ -389,7 +393,7 @@ class GraphDatasetLMDB(Dataset):
         return dataset
 
     def __len__(self):
-        return self.length
+        return self.length if self.indices is None else len(self.indices)
 
     def _ensure_process(self):
         if self._pid != os.getpid():
@@ -488,6 +492,8 @@ class GraphDatasetLMDB(Dataset):
     def __getitems__(self, indices):
         self._ensure_process()
         indices = [self._index(index) for index in indices]
+        if self.indices is not None:
+            indices = [int(self.indices[index]) for index in indices]
         if self.in_memory:
             return [self._project(self.data_list[index]) for index in indices]
         output = [None] * len(indices)
@@ -522,7 +528,8 @@ class GraphDatasetLMDB(Dataset):
         return output
 
     def project(self, fields):
-        if self.fields is not None:
+        """Select decoded fields, or use ``None`` to reopen all stored fields."""
+        if self.fields is not None and fields is not None:
             fields = set(fields).intersection(self.fields)
         dataset = type(self)(
             self.lmdb_paths,
@@ -536,7 +543,42 @@ class GraphDatasetLMDB(Dataset):
         )
         dataset.data_list, dataset.length = self.data_list, self.length
         dataset.metadata = self.metadata
+        dataset.indices = self.indices
+        dataset.sample_fingerprint = self.sample_fingerprint
         return dataset
+
+    def select(self, indices):
+        """Return an immutable view of increasing, unique sample indices.
+
+        Selection is applied before sampling and preserves batched LMDB reads,
+        field projection, and the original shard files.
+        """
+        indices = np.asarray(indices)
+        if indices.ndim != 1 or (indices.size and indices.dtype.kind not in "iu"):
+            raise ValueError(
+                "Selection indices must be a one-dimensional integer array"
+            )
+        if indices.size and (
+            indices[0] < 0
+            or indices[-1] >= len(self)
+            or np.any(indices[1:] <= indices[:-1])
+        ):
+            raise ValueError(
+                "Selection indices must be increasing, unique and in range"
+            )
+        indices = indices.astype(np.int64, copy=True)
+        selected = self.project(self.fields)
+        selected.indices = indices if self.indices is None else self.indices[indices]
+        selected.indices.flags.writeable = False
+        fingerprint = hashlib.sha256()
+        fingerprint.update(
+            digest(
+                [(path.name, n) for path, n in zip(self.lmdb_paths, self.lengths)]
+            ).encode()
+        )
+        fingerprint.update(selected.indices)
+        selected.sample_fingerprint = fingerprint.hexdigest()
+        return selected
 
     def get_sizes(self, indices=None):
         """Read atom/edge counts without loading or decoding graph records."""
@@ -548,12 +590,20 @@ class GraphDatasetLMDB(Dataset):
                     counts = np.memmap(
                         path / "counts.bin", mode="r", dtype="<i8", shape=(length, 2)
                     )
-                    output[start : start + length] = counts
+                    if self.indices is None:
+                        output[start : start + length] = counts
+                    else:
+                        first, last = np.searchsorted(
+                            self.indices, [start, start + length]
+                        )
+                        output[first:last] = counts[self.indices[first:last] - start]
                     del counts
                 start += length
             return output
         indices = range(len(self)) if indices is None else indices
         indices = [self._index(index) for index in indices]
+        if self.indices is not None:
+            indices = [int(self.indices[index]) for index in indices]
         if self.in_memory:
             return np.asarray(
                 [

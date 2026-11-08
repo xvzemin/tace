@@ -5,6 +5,9 @@ This tutorial demonstrates how to use a TACE model as a calculator within OpenMM
 We integrate OpenMM via the ASE interface provided by openmm-ml. Example usage is shown below, 
 and for additional details, please refer to the OpenMM documentation.
 
+Select the neighbor-list backend on the ASE calculator with
+``neighborlist_backend``; see :ref:`ase-neighbor-lists`.
+
 OpenMM-ML github: `github <https://github.com/openmm/openmm-ml>`_
 OpenMM-ML documentation: `docs <https://openmm.github.io/openmm-ml/dev/index.html>`_
 
@@ -28,6 +31,7 @@ OpenMM-ML documentation: `docs <https://openmm.github.io/openmm-ml/dev/index.htm
         model=model,
         dtype='float32',
         device='cuda',
+        neighborlist_backend='matscipy',
     )
 
     test_data_dir = '../data/'

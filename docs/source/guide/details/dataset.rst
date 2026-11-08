@@ -14,7 +14,9 @@ Reading and training
                 |
       batched neighbor construction
                 |
-       immutable graph shards ------> projected statistics
+       immutable graph shards ------> full training-set statistics
+                |              \----> complete validation / test loaders
+       optional train filter
                 |
       batched loader + augmentation
                 |
@@ -172,6 +174,67 @@ available memory.
 
 Incomplete builds are preserved and not reused as complete datasets.
 Augmentation creates sample-local tensors without modifying cached graphs.
+
+Filtering cached structures
+---------------------------
+
+``dataset.filter`` selects training structures from completed graphs without
+rewriting LMDB files or rebuilding neighbors. It is disabled by default.
+When enabled, the default edge limit is 24,000 per structure; all other limits default to
+``null``. Set any limit to ``null`` to disable it.
+
+.. code-block:: yaml
+
+   dataset:
+     storage_mode: lmdb
+     filter:
+       enabled: true
+       max_edges: 24000
+       max_atoms: null
+       max_forces: null
+       max_energy_per_atom: null
+       max_stress: null
+
+A structure is retained only if it satisfies every enabled upper bound;
+equality is retained. ``max_forces`` uses the largest Euclidean norm of any
+atom's stored ``forces`` vector (eV/Angstrom). ``max_energy_per_atom`` compares
+the signed stored total ``energy`` divided by the atom count (eV/atom), without
+subtracting reference atomic energies. ``max_stress`` uses the Frobenius norm
+of the full stored 3-by-3 ``stress`` tensor (eV/Angstrom^3), including both
+off-diagonal entries. Atom and edge bounds count the full cached structure;
+edges are counted exactly as stored in ``edge_index``, including both directed
+edges when present. No atoms or edges are truncated inside a retained graph.
+
+Filtering applies only to the training loader, before training augmentation
+and epoch sampling. Validation and test loaders traverse their complete splits.
+Enabled physical bounds require the corresponding cached label
+and weight fields, even if the current model does not train on that label.
+Structures with nonfinite or zero-weight labels fail that physical bound;
+zero-weight placeholders are not treated as measured zeros. Missing fields
+or a training selection with no remaining structures produce a clear error.
+
+The first training loader scans the count index for atom/edge bounds without
+decoding graphs.
+Physical bounds decode only the needed labels for structures that pass the
+count bounds. A single training-filter progress bar and retained/removed counts
+are shown. The resulting fixed index is held in memory; training keeps the
+existing batched LMDB reader and does not repeat filtering each epoch.
+When all structures pass, the original dataset is reused without a selection
+index allocation.
+The same selection also works for ``storage_mode: memory``;
+``on_the_fly`` requires preparing a completed graph cache first.
+
+``EpochSampler`` uses the retained dataset: a fractional ``epoch_size`` is
+relative to its size, and an integer must not exceed it. Distributed ranks
+sample the same filtered order, and full-checkpoint recovery checks the
+selection identity, including changes that leave the sample count unchanged.
+Changing the selected structures requires starting a new sampling stream.
+Statistics and fitted atomic reference energies always use the complete training
+split, before filtering or epoch sampling. Validation and test labels do not
+enter these statistics. Changing or disabling filters does not invalidate the
+statistics cache. The original shards, labels, and statistics options still
+determine its identity. Finetuning and checkpoint resume retain their existing
+model statistics.
 
 Training epoch size
 -------------------

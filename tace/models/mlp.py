@@ -10,7 +10,46 @@ from typing import Callable, List, Union
 import torch
 import torch.nn.functional as F
 
-from .linear import IndexedFeatures, mlpLinear
+from tace.utils.env import memory_first
+
+from .linear import IndexedFeatures, mlpLinear, radial_features
+
+
+def convolution_radial(network, features):
+    """Prepare radial features and the layers deferred to an EQX convolution.
+
+    Parameters
+    ----------
+    network : MLPV1 or MLPV2
+        Radial network ending in an affine projection.
+    features : torch.Tensor or IndexedFeatures
+        Dense edge features or indexed edge, target and source partitions.
+
+    Returns
+    -------
+    radial : torch.Tensor or tuple
+        Hidden features when ``TACE_MEMORY_FIRST`` is unset or ``0``;
+        original input partitions when it is ``1``.
+    layers : torch.nn.Sequential
+        Final affine layer, or the complete radial MLP when streaming it.
+
+    Examples
+    --------
+    >>> network = MLPV2([4, 8, 16])
+    >>> radial, layers = convolution_radial(network, torch.randn(3, 4))
+    >>> layers(radial).shape
+    torch.Size([3, 16])
+    """
+    if memory_first():
+        return radial_features(features), network.mlp
+    if len(network.mlp) > 1:
+        features = network.mlp[:-1](features)
+    elif isinstance(features, tuple):
+        features = torch.cat(
+            [value if index is None else value[index] for value, index in features],
+            dim=-1,
+        )
+    return features, network.mlp[-1:]
 
 
 def get_activation_scale_factor(

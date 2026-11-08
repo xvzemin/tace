@@ -19,6 +19,9 @@ Once you have prepared the input files, you can start training using the command
 
     tace-train -cn tace.yaml
 
+See :doc:`environment_variables` for backend, compilation, radial fusion, and
+precision switches, including how to set them through ``misc.env``.
+
 For inference, and usage of other scripts, please refer to the scripts documentation: :doc:`Scripts <scripts>`
 
 Input Files
@@ -149,7 +152,8 @@ Now, we support:
 
 For large datasets, set ``dataset.storage_mode`` to ``lmdb``. ``tace-train``
 constructs and caches the graphs automatically, and later runs reuse compatible
-graphs from the configured shard directories.
+graphs from the configured shard directories. See :doc:`neighbor_list` for
+backend selection and multi-GPU batch construction.
 
 Precision
 ~~~~~~~~~

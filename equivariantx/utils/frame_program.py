@@ -33,6 +33,7 @@ def rotate(
     global_dim,
     inverse=False,
     packed=False,
+    native=False,
 ):
     """Encode degree-wise rotation, regrouping and signed basis permutations."""
     mmax, basis_change, irreps, entries = description
@@ -44,6 +45,11 @@ def rotate(
             local_dim,
             lmax=max(x[2] for x in entries) if entries else 0,
             mmax=mmax,
+        )
+    if native:
+        return indexed_rotation(
+            program, description, features, wigner, local_dim, global_dim,
+            lmax, wigner_mmax, inverse, packed,
         )
     slices, offset = [], 0
     for dim, mul in irreps:
@@ -126,3 +132,64 @@ def rotate(
             for _, mul, value in parts_ir
         )
     return program.concatenate(outputs)
+
+
+def indexed_rotation(
+    program, description, features, wigner, local_dim, global_dim,
+    lmax, wigner_mmax, inverse, packed,
+):
+    """Encode a frame map as one multilinear contraction per edge tile."""
+    mmax, basis_change, irreps, entries = description
+    local_offsets, local_width = [], 0
+    for dim, mul in irreps:
+        local_offsets.append(local_width)
+        local_width += dim * mul
+    global_width = sum(mul * (2 * ell + 1) for _, mul, ell, *_ in entries)
+    matrices, layout, offset = [], [], 0
+    for ell in sorted({entry[2] for entry in entries}):
+        dim, retained = 2 * ell + 1, min(ell, mmax)
+        rows = (
+            (ell, *(ell + s * m for m in range(1, retained + 1) for s in (1, -1)))
+            if packed else wigner_indices(ell, retained, lmax)
+        )
+        packed_offset = ell * (4 * ell**2 - 1) // 3
+        if packed:
+            indices = (packed_offset + a * dim + b for a in rows for b in range(dim))
+        elif inverse:
+            indices = (
+                b * local_dim + a for a in rows for b in range(ell**2, (ell + 1)**2)
+            )
+        else:
+            indices = (
+                a * global_dim + b for a in rows for b in range(ell**2, (ell + 1)**2)
+            )
+        matrix = program.gather(wigner, indices)
+        if inverse:
+            matrix = program.scale(
+                matrix, math.sqrt((2 * min(ell, wigner_mmax) + 1) / len(rows))
+            )
+        matrices.append(matrix)
+        for start, mul, degree, odd, local_indices, starts in entries:
+            if degree != ell or not mul:
+                continue
+            local_rows = []
+            for m, (index, begin) in enumerate(zip(local_indices, starts)):
+                for real in range(1 if m == 0 else 2):
+                    swapped = basis_change and odd and m > 0
+                    row = 0 if m == 0 else 2 * m - 1 + (1 - real if swapped else real)
+                    local_rows.append((
+                        local_offsets[index] + real * irreps[index][1] + begin,
+                        row, -1 if swapped and real == 0 else 1,
+                    ))
+            layout.append((start, mul, dim, offset, tuple(local_rows)))
+        offset += len(rows) * dim
+    role = 0 if inverse else 2
+    operands = (
+        program.constant(global_width, 0) if inverse else features,
+        program.concatenate(matrices),
+        features if inverse else program.constant(local_width, 0),
+    )
+    return program.add(
+        "frame", global_width if inverse else local_width, operands,
+        (repr((global_width, local_width, offset, tuple(layout))), role),
+    )

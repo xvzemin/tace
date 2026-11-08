@@ -55,12 +55,13 @@ class CartesianTensorProductConv(O3TensorProductConv):
 
     Examples
     --------
-    >>> from equivariantx import co3, conv
-    >>> tp = co3.TensorProduct(
+    >>> import torch
+    >>> import equivariantx as eqx
+    >>> tp = eqx.co3.TensorProduct(
     ...     "2x0e", "1o", "2x1o", [(0, 0, 0, "uvu", True)],
     ...     internal_weights=False, shared_weights=False,
     ... )
-    >>> layer = conv.CartesianTensorProductConv(tp, backend="torch")
+    >>> layer = eqx.conv.CartesianTensorProductConv(tp, backend="torch")
     >>> features = tp.irreps_in1.randn(3, -1)
     >>> edge_attrs = tp.irreps_in2.randn(4, -1)
     >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])

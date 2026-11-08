@@ -169,3 +169,8 @@ def get_tace_use_dens():
 
 def get_tace_use_matrix_weight():
     return os.environ.get("TACE_USE_MATRIX_WEIGHT", "0")
+
+
+def memory_first() -> bool:
+    """Recompute the complete radial MLP in EQX when TACE_MEMORY_FIRST=1."""
+    return os.environ.get("TACE_MEMORY_FIRST", "0") == "1"

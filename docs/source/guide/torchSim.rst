@@ -54,6 +54,44 @@ the default for all systems. To select a different fidelity for each system,
 set ``state.system_extras["fidelity_idx"]`` to an integer tensor of shape
 ``(n_systems,)``.
 
+.. _torchsim-neighbor-lists:
+
+Neighbor lists
+--------------
+
+Pass a callable as ``neighbor_list_fn``. The default, ``torchsim_nl``,
+selects an installed backend automatically. TorchSim 0.6.2 provides these
+functions in ``torch_sim.neighbors``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 55 45
+
+   * - Callable
+     - Neighbor search
+   * - ``torchsim_nl``
+     - Automatic: AlchemiOps, then Vesin, then PyTorch
+   * - ``alchemiops_nl_n2``, ``alchemiops_nl_cell_list``
+     - Batched AlchemiOps all-pairs or cell-list search
+   * - ``vesin_nl``, ``vesin_nl_ts``
+     - Vesin or its TorchScript implementation
+   * - ``torch_nl_n2``, ``torch_nl_linked_cell``
+     - PyTorch all-pairs or linked-cell search
+
+Examples
+~~~~~~~~
+
+>>> from torch_sim.neighbors import alchemiops_nl_cell_list
+>>> from tace.interface.torchsim import TACETorchSimCalc
+>>> calc = TACETorchSimCalc(
+...     "model.pt", device="cuda", neighbor_list_fn=alchemiops_nl_cell_list
+... )
+
+Custom callables must accept ``(positions, cell, pbc, cutoff, system_idx)``
+and return ``(edge_index, system_mapping, unit_shifts)``. See the
+`TorchSim neighbor interface <https://github.com/TorchSim/torch-sim/blob/v0.6.2/torch_sim/neighbors/__init__.py>`_
+and :doc:`neighbor_list`.
+
 .. autoclass:: tace.interface.torchsim.torchsim.TACETorchSimCalc
    :no-members:
    :show-inheritance:

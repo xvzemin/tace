@@ -131,6 +131,13 @@ dataset:
   no_valid_set: false # The prerequisite for enabling this is that you are using a learning rate scheduler that does not depend on the validation set.
   neighborlist_backend: matscipy # [ase, matscipy, vesin, alchemiops] recommend matscipy
   storage_mode: memory # memory for small datasets; lmdb for large repeated training; on_the_fly is opt-in
+  filter: # training samples only; statistics, validation and test stay complete
+    enabled: false
+    max_edges: null
+    max_atoms: null
+    max_forces: null 
+    max_energy_per_atom: null 
+    max_stress: null 
   shard_dirs: # reusable graph and record caches; source files remain unchanged
     - graphCache
   cache_size: 0 # decoded samples per loader worker; OS page cache remains active

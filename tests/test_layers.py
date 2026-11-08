@@ -996,15 +996,21 @@ def test_unknown_scatter_norm(small_model):
 @pytest.mark.parametrize("hidden", [[], [7]])
 @pytest.mark.parametrize("num_edges", [0, 8])
 @pytest.mark.parametrize("use_eqx", [False, True])
+@pytest.mark.parametrize("memory_first", [None, "0", "1"])
 def test_element2_projects_nodes_before_gather(
-    bias, lora, hidden, num_edges, use_eqx, monkeypatch
+    bias, lora, hidden, num_edges, use_eqx, memory_first, monkeypatch
 ):
+    from equivariantx.ops.radial import materialize
     from tace.models.linear import enable_lora
-    from tace.models.mlp import MLP
+    from tace.models.mlp import MLP, convolution_radial
 
     if use_eqx and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     monkeypatch.setenv("TACE_USE_EQX", str(int(use_eqx)))
+    if memory_first is None:
+        monkeypatch.delenv("TACE_MEMORY_FIRST", raising=False)
+    else:
+        monkeypatch.setenv("TACE_MEMORY_FIRST", memory_first)
     device = DEVICE if use_eqx else torch.device("cpu")
     module = Element2EdgeUpdate(
         layer=0,
@@ -1034,7 +1040,9 @@ def test_element2_projects_nodes_before_gather(
     hook = module.source_embedding.register_forward_pre_hook(
         lambda module, inputs: sizes.append(inputs[0].size(0))
     )
-    actual = mlp(module(None, attrs, feats, edges, None))
+    radial, layers = convolution_radial(mlp, module(None, attrs, feats, edges, None))
+    assert len(layers) == (len(mlp.mlp) if memory_first == "1" else 1)
+    actual = layers(materialize(radial, edges))
     hook.remove()
     assert sizes == [attrs.size(0)]
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)

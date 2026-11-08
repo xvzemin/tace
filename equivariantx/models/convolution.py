@@ -66,10 +66,20 @@ class RadialFeatures(torch.nn.Module):
     hs : sequence of int
         Layer widths retained for the consuming model.
     stream_radial : bool
-        Evaluate the layers inside convolution tiles. Defaults to True.
+        Evaluate hidden layers inside convolution tiles. Defaults to False.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from collections import OrderedDict
+    >>> from equivariantx.models.convolution import RadialFeatures
+    >>> layers = OrderedDict(linear=torch.nn.Linear(3, 8), act=torch.nn.SiLU())
+    >>> radial = RadialFeatures(layers)
+    >>> radial(torch.randn(4, 3)).shape
+    torch.Size([4, 8])
     """
 
-    def __init__(self, layers, bias=False, hs=(), stream_radial=True):
+    def __init__(self, layers, bias=False, hs=(), stream_radial=False):
         super().__init__()
         self.mlp = torch.nn.Sequential(layers)
         self.bias = bias

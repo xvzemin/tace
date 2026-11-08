@@ -873,15 +873,21 @@ def test_uu_o2_compile_and_empty_graph(double_precision):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("memory_first", [None, "1"])
 @pytest.mark.parametrize(
-    "interaction,bias,convert",
+    "interaction,bias,convert,attention",
     [
-        ("cgtp", False, False), ("cgtp", True, False),
-        ("cgtp", False, True), ("cgtp", True, True),
-        ("o2_cgtp", True, True), (["cgtp", "o2"], False, True),
+        ("cgtp", False, False, True), ("cgtp", True, False, True),
+        ("cgtp", False, True, True), ("cgtp", True, True, True),
+        ("o2_cgtp", True, True, True), (["cgtp", "o2"], False, True, True),
+        ("o2", True, False, True), ("o2", True, False, False),
+        ("uu_o2", True, False, False),
+        ("co3", True, False, True), ("so2", True, False, True),
     ],
 )
-def test_streaming_force_training(monkeypatch, device, interaction, bias, convert):
+def test_streaming_force_training(
+    monkeypatch, device, interaction, bias, convert, attention, memory_first
+):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from tace.lightning import convert_cgtp, load_tace
@@ -891,6 +897,10 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias, conver
 
     for name in ("TACE_USE_EQX", "TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
         monkeypatch.setenv(name, "0")
+    if memory_first is None:
+        monkeypatch.delenv("TACE_MEMORY_FIRST", raising=False)
+    else:
+        monkeypatch.setenv("TACE_MEMORY_FIRST", memory_first)
     previous_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
@@ -903,18 +913,21 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias, conver
             Lmax=2,
             lmax=2,
             mmax=2,
-            parity=True,
+            parity=interaction != "so2",
             statistics=[
                 dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
             ],
             target_property=["energy", "forces", "stress", "virials"],
         )
         config["node_embedding"]["type"] = "linear"
-        config["atomic_basis"]["type"] = interaction
+        config["atomic_basis"]["type"] = (
+            ["cgtp", "so2"] if interaction == "so2" else interaction
+        )
+        config["atomic_basis"]["use_radial_rotary_attention"] = attention
         config["readout_emlp"]["use_one_body_magmoms"] = False
         config["radial_basis"]["hidden"] = [128 if bias else 4]
         config["radial_basis"]["bias"] = bias
-        if isinstance(interaction, list):
+        if isinstance(interaction, list) or interaction in ("o2", "uu_o2", "so2"):
             config["radial_basis"]["apply_cutoff"] = False
         config["readout_emlp"]["hidden"] = [2]
         config["scale_shift"]["enable"] = False
@@ -926,17 +939,20 @@ def test_streaming_force_training(monkeypatch, device, interaction, bias, conver
             model = TensorModel(SphericalTACE(**deepcopy(config))).train().to(device)
             model.load_state_dict(reference.state_dict())
         representation = model.readout_fn.representation
-        mixed = isinstance(interaction, list)
-        assert representation.use_packed_wigner == mixed
-        assert representation.use_local_frame == mixed
-        assert representation.use_o3_angular_basis == (mixed or not convert)
+        local = isinstance(interaction, list) or interaction in ("o2", "uu_o2", "so2")
+        assert representation.use_packed_wigner == local
+        assert representation.use_local_frame == local
+        assert representation.use_o3_angular_basis == (
+            local or (not convert and interaction != "co3")
+        )
 
         def no_edge_message(*args, **kwargs):
             raise AssertionError("The streamed convolution must not call an edge TP")
 
         for layer in representation.interactions:
             if getattr(layer, "use_eqx", False) and hasattr(layer.rejector, "tp"):
-                monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
+                if device == "cuda" or interaction != "co3":
+                    monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
                 monkeypatch.setattr(layer.edge_info, "forward", no_edge_message)
 
         data = dict(

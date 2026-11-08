@@ -112,6 +112,20 @@ class TransverseFrame(torch.nn.Module):
     def __repr__(self):
         return f"{type(self).__name__}({self.irreps_in} -> {self.irreps_out}, backend={self.backend!r})"
 
+    def program(self, program, features, direction, *, inverse=False):
+        """Encode restriction or lifting within a complete convolution tile."""
+        if inverse:
+            features = program.gather(features, self.inverse_permutation.tolist())
+        width = self.input_dim if inverse else self.output_dim
+        empty = program.constant(0, 0)
+        output = program.add(
+            "convolution", width,
+            (features, empty, empty, program.constant(1, 1),
+             program.constant(width, 0), direction),
+            ("o3", self.metadata[inverse], 4, False, (0, 0), 0),
+        )
+        return output if inverse else program.gather(output, self.permutation.tolist())
+
     def forward(self, features, direction, source, target, num_nodes, *, inverse=False):
         """Restrict or lift features using unit directions and indexed aggregation."""
         if inverse:

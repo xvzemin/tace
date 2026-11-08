@@ -32,6 +32,7 @@ from .cache import (
 )
 from .dataloader import build_graph_dataloader, build_statistics_dataloader
 from .element import build_element_lookup
+from .filter import filter_graphs, filter_options
 from .graph import batch_geometry, from_records
 from .neighbour_list import get_neighborhood_batch
 from .quantity import KeySpecification, get_need_property
@@ -590,10 +591,12 @@ class GraphDataModule(LightningDataModule):
             else None
         )
         self.train_dataset = self.val_dataset = self.test_datasets = None
+        self._filtered_train_dataset = None
         self._epoch_dataloader = None
         self._epoch_dataloader_state = None
         data = cfg["dataset"]
         self.storage_mode = data.get("storage_mode", "memory")
+        self.filter_options = filter_options(data.get("filter"))
         self.no_valid_set = data.get("no_valid_set", False)
         self.augmentation = validate_augmentations(data.get("augmentation", []))
         self.cache_size = data.get("cache_size", 0)
@@ -661,9 +664,9 @@ class GraphDataModule(LightningDataModule):
             directories,
             stage,
             cache_size=self.cache_size,
-        ).project(fields)
+        )
         logging.info("Reusing %d %s graphs from %s", len(dataset), stage, directories)
-        return dataset
+        return dataset.project(fields)
 
     @property
     def shard_dirs(self):
@@ -827,7 +830,13 @@ class GraphDataModule(LightningDataModule):
         self.element = build_element_lookup(sorted(present))
 
     def train_dataloader(self):
-        dataset = self.train_dataset
+        # Keep the complete dataset for statistics and fitted atomic energies.
+        # Reuse this view when Lightning reloads the training loader.
+        if self._filtered_train_dataset is None:
+            self._filtered_train_dataset = filter_graphs(
+                self.train_dataset, self.filter_options
+            )
+        dataset = self._filtered_train_dataset
         if self.augmentation:
             dataset = AugmentedDataset(dataset, self.augmentation)
         loader = build_graph_dataloader(

@@ -12,6 +12,7 @@ from ...o2.wigner import WignerD
 from ...ops.edge import evaluate
 from ...ops.gate import gate_program
 from ...utils.frame_program import frame_description, rotate
+from ...utils.metadata import parse_metadata
 from ...utils.program import Program
 from ..attention import graph_softmax
 from .transverse import TransverseFrame
@@ -42,8 +43,65 @@ def linear(features, weight, bias, description):
     )
 
 
+def linear_program(program, inputs, weight, bias, description):
+    """Encode grouped channel GEMMs without materializing edge intermediates."""
+    input_shapes, output_shapes, paths, biases, groups = description
+    uniform = bool(paths) and all(path[3] == paths[0][3] for path in paths)
+    if uniform:
+        weight = program.scale(weight, paths[0][3])
+    matrices = [
+        program.scale(
+            program.slice(weight, start, input_shapes[i][1] * output_shapes[j][1]),
+            1 if uniform else scale,
+        )
+        for i, j, start, scale in paths
+    ]
+
+    def columns(values, rows, widths):
+        if len(values) == 1:
+            return values[0]
+        return program.transpose(
+            program.concatenate([
+                program.transpose(value, rows, width)
+                for value, width in zip(values, widths)
+            ]),
+            sum(widths), rows,
+        )
+
+    outputs = [None] * len(output_shapes)
+    for entries in groups:
+        selected = entries[0][1]
+        if not selected:
+            for j, _ in entries:
+                dim, mul = output_shapes[j]
+                outputs[j] = program.constant(dim * mul, 0)
+            continue
+        sources = [paths[k][0] for k in selected]
+        widths = [input_shapes[i][1] for i in sources]
+        dim = output_shapes[entries[0][0]][0]
+        out_widths = [output_shapes[j][1] for j, _ in entries]
+        value = columns([inputs[i] for i in sources], dim, widths)
+        matrix = program.concatenate([
+            columns([matrices[indices[row]] for _, indices in entries], ci, out_widths)
+            for row, ci in enumerate(widths)
+        ])
+        result = program.matmul(value, matrix, dim, sum(widths), sum(out_widths))
+        offset = 0
+        for (j, _), width in zip(entries, out_widths):
+            outputs[j] = program.concatenate([
+                program.slice(result, row * sum(out_widths) + offset, width)
+                for row in range(dim)
+            ])
+            offset += width
+    for j, start, size in biases:
+        value = program.slice(bias, start, size)
+        value = program.gather(value, tuple(range(size)) * output_shapes[j][0])
+        outputs[j] = program.binary("add", outputs[j], value)
+    return outputs
+
+
 class UvO2TensorProductConv(torch.nn.Module):
-    """Apply a channel-mixing O(2) convolution with optional edge representations.
+    """Mix and aggregate local O(2) features in flattened ``ir_mul`` layout.
 
     Parameters
     ----------
@@ -63,25 +121,22 @@ class UvO2TensorProductConv(torch.nn.Module):
     attention_scale, eps : float, optional
         Score normalization and shifted-softmax denominator regularization.
     backend : {"cuda", "torch"}, optional
-        Execution backend. ``"torch"`` evaluates aligned and transverse forms
-        with PyTorch operations and automatic differentiation on either device.
-
-    Notes
-    -----
-    Features use flattened ``ir_mul`` storage. CUDA fuses frame operations,
-    gates and aggregation; channel mixing uses PyTorch matrix products.
-    Both backends support higher derivatives.
+        Execution backend. CUDA streams the complete non-attention convolution
+        in edge tiles and recomputes intermediates for higher derivatives.
+        Attention uses separate projections and a graph softmax. ``"torch"``
+        uses PyTorch operations and automatic differentiation on either device.
 
     Examples
     --------
-    >>> from equivariantx import conv, o2
-    >>> frame = o2.LocalFrame("2x0e + 2x1o")
-    >>> gate = o2.Gate("4x0e", [torch.nn.functional.silu],
+    >>> import torch
+    >>> import equivariantx as eqx
+    >>> frame = eqx.o2.LocalFrame("2x0e + 2x1o")
+    >>> gate = eqx.o2.Gate("4x0e", [torch.nn.functional.silu],
     ...                "2x0e", [torch.sigmoid], "2x1m")
     >>> inputs = (frame.irreps_out + frame.irreps_out).regroup()
-    >>> up = o2.Linear(inputs, gate.irreps_in)
-    >>> down = o2.Linear(gate.irreps_out, frame.irreps_out)
-    >>> layer = conv.UvO2TensorProductConv(
+    >>> up = eqx.o2.Linear(inputs, gate.irreps_in)
+    >>> down = eqx.o2.Linear(gate.irreps_out, frame.irreps_out)
+    >>> layer = eqx.conv.UvO2TensorProductConv(
     ...     frame, up, gate, down, frame, backend="torch",
     ... )
     >>> features = torch.randn(3, frame.input_dim)
@@ -198,7 +253,10 @@ class UvO2TensorProductConv(torch.nn.Module):
             magnetic = program.input(
                 2,
                 "edge",
-                sum(dim * mul for dim, mul, _ in irrep_layout(self.edge_irreps, True)),
+                sum(
+                    dim * mul
+                    for dim, mul, _ in irrep_layout(self.edge_irreps, True)
+                ),
             )
             weight = program.input(3, "edge", self.weight_numel)
         else:
@@ -215,6 +273,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                 local_dim,
                 global_dim,
                 packed=packed,
+                native=self.backend == "cuda",
             )
             target = rotate(
                 program,
@@ -224,6 +283,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                 local_dim,
                 global_dim,
                 packed=packed,
+                native=self.backend == "cuda",
             )
             magnetic = (
                 rotate(
@@ -234,6 +294,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                     local_dim,
                     global_dim,
                     packed=packed,
+                    native=self.backend == "cuda",
                 )
                 if self.frames[1]
                 else None
@@ -323,7 +384,66 @@ class UvO2TensorProductConv(torch.nn.Module):
             global_dim,
             inverse=True,
             packed=packed,
+            native=self.backend == "cuda",
         )
+        return repr((tuple(program.nodes), ((output, 0, "target"),)))
+
+    @lru_cache(maxsize=64)
+    @torch.compiler.assume_constant_result
+    def convolution_program(self, local_dim, global_dim, packed, transverse):
+        """Encode the complete convolution without an attention reduction."""
+        if transverse:
+            program = Program()
+            features = program.input(0, "source", self.input_dim)
+            target = program.input(0, "target", self.input_dim)
+            edge = program.input(1, "edge", self.edge_dim)
+            radial = program.input(2, "edge", self.weight_numel)
+            geometry = program.input(3, "edge", 3)
+            node_frame, edge_frame, _ = self.transverse_frames
+            local_inputs = [
+                node_frame.program(program, features, geometry),
+                node_frame.program(program, target, geometry),
+                edge_frame.program(program, edge, geometry) if edge_frame else edge,
+                radial,
+            ]
+            linears = self.transverse_linears
+            local = program.compose(
+                self.prepare_program(local_dim, global_dim, packed, True), local_inputs,
+            )[0]
+        else:
+            nodes, outputs = parse_metadata(
+                self.prepare_program(local_dim, global_dim, packed, False)
+            )
+            program, local = Program(nodes), outputs[0][0]
+            linears = self.linears
+        inverse = program.input(4, "edge", 0 if transverse else local_dim * global_dim)
+        cutoff = program.input(5, "edge", 1)
+        values, offset = [], 0
+        for dim, mul in linears[0][0]:
+            values.append(program.slice(local, offset, dim * mul))
+            offset += dim * mul
+        for layer, description in enumerate(linears[:2]):
+            ins, outs, paths, biases, _ = description
+            weight = program.input(
+                6 + layer * 2, "shared",
+                sum(ins[i][1] * outs[j][1] for i, j, _, _ in paths),
+            )
+            bias = program.input(7 + layer * 2, "shared", sum(n for _, _, n in biases))
+            values = linear_program(program, values, weight, bias, description)
+            if layer == 0:
+                values = program.compose(
+                    self.transverse_gate_metadata if transverse else self.gate_metadata,
+                    [*values, geometry] if transverse else values,
+                )
+        message = program.concatenate(values)
+        output = program.compose(
+            self.output_program(local_dim, global_dim, packed, transverse),
+            [message, inverse, cutoff],
+        )[0]
+        if transverse:
+            output = self.transverse_frames[2].program(
+                program, output, geometry, inverse=True,
+            )
         return repr((tuple(program.nodes), ((output, 0, "target"),)))
 
     def forward(
@@ -373,8 +493,9 @@ class UvO2TensorProductConv(torch.nn.Module):
             Positive orders use spherical subspaces of width ``2*m+1``.
         radial_network : torch.nn.Module, optional
             Network mapping ``conv_weights`` inputs to radial coefficients.
-            CUDA evaluates nonlinear layers in bounded tiles without retaining
-            activations or full-edge coefficients.
+            Pass only its final affine layer to fuse the projection while
+            evaluating hidden layers with PyTorch. Passing the full network
+            also fuses its hidden layers on CUDA.
 
         Returns
         -------
@@ -411,6 +532,33 @@ class UvO2TensorProductConv(torch.nn.Module):
             radial_network = None
         if edge_features is None:
             edge_features = features.new_empty((source.shape[0], 0))
+        if fused and not self.attention:
+            if transverse:
+                if any(
+                    f is None and description is not None
+                    for f, description in zip(self.transverse_frames, self.frames)
+                ):
+                    raise ValueError("Transverse evaluation requires canonical O(2) frames.")
+                from ...ops.wigner import alignment_cuda
+
+                geometry = alignment_cuda(repr("normalize"), [vectors])[0]
+                inverse = features.new_empty((source.numel(), 0))
+                local_dim = global_dim = 0
+                packed = False
+            else:
+                if wigner is None:
+                    raise ValueError("Supply Wigner matrices or vectors.")
+                packed = wigner.ndim == 2
+                local_dim, global_dim = (wigner.shape[1], 1) if packed else wigner.shape[1:]
+                geometry, inverse = wigner, wigner if packed else wigner_inv
+            metadata = self.convolution_program(local_dim, global_dim, packed, transverse)
+            inputs = [features, edge_features, conv_weights, geometry, inverse, cutoff]
+            inputs.extend(value.reshape(1, -1) for value in parameters[:4])
+            if radial_network is not None:
+                from ...ops.radial import compose_radial
+
+                metadata, inputs = compose_radial(metadata, inputs, 2, radial_network)
+            return evaluate(metadata, inputs, source, target, features.shape[0])[0]
         if transverse:
             if any(
                 f is None and description is not None

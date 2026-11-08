@@ -107,6 +107,10 @@ class AugmentedDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    @property
+    def sample_fingerprint(self):
+        return getattr(self.dataset, "sample_fingerprint", None)
+
     def __getitem__(self, index):
         return self.transform(self.dataset[index])
 

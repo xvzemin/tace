@@ -113,6 +113,32 @@ Property names in a dataset can be remapped with arguments such as
 ``--energy_key``, ``--forces_key``, and the other key options shown by
 ``tace-eval -h``.
 
+.. _eval-neighbor-lists:
+
+Neighbor lists
+~~~~~~~~~~~~~~
+
+Select a :doc:`neighbor-list backend <neighbor_list>` with ``--nl_backend``:
+``ase``, ``matscipy`` (default), ``vesin``, or ``alchemiops``.
+
+.. code-block:: bash
+
+   tace-eval -i structures.xyz -m model.pt -o predict.xyz \
+     --device cuda --nl_backend alchemiops -b 16
+
+For raw structures, graphs are built one structure at a time; ``-b`` controls
+model inference batches only. For large datasets, reuse the
+:ref:`batched training graph cache <training-neighbor-lists>`:
+
+.. code-block:: bash
+
+   tace-eval -i 'graphCache/test0_shard*.lmdb' -m model.pt -o predict.xyz \
+     --device cuda -b 16
+
+TACE graph LMDB input reuses stored neighbors, so ``--nl_backend`` has no
+effect. The cached cutoff and neighbor settings must match the model; see
+:doc:`details/dataset`.
+
 Model Export
 ------------
 

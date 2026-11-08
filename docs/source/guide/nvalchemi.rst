@@ -17,6 +17,19 @@ Install both optional dependencies as described in
        device="cuda",
    )
 
+Neighbor lists
+--------------
+
+NValCHEMI constructs neighbors with ``nvalchemiops``. ``TACEWrapper`` requests
+a full COO list at the model cutoff through
+``model.model_config.neighbor_config`` and has no ``neighborlist_backend``
+argument. For an existing NValCHEMI ``batch``:
+
+>>> from nvalchemi.neighbors import compute_neighbors
+>>> compute_neighbors(batch, config=model.model_config.neighbor_config)
+
+See :doc:`neighbor_list` for training and other inference interfaces.
+
 Upstream projects:
 
 - `nvalchemi-toolkit <https://github.com/NVIDIA/nvalchemi-toolkit>`_

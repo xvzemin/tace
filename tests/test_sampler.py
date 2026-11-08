@@ -13,10 +13,13 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DistributedSampler
 from torch_geometric.data import Data
 
+from tace.dataset.augmentation import AugmentedDataset
 from tace.dataset.dataloader import build_graph_dataloader
 from tace.dataset.datamodule import GraphDataModule
+from tace.dataset.filter import filter_graphs, filter_options
 from tace.dataset.quantity import KeySpecification
 from tace.dataset.sampler import EpochSampler
+from tace.dataset.store import write_graphs
 from tace.utils.callbacks import EpochSamplerCallback
 
 
@@ -426,6 +429,66 @@ def test_loader_validates_resume_batch_shape():
         with pytest.raises(ValueError, match=name):
             loader.load_state_dict(dict(state, **{name: value}))
     loader.load_state_dict(state)
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle):
+    graphs = [
+        Data(
+            num_nodes=1 + i % 3,
+            atomic_numbers=torch.ones(1 + i % 3, dtype=torch.int64),
+            x=torch.tensor([[float(i)]], dtype=torch.float64),
+            edge_index=torch.zeros(2, i, dtype=torch.int64),
+        )
+        for i in range(12)
+    ]
+    source = write_graphs(graphs, [tmp_path], "train", shard_size=3)
+    selected = filter_graphs(source, filter_options({"enabled": True, "max_atoms": 2}))
+    dataset = AugmentedDataset(selected, ["time_reversal"])
+    expected = [i for i in range(12) if i % 3 < 2]
+    assert len(dataset) == len(expected)
+    reference = EpochSampler(dataset, 0.5, shuffle=shuffle, seed=41)
+    ranks = [
+        EpochSampler(dataset, 0.5, num_replicas=2, rank=rank, shuffle=shuffle, seed=41)
+        for rank in range(2)
+    ]
+    stream = []
+    for epoch in range(5):
+        reference.set_epoch(epoch)
+        for sampler in ranks:
+            sampler.set_epoch(epoch)
+        indices = list(itertools.chain.from_iterable(zip(*(list(s) for s in ranks))))
+        assert indices == list(reference)
+        stream.extend(int(graph.x.item()) for graph in dataset.__getitems__(indices))
+        for sampler in ranks:
+            sampler.advance(len(sampler))
+        reference.advance(len(reference))
+    config = {
+        "_target_": "torch_geometric.loader.DataLoader",
+        "batch_size": 2,
+        "shuffle": shuffle,
+        "num_workers": 1,
+        "multiprocessing_context": "spawn",
+    }
+    loader = build_graph_dataloader(config, dataset, epoch_size=0.5, seed=41)
+    iterator = iter(loader)
+    first = next(iterator).x.flatten().tolist()
+    loader.mark_batch_complete()
+    state = loader.state_dict()
+    rest = [batch.x.flatten().tolist() for batch in iterator]
+    resumed = build_graph_dataloader(config, dataset, epoch_size=0.5, seed=41)
+    resumed.load_state_dict(state)
+    assert [batch.x.flatten().tolist() for batch in resumed] == rest
+    assert len(set(first + list(itertools.chain.from_iterable(rest)))) == 4
+    different = source.select([0, 1, 2, 3, 4, 6, 7, 9])
+    assert len(different) == len(selected)
+    changed = build_graph_dataloader(
+        config, AugmentedDataset(different, []), epoch_size=0.5, seed=41
+    )
+    with pytest.raises(ValueError, match="dataset selection"):
+        changed.load_state_dict(state)
+    for view in (source, selected, different):
+        view.close()
 
 
 class SamplingModel(pl.LightningModule):

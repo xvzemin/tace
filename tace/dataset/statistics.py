@@ -1002,6 +1002,8 @@ def _statistics_worker(task, progress=None):
         readahead=task["readahead"],
     )
     dataset.metadata = task["metadata"]
+    if task.get("indices") is not None:
+        dataset = dataset.select(task["indices"])
     try:
         loader = StatisticsDataLoader(dataset, **task["loader"])
         accumulator = _StatisticsAccumulator(
@@ -1055,11 +1057,17 @@ def _statistics_tasks(
         or not isinstance(dataloader.sampler, SequentialSampler)
     ):
         raise ValueError("Multi-GPU statistics require complete sequential batches")
-    if not dataset.lmdb_paths:
+    if not len(dataset):
         raise ValueError("Cannot compute statistics from an empty training dataset")
     if any(length <= 0 for length in dataset.lengths):
         raise ValueError("Statistics shards must contain at least one graph")
-    devices = devices[: min(len(devices), len(dataset.lmdb_paths))]
+    boundaries = None
+    shards = list(range(len(dataset.lmdb_paths)))
+    if dataset.indices is not None:
+        boundaries = np.searchsorted(dataset.indices, [0, *dataset._ends])
+        starts = [0, *dataset._ends[:-1]]
+        shards = [i for i in shards if boundaries[i + 1] > boundaries[i]]
+    devices = devices[: min(len(devices), len(shards))]
     partitions = [[] for _ in devices]
     loads = [0] * len(devices)
     metadata = dataset.metadata or {}
@@ -1068,9 +1076,7 @@ def _statistics_tasks(
         int(sizes.get(path.name, {}).get("num_nodes", length))
         for path, length in zip(dataset.lmdb_paths, dataset.lengths)
     ]
-    for shard in sorted(
-        range(len(weights)), key=lambda index: (-weights[index], index)
-    ):
+    for shard in sorted(shards, key=lambda index: (-weights[index], index)):
         rank = min(range(len(loads)), key=loads.__getitem__)
         partitions[rank].append(shard)
         loads[rank] += weights[shard]
@@ -1094,11 +1100,24 @@ def _statistics_tasks(
     tasks = []
     for device, shards in zip(devices, partitions):
         shards.sort()
+        indices = None
+        if boundaries is not None:
+            count = sum(boundaries[i + 1] - boundaries[i] for i in shards)
+            indices = np.empty(count, dtype=np.int64)
+            row = offset = 0
+            for index in shards:
+                first, last = boundaries[index : index + 2]
+                indices[row : row + last - first] = (
+                    dataset.indices[first:last] - starts[index] + offset
+                )
+                row += last - first
+                offset += dataset.lengths[index]
         tasks.append(
             {
                 "device": str(device),
                 "paths": [str(dataset.lmdb_paths[index]) for index in shards],
                 "lengths": [dataset.lengths[index] for index in shards],
+                "indices": indices,
                 "fields": dataset.fields,
                 "metadata": {"fields": metadata.get("fields", [])},
                 "max_open_shards": dataset.max_open_shards,
@@ -1122,7 +1141,13 @@ def _parallel_statistics(tasks, accumulator):
     states = [None] * len(tasks)
     completed = set()
     counts = [0] * len(tasks)
-    total = sum(sum(task["lengths"]) for task in tasks)
+    task_sizes = [
+        len(task["indices"])
+        if task.get("indices") is not None
+        else sum(task["lengths"])
+        for task in tasks
+    ]
+    total = sum(task_sizes)
     logging.info(
         "Computing statistics for %d graphs on %s; batch_size=%d per device, "
         "independent shard readers",
@@ -1169,7 +1194,7 @@ def _parallel_statistics(tasks, accumulator):
                     counts[index] = payload
                 elif kind == "result":
                     states[index] = payload
-                    counts[index] = sum(tasks[index]["lengths"])
+                    counts[index] = task_sizes[index]
                     completed.add(index)
                 progress.update(counts[index] - previous)
         for state in states:

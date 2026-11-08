@@ -12,7 +12,7 @@ from ...ops.radial import cast_radial, materialize
 
 
 class O3TensorProductConv(torch.nn.Module):
-    """Gather, couple and sum O(3) features with radial path weights.
+    """Gather, couple and sum O(3) features in flattened ``ir_mul`` layout.
 
     Parameters
     ----------
@@ -20,9 +20,8 @@ class O3TensorProductConv(torch.nn.Module):
         Defines the irreps, instructions and normalization. Only ``uvu``
         instructions are supported. Weights are supplied to :meth:`forward`.
     backend : {"cuda", "torch"}, optional
-        CUDA generates sparse contractions on first use and caches the
-        compiled binaries. ``"torch"`` evaluates the CG contractions with
-        PyTorch operations and automatic differentiation on either device.
+        CUDA contractions in float32 or float64, or PyTorch operations.
+        CPU tensors use PyTorch. Both backends support higher derivatives.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization when vectors are supplied.
     normalize : bool, optional
@@ -32,21 +31,16 @@ class O3TensorProductConv(torch.nn.Module):
         Batch compatible CUDA path groups when weights are supplied directly.
         Defaults to false.
 
-    Notes
-    -----
-    Features use flattened ``ir_mul`` storage. Instructions, weights and
-    output multiplicities are preserved. CUDA supports float32 and float64,
-    including higher derivatives. Atomic reductions are not bitwise deterministic.
-
     Examples
     --------
+    >>> import torch
+    >>> import equivariantx as eqx
     >>> from e3nn import o3
-    >>> from equivariantx.conv import O3TensorProductConv
     >>> tp = o3.TensorProduct(
     ...     "2x0e", "1x1o", "2x1o", [(0, 0, 0, "uvu", True)],
     ...     internal_weights=False, shared_weights=False,
     ... )
-    >>> conv = O3TensorProductConv(tp, backend="torch")
+    >>> conv = eqx.conv.O3TensorProductConv(tp, backend="torch")
     >>> x = torch.randn(3, 2)
     >>> edge_attrs = torch.randn(4, 3)
     >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
@@ -225,10 +219,10 @@ class O3TensorProductConv(torch.nn.Module):
             ``(edges, irreps_in2.num_irreps)``; either dimension may be one.
             Used only with ``vectors``; defaults to one.
         radial_network : torch.nn.Module, optional
-            Sequential network preceding ``projection``. CUDA evaluates its
-            nonlinear layers in bounded edge tiles and recomputes activations
-            during backward. A final affine bias may be appended as the last
-            row of ``projection``. PyTorch evaluates the network normally.
+            Network preceding ``projection``. Omit it to supply hidden features
+            and fuse only the final projection. Supplying it also fuses hidden
+            layers on CUDA. Append an affine bias as the last projection row
+            and a constant input channel when no network is supplied.
 
         Returns
         -------

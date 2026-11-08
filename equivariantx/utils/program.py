@@ -156,6 +156,18 @@ class Program:
             "product", width * dims[role], values, (metadata, role, required)
         )
 
+    def compose(self, metadata, inputs):
+        """Substitute expressions for the input slots of another program."""
+        nodes, outputs = parse_metadata(metadata)
+        translated = []
+        for op, size, args, data in nodes:
+            translated.append(
+                inputs[data[0]] if op == "input" else self.add(
+                    op, size, tuple(translated[j] for j in args), data
+                )
+            )
+        return tuple(translated[root] for root, _, _ in outputs)
+
     def adjoint(self, outputs, seeds, active):
         """Differentiate a vector program, without evaluating tensor operations."""
         count = len(self.nodes)
@@ -191,6 +203,15 @@ class Program:
                 x, y = args
                 accumulate(x, self.binary("mul", grad, y))
                 accumulate(y, self.binary("mul", grad, x))
+            elif op == "frame":
+                layout, output = data
+                values = list(args)
+                values[output] = grad
+                for role, x in enumerate(args):
+                    if role != output and needed[x] and self.size(x):
+                        accumulate(
+                            x, self.add("frame", self.size(x), values, (layout, role))
+                        )
             elif op == "convolution":
                 kind, metadata, output, weighted, shape, order = data
                 geometric = kind == "o3" and len(parse_metadata(metadata)) > 3

@@ -20,7 +20,10 @@ from equivariantx.utils import copy_model
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
 @pytest.mark.parametrize("time_reversal", [False, True])
-def test_radial_adapter(implementation, device, time_reversal, double_precision):
+@pytest.mark.parametrize("stream_radial", [None, True])
+def test_radial_adapter(
+    implementation, device, time_reversal, stream_radial, double_precision
+):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     if time_reversal and not hasattr(o3.Irrep("0e"), "t"):
@@ -46,6 +49,7 @@ def test_radial_adapter(implementation, device, time_reversal, double_precision)
             ]
         ),
         bias=True,
+        **({} if stream_radial is None else {"stream_radial": stream_radial}),
     ).to(device)
     convolution = Convolution(
         tp,
@@ -73,7 +77,11 @@ def test_radial_adapter(implementation, device, time_reversal, double_precision)
         cutoff.requires_grad_()
         edges = torch.randint(3, (2, num_edges), device=device)
         deferred = radial(inputs)
-        assert isinstance(deferred, RadialInput) and deferred.features is inputs
+        if stream_radial:
+            assert isinstance(deferred, RadialInput) and deferred.features is inputs
+        else:
+            assert not radial.stream_radial
+            assert deferred.shape == (num_edges, 5)
         actual = compiled(x, vectors, inputs, cutoff, edges)
         convolution.backend = "torch"
         convolution.eqx_tp.backend = "torch"
@@ -90,7 +98,7 @@ def test_radial_adapter(implementation, device, time_reversal, double_precision)
                     torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-8)
         convolution.backend = "cuda"
         convolution.eqx_tp.backend = "cuda"
-        radial.stream_radial = True
+        radial.stream_radial = bool(stream_radial)
 
 
 @pytest.fixture

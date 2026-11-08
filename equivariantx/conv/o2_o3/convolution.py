@@ -10,7 +10,7 @@ from ...utils.metadata import parse_metadata
 
 
 class O2O3TensorProductConv(torch.nn.Module):
-    """Evaluate an O(3) tensor-product convolution through O(2) restriction.
+    """Evaluate an O(3) convolution through O(2) restriction in ``ir_mul`` layout.
 
     Parameters
     ----------
@@ -42,12 +42,13 @@ class O2O3TensorProductConv(torch.nn.Module):
 
     Examples
     --------
-    >>> from equivariantx import conv, o2
-    >>> tp = o2.O3TensorProduct(
+    >>> import torch
+    >>> import equivariantx as eqx
+    >>> tp = eqx.o2.O3TensorProduct(
     ...     "2x0e", "1o", "2x1o", [(0, 0, 0, "uvu", True)],
     ...     internal_weights=False, shared_weights=False,
     ... )
-    >>> layer = conv.O2O3TensorProductConv(tp, backend="torch", method="cg")
+    >>> layer = eqx.conv.O2O3TensorProductConv(tp, backend="torch", method="cg")
     >>> features = torch.randn(3, 2)
     >>> vectors = torch.randn(4, 3)
     >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])

@@ -20,6 +20,20 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
         Store internal weights and share weights between edges.
     backend : {"cuda", "torch"}, optional
         CUDA or PyTorch evaluation. Defaults to "cuda".
+
+    Examples
+    --------
+    >>> import torch
+    >>> import equivariantx as eqx
+    >>> layer = eqx.conv.Wigner6jTensorProductConv(
+    ...     "2x1o", "1o", "1e", "2x1e", "2x0e+2x1e+2x2e",
+    ...     [(0, 0, 0, "uvu", True)],
+    ...     [(0, 0, i, "uvu", True) for i in range(3)], backend="torch",
+    ... )
+    >>> x, attrs, spin = torch.randn(3, 6), torch.randn(4, 3), torch.randn(3, 3)
+    >>> edges = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> layer(x, attrs, spin, edges).shape
+    torch.Size([3, 18])
     """
 
     def forward(
@@ -84,7 +98,10 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
                 edge_index,
                 num_nodes,
             ).index_select(-1, self.output_index)
-        message = self.tp132(intermediate[edge_index[0]], x2, weight)
+        message = self.tp132(
+            intermediate[edge_index[0]], x2,
+            weight.unsqueeze(0) if weight.ndim == 1 else weight,
+        )
         return message.new_zeros((num_nodes, self.output_dim)).index_add(
             0, edge_index[1], message
         )

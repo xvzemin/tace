@@ -38,6 +38,7 @@ from tace.dataset.dataloader import (
 )
 from tace.dataset.datamodule import GraphDatasetLMDB, build_datamodule, create_graphs
 from tace.dataset.element import build_element_lookup
+from tace.dataset.filter import filter_graphs, filter_options
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KeySpecification
 from tace.dataset.read import (
@@ -1629,6 +1630,229 @@ def test_typed_graph_store_batched_projection_and_size_index(tmp_path):
     assert saved.energy.item() == 0
 
 
+@pytest.mark.parametrize("in_memory", [False, True])
+@pytest.mark.parametrize(
+    "options,expected",
+    [
+        (None, list(range(7))),
+        ({"enabled": False, "max_edges": 1}, list(range(7))),
+        ({"enabled": True}, [0, 2, 3, 4, 5, 6]),
+        ({"enabled": True, "max_edges": 24001}, list(range(7))),
+        ({"enabled": True, "max_edges": None}, list(range(7))),
+        ({"enabled": True, "max_forces": 5}, [0, 2, 6]),
+        ({"enabled": True, "max_energy_per_atom": -1}, [0, 3, 6]),
+        ({"enabled": True, "max_stress": 5}, [0, 2, 6]),
+        ({"enabled": True, "max_atoms": 1}, [6]),
+        ({"enabled": True, "max_edges": 1}, [4, 6]),
+        (
+            {
+                "enabled": True,
+                "max_edges": None,
+                "max_atoms": 2,
+                "max_forces": 5,
+                "max_energy_per_atom": -1,
+                "max_stress": 5,
+            },
+            [0, 6],
+        ),
+    ],
+)
+def test_cached_graph_filters_are_inclusive_and_readonly(
+    tmp_path, monkeypatch, options, expected, in_memory
+):
+    graphs = []
+    for index, (atoms, edges, energy, force) in enumerate(
+        [
+            (2, 2, -4, [3, 4, 0]),
+            (4, 24001, -4, [6, 0, 0]),
+            (2, 24000, 6, [0, 0, 0]),
+            (2, 2, -20, [4, 4, 0]),
+            (2, 0, -4, [3, 4, 0]),
+            (2, 2, float("nan"), [float("nan"), 0, 0]),
+            (1, 1, -1, [0, 0, 0]),
+        ]
+    ):
+        stress = torch.zeros(1, 3, 3, dtype=torch.float64)
+        if index in (0, 4):
+            stress[0, 0, 0], stress[0, 1, 1] = 3, 4
+        elif index == 3:
+            stress[0, 0, 1] = stress[0, 1, 0] = 4
+        elif index == 5:
+            stress.fill_(float("nan"))
+        graphs.append(
+            Data(
+                num_nodes=atoms,
+                atomic_numbers=torch.ones(atoms, dtype=torch.int64),
+                edge_index=torch.zeros(2, edges, dtype=torch.int64),
+                energy=torch.tensor([energy], dtype=torch.float64),
+                forces=torch.tensor([force] * atoms, dtype=torch.float64),
+                stress=stress,
+                **{
+                    f"{name}_weight": torch.tensor(
+                        [float(index != 4)], dtype=torch.float64
+                    )
+                    for name in ("energy", "forces", "stress")
+                },
+            )
+        )
+    if in_memory:
+        dataset = GraphDatasetLMDB([], in_memory=True)
+        dataset.data_list, dataset.length = graphs, len(graphs)
+    else:
+        dataset = write_graphs(graphs, [tmp_path], "train", shard_size=2)
+    before = _snapshot(tmp_path)
+    bounds = filter_options(options)
+    if not set(bounds) & {"max_forces", "max_energy_per_atom", "max_stress"}:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                GraphDatasetLMDB,
+                "_decode",
+                lambda *args: pytest.fail("Count filters must not decode graphs"),
+            )
+            selected = filter_graphs(dataset, bounds)
+    else:
+        selected = filter_graphs(dataset, bounds)
+    actual = (
+        list(range(len(dataset)))
+        if selected.indices is None
+        else selected.indices.tolist()
+    )
+    assert actual == expected
+    if expected == list(range(len(graphs))):
+        assert selected is dataset
+    np.testing.assert_array_equal(selected.get_sizes(), dataset.get_sizes(expected))
+    projected = selected.project(["energy"])
+    assert len(projected) == len(expected)
+    for view_index in [-1, 0, -1]:
+        torch.testing.assert_close(
+            projected[view_index].energy,
+            graphs[expected[view_index]].energy,
+            equal_nan=True,
+        )
+    projected.close()
+    selected.close()
+    dataset.close()
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "options,error",
+    [
+        ({"enabled": "true"}, TypeError),
+        ({"enabled": True, "max_atoms": 2.5}, TypeError),
+        ({"enabled": True, "max_edges": True}, TypeError),
+        ({"enabled": True, "max_forces": -1}, ValueError),
+        ({"enabled": True, "max_energy_per_atom": float("inf")}, ValueError),
+        ({"enabled": True, "max_stress": float("nan")}, ValueError),
+        ({"enabled": True, "max_edge": 3}, ValueError),
+    ],
+)
+def test_graph_filter_rejects_invalid_configuration(options, error):
+    with pytest.raises(error, match="dataset.filter"):
+        filter_options(options)
+
+
+@pytest.mark.parametrize("epoch_size", [None, 0.5])
+def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch_size):
+    from tace.dataset.dataloader import build_atomsList
+    from tace.dataset.datamodule import load_cached_datamodule
+    from tace.dataset.sampler import EpochSampler
+
+    cfg, keyspec, _ = _prebuilt_graph_store(
+        tmp_path, [-1, 2, -9, 8], targets=("energy", "forces")
+    )
+    for stage in ("valid", "test0"):
+        _prebuilt_graph_store(
+            tmp_path, [10, 20, 30, 40], targets=("energy",), stage=stage
+        )
+    cfg["dataset"]["no_valid_set"] = False
+    cfg["dataset"]["epoch_size"] = epoch_size
+    cfg["model"]["config"]["fidelity"][0]["atomic_energy"] = None
+    old_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
+    cfg["dataset"]["filter"] = {
+        "enabled": True,
+        "max_energy_per_atom": -1,
+        "max_forces": 2,
+    }
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == old_key
+    before = _snapshot(tmp_path)
+    _forbid_graph_rebuild(monkeypatch)
+    module = load_cached_datamodule(cfg, ["energy"], [], keyspec)
+    module.setup("test")
+    datasets = [module.train_dataset, module.val_dataset, *module.test_datasets]
+    assert [len(dataset) for dataset in datasets] == [4, 4, 4]
+    assert module._filtered_train_dataset is None
+    assert "forces" not in module.train_dataset[0]
+    loader = module.train_dataloader()
+    assert len(loader.dataset) == 2
+    assert "forces" not in loader.dataset[0]
+    assert isinstance(loader.sampler, EpochSampler) == (epoch_size is not None)
+    if epoch_size is not None:
+        assert loader.sampler.epoch_size == 1
+    expected = [-1] if epoch_size is not None else [-1, -9]
+    assert torch.cat([batch.energy for batch in loader]).tolist() == expected
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "tace.dataset.datamodule.filter_graphs",
+            lambda *args: pytest.fail("Loader reload must reuse the filter index"),
+        )
+        assert module.train_dataloader().dataset is loader.dataset
+
+    statistics_loader = module.statistics_dataloader()
+    assert not isinstance(statistics_loader.sampler, EpochSampler)
+    assert torch.cat([batch.energy for batch in statistics_loader]).tolist() == [
+        -1,
+        2,
+        -9,
+        8,
+    ]
+    element, _, references = build_atomsList(
+        cfg, ["energy"], [], keyspec, datamodule=module
+    )
+    assert references[0][1] == pytest.approx(8 / 30)
+    written = []
+    monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", written.append)
+    statistics = statistics_module._compute_statistics(
+        statistics_loader,
+        element.zs,
+        references,
+        target_property=["energy"],
+        device="cpu",
+        num_fidelities=1,
+        data_fingerprint=old_key,
+    )
+    assert statistics[0]["num_graphs"] == 4
+    assert statistics[0]["num_atoms"] == 10
+    assert statistics[0]["data_fingerprint"] == old_key
+    assert written == [statistics]
+    statistics_loader.dataset.close()
+    for evaluation_loader in [module.val_dataloader(), *module.test_dataloader()]:
+        assert not isinstance(evaluation_loader.sampler, EpochSampler)
+        assert torch.cat([batch.energy for batch in evaluation_loader]).tolist() == [
+            10,
+            20,
+            30,
+            40,
+        ]
+        evaluation_loader.dataset.close()
+    with pytest.raises(ValueError, match="removed all"):
+        filter_graphs(datasets[0], {"max_atoms": 0})
+    with pytest.raises(ValueError, match="lack fields"):
+        filter_graphs(datasets[0], {"max_stress": 1})
+    # Even an empty training selection must not block statistics or evaluation.
+    cfg["dataset"]["filter"]["max_atoms"] = 0
+    rejected = load_cached_datamodule(cfg, ["energy"], [], keyspec)
+    assert len(rejected.train_dataset) == len(rejected.val_dataset) == 4
+    with pytest.raises(ValueError, match="removed all"):
+        rejected.train_dataloader()
+    rejected.train_dataset.close()
+    rejected.val_dataset.close()
+    loader.dataset.close()
+    for dataset in datasets:
+        dataset.close()
+    assert _snapshot(tmp_path) == before
+
+
 def test_store_progress_counts_committed_batches_and_final_partial(tmp_path):
     graph = Data(
         num_nodes=1,
@@ -1845,6 +2069,15 @@ def test_raw_and_statistics_cache_dependencies_are_separate(tmp_path):
     keyspec = KeySpecification.from_defaults()
     raw_key = source_cache_key(cfg, keyspec=keyspec)
     stats_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
+    cfg["dataset"]["filter"] = {"enabled": False, "max_forces": 1}
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
+    cfg["dataset"]["filter"]["enabled"] = True
+    filtered_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
+    assert filtered_key == stats_key
+    assert source_cache_key(cfg, keyspec=keyspec) == raw_key
+    cfg["dataset"]["filter"]["max_forces"] = 2
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == filtered_key
+    del cfg["dataset"]["filter"]
     cfg["dataset"]["test_files"] = [str(tmp_path / "test-b.xyz")]
     assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
     cfg["model"]["config"]["cutoff"] = 4.0
@@ -2785,6 +3018,7 @@ def statistics_store(tmp_path, statistics_graphs):
 
 
 @pytest.mark.parametrize("num_workers", [0, 1])
+@pytest.mark.parametrize("filtered", [False, True])
 def test_spawned_statistics_read_all_shards_once_without_changing_cache(
     tmp_path,
     statistics_progress,
@@ -2792,7 +3026,11 @@ def test_spawned_statistics_read_all_shards_once_without_changing_cache(
     statistics_graphs,
     statistics_options,
     num_workers,
+    filtered,
 ):
+    if filtered:
+        statistics_store = statistics_store.select([0, 1, 3, 4, 9, 10])
+        statistics_graphs = [statistics_graphs[i] for i in [0, 1, 3, 4, 9, 10]]
     loader_options = {"batch_size": 2, "num_workers": num_workers}
     if num_workers:
         loader_options["prefetch_factor"] = 1
@@ -2804,8 +3042,18 @@ def test_spawned_statistics_read_all_shards_once_without_changing_cache(
             loader, **statistics_options, devices=[torch.device("cpu")] * 2
         )
         assigned_paths = [path for task in tasks for path in task["paths"]]
-        assert Counter(assigned_paths) == Counter(map(str, statistics_store.lmdb_paths))
-        assert sum(sum(task["lengths"]) for task in tasks) == len(statistics_graphs)
+        expected_paths = [
+            path
+            for i, path in enumerate(statistics_store.lmdb_paths)
+            if not filtered or i != 2
+        ]
+        assert Counter(assigned_paths) == Counter(map(str, expected_paths))
+        assert sum(
+            len(task["indices"])
+            if task["indices"] is not None
+            else sum(task["lengths"])
+            for task in tasks
+        ) == len(statistics_graphs)
         assert all(task["paths"] for task in tasks)
         assert all(task["loader"]["num_workers"] == num_workers for task in tasks)
         accumulator = statistics_module._StatisticsAccumulator(**statistics_options)
@@ -2816,6 +3064,7 @@ def test_spawned_statistics_read_all_shards_once_without_changing_cache(
         )
     finally:
         loader.dataset.close()
+    statistics_store.close()
     assert _snapshot(tmp_path) == before
     assert {process.pid for process in multiprocessing.active_children()} <= (
         children_before

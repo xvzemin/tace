@@ -272,7 +272,8 @@ def test_partitioned_paths(monkeypatch, double_precision, implementation):
 
 @pytest.mark.parametrize("edges", [0, 7])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_wigner6j_convolution(edges, backend, double_precision):
+@pytest.mark.parametrize("shared", [False, True])
+def test_wigner6j_convolution(edges, backend, shared, double_precision):
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -285,12 +286,16 @@ def test_wigner6j_convolution(edges, backend, double_precision):
         [(0, 0, 0, "uvu", True)],
         [(0, 0, i, "uvu", True) for i in range(3)],
         internal_weights=False,
-        shared_weights=False,
+        shared_weights=shared,
         backend=backend,
     ).to(device)
     inputs = [
         torch.randn(*shape, device=device, requires_grad=True)
-        for shape in ((4, 6), (edges, 3), (4, 3), (edges, 2), (edges, 6))
+        for shape in (
+            (4, 6), (edges, 3), (4, 3),
+            (2,) if shared else (edges, 2),
+            (6,) if shared else (edges, 6),
+        )
     ]
     x1, x2, x3, w1, w2 = inputs
     index = torch.randint(3, (2, edges), device=device)
@@ -600,16 +605,28 @@ def test_torch_scalar_direction_gradient(algorithm, edges, double_precision):
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize(
     "mmax,magnetic,attention,odd",
-    [(0, False, False, False), (1, True, True, False), (2, True, True, True)],
+    [
+        (0, False, False, False), (2, False, False, False),
+        (2, True, False, True), (1, True, True, False), (2, True, True, True),
+    ],
 )
-def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precision):
-    if not torch.cuda.is_available():
+def test_uv_o2_transverse(
+    backend, device, mmax, magnetic, attention, odd, double_precision, monkeypatch
+):
+    if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx.conv.attention import graph_softmax
 
-    frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e+2x2e+2x2o", mmax).cuda()
+    if backend == "cuda" and device == "cuda":
+        import equivariantx.backends.cuda.execution as execution
+
+        launch = execution.launch
+        monkeypatch.setattr(execution, "launch", lambda *args: launch(*args, tile_size=3))
+
+    frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e+2x2e+2x2o", mmax).to(device)
     scalars = frame.irreps_out.filter(keep=lambda ir_mul: ir_mul.ir.m == 0)
     tensors = frame.irreps_out.filter(keep=lambda ir_mul: ir_mul.ir.m > 0)
     gates = (
@@ -626,12 +643,12 @@ def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precis
         gates,
         [torch.nn.Tanh() if odd else torch.nn.Sigmoid()] if tensors else [],
         tensors,
-    ).cuda()
+    ).to(device)
     inputs = (frame.irreps_out * (3 if magnetic else 2)).regroup()
-    up = o2.Linear(inputs, gate.irreps_in, biases=True).cuda()
-    down = o2.Linear(gate.irreps_out, frame.irreps_out, biases=True).cuda()
+    up = o2.Linear(inputs, gate.irreps_in, biases=True).to(device)
+    down = o2.Linear(gate.irreps_out, frame.irreps_out, biases=True).to(device)
     query, key = [
-        o2.Linear(frame.irreps_out, frame.irreps_out).cuda() for _ in range(2)
+        o2.Linear(frame.irreps_out, frame.irreps_out).to(device) for _ in range(2)
     ]
     conv = eqx_conv.UvO2TensorProductConv(
         frame,
@@ -645,26 +662,33 @@ def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precis
         num_heads=2,
         attention_scale=0.2,
         backend=backend,
-    ).cuda()
+    ).to(device)
+    if backend == "cuda" and device == "cuda" and not attention:
+        import equivariantx.conv.uv_o2.convolution as uv_convolution
+
+        def no_full_edge_linear(*args, **kwargs):
+            raise AssertionError("Non-attention O2 must keep channel maps inside edge tiles")
+
+        monkeypatch.setattr(uv_convolution, "linear_blocks", no_full_edge_linear)
     parameters = tuple(
         p
         for module in (up, down, *((query, key) if attention else ()))
         for p in (module.weight, module.bias)
     )
-    rotation = o2.WignerD(2, 2, method="recursive").cuda()
+    rotation = o2.WignerD(2, 2, method="recursive").to(device)
     for edges in (8, 0):
 
         def rand(*shape):
-            return (torch.randn(*shape, device="cuda") * 0.3).requires_grad_()
+            return (torch.randn(*shape, device=device) * 0.3).requires_grad_()
 
-        index = torch.randint(4, (2, edges), device="cuda")
+        index = torch.randint(4, (2, edges), device=device)
         x, extra = (
             rand(4, frame.input_dim),
             rand(edges, frame.input_dim) if magnetic else None,
         )
         vectors = (
             torch.cat((torch.eye(3), -torch.eye(3), torch.randn(2, 3)))
-            .cuda()[:edges]
+            .to(device)[:edges]
             .requires_grad_()
         )
         weights, cutoff, radial = (
@@ -742,7 +766,7 @@ def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precis
             if backend == "torch":
                 assert_native_autograd(actual)
             a, b = actual, expected
-            for _ in range(3 if edges else 0):
+            for order in range(3 if edges else 0):
                 gradients = [
                     torch.autograd.grad(
                         value.sin().sum(),
@@ -752,8 +776,11 @@ def test_uv_o2_transverse(backend, mmax, magnetic, attention, odd, double_precis
                     )
                     for value in (a, b)
                 ]
-                for ga, gb in zip(*gradients):
-                    torch.testing.assert_close(ga, gb, atol=3e-8, rtol=3e-8)
+                for slot, (ga, gb) in enumerate(zip(*gradients)):
+                    torch.testing.assert_close(
+                        ga, gb, atol=3e-8, rtol=3e-8,
+                        msg=lambda message: f"transverse={transverse}, order={order + 1}, input={slot}: {message}",
+                    )
                 a, b = [torch.cat([g.flatten() for g in gs]) / 30 for gs in gradients]
                 if backend == "torch":
                     assert_native_autograd(a)
@@ -1117,9 +1144,11 @@ def test_transverse_frame(degree, mmax, double_precision):
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_uv_o2_transverse_compile(backend, double_precision):
+@pytest.mark.parametrize("geometry", ["vectors", "packed", "dense"])
+def test_uv_o2_transverse_compile(backend, geometry, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    torch.compiler.reset()
     frame = o2.LocalFrame("2x0e+2x1e+2x1o").cuda()
     gate = o2.Gate(
         "2x0e+2x0o",
@@ -1133,8 +1162,22 @@ def test_uv_o2_transverse_compile(backend, double_precision):
     module = eqx_conv.UvO2TensorProductConv(
         frame, up, gate, down, frame, backend=backend
     ).cuda()
-    parameters = up.weight, up.bias, down.weight, down.bias
-    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    rotation = o2.WignerD(1, 1, method="recursive").cuda()
+
+    def evaluate(x, vectors, weights, cutoff, up_weight, down_weight, index):
+        if geometry == "packed":
+            wigner, inverse = rotation.forward_packed(vectors), None
+        elif geometry == "dense":
+            wigner, inverse = rotation(vectors)
+        else:
+            wigner = inverse = None
+        return module(
+            x, None, weights, index, wigner, inverse, cutoff,
+            (up_weight, up.bias, down_weight, down.bias),
+            vectors=vectors if geometry == "vectors" else None,
+        )
+
+    compiled = torch.compile(evaluate, backend="aot_eager", fullgraph=True, dynamic=True)
     for nodes, edges in ((4, 8), (5, 11), (3, 0), (0, 0)):
         x = torch.randn(nodes, frame.input_dim, device="cuda", requires_grad=True)
         vectors = torch.randn(edges, 3, device="cuda", requires_grad=True)
@@ -1143,11 +1186,8 @@ def test_uv_o2_transverse_compile(backend, double_precision):
         )
         cutoff = torch.rand(edges, 1, device="cuda", requires_grad=True)
         index = torch.randint(max(1, nodes), (2, edges), device="cuda")
-        args = x, None, weights, index, None, None, cutoff, parameters
-        actual, expected = (
-            compiled(*args, vectors=vectors),
-            module(*args, vectors=vectors),
-        )
+        args = x, vectors, weights, cutoff, up.weight, down.weight, index
+        actual, expected = compiled(*args), evaluate(*args)
         torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-10)
         gradients = [
             torch.autograd.grad(
@@ -1162,16 +1202,8 @@ def test_uv_o2_transverse_compile(backend, double_precision):
             from torch.fx.experimental.proxy_tensor import make_fx
 
             def energy_forces(x, vectors, weights, cutoff, up_weight, down_weight):
-                output = module(
-                    x,
-                    None,
-                    weights,
-                    index,
-                    None,
-                    None,
-                    cutoff,
-                    (up_weight, up.bias, down_weight, down.bias),
-                    vectors=vectors,
+                output = evaluate(
+                    x, vectors, weights, cutoff, up_weight, down_weight, index,
                 )
                 energy = output.square().sum()
                 forces = -torch.autograd.grad(energy, vectors, create_graph=True)[0]
