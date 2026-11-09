@@ -36,10 +36,11 @@ misc:
     # Prefer dtype.matmul; explicit environment values must agree with it and each other.
     # TACE_MATMUL_PRECISION: "tf32" # ieee or tf32; unset uses the precision policy
     # TACE_USE_TF32: "1" # alternative shorthand: 0=ieee, 1=tf32
-    # TACE_APPLY_U_SHIFT: "0" # default 0; 1 adds built-in element offsets to energy labels
+    # TACE_USE_U_SHIFT: "0" # default 0; 1 corrects raw selective-PBE+U energy labels online
     # TACE_USE_DENS: "0" # default 0; 1 adds DeNS noise training and model parameters
     # DeNS requires force labels, compatible DeNS losses, and readout_emlp.use_alllayer=false.
-    # U-shift and DeNS preprocessing also apply to validation/test batches.
+    # U-shift applies to train/valid/test labels; statistics and filters use raw labels.
+    # DeNS augmentation and noise prediction run only during training.
   # Set import-time/runtime options in the shell before starting Python:
   # export TACE_USE_MATRIX_WEIGHT=1 # default 0; matrix-shaped Linear weights for e.g. Muon
   # export CUDA_VISIBLE_DEVICES=0,1 # visible GPUs and their order; unset exposes available GPUs

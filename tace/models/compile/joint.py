@@ -2,6 +2,7 @@
 
 import inspect
 import logging
+from contextlib import nullcontext
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -190,6 +191,17 @@ class JointTraining:
                 else None
             )
         specs = []
+        dynamic_axes = {}
+        axis_names = {
+            id(value): name
+            for name, value in (
+                ("nodes", nodes),
+                ("edges", edges),
+                ("pairs", pairs),
+                ("pair_edges", pair_edges),
+            )
+            if value is not None
+        }
         for key in self.keys:
             dims = [None] * data[key].ndim
             if key in node_fields:
@@ -200,59 +212,141 @@ class JointTraining:
                 dims[pair_fields[key]] = pairs
             elif key in pair_edge_fields:
                 dims[0] = pair_edges
+            dynamic_axes[key] = {
+                i: axis_names[id(dim)] for i, dim in enumerate(dims) if dim is not None
+            }
             specs.append(TensorSpec(dims))
         specs.extend([None] * len(state))
-        with torch.enable_grad():
-            graph = make_fx(
-                compute,
-                decomposition_table=get_decompositions(
-                    [
-                        torch.ops.aten.silu_backward.default,
-                        torch.ops.aten.constant_pad_nd.default,
-                    ]
-                ),
-                tracing_mode="fake",
-                _allow_non_fake_inputs=True,
-                _error_on_data_dependent_ops=True,
-                dynamic_shapes=ShapesSpec(ParamsSpec({"*args": specs})),
-            )(*[data[key].detach().contiguous().clone() for key in self.keys], *state)
-        _strip_saved_tensor_detach(graph)
-        graph = _rebuild_graph_module(graph)
-        _replace_sym_numel(graph)
-        _remove_full_slice_scatter(graph)
-        graph.graph.eliminate_dead_code()
-        graph.recompile()
-        logging.info(
-            "Compiling joint training graph: %d operations", len(graph.graph.nodes)
-        )
-        placeholders = [node for node in graph.graph.nodes if node.op == "placeholder"]
+        from .artifact import JointArtifactCache
+
         backend = getattr(model.readout_fn, "compile_backend", "inductor")
-        # Derivatives are explicit here; no later backward needs these buffers.
-        if backend == "inductor":
-            with torch.no_grad():
-                self.run = torch._inductor.standalone_compile(
-                    graph,
-                    [node.meta["val"].detach() for node in placeholders],
-                    dynamic_shapes="from_graph",
-                    options={
-                        "config_patches": dict(_inductor_options(), inplace_buffers=True)
-                    },
-                    donate_graph_module=True,
-                )
-        else:
-            self.run = torch.compile(
-                graph,
-                fullgraph=True,
-                dynamic=None,
-                dynamic_shapes=ShapesSpec(
-                    {
-                        node.name: spec
-                        for node, spec in zip(placeholders, specs)
-                        if spec is not None
-                    }
+        runtime_values = tuple(
+            data[key].detach().contiguous() for key in self.keys
+        ) + tuple(value.detach() for value in state)
+        cache = (
+            JointArtifactCache.create(
+                module=self.module,
+                keys=self.keys,
+                parameter_names=self.parameter_names,
+                buffer_names=self.buffer_names,
+                trainable=self.trainable,
+                entries=entries,
+                values=runtime_values,
+                dynamic_axes=dynamic_axes,
+                options=dict(
+                    _inductor_options(),
+                    inplace_buffers=True,
+                    keep_static_cubin_raw=True,
                 ),
-                backend=backend,
             )
+            if backend == "inductor"
+            else None
+        )
+        self.artifact_info = cache.info if cache is not None else {"status": "disabled"}
+        with cache.transaction() if cache is not None else nullcontext():
+            if cache is not None:
+                loaded = cache.load()
+                if loaded is not None:
+                    self.run = loaded
+                    return
+            with torch.enable_grad():
+                graph = make_fx(
+                    compute,
+                    decomposition_table=get_decompositions(
+                        [
+                            torch.ops.aten.silu_backward.default,
+                            torch.ops.aten.constant_pad_nd.default,
+                        ]
+                    ),
+                    tracing_mode="fake",
+                    _allow_non_fake_inputs=True,
+                    _error_on_data_dependent_ops=True,
+                    dynamic_shapes=ShapesSpec(ParamsSpec({"*args": specs})),
+                )(
+                    *[data[key].detach().contiguous().clone() for key in self.keys],
+                    *state,
+                )
+            from equivariantx.utils.metadata import compact_metadata
+
+            metadata_arguments = {
+                "eqx.edge_program.default": (0,),
+                "eqx.o3_contraction.default": (0, 1),
+                "eqx.local_channel_product.default": (0, 1),
+            }
+            for node in graph.graph.nodes:
+                positions = metadata_arguments.get(str(node.target), ())
+                if positions:
+                    arguments = list(node.args)
+                    for position in positions:
+                        if position < len(arguments) and isinstance(
+                            arguments[position], str
+                        ):
+                            arguments[position] = compact_metadata(arguments[position])
+                    node.args = tuple(arguments)
+            _strip_saved_tensor_detach(graph)
+            graph = _rebuild_graph_module(graph)
+            _replace_sym_numel(graph)
+            _remove_full_slice_scatter(graph)
+            graph.graph.eliminate_dead_code()
+            graph.recompile()
+            constants = ()
+            if cache is not None:
+                try:
+                    graph, constants = cache.lift_constants(graph, runtime_values)
+                except (TypeError, ValueError) as error:
+                    cache.info.update(status="unsupported", reason=str(error))
+                    logging.warning(
+                        "Joint constant persistence unsupported; original compilation retained: %s",
+                        error,
+                    )
+                    cache = None
+            logging.info(
+                "Compiling joint training graph: %d operations", len(graph.graph.nodes)
+            )
+            placeholders = [
+                node for node in graph.graph.nodes if node.op == "placeholder"
+            ]
+            output_node = next(
+                node for node in graph.graph.nodes if node.op == "output"
+            )
+            output_schema = {
+                "none_mask": [value is None for value in output_node.args[0]]
+            }
+            # Derivatives are explicit here; no later backward needs these buffers.
+            if backend == "inductor":
+                from .metadata_comments import omit_provenance_comments
+
+                with torch.no_grad(), omit_provenance_comments():
+                    self.run = torch._inductor.standalone_compile(
+                        graph,
+                        [node.meta["val"].detach() for node in placeholders],
+                        dynamic_shapes="from_graph",
+                        options={
+                            "config_patches": dict(
+                                _inductor_options(),
+                                inplace_buffers=True,
+                                keep_static_cubin_raw=True,
+                            )
+                        },
+                        donate_graph_module=True,
+                    )
+            else:
+                self.run = torch.compile(
+                    graph,
+                    fullgraph=True,
+                    dynamic=None,
+                    dynamic_shapes=ShapesSpec(
+                        {
+                            node.name: spec
+                            for node, spec in zip(placeholders, specs)
+                            if spec is not None
+                        }
+                    ),
+                    backend=backend,
+                )
+
+            if cache is not None:
+                self.run = cache.save(self.run, output_schema, constants)
 
     def __call__(self, data):
         state = _state_values(self.module, self.parameter_names, self.buffer_names)

@@ -197,25 +197,39 @@ Parameter layout and training features
      - Store supported TACE equivariant Linear weights as separate path
        matrices instead of one flat parameter. This exposes matrix parameters
        to optimizers such as HybridMuon. Set it before importing TACE.
-   * - ``TACE_APPLY_U_SHIFT``
+   * - ``TACE_USE_U_SHIFT``
      - ``0``
-     - Add built-in element reference offsets to energy targets for structures
-       containing oxygen or fluorine. Offsets cover V, Cr, Mn, Fe, Co, Ni, Mo,
-       and W. This changes the energy labels supplied to the loss.
+     - Correct raw selective-PBE+U energy labels online. Structures containing
+       O or F receive negative per-metal offsets for V, Cr, Mn, Fe, Co, Ni, Mo,
+       and W. Source files and graph caches retain their original labels.
    * - ``TACE_USE_DENS``
      - ``0``
      - Enable DeNS position-noise augmentation, force conditioning, and noise
-       readout in spherical models. This changes the training objective and
-       adds model parameters.
+       readout during training in spherical models. This changes the training
+       objective and adds model parameters.
 
 Matrix-weight defaults are read when the Linear classes are imported;
 ``misc.env`` is too late for this option. Switching the environment alone does
 not convert an existing model's parameter layout. Packed EQX/e3nn parameters
 are not automatically split into Muon matrices.
 
-U-shift and DeNS preprocessing currently run in Lightning's shared step for
-training, validation, and test batches. Use U-shift only when the label
-convention requires these offsets. DeNS requires force labels (``forces`` or
+U-shift follows Eq. (4) and Table S1 of
+`arXiv:2601.21056 <https://arxiv.org/abs/2601.21056>`_. The correction is
+``E_shifted = E_raw + sum(n_M * delta_E_M)`` for structures containing O or F,
+including metal atoms outside their neighborhoods. Structures without O/F,
+including isolated metal atoms, receive zero correction. Forces, stress,
+and label weights remain unchanged because the offset depends only on composition.
+
+Set ``TACE_USE_U_SHIFT=1`` for training, validation, test, and
+``tace-eval --test 1`` against raw labels calculated with the Materials Project
+selective +U scheme. Statistics, fitted atomic references, and energy filtering
+use raw labels. The flag does not change graph or statistics cache keys.
+Predictions from the trained model already use the corrected energy convention.
+Do not enable this correction for PBE-only or already-corrected datasets.
+
+DeNS augmentation, force conditioning, and noise prediction run only during
+training. Validation and test use clean structures and the corresponding
+ordinary force/stress losses. DeNS requires force labels (``forces`` or
 ``direct_forces``), compatible
 losses such as ``mse_dens_forces``, and
 ``model.config.readout_emlp.use_alllayer: false``. Set ``TACE_USE_DENS`` before
@@ -282,6 +296,10 @@ they are separate from the ``TACE_*`` model settings.
    * - ``TORCH_EXTENSIONS_DIR``
      - Override PyTorch's extension build-cache root, including EQX's launcher.
        When unset, PyTorch chooses its standard user cache directory.
+   * - ``TORCHINDUCTOR_CACHE_DIR``
+     - Override PyTorch's compiler cache directory. Compiled TACE training also
+       stores reusable joint programs in its ``tace/joint/v1`` subdirectory;
+       no additional TACE switch is required.
    * - ``XDG_CACHE_HOME``
      - EQX stores generated CUDA binaries in ``$XDG_CACHE_HOME/eqx/cuda``;
        its fallback is ``~/.cache/eqx/cuda``. TACE's own cache remains

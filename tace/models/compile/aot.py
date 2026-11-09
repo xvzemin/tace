@@ -24,8 +24,8 @@ from .wrapper import (
     _FlatE3nnLammpsCompileModel,
 )
 
-TACE_AOTI_FORMAT = "tace_graph_v2"
-LAMMPS_AOTI_FORMAT = "tace_lammps_v2"
+TACE_AOTI_FORMAT = "tace_graph_v1"
+LAMMPS_AOTI_FORMAT = "tace_lammps_v1"
 TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY = "tace_custom_ops_libs.txt"
 TACE_AOTI_LUNA_OPS_ENTRY = "tace_luna_ops.json"
 TACE_AOTI_INPUT_KEYS = (

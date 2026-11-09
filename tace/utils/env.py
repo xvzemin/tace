@@ -159,8 +159,8 @@ def select_acceleration(*backends: str, kernel: Optional[str] = None) -> Optiona
     )
 
 
-def get_tace_apply_u_shift():
-    return os.environ.get("TACE_APPLY_U_SHIFT", "0")
+def get_tace_use_u_shift():
+    return os.environ.get("TACE_USE_U_SHIFT", "0")
 
 
 def get_tace_use_dens():

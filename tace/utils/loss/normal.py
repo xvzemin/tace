@@ -47,9 +47,11 @@ class NormalLoss(torch.nn.Module):
     def forward(self, pred, label):
         total_loss = 0.0
         for i, func_name in enumerate(self.loss_function_name):
-            loss = LOSS_FN[func_name](
-                pred, label, **self.loss_function_kwargs[i]
-            )
+            kwargs = self.loss_function_kwargs[i]
+            if not self.training and "_dens_" in func_name:
+                func_name = func_name.replace("_dens_", "_")
+                kwargs = {k: v for k, v in kwargs.items() if k != "dens_loss_ratio"}
+            loss = LOSS_FN[func_name](pred, label, **kwargs)
             total_loss += loss * self.loss_property_weights[i]
         return total_loss
 

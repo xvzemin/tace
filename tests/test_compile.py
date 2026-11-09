@@ -95,8 +95,10 @@ def test_manual_gradient_sync_preserves_dtype_and_views(monkeypatch, backend):
 @pytest.mark.parametrize("uncertainty", [False, True])
 def test_joint_training_gradients(monkeypatch, backend, device, dtype, uncertainty):
     import inspect
+    from functools import wraps
 
     from tace.models.adapter import TensorModel
+    from tace.models.compile import joint
     from tace.utils.loss.normal import NormalLoss
     from tace.utils.loss.uncertainty import UncertaintyLoss
 
@@ -161,7 +163,29 @@ def test_joint_training_gradients(monkeypatch, backend, device, dtype, uncertain
         state = (*model.parameters(), *model.buffers(), *loss_fn.parameters())
         values = [value.detach().clone() for value in state]
         input_values = {key: value.detach().clone() for key, value in batch.items()}
-        actual, loss = model.forward_loss(batch, loss_fn)
+        if step and backend == "inductor":
+            program = next(iter(model._compiled_cache.values()))
+            assert program.artifact_info["status"] in ("saved", "hit")
+            model._compiled_cache.clear()
+
+            @wraps(joint.make_fx)
+            def unexpected_compile(*args, **kwargs):
+                pytest.fail(
+                    "A matching training artifact must load without tracing or compiling"
+                )
+
+            with monkeypatch.context() as cached:
+                cached.setattr(joint, "make_fx", unexpected_compile)
+                cached.setattr(
+                    torch._inductor, "standalone_compile", unexpected_compile
+                )
+                actual, loss = model.forward_loss(batch, loss_fn)
+            assert (
+                next(iter(model._compiled_cache.values())).artifact_info["status"]
+                == "hit"
+            )
+        else:
+            actual, loss = model.forward_loss(batch, loss_fn)
         current = (*model.parameters(), *model.buffers(), *loss_fn.parameters())
         assert len(current) == len(state)
         for original, value, saved in zip(state, current, values):
@@ -221,6 +245,104 @@ def test_joint_loss_aliases_and_scaling(device):
     torch.testing.assert_close(a.grad, torch.ones_like(shared))
     torch.testing.assert_close(b.grad, torch.full_like(shared, 5.0))
     torch.testing.assert_close(shared, torch.ones_like(shared))
+
+
+def test_joint_artifact_contract(tmp_path, monkeypatch):
+    from tace.models.compile.artifact import (
+        FORMAT_VERSION,
+        JointArtifactCache,
+        module_context,
+        pack_constants,
+        runtime_signature,
+        storage_aliases,
+        tensor_contract,
+        unpack_constants,
+    )
+
+    assert FORMAT_VERSION == "v1"
+    module = torch.nn.Linear(2, 2)
+    module.register_buffer("scale", torch.ones(2))
+    module.settings = {"weight": 1.0, "statistics": [2.0]}
+    context = module_context(module)
+    with torch.no_grad():
+        module.weight.add_(1)
+        module.scale.mul_(2)
+    assert module_context(module) == context
+    assert module_context(deepcopy(module)) == context
+    module.settings["weight"] = 2.0
+    assert module_context(module) != context
+    module.settings["weight"] = 1.0
+    module.settings["statistics"][0] = 3.0
+    assert module_context(module) != context
+
+    values = (torch.randn(4, 3), torch.randn(4), torch.randn(2, 2).T)
+    contract = {
+        "tensor_inputs": [
+            tensor_contract(value, {0: "nodes"} if i < 2 else {}, i < 2)
+            for i, value in enumerate(values)
+        ],
+        "storage_aliases": storage_aliases(values),
+        "dynamic_min": 2,
+    }
+    cache = JointArtifactCache(tmp_path, contract)
+    assert cache.load() is None
+    cache.binary.write_bytes(b"incomplete")
+    cache.manifest.write_text(
+        json.dumps({"contract": contract, "binary_sha256": "invalid"})
+    )
+    assert cache.load() is None
+    assert cache.info["status"] == "invalid"
+    assert cache.validate_inputs(values) == {"nodes": 4}
+    unseen = (torch.randn(6, 3), torch.randn(6), values[2])
+    assert cache.validate_inputs(unseen) == {"nodes": 6}
+    for bad in (
+        (unseen[0], values[1], values[2]),
+        (values[0].double(), values[1], values[2]),
+        (values[0], values[1], values[2].contiguous()),
+        (
+            values[0],
+            values[1],
+            torch.empty(8, dtype=values[2].dtype).as_strided((2, 2), (1, 2), 4),
+        ),
+        (values[0][:1], values[1][:1], values[2]),
+    ):
+        with pytest.raises(ValueError):
+            cache.validate_inputs(bad)
+
+    raw = torch.arange(12, dtype=torch.float64)
+    constants = (
+        raw[2:10:2],
+        raw.view(3, 4).T,
+        torch.empty(0),
+        torch.empty(0, dtype=torch.int64),
+    )
+    packed, specs = pack_constants(constants)
+    restored = unpack_constants(packed, specs)
+    for a, b in zip(constants, restored):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+        assert a.stride() == b.stride()
+        assert a.storage_offset() == b.storage_offset()
+    assert torch._C._is_alias_of(restored[0], restored[1])
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "same GPU")
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
+    assert runtime_signature(torch.device("cuda:0"), {}) != runtime_signature(
+        torch.device("cuda:1"), {}
+    )
+
+
+def test_compile_metadata_comments_restore():
+    from torch._inductor import ir
+    from torch._inductor.codegen import triton
+
+    from tace.models.compile.metadata_comments import omit_provenance_comments
+
+    original = (ir.get_kernel_metadata, triton.get_kernel_metadata)
+    with pytest.raises(RuntimeError, match="compiler error"):
+        with omit_provenance_comments():
+            assert ir.get_kernel_metadata() == ("", "")
+            assert triton.get_kernel_metadata() == ("", "")
+            raise RuntimeError("compiler error")
+    assert (ir.get_kernel_metadata, triton.get_kernel_metadata) == original
 
 
 def test_compiled_shared_state(double_precision):
@@ -671,17 +793,19 @@ def test_model_dtype_conversion(space):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize(
-    "interaction,compiled,skip",
+    "interaction,compiled,skip,u_shift",
     [
-        ("cgtp", False, False),
-        ("uv_o2", False, False),
-        ("uv_rra_o2", False, False),
-        ("cgtp", True, False),
-        ("cgtp", True, True),
+        ("cgtp", False, False, False),
+        ("uv_o2", False, False, False),
+        ("uv_rra_o2", False, False, False),
+        ("cgtp", True, False, False),
+        ("cgtp", True, True, False),
+        ("cgtp", False, False, True),
+        ("cgtp", True, False, True),
     ],
 )
 def test_lightning_model_training_precision(
-    monkeypatch, dtype, interaction, compiled, skip
+    monkeypatch, dtype, interaction, compiled, skip, u_shift
 ):
     import inspect
 
@@ -691,6 +815,7 @@ def test_lightning_model_training_precision(
     from tace.lightning import create_model
     from tace.lightning.lit_model import LightningWrapperModel
 
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "1" if u_shift else "0")
     if compiled:
         if "dynamic_shapes" not in inspect.signature(torch.compile).parameters:
             pytest.skip("Joint training requires explicit dynamic shapes")
@@ -713,8 +838,13 @@ def test_lightning_model_training_precision(
     config["radial_basis"]["apply_cutoff"] = False
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
+    numbers = [8, 26] if u_shift else [1]
     statistics = [
-        {"atomic_numbers": [1], "atomic_energy": {1: 0.0}, "avg_num_neighbors": 2.0}
+        {
+            "atomic_numbers": numbers,
+            "atomic_energy": dict.fromkeys(numbers, 0.0),
+            "avg_num_neighbors": 2.0,
+        }
     ]
     model = create_model(config, statistics, ["energy", "forces"], [])
     model.readout_fn.compile_backend = "eager"
@@ -724,9 +854,17 @@ def test_lightning_model_training_precision(
     assert model.readout_fn.atomic_numbers.dtype == torch.int64
 
     class TrainingModel(LightningWrapperModel):
+        def _process_batch(self, batch):
+            torch.testing.assert_close(
+                batch["energy"],
+                torch.full_like(batch["energy"], -2.85 if u_shift else 1.0),
+            )
+            return super()._process_batch(batch)
+
         def training_step(self, batch, batch_idx):
             loss = super().training_step(batch, batch_idx)
             assert loss.dtype == torch.float64 and torch.isfinite(loss)
+            assert (batch["energy"] == 1.0).all()
             if compiled:
                 assert len(self.model._compiled_cache) == 1
             return loss
@@ -755,6 +893,9 @@ def test_lightning_model_training_precision(
     for _ in range(4):
         batch = _magnetic_embedding_sample()
         batch.pop("initial_noncollinear_magmoms")
+        if u_shift:
+            batch["atomic_numbers"] = torch.tensor([26, 26, 8])
+            batch["node_type"] = torch.tensor([1, 1, 0])
         batch.update(
             energy=torch.ones(1),
             forces=torch.ones(3, 3),
@@ -999,6 +1140,7 @@ def test_compile_direct_hessian(dtype, interaction_type):
             prefer_deferred_runtime_asserts_over_guards=True,
         )
     metadata = _export_metadata(model, keys, outputs)
+    assert metadata["tace_format"] == "tace_graph_v1"
     loaded = AOTICompiledTensorModel(exported.module(), metadata, device)
     sample.pop("direct_hessian_pair_index")
     sample.pop("direct_hessian_edge_pairs")

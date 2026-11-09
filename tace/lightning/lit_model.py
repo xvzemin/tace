@@ -20,11 +20,11 @@ from torchmetrics import MetricCollection
 
 from tace.dataset.quantity import get_embedding_property, get_target_property
 from tace.foundations import resolve_model_path
+from tace.foundations.u_shift import shift_energy_labels
 from tace.models.adapter import TensorModel
 from tace.utils.env import (
     DEVICE,
     DTYPE,
-    get_tace_apply_u_shift,
     get_tace_use_dens,
     set_tf32,
 )
@@ -38,7 +38,6 @@ from .lora import to_lora_model
 from .loss_skip import LossSkipController
 from .optimizer import get_optimizer_param_groups
 from .torch_model import create_model
-from .u_shift import apply_u_shift
 
 
 def get_class_from_cfg(cfg):
@@ -148,11 +147,10 @@ class LightningWrapperModel(L.LightningModule):
     def _shared_step(self, batch, batch_idx, prefix):
 
         with torch.no_grad():
-            if get_tace_apply_u_shift() == "1":
-                batch["energy"] = apply_u_shift(batch, batch["energy"])
+            batch = shift_energy_labels(batch)
 
-            if get_tace_use_dens() == "1":
-                batch = add_gaussian_noise_to_position(batch)
+            if prefix == "train" and get_tace_use_dens() == "1":
+                batch = add_gaussian_noise_to_position(copy.copy(batch))
 
         output, loss = self._process_batch(batch)
 

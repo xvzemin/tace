@@ -59,7 +59,11 @@ class UncertaintyLoss(nn.Module):
         for i, (p, fn_name) in enumerate(
             zip(self.loss_property, self.loss_function_name)
         ):
-            p_loss = LOSS_FN[fn_name](pred, label, **self.loss_function_kwargs[i])
+            kwargs = self.loss_function_kwargs[i]
+            if not self.training and "_dens_" in fn_name:
+                fn_name = fn_name.replace("_dens_", "_")
+                kwargs = {k: v for k, v in kwargs.items() if k != "dens_loss_ratio"}
+            p_loss = LOSS_FN[fn_name](pred, label, **kwargs)
             log_sigma = self.log_sigmas[p].to(DATA_DTYPE)
             regularizer = log_sigma * has_valid_labels(label, p)
             total_loss += 0.5 * torch.exp(-log_sigma) * p_loss + regularizer

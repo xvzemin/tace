@@ -540,13 +540,20 @@ def test_contraction_source_reuses_polynomials():
 
 
 def test_shared_metadata_cache():
-    from equivariantx.utils.metadata import parse_metadata
+    from equivariantx.utils.metadata import compact_metadata, parse_metadata
 
     specification = (2, ((0, 1, "uvu", True, 0.5),))
     metadata = repr(specification)
     result = parse_metadata(metadata)
     assert result == specification
     assert parse_metadata(metadata) is result
+    assert compact_metadata(metadata) == metadata
+    large = repr(specification * 1000)
+    packed = compact_metadata(large)
+    assert len(packed) < len(large)
+    assert compact_metadata(packed) == packed
+    assert parse_metadata(packed) == specification * 1000
+    assert parse_metadata(packed) is parse_metadata(packed)
     assert parse_metadata("None") is None
     with pytest.raises(ValueError):
         parse_metadata("tuple()")

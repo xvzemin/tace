@@ -3,6 +3,7 @@ import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -26,6 +27,142 @@ from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.mask_metrics import MaskMAE, MaskRMSE
 from tace.utils.optimizer.hybrid_muon import HybridMuonOptimizer
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("column", [False, True])
+def test_u_shift_energy_convention(dtype, column):
+    from ase import Atoms
+    from torch_geometric.data import Batch, Data
+
+    from tace.foundations.u_shift import apply_u_shift, apply_wtc_u_shift
+
+    metals = [23, 24, 25, 26, 27, 28, 42, 74]
+    offsets = [-2.271, -2.458, -1.602, -1.925, -2.004, -2.586, -4.895, -5.875]
+    structures = [[z, ligand] for ligand in (8, 9) for z in metals]
+    structures += [[z] for z in range(1, 90)] + [[26, 26, 8], [26, 74], [8, 9]]
+    expected = offsets * 2 + [0.0] * 89 + [-3.85, 0.0, 0.0]
+    graphs = [
+        Data(
+            atomic_numbers=torch.tensor(numbers),
+            num_nodes=len(numbers),
+            # The correction applies even when the metal has no O/F neighbor.
+            edge_index=torch.empty(2, 0, dtype=torch.long),
+        )
+        for numbers in structures
+    ]
+    batch = Batch.from_data_list(graphs)
+    energy = torch.full(
+        (len(graphs), 1) if column else (len(graphs),), -10.0, dtype=dtype
+    )
+    reference = energy + energy.new_tensor(expected).reshape_as(energy)
+    torch.testing.assert_close(apply_u_shift(batch, energy), reference)
+    compiled = torch.compile(apply_u_shift, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(batch.to_dict(), energy), reference)
+    assert (energy == -10.0).all()
+    for graph, numbers, offset in zip(graphs, structures, expected):
+        atoms = Atoms(numbers=numbers)
+        shifted = apply_wtc_u_shift(atoms, -10.0)
+        assert shifted == pytest.approx(-10.0 + offset)
+        assert apply_wtc_u_shift(atoms, shifted, minus=True) == pytest.approx(-10.0)
+        torch.testing.assert_close(apply_u_shift(graph, energy[0]), energy[0] + offset)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("dens", [False, True])
+@pytest.mark.parametrize("prefix", ["train", "val", "test_0"])
+def test_shared_step_preprocessing_preserves_raw_batch(
+    monkeypatch, enabled, dens, prefix
+):
+    from torch_geometric.data import Batch, Data
+
+    from tace.foundations.u_shift import shift_energy_labels
+    from tace.lightning import lit_model
+
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "1" if enabled else "0")
+    monkeypatch.setenv("TACE_USE_DENS", "1" if dens else "0")
+    monkeypatch.setattr(
+        lit_model,
+        "add_gaussian_noise_to_position",
+        lambda batch: add_gaussian_noise_to_position(
+            batch,
+            prob=1.0,
+            corrupt_ratio=1.0,
+            strict_max_ratio=None,
+            max_forces_norm=None,
+        ),
+    )
+    graphs = [
+        Data(
+            num_nodes=len(numbers),
+            atomic_numbers=torch.tensor(numbers),
+            energy=torch.tensor([-10.0], dtype=torch.float64),
+            positions=torch.randn(len(numbers), 3, dtype=torch.float64),
+            forces=torch.randn(len(numbers), 3, dtype=torch.float64),
+            stress=torch.randn(1, 3, 3, dtype=torch.float64),
+            energy_weight=torch.ones(1),
+            forces_weight=torch.ones(1),
+            stress_weight=torch.ones(1),
+        )
+        for numbers in ([26, 8], [26])
+    ]
+    batch = Batch.from_data_list(graphs)
+    original = batch.to_dict()
+    expected = batch.energy + batch.energy.new_tensor([-1.925 if enabled else 0, 0])
+    parameter = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    seen = []
+
+    def process(labels):
+        torch.testing.assert_close(labels.energy, expected)
+        if dens and prefix == "train":
+            assert labels.noise_mask.all()
+            torch.testing.assert_close(
+                labels.positions, original["positions"] + labels.noise_vec
+            )
+            assert not torch.equal(labels.positions, original["positions"])
+        else:
+            assert "noise_vec" not in labels and "noise_mask" not in labels
+            assert labels.positions is original["positions"]
+        for name in (
+            "forces",
+            "stress",
+            "energy_weight",
+            "forces_weight",
+            "stress_weight",
+        ):
+            assert labels[name] is original[name]
+        output = {"energy": parameter.expand_as(labels.energy)}
+        return output, (output["energy"] - labels.energy).square().mean()
+
+    def metrics_update(metrics, stage, output, labels, properties):
+        assert stage == prefix
+        torch.testing.assert_close(labels.energy, expected)
+        seen.append(stage)
+
+    monkeypatch.setattr(lit_model, "update_metrics", metrics_update)
+    wrapper = SimpleNamespace(
+        _process_batch=process,
+        skip_controller=None,
+        sync_dist=False,
+        log=lambda *args, **kwargs: None,
+        optimizers=lambda: SimpleNamespace(param_groups=[{"lr": 0.01}]),
+        loss_property=["energy"],
+        **{f"{prefix}_metrics": {}},
+    )
+    for index in range(2):
+        loss = lit_model.LightningWrapperModel._shared_step(
+            wrapper, batch, index, prefix
+        )
+        gradient = torch.autograd.grad(loss, parameter)[0]
+        torch.testing.assert_close(gradient, 2 * (parameter - expected).mean())
+        current = batch.to_dict()
+        assert all(current[key] is value for key, value in original.items())
+        assert (batch.energy == -10.0).all()
+    assert seen == [prefix, prefix]
+    labels = shift_energy_labels(batch.to_dict())
+    torch.testing.assert_close(labels["energy"], expected)
+    unlabeled = {"atomic_numbers": batch.atomic_numbers}
+    assert shift_energy_labels(unlabeled) is unlabeled
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -482,6 +619,43 @@ def test_loss_function_kwargs_are_forwarded(loss_cls, loss_weight):
     )
     expected = loss_weight * mse_dens_forces(pred, label, dens_loss_ratio=0.25)
     torch.testing.assert_close(loss(pred, label), expected)
+
+
+@pytest.mark.parametrize("loss_cls", [NormalLoss, UncertaintyLoss])
+@pytest.mark.parametrize("kind", ["mse", "mae", "huber", "l2mae"])
+def test_dens_evaluation_uses_ordinary_losses(loss_cls, kind):
+    keys = ["forces", "direct_forces", "stress", "direct_stress"]
+    functions = [
+        f"{kind}_dens_forces",
+        f"{kind}_dens_direct_forces",
+        f"{kind}_dens_voigt_stress",
+        f"{kind}_dens_direct_stress",
+    ]
+    kwargs = [{"dens_loss_ratio": 0.25}, {"dens_loss_ratio": 0.5}, {}, {}]
+    if kind == "huber":
+        kwargs = [dict(item, huber_delta=0.1) for item in kwargs]
+    loss = loss_cls(keys, functions, [1.0] * 4, kwargs).eval()
+    reference = loss_cls(
+        keys,
+        [name.replace("_dens_", "_") for name in functions],
+        [1.0] * 4,
+        [{k: v for k, v in item.items() if k != "dens_loss_ratio"} for item in kwargs],
+    ).eval()
+    labels = {"batch": torch.tensor([0, 0, 1]), "entropy": torch.tensor([1.0, 0.5])}
+    predictions = {}
+    for key in keys:
+        shape = (3, 3) if "forces" in key else (2, 3, 3)
+        predictions[key] = torch.randn(shape, requires_grad=True)
+        labels[key] = torch.randn(shape)
+        labels[f"{key}_weight"] = torch.tensor([1.0, 0.0])
+    actual, expected = loss(predictions, labels), reference(predictions, labels)
+    torch.testing.assert_close(actual, expected)
+    gradients = torch.autograd.grad(actual, tuple(predictions.values()))
+    expected_gradients = torch.autograd.grad(expected, tuple(predictions.values()))
+    for gradient, expected_gradient in zip(gradients, expected_gradients):
+        torch.testing.assert_close(gradient, expected_gradient)
+    assert loss.loss_function_name == functions
+    assert loss.loss_function_kwargs == kwargs
 
 
 def test_per_atom_element_weights_follow_node_type_order():

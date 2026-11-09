@@ -7,14 +7,24 @@ from functools import lru_cache
 
 import torch
 
-__all__ = ["KernelPlan", "kernel_plan", "parse_metadata"]
+__all__ = ["KernelPlan", "compact_metadata", "kernel_plan", "parse_metadata"]
 
 
 @lru_cache(maxsize=256)
 @torch.compiler.assume_constant_result
 def parse_metadata(metadata: str):
     """Decode an immutable, tensor-free specification once at trace time."""
+    if metadata.startswith("z:"):
+        metadata = zlib.decompress(bytes.fromhex(metadata[2:])).decode()
     return literal_eval(metadata)
+
+
+@lru_cache(maxsize=256)
+def compact_metadata(metadata: str):
+    """Compact large specifications embedded in compiled operator graphs."""
+    if len(metadata) < 4096 or metadata.startswith("z:"):
+        return metadata
+    return "z:" + zlib.compress(metadata.encode()).hex()
 
 
 @dataclass(eq=False)

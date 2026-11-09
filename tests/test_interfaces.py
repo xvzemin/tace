@@ -6,6 +6,7 @@ No models are downloaded during the test run.
 
 import importlib
 import os
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -20,6 +21,98 @@ from ase.md.verlet import VelocityVerlet
 
 from tace.interface.ase import MagneticFIRE, TACEAseCalc
 from tace.models.adapter import TensorModel
+
+
+@pytest.mark.parametrize("graph_input", [False, True])
+@pytest.mark.parametrize("test_mode", [0, 1])
+def test_eval_u_shift_only_changes_reference_labels(
+    tmp_path, monkeypatch, graph_input, test_mode
+):
+    from ase.io import read
+
+    from tace.dataset.element import build_element_lookup
+    from tace.dataset.graph import from_atoms
+    from tace.dataset.quantity import KeySpecification
+    from tace.dataset.store import write_graphs
+    from tace.scripts import eval as eval_script
+
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "1")
+    atoms_list = [Atoms("FeO", positions=[[0, 0, 0], [10, 0, 0]]), Atoms("Fe")]
+    for atoms in atoms_list:
+        atoms.info["energy"] = -10.0
+    if graph_input:
+        source = tmp_path / "cache"
+        dataset = write_graphs(
+            [
+                from_atoms(
+                    None,
+                    atoms,
+                    cutoff=2.0,
+                    max_neighbors=None,
+                    keyspec=KeySpecification.from_defaults(),
+                    target_property=["energy"],
+                    embedding_property=[],
+                    neighborlist_backend="ase",
+                )
+                for atoms in atoms_list
+            ],
+            [source],
+            "test0",
+        )
+        dataset.close()
+        source = source / "*.lmdb"
+    else:
+        source = tmp_path / "input.xyz"
+        write(source, atoms_list)
+    output = tmp_path / "predicted.xyz"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tace-eval",
+            "-i",
+            str(source),
+            "-o",
+            str(output),
+            "-m",
+            "model.pt",
+            "--device",
+            "cpu",
+            "--nl_backend",
+            "ase",
+            "--test",
+            str(test_mode),
+        ],
+    )
+    prediction = torch.tensor([-11.925, -10.0], dtype=torch.float64)
+    model = Mock(side_effect=lambda batch: {"energy": prediction})
+    model.parameters.return_value = []
+    model.get_max_neighbors.return_value = None
+    model.get_cutoff.return_value = 2.0
+    model.get_torch_element.return_value = build_element_lookup([8, 26])
+    model.get_target_property.return_value = ["energy"]
+    model.get_embedding_property.return_value = []
+    monkeypatch.setattr(eval_script, "load_tace", lambda *args, **kwargs: model)
+    update_metrics = eval_script.update_metrics
+    labels_seen = []
+
+    def check_metrics(metrics, prefix, predictions, labels, properties):
+        labels_seen.append(labels.energy.clone())
+        update_metrics(metrics, prefix, predictions, labels, properties)
+
+    monkeypatch.setattr(eval_script, "update_metrics", check_metrics)
+    eval_script.main()
+    assert len(labels_seen) == test_mode
+    if test_mode:
+        torch.testing.assert_close(labels_seen[0], prediction)
+    assert [atoms.info["TACE_energy"] for atoms in read(output, ":")] == pytest.approx(
+        prediction.tolist()
+    )
+    if not graph_input:
+        assert [atoms.get_potential_energy() for atoms in read(source, ":")] == [
+            -10.0,
+            -10.0,
+        ]
 
 
 @pytest.mark.parametrize("interface", ["ase", "general_ase", "torchsim", "nvalchemi"])
@@ -386,7 +479,9 @@ class PairReadout(torch.nn.Module):
         self.fidelity = {0: "first", 1: "second"}
 
     def forward(self, data, graph):
-        node_energy = (data["node_type"] == 1).to(torch.float64) + 3 * graph.node_fidelity
+        node_energy = (data["node_type"] == 1).to(
+            torch.float64
+        ) + 3 * graph.node_fidelity
         node_energy = node_energy.index_add(
             0, data["edge_index"][0], graph.edge_vector.square().sum(-1)
         )
@@ -508,7 +603,9 @@ def test_torchsim_geometry_precision(torchsim_state, torchsim_calculator, dtype)
     assert inputs[0]["node_type"].dtype == torch.int64
     assert inputs[0]["edge_shifts"].dtype == torch.int64
     assert "node_attrs" not in inputs[0]
-    assert all(output[key].dtype == torch.float64 for key in ("energy", "forces", "stress"))
+    assert all(
+        output[key].dtype == torch.float64 for key in ("energy", "forces", "stress")
+    )
 
 
 @pytest.mark.parametrize("periodic", [False, True])

@@ -642,7 +642,7 @@ class SphericalTACE(torch.nn.Module):
 
         # === DeNS noise ===
         dens_noise = None
-        if hasattr(self, "dens_noise_readouts"):
+        if self.training and hasattr(self, "dens_noise_readouts"):
             noise_list = []
             for ii, dens_noise_readout in enumerate(self.dens_noise_readouts):
                 if not self.use_alllayer:

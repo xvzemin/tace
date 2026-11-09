@@ -1694,9 +1694,23 @@ def test_vector_readouts(small_system, monkeypatch, denoising, all_layers):
         assert gradients and all(torch.isfinite(g).all() for g in gradients)
         assert any(g.abs().sum() > 0 for g in gradients)
     model.eval()
+    data.pop("forces")
+    if denoising:
+        monkeypatch.setattr(
+            model.readout_fn.representation,
+            "_forward_dens_forces_encoding",
+            lambda *args: pytest.fail("Evaluation must not condition on force labels"),
+        )
+        for head in model.readout_fn.dens_noise_readouts:
+            monkeypatch.setattr(
+                head,
+                "forward",
+                lambda *args: pytest.fail("Evaluation must not predict noise"),
+            )
     with torch.no_grad():
         output = model(data)
-    assert all(torch.isfinite(output[key]).all() for key in keys)
+    assert torch.isfinite(output["direct_forces"]).all()
+    assert output["noise_vec"] is None
 
 
 @pytest.mark.parametrize("training", [False, True])

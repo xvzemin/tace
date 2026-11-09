@@ -23,6 +23,7 @@ from tace.dataset.quantity import (
     update_keyspec_from_kwargs,
 )
 from tace.dataset.read import HOW_TO_READ, check_keys
+from tace.foundations.u_shift import shift_energy_labels
 from tace.lightning import load_tace
 from tace.utils.metrics import build_metrics, update_metrics
 from tace.utils.utils import num_params
@@ -222,6 +223,8 @@ def main():
                 )
             )
         batch.to(args.device)
+        if args.test == 1:
+            batch = shift_energy_labels(batch)
         if graph_input:
             batch.node_type = element.z2idx(batch.atomic_numbers)
         for p in target_property:

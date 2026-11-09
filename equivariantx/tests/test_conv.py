@@ -310,6 +310,8 @@ def test_o3_rowwise_tensor_product(rows, shared, copies, device, double_precisio
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 def test_partitioned_paths(monkeypatch, double_precision, implementation):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
     if implementation == "o3":
         from equivariantx.backends.cuda.o3 import convolution
     else:

@@ -4,6 +4,7 @@ import math
 import multiprocessing
 import os
 import pickle
+import shutil
 import sqlite3
 import struct
 import time
@@ -20,11 +21,13 @@ from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.db import connect
 from ase.io import write
+from filelock import FileLock, Timeout
 from omegaconf import OmegaConf
 from torch.utils.data import SequentialSampler
 from torch_geometric.data import Batch, Data
 from torch_geometric.loader import DataLoader
 
+import tace.dataset.cache as cache_module
 import tace.dataset.statistics as statistics_module
 from tace.dataset.cache import (
     ARRAY_CODEC,
@@ -2313,7 +2316,8 @@ def test_independent_graph_store_uses_shared_writer_lock(tmp_path):
     assert not (tmp_path / "train_failed.json").exists()
 
 
-def test_raw_and_statistics_cache_dependencies_are_separate(tmp_path):
+def test_raw_and_statistics_cache_dependencies_are_separate(tmp_path, monkeypatch):
+    monkeypatch.delenv("TACE_USE_U_SHIFT", raising=False)
     source = tmp_path / "train.xyz"
     source.write_text("source")
     cfg = {
@@ -2332,6 +2336,11 @@ def test_raw_and_statistics_cache_dependencies_are_separate(tmp_path):
     keyspec = KeySpecification.from_defaults()
     raw_key = source_cache_key(cfg, keyspec=keyspec)
     stats_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "1")
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
+    assert source_cache_key(cfg, keyspec=keyspec) == raw_key
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "0")
+    assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
     cfg["dataset"]["filter"] = {"enabled": False, "max_forces": 1}
     assert statistics_cache_key(cfg, ["energy"], [], keyspec) == stats_key
     cfg["dataset"]["filter"]["enabled"] = True
@@ -2743,6 +2752,79 @@ def test_compute_atomic_energies_handles_all_fidelities_in_one_call():
     assert energies[0] == pytest.approx({1: 1.0, 2: 3.0})
     assert energies[1] == pytest.approx({1: 4.0, 2: 5.0})
     assert energies[2] == {1: 0.0, 2: 0.0}
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("loader_type", [DataLoader, StatisticsDataLoader])
+def test_u_shift_preserves_raw_statistics_fit_and_filter(
+    tmp_path, monkeypatch, compressed, loader_type
+):
+    numbers = [[26], [8], [26, 8], [26, 26, 8], [28, 9, 9], [26, 8]]
+    raw = [-2.0, -1.0, -2.0, -3.0, -3.0, 999.0]
+    atoms_list, graphs = [], []
+    for index, (zs, energy) in enumerate(zip(numbers, raw)):
+        atoms = Atoms(numbers=zs, positions=np.arange(len(zs) * 3).reshape(-1, 3))
+        atoms.info.update(energy=energy, energy_weight=float(index != 5))
+        atoms.arrays["forces"] = np.arange(len(zs) * 3).reshape(-1, 3).astype(float)
+        atoms_list.append(atoms)
+        graphs.append(
+            from_atoms(
+                None,
+                atoms,
+                cutoff=2.0,
+                max_neighbors=None,
+                keyspec=KeySpecification.from_defaults(),
+                target_property=["energy", "forces"],
+                embedding_property=[],
+                neighborlist_backend="ase",
+            )
+        )
+    dataset = write_graphs(
+        graphs, [tmp_path], "train", compressed=compressed, shard_size=2
+    )
+    before = _snapshot(tmp_path)
+    element = build_element_lookup([8, 9, 26, 28])
+    counts = np.array([[zs.count(z) for z in element.zs] for zs in numbers])
+    expected_fit = dict(
+        zip(element.zs, np.linalg.lstsq(counts[:5], raw[:5], rcond=None)[0])
+    )
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "1")
+    loader = loader_type(dataset, batch_size=2, shuffle=False)
+    fits = [
+        statistics_module.compute_atomic_energies(
+            atoms_list, element, KeySpecification.from_defaults(), [0]
+        ),
+        statistics_module.compute_atomic_energies_from_graphs(loader, element, [0]),
+    ]
+    incremental = statistics_module.AtomicEnergyFit(element.zs, [0])
+    for index in range(5):
+        incremental.update(0, counts[index : index + 1], raw[index : index + 1])
+    fits.append(incremental.result())
+    for fit in fits:
+        assert fit[0] == pytest.approx(expected_fit)
+    options = dict(
+        atomic_numbers=element.zs,
+        atomic_energies=[dict.fromkeys(element.zs, 0.0)],
+        target_property=["energy", "forces"],
+    )
+    accumulator = statistics_module._StatisticsAccumulator(**options)
+    for batch in loader:
+        accumulator.update(batch)
+    actual = accumulator.result()[0]
+    selected = filter_graphs(dataset, {"max_energy_per_atom": -1.5})
+    assert selected.indices.tolist() == [0]
+    assert float(selected[0].energy) == raw[0]
+    selected.close()
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "0")
+    selected = filter_graphs(dataset, {"max_energy_per_atom": -1.5})
+    assert selected.indices.tolist() == [0]
+    selected.close()
+    expected = _accumulator(graphs, options, batch_size=2).result()[0]
+    _assert_statistics_equal(actual, expected)
+    assert [float(graph.energy) for graph in dataset] == raw
+    assert [atoms.info["energy"] for atoms in atoms_list] == raw
+    dataset.close()
+    assert _snapshot(tmp_path) == before
 
 
 def test_energy_statistics_use_canonical_names(monkeypatch):
@@ -3428,3 +3510,357 @@ def test_parallel_statistics_reports_failure_and_reaps_its_workers(
     assert progress.total == 4
     assert progress.n == 1
     assert progress.disable
+
+
+def sample_graphs():
+    """Return tiny CPU graphs with nontrivial labels and integer topology."""
+    return [
+        Data(
+            num_nodes=len(numbers),
+            atomic_numbers=torch.tensor(numbers),
+            positions=torch.arange(len(numbers) * 3, dtype=torch.float64).reshape(
+                -1, 3
+            ),
+            edge_index=torch.stack(
+                (torch.arange(len(numbers)), torch.arange(len(numbers)))
+            ),
+            energy=torch.tensor([energy], dtype=torch.float64),
+            energy_weight=torch.ones(1, dtype=torch.float64),
+            forces=torch.ones(len(numbers), 3, dtype=torch.float64),
+            forces_weight=torch.ones(1, dtype=torch.float64),
+            fidelity_idx=torch.tensor(0),
+        )
+        for numbers, energy in (([26], 2.0), ([8], 3.0), ([26, 8], 5.0))
+    ]
+
+
+def make_cache(directory, *, stage="train", compressed=False, shard_size=1):
+    stored = write_graphs(
+        sample_graphs(),
+        [directory],
+        stage,
+        compressed=compressed,
+        shard_size=shard_size,
+        graph_config={"cutoff": 3.0, "max_neighbors": None},
+    )
+    stored.close()
+    return sorted(directory.glob("*_shard*.lmdb"))
+
+
+def file_snapshot(directory):
+    return {
+        str(path.relative_to(directory)): (
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+def records(path):
+    with lmdb.open(str(path), readonly=True, create=False, lock=False) as env:
+        with env.begin() as transaction:
+            return dict(transaction.cursor())
+
+
+def copy(sources, destination, **kwargs):
+    return cache_module.copy_graph_cache(
+        sources, destination, reserve_bytes=0, transaction_bytes=128, **kwargs
+    )
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_copy_mixed_codecs_preserves_records_and_resumes(tmp_path, workers):
+    raw, compressed, destination = (
+        tmp_path / name for name in ("raw", "compressed", "copy")
+    )
+    make_cache(raw)
+    make_cache(compressed, stage="valid", compressed=True)
+    before = {root: file_snapshot(root) for root in (raw, compressed)}
+    manifest = copy([raw, compressed], destination, workers=workers)
+    assert manifest["status"] == "complete"
+    assert len(manifest["completed"]) == 6
+    for spec in manifest["plan"]["shards"]:
+        source, target = Path(spec["source"]), destination / spec["name"]
+        original, copied = records(source), records(target)
+        assert original.keys() == copied.keys()
+        assert (source / "counts.bin").read_bytes() == (
+            target / "counts.bin"
+        ).read_bytes()
+        assert json.loads((target / "metadata.json").read_text()) == dict(
+            spec["metadata"], codec=COMPRESSED_ARRAY_CODEC
+        )
+        for key, value in original.items():
+            assert copied[key].startswith(b"TACEZLB\0")
+            assert bytes(cache_module.raw_record(value)) == bytes(
+                cache_module.raw_record(copied[key])
+            )
+            left, right = decode_graph(value), decode_graph(copied[key])
+            assert left.keys() == right.keys()
+            for name in left.keys():
+                if isinstance(left[name], torch.Tensor):
+                    torch.testing.assert_close(left[name], right[name], rtol=0, atol=0)
+                else:
+                    assert left[name] == right[name]
+    shards_before = {p.name: file_snapshot(p) for p in destination.glob("*.lmdb")}
+    resumed = copy(
+        [raw, compressed], destination, workers=workers, verify_existing=True
+    )
+    assert resumed["completed"] == manifest["completed"]
+    assert shards_before == {
+        p.name: file_snapshot(p) for p in destination.glob("*.lmdb")
+    }
+    assert all(file_snapshot(root) == snapshot for root, snapshot in before.items())
+    assert not list(destination.glob("*.build.lock"))
+
+
+def test_interruption_hides_partial_cache_and_preserves_completed_shards(
+    tmp_path, monkeypatch
+):
+    source, destination = tmp_path / "source", tmp_path / "copy"
+    make_cache(source, stage="train_shard_outer_part")
+    before = file_snapshot(source)
+    original = cache_module.copy_shard
+    calls = 0
+
+    def interrupt_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise InterruptedError("test interruption")
+        return original(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache_module, "copy_shard", interrupt_second)
+        with pytest.raises(InterruptedError, match="test interruption"):
+            copy([source], destination)
+    assert (destination / "train.build.lock").is_file()
+    assert not (destination / "train_shard_outer_part.build.lock").exists()
+    assert read_cache_metadata([destination], "train") is None
+    partial = json.loads((destination / cache_module.MANIFEST).read_text())
+    assert partial["status"] == "interrupted"
+    assert len(partial["completed"]) == 1
+    published = next(destination.glob("*.lmdb"))
+    published_before = file_snapshot(published)
+    assert copy([source], destination)["status"] == "complete"
+    assert file_snapshot(published) == published_before
+    assert sum(read_cache_metadata([destination], "train")["shards"].values()) == 3
+    assert file_snapshot(source) == before
+
+
+def test_raw_statistics_reused_after_compression_and_online_u_shift(
+    tmp_path, monkeypatch
+):
+    import tace.dataset.datamodule as datamodule_module
+    import tace.scripts.train as train_module
+    from tace.foundations.u_shift import shift_energy_labels
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "0")
+    source, destination = tmp_path / "raw", tmp_path / "compressed"
+    make_cache(source, shard_size=3)
+    stored = write_graphs(
+        [sample_graphs()[-1]],
+        [source],
+        "valid",
+        compressed=False,
+        graph_config={"cutoff": 3.0, "max_neighbors": None},
+    )
+    stored.close()
+    source_before = file_snapshot(source)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError(
+            "Raw source access or statistics recomputation is forbidden"
+        )
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    monkeypatch.setattr(datamodule_module, "tace_read_all_files", forbidden)
+    monkeypatch.setattr(datamodule_module, "from_records", forbidden)
+    monkeypatch.setattr(train_module, "initialize", lambda cfg: cfg)
+    monkeypatch.setattr(train_module, "create_model", lambda *args: None)
+    monkeypatch.setattr(train_module, "configure_model_precision", lambda *args: None)
+    cfg = OmegaConf.create(
+        {
+            "misc": {"device": "cpu"},
+            "dtype": {"model": "float32", "autocast": None, "matmul": "ieee"},
+            "loss": {"loss_property": ["energy", "forces"]},
+            "model": {"config": {"cutoff": 3.0, "fidelity": [{"name": "raw"}]}},
+            "dataset": {
+                "storage_mode": "lmdb",
+                "shard_dirs": [str(source)],
+                "train_file": "must-not-read.db",
+                "valid_file": "must-not-read.db",
+                "train_dataloader": {
+                    "_target_": "torch_geometric.loader.DataLoader",
+                    "batch_size": 2,
+                    "num_workers": 0,
+                },
+                "statistics_dataloader": {"batch_size": 3},
+            },
+        }
+    )
+    keyspec = KeySpecification.from_defaults()
+    original_key = statistics_cache_key(cfg, ["energy", "forces"], [], keyspec)
+    _, original_stats, _, _, _, module = train_module.build(cfg)
+    assert original_stats[0]["atomic_energy"] == pytest.approx({8: 3.0, 26: 2.0})
+    module.train_dataset.close()
+    module.val_dataset.close()
+    yaml_before = (tmp_path / "statistics_0.yaml").read_bytes()
+
+    copy([source], destination)
+    cfg.dataset.storage_mode = "clmdb"
+    cfg.dataset.shard_dirs = [str(destination)]
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "1")
+    assert statistics_cache_key(cfg, ["energy", "forces"], [], keyspec) == original_key
+    monkeypatch.setattr(train_module, "compute_statistics", forbidden)
+    monkeypatch.setattr(train_module, "load_cached_datamodule", forbidden)
+    monkeypatch.setattr(train_module, "build_atomsList", forbidden)
+    _, reused, _, _, _, module = train_module.build(cfg)
+    assert reused == original_stats
+    module.prepare_data()
+    module.setup("fit")
+    graph = module.train_dataset[2]
+    assert graph.energy.item() == 5.0
+    assert shift_energy_labels(graph).energy.item() == pytest.approx(5.0 - 1.925)
+    assert graph.energy.item() == 5.0
+    module.train_dataset.close()
+    module.val_dataset.close()
+    assert (tmp_path / "statistics_0.yaml").read_bytes() == yaml_before
+    assert file_snapshot(source) == source_before
+    assert not torch.cuda.is_initialized()
+
+
+@pytest.mark.parametrize("overlap", ["same", "child", "parent"])
+def test_copy_rejects_overlapping_paths(tmp_path, overlap):
+    source = tmp_path / "source"
+    make_cache(source)
+    destination = {"same": source, "child": source / "copy", "parent": tmp_path}[
+        overlap
+    ]
+    with pytest.raises(ValueError, match="overlap"):
+        copy([source], destination)
+
+
+def test_copy_rejects_duplicate_names_and_foreign_destination(tmp_path):
+    source, duplicate, destination = (
+        tmp_path / name for name in ("source", "duplicate", "copy")
+    )
+    make_cache(source)
+    shutil.copytree(source, duplicate)
+    with pytest.raises(ValueError, match="Duplicate source shard"):
+        copy([source, duplicate], destination)
+    destination.mkdir()
+    (destination / "foreign.txt").write_text("keep me")
+    with pytest.raises(FileExistsError, match="nonempty destination"):
+        copy([source], destination)
+    assert (destination / "foreign.txt").read_text() == "keep me"
+
+
+def test_resume_rejects_changed_source(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "copy"
+    shards = make_cache(source)
+    copy([source], destination)
+    metadata = shards[0] / "metadata.json"
+    metadata.write_text(metadata.read_text() + "\n")
+    with pytest.raises(ValueError, match="different source plan"):
+        copy([source], destination)
+
+
+@pytest.mark.parametrize("failure", ["space", "record"])
+def test_copy_failure_never_publishes_partial_shards(tmp_path, monkeypatch, failure):
+    source, destination = tmp_path / "source", tmp_path / "copy"
+    shards = make_cache(source)
+    if failure == "space":
+        usage = shutil.disk_usage(tmp_path)
+        monkeypatch.setattr(
+            cache_module.shutil,
+            "disk_usage",
+            lambda _: type(usage)(usage.total, usage.used, 0),
+        )
+        error, match = OSError, "Insufficient free space"
+    else:
+        with lmdb.open(str(shards[0])) as env:
+            with env.begin(write=True) as transaction:
+                transaction.put(b"000000000", b"broken")
+        error, match = ValueError, "Truncated typed-array record"
+    before = file_snapshot(source)
+    with pytest.raises(error, match=match):
+        copy([source], destination)
+    assert not list(destination.glob("*.lmdb"))
+    assert read_cache_metadata([destination], "train") is None
+    assert file_snapshot(source) == before
+
+
+@pytest.mark.parametrize("failure", ["bootstrap", "transaction"])
+def test_unfinished_shard_can_restart_after_write_failure(
+    tmp_path, monkeypatch, failure
+):
+    source, destination = tmp_path / "source", tmp_path / "copy"
+    make_cache(source, shard_size=3)
+    source_before = file_snapshot(source)
+    calls = 0
+    with monkeypatch.context() as patch:
+        if failure == "bootstrap":
+            original = cache_module.write_json
+
+            def fail_bootstrap(path, value):
+                if Path(path).name == "source.json":
+                    raise OSError("test bootstrap failure")
+                return original(path, value)
+
+            patch.setattr(cache_module, "write_json", fail_bootstrap)
+        else:
+            original = cache_module.require_space
+
+            def fail_transaction(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise OSError("test transaction failure")
+                return original(*args, **kwargs)
+
+            patch.setattr(cache_module, "require_space", fail_transaction)
+        with pytest.raises(OSError, match=f"test {failure} failure"):
+            copy([source], destination)
+    assert not list(destination.glob("*.lmdb"))
+    assert read_cache_metadata([destination], "train") is None
+    staged = list((destination / cache_module.STAGING).iterdir())
+    if failure == "bootstrap":
+        assert not staged
+    else:
+        assert len(staged) == 1
+        assert (staged[0] / "source.json").is_file()
+        assert len(records(staged[0])) == 1
+    assert copy([source], destination)["status"] == "complete"
+    assert sum(read_cache_metadata([destination], "train")["shards"].values()) == 3
+    assert file_snapshot(source) == source_before
+
+
+def test_copy_respects_native_cache_writer_lock(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "copy"
+    make_cache(source)
+    destination.mkdir()
+    with FileLock(str(destination / ".train.writer.lock"), timeout=0):
+        with pytest.raises(Timeout):
+            copy([source], destination)
+    assert not list(destination.glob("*.lmdb"))
+    assert copy([source], destination)["status"] == "complete"
+
+
+def test_resume_rejects_foreign_files_and_changed_destination(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "copy"
+    make_cache(source)
+    copy([source], destination)
+    foreign = destination / "foreign.txt"
+    foreign.write_text("unrelated content")
+    with pytest.raises(ValueError, match="Unrecognized destination contents"):
+        copy([source], destination)
+    assert foreign.read_text() == "unrelated content"
+    foreign.unlink()
+    counts = next(destination.glob("*.lmdb")) / "counts.bin"
+    counts.write_bytes(counts.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="Destination file changed"):
+        copy([source], destination, verify_existing=True)

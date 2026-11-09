@@ -37,6 +37,15 @@ optimizer updates, and communication. Node and edge counts are dynamic; a differ
 number of structures, such as the last partial batch, uses a separate graph.
 Measure steady-state steps after the first compilation.
 
+The compiled training program is cached automatically under
+``TORCHINDUCTOR_CACHE_DIR/tace/joint/v1`` (PyTorch's cache directory when unset).
+A matching restart loads it without repeating model tracing or whole-graph
+compilation. Parameters, buffers, and trainable loss weights remain live inputs;
+resume training from the usual checkpoint. The cache matches model and loss
+configuration, source, precision, tensor layout, runtime, and device. Each CUDA
+device keeps its own entry. Incompatible or damaged entries are rebuilt.
+External CUDA operators may still initialize or compile their own kernels.
+
 Joint training uses ``NormalLoss`` or ``UncertaintyLoss``, without autocast.
 It requires PyTorch's explicit dynamic-shape and standalone Inductor APIs.
 Unsupported settings raise an error.
