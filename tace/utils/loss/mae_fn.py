@@ -14,7 +14,7 @@ from .common import (
     polarization_error_per_atom,
     tensor_loss,
 )
-from .mse_fn import register_loss
+from .registry import register_loss
 
 
 @register_loss

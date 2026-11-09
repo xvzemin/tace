@@ -26,8 +26,7 @@ from tace.models.spherical.mtace import MagneticBasis
 from tace.models.spherical.prod import MaceACE, NonlinearCgtpACE
 from tace.models.spherical.symmetric_contraction import Contraction
 from tace.utils.env import enable_acceleration
-from tace.utils.precision import configure_model_precision
-from tace.utils.utils import torch_default_dtype
+from tace.utils.precision import configure_model_precision, torch_default_dtype
 
 
 @torch.no_grad()

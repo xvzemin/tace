@@ -10,8 +10,7 @@ import torch
 from e3nn import o3
 
 from tace.dataset.neighbour_list import get_neighborhood
-from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES
-from tace.dataset.utils import hessian_pair_indices
+from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, hessian_pair_indices
 from tace.utils.torch_scatter import scatter_sum
 
 to_irrep = {

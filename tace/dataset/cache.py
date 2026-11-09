@@ -348,7 +348,10 @@ def file_identity(path):
 
 
 def sync_directory(path):
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    """Flush directory entries on platforms supporting directory descriptors."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
     finally:
@@ -361,7 +364,11 @@ def write_json(path, value):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
         ) as stream:
             temporary = Path(stream.name)
             json.dump(value, stream, sort_keys=True, allow_nan=False)

@@ -11,7 +11,7 @@ import torch.distributed as distributed
 from torch.utils.data import DistributedSampler
 
 
-def _integer(value, name, minimum=None):
+def validate_integer(value, name, minimum=None):
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise TypeError(f"{name} must be an integer")
     value = int(value)
@@ -111,18 +111,20 @@ class EpochSampler(DistributedSampler):
             num_replicas = distributed.get_world_size() if initialized else 1
         if rank is None:
             rank = distributed.get_rank() if initialized else 0
-        num_replicas = _integer(num_replicas, "num_replicas", 1)
-        rank = _integer(rank, "rank", 0)
+        num_replicas = validate_integer(num_replicas, "num_replicas", 1)
+        rank = validate_integer(rank, "rank", 0)
         if rank >= num_replicas:
             raise ValueError("rank must be smaller than num_replicas")
         if not isinstance(shuffle, bool):
             raise TypeError("shuffle must be a bool")
-        batch_size = _integer(batch_size, "batch_size", 1)
+        batch_size = validate_integer(batch_size, "batch_size", 1)
         if not isinstance(drop_last, bool):
             raise TypeError("drop_last must be a bool")
         if balance is not None and not isinstance(balance, str):
             try:
-                balance = tuple(_integer(w, "balance weight", 0) for w in balance)
+                balance = tuple(
+                    validate_integer(w, "balance weight", 0) for w in balance
+                )
             except (TypeError, ValueError):
                 raise ValueError(
                     "balance weights must be two nonnegative integers"
@@ -137,7 +139,7 @@ class EpochSampler(DistributedSampler):
             raise ValueError("balance must be None, 'atoms', 'edges' or two weights")
         if balance is not None and not callable(getattr(dataset, "get_sizes", None)):
             raise ValueError("Balanced sampling requires cached graph sizes")
-        seed = _integer(seed, "seed")
+        seed = validate_integer(seed, "seed")
         super().__init__(
             dataset,
             num_replicas=num_replicas,
@@ -256,7 +258,7 @@ class EpochSampler(DistributedSampler):
         sampler, or an explicit jump across epochs, selects the corresponding
         deterministic window without requiring preceding epochs to be read.
         """
-        epoch = _integer(epoch, "epoch", 0)
+        epoch = validate_integer(epoch, "epoch", 0)
         if epoch != self.epoch:
             if epoch == self.epoch + 1 and self.consumed:
                 if (
@@ -277,7 +279,7 @@ class EpochSampler(DistributedSampler):
 
     def advance(self, count):
         """Commit ``count`` local samples after their training batch completes."""
-        count = _integer(count, "count", 0)
+        count = validate_integer(count, "count", 0)
         if self.consumed + count > self.num_samples:
             raise ValueError("Committed sample count exceeds this local epoch")
         self.consumed += count
@@ -315,7 +317,7 @@ class EpochSampler(DistributedSampler):
             "num_replicas",
             "batch_size",
         ):
-            value = _integer(state[name], name)
+            value = validate_integer(state[name], name)
             if value != current[name]:
                 raise ValueError(f"Cannot restore EpochSampler with changed {name}")
         for name in ("shuffle", "drop_last"):
@@ -323,9 +325,9 @@ class EpochSampler(DistributedSampler):
                 raise TypeError(f"{name} must be a bool")
             if state[name] != current[name]:
                 raise ValueError(f"Cannot restore EpochSampler with changed {name}")
-        epoch = _integer(state["epoch"], "epoch", 0)
-        consumed = _integer(state["consumed"], "consumed", 0)
-        start = _integer(state["start"], "start", 0)
+        epoch = validate_integer(state["epoch"], "epoch", 0)
+        consumed = validate_integer(state["consumed"], "consumed", 0)
+        start = validate_integer(state["start"], "start", 0)
         if consumed > self.num_samples:
             raise ValueError("Committed sample count exceeds this local epoch")
         self.epoch = epoch

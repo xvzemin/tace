@@ -3,11 +3,13 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import logging
 import os
 from pathlib import Path
 from string import ascii_letters
 from typing import Dict, Optional
 
+import numpy as np
 import torch
 
 CACHE_DIR = Path.home() / ".cache" / "tace"
@@ -103,6 +105,17 @@ def set_env(cfg: Dict):
                 f"got {type(v).__name__}. Quote the value in the YAML file."
             )
         os.environ[k] = v
+
+
+def set_global_seed(cfg: Dict) -> None:
+    """Seed NumPy and PyTorch using the training configuration."""
+    seed = cfg["misc"].get("global_seed", 42)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    logging.info("Global seed: %s", seed)
+    logging.info("Split seed: %s", cfg["dataset"].get("split_seed", 42))
 
 
 def enable_acceleration(

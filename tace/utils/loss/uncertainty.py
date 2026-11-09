@@ -13,8 +13,7 @@ from torch import nn
 from tace.utils.precision import DATA_DTYPE
 
 from .common import has_valid_labels
-from .mse_fn import LOSS_FN
-from .registry import prepare_loss_function_kwargs
+from .registry import LOSS_FN, prepare_loss_function_kwargs
 
 
 class UncertaintyLoss(nn.Module):

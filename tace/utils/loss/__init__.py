@@ -3,19 +3,10 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-import glob
-import importlib
-import os
+from .normal import NormalLoss
+from .registry import ensure_loss_functions_registered
+from .uncertainty import UncertaintyLoss
 
-__all__ = []
-py_files = glob.glob(os.path.join(os.path.dirname(__file__), "*.py"))
-py_files = [f for f in py_files if not f.endswith("__init__.py")]
+ensure_loss_functions_registered()
 
-for p in py_files:
-    module_name = os.path.splitext(os.path.basename(p))[0]
-    module = importlib.import_module(f".{module_name}", package=__name__)
-    for attr_name in dir(module):
-        attr = getattr(module, attr_name)
-        if isinstance(attr, type):
-            globals()[attr_name] = attr
-            __all__.append(attr_name)
+__all__ = ["NormalLoss", "UncertaintyLoss"]

@@ -3,10 +3,10 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Dict, Iterable, List
 
 import torch
-from ase.data import (  # reference_states, # stored lattice constant, bond length, etc.
+from ase.data import (
     atomic_masses,
     atomic_names,
     atomic_numbers,
@@ -38,10 +38,24 @@ ATOMIC_MAGMOM = ground_state_magnetic_moments.tolist()  # ground state
 
 
 class TorchElement:
-    def __init__(self, zs: Union[List[int], Tuple[int, ...]]):
+    """Map atomic numbers to contiguous element indices.
 
-        self.zs = sorted(list(zs))
-        self.num_elements = len(zs)
+    Parameters
+    ----------
+    zs : iterable of int
+        Atomic numbers, sorted before assigning indices.
+
+    Examples
+    --------
+    >>> elements = TorchElement([8, 1])
+    >>> elements.z2idx(torch.tensor([8, 1])).tolist()
+    [1, 0]
+    """
+
+    def __init__(self, zs: Iterable[int]):
+
+        self.zs = sorted(zs)
+        self.num_elements = len(self.zs)
 
         self.lookup_table = torch.full((max(self.zs) + 1,), -1, dtype=torch.int64)
         for idx, z in enumerate(self.zs):
@@ -54,6 +68,6 @@ class TorchElement:
         return len(self.zs)
 
 
-def build_element_lookup(atomic_numbers: Sequence[int]) -> TorchElement:
-    element = TorchElement(sorted(list(atomic_numbers)))
-    return element
+def build_element_lookup(atomic_numbers: Iterable[int]) -> TorchElement:
+    """Build an element table from the dataset's atomic numbers."""
+    return TorchElement(atomic_numbers)

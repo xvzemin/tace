@@ -18,15 +18,23 @@ from ..dataset.quantity import (
     RMSE_PROPERTIES,
     SPECIAL_METRIC_PROPERTIES,
 )
-from .mask_metrics import (
-    MaskMAE,
-    MaskPerAtomMAE,
-    MaskPerAtomRMSE,
-    MaskRMSE,
-    supports_weight_filter,
-)
 
 SCALE = 1000.0  # for example, metric units from eV to meV
+
+
+def calculate_cps(
+    f1: float, kappa_srme: float, rmsd: float, rmsd_baseline: float = 0.15
+) -> float:
+    """Return the Matbench Discovery combined performance score."""
+    s_f1 = max(0.0, min(1.0, f1))
+    s_kappa = max(0.0, 1.0 - kappa_srme / 2.0)
+    if rmsd <= 0.0:
+        s_rmsd = 1.0
+    elif rmsd >= rmsd_baseline:
+        s_rmsd = 0.0
+    else:
+        s_rmsd = 1.0 - rmsd / rmsd_baseline
+    return 0.5 * s_f1 + 0.4 * s_kappa + 0.1 * s_rmsd
 
 
 def expand_dims_to(T: torch.Tensor, n_dim: int, dim: int = -1) -> torch.Tensor:
@@ -36,6 +44,20 @@ def expand_dims_to(T: torch.Tensor, n_dim: int, dim: int = -1) -> torch.Tensor:
 
 
 class MAE(Metric):
+    """Mean absolute error over tensor entries.
+
+    Parameters
+    ----------
+    scale : float, default=1000.0
+        Output unit conversion factor.
+
+    Examples
+    --------
+    >>> metric = MAE(scale=1.0)
+    >>> float(metric(torch.tensor([0., 1.]), torch.tensor([0., 3.])))
+    1.0
+    """
+
     def __init__(self, scale: float = SCALE):
         super().__init__()
         self.scale = scale
@@ -56,6 +78,20 @@ class MAE(Metric):
 
 
 class RMSE(Metric):
+    """Root mean square error over tensor entries.
+
+    Parameters
+    ----------
+    scale : float, default=1000.0
+        Output unit conversion factor.
+
+    Examples
+    --------
+    >>> metric = RMSE(scale=1.0)
+    >>> float(metric(torch.tensor([1., 1.]), torch.tensor([0., 0.])))
+    1.0
+    """
+
     def __init__(self, scale: float = SCALE):
         super().__init__()
         self.scale = scale
@@ -94,15 +130,25 @@ class PerAtomRMSE(RMSE):
 
 
 class PolarizationMetric(Metric):
+    """Polarization error modulo lattice translations.
+
+    Parameters
+    ----------
+    metric_type : {"mae", "rmse"}
+        Error reduction.
+    per_atom : bool, default=False
+        Normalize each structure's error by its atom count.
+    scale : float, default=1000.0
+        Output unit conversion factor.
+
+    Examples
+    --------
+    >>> metric = PolarizationMetric("mae", per_atom=True)
+    """
+
     def __init__(
         self, metric_type: str = "mae", per_atom: bool = False, scale: float = SCALE
     ):
-        """
-        Args:
-            metric_type: "mae" or "rmse"
-            per_atom: whether to normalize by number of atoms
-            scale: scaling factor
-        """
         super().__init__()
         assert metric_type in ["mae", "rmse"], "metric_type must be 'mae' or 'rmse'"
         self.metric_type = metric_type
@@ -157,13 +203,18 @@ class PolarizationMetric(Metric):
             return torch.sqrt(self.sum_squared_error / self.count) * self.scale
 
 
-class AbsFinalCollinearMagmomsMetric(Metric):
+class WeightedErrorMetric(Metric):
+    """Accumulate weighted errors over labeled entries.
+
+    Parameters
+    ----------
+    metric_type : {"mae", "rmse"}
+        Error reduction.
+    scale : float, default=1000.0
+        Output unit conversion factor.
+    """
+
     def __init__(self, metric_type: str = "mae", scale: float = SCALE):
-        """
-        Args:
-            metric_type: "mae" or "rmse"
-            scale: scaling factor
-        """
         super().__init__()
         assert metric_type in ["mae", "rmse"], "metric_type must be 'mae' or 'rmse'"
         self.metric_type = metric_type
@@ -184,14 +235,26 @@ class AbsFinalCollinearMagmomsMetric(Metric):
 
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
+    def compute(self):
+        if self.count == 0:
+            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
+
+        if self.metric_type == "mae":
+            return self.sum_abs_error / self.count * self.scale
+        else:  # rmse
+            return torch.sqrt(self.sum_squared_error / self.count) * self.scale
+
+
+class AbsFinalCollinearMagmomsMetric(WeightedErrorMetric):
+    """Weighted error of absolute final collinear magnetic moments."""
+
     def update(self, pred: Tensor, label: Tensor):
         batch = label.batch
         total_weight = (label.entropy * label.abs_final_collinear_magmoms_weight)[batch]
         mask = total_weight != 0
-        error = (
-            pred["abs_final_collinear_magmoms"].to(torch.float64)
-            - label.abs_final_collinear_magmoms.to(torch.float64)
-        )
+        error = pred["abs_final_collinear_magmoms"].to(
+            torch.float64
+        ) - label.abs_final_collinear_magmoms.to(torch.float64)
         error = error * total_weight
         mask = expand_dims_to(mask, error.ndim).expand_as(error)
         error = torch.where(mask, error, 0)
@@ -204,42 +267,9 @@ class AbsFinalCollinearMagmomsMetric(Metric):
             self.sum_squared_error += squared_error.sum()
         self.count += mask.sum()
 
-    def compute(self):
-        if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
 
-        if self.metric_type == "mae":
-            return self.sum_abs_error / self.count * self.scale
-        else:  # rmse
-            return torch.sqrt(self.sum_squared_error / self.count) * self.scale
-
-
-class DirectForcesMetric(Metric):
-    def __init__(self, metric_type: str = "mae", scale: float = SCALE):
-        """
-        Args:
-            metric_type: "mae" or "rmse"
-            scale: scaling factor
-        """
-        super().__init__()
-        assert metric_type in ["mae", "rmse"], "metric_type must be 'mae' or 'rmse'"
-        self.metric_type = metric_type
-        self.scale = scale
-
-        if self.metric_type == "mae":
-            self.add_state(
-                "sum_abs_error",
-                default=torch.tensor(0.0, dtype=torch.float64),
-                dist_reduce_fx="sum",
-            )
-        else:  # rmse
-            self.add_state(
-                "sum_squared_error",
-                default=torch.tensor(0.0, dtype=torch.float64),
-                dist_reduce_fx="sum",
-            )
-
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+class DirectForcesMetric(WeightedErrorMetric):
+    """Weighted error of directly predicted forces."""
 
     def update(self, pred: Tensor, label: Tensor):
         batch = label["batch"]
@@ -259,42 +289,9 @@ class DirectForcesMetric(Metric):
             self.sum_squared_error += squared_error.sum()
         self.count += mask.sum()
 
-    def compute(self):
-        if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
 
-        if self.metric_type == "mae":
-            return self.sum_abs_error / self.count * self.scale
-        else:  # rmse
-            return torch.sqrt(self.sum_squared_error / self.count) * self.scale
-
-
-class ForcesMetric(Metric):
-    def __init__(self, metric_type: str = "mae", scale: float = SCALE):
-        """
-        Args:
-            metric_type: "mae" or "rmse"
-            scale: scaling factor
-        """
-        super().__init__()
-        assert metric_type in ["mae", "rmse"], "metric_type must be 'mae' or 'rmse'"
-        self.metric_type = metric_type
-        self.scale = scale
-
-        if self.metric_type == "mae":
-            self.add_state(
-                "sum_abs_error",
-                default=torch.tensor(0.0, dtype=torch.float64),
-                dist_reduce_fx="sum",
-            )
-        else:  # rmse
-            self.add_state(
-                "sum_squared_error",
-                default=torch.tensor(0.0, dtype=torch.float64),
-                dist_reduce_fx="sum",
-            )
-
-        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+class ForcesMetric(WeightedErrorMetric):
+    """Weighted force error, excluding DeNS-perturbed atoms."""
 
     def update(self, pred: Tensor, label: Tensor):
         batch = label["batch"]
@@ -319,14 +316,167 @@ class ForcesMetric(Metric):
             self.sum_squared_error += squared_error.sum()
         self.count += mask.sum()
 
-    def compute(self):
-        if self.count == 0:
-            return torch.tensor(0.0, device=self.count.device, dtype=torch.float64)
 
-        if self.metric_type == "mae":
-            return self.sum_abs_error / self.count * self.scale
-        else:  # rmse
-            return torch.sqrt(self.sum_squared_error / self.count) * self.scale
+def supports_weight_filter(property_name: str) -> bool:
+    return PROPERTIES[property_name]["scope"] in {
+        "per-system",
+        "per-atom",
+        "per-edge",
+        "per-pair",
+    }
+
+
+def property_weight_mask(
+    label: Dict[str, Tensor],
+    property_name: str,
+    value: Tensor,
+) -> Tensor:
+    scope = PROPERTIES[property_name]["scope"]
+    graph_mask = label[f"{property_name}_weight"].reshape(-1) != 0
+
+    if scope == "per-system":
+        mask = graph_mask
+    elif scope == "per-atom":
+        mask = graph_mask[label["batch"]]
+    elif scope == "per-edge":
+        mask = graph_mask[label["batch"][label["edge_index"][0]]]
+    elif scope == "per-pair":
+        counts = label["ptr"][1:] - label["ptr"][:-1]
+        mask = torch.repeat_interleave(
+            graph_mask, counts.square(), output_size=value.shape[0]
+        )
+    else:
+        raise ValueError(
+            f"{property_name} has scope {scope}; only per-system, per-atom, "
+            "per-edge and per-pair metrics support weight filtering"
+        )
+
+    if property_name == "forces" and "noise_mask" in label:
+        mask = mask & (~label["noise_mask"].bool())
+
+    if mask.shape[0] != value.shape[0]:
+        raise ValueError(
+            f"{property_name} weight mask length {mask.shape[0]} does not match "
+            f"value length {value.shape[0]}"
+        )
+    return mask
+
+
+def filter_error_by_property_weight(
+    error: Tensor,
+    label: Dict[str, Tensor],
+    property_name: str,
+) -> Tensor:
+    mask = property_weight_mask(label, property_name, error)
+    return error[mask]
+
+
+def masked_error_and_count(
+    preds: Tensor,
+    targets: Tensor,
+    label: Dict[str, Tensor],
+    property_name: str,
+) -> tuple[Tensor, Tensor]:
+    error = preds.to(torch.float64) - targets.to(torch.float64)
+    mask = property_weight_mask(label, property_name, error)
+    # Boolean indexing needs the selected size on the host, synchronizing CUDA
+    # once per metric. Keep the full shape and reduce the count on the device.
+    mask = expand_dims_to(mask, error.ndim).expand_as(error)
+    return torch.where(mask, error, 0), mask.sum()
+
+
+class MaskMAE(MAE):
+    """Mean absolute error over entries with nonzero property weights.
+
+    Parameters
+    ----------
+    property_name : str
+        Property whose graph weights select entries.
+    scale : float
+        Output unit conversion factor.
+
+    Examples
+    --------
+    >>> metric = MaskMAE("energy", scale=1000.0)
+    """
+
+    def __init__(self, property_name: str, scale: float):
+        super().__init__(scale)
+        self.property_name = property_name
+
+    def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
+        error, count = masked_error_and_count(preds, targets, label, self.property_name)
+        self.sum_abs_error += torch.abs(error).sum()
+        self.count += count
+
+    def compute(self):
+        value = self.sum_abs_error / self.count.clamp_min(1) * self.scale
+        return torch.where(self.count > 0, value, torch.full_like(value, float("nan")))
+
+
+class MaskRMSE(RMSE):
+    """Root mean square error over entries with nonzero property weights.
+
+    Parameters
+    ----------
+    property_name : str
+        Property whose graph weights select entries.
+    scale : float
+        Output unit conversion factor.
+
+    Examples
+    --------
+    >>> metric = MaskRMSE("forces", scale=1000.0)
+    """
+
+    def __init__(self, property_name: str, scale: float):
+        super().__init__(scale)
+        self.property_name = property_name
+
+    def update(self, preds: Tensor, targets: Tensor, label: Dict[str, Tensor]):
+        error, count = masked_error_and_count(preds, targets, label, self.property_name)
+        self.sum_squared_error += torch.square(error).sum()
+        self.count += count
+
+    def compute(self):
+        value = (
+            torch.sqrt(self.sum_squared_error / self.count.clamp_min(1)) * self.scale
+        )
+        return torch.where(self.count > 0, value, torch.full_like(value, float("nan")))
+
+
+class MaskPerAtomMAE(MaskMAE):
+    def update(
+        self,
+        preds: Tensor,
+        targets: Tensor,
+        ptr: Tensor,
+        label: Dict[str, Tensor],
+    ):
+        num_nodes = ptr[1:] - ptr[:-1]
+        num_nodes = expand_dims_to(num_nodes, preds.ndim, dim=-1)
+        super().update(
+            preds.to(torch.float64) / num_nodes,
+            targets.to(torch.float64) / num_nodes,
+            label,
+        )
+
+
+class MaskPerAtomRMSE(MaskRMSE):
+    def update(
+        self,
+        preds: Tensor,
+        targets: Tensor,
+        ptr: Tensor,
+        label: Dict[str, Tensor],
+    ):
+        num_nodes = ptr[1:] - ptr[:-1]
+        num_nodes = expand_dims_to(num_nodes, preds.ndim, dim=-1)
+        super().update(
+            preds.to(torch.float64) / num_nodes,
+            targets.to(torch.float64) / num_nodes,
+            label,
+        )
 
 
 def use_weight_filter(property_name: str) -> bool:
@@ -472,8 +622,12 @@ def update_metrics(metrics, prefix, pred, label, loss_property):
         if p == "polarization":
             metrics[f"{prefix}/{p}_mae"].update(output_value, batch_value, label)
             metrics[f"{prefix}/{p}_rmse"].update(output_value, batch_value, label)
-            metrics[f"{prefix}/{p}_per_atom_mae"].update(output_value, batch_value, label)
-            metrics[f"{prefix}/{p}_per_atom_rmse"].update(output_value, batch_value, label)
+            metrics[f"{prefix}/{p}_per_atom_mae"].update(
+                output_value, batch_value, label
+            )
+            metrics[f"{prefix}/{p}_per_atom_rmse"].update(
+                output_value, batch_value, label
+            )
         if p == "abs_final_collinear_magmoms":
             metrics[f"{prefix}/{p}_mae"].update(pred, label)
             metrics[f"{prefix}/{p}_rmse"].update(pred, label)

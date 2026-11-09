@@ -12,7 +12,6 @@ import lightning as L
 from hydra.utils import instantiate
 from lightning.pytorch.callbacks import (
     ModelCheckpoint,
-    RichProgressBar,
     StochasticWeightAveraging,
     TQDMProgressBar,
 )
@@ -22,8 +21,8 @@ from torch_geometric.loader import DataLoader
 # from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from ..utils.callbacks import PrintMetricsCallback
 from ..utils.env import acceleration_enabled
+from ..utils.logger import log_parameters
 from ..utils.precision import resolve_precision
-from ..utils.utils import log_parameters
 from .lit_model import LightningWrapperModel
 
 

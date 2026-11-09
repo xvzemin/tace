@@ -4,26 +4,131 @@
 ################################################################################
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Dict, List, Optional
 
-from .utils import (
-    default_value_for_rank0_atom,
-    default_value_for_rank0_graph,
-    default_value_for_rank1_atom,
-    default_value_for_rank1_edge,
-    default_value_for_rank1_graph,
-    default_value_for_rank2_atom,
-    default_value_for_rank2_graph,
-    default_value_for_rank2_pair,
-    default_value_for_rank3_atom,
-    default_value_for_rank3_graph,
-    default_value_for_rank4_atom,
-    default_value_for_rank4_graph,
-    shape_fn_for_abs_fc_mag,
-    shape_fn_for_hessian,
-    voigt_to_matrix,
-)
+import numpy as np
+import torch
+from torch import Tensor
+
+
+def default_value_for_rank0_atom(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((num_atoms,))
+
+
+def default_value_for_rank1_atom(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((num_atoms, 3))
+
+
+def default_value_for_rank1_edge(
+    num_atoms: int, class_: str, *, num_edges: int, **kwargs
+):
+    return np.zeros((num_edges, 3))
+
+
+def default_value_for_rank2_atom(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((num_atoms, 3, 3))
+
+
+def default_value_for_rank3_atom(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((num_atoms, 3, 3, 3))
+
+
+def default_value_for_rank4_atom(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((num_atoms, 3, 3, 3, 3))
+
+
+def default_value_for_rank0_graph(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((1,))
+
+
+def default_value_for_rank1_graph(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((3,))
+
+
+def default_value_for_rank2_graph(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((3, 3))
+
+
+def default_value_for_rank3_graph(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((3, 3, 3))
+
+
+def default_value_for_rank4_graph(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((3, 3, 3, 3))
+
+
+def default_value_for_rank2_pair(num_atoms: int, class_: str, **kwargs):
+    return np.zeros((num_atoms * num_atoms, 3, 3))
+
+
+def shape_fn_for_hessian(tensor: torch.Tensor, num_atoms: int) -> torch.Tensor:
+    """Convert a full Hessian to row-major atom-pair blocks.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Shape ``(3N, 3N)``, ``(9N**2,)``, ``(N, N, 3, 3)``, or ``(N**2, 3, 3)``.
+    num_atoms : int
+        Number of atoms.
+
+    Returns
+    -------
+    torch.Tensor
+        Contiguous blocks of shape ``(num_atoms**2, 3, 3)``, ordered by
+        ``i * num_atoms + j``. Dtype and device are unchanged.
+        Flat inputs use the row-major order of the ``(3N, 3N)`` matrix.
+    """
+    n = num_atoms
+    if tensor.shape in {(3 * n, 3 * n), (9 * n * n,)}:
+        tensor = tensor.reshape(n, 3, n, 3).permute(0, 2, 1, 3)
+    elif tensor.shape not in {(n, n, 3, 3), (n * n, 3, 3)}:
+        raise ValueError(
+            f"Invalid Hessian shape {tuple(tensor.shape)} for {n} atoms; expected "
+            f"{(3 * n, 3 * n)}, {(9 * n * n,)}, {(n, n, 3, 3)}, or {(n * n, 3, 3)}."
+        )
+    return tensor.reshape(n * n, 3, 3).contiguous()
+
+
+def hessian_pair_indices(ptr: torch.Tensor) -> torch.Tensor:
+    """Return all ordered atom pairs within each structure, including self pairs."""
+    counts = ptr[1:] - ptr[:-1]
+    sizes = counts.square()
+    offsets = sizes.cumsum(0) - sizes
+    graph = torch.repeat_interleave(
+        torch.arange(counts.numel(), device=ptr.device), sizes
+    )
+    pair = torch.arange(graph.numel(), device=ptr.device) - offsets[graph]
+    source = ptr[graph] + torch.div(pair, counts[graph], rounding_mode="floor")
+    target = ptr[graph] + pair.remainder(counts[graph])
+    return torch.stack((source, target))
+
+
+def shape_fn_for_abs_fc_mag(t: Tensor, num_atoms: int, **kwargs):
+    return torch.abs(t)
+
+
+def voigt_to_matrix(t: Tensor, **kwargs):
+    """
+    Convert voigt notation to matrix notation
+    """
+    if t.shape == (3, 3):
+        return t
+    if t.shape == (6,):
+        return torch.tensor(
+            [
+                [t[0], t[5], t[4]],
+                [t[5], t[1], t[3]],
+                [t[4], t[3], t[2]],
+            ],
+            dtype=t.dtype,
+        )
+    if t.shape == (9,):
+        return t.view(3, 3)
+
+    raise ValueError(
+        f"Stress tensor must be of shape (6,) or (3, 3), or (9,) but has shape {t.shape}"
+    )
+
 
 # per-edge follows edge_index; per-pair contains all ordered (i, j), including i=j.
 PROPERTIES = {
@@ -193,7 +298,6 @@ PROPERTIES = {
         "enable_embedding": False,
         "first_derivative": True,
         "second_derivative": False,
-        # "requires_grad_with": ['displacement'],
         "requires_grad_with": [],  # manual set
     },
     "direct_stress": {
@@ -236,7 +340,6 @@ PROPERTIES = {
         "enable_embedding": False,
         "first_derivative": True,
         "second_derivative": False,
-        # "requires_grad_with": ['displacement'],
         "requires_grad_with": [],  # manual set
     },
     "direct_virials": {
@@ -428,44 +531,6 @@ PROPERTIES = {
         "second_derivative": True,
         "requires_grad_with": ["electric_field", "positions"],
     },
-    # "magnetization": {
-    #     "ase_name": None,
-    #     'type': 'float',
-    #     "scope": "per-system",
-    #     "rank": 1,
-    #     "irreps": '1x1e',
-    #     "abbreviation": "M",
-    #     "shape": {
-    #         "in_data": (1, 3),
-    #         "shape_fn": None,
-    #     },
-    #     "default_value_fn": default_value_for_rank1_graph,
-    #     "must_be_with": [],
-    #     "enable_prediction": True,
-    #     "enable_embedding": False,
-    #     "first_derivative": True,
-    #     "second_derivative": False,
-    #     "requires_grad_with": ['magnetic_field'],
-    # },
-    # "magnetic_susceptibility": {
-    #     "ase_name": None,
-    #     'type': 'float',
-    #     "scope": "per-system",
-    #     "rank": 2,
-    #     "irreps": '1x2e', # TODO, check
-    #     "abbreviation": "CHI_M",
-    #     "shape": {
-    #         "in_data": (1, 3, 3),
-    #         "shape_fn": None,
-    #     },
-    #     "default_value_fn": default_value_for_rank2_graph,
-    #     "must_be_with": ['magnetization'],
-    #     "enable_prediction": True,
-    #     "enable_embedding": False,
-    #     "first_derivative": False,
-    #     "second_derivative": True,
-    #     "requires_grad_with": ['magnetic_field'],
-    # },
     "charges": {
         "ase_name": "charges",
         "type": "float",
@@ -508,25 +573,6 @@ PROPERTIES = {
         "second_derivative": False,
         "requires_grad_with": [],
     },
-    # "spin_multiplicity": {
-    #     "ase_name": None,
-    #     'type': 'int',
-    #     "scope": "per-system",
-    #     "rank": 0,
-    #     "irreps": '1x0e',
-    #     "abbreviation": "SM",
-    #     "shape": {
-    #         "in_data": (1,),
-    #         "shape_fn": None,
-    #     },
-    #     "default_value_fn": default_value_for_rank0_graph,
-    #     "must_be_with": [],
-    #     "enable_prediction": False,
-    #     "enable_embedding": True,
-    #     "first_derivative": False,
-    #     "second_derivative": False,
-    #     "requires_grad_with": [],
-    # },
     "initial_collinear_magmoms": {
         "ase_name": "initial_magmoms",
         "type": "float",
@@ -758,44 +804,6 @@ PROPERTIES = {
         "second_derivative": False,
         "requires_grad_with": [],
     },
-    # "temperature": {
-    #     "ase_name": None,
-    #     'type': 'float',
-    #     "scope": "per-system",
-    #     "rank": 0,
-    #     "irreps": '1x0e',
-    #     "abbreviation": "TEMP",
-    #     "shape": {
-    #         "in_data": (1,),
-    #         "shape_fn": None,
-    #     },
-    #     "default_value_fn": default_value_for_rank0_graph,
-    #     "must_be_with": [],
-    #     "enable_prediction": False,
-    #     "enable_embedding": True,
-    #     "first_derivative": False,
-    #     "second_derivative": False,
-    #     "requires_grad_with": [],
-    # },
-    # "electron_temperature": {
-    #     "ase_name": None,
-    #     'type': 'float',
-    #     "scope": "per-system",
-    #     "rank": 0,
-    #     "irreps": '1x0e',
-    #     "abbreviation": "E_TEMP",
-    #     "shape": {
-    #         "in_data": (1,),
-    #         "shape_fn": None,
-    #     },
-    #     "default_value_fn": default_value_for_rank0_graph,
-    #     "must_be_with": [],
-    #     "enable_prediction": False,
-    #     "enable_embedding": True,
-    #     "first_derivative": False,
-    #     "second_derivative": False,
-    #     "requires_grad_with": [],
-    # },
 }
 
 SUPPORTED_PREDICTION_PROPERTIES = tuple(
@@ -815,71 +823,23 @@ TIME_ODD_PROPERTIES = tuple(
 KEYS = {f"{k}_key": k for k in PROPERTIES}
 
 
-# should be delete in future versions TODO
-class DefaultKeys(Enum):
-    # basic
-    ENERGY = "energy"
-    FORCES = "forces"
-    STRESS = "stress"
-    VIRIALS = "virials"
-
-    HESSIAN = "hessian"
-    EDGE_FORCES = "edge_forces"
-    ATOMIC_VIRIALS = "atomic_virials"
-    ATOMIC_STRESSES = "atomic_stresses"
-
-    # direct property
-    DIRECT_FORCES = "direct_forces"
-    DIRECT_STRESS = "direct_stress"
-    DIRECT_VIRIALS = "direct_virials"
-    DIRECT_DIPOLE = "direct_dipole"
-    DIRECT_POLARIZABILITY = "direct_polarizability"
-    DIRECT_HESSIAN = "direct_hessian"
-
-    # charges
-    CHARGES = "charges"
-    TOTAL_CHARGE = "total_charge"
-
-    # external field
-    ELECTRIC_FIELD = "electric_field"
-    MAGNETIC_FIELD = "magnetic_field"
-
-    CONSERVATIVE_DIPOLE = "conservative_dipole"
-    CONSERVATIVE_POLARIZABILITY = "conservative_polarizability"
-    BORN_EFFECTIVE_CHARGES = "born_effective_charges"  # do not consider LES
-    # MAGNETIZATION = "magnetization"
-    # MAGNETIC_SUSCEPTIBILITY = "magnetic_susceptibility"
-    POLARIZATION = "polarization"
-
-    # MAG
-    INITIAL_COLLINEAR_MAGMOMS = "initial_collinear_magmoms"
-    INITIAL_NONCOLLINEAR_MAGMOMS = "initial_noncollinear_magmoms"
-    FINAL_COLLINEAR_MAGMOMS = "final_collinear_magmoms"
-    ABS_FINAL_COLLINEAR_MAGMOMS = "abs_final_collinear_magmoms"
-    FINAL_NONCOLLINEAR_MAGMOMS = "final_noncollinear_magmoms"
-    COLLINEAR_MAGNETIC_FORCES = "collinear_magnetic_forces"
-    NONCOLLINEAR_MAGNETIC_FORCES = "noncollinear_magnetic_forces"
-    TOTAL_COLLINEAR_MAGMOM = "total_collinear_magmom"
-    TOTAL_NONCOLLINEAR_MAGMOM = "total_noncollinear_magmom"
-
-    # only for embedding
-    FIDELITY_IDX = "fidelity_idx"
-    # TEMPERATURE = "temperature"
-    # ELECTRON_TEMPERATURE = "electron_temperature"
-    # SPIN_MULTIPLICITY = "spin_multiplicity"
-
-    @staticmethod
-    def keydict() -> dict[str, str]:
-        key_dict = {}
-        for member in DefaultKeys:
-            key_name = f"{member.name.lower()}_key"
-            key_dict[key_name] = member.value
-        return key_dict
-
-
 @dataclass
 class KeySpecification:
-    """Modify from MACE to simplify reading property"""
+    """Map model properties to source metadata and array keys.
+
+    Parameters
+    ----------
+    info_keys : dict
+        Graph, edge and pair property names mapped to metadata keys.
+    arrays_keys : dict
+        Atom property names mapped to array keys.
+
+    Examples
+    --------
+    >>> keys = KeySpecification.from_defaults()
+    >>> keys.update(info_keys={"energy": "dft_energy"}).info_keys["energy"]
+    'dft_energy'
+    """
 
     info_keys: Dict[str, str] = field(default_factory=dict)
     arrays_keys: Dict[str, str] = field(default_factory=dict)
@@ -897,8 +857,7 @@ class KeySpecification:
 
     @classmethod
     def from_defaults(cls):
-        instance = cls()
-        return update_keyspec_from_kwargs(instance, DefaultKeys.keydict())
+        return update_keyspec_from_kwargs(cls(), KEYS)
 
 
 def update_keyspec_from_kwargs(

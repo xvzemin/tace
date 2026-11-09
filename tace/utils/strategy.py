@@ -4,6 +4,15 @@ import torch
 from lightning.pytorch.strategies import DDPStrategy
 
 
+def is_rank_0():
+    """Return whether the current process is rank zero or runs without DDP."""
+    return (
+        not torch.distributed.is_available()
+        or not torch.distributed.is_initialized()
+        or torch.distributed.get_rank() == 0
+    )
+
+
 class SimpleDDPStrategy(DDPStrategy):
     """Average parameter gradients after backward without wrapping the model.
 

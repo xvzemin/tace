@@ -5,6 +5,7 @@
 
 """Precision policies for data, geometry, and learned features."""
 
+import contextlib
 import logging
 import os
 from dataclasses import asdict, dataclass
@@ -12,6 +13,36 @@ from dataclasses import asdict, dataclass
 import torch
 
 DATA_DTYPE = torch.float64
+
+
+@contextlib.contextmanager
+def torch_default_dtype(dtype):
+    """Use a default tensor dtype within a context, restoring it on exit.
+
+    Parameters
+    ----------
+    dtype : torch.dtype
+        Default floating-point dtype within the context.
+
+    Examples
+    --------
+    >>> with torch_default_dtype(torch.float64):
+    ...     torch.ones(1).dtype
+    torch.float64
+    """
+    default_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(dtype)
+        yield
+    finally:
+        torch.set_default_dtype(default_dtype)
+
+
+def set_precision(cfg: dict) -> None:
+    """Apply and log the training precision policy."""
+    policy = resolve_precision(cfg, training=True)
+    policy.apply()
+    log_precision(policy)
 
 
 @dataclass(frozen=True)

@@ -152,14 +152,14 @@ dataset:
   split_seed: ${misc.global_seed} # this random seed is useful if auto split
   train_file: ../data/BaTiO3.xyz
   valid_file: null
-  # test_files: # (null, str, list) recoomend to use tace-eval --test 1 to print test errors to avoild possible bugs
+  # test_files: # optional test sets
   #   - dataset/test_300K.xyz
   #   - dataset/test_600K.xyz
   #   - dataset/test_1200K.xyz
   #   - dataset/test_dih.xyz
-  valid_ratio: 0.1 # auto split from train file if valid file is null, The priority order is:  no_valid_set > valid_file > valid_from_index > ``valid_ratio.
+  valid_ratio: 0.1 # split training data when valid_file is null
   valid_from_index: false # split train and val from train.index and valid.index in current directory
-  no_valid_set: false # The prerequisite for enabling this is that you are using a learning rate scheduler that does not depend on the validation set.
+  no_valid_set: false # requires a scheduler that does not depend on validation
   neighborlist_backend: matscipy # [ase, matscipy, vesin, alchemiops] recommend matscipy
   storage_mode: clmdb # [memory, clmdb, lmdb, on_the_fly]
   # Both LMDB modes automatically read either format, including mixed shards.
@@ -178,8 +178,6 @@ dataset:
   # record_cache_dir: ${dataset.shard_dirs.0}/records # omitted: this path; null disables it
   cache_size: 0 # decoded samples per loader worker; OS page cache remains active
   # Graph construction settings affect new graphs only, not reads from completed caches.
-  # dataset.num_workers is unused; select graph_workers or a dataloader.num_workers instead.
-  # dataset.shard_size is not consumed by the training entry point.
   graph_batch_size: 256 # structures per preprocessing/neighbor-search batch
   graph_workers: 0 # CPU preprocessing threads; independent of loader num_workers
   graph_device: null # alchemiops offline: all visible GPUs, CPU fallback; override with cpu, cuda:0, or [cuda:0, cuda:1]
@@ -424,7 +422,6 @@ model:
     atomic_basis:
       # uv_o2 has no attention; uv_rra_o2 uses attention; uu_o2 is a separate UU interaction.
       # Magnetic UV-O2 uses uv_o2_mag. Interaction choices can change the model architecture.
-      # use_radial_rotary_attention is only a migration flag for legacy o2/o2_mag names.
       type: cgtp # str or per-layer list: cgtp, o2_cgtp, so2, uv_o2, uv_rra_o2, uu_o2, uv_o2_mag
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density]

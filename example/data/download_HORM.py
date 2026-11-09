@@ -16,7 +16,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.db import connect
 from tqdm import tqdm
 
-from tace.dataset.utils import shape_fn_for_hessian
+from tace.dataset.quantity import shape_fn_for_hessian
 
 DATASET = "yunhonghan/hessian-dataset-for-optimizing-reactive-mliphorm"
 OUTPUT = Path.home() / "dataset" / "HORM"

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import torch
 
 from .common import apply_element_weights
-from .mse_fn import register_loss
+from .registry import register_loss
 
 
 @register_loss

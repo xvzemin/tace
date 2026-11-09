@@ -8,8 +8,7 @@ from typing import Any, List, Union
 import torch
 from omegaconf import ListConfig
 
-from .mse_fn import LOSS_FN
-from .registry import prepare_loss_function_kwargs
+from .registry import LOSS_FN, prepare_loss_function_kwargs
 
 
 class NormalLoss(torch.nn.Module):

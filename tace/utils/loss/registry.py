@@ -8,11 +8,37 @@ import inspect
 import re
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Any, Iterable, Union
+from functools import wraps
+from typing import Any, Callable, Iterable, Union
 
+import torch
 from omegaconf import ListConfig
 
-from .mse_fn import LOSS_FN
+from .common import loss_inputs
+
+LOSS_FN: dict[str, Callable] = {}
+
+
+def register_loss(func: Callable = None, *, key: str = None):
+    """Register a loss evaluated in FP64, independently of network precision."""
+
+    def decorator(f: Callable):
+        @wraps(f)
+        def loss(pred, label, *args, **kwargs):
+            pred, label = loss_inputs(pred, label)
+            device = next(
+                value.device
+                for value in pred.values()
+                if isinstance(value, torch.Tensor)
+            )
+            with torch.autocast(device_type=device.type, enabled=False):
+                return f(pred, label, *args, **kwargs)
+
+        LOSS_FN[key if key is not None else f.__name__] = loss
+        return loss
+
+    return decorator if func is None else decorator(func)
+
 
 LOSS_MODULES = (
     "mse_fn",
@@ -35,18 +61,18 @@ def ensure_loss_functions_registered() -> None:
         importlib.import_module(f".{module_name}", package=__package__)
 
 
-def _natural_sort_key(value: str) -> list[object]:
+def natural_sort_key(value: str) -> list[object]:
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
 
 
-def _loss_property_name(loss_name: str) -> str:
+def loss_property_name(loss_name: str) -> str:
     for prefix in LOSS_NAME_PREFIXES:
         if loss_name.startswith(prefix):
             return loss_name[len(prefix) :]
     return loss_name
 
 
-def _is_special_loss(loss_fn) -> bool:
+def is_special_loss(loss_fn) -> bool:
     return loss_fn.__module__.endswith(".special_fn")
 
 
@@ -57,15 +83,15 @@ def available_losses_by_property(
     ensure_loss_functions_registered()
     losses_by_property: dict[str, list[str]] = defaultdict(list)
     for loss_name, loss_fn in LOSS_FN.items():
-        if not include_special and _is_special_loss(loss_fn):
+        if not include_special and is_special_loss(loss_fn):
             continue
-        losses_by_property[_loss_property_name(loss_name)].append(loss_name)
+        losses_by_property[loss_property_name(loss_name)].append(loss_name)
 
     return {
-        property_name: sorted(loss_names, key=_natural_sort_key)
+        property_name: sorted(loss_names, key=natural_sort_key)
         for property_name, loss_names in sorted(
             losses_by_property.items(),
-            key=lambda item: _natural_sort_key(item[0]),
+            key=lambda item: natural_sort_key(item[0]),
         )
     }
 
@@ -79,7 +105,7 @@ def format_available_losses_by_property() -> str:
 
 
 def format_unknown_loss_error(unknown_loss_names: Iterable[str]) -> str:
-    unknown = sorted(set(unknown_loss_names), key=_natural_sort_key)
+    unknown = sorted(set(unknown_loss_names), key=natural_sort_key)
     unknown_lines = "\n".join(f"  - {loss_name}" for loss_name in unknown)
     return (
         "Unknown loss function(s):\n"

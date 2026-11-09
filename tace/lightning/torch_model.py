@@ -8,8 +8,8 @@ from typing import Any, Dict, List
 
 import torch
 
+from tace.utils.cfg import deep_convert
 from tace.utils.env import acceleration_enabled
-from tace.utils.utils import deep_convert
 
 
 def _prune_removed_keys(model_config: Dict) -> Dict:

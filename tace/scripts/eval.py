@@ -25,8 +25,8 @@ from tace.dataset.quantity import (
 from tace.dataset.read import HOW_TO_READ, check_keys
 from tace.foundations.u_shift import shift_energy_labels
 from tace.lightning import load_tace
+from tace.utils.logger import num_params
 from tace.utils.metrics import build_metrics, update_metrics
-from tace.utils.utils import num_params
 
 
 def parse_args():

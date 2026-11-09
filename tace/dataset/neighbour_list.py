@@ -40,11 +40,11 @@ NV_NONPERIODIC_CELL_LIST_THRESHOLD = 4096
 NV_CPU_CELL_LIST_THRESHOLD = 128
 
 
-def _grow_search_capacity(capacity: int) -> int:
+def grow_search_capacity(capacity: int) -> int:
     return max(capacity + 1, (capacity * 5 + 3) // 4)
 
 
-def _choose_nv_method(n_atoms: int, periodic: bool, device) -> str:
+def choose_nv_method(n_atoms: int, periodic: bool, device) -> str:
     if device.type == "cpu":
         threshold = NV_CPU_CELL_LIST_THRESHOLD
     elif periodic:
@@ -54,7 +54,7 @@ def _choose_nv_method(n_atoms: int, periodic: bool, device) -> str:
     return "batch_cell_list" if n_atoms >= threshold else "batch_naive"
 
 
-def _get_nv_start_capacity(n_atoms: int, max_neighbors: Union[int, str, None]) -> int:
+def get_nv_start_capacity(n_atoms: int, max_neighbors: Union[int, str, None]) -> int:
     # A periodic atom can have many images of the same neighbor, even for N=1.
     # This is an allocation hint, never a cap on the returned neighbor count.
     if max_neighbors is None or max_neighbors == "inf":
@@ -62,7 +62,7 @@ def _get_nv_start_capacity(n_atoms: int, max_neighbors: Union[int, str, None]) -
     return max(1, int(max_neighbors))
 
 
-def _build_alchemiops_batch(
+def build_alchemiops_batch(
     positions: np.ndarray,
     ptr: np.ndarray,
     cutoff: float,
@@ -116,7 +116,7 @@ def _build_alchemiops_batch(
     )
     batch_ptr = torch.as_tensor(ptr, dtype=torch.int32, device=device)
     max_atoms = int(counts.max())
-    method = _choose_nv_method(max_atoms, periodic=periodic, device=device)
+    method = choose_nv_method(max_atoms, periodic=periodic, device=device)
     if periodic:
         # Naive explicitly enumerates all images, supports partial PBC, and
         # corrects shifts for unwrapped atoms. Do not use cluster_tile (FP32).
@@ -133,7 +133,7 @@ def _build_alchemiops_batch(
     if method == "batch_naive":
         extra_kwargs["max_atoms_per_system"] = max_atoms
 
-    search_capacity = _get_nv_start_capacity(max_atoms, None)
+    search_capacity = get_nv_start_capacity(max_atoms, None)
     while True:
         result = nvidia_neighbor_list(
             pos,
@@ -158,7 +158,7 @@ def _build_alchemiops_batch(
         max_found = int(num_neighbors.max().item()) if num_neighbors.numel() else 0
         if max_found <= search_capacity:
             break
-        search_capacity = max(max_found, _grow_search_capacity(search_capacity))
+        search_capacity = max(max_found, grow_search_capacity(search_capacity))
 
     total_atoms, capacity = neighbor_matrix.shape
     slots = torch.arange(capacity, dtype=torch.long, device=device).expand(
@@ -191,7 +191,7 @@ def _build_alchemiops_batch(
     return edge_index[:, keep], edge_shifts[keep]
 
 
-def _as_numpy(value):
+def as_numpy(value):
     """Accept NumPy-like values and detached CPU/CUDA Torch tensors."""
     if hasattr(value, "detach"):
         value = value.detach()
@@ -239,26 +239,26 @@ def get_neighborhood_batch(
         )
     if not np.isfinite(cutoff) or cutoff <= 0:
         raise ValueError("cutoff must be finite and positive")
-    positions = np.ascontiguousarray(_as_numpy(positions), dtype=np.float64)
+    positions = np.ascontiguousarray(as_numpy(positions), dtype=np.float64)
     if positions.ndim != 2 or positions.shape[1] != 3:
         raise ValueError("positions must have shape (N, 3)")
     if not np.isfinite(positions).all():
         raise ValueError("Positions must contain finite values")
-    ptr = _as_numpy(ptr)
+    ptr = as_numpy(ptr)
     if ptr.ndim != 1 or not ptr.size or not np.issubdtype(ptr.dtype, np.integer):
         raise ValueError("ptr must be a nonempty one-dimensional integer array")
     ptr = ptr.astype(np.int64, copy=False)
     if ptr[0] != 0 or ptr[-1] != len(positions) or np.any(np.diff(ptr) < 0):
         raise ValueError("ptr must start at zero, be nondecreasing, and end at N")
     num_graphs = len(ptr) - 1
-    pbc = np.asarray(False if pbc is None else _as_numpy(pbc), dtype=bool)
+    pbc = np.asarray(False if pbc is None else as_numpy(pbc), dtype=bool)
     if pbc.shape not in {(), (3,), (num_graphs, 3)}:
         raise ValueError("pbc must be a bool, shape (3,), or shape (B, 3)")
     pbc = np.broadcast_to(pbc, (num_graphs, 3)).copy()
     if lattice is None:
         lattice = np.zeros((num_graphs, 3, 3), dtype=np.float64)
     else:
-        lattice = np.asarray(_as_numpy(lattice), dtype=np.float64)
+        lattice = np.asarray(as_numpy(lattice), dtype=np.float64)
         if lattice.shape not in {(3, 3), (num_graphs, 3, 3)}:
             raise ValueError("lattice must have shape (3, 3) or (B, 3, 3)")
         lattice = np.broadcast_to(lattice, (num_graphs, 3, 3)).copy()
@@ -278,7 +278,7 @@ def get_neighborhood_batch(
 
     if backend == "alchemiops":
         try:
-            edge_index, shifts = _build_alchemiops_batch(
+            edge_index, shifts = build_alchemiops_batch(
                 positions, ptr, cutoff, pbc, lattice, device=device
             )
         except NotImplementedError as exc:

@@ -945,7 +945,7 @@ def test_foundation_aoti_output_keeps_version(monkeypatch, path_class):
 @pytest.mark.parametrize("training", [False, True])
 def test_tf32_environment(monkeypatch, value, training):
     from tace.utils.env import set_tf32
-    from tace.utils.utils import set_precision
+    from tace.utils.precision import set_precision
 
     previous = (
         torch.backends.cuda.matmul.allow_tf32,

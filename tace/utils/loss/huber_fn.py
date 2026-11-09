@@ -13,10 +13,10 @@ from .common import (
     polarization_error_per_atom,
     tensor_loss,
 )
-from .mse_fn import register_loss
+from .registry import register_loss
 
 
-def _per_atom_huber_loss(
+def per_atom_huber_loss(
     pred: torch.Tensor,
     label_value: torch.Tensor,
     total_weight: torch.Tensor,
@@ -76,7 +76,7 @@ def huber_forces(
     batch = label["batch"]
     total_weight = (label["entropy"] * label["forces_weight"])[batch].unsqueeze(-1)
     key = "forces"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -133,7 +133,7 @@ def huber_direct_forces(
         "direct_forces_weight"
     ][batch].unsqueeze(-1)
     key = "direct_forces"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -347,7 +347,7 @@ def huber_born_effective_charges(
         .unsqueeze(-1)
     )
     key = "born_effective_charges"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -379,7 +379,7 @@ def huber_charges(
     batch = label["batch"]
     total_weight = (label["entropy"] * label["charges_weight"])[batch]
     key = "charges"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -394,7 +394,7 @@ def huber_final_collinear_magmoms(
     batch = label["batch"]
     total_weight = (label["entropy"] * label["final_collinear_magmoms_weight"])[batch]
     key = "final_collinear_magmoms"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -411,7 +411,7 @@ def huber_abs_final_collinear_magmoms(
         batch
     ]
     key = "abs_final_collinear_magmoms"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -428,7 +428,7 @@ def huber_final_noncollinear_magmoms(
         "final_noncollinear_magmoms_weight"
     ][batch].unsqueeze(-1)
     key = "final_noncollinear_magmoms"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -443,7 +443,7 @@ def huber_collinear_magnetic_forces(
     batch = label["batch"]
     total_weight = (label["entropy"] * label["collinear_magnetic_forces_weight"])[batch]
     key = "collinear_magnetic_forces"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 
@@ -460,7 +460,7 @@ def huber_noncollinear_magnetic_forces(
         "noncollinear_magnetic_forces_weight"
     ][batch].unsqueeze(-1)
     key = "noncollinear_magnetic_forces"
-    return _per_atom_huber_loss(
+    return per_atom_huber_loss(
         pred[key], label[key], total_weight, label, huber_delta, element_weights
     )
 

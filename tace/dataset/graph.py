@@ -20,22 +20,22 @@ from .records import (
 )
 
 
-def _tensor(value, dtype):
+def as_tensor(value, dtype):
     # Read-only database views cannot safely back writable Torch tensors.
     if isinstance(value, np.ndarray) and not value.flags.writeable:
         value = value.copy()
     return torch.as_tensor(value, dtype=dtype)
 
 
-def _weight(record, name):
+def property_weight(record, name):
     value = record.info.get(f"{name}_weight", record.data.get(f"{name}_weight", 1.0))
-    tensor = _tensor(value, torch.float64)
+    tensor = as_tensor(value, torch.float64)
     if tensor.numel() != 1 or not torch.isfinite(tensor).all() or tensor.item() < 0:
         raise ValueError(f"{name}_weight must be one finite, non-negative scalar")
     return tensor.reshape(1)
 
 
-def _shape_property(value, name, config, num_atoms, num_edges):
+def shape_property(value, name, config, num_atoms, num_edges):
     scope = config["scope"]
     shape = config["shape"]["in_data"]
     counts = {
@@ -88,7 +88,7 @@ def read_properties(
             config = PROPERTIES[name]
             value = resolve_property(record, name, keyspec)
             present = value is not None
-            weight = _weight(record, name)
+            weight = property_weight(record, name)
             if not present:
                 if config["scope"] == "per-edge" and num_edges is None:
                     raise ValueError("Reading per-edge properties requires num_edges.")
@@ -97,14 +97,14 @@ def read_properties(
                 )
                 weight = torch.zeros(1, dtype=torch.float64)
             if config["type"] == "float":
-                value = _tensor(value, torch.float64)
+                value = as_tensor(value, torch.float64)
             elif config["type"] == "int":
                 if name == "fidelity_idx":
                     value = validate_fidelity(value) if present else 0
-                value = _tensor(value, torch.int64)
+                value = as_tensor(value, torch.int64)
             else:
                 raise TypeError(f"Unsupported property type: {config['type']}")
-            value = _shape_property(value, name, config, len(record), num_edges)
+            value = shape_property(value, name, config, len(record), num_edges)
             if not torch.isfinite(value).all():
                 raise ValueError(f"{name} contains NaN or infinite values.")
             if config["requires_periodic_cell"] and not periodic_cell:
@@ -120,7 +120,7 @@ def read_properties(
     return data
 
 
-def _geometry(record):
+def record_geometry(record):
     numbers = np.asarray(record.numbers)
     if numbers.ndim != 1 or numbers.dtype.kind not in "iu" or np.any(numbers <= 0):
         raise ValueError(
@@ -164,7 +164,7 @@ def from_record(
             "Graph data always use float64; set the model dtype separately."
         )
     record = record_from_atoms(record)
-    numbers, positions, lattice, pbc, periodic_cell = _geometry(record)
+    numbers, positions, lattice, pbc, periodic_cell = record_geometry(record)
     if neighborhood is None:
         neighborhood = get_neighborhood(
             positions=positions,
@@ -177,19 +177,19 @@ def from_record(
     edge_index, edge_shifts, pbc, lattice = neighborhood
     fidelity = resolve_property(record, "fidelity_idx", keyspec)
     fidelity = 0 if fidelity is None else validate_fidelity(fidelity)
-    entropy = _tensor(
+    entropy = as_tensor(
         record.info.get("entropy", record.data.get("entropy", 1.0)), torch.float64
     )
     if entropy.numel() != 1 or not torch.isfinite(entropy).all():
         raise ValueError("entropy must be one finite scalar")
     data = {
         "entropy": entropy.reshape(()),
-        "atomic_numbers": _tensor(numbers, torch.int64),
-        "lattice": _tensor(lattice, torch.float64).reshape(1, 3, 3),
+        "atomic_numbers": as_tensor(numbers, torch.int64),
+        "lattice": as_tensor(lattice, torch.float64).reshape(1, 3, 3),
         "pbc": torch.tensor([pbc], dtype=torch.bool),
-        "positions": _tensor(positions, torch.float64),
-        "edge_index": _tensor(edge_index, torch.int64),
-        "edge_shifts": _tensor(edge_shifts, torch.int64),
+        "positions": as_tensor(positions, torch.float64),
+        "edge_index": as_tensor(edge_index, torch.int64),
+        "edge_shifts": as_tensor(edge_shifts, torch.int64),
         "num_neighbors": torch.as_tensor(
             np.bincount(np.asarray(edge_index)[0], minlength=len(record)),
             dtype=torch.int64,
@@ -237,7 +237,7 @@ def from_atoms(
 
 def batch_geometry(records):
     """Pack validated record geometry for one neighbor-search batch."""
-    geometry = [_geometry(record) for record in records]
+    geometry = [record_geometry(record) for record in records]
     ptr = np.concatenate(
         ([0], np.cumsum([len(record) for record in records], dtype=np.int64))
     )

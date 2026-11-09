@@ -65,14 +65,14 @@ except ImportError:
     pass
 
 
-def _check_record_bytes(size, maximum):
+def check_record_bytes(size, maximum):
     if maximum is not None and size > maximum:
         raise ValueError(
             f"A record requires at least {size} bytes, exceeding max_buffer_bytes={maximum}"
         )
 
 
-def _encode(mapping, kind, max_bytes=None):
+def encode_array_record(mapping, kind, max_bytes=None):
     arrays, payloads = [], []
     offset = 0
 
@@ -94,7 +94,7 @@ def _encode(mapping, kind, max_bytes=None):
                 ):
                     raise ValueError(f"{path} must use int64 indices")
                 itemsize = 8 if value.is_floating_point() else value.element_size()
-                _check_record_bytes(
+                check_record_bytes(
                     _HEADER.size + offset + value.numel() * itemsize, max_bytes
                 )
                 if kind == "records" and value.is_floating_point():
@@ -115,7 +115,7 @@ def _encode(mapping, kind, max_bytes=None):
                 and (array.dtype.kind != "i" or array.dtype.itemsize != 8)
             ):
                 raise ValueError(f"{path} must use int64 indices")
-            _check_record_bytes(
+            check_record_bytes(
                 _HEADER.size + offset + array.size * dtype.itemsize, max_bytes
             )
             array = np.ascontiguousarray(array.astype(dtype, copy=False)).reshape(
@@ -174,11 +174,11 @@ def _encode(mapping, kind, max_bytes=None):
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    _check_record_bytes(_HEADER.size + len(header) + offset, max_bytes)
+    check_record_bytes(_HEADER.size + len(header) + offset, max_bytes)
     return b"".join((_HEADER.pack(_MAGIC, 1, len(header)), header, *payloads))
 
 
-def _compress_array_record(value):
+def compress_array_record(value):
     """Losslessly compress an encoded record with a bounded decoded length."""
     view = memoryview(value)
     if not _HEADER.size <= len(view) <= _MAX_COMPRESSED_RECORD_BYTES:
@@ -191,7 +191,7 @@ def _compress_array_record(value):
     )
 
 
-def _decode(value, kind, fields=None):
+def decode_array_record(value, kind, fields=None):
     view = memoryview(value)
     if len(view) < _HEADER.size:
         raise ValueError("Truncated typed-array record")
@@ -305,15 +305,15 @@ def encode_graph(graph, max_bytes=None):
     mapping = graph.to_dict() if hasattr(graph, "to_dict") else dict(graph)
     if "num_nodes" not in mapping:
         mapping["num_nodes"] = int(graph.num_nodes)
-    return _encode(mapping, "graphs", max_bytes=max_bytes)
+    return encode_array_record(mapping, "graphs", max_bytes=max_bytes)
 
 
 def decode_graph(value, fields=None):
-    return Data(**_decode(value, "graphs", fields))
+    return Data(**decode_array_record(value, "graphs", fields))
 
 
 def encode_record(record, max_bytes=None):
-    return _encode(
+    return encode_array_record(
         record.to_dict() if hasattr(record, "to_dict") else dict(record),
         "records",
         max_bytes=max_bytes,
@@ -323,40 +323,40 @@ def encode_record(record, max_bytes=None):
 def decode_record(value):
     from .records import AtomicRecord
 
-    return AtomicRecord.from_dict(_decode(value, "records"))
+    return AtomicRecord.from_dict(decode_array_record(value, "records"))
 
 
 _ENVIRONMENTS = {}
 _ENV_LOCK = threading.RLock()
 
 
-def _close_entry(entry):
+def close_entry(entry):
     entry["txn"].abort()
     entry["env"].close()
 
 
-def _before_fork():
+def before_fork():
     _ENV_LOCK.acquire()
     # The parent also lazily reopens. A child never inherits a live LMDB handle.
     for entry in _ENVIRONMENTS.values():
-        _close_entry(entry)
+        close_entry(entry)
     _ENVIRONMENTS.clear()
 
 
-def _after_fork_parent():
+def after_fork_parent():
     _ENV_LOCK.release()
 
 
-def _after_fork_child():
+def after_fork_child():
     global _ENV_LOCK
     _ENV_LOCK = threading.RLock()
 
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(
-        before=_before_fork,
-        after_in_parent=_after_fork_parent,
-        after_in_child=_after_fork_child,
+        before=before_fork,
+        after_in_parent=after_fork_parent,
+        after_in_child=after_fork_child,
     )
 
 
@@ -449,7 +449,7 @@ class GraphDatasetLMDB(Dataset):
         if entry is not None:
             entry["owners"].discard(id(self))
             if not entry["owners"]:
-                _close_entry(entry)
+                close_entry(entry)
                 del _ENVIRONMENTS[path]
         self._opened.pop(path, None)
 
@@ -721,7 +721,7 @@ class RecordDataset(GraphDatasetLMDB):
         return self.__getitems__(indices)
 
 
-def _write_store_locked(
+def write_store_locked(
     items,
     shard_dirs,
     stage,
@@ -846,8 +846,8 @@ def _write_store_locked(
                 nodes, edges = len(item), 0
                 fields = item.to_dict()
             if compressed:
-                value = _compress_array_record(value)
-                _check_record_bytes(len(value), max_buffer_bytes)
+                value = compress_array_record(value)
+                check_record_bytes(len(value), max_buffer_bytes)
             if env is not None and (
                 shard_length >= shard_size
                 or shard_total_bytes + len(value) > shard_bytes
@@ -909,7 +909,7 @@ def _write_store_locked(
     )
 
 
-def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwargs):
+def build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwargs):
     """Build once across jobs; waiters attach without consuming their iterators."""
     validate_stage(stage)
     try:
@@ -1008,8 +1008,8 @@ def _build_store(builder, shard_dirs, stage, *, kind, lock_timeout=86400, **kwar
 
 def write_graphs(graphs, shard_dirs, stage, **kwargs):
     """Write losslessly compressed graphs with bounded, atomic shard publication."""
-    return _build_store(
-        lambda directories, stage, options: _write_store_locked(
+    return build_store(
+        lambda directories, stage, options: write_store_locked(
             graphs, directories, stage, kind="graphs", **options
         ),
         shard_dirs,
@@ -1021,8 +1021,8 @@ def write_graphs(graphs, shard_dirs, stage, **kwargs):
 
 def write_records(records, shard_dirs, stage="source", **kwargs):
     """Compress complete raw namespaces for reuse with different graph requests."""
-    return _build_store(
-        lambda directories, stage, options: _write_store_locked(
+    return build_store(
+        lambda directories, stage, options: write_store_locked(
             records, directories, stage, kind="records", **options
         ),
         shard_dirs,
@@ -1054,4 +1054,4 @@ def build_graph_store(builder, shard_dirs, stage, **kwargs):
             max_open_shards=options.get("max_open_shards", DEFAULT_MAX_OPEN_SHARDS),
         )
 
-    return _build_store(publish, shard_dirs, stage, kind="graphs", **kwargs)
+    return build_store(publish, shard_dirs, stage, kind="graphs", **kwargs)

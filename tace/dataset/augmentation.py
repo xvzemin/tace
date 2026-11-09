@@ -49,7 +49,7 @@ def validate_augmentations(
     return augmentations
 
 
-def _first_tensor(data, names: tuple[str, ...]):
+def first_tensor(data, names: tuple[str, ...]):
     for name in names:
         value = getattr(data, name, None)
         if torch.is_tensor(value):
@@ -57,7 +57,7 @@ def _first_tensor(data, names: tuple[str, ...]):
     return None
 
 
-def _random_rotation(reference: torch.Tensor) -> torch.Tensor:
+def random_rotation(reference: torch.Tensor) -> torch.Tensor:
     sample_dtype = (
         torch.float32
         if reference.dtype in (torch.float16, torch.bfloat16)
@@ -130,16 +130,16 @@ class AugmentedDataset(Dataset):
         data = copy(graph)
 
         if "spin_rotation" in self.augmentations:
-            reference = _first_tensor(data, PROPERTIES)
+            reference = first_tensor(data, PROPERTIES)
             if reference is not None:
-                rotation = _random_rotation(reference)
+                rotation = random_rotation(reference)
                 for name in PROPERTIES:
                     value = getattr(data, name, None)
                     if torch.is_tensor(value):
                         setattr(data, name, value @ rotation.mT)
 
         if "time_reversal" in self.augmentations:
-            reference = _first_tensor(data, PROPERTIES)
+            reference = first_tensor(data, PROPERTIES)
             if reference is not None and torch.rand((), device=reference.device) < 0.5:
                 for name in PROPERTIES:
                     value = getattr(data, name, None)

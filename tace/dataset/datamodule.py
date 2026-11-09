@@ -16,7 +16,6 @@ from concurrent.futures import (
     wait,
 )
 from contextlib import ExitStack
-from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -698,7 +697,6 @@ class GraphDataModule(LightningDataModule):
                 self.target_property,
                 self.embedding_property,
                 self.keyspec,
-                in_datamodule=True,
                 stages=stages,
             )
         return self.threeAtomsList
@@ -715,7 +713,6 @@ class GraphDataModule(LightningDataModule):
                     self.target_property,
                     self.embedding_property,
                     self.keyspec,
-                    in_datamodule=True,
                     stages=("valid",),
                 ).valid
             return self.sources()[1]
@@ -725,7 +722,6 @@ class GraphDataModule(LightningDataModule):
                 self.target_property,
                 self.embedding_property,
                 self.keyspec,
-                in_datamodule=True,
                 stages=("test",),
             ).test
             if self.threeAtomsList is not None:

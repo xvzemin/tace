@@ -9,8 +9,12 @@ import torch
 from torch import Tensor
 
 from tace.dataset.element import TorchElement
-from tace.dataset.quantity import PROPERTIES, ComputeFlag
-from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
+from tace.dataset.quantity import (
+    PROPERTIES,
+    ComputeFlag,
+    hessian_pair_indices,
+    shape_fn_for_hessian,
+)
 from tace.utils.precision import DATA_DTYPE, apply_model_precision
 
 from .lammps import Graph

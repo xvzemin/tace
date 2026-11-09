@@ -14,7 +14,6 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from tace.dataset.cache import GRAPH_SCHEMA, statistics_cache_key
-from tace.dataset.dataloader import build_atomsList, compute_statistics
 from tace.dataset.datamodule import build_datamodule, load_cached_datamodule
 from tace.dataset.quantity import (
     KEYS,
@@ -23,18 +22,19 @@ from tace.dataset.quantity import (
     get_target_property,
     update_keyspec_from_kwargs,
 )
-from tace.dataset.statistics import missing_model_statistics
+from tace.dataset.statistics import (
+    compute_statistics,
+    missing_model_statistics,
+    prepare_atomic_energies,
+)
 from tace.lightning.lit_model import finetune, load_tace
 from tace.lightning.torch_model import create_model
 from tace.lightning.trainer import train
-from tace.utils.env import set_env
-from tace.utils.hydra_resolver import register_resolvers
+from tace.utils.cfg import deep_convert, register_resolvers, save_full_cfg
+from tace.utils.env import set_env, set_global_seed
 from tace.utils.logger import set_logger
-from tace.utils.precision import configure_model_precision
-from tace.utils.utils import (
-    deep_convert,
-    save_full_cfg,
-    set_global_seed,
+from tace.utils.precision import (
+    configure_model_precision,
     set_precision,
     torch_default_dtype,
 )
@@ -81,7 +81,6 @@ def build(cfg: DictConfig):
 
     # train from scratch, calculate statistics
     statistics = None
-    threeAtomsList = None
     datamodule = None
     if not (cfg.get("finetune_from_model", None) or cfg.get("resume_from_model", None)):
         statistics_yaml = [
@@ -132,24 +131,12 @@ def build(cfg: DictConfig):
             )
             if datamodule is None:
                 datamodule = build_datamodule(
-                    cfg, None, target_property, embedding_property, keyspec, None
+                    cfg, None, target_property, embedding_property, keyspec
                 )
                 datamodule.setup("fit")
-            element, threeAtomsList, atomic_energies = build_atomsList(
-                cfg, target_property, embedding_property, keyspec, datamodule=datamodule
-            )
+            element, atomic_energies = prepare_atomic_energies(cfg, datamodule)
             atomic_numbers = element.zs
-            statistics = compute_statistics(
-                cfg,
-                target_property,
-                embedding_property,
-                keyspec,
-                element,
-                threeAtomsList,
-                fidelity,
-                atomic_energies,
-                dataloader_train=datamodule.statistics_dataloader(),
-            )
+            statistics = compute_statistics(cfg, datamodule, element, atomic_energies)
     # finetune or reusme, statistics is no need to recalculate
     if cfg.get("finetune_from_model", None):
         model = finetune(cfg)
@@ -201,7 +188,6 @@ def build(cfg: DictConfig):
             target_property,
             embedding_property,
             keyspec,
-            threeAtomsList,
         )
     # Build shared caches before Lightning initializes distributed collectives;
     # large cold-cache preparation must not time out an idle NCCL rank.

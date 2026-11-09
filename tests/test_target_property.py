@@ -16,9 +16,14 @@ from tace.dataset import quantity
 from tace.dataset.element import build_element_lookup
 from tace.dataset.graph import from_atoms, from_records, read_properties
 from tace.dataset.neighbour_list import get_neighborhood_batch
-from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, KeySpecification
-from tace.dataset.read import ase_db_connect, ase_io_read
-from tace.dataset.utils import hessian_pair_indices, shape_fn_for_hessian
+from tace.dataset.quantity import (
+    DIRECT_PROPERTIES,
+    PROPERTIES,
+    KeySpecification,
+    hessian_pair_indices,
+    shape_fn_for_hessian,
+)
+from tace.dataset.read import ASEDatabaseSource, ASEFileSource
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 from tace.models.spherical.les import TACELES, required_les_irreps
@@ -28,9 +33,8 @@ from tace.models.utils import get_target_irreps, prepare_direct_hessian_inputs
 from tace.utils.loss.common import hessian_loss, prepare_tensor_loss_counts
 from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
-from tace.utils.mask_metrics import MaskMAE, supports_weight_filter
-from tace.utils.precision import configure_model_precision
-from tace.utils.utils import torch_default_dtype
+from tace.utils.metrics import MaskMAE, supports_weight_filter
+from tace.utils.precision import configure_model_precision, torch_default_dtype
 
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -535,7 +539,7 @@ def test_packed_neighbor_inputs_and_fallback():
     with pytest.raises(ValueError, match="nonsingular"):
         get_neighborhood_batch(positions, [0, 2], 1.0, True, np.diag([1, 1, 0]))
     with patch(
-        "tace.dataset.neighbour_list._build_alchemiops_batch",
+        "tace.dataset.neighbour_list.build_alchemiops_batch",
         side_effect=NotImplementedError("test unsupported combination"),
     ):
         with pytest.warns(RuntimeWarning, match="falling back to Matscipy"):
@@ -664,8 +668,8 @@ def check_hessian_data_roundtrip(tmp_path, key):
     write(tmp_path / f"{key}.xyz", structures)
     expected = torch.from_numpy(blocks.reshape(9, 3, 3))
     for reader, filename in (
-        (ase_db_connect, f"{key}.db"),
-        (ase_io_read, f"{key}.xyz"),
+        (ASEDatabaseSource, f"{key}.db"),
+        (ASEFileSource, f"{key}.xyz"),
     ):
         restored = reader(str(tmp_path / filename))
         assert len(restored) == 4

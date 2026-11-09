@@ -21,7 +21,24 @@ def parse_metadata(metadata: str):
 
 @lru_cache(maxsize=256)
 def compact_metadata(metadata: str):
-    """Compact large specifications embedded in compiled operator graphs."""
+    """Compact a literal operator specification.
+
+    Parameters
+    ----------
+    metadata : str
+        Tensor-free specification accepted by :func:`parse_metadata`.
+
+    Returns
+    -------
+    str
+        Compressed specification, or the input if short or already compressed.
+
+    Examples
+    --------
+    >>> spec = repr(tuple(range(2000)))
+    >>> parse_metadata(compact_metadata(spec)) == parse_metadata(spec)
+    True
+    """
     if len(metadata) < 4096 or metadata.startswith("z:"):
         return metadata
     return "z:" + zlib.compress(metadata.encode()).hex()

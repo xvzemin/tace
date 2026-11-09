@@ -30,8 +30,11 @@ from tace.utils.env import (
 )
 from tace.utils.loss.uncertainty import UncertaintyLoss
 from tace.utils.metrics import build_metrics, update_metrics
-from tace.utils.precision import configure_model_precision, resolve_precision
-from tace.utils.utils import torch_default_dtype
+from tace.utils.precision import (
+    configure_model_precision,
+    resolve_precision,
+    torch_default_dtype,
+)
 
 from ..utils.loss.dens import add_gaussian_noise_to_position
 from .lora import to_lora_model

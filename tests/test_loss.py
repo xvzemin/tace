@@ -22,10 +22,11 @@ from tace.utils.loss.dens import (
     mse_dens_forces,
 )
 from tace.utils.loss.huber_fn import huber_forces
-from tace.utils.loss.mse_fn import LOSS_FN, mse_forces
+from tace.utils.loss.mse_fn import mse_forces
 from tace.utils.loss.normal import NormalLoss
+from tace.utils.loss.registry import LOSS_FN
 from tace.utils.loss.uncertainty import UncertaintyLoss
-from tace.utils.mask_metrics import MaskMAE, MaskRMSE
+from tace.utils.metrics import MaskMAE, MaskRMSE
 from tace.utils.optimizer.hybrid_muon import HybridMuonOptimizer
 
 

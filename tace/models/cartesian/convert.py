@@ -27,8 +27,7 @@ def convert_basis(model, basis="cartesian"):
     from tace.models.layout import LayoutTransform
     from tace.models.linear import switch_e3nn_weight_layout
     from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
-    from tace.utils.precision import configure_model_precision
-    from tace.utils.utils import torch_default_dtype
+    from tace.utils.precision import configure_model_precision, torch_default_dtype
 
     if not isinstance(model, TensorModel):
         raise TypeError("Pass an eager TensorModel, for example from load_tace.")
@@ -36,7 +35,9 @@ def convert_basis(model, basis="cartesian"):
         raise ValueError("basis must be 'cartesian' or 'spherical'.")
     config = deepcopy(model.readout_fn.model_config)
     config["_target_"] = (
-        "tace.models.CartesianTACE" if basis == "cartesian" else "tace.models.SphericalTACE"
+        "tace.models.CartesianTACE"
+        if basis == "cartesian"
+        else "tace.models.SphericalTACE"
     )
     if basis == "spherical":
         kinds = config["product_basis"]["type"]

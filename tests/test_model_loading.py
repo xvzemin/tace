@@ -25,8 +25,7 @@ from tace.models.linear import switch_e3nn_weight_layout
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 from tace.models.spherical.tace import SphericalTACE
 from tace.scripts.export_elements import select_elements
-from tace.utils.precision import configure_model_precision
-from tace.utils.utils import torch_default_dtype
+from tace.utils.precision import configure_model_precision, torch_default_dtype
 
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -123,8 +122,9 @@ def test_model_target_aliases(
             restored.readout_fn.model_config["atomic_basis"]
             == reference.readout_fn.model_config["atomic_basis"]
         )
-        assert "use_radial_rotary_attention" not in (
-            restored.readout_fn.model_config["atomic_basis"]
+        assert (
+            "use_radial_rotary_attention"
+            not in (restored.readout_fn.model_config["atomic_basis"])
         )
         assert (
             dict(restored.named_parameters()).keys()
@@ -269,7 +269,11 @@ def test_native_cartesian_model(
             assert block.use_eqx
             if hasattr(block.rejector, "eqx_tp"):
                 if interaction in (
-                    "uv_o2", "uv_rra_o2", "uu_o2", "uv_o2_mag", "uv_o2_mag_non_soc"
+                    "uv_o2",
+                    "uv_rra_o2",
+                    "uu_o2",
+                    "uv_o2_mag",
+                    "uv_o2_mag_non_soc",
                 ):
                     assert block.rejector.eqx_tp is None
                     assert block.rejector.local_frame_in.method == "direct"
@@ -730,8 +734,14 @@ def test_nonlinear_product_loading(tmp_path, double_precision, product):
 @pytest.mark.parametrize(
     "interaction",
     [
-        "cgtp", "so2", "uv_o2", "uv_rra_o2", "uv_o2_mag", "mace",
-        "nonlinear_cgtp", "nonlinear_ictd",
+        "cgtp",
+        "so2",
+        "uv_o2",
+        "uv_rra_o2",
+        "uv_o2_mag",
+        "mace",
+        "nonlinear_cgtp",
+        "nonlinear_ictd",
     ],
 )
 @pytest.mark.parametrize("elements", [["O", "H"], [14, 8, 6, 1], ["H", "O", "Si"]])

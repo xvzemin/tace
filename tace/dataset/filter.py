@@ -57,7 +57,7 @@ def filter_options(config):
     return {name: value for name, value in options.items() if value is not None}
 
 
-def _size_chunks(dataset):
+def size_chunks(dataset):
     # Bound temporary memory even for tens of millions of cached structures.
     chunk_size = 65536
     if dataset.in_memory or dataset.indices is not None:
@@ -79,7 +79,7 @@ def _size_chunks(dataset):
         offset += length
 
 
-def _accepts(graph, bounds):
+def accepts_graph(graph, bounds):
     for name, limit in bounds.items():
         field = _LABELS[name]
         value = graph.get(field)
@@ -139,7 +139,7 @@ def filter_graphs(dataset, options, stage="train"):
         with tqdm(
             total=len(dataset), desc=f"{stage} filter", unit="graph", disable=disabled
         ) as progress:
-            for start, sizes in _size_chunks(dataset):
+            for start, sizes in size_chunks(dataset):
                 mask = keep[start : start + len(sizes)]
                 if "max_atoms" in options:
                     mask &= sizes[:, 0] <= options["max_atoms"]
@@ -150,7 +150,9 @@ def filter_graphs(dataset, options, stage="train"):
                     for offset in range(0, len(candidates), 256):
                         indices = candidates[offset : offset + 256]
                         graphs = labels.__getitems__(indices)
-                        keep[indices] = [_accepts(graph, bounds) for graph in graphs]
+                        keep[indices] = [
+                            accepts_graph(graph, bounds) for graph in graphs
+                        ]
                 progress.update(len(sizes))
     finally:
         if labels is not None:

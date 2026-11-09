@@ -28,6 +28,19 @@ LOG_LEVELS = {
 }
 
 
+def num_params(model) -> int:
+    """Return the number of trainable scalar parameters."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def log_parameters(model) -> None:
+    """Log trainable parameter counts for the model and each parameter tensor."""
+    logging.debug("Total number of parameters in the model: %s", num_params(model))
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            logging.debug("Layer: %s, Number of parameters: %s", name, param.numel())
+
+
 def set_logger(_level: Union[int, str] = "info", _rank_zero_only: bool = True) -> None:
     log_level = LOG_LEVELS[_level]
     root_logger = logging.getLogger()

@@ -14,11 +14,12 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 
-from .quantity import KeySpecification, get_need_property
+from .quantity import get_need_property
 from .records import (
     record_from_atoms,
     record_from_row,
@@ -123,7 +124,18 @@ class SourceSequence(Sequence):
 
 
 class ASEFileSource(SourceSequence):
-    """XYZ byte offsets and trajectory random access; bounded generic ASE fallback."""
+    """Read structures from an ASE-supported file.
+
+    Parameters
+    ----------
+    path : path-like
+        Source file. Its format is detected by ASE.
+
+    Examples
+    --------
+    >>> source = ASEFileSource("structures.xyz")
+    >>> atoms = source[0]
+    """
 
     def __init__(self, path):
         from ase.io.formats import filetype
@@ -257,7 +269,7 @@ class RecordSource(SourceSequence):
         self.dataset.close()
 
 
-def _cached_random_source(source, directory):
+def cached_random_source(source, directory):
     """Materialize only non-random ASE formats in the typed raw-record store."""
     if (
         directory is None
@@ -298,7 +310,7 @@ _LMDB_HANDLES = OrderedDict()
 _LMDB_LOCK = threading.RLock()
 
 
-def _close_inherited_lmdb_handles():
+def close_inherited_lmdb_handles():
     global _LMDB_LOCK
     for environment in _LMDB_HANDLES.values():
         environment.close()
@@ -307,7 +319,7 @@ def _close_inherited_lmdb_handles():
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_close_inherited_lmdb_handles)
+    os.register_at_fork(after_in_child=close_inherited_lmdb_handles)
 
 
 class ASEDatabaseSource(SourceSequence):
@@ -568,7 +580,6 @@ RGLOB = {
     "ase_db": ["*.db"],
     "fair_aselmdb": ["*.aselmdb"],
     "aselmdb": ["*.aselmdb"],
-    "torchsim_h5": ["*.h5"],
 }
 
 
@@ -707,28 +718,11 @@ def discover_sources(filename, reader="ase"):
     return [found[path] for path in sorted(found)]
 
 
-def ase_io_read(filename):
-    return ASEFileSource(filename)
-
-
-def ase_db_connect(filename):
-    return ASEDatabaseSource(filename)
-
-
-def fair_aselmdb(filename):
-    return ASEDatabaseSource(filename, lmdb=True)
-
-
-def torchsim_h5(filename):
-    raise NotImplementedError("torchsim_h5 is not yet implemented")
-
-
 HOW_TO_READ = {
-    "ase": ase_io_read,
-    "ase_db": ase_db_connect,
-    "fair_aselmdb": fair_aselmdb,
-    "aselmdb": fair_aselmdb,
-    "torchsim_h5": torchsim_h5,
+    "ase": ASEFileSource,
+    "ase_db": ASEDatabaseSource,
+    "fair_aselmdb": partial(ASEDatabaseSource, lmdb=True),
+    "aselmdb": partial(ASEDatabaseSource, lmdb=True),
 }
 
 
@@ -743,7 +737,7 @@ def read_single_file(
     record_cache_dir=None,
 ):
     source = HOW_TO_READ[reader](str(fpath))
-    source = _cached_random_source(source, record_cache_dir)
+    source = cached_random_source(source, record_cache_dir)
     return BoundSource(
         source, keyspec, target_property, embedding_property or [], fidelity_idx
     )
@@ -754,7 +748,6 @@ def read_all_files(
     target_property,
     keyspec,
     embedding_property=None,
-    num_workers=None,
     reader="ase",
     *,
     record_cache_dir=None,
@@ -786,7 +779,6 @@ def tace_read_all_files(
     target_property,
     embedding_property,
     keyspec,
-    in_datamodule=False,
     *,
     stages=("train", "valid", "test"),
 ):
@@ -810,7 +802,6 @@ def tace_read_all_files(
             target_property,
             keyspec,
             embedding_property,
-            dataset.get("num_workers"),
             readers[stage],
             record_cache_dir=dataset.get(
                 "record_cache_dir",

@@ -9,19 +9,184 @@ import os
 import queue
 import time
 import traceback
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import ase
 import numpy as np
 import torch
 import torch.distributed as dist
+import yaml
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
-from ..utils.utils import log_statistics_to_yaml
-from .cache import GRAPH_SCHEMA
-from .element import TorchElement
+from .cache import GRAPH_SCHEMA, statistics_cache_key
+from .element import TorchElement, build_element_lookup
 from .quantity import KeySpecification, get_need_property
+from .store import GraphDatasetLMDB
+
+
+@rank_zero_only
+def log_statistics_to_yaml(statistics) -> None:
+    """Write one complete statistics YAML file per fidelity on rank zero."""
+    if statistics is not None:
+        for index, values in enumerate(statistics):
+            path = Path(f"statistics_{index}.yaml")
+            temporary = path.with_suffix(".yaml.tmp")
+            with temporary.open("w", encoding="utf-8") as stream:
+                yaml.dump(values, stream, sort_keys=False, allow_unicode=True)
+            temporary.replace(path)
+
+
+def statistics_devices(cfg, dataset):
+    """Select statistics devices, respecting the current DDP rank."""
+    device = torch.device(cfg.get("misc", {}).get("device", "cpu"))
+    if (
+        device.type == "cuda"
+        and device.index is None
+        and isinstance(dataset, GraphDatasetLMDB)
+        and not dataset.in_memory
+    ):
+        distributed = (
+            dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        ) or int(os.environ.get("WORLD_SIZE", "1")) > 1
+        if distributed:
+            local_rank = os.environ.get("LOCAL_RANK")
+            return [
+                str(torch.device("cuda", int(local_rank)))
+                if local_rank is not None
+                else str(device)
+            ]
+        return [f"cuda:{index}" for index in range(torch.cuda.device_count())] or [
+            str(device)
+        ]
+    return [str(device)]
+
+
+def prepare_atomic_energies(cfg, datamodule):
+    """Resolve chemical elements and isolated-atom references.
+
+    Parameters
+    ----------
+    cfg : dict
+        Training configuration containing model elements and fidelities.
+    datamodule : GraphDataModule
+        Prepared module whose complete training set supplies missing references.
+
+    Returns
+    -------
+    element : TorchElement
+        Element table covering both the dataset and configured references.
+    atomic_energies : list of dict or None
+        Energy offsets by atomic number, one mapping per fidelity.
+
+    Examples
+    --------
+    >>> element, atomic_energies = prepare_atomic_energies(cfg, datamodule)
+    """
+    from .dataloader import build_statistics_dataloader
+
+    atomic_numbers = set(datamodule.element.zs)
+    configured = cfg["model"]["config"].get("atomic_numbers")
+    if configured is not None:
+        configured = set(configured)
+        assert atomic_numbers.issubset(configured), (
+            "cfg.model.config.atomic_numbers must include all atomic numbers present in the dataset, "
+            f"but is missing: {atomic_numbers - configured}"
+        )
+        atomic_numbers = configured
+    if "energy" not in datamodule.target_property:
+        return build_element_lookup(atomic_numbers), None
+
+    fidelities = cfg["model"]["config"]["fidelity"]
+    references = []
+    for fidelity in fidelities:
+        values = fidelity.get("atomic_energy")
+        assert values is None or isinstance(values, dict), (
+            "You must provide each fidelity's atomic_energy or set it to null"
+        )
+        if values is not None:
+            values = {int(z): float(value) for z, value in values.items()}
+            atomic_numbers.update(values)
+        references.append(values)
+    element = build_element_lookup(atomic_numbers)
+    datamodule.element = element
+    missing = [index for index, values in enumerate(references) if values is None]
+    for index in missing:
+        logging.info(
+            "Computing isolated atomic energy for fidelity %s",
+            fidelities[index]["name"],
+        )
+    fitted = (
+        compute_atomic_energies_from_graphs(
+            build_statistics_dataloader(
+                cfg, datamodule.train_dataset, ["energy"], neighbors=False
+            ),
+            element,
+            missing,
+        )
+        if missing
+        else {}
+    )
+    for index, values in enumerate(references):
+        if values is None:
+            references[index] = fitted[index]
+        else:
+            references[index] = {z: float(values.get(z, 0.0)) for z in element.zs}
+            for z in element.zs:
+                if z not in values:
+                    logging.warning(
+                        "Fidelity %s: No isolated atomic energy provided for Z=%s, using 0.0",
+                        fidelities[index]["name"],
+                        z,
+                    )
+    logging.info("Isolated atomic energy per computational fidelity:")
+    for fidelity, values in zip(fidelities, references):
+        logging.info("  %s: %s", fidelity["name"], values)
+    return element, references
+
+
+def compute_statistics(cfg, datamodule, element, atomic_energies):
+    """Compute statistics from the complete training graph dataset.
+
+    Parameters
+    ----------
+    cfg : dict
+        Training configuration.
+    datamodule : GraphDataModule
+        Prepared module providing the statistics loader and property keys.
+    element : TorchElement
+        Chemical element table.
+    atomic_energies : list of dict or None
+        Isolated-atom energies by atomic number, one mapping per fidelity.
+
+    Returns
+    -------
+    list of dict
+        FP64 statistics, also written to ``statistics_<index>.yaml`` on rank zero.
+
+    Examples
+    --------
+    >>> element, energies = prepare_atomic_energies(cfg, datamodule)
+    >>> statistics = compute_statistics(cfg, datamodule, element, energies)
+    """
+    dataloader = datamodule.statistics_dataloader()
+    return statistics_from_loader(
+        dataloader,
+        element.zs,
+        atomic_energies,
+        target_property=datamodule.target_property,
+        device=cfg.get("misc", {}).get("device", "cpu"),
+        num_fidelities=len(cfg["model"]["config"]["fidelity"]),
+        data_fingerprint=statistics_cache_key(
+            cfg,
+            datamodule.target_property,
+            datamodule.embedding_property,
+            datamodule.keyspec,
+        ),
+        devices=statistics_devices(cfg, dataloader.dataset),
+    )
 
 
 def missing_model_statistics(
@@ -111,14 +276,14 @@ def balanced_element_weights(
     return weights
 
 
-def _canonical_atomic_energy(
+def canonical_atomic_energy(
     atomic_energy: Dict[int, float], atomic_numbers: Sequence[int]
 ) -> Dict[int, float]:
     values = {int(z): float(value) for z, value in atomic_energy.items()}
     return {int(z): values.get(int(z), 0.0) for z in atomic_numbers}
 
 
-class _GroupedMoments:
+class GroupedMoments:
     """Numerically stable streaming moments for indexed groups."""
 
     def __init__(
@@ -167,7 +332,7 @@ class _GroupedMoments:
 
     def merge(self, state):
         """Combine independent grouped moments using the parallel Welford rule."""
-        if isinstance(state, _GroupedMoments):
+        if isinstance(state, GroupedMoments):
             state = state.state()
         other_count = torch.as_tensor(state["count"], device=self.count.device)
         other_mean = torch.as_tensor(state["mean"], device=self.mean.device)
@@ -226,7 +391,7 @@ class _GroupedMoments:
         return count, mean, std, rms
 
 
-def _by_element(values: torch.Tensor, atomic_numbers: Sequence[int]) -> Dict:
+def by_element(values: torch.Tensor, atomic_numbers: Sequence[int]) -> Dict:
     return dict(zip(atomic_numbers, values.tolist()))
 
 
@@ -363,7 +528,7 @@ def compute_atomic_energies_from_graphs(
     return fit.result()
 
 
-class _StatisticsAccumulator:
+class StatisticsAccumulator:
     """Mergeable FP64 moments for complete graph-dataset statistics."""
 
     def __init__(
@@ -413,18 +578,18 @@ class _StatisticsAccumulator:
             (), self.num_fidelities, dtype=torch.int64, device=self.device
         )
         self.max_fidelity = torch.full((), -1, dtype=torch.int64, device=self.device)
-        self.neighbor_moments = _GroupedMoments(self.num_elements, 1, self.device)
+        self.neighbor_moments = GroupedMoments(self.num_elements, 1, self.device)
         self.energy_moments = (
-            _GroupedMoments(self.num_fidelities, 3, self.device)
+            GroupedMoments(self.num_fidelities, 3, self.device)
             if self.needs_energy
             else None
         )
         self.forces_moments = (
-            _GroupedMoments(self.num_node_groups, 4, self.device)
+            GroupedMoments(self.num_node_groups, 4, self.device)
             if self.needs_forces
             else None
         )
-        self.noncollinear_magmoms_moments = _GroupedMoments(
+        self.noncollinear_magmoms_moments = GroupedMoments(
             self.num_node_groups, 4, self.device
         )
         self.max_noncollinear_magmoms_norm = torch.zeros(
@@ -436,7 +601,7 @@ class _StatisticsAccumulator:
         if self.needs_energy:
             self.atomic_energy_table = torch.tensor(
                 [
-                    list(_canonical_atomic_energy(energy, self.atomic_numbers).values())
+                    list(canonical_atomic_energy(energy, self.atomic_numbers).values())
                     for energy in self.atomic_energies
                 ],
                 dtype=torch.float64,
@@ -655,7 +820,7 @@ class _StatisticsAccumulator:
         _, neighbor_mean_by_element, _, _ = neighbor_moments.statistics()
         _, neighbor_mean, _, _ = neighbor_moments.statistics(group_size=num_elements)
         avg_num_neighbors = float(neighbor_mean[0, 0].cpu())
-        avg_neighbors_by_element = _by_element(
+        avg_neighbors_by_element = by_element(
             neighbor_mean_by_element[:, 0].cpu(), atomic_numbers
         )
 
@@ -760,26 +925,26 @@ class _StatisticsAccumulator:
                         "max_noncollinear_magmoms_norm": float(
                             max_noncollinear_magmoms_norm[level].max()
                         ),
-                        "mean_noncollinear_magmoms_xyz_by_element": _by_element(
+                        "mean_noncollinear_magmoms_xyz_by_element": by_element(
                             mag_mean_by_element[:, :3], atomic_numbers
                         ),
-                        "std_noncollinear_magmoms_xyz_by_element": _by_element(
+                        "std_noncollinear_magmoms_xyz_by_element": by_element(
                             mag_std_by_element[:, :3], atomic_numbers
                         ),
-                        "rms_noncollinear_magmoms_xyz_by_element": _by_element(
+                        "rms_noncollinear_magmoms_xyz_by_element": by_element(
                             mag_rms_by_element[:, :3], atomic_numbers
                         ),
-                        "mean_noncollinear_magmoms_norm_by_element": _by_element(
+                        "mean_noncollinear_magmoms_norm_by_element": by_element(
                             mag_mean_by_element[:, 3], atomic_numbers
                         ),
-                        "std_noncollinear_magmoms_norm_by_element": _by_element(
+                        "std_noncollinear_magmoms_norm_by_element": by_element(
                             mag_std_by_element[:, 3], atomic_numbers
                         ),
                         "rms_noncollinear_magmoms": {
                             z: float(safe_rms_noncollinear_magmoms)
                             for z in atomic_numbers
                         },
-                        "rms_noncollinear_magmoms_by_element": _by_element(
+                        "rms_noncollinear_magmoms_by_element": by_element(
                             safe_rms_noncollinear_magmoms_by_element,
                             atomic_numbers,
                         ),
@@ -787,14 +952,14 @@ class _StatisticsAccumulator:
                             z: float(safe_rms_noncollinear_magmoms_norm)
                             for z in atomic_numbers
                         },
-                        "rms_noncollinear_magmoms_norm_by_element": _by_element(
+                        "rms_noncollinear_magmoms_norm_by_element": by_element(
                             safe_rms_noncollinear_magmoms_norm_by_element,
                             atomic_numbers,
                         ),
-                        "max_noncollinear_magmoms_norm_by_element": _by_element(
+                        "max_noncollinear_magmoms_norm_by_element": by_element(
                             max_noncollinear_magmoms_norm[level], atomic_numbers
                         ),
-                        "num_noncollinear_magmoms_by_element": _by_element(
+                        "num_noncollinear_magmoms_by_element": by_element(
                             mag_count_by_element[:, 0], atomic_numbers
                         ),
                     }
@@ -810,7 +975,7 @@ class _StatisticsAccumulator:
                     {
                         "mean_energy": float(energy_mean[0]),
                         "std_energy": float(energy_std[0]),
-                        "atomic_energy": _canonical_atomic_energy(
+                        "atomic_energy": canonical_atomic_energy(
                             atomic_energies[level], atomic_numbers
                         ),
                         "mean_energy_per_atom": {
@@ -892,37 +1057,35 @@ class _StatisticsAccumulator:
                         "rms_forces_xyz": forces_rms[:3].tolist(),
                         "mean_forces_norm": float(forces_mean[3]),
                         "std_forces_norm": float(forces_std[3]),
-                        "mean_forces_xyz_by_element": _by_element(
+                        "mean_forces_xyz_by_element": by_element(
                             forces_mean_by_element[:, :3], atomic_numbers
                         ),
-                        "std_forces_xyz_by_element": _by_element(
+                        "std_forces_xyz_by_element": by_element(
                             forces_std_by_element[:, :3], atomic_numbers
                         ),
-                        "rms_forces_xyz_by_element": _by_element(
+                        "rms_forces_xyz_by_element": by_element(
                             forces_rms_by_element[:, :3], atomic_numbers
                         ),
-                        "mean_forces_norm_by_element": _by_element(
+                        "mean_forces_norm_by_element": by_element(
                             forces_mean_by_element[:, 3], atomic_numbers
                         ),
-                        "std_forces_norm_by_element": _by_element(
+                        "std_forces_norm_by_element": by_element(
                             forces_std_by_element[:, 3], atomic_numbers
                         ),
                         "rms_forces": {
                             z: float(safe_rms_forces) for z in atomic_numbers
                         },
-                        "rms_forces_by_element": _by_element(
+                        "rms_forces_by_element": by_element(
                             safe_rms_forces_by_element, atomic_numbers
                         ),
                         "rms_forces_norm": {
                             z: float(safe_rms_forces_norm) for z in atomic_numbers
                         },
-                        "rms_forces_norm_by_element": _by_element(
+                        "rms_forces_norm_by_element": by_element(
                             safe_rms_forces_norm_by_element, atomic_numbers
                         ),
-                        "num_forces_by_element": _by_element(
-                            num_forces, atomic_numbers
-                        ),
-                        "mean_squared_forces_xyz_by_element": _by_element(
+                        "num_forces_by_element": by_element(num_forces, atomic_numbers),
+                        "mean_squared_forces_xyz_by_element": by_element(
                             mean_squared_forces_xyz, atomic_numbers
                         ),
                         "recommended_forces_element_weights": (
@@ -942,7 +1105,7 @@ class _StatisticsAccumulator:
         return per_level_stats
 
 
-def _accumulate_statistics(dataloader, accumulator, progress=None):
+def accumulate_statistics(dataloader, accumulator, progress=None):
     """Show local progress or send bounded-rate counts to the parent reader."""
     dataset = getattr(dataloader, "dataset", None)
     total = len(dataset) if dataset is not None else None
@@ -984,7 +1147,7 @@ def _accumulate_statistics(dataloader, accumulator, progress=None):
             progress(processed)
 
 
-def _statistics_worker(task, progress=None):
+def statistics_worker(task, progress=None):
     """Read assigned immutable shards and return only compact CPU moments."""
     from .dataloader import StatisticsDataLoader
     from .store import GraphDatasetLMDB
@@ -1006,14 +1169,14 @@ def _statistics_worker(task, progress=None):
         dataset = dataset.select(task["indices"])
     try:
         loader = StatisticsDataLoader(dataset, **task["loader"])
-        accumulator = _StatisticsAccumulator(
+        accumulator = StatisticsAccumulator(
             task["atomic_numbers"],
             task["atomic_energies"],
             task["target_property"],
             device=device,
             num_fidelities=task["num_fidelities"],
         )
-        processed = _accumulate_statistics(loader, accumulator, progress)
+        processed = accumulate_statistics(loader, accumulator, progress)
         if processed != len(dataset):
             raise RuntimeError(
                 f"Statistics worker processed {processed} of {len(dataset)} graphs"
@@ -1023,10 +1186,10 @@ def _statistics_worker(task, progress=None):
         dataset.close()
 
 
-def _statistics_process(index, task, messages):
+def statistics_process(index, task, messages):
     """Isolate CUDA and LMDB handles inside one spawned statistics reader."""
     try:
-        state = _statistics_worker(
+        state = statistics_worker(
             task,
             progress=lambda count: messages.put(("progress", index, count)),
         )
@@ -1035,7 +1198,7 @@ def _statistics_process(index, task, messages):
         messages.put(("error", index, traceback.format_exc()))
 
 
-def _statistics_tasks(
+def statistics_tasks(
     dataloader,
     atomic_numbers,
     atomic_energies,
@@ -1133,7 +1296,7 @@ def _statistics_tasks(
     return tasks
 
 
-def _parallel_statistics(tasks, accumulator):
+def parallel_statistics(tasks, accumulator):
     """Collect worker moments in assignment order, with no graph IPC."""
     context = multiprocessing.get_context("spawn")
     messages = context.Queue()
@@ -1164,7 +1327,7 @@ def _parallel_statistics(tasks, accumulator):
     try:
         for index, task in enumerate(tasks):
             process = context.Process(
-                target=_statistics_process,
+                target=statistics_process,
                 args=(index, task, messages),
                 name=f"tace-statistics-{index}",
             )
@@ -1213,7 +1376,7 @@ def _parallel_statistics(tasks, accumulator):
         messages.join_thread()
 
 
-def _compute_statistics(
+def statistics_from_loader(
     dataloader_train: DataLoader,
     atomic_numbers: List[int],
     atomic_energies: Optional[List[Dict[int, float]]],
@@ -1223,11 +1386,36 @@ def _compute_statistics(
     data_fingerprint: Optional[str] = None,
     devices: Optional[Sequence] = None,
 ) -> List[Dict]:
-    """Compute full-dataset FP64 moments, optionally using independent GPUs.
+    """Compute FP64 statistics from graph batches.
 
-    ``devices=None`` retains the existing single-device behavior. Multiple
-    devices require a sequential loader backed by immutable LMDB graph shards.
-    Batch size is per device; only the parent writes statistics YAML files.
+    Parameters
+    ----------
+    dataloader_train : DataLoader
+        Loader traversing the complete training set.
+    atomic_numbers : list of int
+        Chemical elements included in the statistics.
+    atomic_energies : list of dict or None
+        Isolated-atom energies by atomic number, one mapping per fidelity.
+    target_property : list of str
+        Training properties to summarize.
+    device : str, default="cpu"
+        Reduction device when ``devices`` is omitted.
+    num_fidelities : int, default=1
+        Number of computational fidelities.
+    data_fingerprint : str or None
+        Dataset identity saved alongside the statistics.
+    devices : sequence or None
+        Reduction devices. Multiple devices require distinct CUDA devices and
+        a sequential LMDB loader; batch size is per device.
+
+    Returns
+    -------
+    list of dict
+        Statistics per fidelity, also written to YAML on rank zero.
+
+    Examples
+    --------
+    >>> statistics = statistics_from_loader(loader, [1, 8], energies, ["energy", "forces"])
     """
     if devices is None:
         selected = [torch.device(device)]
@@ -1252,10 +1440,10 @@ def _compute_statistics(
         count = torch.cuda.device_count()
         if any(not 0 <= item.index < count for item in selected):
             raise ValueError("Statistics device is outside the visible CUDA devices")
-        accumulator = _StatisticsAccumulator(
+        accumulator = StatisticsAccumulator(
             atomic_numbers, atomic_energies, target_property, "cpu", num_fidelities
         )
-        tasks = _statistics_tasks(
+        tasks = statistics_tasks(
             dataloader_train,
             atomic_numbers,
             atomic_energies,
@@ -1263,16 +1451,16 @@ def _compute_statistics(
             num_fidelities,
             selected,
         )
-        _parallel_statistics(tasks, accumulator)
+        parallel_statistics(tasks, accumulator)
     else:
-        accumulator = _StatisticsAccumulator(
+        accumulator = StatisticsAccumulator(
             atomic_numbers,
             atomic_energies,
             target_property,
             selected[0],
             num_fidelities,
         )
-        _accumulate_statistics(dataloader_train, accumulator)
+        accumulate_statistics(dataloader_train, accumulator)
     statistics = accumulator.result(data_fingerprint)
     log_statistics_to_yaml(statistics)
     return statistics

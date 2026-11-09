@@ -3,46 +3,18 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from functools import wraps
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import torch
 
 from .common import (
     apply_element_weights,
     hessian_loss,
-    loss_inputs,
     num_atoms_per_graph,
     polarization_error_per_atom,
     tensor_loss,
 )
-
-LOSS_FN: Dict[str, Callable] = {}
-
-
-def register_loss(func: Callable = None, *, key: str = None):
-    """Register a loss evaluated in FP64, independently of network precision."""
-
-    def decorator(f: Callable):
-        @wraps(f)
-        def loss(pred, label, *args, **kwargs):
-            pred, label = loss_inputs(pred, label)
-            device = next(
-                value.device
-                for value in pred.values()
-                if isinstance(value, torch.Tensor)
-            )
-            with torch.autocast(device_type=device.type, enabled=False):
-                return f(pred, label, *args, **kwargs)
-
-        k = key if key is not None else f.__name__
-        LOSS_FN[k] = loss
-        return loss
-
-    if func is None:
-        return decorator
-    else:
-        return decorator(func)
+from .registry import register_loss
 
 
 @register_loss

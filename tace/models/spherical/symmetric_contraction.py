@@ -17,6 +17,7 @@ from e3nn.util.codegen import CodeGenMixin
 
 try:
     import cuequivariance as cue
+
     CUET_AVAILABLE = True
 except ImportError:
     CUET_AVAILABLE = False
@@ -140,6 +141,7 @@ def U_matrix_real(
     current_ir = wigners[0][0]
     out = []
     stack = torch.tensor([], dtype=dtype)
+    last_ir = None
 
     for ir, _, base_o3 in wigners:
         if ir in irreps_out and ir == current_ir:
@@ -152,9 +154,9 @@ def U_matrix_real(
             current_ir, last_ir = ir, ir
         else:
             current_ir = ir
-    try:
+    if last_ir is not None:
         out += [last_ir, stack]
-    except:  # pylint: disable=bare-except
+    else:
         first_dim = irreps_out.dim
         if first_dim != 1:
             size = [first_dim] + [o3.Irreps(irreps_in).dim] * correlation + [1]
@@ -165,6 +167,7 @@ def U_matrix_real(
 
 
 if CUET_AVAILABLE:
+
     def compute_U_cueq(irreps_in, irreps_out, correlation=2, dtype=None):
         if dtype is None:
             dtype = torch.float64
@@ -246,8 +249,10 @@ if CUET_AVAILABLE:
                 yield O3_e3nn(l=l, p=-1 * (-1) ** l)
 
 else:
+
     class O3_e3nn:
         pass
+
     print(
         "cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled."
     )
@@ -497,9 +502,7 @@ class EmptyParam(torch.nn.Parameter):
         zero = torch.zeros_like(data)
         return super().__new__(cls, zero, requires_grad=False)
 
-    def requires_grad_(
-        self, mode: bool = True
-    ):  # pylint: disable=arguments-differ, arguments-renamed
+    def requires_grad_(self, mode: bool = True):  # pylint: disable=arguments-differ, arguments-renamed
         del mode
         return self
 
@@ -510,7 +513,8 @@ class CuEquivarianceConfig:
     layout_str: str = "mul_ir"
     group: str = "O3"
 
-cueq_config  = CuEquivarianceConfig()
+
+cueq_config = CuEquivarianceConfig()
 
 
 class SymmetricContractionWrapper:
@@ -528,6 +532,7 @@ class SymmetricContractionWrapper:
             assert use_reduced_cg
             import cuequivariance as cue
             import cuequivariance_torch as cuet
+
             return cuet.SymmetricContraction(
                 cue.Irreps(cueq_config.group, irreps_in),
                 cue.Irreps(cueq_config.group, irreps_out),

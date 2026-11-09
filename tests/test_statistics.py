@@ -43,7 +43,6 @@ from tace.dataset.dataloader import (
     StatisticsDataLoader,
     build_statistics_dataloader,
     collate_statistics,
-    statistics_devices,
 )
 from tace.dataset.datamodule import GraphDatasetLMDB, build_datamodule, create_graphs
 from tace.dataset.element import build_element_lookup
@@ -60,9 +59,10 @@ from tace.dataset.read import (
 )
 from tace.dataset.records import record_from_atoms
 from tace.dataset.split import IndexedSource
+from tace.dataset.statistics import statistics_devices
 from tace.dataset.store import (
-    _compress_array_record,
     build_graph_store,
+    compress_array_record,
     decode_graph,
     encode_graph,
     write_graphs,
@@ -893,8 +893,8 @@ def test_source_reader_selection_rejects_invalid_configuration(tmp_path):
 
 
 def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
-    from tace.dataset.dataloader import build_atomsList, compute_statistics
     from tace.dataset.datamodule import build_datamodule, load_cached_datamodule
+    from tace.dataset.statistics import compute_statistics, prepare_atomic_energies
 
     pytest.importorskip("ase_db_backends.aselmdb")
     monkeypatch.chdir(tmp_path)
@@ -946,22 +946,10 @@ def test_storage_modes_cold_statistics_and_warm_training(tmp_path, monkeypatch):
             assert module.train_dataset.metadata["codec"] == (
                 COMPRESSED_ARRAY_CODEC if mode == "clmdb" else ARRAY_CODEC
             )
-        element, raw, references = build_atomsList(
-            cfg, ["energy", "forces"], [], keys, datamodule=module
-        )
+        element, references = prepare_atomic_energies(cfg, module)
         assert element.zs == [1, 8]
         assert references[0] == pytest.approx({1: -1.0, 8: -2.0}, abs=1e-12)
-        statistics = compute_statistics(
-            cfg,
-            ["energy", "forces"],
-            [],
-            keys,
-            element,
-            raw,
-            cfg["model"]["config"]["fidelity"],
-            references,
-            dataloader_train=module.statistics_dataloader(),
-        )
+        statistics = compute_statistics(cfg, module, element, references)
         assert statistics[0]["num_graphs"] == 4
         assert statistics[0]["rms_forces"][1] == pytest.approx(
             math.sqrt(0.045), abs=1e-12
@@ -1468,8 +1456,8 @@ def _forbid_graph_rebuild(monkeypatch):
 def test_completed_graph_cache_survives_raw_source_changes(
     tmp_path, monkeypatch, change
 ):
-    from tace.dataset.dataloader import build_atomsList, compute_statistics
     from tace.dataset.datamodule import build_datamodule, load_cached_datamodule
+    from tace.dataset.statistics import compute_statistics, prepare_atomic_energies
 
     monkeypatch.chdir(tmp_path)
     filename = tmp_path / "structures.db"
@@ -1516,20 +1504,8 @@ def test_completed_graph_cache_survives_raw_source_changes(
     warm = load_cached_datamodule(cfg, ["energy", "forces"], [], keyspec)
     assert warm is not None and warm.threeAtomsList is None
     assert warm.train_dataset.lmdb_paths == paths
-    element, raw, references = build_atomsList(
-        cfg, ["energy", "forces"], [], keyspec, datamodule=warm
-    )
-    statistics = compute_statistics(
-        cfg,
-        ["energy", "forces"],
-        [],
-        keyspec,
-        element,
-        raw,
-        cfg["model"]["config"]["fidelity"],
-        references,
-        dataloader_train=warm.statistics_dataloader(),
-    )
+    element, references = prepare_atomic_energies(cfg, warm)
+    statistics = compute_statistics(cfg, warm, element, references)
     assert statistics[0]["num_graphs"] == 4
     assert statistics[0]["data_fingerprint"] == fingerprint
     warm.train_dataset.close()
@@ -1727,7 +1703,7 @@ def _convert_test_shard(path, compressed):
             for key, value in list(txn.cursor()):
                 if value[:8] == b"TACEZLB\0":
                     value = zlib.decompress(value[16:])
-                txn.put(key, _compress_array_record(value) if compressed else value)
+                txn.put(key, compress_array_record(value) if compressed else value)
     manifest = path / "metadata.json"
     metadata = json.loads(manifest.read_text())
     metadata["codec"] = COMPRESSED_ARRAY_CODEC if compressed else ARRAY_CODEC
@@ -1805,7 +1781,7 @@ def test_typed_graph_store_batched_projection_and_size_index(tmp_path, compresse
     for graph in graphs:
         encoded = encode_graph(graph)
         decoded = decode_graph(
-            _compress_array_record(encoded) if compressed else encoded
+            compress_array_record(encoded) if compressed else encoded
         )
         for name, value in graph.items():
             if torch.is_tensor(value):
@@ -1869,7 +1845,7 @@ def test_compressed_graph_records_reject_corruption():
     raw = encode_graph(
         Data(num_nodes=1, positions=torch.ones(1, 3, dtype=torch.float64))
     )
-    value = _compress_array_record(raw)
+    value = compress_array_record(raw)
     for malformed in (
         value[:15],
         value[:-1],
@@ -1882,7 +1858,7 @@ def test_compressed_graph_records_reject_corruption():
         with pytest.raises(ValueError):
             decode_graph(malformed)
     with pytest.raises(ValueError, match="uncompressed"):
-        _compress_array_record(value)
+        compress_array_record(value)
 
 
 @pytest.mark.parametrize("in_memory", [False, True])
@@ -2009,9 +1985,9 @@ def test_graph_filter_rejects_invalid_configuration(options, error):
 
 @pytest.mark.parametrize("epoch_size", [None, 0.5])
 def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch_size):
-    from tace.dataset.dataloader import build_atomsList
     from tace.dataset.datamodule import load_cached_datamodule
     from tace.dataset.sampler import EpochSampler
+    from tace.dataset.statistics import prepare_atomic_energies
 
     cfg, keyspec, _ = _prebuilt_graph_store(
         tmp_path, [-1, 2, -9, 8], targets=("energy", "forces")
@@ -2065,13 +2041,11 @@ def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch
         -9,
         8,
     ]
-    element, _, references = build_atomsList(
-        cfg, ["energy"], [], keyspec, datamodule=module
-    )
+    element, references = prepare_atomic_energies(cfg, module)
     assert references[0][1] == pytest.approx(8 / 30)
     written = []
     monkeypatch.setattr(statistics_module, "log_statistics_to_yaml", written.append)
-    statistics = statistics_module._compute_statistics(
+    statistics = statistics_module.statistics_from_loader(
         statistics_loader,
         element.zs,
         references,
@@ -2124,7 +2098,7 @@ def test_store_progress_counts_committed_batches_and_final_partial(tmp_path):
         [graph] * 5,
         [tmp_path],
         "train",
-        transaction_bytes=2 * len(_compress_array_record(encode_graph(graph))),
+        transaction_bytes=2 * len(compress_array_record(encode_graph(graph))),
         progress=written.append,
     )
     assert written == [2, 2, 1]
@@ -2495,7 +2469,7 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
         assert statistics[1]["atomic_energy"] == {1: 4.0, 8: 5.0}
         with monkeypatch.context() as patch:
             patch.setattr(statistics_module, "log_statistics_to_yaml", lambda _: None)
-            reference = statistics_module._compute_statistics(
+            reference = statistics_module.statistics_from_loader(
                 DataLoader(graphs, batch_size=3, exclude_keys=["direct_hessian"]),
                 [1, 8],
                 [{1: 1.0, 8: 3.0}, {1: 4.0, 8: 5.0}],
@@ -2510,7 +2484,7 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     datamodule.val_dataset.close()
 
     monkeypatch.setattr(train_module, "load_cached_datamodule", no_source_read)
-    monkeypatch.setattr(train_module, "build_atomsList", no_source_read)
+    monkeypatch.setattr(train_module, "prepare_atomic_energies", no_source_read)
     monkeypatch.setattr(train_module, "compute_statistics", no_source_read)
     _, reused, _, _, _, datamodule = train_module.build(cfg)
     assert reused == statistics
@@ -2723,7 +2697,7 @@ def test_statistics_does_not_move_the_complete_batch(monkeypatch):
         unused=torch.ones(1_000),
     )
 
-    stats = statistics_module._compute_statistics(
+    stats = statistics_module.statistics_from_loader(
         [batch],
         atomic_numbers=[1],
         atomic_energies=None,
@@ -2807,7 +2781,7 @@ def test_u_shift_preserves_raw_statistics_fit_and_filter(
         atomic_energies=[dict.fromkeys(element.zs, 0.0)],
         target_property=["energy", "forces"],
     )
-    accumulator = statistics_module._StatisticsAccumulator(**options)
+    accumulator = statistics_module.StatisticsAccumulator(**options)
     for batch in loader:
         accumulator.update(batch)
     actual = accumulator.result()[0]
@@ -2849,7 +2823,7 @@ def test_energy_statistics_use_canonical_names(monkeypatch):
         ),
     ]
 
-    stats = statistics_module._compute_statistics(
+    stats = statistics_module.statistics_from_loader(
         DataLoader(graphs, batch_size=2),
         atomic_numbers=[1, 2],
         atomic_energies=[{1: 1.0, 2: 2.0}],
@@ -2900,7 +2874,7 @@ def test_forces_statistics_use_canonical_names(monkeypatch):
         ),
     ]
 
-    stats = statistics_module._compute_statistics(
+    stats = statistics_module.statistics_from_loader(
         DataLoader(graphs, batch_size=2),
         atomic_numbers=[1, 2],
         atomic_energies=None,
@@ -2997,7 +2971,7 @@ def test_noncollinear_magmoms_statistics_use_canonical_names(monkeypatch):
         ),
     ]
 
-    stats = statistics_module._compute_statistics(
+    stats = statistics_module.statistics_from_loader(
         DataLoader(graphs, batch_size=2),
         atomic_numbers=[1, 2],
         atomic_energies=None,
@@ -3093,7 +3067,7 @@ def test_noncollinear_magmoms_statistics_are_per_fidelity(monkeypatch):
         ),
     ]
 
-    stats = statistics_module._compute_statistics(
+    stats = statistics_module.statistics_from_loader(
         DataLoader(graphs, batch_size=2),
         atomic_numbers=[26],
         atomic_energies=None,
@@ -3167,7 +3141,7 @@ def statistics_options():
 
 
 def _accumulator(graphs, options, batch_size=3):
-    accumulator = statistics_module._StatisticsAccumulator(**options)
+    accumulator = statistics_module.StatisticsAccumulator(**options)
     for batch in DataLoader(graphs, batch_size=batch_size):
         accumulator.update(batch)
     return accumulator
@@ -3187,7 +3161,7 @@ def test_statistics_progress_counts_only_successful_batches(
     loader = DataLoader(statistics_graphs, batch_size=4)
     if mode == "iterable":
         loader = list(loader)
-    accumulator = statistics_module._StatisticsAccumulator(**statistics_options)
+    accumulator = statistics_module.StatisticsAccumulator(**statistics_options)
     update = accumulator.update
     now = [0.0]
     batches = 0
@@ -3208,9 +3182,9 @@ def test_statistics_progress_counts_only_successful_batches(
     callback = reported.append if mode == "callback" else None
     if failure:
         with pytest.raises(RuntimeError, match="injected statistics failure"):
-            statistics_module._accumulate_statistics(loader, accumulator, callback)
+            statistics_module.accumulate_statistics(loader, accumulator, callback)
     else:
-        assert statistics_module._accumulate_statistics(
+        assert statistics_module.accumulate_statistics(
             loader, accumulator, callback
         ) == len(statistics_graphs)
     output = capsys.readouterr().err
@@ -3241,7 +3215,7 @@ def test_statistics_merge_preserves_masks_fidelities_and_element_table(
             graph[force_key] = graph.pop("forces")
             graph[f"{force_key}_weight"] = graph.pop("forces_weight")
 
-    merged = statistics_module._StatisticsAccumulator(**options)
+    merged = statistics_module.StatisticsAccumulator(**options)
     # Unequal partitions, including a neutral empty state, require weighted
     # moment merging; averaging finalized standard deviations is incorrect.
     for partition in ([], graphs[:1], graphs[1:7], graphs[7:]):
@@ -3319,7 +3293,7 @@ def test_statistics_merge_retains_small_variance_on_large_energy_offset():
         )
         for value in (-6.0, 0.0, 2.0, 4.0)
     ]
-    merged = statistics_module._StatisticsAccumulator(**options)
+    merged = statistics_module.StatisticsAccumulator(**options)
     for partition in (graphs[:1], graphs[1:]):
         merged.merge(_accumulator(partition, options).state())
     entry = merged.result()[0]
@@ -3383,7 +3357,7 @@ def test_spawned_statistics_read_all_shards_once_without_changing_cache(
     before = _snapshot(tmp_path)
     children_before = {process.pid for process in multiprocessing.active_children()}
     try:
-        tasks = statistics_module._statistics_tasks(
+        tasks = statistics_module.statistics_tasks(
             loader, **statistics_options, devices=[torch.device("cpu")] * 2
         )
         assigned_paths = [path for task in tasks for path in task["paths"]]
@@ -3401,8 +3375,8 @@ def test_spawned_statistics_read_all_shards_once_without_changing_cache(
         ) == len(statistics_graphs)
         assert all(task["paths"] for task in tasks)
         assert all(task["loader"]["num_workers"] == num_workers for task in tasks)
-        accumulator = statistics_module._StatisticsAccumulator(**statistics_options)
-        statistics_module._parallel_statistics(tasks, accumulator)
+        accumulator = statistics_module.StatisticsAccumulator(**statistics_options)
+        statistics_module.parallel_statistics(tasks, accumulator)
         _assert_statistics_equal(
             accumulator.result(),
             _accumulator(statistics_graphs, statistics_options).result(),
@@ -3437,7 +3411,7 @@ def test_two_gpu_statistics_match_cpu_and_only_parent_writes_yaml(
     before = _snapshot(tmp_path)
     loader = StatisticsDataLoader(statistics_store, batch_size=2, num_workers=0)
     try:
-        result = statistics_module._compute_statistics(
+        result = statistics_module.statistics_from_loader(
             loader, **statistics_options, devices=["cuda:0", "cuda:1"]
         )
     finally:
@@ -3484,7 +3458,7 @@ def test_parallel_statistics_reports_failure_and_reaps_its_workers(
         "multiprocessing",
         SimpleNamespace(get_context=lambda _: recorded_context),
     )
-    monkeypatch.setattr(statistics_module, "_statistics_process", _fail_or_wait)
+    monkeypatch.setattr(statistics_module, "statistics_process", _fail_or_wait)
     tasks = [
         {
             "device": "cpu",
@@ -3498,8 +3472,8 @@ def test_parallel_statistics_reports_failure_and_reaps_its_workers(
         "deliberate statistics worker failure" if failure == "error" else "code 7"
     )
     with pytest.raises(RuntimeError, match=expected):
-        statistics_module._parallel_statistics(
-            tasks, statistics_module._StatisticsAccumulator(**statistics_options)
+        statistics_module.parallel_statistics(
+            tasks, statistics_module.StatisticsAccumulator(**statistics_options)
         )
     assert len(processes) == 2
     assert all(not process.is_alive() for process in processes)
@@ -3571,8 +3545,14 @@ def copy(sources, destination, **kwargs):
     )
 
 
-@pytest.mark.parametrize("workers", [1, 2])
-def test_copy_mixed_codecs_preserves_records_and_resumes(tmp_path, workers):
+@pytest.mark.parametrize(
+    "workers,directory_descriptors", [(1, True), (2, True), (1, False)]
+)
+def test_copy_mixed_codecs_preserves_records_and_resumes(
+    tmp_path, monkeypatch, workers, directory_descriptors
+):
+    if not directory_descriptors:
+        monkeypatch.delattr(cache_module.os, "O_DIRECTORY", raising=False)
     raw, compressed, destination = (
         tmp_path / name for name in ("raw", "compressed", "copy")
     )
@@ -3717,7 +3697,7 @@ def test_raw_statistics_reused_after_compression_and_online_u_shift(
     assert statistics_cache_key(cfg, ["energy", "forces"], [], keyspec) == original_key
     monkeypatch.setattr(train_module, "compute_statistics", forbidden)
     monkeypatch.setattr(train_module, "load_cached_datamodule", forbidden)
-    monkeypatch.setattr(train_module, "build_atomsList", forbidden)
+    monkeypatch.setattr(train_module, "prepare_atomic_energies", forbidden)
     _, reused, _, _, _, module = train_module.build(cfg)
     assert reused == original_stats
     module.prepare_data()

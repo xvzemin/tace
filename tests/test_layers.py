@@ -40,7 +40,7 @@ from tace.models.spherical.scatter_norm import (
     get_scatter_norm_layer,
 )
 from tace.utils.env import EQX_KERNELS
-from tace.utils.utils import torch_default_dtype
+from tace.utils.precision import torch_default_dtype
 
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1383,7 +1383,9 @@ def test_shared_linear(matrix, internal, num_nodes, double_precision):
     weight = (
         None
         if internal
-        else torch.randn(num_nodes, actual.weight_numel, device=DEVICE, requires_grad=True)
+        else torch.randn(
+            num_nodes, actual.weight_numel, device=DEVICE, requires_grad=True
+        )
     )
     values = [module(x, weight) for module in (actual, reference)]
     torch.testing.assert_close(*values, atol=1e-12, rtol=1e-12)
