@@ -61,29 +61,22 @@ def create_model(
     # === model cls ===
     model_path = model_config.get("_target_", "tace.models.SphericalTACE")
     MODEL_CLS = select_wrapper(model_path)
-    is_spherical_model = MODEL_CLS is SphericalTACE
-    is_cartesian_model = MODEL_CLS is CartesianTACE
+    is_tace_model = MODEL_CLS in (SphericalTACE, CartesianTACE)
     wrapper_config = model_config.get("wrapper") or {}
     wrapper_path = wrapper_config.get("_target_", "tace.models.TensorModel")
 
-    use_compile = acceleration_enabled("compile") and (
-        is_spherical_model or is_cartesian_model
-    )
-    if use_compile:
-        model_path = (
-            "tace.models.compile.CartesianTACE"
-            if is_cartesian_model
-            else "tace.models.compile.SphericalTACE"
-        )
-        MODEL_CLS = select_wrapper(model_path)
-        if wrapper_path == "tace.models.TensorModel":
-            wrapper_path = "tace.models.CompileTensorModel"
+    if (
+        acceleration_enabled("compile")
+        and is_tace_model
+        and wrapper_path == "tace.models.TensorModel"
+    ):
+        wrapper_path = "tace.models.CompileTensorModel"
 
     # === wrapper cls ===
     WRAPPER_CLS = select_wrapper(wrapper_path)
 
     model_config = deep_convert(model_config)
-    if prune_removed_keys and (is_spherical_model or is_cartesian_model):
+    if prune_removed_keys and is_tace_model:
         model_config = _prune_removed_keys(model_config)
     if "statistics" not in model_config:
         model_config["statistics"] = statistics

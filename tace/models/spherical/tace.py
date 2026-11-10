@@ -65,6 +65,7 @@ class SphericalTACE(torch.nn.Module):
         embedding_property=[],
         atomic_numbers=None,
         mlp_type: str = "mlp_v1",
+        compile_backend: str = "inductor",
         **kwargs,
     ):
         atomic_basis = normalize_atomic_basis(atomic_basis)
@@ -79,6 +80,7 @@ class SphericalTACE(torch.nn.Module):
         self.model_config["_target_"] = "tace.models.SphericalTACE"
         cfg = check_model_config(cfg)
         super().__init__()
+        self.compile_backend = compile_backend
 
         # === Will be called by other module ===
         self.fidelity = cfg["fidelity"]

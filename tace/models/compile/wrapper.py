@@ -100,7 +100,7 @@ class CompileTensorModel(TensorModel):
         cache_key = (self.training, input_keys, output_keys)
         cache = self._compiled_cache
         if cache_key not in cache:
-            flat_model = _FlatE3nnCompileModel(self, input_keys, output_keys)
+            flat_model = FlatTorchModel(self, input_keys, output_keys)
             inputs = tuple(data[key] for key in input_keys)
             cache[cache_key] = (
                 flat_model,
@@ -177,7 +177,7 @@ class CompileTensorModel(TensorModel):
             )
         missing = [key for key in required if key not in data]
         if missing:
-            raise KeyError(f"missing e3nn compile inputs: {missing}")
+            raise KeyError(f"missing compile inputs: {missing}")
         return tuple(required)
 
     def _output_keys(self) -> tuple[str, ...]:
@@ -243,7 +243,7 @@ class CompileTensorModel(TensorModel):
                 )
 
 
-class _FlatE3nnCompileModel(torch.nn.Module):
+class FlatTorchModel(torch.nn.Module):
     def __init__(
         self,
         model: CompileTensorModel,
@@ -375,7 +375,7 @@ class _FlatE3nnCompileModel(torch.nn.Module):
         return output
 
 
-class _FlatE3nnLammpsCompileModel(torch.nn.Module):
+class FlatLammpsModel(torch.nn.Module):
     def __init__(
         self,
         model: CompileTensorModel,

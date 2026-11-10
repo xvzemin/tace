@@ -6,6 +6,8 @@
 import operator
 import sys
 from contextlib import contextmanager
+from importlib import import_module
+from threading import RLock
 from typing import Callable, Dict, Iterable, Sequence
 
 import torch
@@ -14,10 +16,35 @@ from torch.func import functional_call
 from torch.fx.experimental.proxy_tensor import make_fx
 
 torch._dynamo.config.optimize_ddp = False
+compile_comment_lock = RLock()
 
 
 @contextmanager
-def _disable_duck_shape():
+def omit_provenance_comments():
+    """Skip descriptive Triton and external-call comments during compilation."""
+    modules = {
+        name: import_module(name)
+        for name in ("torch._inductor.codegen.triton", "torch._inductor.ir")
+    }
+    with compile_comment_lock:
+        originals = {
+            name: module.get_kernel_metadata for name, module in modules.items()
+        }
+
+        def comments_only(*args, **kwargs):
+            return "", ""
+
+        try:
+            for name, module in modules.items():
+                module.get_kernel_metadata = comments_only
+            yield
+        finally:
+            for name, module in modules.items():
+                module.get_kernel_metadata = originals[name]
+
+
+@contextmanager
+def disable_duck_shape():
     previous = torch.fx.experimental._config.use_duck_shape
     torch.fx.experimental._config.use_duck_shape = False
     try:
@@ -34,7 +61,7 @@ def trace_and_compile(
 ) -> tuple[Callable, tuple[str, ...], tuple[str, ...]]:
     parameter_names = tuple(name for name, _ in model.named_parameters())
     buffer_names = tuple(name for name, _ in model.named_buffers())
-    state_values = _state_values(model, parameter_names, buffer_names)
+    state_values = model_state_values(model, parameter_names, buffer_names)
     state_indices = {id(value): i for i, value in enumerate(state_values)}
     state_entries = tuple(
         (f"{prefix}.{name}" if prefix else name, state_indices[id(value)])
@@ -61,7 +88,7 @@ def trace_and_compile(
         backend=backend,
         dynamic=True,
         fullgraph=True,
-        options=_inductor_options() if backend == "inductor" else None,
+        options=inductor_options() if backend == "inductor" else None,
     )
     return compiled, parameter_names, buffer_names
 
@@ -72,7 +99,7 @@ def trace_to_fx(
     *,
     functionalize: bool = False,
 ) -> torch.fx.GraphModule:
-    with _disable_duck_shape():
+    with disable_duck_shape():
         traced = make_fx(
             fn,
             decomposition_table=get_decompositions(
@@ -89,14 +116,14 @@ def trace_to_fx(
                 _allow_non_fake_inputs=True,
                 _error_on_data_dependent_ops=True,
             )(*[value.clone() for value in inputs])
-    _strip_saved_tensor_detach(traced)
-    traced = _rebuild_graph_module(traced)
-    _replace_sym_numel(traced)
-    _remove_full_slice_scatter(traced)
+    strip_saved_tensor_detach(traced)
+    traced = rebuild_graph_module(traced)
+    replace_sym_numel(traced)
+    remove_full_slice_scatter(traced)
     return traced
 
 
-def _remove_full_slice_scatter(graph_module: torch.fx.GraphModule) -> None:
+def remove_full_slice_scatter(graph_module: torch.fx.GraphModule) -> None:
     """Remove identity slice scatters emitted for a full ``:`` assignment."""
     changed = False
     for node in list(graph_module.graph.nodes):
@@ -127,11 +154,11 @@ def compiled_call(
 ) -> tuple[torch.Tensor, ...]:
     return compiled(
         *inputs,
-        *_state_values(model, parameter_names, buffer_names),
+        *model_state_values(model, parameter_names, buffer_names),
     )
 
 
-def _state_values(
+def model_state_values(
     model: torch.nn.Module,
     parameter_names: Sequence[str],
     buffer_names: Sequence[str],
@@ -143,7 +170,7 @@ def _state_values(
     ]
 
 
-def _inductor_options() -> Dict[str, object]:
+def inductor_options() -> Dict[str, object]:
     options: Dict[str, object] = {
         "max_autotune": False,
         "shape_padding": True,
@@ -171,7 +198,7 @@ def _inductor_options() -> Dict[str, object]:
         return options
 
 
-def _replace_sym_numel(graph_module: torch.fx.GraphModule) -> None:
+def replace_sym_numel(graph_module: torch.fx.GraphModule) -> None:
     graph = graph_module.graph
     for node in list(graph.nodes):
         if node.target != torch.ops.aten.sym_numel.default:
@@ -192,7 +219,7 @@ def _replace_sym_numel(graph_module: torch.fx.GraphModule) -> None:
     graph_module.recompile()
 
 
-def _strip_saved_tensor_detach(graph_module: torch.fx.GraphModule) -> None:
+def strip_saved_tensor_detach(graph_module: torch.fx.GraphModule) -> None:
     detach = torch.ops.aten.detach.default
 
     def is_detach(node: torch.fx.Node) -> bool:
@@ -217,7 +244,7 @@ def _strip_saved_tensor_detach(graph_module: torch.fx.GraphModule) -> None:
     graph_module.recompile()
 
 
-def _rebuild_graph_module(
+def rebuild_graph_module(
     graph_module: torch.fx.GraphModule,
 ) -> torch.fx.GraphModule:
     graph = torch.fx.Graph()

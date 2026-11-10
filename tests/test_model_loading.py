@@ -65,10 +65,6 @@ def test_model_config_class_names():
         model_cls = getattr(package, new_cls)
         for prefix in ("tace.models", f"tace.models.{old}", f"tace.models.{old}.tace"):
             assert select_wrapper(f"{prefix}.{old_cls}") is model_cls
-        for prefix in ("tace.models.compile", "tace.models.compile.tace"):
-            assert select_wrapper(f"{prefix}.{old_cls}") is getattr(
-                import_module(prefix), new_cls
-            )
     assert not any(
         name.startswith(("tace.models._e3nn", "tace.models._cart"))
         for name in sys.modules
@@ -105,8 +101,7 @@ def test_model_target_aliases(
     if basis == "spherical":
         names.append(None)
     monkeypatch.setenv("TACE_USE_COMPILE", str(int(compiled)))
-    if compiled:
-        saved["cfg"]["compile_backend"] = "aot_eager"
+    saved["cfg"]["compile_backend"] = "aot_eager"
     for name in names:
         if name is None:
             saved["cfg"].pop("_target_", None)
@@ -114,9 +109,12 @@ def test_model_target_aliases(
             saved["cfg"]["_target_"] = name
         torch.save(saved, path)
         restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()
-        assert type(restored.readout_fn) is getattr(
-            models.compile if compiled else models, cls_name
+        assert type(restored) is (
+            models.CompileTensorModel if compiled else models.TensorModel
         )
+        assert type(restored.readout_fn) is getattr(models, cls_name)
+        assert restored.readout_fn.compile_backend == "aot_eager"
+        assert restored.readout_fn.model_config["compile_backend"] == "aot_eager"
         assert restored.readout_fn.model_config["_target_"] == canonical
         assert (
             restored.readout_fn.model_config["atomic_basis"]
@@ -1343,13 +1341,13 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
         from tace.models.compile.compile import trace_to_fx
         from tace.models.compile.wrapper import (
             CompileTensorModel,
-            _FlatE3nnCompileModel,
+            FlatTorchModel,
         )
 
         compiled_model = CompileTensorModel(module.readout_fn).eval()
         input_keys = compiled_model._input_keys(data)
         output_keys = compiled_model._output_keys()
-        flat_model = _FlatE3nnCompileModel(compiled_model, input_keys, output_keys)
+        flat_model = FlatTorchModel(compiled_model, input_keys, output_keys)
         inputs = tuple(data[key] for key in input_keys)
         traced = trace_to_fx(flat_model, inputs)
         for key, output in zip(output_keys, traced(*inputs)):

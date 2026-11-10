@@ -1,6 +1,9 @@
-"""Persist jointly compiled predictions, loss and parameter gradients."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
-from __future__ import annotations
+"""Persist jointly compiled predictions, loss and parameter gradients."""
 
 import hashlib
 import importlib.metadata
@@ -248,9 +251,10 @@ def runner_source_identities(runner):
             from torch._inductor.codecache import get_path
 
             source_path = Path(get_path(value.cache_key, "py")[2])
+            # Inductor writes text with platform-native line endings.
             if (
                 not source_path.is_file()
-                or digest(source_path) != identity["source_sha256"]
+                or source_path.read_text(encoding="utf-8") != value.source_code
             ):
                 raise ValueError(
                     "Actual generated source file differs from the saved wrapper"

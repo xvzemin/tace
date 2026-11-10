@@ -3553,6 +3553,14 @@ def test_copy_mixed_codecs_preserves_records_and_resumes(
 ):
     if not directory_descriptors:
         monkeypatch.delattr(cache_module.os, "O_DIRECTORY", raising=False)
+        fsync = os.fsync
+
+        def sync_writable_file(descriptor):
+            # Windows requires write access even when fsync has no new data.
+            os.write(descriptor, b"")
+            fsync(descriptor)
+
+        monkeypatch.setattr(cache_module.os, "fsync", sync_writable_file)
     raw, compressed, destination = (
         tmp_path / name for name in ("raw", "compressed", "copy")
     )

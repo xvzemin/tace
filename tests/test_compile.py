@@ -25,18 +25,18 @@ from tace.models.compile.aot import (
     TACE_AOTI_CUSTOM_OPS_LIBS_ENTRY,
     TACE_AOTI_LUNA_OPS_ENTRY,
     AOTICompiledTensorModel,
-    _custom_ops_libs_from_model,
-    _embed_custom_ops_libs,
-    _ensure_sample_inputs,
-    _export_metadata,
-    _graph_aoti_input_keys,
-    _graph_dynamic_shapes,
-    _import_custom_ops_libs,
-    _size_oblivious_export,
-    _synthetic_graph_sample,
+    custom_ops_libs_from_model,
+    embed_custom_ops_libs,
+    ensure_sample_inputs,
+    export_metadata,
+    graph_aoti_input_keys,
+    graph_dynamic_shapes,
+    import_custom_ops_libs,
+    size_oblivious_export,
+    synthetic_graph_sample,
 )
 from tace.models.compile.compile import compiled_call, trace_and_compile, trace_to_fx
-from tace.models.compile.wrapper import CompileTensorModel, _FlatE3nnCompileModel
+from tace.models.compile.wrapper import CompileTensorModel, FlatTorchModel
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
 
@@ -142,7 +142,7 @@ def test_joint_training_gradients(monkeypatch, backend, device, dtype, uncertain
     parameters = tuple(
         p for p in (*model.parameters(), *loss_fn.parameters()) if p.requires_grad
     )
-    data = _synthetic_graph_sample(model)
+    data = synthetic_graph_sample(model)
     data["entropy"] = data["positions"].new_ones(2)
     for key, shape in (("energy", (2,)), ("forces", (4, 3)), ("stress", (2, 3, 3))):
         data[key] = data["positions"].new_full(shape, 0.1)
@@ -165,7 +165,10 @@ def test_joint_training_gradients(monkeypatch, backend, device, dtype, uncertain
         input_values = {key: value.detach().clone() for key, value in batch.items()}
         if step and backend == "inductor":
             program = next(iter(model._compiled_cache.values()))
-            assert program.artifact_info["status"] in ("saved", "hit")
+            assert program.artifact_info["status"] in (
+                "saved",
+                "hit",
+            ), program.artifact_info
             model._compiled_cache.clear()
 
             @wraps(joint.make_fx)
@@ -248,11 +251,15 @@ def test_joint_loss_aliases_and_scaling(device):
 
 
 def test_joint_artifact_contract(tmp_path, monkeypatch):
+    from torch._inductor.output_code import CompiledFxGraph
+
     from tace.models.compile.artifact import (
         FORMAT_VERSION,
         JointArtifactCache,
+        compiled_source_identity,
         module_context,
         pack_constants,
+        runner_source_identities,
         runtime_signature,
         storage_aliases,
         tensor_contract,
@@ -329,12 +336,39 @@ def test_joint_artifact_contract(tmp_path, monkeypatch):
         torch.device("cuda:1"), {}
     )
 
+    source_path = tmp_path / "compiled.py"
+    monkeypatch.setattr(
+        "torch._inductor.codecache.get_path",
+        lambda *args: (None, None, str(source_path)),
+    )
+    compiled = Mock(
+        spec=CompiledFxGraph,
+        source_code=(
+            "def call(args):\n    assert args[0].shape[0] >= 2\n    return args\n"
+        ),
+        cache_key="test_source",
+        guards_expr=None,
+    )
+    for newline in ("\n", "\r\n"):
+        source_path.write_bytes(
+            compiled.source_code.replace("\n", newline).encode("utf-8")
+        )
+        assert runner_source_identities(compiled) == [
+            compiled_source_identity(compiled)
+        ]
+    source_path.write_bytes(compiled.source_code.replace(">= 2", ">= 1").encode())
+    with pytest.raises(ValueError, match="Actual generated source file differs"):
+        runner_source_identities(compiled)
+    source_path.unlink()
+    with pytest.raises(ValueError, match="Actual generated source file differs"):
+        runner_source_identities(compiled)
+
 
 def test_compile_metadata_comments_restore():
     from torch._inductor import ir
     from torch._inductor.codegen import triton
 
-    from tace.models.compile.metadata_comments import omit_provenance_comments
+    from tace.models.compile.compile import omit_provenance_comments
 
     original = (ir.get_kernel_metadata, triton.get_kernel_metadata)
     with pytest.raises(RuntimeError, match="compiler error"):
@@ -453,13 +487,13 @@ def test_aoti_dependencies(tmp_path, monkeypatch, backend):
         }[backend]
         if backend == "lunaequivariance":
             model.aoti_config = {"dtype": "float64"}
-    libs = _custom_ops_libs_from_model(model)
+    libs = custom_ops_libs_from_model(model)
     assert libs == expected_libs
 
     path = tmp_path / "model.pt2"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("model/archive_format", "pt2")
-    _embed_custom_ops_libs(path, libs, model)
+    embed_custom_ops_libs(path, libs, model)
     if libs:
         with zipfile.ZipFile(path) as archive:
             assert (
@@ -486,7 +520,7 @@ def test_aoti_dependencies(tmp_path, monkeypatch, backend):
         )
     importer = Mock()
     monkeypatch.setattr("tace.models.compile.aot.importlib.import_module", importer)
-    _import_custom_ops_libs(path)
+    import_custom_ops_libs(path)
     assert [call.args[0] for call in importer.call_args_list] == sorted(libs)
     if backend == "lunaequivariance":
         register.assert_called_once_with(model.aoti_config)
@@ -545,7 +579,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
     )
     model = create_model(config, statistics, targets, []).cuda()
     model.load_state_dict(state)
-    sample = _synthetic_graph_sample(model)
+    sample = synthetic_graph_sample(model)
     tolerance = 2e-4 if dtype == torch.float32 else 2e-9
     for step in range(2):
         data = {key: value.clone() for key, value in sample.items()}
@@ -1084,7 +1118,7 @@ def test_compile_direct_hessian(dtype, interaction_type):
     eager = create_model(config, statistics, targets, []).to(device)
     model = CompileTensorModel(deepcopy(eager.readout_fn)).to(device)
     model.readout_fn.compile_backend = "aot_eager"
-    sample = _synthetic_graph_sample(model)
+    sample = synthetic_graph_sample(model)
     sample["pbc"].zero_()
     expected = eager(dict(sample))
     actual = model(dict(sample))
@@ -1125,21 +1159,21 @@ def test_compile_direct_hessian(dtype, interaction_type):
 
     model.eval()
     eager.eval()
-    keys = _graph_aoti_input_keys(model)
+    keys = graph_aoti_input_keys(model)
     outputs = model._output_keys()
-    _ensure_sample_inputs(sample, keys, model)
-    flat_model = _FlatE3nnCompileModel(model, keys, outputs)
+    ensure_sample_inputs(sample, keys, model)
+    flat_model = FlatTorchModel(model, keys, outputs)
     inputs = tuple(sample[key] for key in keys)
-    with _size_oblivious_export():
+    with size_oblivious_export():
         traced = trace_to_fx(flat_model, inputs)
         exported = torch.export.export(
             traced,
             inputs,
-            dynamic_shapes=_graph_dynamic_shapes(keys, num_graphs=2),
+            dynamic_shapes=graph_dynamic_shapes(keys, num_graphs=2),
             strict=False,
             prefer_deferred_runtime_asserts_over_guards=True,
         )
-    metadata = _export_metadata(model, keys, outputs)
+    metadata = export_metadata(model, keys, outputs)
     assert metadata["tace_format"] == "tace_graph_v1"
     loaded = AOTICompiledTensorModel(exported.module(), metadata, device)
     sample.pop("direct_hessian_pair_index")
@@ -1282,16 +1316,16 @@ def test_aoti_charges_requires_total_charge_input():
     with pytest.raises(KeyError, match="total_charge"):
         model._input_keys(sample)
 
-    input_keys = _graph_aoti_input_keys(model)
+    input_keys = graph_aoti_input_keys(model)
     assert input_keys[-1] == "total_charge"
     with pytest.raises(KeyError, match="total_charge"):
-        _ensure_sample_inputs(dict(sample), input_keys, model)
+        ensure_sample_inputs(dict(sample), input_keys, model)
 
     sample["total_charge"] = torch.tensor([1.5])
     assert model._input_keys(sample)[-1] == "total_charge"
     output_keys = model._output_keys()
     assert output_keys == ("charges",)
-    flat_model = _FlatE3nnCompileModel(model, input_keys, output_keys).eval()
+    flat_model = FlatTorchModel(model, input_keys, output_keys).eval()
     inputs = tuple(sample[key] for key in input_keys)
     (charges,) = flat_model(*inputs)
     torch.testing.assert_close(charges.sum(), sample["total_charge"].sum())
@@ -1299,9 +1333,9 @@ def test_aoti_charges_requires_total_charge_input():
     (traced_charges,) = traced_model(*inputs)
     torch.testing.assert_close(traced_charges, charges)
 
-    synthetic = _synthetic_graph_sample(model)
+    synthetic = synthetic_graph_sample(model)
     assert synthetic["total_charge"].shape == (2,)
-    metadata = _export_metadata(model, input_keys, output_keys)
+    metadata = export_metadata(model, input_keys, output_keys)
     assert "total_charge" in json.loads(metadata["tace_input_keys"])
     assert "total_charge" in json.loads(metadata["tace_embedding_property"])
     assert json.loads(metadata["tace_output_keys"]) == ["charges"]
@@ -1436,12 +1470,12 @@ def test_aoti_keeps_magnetic_embedding_without_magnetic_force_target(
         training=True,
     )
 
-    input_keys = _graph_aoti_input_keys(model)
+    input_keys = graph_aoti_input_keys(model)
     output_keys = model._output_keys()
     assert "initial_noncollinear_magmoms" in input_keys
     assert "noncollinear_magnetic_forces" not in output_keys
 
-    flat_model = _FlatE3nnCompileModel(model, input_keys, output_keys).eval()
+    flat_model = FlatTorchModel(model, input_keys, output_keys).eval()
     output = flat_model(*(sample[key] for key in input_keys))
     zero_magmoms = dict(sample)
     zero_magmoms["initial_noncollinear_magmoms"] = torch.zeros_like(
@@ -1453,7 +1487,7 @@ def test_aoti_keeps_magnetic_embedding_without_magnetic_force_target(
     torch.testing.assert_close(output[2], output_without_magmoms[2])
     torch.testing.assert_close(output[2], -2.0 * sample["positions"])
 
-    metadata = _export_metadata(model, input_keys, output_keys)
+    metadata = export_metadata(model, input_keys, output_keys)
     assert "initial_noncollinear_magmoms" in json.loads(metadata["tace_input_keys"])
     assert "initial_noncollinear_magmoms" in json.loads(
         metadata["tace_embedding_property"]

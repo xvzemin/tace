@@ -772,7 +772,8 @@ def copy_shard_locked(
         target.sync()
     source_path = Path(spec["source"])
     shutil.copyfile(source_path / "counts.bin", stage / "counts.bin")
-    with (stage / "counts.bin").open("rb") as stream:
+    # Windows requires a writable descriptor for fsync.
+    with (stage / "counts.bin").open("r+b") as stream:
         os.fsync(stream.fileno())
     metadata = dict(spec["metadata"], codec=spec["target_codec"])
     write_json(stage / "metadata.json", metadata)

@@ -1,4 +1,7 @@
-"""Joint compilation of predictions, loss and parameter gradients."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import inspect
 import logging
@@ -15,12 +18,13 @@ from tace.utils.loss.normal import NormalLoss
 from tace.utils.loss.uncertainty import UncertaintyLoss
 
 from .compile import (
-    _inductor_options,
-    _rebuild_graph_module,
-    _remove_full_slice_scatter,
-    _replace_sym_numel,
-    _state_values,
-    _strip_saved_tensor_detach,
+    inductor_options,
+    model_state_values,
+    omit_provenance_comments,
+    rebuild_graph_module,
+    remove_full_slice_scatter,
+    replace_sym_numel,
+    strip_saved_tensor_detach,
 )
 
 
@@ -68,9 +72,9 @@ class ParameterLoss(torch.autograd.Function):
 class TrainingLoss(torch.nn.Module):
     def __init__(self, model, loss_fn, input_keys):
         super().__init__()
-        from .wrapper import _FlatE3nnCompileModel
+        from .wrapper import FlatTorchModel
 
-        self.model = _FlatE3nnCompileModel(
+        self.model = FlatTorchModel(
             model, model._input_keys(input_keys), model._output_keys()
         )
         self.loss_fn = loss_fn
@@ -117,7 +121,7 @@ class JointTraining:
         self.module = TrainingLoss(model, loss_fn, self.keys)
         self.parameter_names = tuple(name for name, _ in self.module.named_parameters())
         self.buffer_names = tuple(name for name, _ in self.module.named_buffers())
-        state = _state_values(self.module, self.parameter_names, self.buffer_names)
+        state = model_state_values(self.module, self.parameter_names, self.buffer_names)
         indices = {id(value): i for i, value in enumerate(state)}
         entries = tuple(
             (f"{prefix}.{name}" if prefix else name, indices[id(value)])
@@ -234,7 +238,7 @@ class JointTraining:
                 values=runtime_values,
                 dynamic_axes=dynamic_axes,
                 options=dict(
-                    _inductor_options(),
+                    inductor_options(),
                     inplace_buffers=True,
                     keep_static_cubin_raw=True,
                 ),
@@ -283,10 +287,10 @@ class JointTraining:
                         ):
                             arguments[position] = compact_metadata(arguments[position])
                     node.args = tuple(arguments)
-            _strip_saved_tensor_detach(graph)
-            graph = _rebuild_graph_module(graph)
-            _replace_sym_numel(graph)
-            _remove_full_slice_scatter(graph)
+            strip_saved_tensor_detach(graph)
+            graph = rebuild_graph_module(graph)
+            replace_sym_numel(graph)
+            remove_full_slice_scatter(graph)
             graph.graph.eliminate_dead_code()
             graph.recompile()
             constants = ()
@@ -314,8 +318,6 @@ class JointTraining:
             }
             # Derivatives are explicit here; no later backward needs these buffers.
             if backend == "inductor":
-                from .metadata_comments import omit_provenance_comments
-
                 with torch.no_grad(), omit_provenance_comments():
                     self.run = torch._inductor.standalone_compile(
                         graph,
@@ -323,7 +325,7 @@ class JointTraining:
                         dynamic_shapes="from_graph",
                         options={
                             "config_patches": dict(
-                                _inductor_options(),
+                                inductor_options(),
                                 inplace_buffers=True,
                                 keep_static_cubin_raw=True,
                             )
@@ -349,7 +351,7 @@ class JointTraining:
                 self.run = cache.save(self.run, output_schema, constants)
 
     def __call__(self, data):
-        state = _state_values(self.module, self.parameter_names, self.buffer_names)
+        state = model_state_values(self.module, self.parameter_names, self.buffer_names)
         inputs = [data[key].detach().contiguous() for key in self.keys]
         inputs.extend([value.detach() for value in state])
         with torch.no_grad():

@@ -17,11 +17,11 @@ import torch
 from tace.dataset.element import TorchElement
 
 from ..utils import prepare_direct_hessian_inputs
-from .compile import _inductor_options, trace_to_fx
+from .compile import inductor_options, trace_to_fx
 from .wrapper import (
     CompileTensorModel,
-    _FlatE3nnCompileModel,
-    _FlatE3nnLammpsCompileModel,
+    FlatLammpsModel,
+    FlatTorchModel,
 )
 
 TACE_AOTI_FORMAT = "tace_graph_v1"
@@ -60,17 +60,17 @@ class AOTICompiledTensorModel(torch.nn.Module):
         super().__init__()
         self.compiled_model = compiled_model
         self.metadata = metadata
-        self.input_keys = tuple(_metadata_json(metadata, "tace_input_keys"))
-        self.output_keys = tuple(_metadata_json(metadata, "tace_output_keys"))
+        self.input_keys = tuple(metadata_json(metadata, "tace_input_keys"))
+        self.output_keys = tuple(metadata_json(metadata, "tace_output_keys"))
         self.exported_target_property = list(
-            _metadata_json(metadata, "tace_target_property")
+            metadata_json(metadata, "tace_target_property")
         )
         self.target_property = list(self.exported_target_property)
         self.embedding_property = list(
-            _metadata_json(metadata, "tace_embedding_property")
+            metadata_json(metadata, "tace_embedding_property")
         )
         self.atomic_numbers = [
-            int(z) for z in _metadata_json(metadata, "tace_atomic_numbers")
+            int(z) for z in metadata_json(metadata, "tace_atomic_numbers")
         ]
         self.cutoff = float(metadata["tace_cutoff"])
         self.direct_hessian_cutoff = (
@@ -78,9 +78,9 @@ class AOTICompiledTensorModel(torch.nn.Module):
             if "direct_hessian" in self.exported_target_property
             else None
         )
-        self.max_neighbors = _metadata_json(metadata, "tace_max_neighbors")
+        self.max_neighbors = metadata_json(metadata, "tace_max_neighbors")
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
-        self.model_dtype = _dtype_from_name(metadata["tace_dtype"])
+        self.model_dtype = dtype_from_name(metadata["tace_dtype"])
         compile_device = metadata.get("AOTI_DEVICE_KEY") or device or "cpu"
         self.compile_device = torch.device(compile_device)
         self._check_device(device)
@@ -88,7 +88,7 @@ class AOTICompiledTensorModel(torch.nn.Module):
     def forward(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, Union[torch.Tensor, None]]:
-        data = _canonicalize_inputs(
+        data = canonicalize_inputs(
             data,
             self.input_keys,
             self.fidelity_idx,
@@ -183,14 +183,14 @@ class AOTICompiledLammpsModel(torch.nn.Module):
         super().__init__()
         self.compiled_model = compiled_model
         self.metadata = metadata
-        self.input_keys = tuple(_metadata_json(metadata, "tace_input_keys"))
-        self.output_keys = tuple(_metadata_json(metadata, "tace_output_keys"))
+        self.input_keys = tuple(metadata_json(metadata, "tace_input_keys"))
+        self.output_keys = tuple(metadata_json(metadata, "tace_output_keys"))
         self.atomic_numbers = [
-            int(z) for z in _metadata_json(metadata, "tace_atomic_numbers")
+            int(z) for z in metadata_json(metadata, "tace_atomic_numbers")
         ]
         self.cutoff = float(metadata["tace_cutoff"])
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
-        self.model_dtype = _dtype_from_name(metadata["tace_dtype"])
+        self.model_dtype = dtype_from_name(metadata["tace_dtype"])
         compile_device = metadata.get("AOTI_DEVICE_KEY") or device or "cpu"
         self.compile_device = torch.device(compile_device)
         self._check_device(device)
@@ -198,7 +198,7 @@ class AOTICompiledLammpsModel(torch.nn.Module):
     def forward(
         self, data: Dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        data = _canonicalize_inputs(
+        data = canonicalize_inputs(
             data, self.input_keys, self.fidelity_idx, atomic_numbers=self.atomic_numbers
         )
         missing = [key for key in self.input_keys if key not in data]
@@ -236,31 +236,31 @@ def export_aotinductor(
 ) -> str:
     logging.info("[AOTI 1/5] Preparing model and example inputs...")
     model.eval()
-    compile_model = _as_compile_tensor_model(model)
+    compile_model = as_compile_tensor_model(model)
     CompileTensorModel._validate_compile_properties(compile_model.readout_fn)
-    input_keys = _graph_aoti_input_keys(compile_model)
+    input_keys = graph_aoti_input_keys(compile_model)
     output_keys = compile_model._output_keys()
     if not output_keys:
         raise ValueError("TACE graph .pt2 export needs at least one output property.")
 
     if sample_data is None:
-        sample_data = _synthetic_graph_sample(compile_model)
+        sample_data = synthetic_graph_sample(compile_model)
     else:
         sample_data = {key: value for key, value in sample_data.items()}
-    _ensure_sample_inputs(sample_data, input_keys, compile_model)
+    ensure_sample_inputs(sample_data, input_keys, compile_model)
 
-    flat_model = _FlatE3nnCompileModel(compile_model, input_keys, output_keys)
+    flat_model = FlatTorchModel(compile_model, input_keys, output_keys)
     flat_model.eval()
-    custom_ops_libs = _custom_ops_libs_from_model(flat_model)
+    custom_ops_libs = custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
-    with _size_oblivious_export():
+    with size_oblivious_export():
         logging.info("[AOTI 2/5] Tracing the forward and derivative graph...")
         traced = trace_to_fx(
             flat_model,
             inputs,
             functionalize=compile_model.flags.compute_noncollinear_magnetic_forces,
         )
-        dynamic_shapes = _graph_dynamic_shapes(
+        dynamic_shapes = graph_dynamic_shapes(
             input_keys,
             num_graphs=sample_data["ptr"].numel() - 1,
         )
@@ -273,16 +273,16 @@ def export_aotinductor(
             prefer_deferred_runtime_asserts_over_guards=True,
         )
 
-    custom_ops_libs.update(_custom_ops_libs_from_model(exported.graph_module))
-    output_path = _normalize_pt2_path(output_path)
-    metadata = _export_metadata(
+    custom_ops_libs.update(custom_ops_libs_from_model(exported.graph_module))
+    output_path = normalize_pt2_path(output_path)
+    metadata = export_metadata(
         compile_model,
         input_keys,
         output_keys,
         export_num_graphs=sample_data["ptr"].numel() - 1,
     )
-    inductor_configs = {**_inductor_options(), "aot_inductor.metadata": metadata}
-    _ensure_cxx_compiler()
+    inductor_configs = {**inductor_options(), "aot_inductor.metadata": metadata}
+    ensure_cxx_compiler()
     logging.info(
         "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
     )
@@ -292,7 +292,7 @@ def export_aotinductor(
         inductor_configs=inductor_configs,
     )
     logging.info("[AOTI 5/5] Finalizing the package...")
-    _embed_custom_ops_libs(out_path, custom_ops_libs, flat_model)
+    embed_custom_ops_libs(out_path, custom_ops_libs, flat_model)
     return str(out_path)
 
 
@@ -300,7 +300,7 @@ def load_aotinductor(
     model_path: Union[str, Path],
     device: Union[str, torch.device, None],
 ) -> AOTICompiledTensorModel:
-    _import_custom_ops_libs(str(model_path))
+    import_custom_ops_libs(str(model_path))
     compiled_model = torch._inductor.aoti_load_package(str(model_path))
     metadata = dict(compiled_model.get_metadata())
     if metadata.get("tace_format") != TACE_AOTI_FORMAT:
@@ -318,54 +318,54 @@ def export_lammps_aotinductor(
 ) -> str:
     logging.info("[AOTI 1/5] Preparing model and example inputs...")
     model.eval()
-    compile_model = _as_compile_tensor_model(model)
+    compile_model = as_compile_tensor_model(model)
     CompileTensorModel._validate_compile_properties(compile_model.readout_fn)
     input_keys = LAMMPS_AOTI_INPUT_KEYS
 
     if sample_data is None:
-        sample_data = _synthetic_lammps_sample(compile_model)
+        sample_data = synthetic_lammps_sample(compile_model)
     else:
         sample_data = {key: value for key, value in sample_data.items()}
-    _ensure_sample_inputs(sample_data, input_keys, compile_model)
+    ensure_sample_inputs(sample_data, input_keys, compile_model)
 
-    flat_model = _FlatE3nnLammpsCompileModel(compile_model, input_keys)
+    flat_model = FlatLammpsModel(compile_model, input_keys)
     flat_model.eval()
-    custom_ops_libs = _custom_ops_libs_from_model(flat_model)
+    custom_ops_libs = custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
-    with _size_oblivious_export():
+    with size_oblivious_export():
         logging.info("[AOTI 2/5] Tracing the forward and derivative graph...")
         traced = trace_to_fx(flat_model, inputs)
         logging.info("[AOTI 3/5] Exporting the dynamic graph...")
         exported = torch.export.export(
             traced,
             inputs,
-            dynamic_shapes=_lammps_dynamic_shapes(),
+            dynamic_shapes=lammps_dynamic_shapes(),
             strict=False,
             prefer_deferred_runtime_asserts_over_guards=True,
         )
 
-    custom_ops_libs.update(_custom_ops_libs_from_model(exported.graph_module))
-    output_path = _normalize_pt2_path(output_path)
-    metadata = _export_metadata(
+    custom_ops_libs.update(custom_ops_libs_from_model(exported.graph_module))
+    output_path = normalize_pt2_path(output_path)
+    metadata = export_metadata(
         compile_model,
         input_keys,
         LAMMPS_AOTI_OUTPUT_KEYS,
         aoti_format=LAMMPS_AOTI_FORMAT,
         target="lammps",
     )
-    inductor_configs = {**_inductor_options(), "aot_inductor.metadata": metadata}
-    _ensure_cxx_compiler()
+    inductor_configs = {**inductor_options(), "aot_inductor.metadata": metadata}
+    ensure_cxx_compiler()
     logging.info(
         "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
     )
-    with _size_oblivious_export():
+    with size_oblivious_export():
         out_path = torch._inductor.aoti_compile_and_package(
             exported,
             package_path=output_path,
             inductor_configs=inductor_configs,
         )
     logging.info("[AOTI 5/5] Finalizing the package...")
-    _embed_custom_ops_libs(out_path, custom_ops_libs, flat_model)
+    embed_custom_ops_libs(out_path, custom_ops_libs, flat_model)
     return str(out_path)
 
 
@@ -373,7 +373,7 @@ def load_lammps_aotinductor(
     model_path: Union[str, Path],
     device: Union[str, torch.device],
 ) -> AOTICompiledLammpsModel:
-    _import_custom_ops_libs(str(model_path))
+    import_custom_ops_libs(str(model_path))
     compiled_model = torch._inductor.aoti_load_package(str(model_path))
     metadata = dict(compiled_model.get_metadata())
     if metadata.get("tace_format") != LAMMPS_AOTI_FORMAT:
@@ -384,22 +384,7 @@ def load_lammps_aotinductor(
     return AOTICompiledLammpsModel(compiled_model, metadata, device)
 
 
-def export_ase_aotinductor(
-    model: torch.nn.Module,
-    output_path: Union[str, Path],
-    sample_data: Union[Dict[str, torch.Tensor], None] = None,
-) -> str:
-    return export_aotinductor(model, output_path, sample_data)
-
-
-def load_ase_aotinductor(
-    model_path: Union[str, Path],
-    device: Union[str, torch.device, None],
-) -> AOTICompiledTensorModel:
-    return load_aotinductor(model_path, device)
-
-
-def _as_compile_tensor_model(model: torch.nn.Module) -> CompileTensorModel:
+def as_compile_tensor_model(model: torch.nn.Module) -> CompileTensorModel:
     if isinstance(model, CompileTensorModel):
         return model
     if hasattr(model, "readout_fn"):
@@ -410,7 +395,7 @@ def _as_compile_tensor_model(model: torch.nn.Module) -> CompileTensorModel:
     raise TypeError("TACE graph .pt2 export requires a TensorModel-like model.")
 
 
-def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
+def synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
     dtype = torch.float64
     device = next(model.parameters()).device
     lattice = torch.eye(3, dtype=dtype, device=device).reshape(1, 3, 3)
@@ -466,7 +451,7 @@ def _synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor
     return sample
 
 
-def _synthetic_lammps_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
+def synthetic_lammps_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
     dtype = torch.float64
     device = next(model.parameters()).device
     edge_vector = torch.tensor(
@@ -500,7 +485,7 @@ def _synthetic_lammps_sample(model: CompileTensorModel) -> Dict[str, torch.Tenso
     }
 
 
-def _ensure_sample_inputs(
+def ensure_sample_inputs(
     sample_data: Dict[str, torch.Tensor],
     input_keys: Sequence[str],
     model: CompileTensorModel,
@@ -520,7 +505,7 @@ def _ensure_sample_inputs(
         else None
     )
     sample_data.update(
-        _canonicalize_inputs(
+        canonicalize_inputs(
             sample_data,
             input_keys,
             model.get_fidelity_idx(),
@@ -533,7 +518,7 @@ def _ensure_sample_inputs(
         raise KeyError(f"missing TACE graph .pt2 sample inputs: {missing}")
 
 
-def _graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
+def graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
     keys = list(TACE_AOTI_INPUT_KEYS)
     if model._requires_noncollinear_magmoms():
         keys.append("initial_noncollinear_magmoms")
@@ -550,7 +535,7 @@ def _graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
     return tuple(keys)
 
 
-def _graph_dynamic_shapes(
+def graph_dynamic_shapes(
     input_keys: Sequence[str],
     num_graphs: int,
 ) -> tuple[Dict[int, object], ...]:
@@ -578,14 +563,14 @@ def _graph_dynamic_shapes(
     return tuple(shapes[key] for key in input_keys)
 
 
-def _size_oblivious_export():
+def size_oblivious_export():
     config = torch.fx.experimental._config
     if hasattr(config, "backed_size_oblivious"):
         return config.patch(backed_size_oblivious=True)
     return nullcontext()
 
 
-def _lammps_dynamic_shapes() -> tuple[Dict[int, object], ...]:
+def lammps_dynamic_shapes() -> tuple[Dict[int, object], ...]:
     num_edges = torch.export.Dim("num_edges", min=2)
     num_total = torch.export.Dim("num_total", min=2)
     num_local = torch.export.Dim("num_local", min=1)
@@ -599,7 +584,7 @@ def _lammps_dynamic_shapes() -> tuple[Dict[int, object], ...]:
     )
 
 
-def _export_metadata(
+def export_metadata(
     model: CompileTensorModel,
     input_keys: Sequence[str],
     output_keys: Sequence[str],
@@ -640,7 +625,7 @@ def _export_metadata(
     return metadata
 
 
-def _ensure_cxx_compiler() -> None:
+def ensure_cxx_compiler() -> None:
     from torch._inductor import config
 
     configured = config.cpp.cxx
@@ -661,7 +646,7 @@ def _ensure_cxx_compiler() -> None:
             return
 
 
-def _canonicalize_inputs(
+def canonicalize_inputs(
     data: Dict[str, torch.Tensor],
     input_keys: Sequence[str],
     fidelity_idx: int,
@@ -669,7 +654,7 @@ def _canonicalize_inputs(
     *,
     atomic_numbers=None,
 ) -> Dict[str, torch.Tensor]:
-    data = _as_tensor_dict(data)
+    data = as_tensor_dict(data)
     if "node_type" not in data and atomic_numbers is not None:
         data["node_type"] = TorchElement(atomic_numbers).z2idx(data["atomic_numbers"])
     for key in input_keys:
@@ -695,7 +680,7 @@ def _canonicalize_inputs(
     }
 
 
-def _as_tensor_dict(data) -> Dict[str, torch.Tensor]:
+def as_tensor_dict(data) -> Dict[str, torch.Tensor]:
     if isinstance(data, dict):
         return dict(data)
     if hasattr(data, "items"):
@@ -705,14 +690,14 @@ def _as_tensor_dict(data) -> Dict[str, torch.Tensor]:
     return dict(data)
 
 
-def _normalize_pt2_path(output_path: Union[str, Path]) -> str:
+def normalize_pt2_path(output_path: Union[str, Path]) -> str:
     output_path = str(output_path)
     if not output_path.endswith(".pt2"):
         output_path += ".pt2"
     return output_path
 
 
-def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
+def custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
     """Collect registration modules from model layers and traced operators."""
     libs: Set[str] = set()
     for module in model.modules():
@@ -735,7 +720,7 @@ def _custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
     return libs
 
 
-def _embed_custom_ops_libs(
+def embed_custom_ops_libs(
     pt2_path: Union[str, Path],
     custom_ops_libs: Set[str],
     model: Union[torch.nn.Module, None] = None,
@@ -765,7 +750,7 @@ def _embed_custom_ops_libs(
             )
 
 
-def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
+def import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
     """Register external operators before constructing the AOTI runner."""
     with zipfile.ZipFile(pt2_path, "r") as archive:
         archive_root = archive.namelist()[0].split("/", 1)[0]
@@ -790,14 +775,14 @@ def _import_custom_ops_libs(pt2_path: Union[str, Path]) -> None:
             register_luna_ops(config)
 
 
-def _metadata_json(metadata: Dict[str, str], key: str):
+def metadata_json(metadata: Dict[str, str], key: str):
     value = metadata[key]
     if isinstance(value, bytes):
         value = value.decode()
     return json.loads(value)
 
 
-def _dtype_from_name(name: str) -> torch.dtype:
+def dtype_from_name(name: str) -> torch.dtype:
     if name.startswith("torch."):
         name = name[len("torch.") :]
     if not hasattr(torch, name):
