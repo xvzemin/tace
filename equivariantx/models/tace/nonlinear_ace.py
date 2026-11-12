@@ -5,7 +5,7 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-from ...ace.ictd_semi_coupled import coupling_entries
+from ...mbe.ace.ictd_semi_coupled import coupling_entries
 from ...co3 import Projector
 from ...ops.edge import evaluate
 from ...utils.program import Program, activate

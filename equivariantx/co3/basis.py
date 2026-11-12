@@ -7,6 +7,7 @@ from math import factorial, ldexp, prod, sqrt
 import torch
 from e3nn import o3
 
+from ..ops.precision import validate_module_precision
 from .irreps import Irreps
 from .symmetric import SymmetricBasis
 
@@ -129,6 +130,7 @@ class ChangeOfBasis(torch.nn.Module):
 
     def forward(self, features):
         """Transform features of shape (..., irreps_in.dim) in mul_ir order."""
+        validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         values = []
@@ -210,6 +212,7 @@ class Projector(torch.nn.Module):
 
     def forward(self, features):
         """Project features of shape (..., irreps_in.dim) in mul_ir order."""
+        validate_module_precision(self, (features,))
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if not self.groups:

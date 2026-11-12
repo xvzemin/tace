@@ -2,6 +2,7 @@
 
 import torch
 
+from ..ops.precision import validate_module_precision
 from .clebsch_gordan import clebsch_gordan_product
 from .irreps import Irrep, Irreps
 
@@ -127,6 +128,7 @@ class ICTD(torch.nn.Module):
 
     def forward(self, features):
         """Extract irreducible features from tensors of shape (..., 2**rank)."""
+        validate_module_precision(self, (features,))
         return features @ self.change_of_basis
 
     def inverse(self, features):

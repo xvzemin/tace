@@ -1,5 +1,6 @@
 """Node--edge--node convolutions with Wigner-6j recoupling."""
 
+from ...ops.precision import validate_module_precision
 from .tensor_product import Wigner6jTensorProduct
 
 
@@ -19,7 +20,7 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
     internal_weights, shared_weights : bool, optional
         Store internal weights and share weights between edges.
     backend : {"cuda", "torch"}, optional
-        CUDA or PyTorch evaluation. Defaults to "cuda".
+        CUDA or PyTorch evaluation. Defaults to "torch".
 
     Examples
     --------
@@ -71,6 +72,9 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
         torch.Tensor
             Destination features of shape ``(num_nodes, irreps_out.dim)``.
         """
+        validate_module_precision(
+            self, (x1, x2, x3, edge_index, weight1, weight2, num_nodes, backend)
+        )
         if x1.ndim != 2 or x2.ndim != 2 or x3.ndim != 2:
             raise ValueError("Convolution inputs must be matrices.")
         if x1.shape[0] != x3.shape[0] or edge_index.shape != (2, x2.shape[0]):
@@ -99,7 +103,8 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
                 num_nodes,
             ).index_select(-1, self.output_index)
         message = self.tp132(
-            intermediate[edge_index[0]], x2,
+            intermediate[edge_index[0]],
+            x2,
             weight.unsqueeze(0) if weight.ndim == 1 else weight,
         )
         return message.new_zeros((num_nodes, self.output_dim)).index_add(

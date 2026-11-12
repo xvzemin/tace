@@ -8,7 +8,7 @@ class CueSymmetricContraction(torch.nn.Module):
 
     Parameters
     ----------
-    module : equivariantx.ace.SymmetricContraction
+    module : equivariantx.mbe.ace.SymmetricContraction
         Contraction supplying angular coefficients and weight ordering.
     """
 

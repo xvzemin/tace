@@ -76,6 +76,7 @@ class FullConv(torch.nn.Module):
             layout="ir_mul",
             normalization=normalization,
             normalize=normalize,
+            radial_mode="full" if stream_radial else "last",
         )
         # Merge paths along channels after node aggregation, not on edges.
         indices = []
@@ -121,7 +122,7 @@ def convert_equflash_to_eqx(
     *,
     implementation="o3",
     inplace=False,
-    backend="cuda",
+    backend="torch",
     stream_radial=False,
 ):
     """Replace EquFlash FullConv interactions with EQX convolutions.
@@ -135,7 +136,7 @@ def convert_equflash_to_eqx(
     inplace : bool, optional
         Modify the supplied model instead of returning a copy.
     backend : {"cuda", "torch"}, optional
-        Convolution backend. Defaults to CUDA, with PyTorch on CPU.
+        Convolution backend. Defaults to optimized PyTorch on either device.
     stream_radial : bool, optional
         Fuse the complete radial MLP when True. Defaults to False: evaluate
         hidden layers with PyTorch and fuse only the final projection.

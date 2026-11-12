@@ -3,8 +3,9 @@ from typing import Iterator, NamedTuple, Optional, Sequence, Union
 
 import torch
 
-from ..backends.torch.linear import linear, linear_layout
 from ..nn.element_linear import ElementLinear as ElementLinearBase
+from ..ops.kernels.torch.linear import linear, linear_layout
+from ..ops.precision import validate_module_precision
 from .irreps import Irreps, IrrepsLike
 
 
@@ -245,6 +246,7 @@ class Linear(torch.nn.Module):
             Output with shape ``(..., irreps_out.dim)`` over the broadcast
             leading shape.
         """
+        validate_module_precision(self, (features, weight, bias))
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "Linear feature trailing dimension must be "
@@ -492,6 +494,7 @@ class UuLinear(torch.nn.Module):
             Output with shape ``(..., irreps_out.dim)`` over the broadcast
             leading dimensions.
         """
+        validate_module_precision(self, (features, weight))
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(f"UuLinear features must end in {self.irreps_in.dim}.")
         if weight.ndim < 1 or weight.size(-1) != self.weight_numel:

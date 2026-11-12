@@ -4,8 +4,9 @@ import math
 
 import torch
 
-from ..backends.torch.linear import element_linear
+from ..ops.kernels.torch.linear import element_linear
 from ..ops.linear import contract
+from ..ops.precision import validate_module_precision
 
 
 class ElementLinear(torch.nn.Module):
@@ -90,6 +91,7 @@ class ElementLinear(torch.nn.Module):
         torch.Tensor
             Features of shape ``(samples, irreps_out.dim)``.
         """
+        validate_module_precision(self, (features, weight, node_type, target_type))
         if features.ndim != 2 or features.shape[1] != self.input_dim:
             raise ValueError("Features must have shape (samples, irreps_in.dim).")
         pair = self.element_mode == "pair"
@@ -114,14 +116,8 @@ class ElementLinear(torch.nn.Module):
         if weight.device != features.device:
             raise ValueError("Features and weights must share their device.")
         fused = features.is_cuda and self.backend == "cuda"
-        autocast = (
-            not fused
-            and torch.is_autocast_enabled(features.device.type)
-            and features.dtype in (torch.float32, torch.float16, torch.bfloat16)
-            and weight.dtype in (torch.float32, torch.float16, torch.bfloat16)
-        )
-        if weight.dtype != features.dtype and not autocast:
-            raise ValueError("Features and weights must share their dtype outside autocast.")
+        if weight.dtype != features.dtype:
+            raise ValueError("Features and weights must share their dtype.")
         if pair:
             node_type = node_type * weight.shape[1] + target_type
         weight = weight.reshape(

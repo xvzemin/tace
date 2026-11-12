@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 import torch
 from e3nn import o3
 
+from ..ops.precision import validate_module_precision
 from .local_frame import LocalFrame
 
 
@@ -344,6 +345,9 @@ class O3TensorProduct(torch.nn.Module):
         torch.Tensor
             Global output with shape ``(batch, ..., irreps_out.dim)``.
         """
+        validate_module_precision(
+            self, (features, wigner, wigner_inv, weight, harmonic_scale)
+        )
         features = self.local_frame_in.to_local(features, wigner)
         features = self.forward_local(features, weight, harmonic_scale)
         features = self.local_frame_out.to_global(features, wigner_inv)

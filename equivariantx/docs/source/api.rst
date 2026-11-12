@@ -19,7 +19,7 @@ API Reference
 
    api/nn
    api/convolutions
-   api/ace
+   api/mbe
 
 .. toctree::
    :maxdepth: 1

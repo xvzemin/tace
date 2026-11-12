@@ -2,11 +2,15 @@
 
 import torch
 
+from ..ops import get_kernel
 from ..ops.attention import normalized_exp
+from ..ops.precision import validate_precision
 from ..ops.recompute import Replay
 
 
-def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=True):
+def graph_softmax(
+    scores, target, num_nodes, weight=None, eps=1e-16, *, backend="torch", fused=None
+):
     """Normalize attention scores over incoming edges of each node.
 
     Parameters
@@ -22,9 +26,10 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=Tr
         ``(edges, heads)``. Defaults to one.
     eps : float, optional
         Constant added to the shifted denominator. Defaults to ``1e-16``.
+    backend : {"torch", "cuda"}, optional
+        Execution provider. Defaults to ``"torch"``; CPU inputs use Torch.
     fused : bool, optional
-        Use the CUDA kernel for supported inputs. Set ``False`` to use
-        PyTorch on either device. Defaults to ``True``.
+        Compatibility alias: True selects CUDA and False selects Torch.
 
     Returns
     -------
@@ -41,11 +46,16 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=Tr
     >>> from equivariantx.conv import graph_softmax
     >>> scores = torch.zeros(3, 1)
     >>> target = torch.tensor([0, 0, 1])
-    >>> graph_softmax(scores, target, num_nodes=3, fused=False)
+    >>> graph_softmax(scores, target, num_nodes=3)
     tensor([[0.5000],
             [0.5000],
             [1.0000]])
     """
+    validate_precision((scores, weight))
+    if fused is not None:
+        backend = "cuda" if fused else "torch"
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be torch or cuda.")
     if weight is None:
         weight = scores.new_ones((scores.shape[0], 1))
     if scores.ndim != 2 or weight.ndim != 2:
@@ -61,25 +71,23 @@ def graph_softmax(scores, target, num_nodes, weight=None, eps=1e-16, *, fused=Tr
         target.ndim != 1
         or target.shape[0] != scores.shape[0]
         or target.device != scores.device
+        or target.dtype not in (torch.int32, torch.int64)
     ):
         raise ValueError("Target indices must match the edges and device of scores.")
-    if fused and scores.is_cuda and scores.dtype in (torch.float32, torch.float64):
+    target = target.long()
+    if backend == "cuda" and scores.is_cuda:
         return (
             normalized_exp(
-                scores.contiguous(), weight.contiguous(), target.long(), num_nodes, eps
+                scores.contiguous(), weight.contiguous(), target, num_nodes, eps
             )
             * weight
         )
-    maxima = scores.new_full((num_nodes, scores.shape[1]), -torch.inf)
-    maxima.scatter_reduce_(
-        0, target[:, None].expand_as(scores), scores.detach(), reduce="amax"
+    return (
+        get_kernel("graph_normalized_exp", "torch")(
+            scores, weight, target, num_nodes, eps
+        )
+        * weight
     )
-    maxima = torch.where(torch.isneginf(maxima), 0, maxima)
-    exp = (scores - maxima[target]).exp()
-    denominator = scores.new_zeros((num_nodes, scores.shape[1])).index_add(
-        0, target, exp * weight
-    )
-    return exp * weight / (denominator[target] + eps)
 
 
 class StreamingGraphAttention(Replay):
@@ -111,6 +119,12 @@ class StreamingGraphAttention(Replay):
     backend : {"cuda", "torch"}, optional
         ``"cuda"`` replays tiles during differentiation. ``"torch"`` retains
         the PyTorch online-softmax graph and uses automatic differentiation.
+
+    Notes
+    -----
+    Tracing exposes the tensor program for compiler fusion and standalone
+    export. The number of tiles is specialized; compiled activation memory
+    can differ from eager CUDA replay.
     """
 
     def __init__(
@@ -125,7 +139,7 @@ class StreamingGraphAttention(Replay):
         tile_size,
         eps,
         *,
-        backend="cuda",
+        backend="torch",
     ):
         if backend not in ("torch", "cuda"):
             raise ValueError("backend must be torch or cuda.")
@@ -159,6 +173,7 @@ class StreamingGraphAttention(Replay):
             ]
 
     def forward(self, inputs, create_graph):
+        validate_precision(inputs)
         result, denominator, maximum = self.fake_function(inputs)
         result.zero_()
         denominator.zero_()

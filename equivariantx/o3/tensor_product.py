@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops.precision import validate_module_precision
 from ..ops.radial import materialize
 
 __all__ = ["FactorizedTensorProduct"]
@@ -229,6 +230,7 @@ class FactorizedTensorProduct(torch.nn.Module):
         torch.Tensor
             Features of shape ``(..., irreps_out.dim)`` in ``mul_ir`` layout.
         """
+        validate_module_precision(self, (x, y, weight))
         if x.ndim < 1 or x.shape[-1] != self.input_dim1:
             raise ValueError("The first input must end with irreps_in1.dim.")
         if y.ndim < 1 or y.shape[-1] != self.input_dim2:
@@ -332,6 +334,18 @@ class TensorProductConv(torch.nn.Module):
         torch.Tensor
             Destination features of shape ``(num_nodes, irreps_out.dim)``.
         """
+        validate_module_precision(
+            self,
+            (
+                features,
+                edge_attrs,
+                edge_index,
+                weight,
+                num_nodes,
+                radial,
+                radial_network,
+            ),
+        )
         if features.ndim != 2 or features.shape[-1] != self.input_dim:
             raise ValueError("features must have shape (nodes, irreps_in1.dim).")
         if (

@@ -7,44 +7,16 @@ from typing import NamedTuple
 
 import torch
 from e3nn import o3
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
+from ...ops.precision import validate_module_precision
+from ...ops import config, get_kernel
+from ...ops.kernels.torch.cartesian import cartesian_product, normalized_coefficients
+from ...ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ...ops.kernels.torch.tensor_product import instruction_groups
 from ..basis import Projector, path_matrix
 from ..basis import path_normalization as coupling_scale
 from ..irreps import Irreps
-
-
-def cartesian_product(x, y, l1, l2, l3):
-    """Return an unprojected Cartesian coupling with trailing size 3**l3.
-
-    Inputs must be symmetric traceless tensors with broadcastable leading
-    dimensions. Delta and epsilon contractions use factors 3**(-k/2) and
-    (2*3**k)**(-1/2), respectively.
-    """
-    if not abs(l1 - l2) <= l3 <= l1 + l2:
-        raise ValueError("Degrees must satisfy the triangle inequality.")
-    k, odd = divmod(l1 + l2 - l3, 2)
-    if not k:
-        if not odd:
-            if not l1 or not l2:
-                return x * y
-            return (x.unsqueeze(-1) * y.unsqueeze(-2)).flatten(-2)
-        x = x.reshape(*x.shape[:-1], 3 ** (l1 - 1), 1, 3)
-        y = y.reshape(*y.shape[:-1], 3, 3 ** (l2 - 1))
-        y = y.transpose(-2, -1).unsqueeze(-3)
-        x, y = torch.broadcast_tensors(x, y)
-        value = torch.linalg.cross(x, y).transpose(-2, -1)
-        return value.flatten(-3) / math.sqrt(2)
-    if not odd:
-        x = x.reshape(*x.shape[:-1], 3 ** (l1 - k), 3**k)
-        y = y.reshape(*y.shape[:-1], 3**k, 3 ** (l2 - k))
-        return (x @ y).flatten(-2) / math.sqrt(3**k)
-    x = x.reshape(*x.shape[:-1], 3 ** (l1 - k - 1), 3, 3**k)
-    y = y.reshape(*y.shape[:-1], 3**k, 3, 3 ** (l2 - k - 1))
-    values = [
-        x[..., a, :] @ y[..., b, :] - x[..., b, :] @ y[..., a, :]
-        for a, b in ((1, 2), (2, 0), (0, 1))
-    ]
-    return torch.stack(values, dim=-2).flatten(-3) / math.sqrt(2 * 3**k)
 
 
 @lru_cache(maxsize=None)
@@ -102,6 +74,9 @@ class TensorProduct(torch.nn.Module):
     project : bool, optional
         Project outputs to symmetric traceless tensors. Set False to defer
         projection until after aggregation and channel mixing.
+    backend : {"torch", "cuda"}, optional
+        Torch groups compatible paths. CUDA uses sparse angular kernels;
+        channel-wise paths share a native product program. Defaults to torch.
 
     Notes
     -----
@@ -137,8 +112,12 @@ class TensorProduct(torch.nn.Module):
         internal_weights=None,
         shared_weights=None,
         project=True,
+        backend="torch",
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         if irrep_normalization not in (
             "component",
             "norm",
@@ -149,6 +128,8 @@ class TensorProduct(torch.nn.Module):
             Irreps, (irreps_in1, irreps_in2, irreps_out)
         )
         self.irrep_normalization = irrep_normalization
+        self.input_dims = (self.irreps_in1.dim, self.irreps_in2.dim)
+        self.output_dim = self.irreps_out.dim
         self.path_normalization = path_normalization
         self.project = project
         variances = []
@@ -314,6 +295,36 @@ class TensorProduct(torch.nn.Module):
         self.projection = Projector(
             self.irreps_out, instructions=self.projection_indices if project else ()
         )
+        reference_paths = [
+            ins._replace(path_weight=scale)
+            for ins, scale in zip(self.instructions, self.path_factors)
+        ]
+        couplings = tuple(
+            (
+                self.irreps_in1[ins.i_in1].ir.l,
+                self.irreps_in2[ins.i_in2].ir.l,
+                self.irreps_out[ins.i_out].ir.l,
+            )
+            for ins in self.instructions
+        )
+        _, reference_groups = instruction_groups(
+            reference_paths, couplings, grouped=False
+        )
+        self.reference = GroupedTensorProduct(
+            [
+                tuple((mul, ir.dim) for mul, ir in irreps)
+                for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+            ],
+            reference_groups,
+            self.couple,
+        )
+        self.product_degree = max((max(degrees) for degrees in couplings), default=0)
+        self.kernel_metadata = (
+            self.channel_metadata(couplings)
+            if backend == "cuda"
+            or self.product_degree <= config.CARTESIAN_POLYNOMIAL_DEGREE
+            else None
+        )
         self.slices_in1, self.slices_in2 = (
             self.irreps_in1.slices(),
             self.irreps_in2.slices(),
@@ -356,7 +367,8 @@ class TensorProduct(torch.nn.Module):
             Features of shape (..., irreps_out.dim). Outputs are STF only
             when project=True.
         """
-        if x.shape[-1] != self.irreps_in1.dim or y.shape[-1] != self.irreps_in2.dim:
+        validate_module_precision(self, (x, y, weight))
+        if x.shape[-1] != self.input_dims[0] or y.shape[-1] != self.input_dims[1]:
             raise ValueError("Input feature dimensions do not match the irreps.")
         weight = self.weight if weight is None else weight
         if weight.shape[-1] != self.weight_numel:
@@ -364,6 +376,36 @@ class TensorProduct(torch.nn.Module):
         if self.shared_weights and weight.ndim != 1:
             raise ValueError("Shared weights must be one-dimensional.")
         shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
+        if self.backend == "cuda" and self.kernel_metadata is not None:
+            from ...ops.channel_product import tensor_product
+
+            return self.projection(
+                tensor_product(self.kernel_metadata, x, y, weight, self.output_dim)
+            )
+        if self.backend == "torch" and config.TORCH_REFERENCE:
+            zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
+            return (
+                self.projection(self.reference(x, y, weight, self.path_scales)) + zero
+            )
+        if (
+            self.backend == "torch"
+            and x.is_cuda
+            and self.kernel_metadata is not None
+            and self.product_degree <= config.CARTESIAN_POLYNOMIAL_DEGREE
+            and not config.TORCH_RECOMPUTE
+            and (
+                torch.compiler.is_compiling()
+                or get_proxy_mode() is not None
+                or torch._C._are_functorch_transforms_active()
+            )
+        ):
+            from ...ops.channel_product import tensor_product
+
+            return self.projection(
+                tensor_product(
+                    self.kernel_metadata, x, y, weight, self.output_dim, backend="torch"
+                )
+            )
         zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
         outputs = [None] * len(self.irreps_out)
         inputs = [
@@ -440,7 +482,36 @@ class TensorProduct(torch.nn.Module):
 
     def couple(self, x, y, l1, l2, l3):
         """Contract one angular path before output projection."""
-        return cartesian_product(x, y, l1, l2, l3)
+        return get_kernel("cartesian_product", self.backend)(x, y, l1, l2, l3)
+
+    def channel_metadata(self, couplings):
+        """Combine channel-wise paths without expanding intermediate products."""
+        if any(ins.connection_mode != "uuu" for ins in self.instructions):
+            return None
+        rows, offset = [], 0
+        sections = [
+            irreps.slices()
+            for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+        ]
+        for ins, degrees, scale in zip(self.instructions, couplings, self.path_factors):
+            for a, b, c, coefficient in normalized_coefficients(*degrees):
+                rows.append(
+                    (
+                        (
+                            sections[0][ins.i_in1].start + a,
+                            sections[1][ins.i_in2].start + b,
+                            offset if ins.has_weight else -1,
+                            sections[2][ins.i_out].start + c,
+                        ),
+                        coefficient * scale,
+                        ins.path_shape[0],
+                        (3 ** degrees[0], 3 ** degrees[1], 1, 3 ** degrees[2]),
+                    )
+                )
+            offset += math.prod(ins.path_shape) if ins.has_weight else 0
+        return repr(
+            (0, (*self.input_dims, self.weight_numel, self.output_dim), tuple(rows))
+        )
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

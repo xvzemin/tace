@@ -8,7 +8,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from equivariantx.ace import SemiCoupledSymmetricContraction
+from equivariantx.mbe.ace import SemiCoupledSymmetricContraction
 from tace.utils.env import acceleration_enabled, select_acceleration
 
 from ..layout import LayoutTransform

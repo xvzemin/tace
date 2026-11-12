@@ -3,6 +3,7 @@
 import torch
 
 from ..utils.outputs import rotation_output
+from .precision import validate_uniform
 
 
 def rotate(features, matrix, metadata):
@@ -13,19 +14,19 @@ def rotate(features, matrix, metadata):
 
 
 @torch.library.custom_op("eqx::frame_rotation", mutates_args=(), device_types="cuda")
-def contract(
+def contract_cuda(
     features: torch.Tensor,
     matrix: torch.Tensor,
     edge: torch.Tensor,
     metadata: str,
     role: int,
 ) -> torch.Tensor:
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("frame_rotation", "cuda")(features, matrix, edge, metadata, role)
 
 
-contract.register_fake(rotation_output)
+contract_cuda.register_fake(rotation_output)
 
 
 def setup_context(ctx, inputs, output):
@@ -48,4 +49,15 @@ def backward(ctx, grad):
     )
 
 
-contract.register_autograd(backward, setup_context=setup_context)
+contract_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+@torch.compiler.allow_in_graph
+def contract(features, matrix, edge, metadata, role):
+    """Expose degree-wise products inside functional transformations."""
+    validate_uniform((features, matrix, edge))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.frame import frame_rotation
+
+        return frame_rotation(features, matrix, edge, metadata, role)
+    return torch.ops.eqx.frame_rotation(features, matrix, edge, metadata, role)

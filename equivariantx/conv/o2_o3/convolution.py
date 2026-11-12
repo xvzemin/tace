@@ -5,7 +5,9 @@ import math
 import torch
 from e3nn import o3
 
+from ...ops import config
 from ...ops.o2_o3 import contraction
+from ...ops.precision import validate_module_precision
 from ...utils.metadata import parse_metadata
 
 
@@ -18,8 +20,8 @@ class O2O3TensorProductConv(torch.nn.Module):
         Tensor product defining paths, normalization and feature layouts.
     backend : {"torch", "cuda"}, optional
         Execution backend. ``"torch"`` evaluates the selected algorithm with
-        PyTorch operations and automatic differentiation. Defaults to ``"cuda"``
-        on CUDA inputs and PyTorch operations on CPU.
+        optimized PyTorch operations and automatic differentiation by default.
+        ``"cuda"`` selects native kernels for CUDA tensors.
         The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
         for channel-mixing ``"uvw"`` instructions.
     method : {"auto", "baseline", "generator", "recurrence", "cg", "wigner"}, optional
@@ -31,6 +33,10 @@ class O2O3TensorProductConv(torch.nn.Module):
         ``"auto"`` measures complete CUDA evaluations and caches the fastest
         method. Warm up before compilation or CUDA Graph capture; otherwise
         these use the baseline until a method has been measured in eager mode.
+    radial_mode : {"last", "full"}, optional
+        ``"last"`` retains hidden MLP activations. ``"full"`` includes all
+        radial layers in the derivative program and recomputes activations.
+        The full Torch path uses explicit CG polynomials or Wigner rotations.
 
     Notes
     -----
@@ -59,7 +65,9 @@ class O2O3TensorProductConv(torch.nn.Module):
     torch.Size([3, 6])
     """
 
-    def __init__(self, tensor_product, *, backend="cuda", method="auto"):
+    def __init__(
+        self, tensor_product, *, backend="torch", method="auto", radial_mode="last"
+    ):
         super().__init__()
         if backend not in ("torch", "cuda"):
             raise ValueError("backend must be torch or cuda.")
@@ -71,6 +79,9 @@ class O2O3TensorProductConv(torch.nn.Module):
                 "Use backend='torch' for other connection modes."
             )
         self.backend = backend
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.radial_mode = radial_mode
         if method not in (
             "auto",
             "baseline",
@@ -296,9 +307,9 @@ class O2O3TensorProductConv(torch.nn.Module):
         method : str, optional
             Override the constructor's evaluation method for this call.
         radial_network : torch.nn.Module, optional
-            Sequential network preceding ``projection``, evaluated in bounded
-            CUDA tiles. Nonlinear activations are recomputed during backward.
-            A final affine bias may be appended to ``projection`` as a row.
+            Sequential network preceding ``projection``. ``radial_mode``
+            selects its evaluation schedule; CUDA full mode uses bounded tiles.
+            Append a final affine bias to ``projection`` as an extra row.
 
         Returns
         -------
@@ -306,19 +317,32 @@ class O2O3TensorProductConv(torch.nn.Module):
             Target features of shape ``(num_nodes, irreps_out.dim)`` in the
             declared, unsimplified ``ir_mul`` layout.
         """
+        validate_module_precision(
+            self,
+            (
+                features,
+                radial,
+                projection,
+                wigner,
+                amplitudes,
+                edge_index,
+                num_nodes,
+                vectors,
+                method,
+                radial_network,
+            ),
+        )
         from ...ops.radial import cast_radial
 
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         amplitudes = amplitudes.to(features)
         if radial_network is not None and (
-            self.backend != "cuda" or not features.is_cuda
+            self.radial_mode == "last" or config.TORCH_REFERENCE
         ):
-            from ...ops.radial import materialize
+            from ...ops.radial import radial_features
 
-            radial = radial_network(materialize(radial, edge_index))
-            if radial.shape[-1] + 1 == projection.shape[0]:
-                radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+            radial = radial_features(radial_network, radial, edge_index, projection)
             radial_network = None
         if self.backend == "cuda" and radial_network is None:
             from ...ops.radial import align_projection
@@ -378,9 +402,32 @@ class O2O3TensorProductConv(torch.nn.Module):
             raise ValueError("Supply vectors or packed Wigner matrices.")
         wigner = wigner.to(features)
         if self.backend == "torch" or not features.is_cuda:
-            result = self.reference(
-                features, radial, projection, wigner, amplitudes, edge_index, num_nodes
-            )
+            if self.radial_mode == "full" and not config.TORCH_REFERENCE:
+                from ...ops.convolution import convolve_torch
+
+                result = convolve_torch(
+                    self.kernel_metadata,
+                    features,
+                    wigner,
+                    radial,
+                    projection,
+                    edge_index,
+                    num_nodes,
+                    self.output_dim,
+                    network=radial_network,
+                    recompute=True,
+                    amplitudes=amplitudes,
+                )
+            else:
+                result = self.reference(
+                    features,
+                    radial,
+                    projection,
+                    wigner,
+                    amplitudes,
+                    edge_index,
+                    num_nodes,
+                )
             return result if vectors is None else result + vectors.sum() * 0
         # A zero-stride placeholder supplies the output shape without allocating
         # a second node output. It is never read by the forward contraction.
@@ -465,6 +512,52 @@ class O2O3TensorProductConv(torch.nn.Module):
                 operands,
             )[0]
         direction = vectors / vectors.norm(dim=-1, keepdim=True)
+        if self.radial_mode == "full" and not config.TORCH_REFERENCE:
+            from ...ops.convolution import convolve_torch
+
+            if any(mode != "uvu" for mode, _ in self.transverse_layout):
+                wigner = self.frame.forward_packed(vectors, method="recursive")
+                return convolve_torch(
+                    self.kernel_metadata,
+                    features,
+                    wigner,
+                    radial,
+                    projection,
+                    edge_index,
+                    num_nodes,
+                    self.output_dim,
+                    network=radial_network,
+                    recompute=True,
+                    amplitudes=amplitudes,
+                )
+            attributes, paths, offsets = [], [], {}
+            for path in self.transverse_paths:
+                harmonic, dimension = path[1], path[6]
+                key = harmonic, dimension
+                if key not in offsets:
+                    offsets[key] = sum(value.shape[-1] for value in attributes)
+                    value = o3.spherical_harmonics(
+                        (dimension - 1) // 2,
+                        direction,
+                        normalize=False,
+                        normalization=self.normalization,
+                    )
+                    attributes.append(value * amplitudes[:, harmonic : harmonic + 1])
+                paths.append((path[0], offsets[key], *path[2:]))
+            metadata = repr((tuple(paths), projection.shape[1], False))
+            attributes = torch.cat(attributes, -1) if attributes else vectors[:, :0]
+            return convolve_torch(
+                metadata,
+                features,
+                attributes,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                self.output_dim,
+                network=radial_network,
+                recompute=True,
+            )
         source, target = edge_index
         edges = source.numel()
         weights = radial @ projection if projection.numel() else radial

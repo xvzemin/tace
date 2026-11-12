@@ -6,6 +6,8 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
+from ...ops.precision import validate_module_precision
+
 
 @lru_cache(maxsize=None)
 def recoupling_coefficient(l1, l2, l3, l12, l13, l_out):
@@ -51,7 +53,7 @@ class Wigner6jTensorProduct(torch.nn.Module):
         Both default to true. Internal weights require shared weights.
     backend : {"cuda", "torch"}, optional
         CUDA contractions or PyTorch operations with automatic differentiation.
-        Defaults to "cuda"; CPU inputs use PyTorch.
+        Defaults to "torch"; CUDA kernels are selected explicitly.
 
     Notes
     -----
@@ -84,7 +86,7 @@ class Wigner6jTensorProduct(torch.nn.Module):
         path_normalization="element",
         internal_weights=None,
         shared_weights=None,
-        backend="cuda",
+        backend="torch",
     ):
         super().__init__()
         if backend not in ("cuda", "torch"):
@@ -337,6 +339,7 @@ class Wigner6jTensorProduct(torch.nn.Module):
         torch.Tensor
             Features of shape ``(..., irreps_out.dim)`` in ``mul_ir`` layout.
         """
+        validate_module_precision(self, (x1, x2, x3, weight1, weight2))
         weight1, weight2 = self.get_weights(weight1, weight2)
         for value, width in zip((x1, x2, x3), self.input_dims):
             if value.ndim < 1 or value.shape[-1] != width:

@@ -3,14 +3,16 @@
 from functools import lru_cache
 
 import torch
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-from ...backends.torch.edge import evaluate_torch
-from ...backends.torch.linear import linear as linear_blocks
-from ...backends.torch.linear import linear_layout
 from ...o2.layout import irrep_layout
 from ...o2.wigner import WignerD
+from ...ops import config, get_kernel
 from ...ops.edge import evaluate
 from ...ops.gate import gate_program
+from ...ops.kernels.torch.linear import linear as linear_blocks
+from ...ops.kernels.torch.linear import linear_layout
+from ...ops.precision import validate_module_precision
 from ...utils.frame_program import frame_description, rotate
 from ...utils.metadata import parse_metadata
 from ...utils.program import Program
@@ -61,11 +63,14 @@ def linear_program(program, inputs, weight, bias, description):
         if len(values) == 1:
             return values[0]
         return program.transpose(
-            program.concatenate([
-                program.transpose(value, rows, width)
-                for value, width in zip(values, widths)
-            ]),
-            sum(widths), rows,
+            program.concatenate(
+                [
+                    program.transpose(value, rows, width)
+                    for value, width in zip(values, widths)
+                ]
+            ),
+            sum(widths),
+            rows,
         )
 
     outputs = [None] * len(output_shapes)
@@ -81,17 +86,23 @@ def linear_program(program, inputs, weight, bias, description):
         dim = output_shapes[entries[0][0]][0]
         out_widths = [output_shapes[j][1] for j, _ in entries]
         value = columns([inputs[i] for i in sources], dim, widths)
-        matrix = program.concatenate([
-            columns([matrices[indices[row]] for _, indices in entries], ci, out_widths)
-            for row, ci in enumerate(widths)
-        ])
+        matrix = program.concatenate(
+            [
+                columns(
+                    [matrices[indices[row]] for _, indices in entries], ci, out_widths
+                )
+                for row, ci in enumerate(widths)
+            ]
+        )
         result = program.matmul(value, matrix, dim, sum(widths), sum(out_widths))
         offset = 0
         for (j, _), width in zip(entries, out_widths):
-            outputs[j] = program.concatenate([
-                program.slice(result, row * sum(out_widths) + offset, width)
-                for row in range(dim)
-            ])
+            outputs[j] = program.concatenate(
+                [
+                    program.slice(result, row * sum(out_widths) + offset, width)
+                    for row in range(dim)
+                ]
+            )
             offset += width
     for j, start, size in biases:
         value = program.slice(bias, start, size)
@@ -125,6 +136,11 @@ class UvO2TensorProductConv(torch.nn.Module):
         in edge tiles and recomputes intermediates for higher derivatives.
         Attention uses separate projections and a graph softmax. ``"torch"``
         uses PyTorch operations and automatic differentiation on either device.
+    radial_mode : {"last", "full"}, optional
+        ``"last"`` evaluates hidden layers with Torch and fuses the final
+        projection and its pointwise tail into the edge program.
+        ``"full"`` composes all radial layers into that program and recomputes
+        activations during differentiation.
 
     Examples
     --------
@@ -163,12 +179,16 @@ class UvO2TensorProductConv(torch.nn.Module):
         num_heads=1,
         attention_scale=1.0,
         eps=1e-16,
-        backend="cuda",
+        backend="torch",
+        radial_mode="last",
     ):
         super().__init__()
         if backend not in ("cuda", "torch"):
             raise ValueError("backend must be cuda or torch.")
         self.backend = backend
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.radial_mode = radial_mode
         if (query is None) != (key is None):
             raise ValueError("Supply both query and key maps, or neither.")
         local_inputs = frame_in.irreps_out + frame_in.irreps_out
@@ -203,9 +223,8 @@ class UvO2TensorProductConv(torch.nn.Module):
             frame_description(f) if f is not None else None
             for f in (frame_in, frame_edge, frame_out)
         )
-        degree = max(
-            f.lmax for f in (frame_in, frame_edge, frame_out) if f is not None
-        )
+        degree = max(f.lmax for f in (frame_in, frame_edge, frame_out) if f is not None)
+        self.degree = degree
         self.wigner = WignerD(degree, degree)
         self.transverse_frames = torch.nn.ModuleList(
             TransverseFrame(f, backend) if f is not None and f.basis_change else None
@@ -253,10 +272,7 @@ class UvO2TensorProductConv(torch.nn.Module):
             magnetic = program.input(
                 2,
                 "edge",
-                sum(
-                    dim * mul
-                    for dim, mul, _ in irrep_layout(self.edge_irreps, True)
-                ),
+                sum(dim * mul for dim, mul, _ in irrep_layout(self.edge_irreps, True)),
             )
             weight = program.input(3, "edge", self.weight_numel)
         else:
@@ -390,7 +406,9 @@ class UvO2TensorProductConv(torch.nn.Module):
 
     @lru_cache(maxsize=64)
     @torch.compiler.assume_constant_result
-    def convolution_program(self, local_dim, global_dim, packed, transverse):
+    def convolution_program(
+        self, local_dim, global_dim, packed, transverse, native=True
+    ):
         """Encode the complete convolution without an attention reduction."""
         if transverse:
             program = Program()
@@ -401,14 +419,17 @@ class UvO2TensorProductConv(torch.nn.Module):
             geometry = program.input(3, "edge", 3)
             node_frame, edge_frame, _ = self.transverse_frames
             local_inputs = [
-                node_frame.program(program, features, geometry),
-                node_frame.program(program, target, geometry),
-                edge_frame.program(program, edge, geometry) if edge_frame else edge,
+                node_frame.program(program, features, geometry, native=native),
+                node_frame.program(program, target, geometry, native=native),
+                edge_frame.program(program, edge, geometry, native=native)
+                if edge_frame
+                else edge,
                 radial,
             ]
             linears = self.transverse_linears
             local = program.compose(
-                self.prepare_program(local_dim, global_dim, packed, True), local_inputs,
+                self.prepare_program(local_dim, global_dim, packed, True),
+                local_inputs,
             )[0]
         else:
             nodes, outputs = parse_metadata(
@@ -425,7 +446,8 @@ class UvO2TensorProductConv(torch.nn.Module):
         for layer, description in enumerate(linears[:2]):
             ins, outs, paths, biases, _ = description
             weight = program.input(
-                6 + layer * 2, "shared",
+                6 + layer * 2,
+                "shared",
                 sum(ins[i][1] * outs[j][1] for i, j, _, _ in paths),
             )
             bias = program.input(7 + layer * 2, "shared", sum(n for _, _, n in biases))
@@ -442,7 +464,11 @@ class UvO2TensorProductConv(torch.nn.Module):
         )[0]
         if transverse:
             output = self.transverse_frames[2].program(
-                program, output, geometry, inverse=True,
+                program,
+                output,
+                geometry,
+                inverse=True,
+                native=native,
             )
         return repr((tuple(program.nodes), ((output, 0, "target"),)))
 
@@ -493,9 +519,7 @@ class UvO2TensorProductConv(torch.nn.Module):
             Positive orders use spherical subspaces of width ``2*m+1``.
         radial_network : torch.nn.Module, optional
             Network mapping ``conv_weights`` inputs to radial coefficients.
-            Pass only its final affine layer to fuse the projection while
-            evaluating hidden layers with PyTorch. Passing the full network
-            also fuses its hidden layers on CUDA.
+            ``radial_mode`` selects final-projection or full-network fusion.
 
         Returns
         -------
@@ -503,6 +527,22 @@ class UvO2TensorProductConv(torch.nn.Module):
             Aggregated node features in flattened ``ir_mul`` layout with
             the global output representation declared by ``frame_out``.
         """
+        validate_module_precision(
+            self,
+            (
+                features,
+                edge_features,
+                conv_weights,
+                edge_index,
+                wigner,
+                wigner_inv,
+                cutoff,
+                parameters,
+                radial_attention,
+                vectors,
+                radial_network,
+            ),
+        )
         source, target = edge_index[0], edge_index[1]
         from ...ops.radial import cast_radial
 
@@ -524,24 +564,51 @@ class UvO2TensorProductConv(torch.nn.Module):
             wigner_inv = wigner_inv.to(features)
         transverse = vectors is not None
         fused = self.backend == "cuda" and features.is_cuda
-        execute = evaluate if fused else evaluate_torch
-        if radial_network is not None and not fused:
-            from ...ops.radial import materialize
+        expanded = (
+            transverse
+            and not self.attention
+            and not config.TORCH_REFERENCE
+            and self.degree <= config.TRANSVERSE_POLYNOMIAL_DEGREE
+            and (
+                torch.compiler.is_compiling()
+                or get_proxy_mode() is not None
+                or torch._C._are_functorch_transforms_active()
+            )
+        )
+        execute = evaluate if fused else get_kernel("edge_program", "torch")
+        if not fused and self.radial_mode == "full" and not config.TORCH_REFERENCE:
+            from ...ops.kernels.torch.edge import evaluate_recomputed
 
-            conv_weights = radial_network(materialize(conv_weights, edge_index))
-            radial_network = None
+            execute = evaluate_recomputed
+        if radial_network is not None:
+            from ...ops.radial import radial_features, split_radial
+
+            if config.TORCH_REFERENCE:
+                conv_weights = radial_features(radial_network, conv_weights, edge_index)
+                radial_network = None
+            elif self.radial_mode == "last":
+                hidden, projection = split_radial(radial_network)
+                if hidden or not projection:
+                    conv_weights = radial_features(hidden, conv_weights, edge_index)
+                radial_network = projection or None
         if edge_features is None:
             edge_features = features.new_empty((source.shape[0], 0))
-        if fused and not self.attention:
+        if (fused or expanded) and not self.attention:
             if transverse:
                 if any(
                     f is None and description is not None
                     for f, description in zip(self.transverse_frames, self.frames)
                 ):
-                    raise ValueError("Transverse evaluation requires canonical O(2) frames.")
+                    raise ValueError(
+                        "Transverse evaluation requires canonical O(2) frames."
+                    )
                 from ...ops.wigner import alignment_cuda
 
-                geometry = alignment_cuda(repr("normalize"), [vectors])[0]
+                geometry = (
+                    vectors / vectors.norm(dim=-1, keepdim=True)
+                    if expanded
+                    else alignment_cuda(repr("normalize"), [vectors])[0]
+                )
                 inverse = features.new_empty((source.numel(), 0))
                 local_dim = global_dim = 0
                 packed = False
@@ -549,15 +616,25 @@ class UvO2TensorProductConv(torch.nn.Module):
                 if wigner is None:
                     raise ValueError("Supply Wigner matrices or vectors.")
                 packed = wigner.ndim == 2
-                local_dim, global_dim = (wigner.shape[1], 1) if packed else wigner.shape[1:]
+                local_dim, global_dim = (
+                    (wigner.shape[1], 1) if packed else wigner.shape[1:]
+                )
                 geometry, inverse = wigner, wigner if packed else wigner_inv
-            metadata = self.convolution_program(local_dim, global_dim, packed, transverse)
+            metadata = self.convolution_program(
+                local_dim, global_dim, packed, transverse, native=not expanded
+            )
             inputs = [features, edge_features, conv_weights, geometry, inverse, cutoff]
             inputs.extend(value.reshape(1, -1) for value in parameters[:4])
             if radial_network is not None:
                 from ...ops.radial import compose_radial
 
                 metadata, inputs = compose_radial(metadata, inputs, 2, radial_network)
+            if expanded:
+                from ...ops.kernels.torch.edge import evaluate_torch
+
+                return evaluate_torch(
+                    metadata, inputs, source, target, features.shape[0], optimized=True
+                )[0]
             return evaluate(metadata, inputs, source, target, features.shape[0])[0]
         if transverse:
             if any(
@@ -656,7 +733,12 @@ class UvO2TensorProductConv(torch.nn.Module):
             )[0]
             scale = (
                 graph_softmax(
-                    score, target, features.shape[0], cutoff, self.eps, fused=fused
+                    score,
+                    target,
+                    features.shape[0],
+                    cutoff,
+                    self.eps,
+                    backend=self.backend,
                 )
                 * cutoff
             )

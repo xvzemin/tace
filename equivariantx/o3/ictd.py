@@ -3,6 +3,8 @@
 import torch
 from e3nn import o3
 
+from ..ops.precision import validate_module_precision
+
 
 def path_matrices(rank):
     """Generate normalized O(3) decomposition paths.
@@ -121,6 +123,7 @@ class ICTD(torch.nn.Module):
 
     def forward(self, features):
         """Extract irreducible features from tensors of shape (..., 3**rank)."""
+        validate_module_precision(self, (features,))
         return features @ self.change_of_basis
 
     def inverse(self, features):

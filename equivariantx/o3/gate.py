@@ -5,6 +5,8 @@ import math
 import torch
 from e3nn.nn import Gate as E3nnGate
 
+from ..ops.precision import validate_module_precision
+
 
 class Gate(E3nnGate):
     """Apply normalized scalar activations and gates.
@@ -33,7 +35,7 @@ class Gate(E3nnGate):
         irreps_gates,
         act_gates,
         irreps_gated,
-        backend="cuda",
+        backend="torch",
     ):
         super().__init__(
             irreps_scalars, act_scalars, irreps_gates, act_gates, irreps_gated
@@ -92,6 +94,7 @@ class Gate(E3nnGate):
 
     def forward(self, features):
         """Return gated features with shape ``(..., irreps_out.dim)``."""
+        validate_module_precision(self, (features,))
         if (
             self.metadata is None
             or not features.is_cuda

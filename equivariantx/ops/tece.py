@@ -15,7 +15,7 @@ def interaction(
     target: torch.Tensor,
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("tece_interaction", "cuda")(metadata, source, target, inputs)
 
@@ -65,7 +65,7 @@ def contraction(
     inputs: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate local expressions and their derivatives with CUDA kernels."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("tece_contraction", "cuda")(metadata, source, target, inputs)
 

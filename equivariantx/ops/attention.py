@@ -5,26 +5,27 @@ from functools import lru_cache
 import torch
 
 from ..utils.outputs import attention_adjoint_outputs
+from .precision import validate_uniform
 
 
 @torch.library.custom_op(
     "eqx::graph_normalized_exp", mutates_args=(), device_types="cuda"
 )
-def normalized_exp(
+def normalized_exp_cuda(
     scores: torch.Tensor,
     weight: torch.Tensor,
     target: torch.Tensor,
     num_nodes: int,
     eps: float,
 ) -> torch.Tensor:
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("graph_normalized_exp", "cuda")(
         scores, weight, target, num_nodes, eps
     )
 
 
-@normalized_exp.register_fake
+@normalized_exp_cuda.register_fake
 def normalized_exp_fake(scores, weight, target, num_nodes, eps):
     return torch.empty_like(scores)
 
@@ -73,21 +74,21 @@ def adjoint_program(heads, weight_heads):
 @torch.library.custom_op(
     "eqx::graph_normalized_exp_adjoint", mutates_args=(), device_types="cuda"
 )
-def evaluate_adjoint(
+def evaluate_adjoint_cuda(
     values: torch.Tensor,
     grad: torch.Tensor,
     weight: torch.Tensor,
     target: torch.Tensor,
     num_nodes: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("graph_normalized_exp_adjoint", "cuda")(
         values, grad, weight, target, num_nodes
     )
 
 
-evaluate_adjoint.register_fake(attention_adjoint_outputs)
+evaluate_adjoint_cuda.register_fake(attention_adjoint_outputs)
 
 
 def adjoint_setup_context(ctx, inputs, output):
@@ -130,9 +131,22 @@ def adjoint_backward(ctx, grad_scores, grad_weight, grad_total):
     return *results, None, None
 
 
-evaluate_adjoint.register_autograd(
+evaluate_adjoint_cuda.register_autograd(
     adjoint_backward, setup_context=adjoint_setup_context
 )
+
+
+@torch.compiler.allow_in_graph
+def evaluate_adjoint(values, grad, weight, target, num_nodes):
+    """Expose the native transpose formula inside functional transformations."""
+    validate_uniform((values, grad, weight))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.attention import evaluate_adjoint as evaluate
+
+        return evaluate(values, grad, weight, target, num_nodes)
+    return torch.ops.eqx.graph_normalized_exp_adjoint(
+        values, grad, weight, target, num_nodes
+    )
 
 
 def backward(ctx, grad):
@@ -156,4 +170,15 @@ def backward(ctx, grad):
     return grad_scores, grad_weight, None, None, None
 
 
-normalized_exp.register_autograd(backward, setup_context=setup_context)
+normalized_exp_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+@torch.compiler.allow_in_graph
+def normalized_exp(scores, weight, target, num_nodes, eps):
+    """Retain native normalization and expose its functional derivatives."""
+    validate_uniform((scores, weight))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.attention import normalized_exp as evaluate
+
+        return evaluate(scores, weight, target, num_nodes, eps)
+    return torch.ops.eqx.graph_normalized_exp(scores, weight, target, num_nodes, eps)

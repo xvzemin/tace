@@ -8,6 +8,7 @@ from e3nn import o3
 
 from ..co3.basis import path_matrix as spherical_path_matrix
 from ..co3.symmetric import SymmetricBasis
+from ..ops.precision import validate_module_precision
 from .basis import path_matrix
 from .projection import detracing_coefficients
 
@@ -110,6 +111,7 @@ class TransverseProjector(torch.nn.Module):
         Leading dimensions broadcast. The result retains global Cartesian
         indices; it is not stored in the two-dimensional co2.Irreps layout.
         """
+        validate_module_precision(self, (tensor, direction))
         if tensor.shape[-1] != 3**self.m or direction.shape[-1] != 3:
             raise ValueError("Tensor or direction has an incorrect trailing size.")
         if self.m == 0:
@@ -176,6 +178,7 @@ class Restriction(torch.nn.Module):
 
     def forward(self, tensor, direction):
         """Return orders 0,...,l for STF tensors and unit, broadcastable directions."""
+        validate_module_precision(self, (tensor, direction))
         if tensor.shape[-1] != 3**self.l or direction.shape[-1] != 3:
             raise ValueError("Tensor or direction has an incorrect trailing size.")
         if self.l == 0:

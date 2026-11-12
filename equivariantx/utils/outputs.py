@@ -59,8 +59,17 @@ def channel_product_outputs(metadata, program, operands):
     return outputs
 
 
+def edge_node_counts(metadata, inputs, num_nodes):
+    """Keep source and destination sizes independent for bipartite graphs."""
+    for op, _, _, data in parse_metadata(metadata)[0]:
+        if op == "input" and data[1] == "source":
+            return {"source": inputs[data[0]].shape[0], "target": num_nodes}
+    return {"source": num_nodes, "target": num_nodes}
+
+
 def edge_outputs(metadata, inputs, source, target, num_nodes):
     nodes, outputs = parse_metadata(metadata)
+    counts = edge_node_counts(metadata, inputs, num_nodes)
     specifications = {slot: (nodes[root][1], kind) for root, slot, kind in outputs}
     return [
         inputs[0].new_empty(
@@ -69,7 +78,7 @@ def edge_outputs(metadata, inputs, source, target, num_nodes):
                 if kind == "shared"
                 else source.numel()
                 if kind == "edge"
-                else num_nodes
+                else counts[kind]
             ),
             width,
         )

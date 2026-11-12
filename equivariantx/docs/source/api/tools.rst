@@ -78,3 +78,8 @@ Module utilities
 .. autofunction:: equivariantx.utils.copy_model
 
 .. autofunction:: equivariantx.utils.convert_modules
+
+Compilation
+-----------
+
+.. autofunction:: equivariantx.ops.decompositions.torch_decompositions

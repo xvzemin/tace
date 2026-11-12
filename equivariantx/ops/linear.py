@@ -3,10 +3,11 @@
 import torch
 
 from ..utils.outputs import linear_output
+from .polynomial import native_polynomial
 
 
 @torch.library.custom_op("eqx::element_linear", mutates_args=(), device_types="cuda")
-def contract(
+def contract_cuda(
     metadata: str,
     role: int,
     node_type: torch.Tensor,
@@ -15,14 +16,14 @@ def contract(
     output: torch.Tensor,
 ) -> torch.Tensor:
     """Contract two operands into the selected feature or weight role."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("element_linear", "cuda")(
         metadata, role, node_type, features, weight, output
     )
 
 
-contract.register_fake(linear_output)
+contract_cuda.register_fake(linear_output)
 
 
 def setup_context(ctx, inputs, output):
@@ -40,4 +41,12 @@ def backward(ctx, grad_output):
     return None, None, None, *gradients
 
 
-contract.register_autograd(backward, setup_context=setup_context)
+contract_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+def contract(metadata, role, node_type, features, weight, output):
+    """Apply native indexed maps with explicit functional-transform rules."""
+    program = repr((((0, 1, 2), role, 0),))
+    return native_polynomial(
+        "linear", metadata, program, node_type, features, weight, output
+    )[0]

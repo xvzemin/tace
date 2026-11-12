@@ -7,6 +7,9 @@ from functools import lru_cache
 from itertools import product
 
 from ...co3.symmetric import symmetric_powers
+from ...ops.kernels.torch.cartesian import (
+    coupling_coefficients as coupling_coefficients,
+)
 
 ANGULAR_TILE_SIZE = 27
 FUSED_TILE_LIMIT = 16
@@ -298,27 +301,6 @@ def output_components(paths, irreps, normalization):
         offset += mul * width
         start += mul * ir.dim
     return tuple(output_paths), tuple(expansion), offset
-
-
-@lru_cache(maxsize=None)
-def coupling_coefficients(l1, l2, l3):
-    """Return integer delta/epsilon coefficients, excluding path normalization."""
-    k, odd = divmod(l1 + l2 - l3, 2)
-    left, contracted, right = 3 ** (l1 - k - odd), 3**k, 3 ** (l2 - k - odd)
-    entries = []
-    for i, j, t in product(range(left), range(right), range(contracted)):
-        if odd:
-            for c, (a, b) in enumerate(((1, 2), (2, 0), (0, 1))):
-                out = (i * 3 + c) * right + j
-                entries.append(
-                    ((i * 3 + a) * contracted + t, (t * 3 + b) * right + j, out, 1)
-                )
-                entries.append(
-                    ((i * 3 + b) * contracted + t, (t * 3 + a) * right + j, out, -1)
-                )
-        else:
-            entries.append((i * contracted + t, t * right + j, i * right + j, 1))
-    return tuple(entries)
 
 
 @lru_cache(maxsize=None)

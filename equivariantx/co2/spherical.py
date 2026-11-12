@@ -7,6 +7,7 @@ import torch
 from e3nn import o3
 
 from ..o3.rotation import so3_generators
+from ..ops.precision import validate_module_precision
 
 
 @lru_cache(maxsize=256)
@@ -180,6 +181,7 @@ class SphericalCoupling(torch.nn.Module):
 
     def forward(self, features, vectors, method=None):
         """Couple (..., 2*l1+1) features to harmonics of (..., 3) vectors."""
+        validate_module_precision(self, (features, vectors, method))
         method = self.method if method is None else method
         if method not in ("chebyshev", "recurrence"):
             raise ValueError("method must be chebyshev or recurrence.")

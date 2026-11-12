@@ -5,7 +5,8 @@ from typing import NamedTuple
 
 import torch
 
-from ..backends.torch.linear import cartesian_linear
+from ..ops.kernels.torch.linear import cartesian_linear
+from ..ops.precision import validate_module_precision
 from .basis import ChangeOfBasis, Projector
 from .irreps import Irreps
 
@@ -190,6 +191,7 @@ class Linear(torch.nn.Module):
         torch.Tensor
             Features of shape (..., irreps_out.dim) in the selected output basis.
         """
+        validate_module_precision(self, (features, weight, bias))
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         weight = self.weight if weight is None else weight

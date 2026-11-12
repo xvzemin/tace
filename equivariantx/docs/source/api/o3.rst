@@ -25,8 +25,9 @@ Tensor products
 
 Available from ``equivariantx.o3`` and its ``cgtp``, ``gtp``, ``mtp``, and ``wigner6j``
 submodules. ``TensorProduct``, ``FullyConnectedTensorProduct``,
-``FullTensorProduct``, and ``ElementwiseTensorProduct`` reuse the corresponding
-e3nn classes, including their instructions and normalization.
+``FullTensorProduct``, and ``ElementwiseTensorProduct`` retain e3nn instructions,
+normalization and weight layouts, with ``torch``/``cuda`` providers.
+See :class:`equivariantx.o3.TensorProduct` for execution options.
 
 .. code-block:: python
 

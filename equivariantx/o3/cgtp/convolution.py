@@ -5,10 +5,12 @@ import math
 import torch
 from e3nn import o3
 
-from ...backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ...backends.torch.tensor_product import instruction_groups
+from ...ops import config
+from ...ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ...ops.kernels.torch.tensor_product import instruction_groups
 from ...ops.o3 import contraction
-from ...ops.radial import cast_radial, materialize
+from ...ops.precision import validate_module_precision
+from ...ops.radial import cast_radial, radial_features
 
 
 class O3TensorProductConv(torch.nn.Module):
@@ -30,6 +32,10 @@ class O3TensorProductConv(torch.nn.Module):
     batch_paths : bool, optional
         Batch compatible CUDA path groups when weights are supplied directly.
         Defaults to false.
+    radial_mode : {"last", "full"}, optional
+        ``"last"`` keeps hidden MLP activations and fuses the final projection.
+        ``"full"`` includes the complete radial network in the convolution
+        program and recomputes its activations during differentiation.
 
     Examples
     --------
@@ -56,10 +62,11 @@ class O3TensorProductConv(torch.nn.Module):
         self,
         tensor_product,
         *,
-        backend="cuda",
+        backend="torch",
         normalization="component",
         normalize=True,
         batch_paths=False,
+        radial_mode="last",
     ):
         super().__init__()
         if backend not in ("cuda", "torch"):
@@ -69,6 +76,9 @@ class O3TensorProductConv(torch.nn.Module):
                 "O3TensorProductConv supports only 'uvu' instructions."
             )
         self.backend = backend
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.radial_mode = radial_mode
         self.batch_paths = batch_paths
         if normalization not in ("component", "integral", "norm"):
             raise ValueError("normalization must be integral, component or norm.")
@@ -220,8 +230,8 @@ class O3TensorProductConv(torch.nn.Module):
             Used only with ``vectors``; defaults to one.
         radial_network : torch.nn.Module, optional
             Network preceding ``projection``. Omit it to supply hidden features
-            and fuse only the final projection. Supplying it also fuses hidden
-            layers on CUDA. Append an affine bias as the last projection row
+            and fuse only the final projection. ``radial_mode`` controls hidden
+            layer evaluation on either backend. Append an affine bias as the last projection row
             and a constant input channel when no network is supplied.
 
         Returns
@@ -229,6 +239,20 @@ class O3TensorProductConv(torch.nn.Module):
         torch.Tensor
             Target features, shape ``(num_nodes, irreps_out.dim)``.
         """
+        validate_module_precision(
+            self,
+            (
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
+            ),
+        )
         indexed = edge_index is not None
         if not indexed and (
             vectors is not None or radial_network is not None or projection.numel()
@@ -240,11 +264,9 @@ class O3TensorProductConv(torch.nn.Module):
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         if radial_network is not None and (
-            self.backend != "cuda" or not features.is_cuda
+            self.radial_mode == "last" or config.TORCH_REFERENCE
         ):
-            radial = radial_network(materialize(radial, edge_index))
-            if radial.shape[-1] + 1 == projection.shape[0]:
-                radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+            radial = radial_features(radial_network, radial, edge_index, projection)
             radial_network = None
         if vectors is not None:
             if vectors.ndim != 2 or vectors.shape != (edge_index.size(1), 3):
@@ -261,7 +283,9 @@ class O3TensorProductConv(torch.nn.Module):
                 sections, offset = [], 0
                 for mul, degree in self.harmonic_entries:
                     harmonic = o3.spherical_harmonics(
-                        degree, vectors, normalize=False,
+                        degree,
+                        vectors,
+                        normalize=False,
                         normalization=self.normalization,
                     )
                     sections.append(
@@ -362,9 +386,25 @@ class O3TensorProductConv(torch.nn.Module):
                 offset += mul
             edge_attrs = torch.cat(sections, dim=-1)
         edge_attrs = edge_attrs.to(features)
-        result = self.reference(
-            features, edge_attrs, radial, projection, edge_index, num_nodes
-        )
+        if config.TORCH_REFERENCE:
+            result = self.reference(
+                features, edge_attrs, radial, projection, edge_index, num_nodes
+            )
+        else:
+            from ...ops.convolution import convolve_torch
+
+            result = convolve_torch(
+                self.kernel_metadata,
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                self.output_dim,
+                network=radial_network,
+                recompute=self.radial_mode == "full",
+            )
         return result if vectors is None else result + vectors.sum() * 0
 
     def reference(

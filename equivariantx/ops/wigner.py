@@ -8,18 +8,20 @@ from ..utils.outputs import (
     packed_wigner_output,
     wigner_rotation_output,
 )
+from . import config
+from .precision import validate_module_precision, validate_uniform
 from .quaternion import quaternion_wigner
 
 
 @torch.library.custom_op("eqx::alignment_cuda", mutates_args=(), device_types="cuda")
-def alignment_cuda(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
+def alignment_native(key: str, values: list[torch.Tensor]) -> list[torch.Tensor]:
     """Execute frame geometry expressions or their recursive transposes."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("alignment_cuda", "cuda")(key, values)
 
 
-alignment_cuda.register_fake(alignment_outputs)
+alignment_native.register_fake(alignment_outputs)
 
 
 def alignment_setup_context(ctx, inputs, output):
@@ -46,20 +48,33 @@ def alignment_backward(ctx, gradients):
     return None, results
 
 
-alignment_cuda.register_autograd(
+alignment_native.register_autograd(
     alignment_backward, setup_context=alignment_setup_context
 )
 
 
+@torch.compiler.allow_in_graph
+def alignment_cuda(key, values):
+    """Retain native geometry while exposing functional transforms to Torch."""
+    validate_uniform(values)
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.wigner import alignment
+
+        return alignment(key, values)
+    return torch.ops.eqx.alignment_cuda(key, values)
+
+
 @torch.library.custom_op("eqx::rotation", mutates_args=(), device_types="cuda")
-def rotation(cg: torch.Tensor, output: int, values: list[torch.Tensor]) -> torch.Tensor:
+def rotation_native(
+    cg: torch.Tensor, output: int, values: list[torch.Tensor]
+) -> torch.Tensor:
     """Evaluate a degree contraction or any of its multilinear transposes."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("rotation", "cuda")(cg, output, values)
 
 
-rotation.register_fake(wigner_rotation_output)
+rotation_native.register_fake(wigner_rotation_output)
 
 
 def rotation_setup_context(ctx, inputs, output):
@@ -83,23 +98,47 @@ def rotation_backward(ctx, gradient):
     )
 
 
-rotation.register_autograd(rotation_backward, setup_context=rotation_setup_context)
+rotation_native.register_autograd(
+    rotation_backward, setup_context=rotation_setup_context
+)
+
+
+@torch.compiler.allow_in_graph
+def rotation(cg, output, values):
+    """Expose recursive degree contractions inside functional transformations."""
+    validate_uniform((cg, values))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.wigner import rotation as evaluate
+
+        return evaluate(cg, output, values)
+    return torch.ops.eqx.rotation(cg, output, values)
 
 
 @torch.library.custom_op("eqx::packed_wigner", mutates_args=(), device_types="cuda")
-def packed_wigner(
+def packed_wigner_native(
     vectors: torch.Tensor, degree: int, coefficients: list[torch.Tensor]
 ) -> torch.Tensor:
     """Build cached degree matrices directly in one packed allocation."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("packed_wigner", "cuda")(vectors, degree, coefficients)
 
 
-packed_wigner.register_fake(packed_wigner_output)
+packed_wigner_native.register_fake(packed_wigner_output)
 
 
-def wigner_D(frame, vectors, *, backend="cuda", method=None):
+@torch.compiler.allow_in_graph
+def packed_wigner(vectors, degree, coefficients):
+    """Keep inference-only packing from suppressing a forward-mode tangent."""
+    validate_uniform((vectors, coefficients))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.wigner import packed_wigner as evaluate
+
+        return evaluate(vectors, degree, coefficients)
+    return torch.ops.eqx.packed_wigner(vectors, degree, coefficients)
+
+
+def wigner_D(frame, vectors, *, backend="torch", method=None):
     """Return packed Wigner matrices with fused CUDA derivatives.
 
     Parameters
@@ -109,8 +148,7 @@ def wigner_D(frame, vectors, *, backend="cuda", method=None):
     vectors : torch.Tensor
         Frame directions with shape ``(edges, 3)``.
     backend : {"cuda", "torch"}, optional
-        Execution backend. CUDA is the default on GPU. PyTorch uses recursive
-        degree contractions, including when falling back to CPU.
+        Execution provider. Defaults to Torch on either device.
     method : {"auto", "quaternion", "recursive"}, optional
         Overrides the frame's method. On CUDA, ``"auto"`` uses direct
         quaternion polynomials. ``"recursive"`` retains the sparse degree
@@ -120,31 +158,40 @@ def wigner_D(frame, vectors, *, backend="cuda", method=None):
     -------
     torch.Tensor
         Degree blocks flattened and concatenated along the last dimension.
-        CPU and unsupported dtypes use the frame's PyTorch implementation.
+        CPU inputs use Torch on either backend. Only FP32/FP64 are supported.
     """
     if backend not in ("torch", "cuda"):
         raise ValueError("backend must be torch or cuda.")
+    validate_module_precision(frame, (vectors,))
     method = getattr(frame, "method", "auto") if method is None else method
     if method not in ("auto", "quaternion", "recursive"):
         raise ValueError("method must be auto, quaternion or recursive.")
-    if method == "quaternion" and backend == "torch":
-        raise ValueError("The quaternion method requires the CUDA backend.")
+    if backend == "torch" and config.TORCH_REFERENCE:
+        method = "recursive"
     if method == "quaternion" or (
         method == "auto"
         and backend == "cuda"
         and vectors.is_cuda
         and vectors.dtype in (torch.float32, torch.float64)
     ):
-        return quaternion_wigner(vectors, frame.lmax)
+        return quaternion_wigner(vectors, frame.lmax, backend=backend)
     if (
         backend == "torch"
         or not vectors.is_cuda
         or vectors.dtype not in (torch.float32, torch.float64)
     ):
-        return frame.forward_packed(vectors, method="recursive")
+        from ..o2.rotation_matrix import rotation_matrix_to_y_axis
+
+        return torch.cat(
+            [
+                matrix.flatten(1)
+                for matrix in frame.from_matrix(rotation_matrix_to_y_axis(vectors))
+            ],
+            dim=1,
+        )
     if not vectors.requires_grad or not torch.is_grad_enabled():
         return packed_wigner(
-            vectors.detach(),
+            vectors,
             frame.lmax,
             [getattr(frame, f"cg_{l}").to(vectors) for l in range(2, frame.lmax + 1)],
         )

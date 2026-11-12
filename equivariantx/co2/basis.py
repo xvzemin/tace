@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import torch
 
+from ..ops.precision import validate_module_precision
 from .irreps import Irreps
 
 
@@ -156,6 +157,7 @@ class ChangeOfBasis(torch.nn.Module):
 
     def forward(self, features):
         """Transform features with trailing size irreps_in.dim."""
+        validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         values = []
@@ -239,6 +241,7 @@ class Projector(torch.nn.Module):
 
     def forward(self, features):
         """Project equal-order Cartesian blocks together."""
+        validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if self.backend == "cuda":

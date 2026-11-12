@@ -8,6 +8,58 @@ from ..utils.metadata import parse_metadata
 from ..utils.outputs import channel_product_outputs
 
 
+def angular_product(x, y, entries, output_dim):
+    """Contract sparse angular coefficients before ordinary channel GEMMs."""
+    if not x.is_cuda or not y.is_cuda:
+        raise ValueError("backend='cuda' requires CUDA inputs.")
+    if (
+        x.ndim >= 3
+        and y.ndim >= 3
+        and x.shape[-2] == 1
+        and y.shape[-3] == 1
+        and x.shape[-3] >= 64
+        and y.shape[-2] >= 64
+        and math.prod(torch.broadcast_shapes(x.shape[:-3], y.shape[:-3])) >= 512
+    ):
+        return crossed_angular_product(x, y, entries, output_dim)
+    shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1])
+    rows = math.prod(shape)
+    metadata = repr(
+        (
+            1,
+            (x.shape[-1], y.shape[-1], output_dim),
+            tuple(((a, b, c), value) for a, b, c, value in entries),
+        )
+    )
+    values = [
+        value.expand(*shape, value.shape[-1]).reshape(rows, value.shape[-1])
+        for value in (x, y)
+    ]
+    values.append(x.new_empty((0, output_dim)))
+    result = channel_product(metadata, repr((((0, 1, 2), 2, 0, 0),)), values)[0]
+    return result.reshape(*shape, output_dim)
+
+
+def crossed_angular_product(x, y, entries, output_dim):
+    """Keep crossed channel operands compact instead of copying every pair."""
+    shape = torch.broadcast_shapes(x.shape[:-3], y.shape[:-3])
+    nodes = math.prod(shape)
+    ci, di, cj, dj = x.shape[-3], x.shape[-1], y.shape[-2], y.shape[-1]
+    rows = tuple(
+        ((u * di + a, b, u * cj * output_dim + c), coefficient, cj, (0, dj, output_dim))
+        for u in range(ci)
+        for a, b, c, coefficient in entries
+    )
+    metadata = repr((0, (ci * di, cj * dj, ci * cj * output_dim), rows))
+    values = [
+        x.squeeze(-2).expand(*shape, ci, di).reshape(nodes, ci * di),
+        y.squeeze(-3).expand(*shape, cj, dj).reshape(nodes, cj * dj),
+        x.new_empty((0, ci * cj * output_dim)),
+    ]
+    result = channel_product(metadata, repr((((0, 1, 2), 2, 0, 0),)), values)[0]
+    return result.reshape(*shape, ci, cj, output_dim)
+
+
 def project(metadata, features):
     """Apply the native Cartesian projector and its recursive transpose."""
     if not features.is_cuda or features.dtype not in (torch.float32, torch.float64):
@@ -46,31 +98,42 @@ def polynomial_contraction(metadata, inputs, weight, shape, output_dim):
     return channel_product(metadata, program, operands)[0].reshape(*shape, output_dim)
 
 
-def tensor_product(metadata, x, y, weight, output_dim):
-    """Evaluate supported CUDA paths without a PyTorch fallback."""
+def tensor_product(metadata, x, y, weight, output_dim, *, backend="cuda"):
+    """Evaluate a complete diagonal product program with the selected provider."""
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be 'torch' or 'cuda'.")
     if metadata is None:
         raise NotImplementedError(
             "The CUDA tensor product supports uuu and u1u paths only."
         )
-    if not all(value.is_cuda for value in (x, y, weight)):
+    if backend == "cuda" and not all(value.is_cuda for value in (x, y, weight)):
         raise ValueError("backend='cuda' requires CUDA inputs and weights.")
     if (
         x.dtype not in (torch.float32, torch.float64)
         or not x.dtype == y.dtype == weight.dtype
     ):
-        raise ValueError("CUDA inputs and weights must share float32 or float64 dtype.")
+        raise ValueError("Inputs and weights must share float32 or float64 dtype.")
     if not x.device == y.device == weight.device:
-        raise ValueError("CUDA inputs and weights must share a device.")
+        raise ValueError("Inputs and weights must share a device.")
     shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
     rows = math.prod(shape)
     operands = [
-        value.reshape(1, value.shape[-1])
+        value
+        if value.ndim == 2 and value.shape[0] == rows
+        else value.reshape(1, value.shape[-1])
         if i and math.prod(value.shape[:-1]) == 1
         else value.expand(*shape, value.shape[-1]).reshape(rows, value.shape[-1])
         for i, value in enumerate((x, y, weight))
     ]
     operands.append(x.new_empty((0, output_dim)))
-    result = channel_product(metadata, repr((((0, 1, 2, 3), 3, 0, 0),)), operands)[0]
+    from . import get_kernel
+
+    execute = (
+        channel_product
+        if backend == "cuda"
+        else get_kernel("local_channel_product", "torch")
+    )
+    result = execute(metadata, repr((((0, 1, 2, 3), 3, 0, 0),)), operands)[0]
     return result.reshape(*shape, output_dim)
 
 
@@ -93,16 +156,16 @@ def local_product(metadata, *features):
 @torch.library.custom_op(
     "eqx::local_channel_product", mutates_args=(), device_types="cuda"
 )
-def channel_product(
+def channel_product_cuda(
     metadata: str, program: str, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
     """Evaluate sparse diagonal products and their recursive transposes."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("local_channel_product", "cuda")(metadata, program, operands)
 
 
-channel_product.register_fake(channel_product_outputs)
+channel_product_cuda.register_fake(channel_product_outputs)
 
 
 def setup_context(ctx, inputs, output):
@@ -142,4 +205,11 @@ def backward(ctx, grad_outputs):
     return None, None, gradients
 
 
-channel_product.register_autograd(backward, setup_context=setup_context)
+channel_product_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+def channel_product(metadata, program, operands):
+    """Evaluate native channel polynomials with complete AD transformation rules."""
+    from .polynomial import native_polynomial
+
+    return list(native_polynomial("channel", metadata, program, None, *operands))

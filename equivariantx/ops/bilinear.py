@@ -5,18 +5,19 @@ import torch
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
 from ..utils.outputs import bilinear_outputs
+from .polynomial import native_polynomial
 
 
 @torch.library.custom_op("eqx::bilinear_ace", mutates_args=(), device_types="cuda")
-def contract(
+def contract_cuda(
     metadata: str, program: str, node_type: torch.Tensor, operands: list[torch.Tensor]
 ) -> list[torch.Tensor]:
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("bilinear_ace", "cuda")(metadata, program, node_type, operands)
 
 
-contract.register_fake(bilinear_outputs)
+contract_cuda.register_fake(bilinear_outputs)
 
 
 def setup_context(ctx, inputs, output):
@@ -54,4 +55,9 @@ def backward(ctx, grad_outputs):
     return None, None, None, gradients
 
 
-contract.register_autograd(backward, setup_context=setup_context)
+contract_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+def contract(metadata, program, node_type, operands):
+    """Evaluate expert products with analytic JVP and batching rules."""
+    return list(native_polynomial("bilinear", metadata, program, node_type, *operands))

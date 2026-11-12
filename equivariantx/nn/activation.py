@@ -5,6 +5,8 @@ import math
 import torch
 from torch.nn import functional
 
+from ..ops.precision import validate_module_precision
+
 
 class PolynomialActivation(torch.nn.Module):
     """Approximate an activation by a fixed Chebyshev polynomial.
@@ -96,6 +98,7 @@ class PolynomialActivation(torch.nn.Module):
 
     def forward(self, features):
         """Evaluate the polynomial elementwise, preserving the input shape."""
+        validate_module_precision(self, (features,))
         features = features / self.bound
         previous = torch.zeros_like(features)
         current = torch.zeros_like(features)

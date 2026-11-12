@@ -1,6 +1,7 @@
 """Indexed feature sums and their transposes."""
 
 import torch
+from .precision import validate_uniform
 
 from ..utils.outputs import (
     gather_sum_output,
@@ -10,7 +11,7 @@ from ..utils.outputs import (
 
 
 @torch.library.custom_op("eqx::gather_sum", mutates_args=(), device_types="cuda")
-def gather_sum(
+def gather_sum_cuda(
     features: list[torch.Tensor],
     indices: list[torch.Tensor | None],
 ) -> torch.Tensor:
@@ -23,12 +24,12 @@ def gather_sum(
     indices : list of torch.Tensor or None
         Row indices for each matrix. ``None`` leaves its rows unchanged.
     """
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("gather_sum", "cuda")(features, indices)
 
 
-gather_sum.register_fake(gather_sum_output)
+gather_sum_cuda.register_fake(gather_sum_output)
 
 
 def gather_sum_setup_context(ctx, inputs, output):
@@ -52,13 +53,13 @@ def gather_sum_backward(ctx, gradient):
     ) else None
 
 
-gather_sum.register_autograd(
+gather_sum_cuda.register_autograd(
     gather_sum_backward, setup_context=gather_sum_setup_context
 )
 
 
 @torch.library.custom_op("eqx::grouped_permute", mutates_args=(), device_types="cuda")
-def grouped_permute(
+def grouped_permute_cuda(
     features: torch.Tensor,
     indices: torch.Tensor,
     inverse: torch.Tensor,
@@ -66,14 +67,14 @@ def grouped_permute(
     transpose: bool = False,
 ) -> torch.Tensor:
     """Pack feature groups into contiguous batch matrices, or apply its transpose."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("grouped_permute", "cuda")(
         features, indices, inverse, widths, transpose
     )
 
 
-grouped_permute.register_fake(grouped_permute_output)
+grouped_permute_cuda.register_fake(grouped_permute_output)
 
 
 def permutation_setup_context(ctx, inputs, output):
@@ -92,13 +93,13 @@ def permutation_backward(ctx, gradient):
     )
 
 
-grouped_permute.register_autograd(
+grouped_permute_cuda.register_autograd(
     permutation_backward, setup_context=permutation_setup_context
 )
 
 
 @torch.library.custom_op("eqx::indexed_sum", mutates_args=(), device_types="cuda")
-def indexed_sum(
+def indexed_sum_cuda(
     features: torch.Tensor,
     indices: torch.Tensor,
     ptr: torch.Tensor,
@@ -122,14 +123,14 @@ def indexed_sum(
     transpose : bool, optional
         Apply divisors to inputs instead of outputs in a transposed map.
     """
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("indexed_sum", "cuda")(
         features, indices, ptr, transpose_indices, transpose_ptr, count, transpose
     )
 
 
-indexed_sum.register_fake(indexed_sum_output)
+indexed_sum_cuda.register_fake(indexed_sum_output)
 
 
 def setup_context(ctx, inputs, output):
@@ -158,4 +159,43 @@ def backward(ctx, gradient):
     )
 
 
-indexed_sum.register_autograd(backward, setup_context=setup_context)
+indexed_sum_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+@torch.compiler.allow_in_graph
+def gather_sum(features, indices):
+    """Sum gathered features with native execution and functional derivatives."""
+    validate_uniform(features)
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.layout import gather_sum as evaluate
+
+        return evaluate(features, indices)
+    return torch.ops.eqx.gather_sum(features, indices)
+
+
+@torch.compiler.allow_in_graph
+def grouped_permute(features, indices, inverse, widths, transpose=False):
+    """Pack feature groups with ordinary functional transformation rules."""
+    validate_uniform((features,))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.layout import grouped_permute as evaluate
+
+        return evaluate(features, indices, inverse, widths, transpose)
+    return torch.ops.eqx.grouped_permute(features, indices, inverse, widths, transpose)
+
+
+@torch.compiler.allow_in_graph
+def indexed_sum(
+    features, indices, ptr, transpose_indices, transpose_ptr, count, transpose=False
+):
+    """Sum CSR feature columns with native execution and functional derivatives."""
+    validate_uniform((features,))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.layout import indexed_sum as evaluate
+
+        return evaluate(
+            features, indices, ptr, transpose_indices, transpose_ptr, count, transpose
+        )
+    return torch.ops.eqx.indexed_sum(
+        features, indices, ptr, transpose_indices, transpose_ptr, count, transpose
+    )

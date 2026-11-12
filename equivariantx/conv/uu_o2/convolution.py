@@ -8,6 +8,8 @@ from e3nn import o3
 from ...co2.spherical import SphericalCoupling
 from ...o2.irreps import Irrep
 from ...o2.wigner import WignerD
+from ...ops import config
+from ...ops.precision import validate_module_precision
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
@@ -28,6 +30,9 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         Execution backend. CUDA fuses directional couplings and aggregation
         without storing edge messages. ``"torch"`` uses PyTorch operations
         and automatic differentiation for both aligned and transverse forms.
+    radial_mode : {"last", "full"}, optional
+        Retain hidden MLP activations or recompute the complete radial network.
+        Defaults to ``"last"``; see :class:`O2O3TensorProductConv`.
 
     Examples
     --------
@@ -46,7 +51,9 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     torch.Size([3, 8])
     """
 
-    def __init__(self, frame_in, linear, frame_out, *, backend="cuda"):
+    def __init__(
+        self, frame_in, linear, frame_out, *, backend="torch", radial_mode="last"
+    ):
         torch.nn.Module.__init__(self)
         if backend not in ("torch", "cuda"):
             raise ValueError("backend must be torch or cuda.")
@@ -56,6 +63,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         ):
             raise ValueError("UuLinear representations must match the local frames.")
         self.backend = backend
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.radial_mode = radial_mode
+        self.normalization = "norm"
         self.irreps_in = frame_in.irreps_in
         self.irreps_out = frame_out.irreps_in
         self.output_dim = self.irreps_out.dim
@@ -361,8 +372,15 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         """Evaluate local order weights without constructing alignment matrices."""
         if vectors.dtype != features.dtype:
             return self.forward_wigner(
-                features, radial, projection, None, cutoff, edge_index, num_nodes,
-                vectors=vectors, radial_network=radial_network,
+                features,
+                radial,
+                projection,
+                None,
+                cutoff,
+                edge_index,
+                num_nodes,
+                vectors=vectors,
+                radial_network=radial_network,
             )
         if radial_network is not None and not projection.numel():
             raise ValueError(
@@ -436,19 +454,31 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         torch.Tensor
             Aggregated features, ``(num_nodes, irreps_out.dim)``, in ir_mul order.
         """
+        validate_module_precision(
+            self,
+            (
+                features,
+                radial,
+                projection,
+                wigner,
+                cutoff,
+                edge_index,
+                num_nodes,
+                vectors,
+                radial_network,
+            ),
+        )
         from ...ops.radial import cast_radial
 
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         cutoff = cutoff.to(features)
         if radial_network is not None and (
-            self.backend != "cuda" or not features.is_cuda
+            self.radial_mode == "last" or config.TORCH_REFERENCE
         ):
-            from ...ops.radial import materialize
+            from ...ops.radial import radial_features
 
-            radial = radial_network(materialize(radial, edge_index))
-            if radial.shape[-1] + 1 == projection.shape[0]:
-                radial = torch.cat((radial, torch.ones_like(radial[:, :1])), -1)
+            radial = radial_features(radial_network, radial, edge_index, projection)
             radial_network = None
         if vectors is not None:
             return self.forward_transverse(

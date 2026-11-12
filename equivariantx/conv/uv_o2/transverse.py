@@ -7,6 +7,8 @@ from e3nn import o3
 
 from ...co2.spherical import SphericalCoupling
 from ...o2.layout import irrep_layout
+from ...ops.precision import validate_module_precision
+from ...utils.harmonics import harmonic_program
 
 
 class TransverseFrame(torch.nn.Module):
@@ -20,7 +22,7 @@ class TransverseFrame(torch.nn.Module):
         CUDA fuses the angular contractions and indexed aggregation.
     """
 
-    def __init__(self, frame, backend="cuda"):
+    def __init__(self, frame, backend="torch"):
         super().__init__()
         if not frame.basis_change:
             raise ValueError("Transverse evaluation requires the canonical O(2) basis.")
@@ -103,6 +105,10 @@ class TransverseFrame(torch.nn.Module):
         self.metadata = tuple(
             repr((values, 0, True, ("transverse", "norm"))) for values in self.paths
         )
+        self.permutation_indices = tuple(permutation)
+        self.inverse_indices = tuple(
+            sorted(range(len(permutation)), key=permutation.__getitem__)
+        )
         permutation = torch.tensor(permutation, dtype=torch.long)
         self.register_buffer("permutation", permutation, persistent=False)
         self.register_buffer(
@@ -112,22 +118,56 @@ class TransverseFrame(torch.nn.Module):
     def __repr__(self):
         return f"{type(self).__name__}({self.irreps_in} -> {self.irreps_out}, backend={self.backend!r})"
 
-    def program(self, program, features, direction, *, inverse=False):
+    def program(self, program, features, direction, *, inverse=False, native=True):
         """Encode restriction or lifting within a complete convolution tile."""
         if inverse:
-            features = program.gather(features, self.inverse_permutation.tolist())
+            features = program.gather(features, self.inverse_indices)
         width = self.input_dim if inverse else self.output_dim
+        if not native:
+            from ...ops.convolution import tensor_product_program
+
+            harmonics, offsets, position = [], {}, 0
+            for degree in sorted({(path[6] - 1) // 2 for path in self.paths[inverse]}):
+                offsets[degree] = position
+                harmonics.append(harmonic_program(program, direction, degree))
+                position += 2 * degree + 1
+            paths = []
+            for path in self.paths[inverse]:
+                path = list(path)
+                path[1] = offsets[(path[6] - 1) // 2]
+                paths.append(tuple(path))
+            output = tensor_product_program(
+                program,
+                repr((tuple(paths), 0, True)),
+                features,
+                program.concatenate(harmonics),
+                program.constant(0, 0),
+                width,
+            )
+            return (
+                output if inverse else program.gather(output, self.permutation_indices)
+            )
         empty = program.constant(0, 0)
         output = program.add(
-            "convolution", width,
-            (features, empty, empty, program.constant(1, 1),
-             program.constant(width, 0), direction),
+            "convolution",
+            width,
+            (
+                features,
+                empty,
+                empty,
+                program.constant(1, 1),
+                program.constant(width, 0),
+                direction,
+            ),
             ("o3", self.metadata[inverse], 4, False, (0, 0), 0),
         )
-        return output if inverse else program.gather(output, self.permutation.tolist())
+        return output if inverse else program.gather(output, self.permutation_indices)
 
     def forward(self, features, direction, source, target, num_nodes, *, inverse=False):
         """Restrict or lift features using unit directions and indexed aggregation."""
+        validate_module_precision(
+            self, (features, direction, source, target, num_nodes, inverse)
+        )
         if inverse:
             features = features.index_select(1, self.inverse_permutation)
         width = self.input_dim if inverse else self.output_dim

@@ -1,5 +1,6 @@
 import torch
 
+from ..ops.precision import validate_module_precision
 from .irreps import Irrep, Irreps
 
 
@@ -113,6 +114,7 @@ class CircularHarmonics(torch.nn.Module):
         torch.Tensor
             Harmonics with shape ``(..., irreps_out.dim)``.
         """
+        validate_module_precision(self, (input,))
         return circular_harmonics(
             input,
             self.mmax,

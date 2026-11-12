@@ -6,7 +6,8 @@ import torch
 
 from ...co3.basis import path_matrix
 from ...co3.linear import Linear as CartesianLinear
-from ...utils.layout import _Permute
+from ...ops.precision import validate_module_precision
+from ...utils.layout import permute
 
 
 class Linear(CartesianLinear):
@@ -33,7 +34,7 @@ class Linear(CartesianLinear):
         irreps_out,
         input_indices,
         *,
-        backend="cuda",
+        backend="torch",
         output_basis="spherical",
         **kwargs,
     ):
@@ -130,6 +131,7 @@ class Linear(CartesianLinear):
 
     def forward(self, features, weight=None, bias=None):
         """Apply channel weights to compact coordinates and then project."""
+        validate_module_precision(self, (features, weight, bias))
         if features.shape[-1] != self.input_dim:
             raise ValueError(
                 "The compact feature dimension does not match input_indices."
@@ -158,7 +160,7 @@ class Linear(CartesianLinear):
             )
         elif not self.input_identity:
             features = (
-                _Permute.apply(features, self.input_index, self.input_inverse)
+                permute(features, self.input_index, self.input_inverse)
                 if self.input_permutation
                 else features.index_select(-1, self.input_index)
             )

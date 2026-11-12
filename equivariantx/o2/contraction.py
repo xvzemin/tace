@@ -7,6 +7,7 @@ from typing import NamedTuple, Sequence
 
 import torch
 
+from ..ops.precision import validate_module_precision
 from .clebsch_gordan import clebsch_gordan_product, coupling_entries
 from .irreps import Irrep, Irreps, IrrepsLike
 
@@ -258,7 +259,7 @@ class AsymmetricContraction(torch.nn.Module):
             self._base_output_slices,
         )
         if self.backend == "torch":
-            from ..backends.torch.o2_contraction import Contraction
+            from ..ops.kernels.torch.o2_contraction import Contraction
 
             self.contraction = Contraction(*arguments, self._base_irreps_out.dim).to(
                 self._basis_reference
@@ -421,6 +422,7 @@ class AsymmetricContraction(torch.nn.Module):
         torch.Tensor
             Contracted features with shape ``(..., irreps_out.dim)``.
         """
+        validate_module_precision(self, (inputs, weight))
         if len(inputs) != self.correlation:
             raise ValueError(
                 f"Expected {self.correlation} independent inputs, got {len(inputs)}."
@@ -612,4 +614,5 @@ class SymmetricContraction(AsymmetricContraction):
         torch.Tensor
             Features of shape ``(..., irreps_out.dim)`` in ``ir_mul`` layout.
         """
+        validate_module_precision(self, (features, weight))
         return super().forward((features,) * self.correlation, weight)

@@ -59,6 +59,10 @@ class Program:
         self.cache = {node: i for i, node in enumerate(nodes)}
 
     def add(self, op, size, args=(), data=()):
+        if op in ("product", "frame"):
+            # The output operand only declares its shape; it is never read.
+            args = list(args)
+            args[data[1]] = self.constant(self.size(args[data[1]]), 0)
         node = (op, size, tuple(args), data)
         if node not in self.cache:
             self.cache[node] = len(self.nodes)
@@ -162,9 +166,9 @@ class Program:
         translated = []
         for op, size, args, data in nodes:
             translated.append(
-                inputs[data[0]] if op == "input" else self.add(
-                    op, size, tuple(translated[j] for j in args), data
-                )
+                inputs[data[0]]
+                if op == "input"
+                else self.add(op, size, tuple(translated[j] for j in args), data)
             )
         return tuple(translated[root] for root, _, _ in outputs)
 
@@ -352,3 +356,62 @@ def next_adjoint(metadata, active, seeds, num_inputs):
             )
     result = program.adjoint(roots, gradients, active)
     return repr((tuple(program.nodes), result))
+
+
+@lru_cache(maxsize=128)
+def next_tangent(metadata, num_inputs):
+    """Transpose the linear cotangent map to construct an analytic JVP."""
+    nodes, outputs = parse_metadata(metadata)
+    program = Program(nodes)
+    slots = tuple(sorted({slot for _, slot, _ in outputs}))
+    seed_slots = tuple(2 * num_inputs + i for i in range(len(slots)))
+    seeds = [
+        program.input(seed_slots[slots.index(slot)], kind, program.size(root))
+        for root, slot, kind in outputs
+    ]
+    adjoints = program.adjoint(
+        [root for root, _, _ in outputs], seeds, tuple(range(num_inputs))
+    )
+    directions = [
+        program.input(num_inputs + slot, kind, program.size(root))
+        for root, slot, kind in adjoints
+    ]
+    tangents = program.adjoint(
+        [root for root, _, _ in adjoints], directions, seed_slots
+    )
+    results = [
+        (root, slots[seed_slots.index(slot)], kind) for root, slot, kind in tangents
+    ]
+    present = {slot for _, slot, _ in results}
+    for root, slot, kind in outputs:
+        if slot not in present:
+            results.append((program.constant(program.size(root), 0), slot, kind))
+            present.add(slot)
+    # Cotangent placeholders cancel algebraically; never allocate them at runtime.
+    used = set()
+
+    def visit(node):
+        if node not in used:
+            used.add(node)
+            for argument in program.nodes[node][2]:
+                visit(argument)
+
+    if any(kind == "source" for _, _, kind in results):
+        # A source adjoint may not depend on source values, but retains their
+        # node domain. Target count alone is insufficient for bipartite graphs.
+        for index, (op, _, _, data) in enumerate(nodes):
+            if op == "input" and data[1] == "source":
+                visit(index)
+                break
+    for root, _, _ in results:
+        visit(root)
+    selected = sorted(used)
+    remap = {node: i for i, node in enumerate(selected)}
+    compact = tuple(
+        (op, width, tuple(remap[arg] for arg in args), data)
+        for node in selected
+        for op, width, args, data in (program.nodes[node],)
+    )
+    return repr(
+        (compact, tuple((remap[root], slot, kind) for root, slot, kind in results))
+    )

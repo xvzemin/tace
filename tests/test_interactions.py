@@ -575,8 +575,8 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if edges == 1025:
         from functools import partial
 
-        import equivariantx.backends.cuda.execution as convolution_execution
-        import equivariantx.backends.cuda.models.tace.attention as execution
+        import equivariantx.ops.kernels.cuda.execution as convolution_execution
+        import equivariantx.ops.kernels.cuda.models.tace.attention as execution
 
         monkeypatch.setattr(execution, "BACKWARD_TILE_SIZE", 256)
         monkeypatch.setattr(

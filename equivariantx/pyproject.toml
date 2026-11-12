@@ -31,14 +31,15 @@ Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/api.html"
 [tool.setuptools]
 packages = [
     "equivariantx",
-    "equivariantx.ace",
-    "equivariantx.backends",
-    "equivariantx.backends.cuda",
-    "equivariantx.backends.cuda.models",
-    "equivariantx.backends.cuda.models.tace",
-    "equivariantx.backends.cuda.o2_o3",
-    "equivariantx.backends.cuda.o3",
-    "equivariantx.backends.torch",
+    "equivariantx.mbe",
+    "equivariantx.mbe.ace",
+    "equivariantx.ops.kernels",
+    "equivariantx.ops.kernels.cuda",
+    "equivariantx.ops.kernels.cuda.models",
+    "equivariantx.ops.kernels.cuda.models.tace",
+    "equivariantx.ops.kernels.cuda.o2_o3",
+    "equivariantx.ops.kernels.cuda.o3",
+    "equivariantx.ops.kernels.torch",
     "equivariantx.co2",
     "equivariantx.co3",
     "equivariantx.co3.ictp",
@@ -56,6 +57,7 @@ packages = [
     "equivariantx.models.sevennet",
     "equivariantx.models.tace",
     "equivariantx.models.tace.tece_oam_rra",
+    "equivariantx.models.tace.tace_oam_xl_v2",
     "equivariantx.nn",
     "equivariantx.o2",
     "equivariantx.o3",
@@ -69,7 +71,7 @@ packages = [
 package-dir = { equivariantx = "." }
 
 [tool.setuptools.package-data]
-equivariantx = ["README.md", "backends/cuda/csrc/*.cpp"]
+equivariantx = ["README.md", "ops/kernels/cuda/csrc/*.cpp", "models/tace/tace_oam_xl_v2/README.rst"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

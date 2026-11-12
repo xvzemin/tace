@@ -5,6 +5,7 @@ from collections import Counter
 
 import torch
 
+from ..ops.precision import validate_module_precision
 from .irreps import Irrep, Irreps
 
 __all__ = ["O2Grid"]
@@ -230,6 +231,7 @@ class O2Grid(torch.nn.Module):
         torch.Tensor
             Values of shape ``(..., num_channels, num_sheets, resolution)``.
         """
+        validate_module_precision(self, (features, features2))
         return self.to_grid(features, features2)
 
     def to_grid(self, features, features2=None):

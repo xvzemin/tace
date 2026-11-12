@@ -44,7 +44,7 @@ CG table. `o2` and `co2` support time-reversal labels directly. Time-odd
 
 Built-in modules: [neural network modules](https://tace.readthedocs.io/en/latest/equivariantx/api/nn.html),
 [convolutions](https://tace.readthedocs.io/en/latest/equivariantx/api/convolutions.html),
-and [cluster expansions](https://tace.readthedocs.io/en/latest/equivariantx/api/ace.html).
+and [many-body expansions](https://tace.readthedocs.io/en/latest/equivariantx/api/mbe.html).
 [Model adapters](https://tace.readthedocs.io/en/latest/equivariantx/api/models.html)
 convert supported pretrained architectures.
 

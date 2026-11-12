@@ -5,8 +5,9 @@ import math
 import torch
 
 from equivariantx import o2
-from equivariantx.backends.torch.linear import linear, linear_layout
+from equivariantx.ops.kernels.torch.linear import linear, linear_layout
 
+from ..ops.precision import validate_module_precision
 from .basis import ChangeOfBasis, Projector
 from .irreps import Irreps
 
@@ -140,6 +141,7 @@ class Linear(torch.nn.Module):
             Features of shape ``(..., irreps_out.dim)`` in the selected
             ``output_basis``.
         """
+        validate_module_precision(self, (features, weight, bias))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         weight = self.weight if weight is None else weight
@@ -223,6 +225,7 @@ class UuLinear(torch.nn.Module):
 
     def forward(self, features, weight):
         """Apply weights ordered as (copies_in, copies_out, num_channel)."""
+        validate_module_precision(self, (features, weight))
         if (
             features.shape[-1] != self.irreps_in.dim
             or weight.shape[-1] != self.weight_numel

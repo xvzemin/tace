@@ -3,6 +3,7 @@
 import torch
 
 from ..utils.outputs import EDGE, MATRIX, NODE, indexed_frame_output
+from .precision import validate_uniform
 
 
 def transform(frame, features, wigner, index, num_nodes, inverse):
@@ -49,7 +50,7 @@ def transform(frame, features, wigner, index, num_nodes, inverse):
 
 
 @torch.library.custom_op("eqx::indexed_frame", mutates_args=(), device_types="cuda")
-def contract(
+def contract_cuda(
     nodes: torch.Tensor,
     matrix: torch.Tensor,
     edges: torch.Tensor,
@@ -64,14 +65,14 @@ def contract(
     and ``EDGE`` gathers and rotates node features. The selected input is unused;
     each adjoint applies the same contraction with a different output role.
     """
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("indexed_frame", "cuda")(
         nodes, matrix, edges, index, num_nodes, layout, role
     )
 
 
-contract.register_fake(indexed_frame_output)
+contract_cuda.register_fake(indexed_frame_output)
 
 
 def setup_context(ctx, inputs, output):
@@ -92,4 +93,17 @@ def backward(ctx, grad):
     return *gradients, None, None, None, None
 
 
-contract.register_autograd(backward, setup_context=setup_context)
+contract_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+@torch.compiler.allow_in_graph
+def contract(nodes, matrix, edges, index, num_nodes, layout, role):
+    """Retain native frame evaluation with differentiable functional transforms."""
+    validate_uniform((nodes, matrix, edges))
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.frame import indexed_frame
+
+        return indexed_frame(nodes, matrix, edges, index, num_nodes, layout, role)
+    return torch.ops.eqx.indexed_frame(
+        nodes, matrix, edges, index, num_nodes, layout, role
+    )

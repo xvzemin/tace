@@ -10,6 +10,21 @@ import torch
 __all__ = ["KernelPlan", "compact_metadata", "kernel_plan", "parse_metadata"]
 
 
+@torch.compiler.assume_constant_result
+def dimension_values(tensor, dimensions):
+    """Read dimensions already specialized by :func:`static_dimensions`."""
+    return tuple(int(tensor.shape[dimension]) for dimension in dimensions)
+
+
+def static_dimensions(tensor, dimensions=None):
+    """Specialize model widths while leaving unselected batch dimensions dynamic."""
+    dimensions = tuple(range(tensor.ndim)) if dimensions is None else dimensions
+    if torch.compiler.is_compiling():
+        for dimension in dimensions:
+            torch._dynamo.mark_static(tensor, dimension)
+    return dimension_values(tensor, dimensions)
+
+
 @lru_cache(maxsize=256)
 @torch.compiler.assume_constant_result
 def parse_metadata(metadata: str):

@@ -3,6 +3,7 @@
 import torch
 from e3nn.nn import Activation as ScalarActivation
 
+from ..ops.precision import validate_module_precision
 from .ictd import ElementwiseTensorProduct
 from .irreps import Irreps
 
@@ -29,6 +30,7 @@ class Activation(torch.nn.Module):
 
     def forward(self, features):
         """Activate scalar features of shape (..., irreps_in.dim)."""
+        validate_module_precision(self, (features,))
         return self.activation(features)
 
     def extra_repr(self):
@@ -61,7 +63,7 @@ class Gate(torch.nn.Module):
         irreps_gates,
         act_gates,
         irreps_gated,
-        backend="cuda",
+        backend="torch",
     ):
         super().__init__()
         if backend not in ("cuda", "torch"):
@@ -152,6 +154,7 @@ class Gate(torch.nn.Module):
 
     def forward(self, features):
         """Evaluate features of shape (..., irreps_in.dim)."""
+        validate_module_precision(self, (features,))
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if (

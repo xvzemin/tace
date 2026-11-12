@@ -18,7 +18,7 @@ def direction_contraction(
     use_cuda: bool,
 ) -> list[torch.Tensor]:
     """Evaluate angular contractions without independent matrix adjoints."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     backend = "cuda" if vectors.is_cuda and use_cuda else "torch"
     return get_kernel("direction_contraction", backend)(

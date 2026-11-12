@@ -7,6 +7,7 @@ from e3nn import o3
 
 from equivariantx import co3
 
+from ..ops.precision import validate_module_precision
 from .restriction import (
     Restriction,
     coupling_coefficients,
@@ -213,6 +214,7 @@ class O3TensorProduct(torch.nn.Module):
 
     def forward(self, features, vectors, weight=None):
         """Return edge features for nonzero (..., 3) vectors and broadcast weights."""
+        validate_module_precision(self, (features, vectors, weight))
         return self.projection(self.contract(self.embedding(features), vectors, weight))
 
     def contract(self, features, vectors, weight=None):

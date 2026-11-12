@@ -4,7 +4,8 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
-from ..utils.layout import _Permute
+from ..ops.precision import validate_module_precision
+from ..utils.layout import permute
 from .irreps import Irrep, Irreps
 from .layout import wigner_indices, wigner_orders
 
@@ -378,9 +379,7 @@ class LocalFrame(torch.nn.Module):
             raise ValueError("Feature and Wigner batch dimensions must match.")
         matrices = self._rotation_matrices(wigner.to(features))
         if not self._global_identity:
-            features = _Permute.apply(
-                features, self._global_index, self._global_inverse
-            )
+            features = permute(features, self._global_index, self._global_inverse)
         outputs = []
         for degree, mul, matrix, values in zip(
             self._degrees,
@@ -399,7 +398,7 @@ class LocalFrame(torch.nn.Module):
             return features[..., :0]
         features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
         if not self._local_identity:
-            features = _Permute.apply(features, self._local_index, self._local_inverse)
+            features = permute(features, self._local_index, self._local_inverse)
         return features * self._local_sign.to(features) if self._has_signs else features
 
     def forward(
@@ -408,6 +407,7 @@ class LocalFrame(torch.nn.Module):
         wigner: torch.Tensor,
     ) -> torch.Tensor:
         """Alias for :meth:`to_local`."""
+        validate_module_precision(self, (features, wigner))
         return self.to_local(features, wigner)
 
     def to_global(
@@ -446,7 +446,7 @@ class LocalFrame(torch.nn.Module):
         if self._has_signs:
             features = features * self._local_sign.to(features)
         if not self._local_identity:
-            features = _Permute.apply(features, self._local_inverse, self._local_index)
+            features = permute(features, self._local_inverse, self._local_index)
         outputs = []
         for degree, mul, matrix, values in zip(
             self._degrees,
@@ -468,7 +468,7 @@ class LocalFrame(torch.nn.Module):
         return (
             features
             if self._global_identity
-            else _Permute.apply(features, self._global_inverse, self._global_index)
+            else permute(features, self._global_inverse, self._global_index)
         )
 
     def gather(

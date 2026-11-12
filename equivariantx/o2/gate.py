@@ -3,7 +3,10 @@ from typing import Callable, NamedTuple, Optional, Sequence
 import torch
 from e3nn.math import normalize2mom
 
-from ..utils.layout import _Permute
+from ..ops import config
+from ..ops.precision import validate_module_precision, validate_precision
+from ..utils.autograd import nested_forward_ad
+from ..utils.layout import permute
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
@@ -102,6 +105,7 @@ class Activation(torch.nn.Module):
         torch.Tensor
             Activated features with shape ``(..., irreps_out.dim)``.
         """
+        validate_module_precision(self, (features,))
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "Activation feature trailing dimension must be "
@@ -131,7 +135,15 @@ class _GatePath(NamedTuple):
 
 
 @torch.compiler.allow_in_graph
-class _GateExpand(torch.autograd.Function):
+def expand_gates(gates, index, *layout):
+    """Broadcast gates while preserving nested forward derivatives."""
+    if config.TORCH_REFERENCE or nested_forward_ad():
+        return gates.index_select(-1, index)
+    return GateExpand.apply(gates, index, *layout)
+
+
+@torch.compiler.allow_in_graph
+class GateExpand(torch.autograd.Function):
     """Broadcast gates and sum component gradients in the backward pass."""
 
     generate_vmap_rule = True
@@ -140,6 +152,17 @@ class _GateExpand(torch.autograd.Function):
     def forward(
         gates, index, output_index, output_inverse, gate_index, gate_inverse, layout
     ):
+        validate_precision(
+            (
+                gates,
+                index,
+                output_index,
+                output_inverse,
+                gate_index,
+                gate_inverse,
+                layout,
+            )
+        )
         return gates.index_select(-1, index)
 
     @staticmethod
@@ -156,7 +179,7 @@ class _GateExpand(torch.autograd.Function):
         output_index, output_inverse, gate_index, gate_inverse = ctx.saved_tensors
         sizes, dimensions, output_identity, gate_identity = ctx.layout
         if not output_identity:
-            gradient = _Permute.apply(gradient, output_inverse, output_index)
+            gradient = permute(gradient, output_inverse, output_index)
         widths = tuple(dim * mul for dim, mul in zip(dimensions, sizes))
         values = [
             value.view(*gradient.shape[:-1], dim, mul).sum(-2)
@@ -166,7 +189,7 @@ class _GateExpand(torch.autograd.Function):
         ]
         gradient = values[0] if len(values) == 1 else torch.cat(values, dim=-1)
         if not gate_identity:
-            gradient = _Permute.apply(gradient, gate_inverse, gate_index)
+            gradient = permute(gradient, gate_inverse, gate_index)
         return gradient, None, None, None, None, None, None
 
     @staticmethod
@@ -427,6 +450,7 @@ class Gate(torch.nn.Module):
             Activated scalars followed by gated entries, with shape
             ``(..., irreps_out.dim)`` in flattened ``ir_mul`` order.
         """
+        validate_module_precision(self, (features,))
         if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
             raise ValueError(
                 "Gate feature trailing dimension must be "
@@ -452,10 +476,10 @@ class Gate(torch.nn.Module):
             ).flatten(-3)
             return torch.cat((scalars, output), -1) if scalars.size(-1) else output
         if not self._gated_identity:
-            values = _Permute.apply(values, self._gated_indices, self._gated_inverse)
+            values = permute(values, self._gated_indices, self._gated_inverse)
         if self._has_signs:
             values = values * self._gated_signs
-        gates = _GateExpand.apply(
+        gates = expand_gates(
             gates,
             self._expanded_indices,
             self._output_indices,

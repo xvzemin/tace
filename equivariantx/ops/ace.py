@@ -5,22 +5,23 @@ import torch
 from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
 from ..utils.outputs import ace_outputs
+from .polynomial import native_polynomial
 
 
 @torch.library.custom_op("eqx::ace_contract", mutates_args=(), device_types="cuda")
-def contract(
+def contract_cuda(
     metadata: str,
     program: str,
     node_type: torch.Tensor,
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate a multilinear contraction without expanded CG products."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("ace_contract", "cuda")(metadata, program, node_type, operands)
 
 
-contract.register_fake(ace_outputs)
+contract_cuda.register_fake(ace_outputs)
 
 
 def setup_context(ctx, inputs, output):
@@ -58,4 +59,9 @@ def backward(ctx, grad_outputs):
     return None, None, None, gradients
 
 
-contract.register_autograd(backward, setup_context=setup_context)
+contract_cuda.register_autograd(backward, setup_context=setup_context)
+
+
+def contract(metadata, program, node_type, operands):
+    """Evaluate sparse native products with analytic functional derivatives."""
+    return list(native_polynomial("ace", metadata, program, node_type, *operands))

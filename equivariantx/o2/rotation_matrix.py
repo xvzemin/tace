@@ -1,5 +1,7 @@
 import torch
 
+from ..ops.precision import validate_precision
+
 
 def _normalize(x: torch.Tensor, eps: float) -> torch.Tensor:
     return x / torch.sqrt(torch.sum(x * x, dim=-1, keepdim=True) + eps * eps)
@@ -54,6 +56,17 @@ def _quaternion_to_matrix(q: torch.Tensor) -> torch.Tensor:
     )
 
 
+def alignment_quaternion(vector: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    """Return the smooth, regularized quaternion aligning vectors with y."""
+    validate_precision((vector,))
+    unit_vector = _normalize(vector, eps)
+    x, y, z = unit_vector.unbind(dim=-1)
+    q_pos = _normalize(torch.stack([1.0 + y, -z, torch.zeros_like(x), x], dim=-1), eps)
+    q_neg = _normalize(torch.stack([-z, 1.0 - y, x, torch.zeros_like(x)], dim=-1), eps)
+    blend = _smooth_step(0.5 * (y + 1.0))
+    return _interpolate_quaternions(q_neg, q_pos, blend, eps)
+
+
 def rotation_matrix_to_y_axis(
     vector: torch.Tensor,
     eps: float = 1e-7,
@@ -82,13 +95,7 @@ def rotation_matrix_to_y_axis(
     >>> expected = vector.norm() * vector.new_tensor([0.0, 1.0, 0.0])
     >>> torch.testing.assert_close(aligned, expected, atol=1e-6, rtol=1e-6)
     """
-    unit_vector = _normalize(vector, eps)
-    x, y, z = unit_vector.unbind(dim=-1)
-    q_pos = _normalize(torch.stack([1.0 + y, -z, torch.zeros_like(x), x], dim=-1), eps)
-    q_neg = _normalize(torch.stack([-z, 1.0 - y, x, torch.zeros_like(x)], dim=-1), eps)
-    blend = _smooth_step(0.5 * (y + 1.0))
-    quaternion = _interpolate_quaternions(q_neg, q_pos, blend, eps)
-    return _quaternion_to_matrix(quaternion)
+    return _quaternion_to_matrix(alignment_quaternion(vector, eps))
 
 
 def rotation_matrix_to_x_axis(
@@ -110,6 +117,7 @@ def rotation_matrix_to_x_axis(
         Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
         its corresponding input vector aligns the result with ``[1, 0, 0]``.
     """
+    validate_precision((vector,))
     unit_vector = _normalize(vector, eps)
     x, y, z = unit_vector.unbind(dim=-1)
     q_pos = _normalize(torch.stack([1.0 + x, torch.zeros_like(x), z, -y], dim=-1), eps)
@@ -138,6 +146,7 @@ def rotation_matrix_to_z_axis(
         Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
         its corresponding input vector aligns the result with ``[0, 0, 1]``.
     """
+    validate_precision((vector,))
     unit_vector = _normalize(vector, eps)
     x, y, z = unit_vector.unbind(dim=-1)
     q_pos = _normalize(torch.stack([1.0 + z, y, -x, torch.zeros_like(x)], dim=-1), eps)

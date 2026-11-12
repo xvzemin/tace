@@ -5,6 +5,8 @@ from functools import lru_cache
 
 import torch
 
+from ..ops.precision import validate_module_precision
+
 
 @lru_cache(maxsize=None)
 def symmetric_powers(rank):
@@ -180,6 +182,7 @@ class SymmetricBasis(torch.nn.Module):
 
     def forward(self, tensor, matrix):
         """Apply a 3-by-3 matrix to every index in normalized storage."""
+        validate_module_precision(self, (tensor, matrix))
         if self.rank == 1:
             return torch.einsum("...ij,...j->...i", matrix, tensor)
         for k in range(1, self.rank + 1):

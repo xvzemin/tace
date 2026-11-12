@@ -5,7 +5,7 @@ from e3nn import o3
 from e3nn.nn import Gate
 
 from equivariantx import co3
-from equivariantx.ace import (
+from equivariantx.mbe.ace import (
     IctdBilinearContraction,
     IctdSemiCoupledSymmetricContraction,
 )

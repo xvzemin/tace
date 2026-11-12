@@ -6,10 +6,11 @@ from ..utils.autograd import gradient_mask
 from ..utils.metadata import kernel_plan, parse_metadata
 from ..utils.outputs import contraction_outputs
 from .contraction import adjoint_program
+from .precision import validate_uniform
 
 
 @torch.library.custom_op("eqx::contraction", mutates_args=(), device_types="cuda")
-def contraction(
+def contraction_cuda(
     metadata: str,
     program: str,
     source: torch.Tensor,
@@ -17,14 +18,14 @@ def contraction(
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Keep runtime scheduling and kernel compilation outside tensor tracing."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("contraction", "cuda")(
         metadata, program, source, target, operands
     )
 
 
-@contraction.register_fake
+@contraction_cuda.register_fake
 def contraction_fake(metadata, program, source, target, operands):
     return contraction_outputs(program, operands)
 
@@ -60,6 +61,17 @@ def contraction_backward(ctx, grad_outputs):
     return None, None, None, None, gradients
 
 
-contraction.register_autograd(
+contraction_cuda.register_autograd(
     contraction_backward, setup_context=contraction_setup_context
 )
+
+
+@torch.compiler.allow_in_graph
+def contraction(metadata, program, source, target, operands):
+    """Expose frame-convolution transposes inside functional transformations."""
+    validate_uniform(operands)
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.convolution import contraction as torch_contraction
+
+        return torch_contraction(metadata, program, source, target, operands)
+    return torch.ops.eqx.contraction(metadata, program, source, target, operands)

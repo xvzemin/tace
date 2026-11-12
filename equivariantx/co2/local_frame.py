@@ -4,6 +4,7 @@ import torch
 
 from equivariantx import co3, o2
 
+from ..ops.precision import validate_module_precision
 from .basis import path_matrix
 from .irreps import Irrep, Irreps
 from .restriction import Restriction, restriction_matrix, restriction_scale
@@ -242,7 +243,10 @@ class LocalFrame(torch.nn.Module):
             if self.method == "projection":
                 value = self.restrictions[str(l)].inverse(values, direction)
             else:
-                value = torch.cat(values, -1) @ getattr(self, f"synthesis_{l}").to(features).T
+                value = (
+                    torch.cat(values, -1)
+                    @ getattr(self, f"synthesis_{l}").to(features).T
+                )
                 value = value.expand(*shape, mul, 3**l)
                 value = transform_tensor(
                     value, rotation.transpose(-1, -2).unsqueeze(-3), l
@@ -251,6 +255,7 @@ class LocalFrame(torch.nn.Module):
         return torch.cat(outputs, -1) if outputs else features[..., :0]
 
     def forward(self, features, rotation):
+        validate_module_precision(self, (features, rotation))
         return self.to_local(features, rotation)
 
     def extra_repr(self):

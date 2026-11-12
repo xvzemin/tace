@@ -4,8 +4,10 @@ import math
 
 import torch
 
-from ..backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ..backends.torch.tensor_product import instruction_groups
+from ..ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ..ops.kernels.torch.tensor_product import instruction_groups
+from ..ops.precision import validate_module_precision
+from ..ops import config
 from ..utils.tensor_product import tensor_product_instructions
 from .basis import Projector
 from .irreps import Irrep, Irreps
@@ -107,8 +109,8 @@ class TensorProduct(torch.nn.Module):
     project : bool, optional
         Apply STF projection. False defers it until after linear operations.
     backend : {"torch", "cuda"}, optional
-        CUDA evaluates ``uuu`` and ``u1u`` paths and STF projection using
-        float32 or float64 CUDA tensors. Unsupported modes raise an error.
+        CUDA fuses diagonal paths and STF projection, and uses sparse angular
+        kernels followed by channel GEMMs for ``uvw``. Inputs use FP32 or FP64.
 
     Notes
     -----
@@ -211,7 +213,13 @@ class TensorProduct(torch.nn.Module):
                 for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
             ],
             self.groups,
-            cartesian_product,
+            self.couple if backend == "cuda" else cartesian_product,
+        )
+        _, reference_groups = instruction_groups(
+            self.instructions, self.paths, grouped=False
+        )
+        self.reference = GroupedTensorProduct(
+            self.contraction.shapes, reference_groups, cartesian_product
         )
         self.kernel_metadata = None
         if backend == "cuda" and all(
@@ -287,6 +295,7 @@ class TensorProduct(torch.nn.Module):
         torch.Tensor
             Features of shape ``(..., irreps_out.dim)`` in ``mul_ir`` layout.
         """
+        validate_module_precision(self, (x, y, weight))
         if x.shape[-1] != self.input_dims[0] or y.shape[-1] != self.input_dims[1]:
             raise ValueError("Input feature dimensions do not match the irreps.")
         weight = self.weight if weight is None else weight
@@ -298,12 +307,21 @@ class TensorProduct(torch.nn.Module):
         if self.backend == "cuda":
             from ..ops.channel_product import tensor_product as cuda_product
 
-            output = cuda_product(
-                self.kernel_metadata, x, y, weight, self.irreps_out.dim
+            output = (
+                cuda_product(self.kernel_metadata, x, y, weight, self.irreps_out.dim)
+                if self.kernel_metadata is not None
+                else self.contraction(x, y, weight, self.path_scales.to(x))
             )
             return self.projection(output)
-        output = self.contraction(x, y, weight, self.path_scales.to(x))
+        contract = self.reference if config.TORCH_REFERENCE else self.contraction
+        output = contract(x, y, weight, self.path_scales.to(x))
         return self.projection(output)
+
+    def couple(self, x, y, a, b, c):
+        """Apply the sparse Cartesian angular coefficients on CUDA."""
+        from ..ops.channel_product import angular_product
+
+        return angular_product(x, y, coupling_entries(a, b, c), c.dim)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

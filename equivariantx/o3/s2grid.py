@@ -6,6 +6,7 @@ import torch
 from e3nn import o3
 from scipy.integrate import lebedev_rule
 
+from ..ops.precision import validate_module_precision
 from .rotation import so3_generators
 
 __all__ = ["S2Grid"]
@@ -212,6 +213,7 @@ class S2Grid(torch.nn.Module):
         torch.Tensor
             Grid values of shape ``(..., n_points)``.
         """
+        validate_module_precision(self, (features,))
         return self.to_grid(features)
 
     def to_grid(self, features):

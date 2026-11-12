@@ -116,6 +116,8 @@ class Convolution(torch.nn.Module):
         Whether edge harmonics are evaluated on unit vectors.
     packed_dim : int
         Packed Wigner entries appended after edge harmonics, if supplied.
+    radial_mode : {"last", "full"}, optional
+        Retain hidden activations or recompute the deferred radial network.
     """
 
     def __init__(
@@ -124,11 +126,12 @@ class Convolution(torch.nn.Module):
         projection=None,
         *,
         implementation="o3",
-        backend="cuda",
+        backend="torch",
         layout="mul_ir",
         normalization="component",
         normalize=True,
         packed_dim=0,
+        radial_mode="last",
     ):
         super().__init__()
         if implementation not in ("o3", "o2"):
@@ -169,7 +172,9 @@ class Convolution(torch.nn.Module):
                 shared_weights=False,
                 normalization=normalization,
             )
-            self.eqx_tp = O2O3TensorProductConv(tensor_product, backend=backend)
+            self.eqx_tp = O2O3TensorProductConv(
+                tensor_product, backend=backend, radial_mode=radial_mode
+            )
             if not packed_dim:
                 self.wigner = WignerD(tensor_product.lmax, tensor_product.lmax)
             self.direction_start = next(
@@ -192,7 +197,9 @@ class Convolution(torch.nn.Module):
                 "norm": 1.0,
             }[normalization]
         else:
-            self.eqx_tp = O3TensorProductConv(tensor_product, backend=backend)
+            self.eqx_tp = O3TensorProductConv(
+                tensor_product, backend=backend, radial_mode=radial_mode
+            )
 
         for name, irreps, inverse in (
             ("input_index", self.irreps_in1, False),

@@ -10,7 +10,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from equivariantx.ace import BilinearContraction
+from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.conv.attention import graph_softmax
 from equivariantx.models.tace.tece_oam_rra import LocalSplit
 from equivariantx.o2.clebsch_gordan import clebsch_gordan_product

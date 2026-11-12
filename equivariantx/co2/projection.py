@@ -6,6 +6,7 @@ from functools import lru_cache
 import torch
 
 from ..co3.symmetric import symmetric_basis
+from ..ops.precision import validate_module_precision
 
 
 def plane_projector(direction):
@@ -79,6 +80,7 @@ class PlaneProjector(torch.nn.Module):
         Leading dimensions broadcast. For (edge, channel, 3**rank) tensors,
         pass plane matrices of shape (edge, 1, 3, 3).
         """
+        validate_module_precision(self, (tensor, plane))
         if tensor.shape[-1] != self.dim or plane.shape[-2:] != (3, 3):
             raise ValueError("Tensor or plane has an incorrect trailing shape.")
         if self.rank == 0:
@@ -168,6 +170,7 @@ class PlanarDetracer(torch.nn.Module):
 
     def forward(self, tensor, plane):
         """Detrace (..., 3**rank) tensors using broadcastable (..., 3, 3) planes."""
+        validate_module_precision(self, (tensor, plane))
         if tensor.shape[-1] != self.dim:
             raise ValueError("Tensor has an incorrect trailing size.")
         if plane.shape[-2:] != (3, 3):

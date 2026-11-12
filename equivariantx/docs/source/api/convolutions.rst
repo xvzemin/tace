@@ -3,10 +3,9 @@
 Convolutions
 ============
 
-CUDA contractions support float32 and float64. Floating operands within a
-kernel must share a dtype and device. Convolution wrappers can evaluate geometry
-in float64 and cast the resulting angular features to the network dtype;
-these casts preserve autograd. FP16 and BF16 CUDA contractions are not supported.
+Torch is the default backend; CUDA kernels are optional. Operands support
+FP32 and FP64, with the caller's TF32 matrix policy. FP16, BF16 and reduced
+precision autocast are unsupported. Geometry may remain FP64 with FP32 features.
 
 O(3) convolutions
 -----------------

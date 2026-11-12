@@ -3,7 +3,7 @@ import math
 import torch
 from e3nn import o3
 
-from .rotation_matrix import rotation_matrix_to_y_axis
+from ..ops.precision import validate_module_precision
 
 
 class WignerD(torch.nn.Module):
@@ -16,10 +16,11 @@ class WignerD(torch.nn.Module):
     lmax : int
         Largest global O(3) degree represented by the matrices.
     method : {"auto", "quaternion", "recursive"}, optional
-        ``"auto"`` uses direct quaternion polynomials for CUDA float32 and
-        float64 inputs and recursive PyTorch contractions otherwise.
-        ``"quaternion"`` requires CUDA and its toolkit. ``"recursive"``
-        selects PyTorch contractions on either device.
+        ``"auto"`` uses direct quaternion polynomials on the CUDA backend
+        and recursive contractions on Torch. Both explicit methods support
+        Torch and CUDA execution.
+    backend : {"torch", "cuda"}, optional
+        Defaults to Torch. CPU inputs always use Torch operations.
 
     Examples
     --------
@@ -40,6 +41,7 @@ class WignerD(torch.nn.Module):
         lmax: int,
         *,
         method: str = "auto",
+        backend: str = "torch",
     ) -> None:
         super().__init__()
 
@@ -57,10 +59,14 @@ class WignerD(torch.nn.Module):
         self.mmax = mmax
         self.lmax = lmax
         self.method = method
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
 
         for l in range(2, self.lmax + 1):
             self.register_buffer(
-                f"cg_{l}", o3.wigner_3j(1, l - 1, l, dtype=torch.float64),
+                f"cg_{l}",
+                o3.wigner_3j(1, l - 1, l, dtype=torch.float64),
                 persistent=False,
             )
 
@@ -125,6 +131,7 @@ class WignerD(torch.nn.Module):
             ``(batch, (lmax + 1)**2, local_dim)``. Truncated degrees include
             the variance-preserving inverse scale.
         """
+        validate_module_precision(self, (vectors,))
         packed = self.forward_packed(vectors)
         dim = (self.lmax + 1) ** 2
         if self.mmax < self.lmax:
@@ -154,23 +161,10 @@ class WignerD(torch.nn.Module):
             Matrices in increasing degree order, flattened to
             ``(batch, sum((2*l+1)**2 for l in range(lmax+1)))``.
         """
-        method = getattr(self, "method", "auto") if method is None else method
-        if method not in ("auto", "quaternion", "recursive"):
-            raise ValueError("method must be auto, quaternion or recursive.")
-        if method == "quaternion" or (
-            method == "auto"
-            and vectors.is_cuda
-            and vectors.dtype in (torch.float32, torch.float64)
-        ):
-            from ..ops.wigner import wigner_D
+        from ..ops.wigner import wigner_D
 
-            return wigner_D(self, vectors, method=method)
-        return torch.cat(
-            [
-                matrix.flatten(1)
-                for matrix in self.matrix_blocks(vectors, method="recursive")
-            ],
-            dim=1,
+        return wigner_D(
+            self, vectors, backend=getattr(self, "backend", "torch"), method=method
         )
 
     def matrix_blocks(
@@ -193,21 +187,13 @@ class WignerD(torch.nn.Module):
         """
         if vectors.ndim != 2 or vectors.shape[-1] != 3:
             raise ValueError("vectors must have shape (batch, 3).")
-        method = getattr(self, "method", "auto") if method is None else method
-        if method not in ("auto", "quaternion", "recursive"):
-            raise ValueError("method must be auto, quaternion or recursive.")
-        if method != "recursive" and (vectors.is_cuda or method == "quaternion"):
-            packed = self.forward_packed(vectors, method=method)
-            return [
-                block.view(vectors.size(0), 2 * l + 1, 2 * l + 1)
-                for l, block in enumerate(
-                    packed.split(
-                        [(2 * l + 1) ** 2 for l in range(self.lmax + 1)], dim=1
-                    )
-                )
-            ]
-        rotation = rotation_matrix_to_y_axis(vectors)
-        return self.from_matrix(rotation)
+        packed = self.forward_packed(vectors, method=method)
+        return [
+            block.view(vectors.size(0), 2 * l + 1, 2 * l + 1)
+            for l, block in enumerate(
+                packed.split([(2 * l + 1) ** 2 for l in range(self.lmax + 1)], dim=1)
+            )
+        ]
 
     def from_matrix(self, rotation: torch.Tensor) -> list[torch.Tensor]:
         """Return degree-wise Wigner matrices from proper rotation matrices.
@@ -217,6 +203,7 @@ class WignerD(torch.nn.Module):
         rotation : torch.Tensor
             Proper rotation matrices of shape ``(batch, 3, 3)``.
         """
+        validate_module_precision(self, (rotation,))
         batch = rotation.shape[0]
         matrices = [rotation.new_ones((batch, 1, 1))]
         if self.lmax >= 1:

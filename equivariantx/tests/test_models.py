@@ -55,6 +55,7 @@ def test_radial_adapter(
         tp,
         torch.nn.Linear(4, tp.weight_numel),
         implementation=implementation,
+        radial_mode="full" if stream_radial else "last",
     ).to(device)
     harmonics = o3.SphericalHarmonics("0e+1o", True, normalization="component").to(
         device
@@ -153,6 +154,7 @@ def mace_data(mace_model, atoms):
     return atoms, torch_geometric.Batch.from_data_list([graph, other])
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize(
     "interaction",
@@ -165,7 +167,9 @@ def mace_data(mace_model, atoms):
         "RealAgnosticResidualNonLinearInteractionBlock",
     ],
 )
-def test_mace_conversion_training(mace_model, mace_data, interaction, implementation):
+def test_mace_conversion_training(
+    mace_model, mace_data, interaction, implementation, backend
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
@@ -173,7 +177,9 @@ def test_mace_conversion_training(mace_model, mace_data, interaction, implementa
     converted = copy_model(reference)
     parameters = tuple(converted.parameters())
     assert (
-        convert_mace_to_eqx(converted, inplace=True, implementation=implementation)
+        convert_mace_to_eqx(
+            converted, inplace=True, implementation=implementation, backend=backend
+        )
         is converted
     )
     assert set(converted.parameters()) == set(parameters)
@@ -201,9 +207,10 @@ def test_mace_conversion_training(mace_model, mace_data, interaction, implementa
     assert not torch.equal(projection, before)
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 def test_mace_conversion_ase_and_checkpoint(
-    mace_model, mace_data, tmp_path, implementation
+    mace_model, mace_data, tmp_path, implementation, backend
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -213,7 +220,9 @@ def test_mace_conversion_ase_and_checkpoint(
     original.interactions[0].conv_tp_weights.requires_grad_(False)
     # Conversion follows the model precision without changing the caller's default.
     torch.set_default_dtype(torch.float32)
-    converted = convert_mace_to_eqx(original, implementation=implementation)
+    converted = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend
+    )
     assert torch.get_default_dtype() == torch.float32
     assert not converted.training
     assert next(converted.parameters()).dtype == torch.float64
@@ -221,19 +230,24 @@ def test_mace_conversion_ase_and_checkpoint(
     assert converted is not original
     assert not hasattr(original.interactions[0], "conv_fusion")
     assert (
-        convert_mace_to_eqx(converted, inplace=True, implementation=implementation)
+        convert_mace_to_eqx(
+            converted, inplace=True, implementation=implementation, backend=backend
+        )
         is converted
     )
     assert (
-        convert_mace_to_eqx(converted, implementation=implementation) is not converted
+        convert_mace_to_eqx(converted, implementation=implementation, backend=backend)
+        is not converted
     )
     checkpoint = tmp_path / "mace-eqx.model"
     torch.save(converted, checkpoint)
     restored = torch.load(checkpoint, weights_only=False)
-    reloaded = convert_mace_to_eqx(original, implementation=implementation)
+    reloaded = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend
+    )
     reloaded.load_state_dict(converted.state_dict(), strict=True)
     last_only = convert_mace_to_eqx(
-        original, implementation=implementation, stream_radial=False
+        original, implementation=implementation, backend=backend, stream_radial=False
     )
     results = []
     for model in (original, restored, reloaded, last_only):
@@ -251,14 +265,19 @@ def test_mace_conversion_ase_and_checkpoint(
             )
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
-def test_mace_conversion_solid_harmonics(mace_model, mace_data, implementation):
+def test_mace_conversion_solid_harmonics(
+    mace_model, mace_data, implementation, backend
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
 
     original = mace_model().cuda()
     original.spherical_harmonics.normalize = False
-    converted = convert_mace_to_eqx(original, implementation=implementation)
+    converted = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend
+    )
     batch = mace_data[1].cuda()
     expected = original(batch.clone().to_dict(), training=True)
     actual = converted(batch.clone().to_dict(), training=True)

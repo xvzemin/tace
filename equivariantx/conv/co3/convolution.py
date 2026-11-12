@@ -10,7 +10,9 @@ from equivariantx import co3
 from ...co3.basis import path_normalization
 from ...co3.ictd.tensor_product import coupling_phase
 from ...o3.cgtp.convolution import O3TensorProductConv
-from ...utils.layout import _Permute
+from ...ops import config
+from ...ops.precision import validate_module_precision
+from ...utils.layout import permute
 from .polynomials import (
     ANGULAR_TILE_SIZE,
     coupling_coefficients,
@@ -45,6 +47,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Return partially symmetric raw tensors in ``ir_mul`` order. Requires
         symmetric inputs and ``tensor_product.project=False``. The expansion
         map is available as ``harmonic_output_index`` for node-level Linear.
+    radial_mode : {"last", "full"}, optional
+        Retain hidden MLP activations or recompute the complete radial network.
+        Defaults to ``"last"``; see :class:`O3TensorProductConv`.
 
     Notes
     -----
@@ -75,12 +80,13 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self,
         tensor_product,
         *,
-        backend="cuda",
+        backend="torch",
         normalization="component",
         normalize=True,
         symmetric_inputs=False,
         input_basis="cartesian",
         compact_output=False,
+        radial_mode="last",
     ):
         torch.nn.Module.__init__(self)
         if backend not in ("cuda", "torch"):
@@ -96,6 +102,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
             normalization,
             normalize,
         )
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.radial_mode = radial_mode
         self.symmetric_inputs = symmetric_inputs
         if input_basis not in ("cartesian", "spherical"):
             raise ValueError("input_basis must be cartesian or spherical.")
@@ -316,10 +325,22 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Parameters follow :meth:`equivariantx.conv.O3TensorProductConv.forward`, with all tensor
         features in flattened ``mul_ir`` layout and Cartesian dimensions.
         """
-        fused = self.backend == "cuda" and features.is_cuda
-        fused_geometry = fused and (
-            vectors is None or vectors.dtype == features.dtype
+        validate_module_precision(
+            self,
+            (
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
+            ),
         )
+        fused = self.backend == "cuda" and features.is_cuda
+        fused_geometry = fused and (vectors is None or vectors.dtype == features.dtype)
         packed_input = (
             self.input_basis == "spherical" and vectors is not None and fused_geometry
         )
@@ -384,13 +405,13 @@ class CartesianTensorProductConv(O3TensorProductConv):
             )
         elif not packed_input and not self.input_identity:
             features = (
-                _Permute.apply(features, self.input_index, self.input_inverse)
+                permute(features, self.input_index, self.input_inverse)
                 if fused
                 else features.index_select(-1, self.input_index)
             )
         if vectors is None and not self.attrs_identity:
             edge_attrs = (
-                _Permute.apply(edge_attrs, self.attrs_index, self.attrs_inverse)
+                permute(edge_attrs, self.attrs_index, self.attrs_inverse)
                 if fused
                 else edge_attrs.index_select(-1, self.attrs_index)
             )
@@ -411,13 +432,13 @@ class CartesianTensorProductConv(O3TensorProductConv):
             output = output.index_select(-1, self.harmonic_output_index)
         elif not self.output_identity:
             output = (
-                _Permute.apply(output, self.output_inverse, self.output_index)
+                permute(output, self.output_inverse, self.output_index)
                 if fused
                 else output.index_select(-1, self.output_inverse)
             )
         if self.compact_output:
             return output.index_select(-1, self.output_pack_index)
-        return self.projector(output) if fused else output
+        return self.projector(output) if fused or not config.TORCH_REFERENCE else output
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

@@ -3,8 +3,10 @@ from typing import Iterator, Optional, Sequence
 
 import torch
 
-from ..backends.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ..backends.torch.tensor_product import instruction_groups
+from ..ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ..ops.kernels.torch.tensor_product import instruction_groups
+from ..ops.precision import validate_module_precision
+from ..ops import config
 from ..utils.tensor_product import tensor_product_instructions
 from .clebsch_gordan import channel_product as couple_channels
 from .clebsch_gordan import clebsch_gordan_products, coupling_entries, coupling_type
@@ -48,8 +50,8 @@ class TensorProduct(torch.nn.Module):
     shared_weights : bool, optional
         Whether one weight vector is shared over all leading dimensions.
     backend : {"torch", "cuda"}, optional
-        CUDA evaluates ``uuu`` and ``u1u`` paths with float32 or float64
-        CUDA tensors. Unsupported modes raise an error.
+        CUDA fuses diagonal paths and uses sparse angular kernels followed
+        by channel GEMMs for ``uvw`` paths. Inputs use FP32 or FP64.
 
     Notes
     -----
@@ -182,6 +184,16 @@ class TensorProduct(torch.nn.Module):
             (*key, tuple(irreps), tuple(paths))
             for key, (irreps, paths) in couplings.items()
         )
+        self.reference_couplings = tuple(
+            (
+                ins.i_in1,
+                ins.i_in2,
+                ins.connection_mode != "uvw",
+                (self.irreps_out[ins.i_out].ir,),
+                ((index, 0),),
+            )
+            for index, ins in enumerate(self.instructions)
+        )
         output_mask = []
         for i_out, ir_mul in enumerate(self.irreps_out):
             connected = any(
@@ -296,6 +308,7 @@ class TensorProduct(torch.nn.Module):
             Coupled features with shape ``(..., irreps_out.dim)`` over the
             broadcast leading shape.
         """
+        validate_module_precision(self, (input1, input2, weight))
         if input1.is_complex() or input2.is_complex():
             raise TypeError("O(2) TensorProduct supports real inputs only.")
         if input1.ndim < 1 or input1.size(-1) != self.irreps_in1.dim:
@@ -323,15 +336,19 @@ class TensorProduct(torch.nn.Module):
         if self.backend == "cuda":
             from ..ops.channel_product import tensor_product as cuda_product
 
+            if self.kernel_metadata is None:
+                return self.forward_paths(input1, input2, weight, native=True)
             return cuda_product(
                 self.kernel_metadata, input1, input2, weight, self.irreps_out.dim
             )
 
+        if config.TORCH_REFERENCE:
+            return self.forward_paths(input1, input2, weight, reference=True)
         if self.contraction.indexed:
             return self.contraction(input1, input2, weight, self.path_scales.to(input1))
         return self.forward_paths(input1, input2, weight)
 
-    def forward_paths(self, input1, input2, weight):
+    def forward_paths(self, input1, input2, weight, *, reference=False, native=False):
         """Reuse angular products when instruction batches are too small to pack."""
         shape = torch.broadcast_shapes(
             input1.shape[:-1], input2.shape[:-1], weight.shape[:-1]
@@ -347,15 +364,35 @@ class TensorProduct(torch.nn.Module):
         ]
         weights = weight.split(self._weight_sizes, -1)
         outputs = [None] * len(self.irreps_out)
-        for i, j, elementwise, irreps, paths in self.couplings:
-            values = clebsch_gordan_products(
-                inputs[0][i],
-                self.irreps_in1[i].ir,
-                inputs[1][j],
-                self.irreps_in2[j].ir,
-                irreps,
-                elementwise=elementwise,
-            )
+        for i, j, elementwise, irreps, paths in (
+            self.reference_couplings if reference else self.couplings
+        ):
+            if native:
+                from ..ops.channel_product import angular_product
+
+                x, y = inputs[0][i].transpose(-1, -2), inputs[1][j].transpose(-1, -2)
+                if not elementwise:
+                    x, y = x.unsqueeze(-2), y.unsqueeze(-3)
+                values = tuple(
+                    angular_product(
+                        x,
+                        y,
+                        coupling_entries(
+                            self.irreps_in1[i].ir, self.irreps_in2[j].ir, ir
+                        ),
+                        ir.dim,
+                    ).movedim(-1, -2 if elementwise else -3)
+                    for ir in irreps
+                )
+            else:
+                values = clebsch_gordan_products(
+                    inputs[0][i],
+                    self.irreps_in1[i].ir,
+                    inputs[1][j],
+                    self.irreps_in2[j].ir,
+                    irreps,
+                    elementwise=elementwise,
+                )
             for index, angular in paths:
                 ins = self.instructions[index]
                 value = values[angular]

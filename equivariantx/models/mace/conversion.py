@@ -53,7 +53,7 @@ def convert_mace_to_eqx(
     implementation="o3",
     enable_cueq=False,
     inplace=False,
-    backend="cuda",
+    backend="torch",
     stream_radial=False,
 ):
     """Replace MACE convolutions and symmetric contractions with EQX operations.
@@ -75,9 +75,8 @@ def convert_mace_to_eqx(
         copy. Enabling cuEquivariance may construct a new model even when
         this is True.
     backend : {"cuda", "torch"}, optional
-        Operator backend. Defaults to CUDA kernels on CUDA tensors and
-        PyTorch operations on CPU. Select "torch" for a reference on either
-        device.
+        Operator backend. Defaults to optimized PyTorch on either device.
+        Select "cuda" for native CUDA kernels.
     stream_radial : bool, optional
         Fuse the complete radial MLP when True. Defaults to False: evaluate
         hidden layers with PyTorch and fuse only the final projection.
@@ -227,6 +226,7 @@ def convert_mace_to_eqx(
                     normalization=attributes.normalization,
                     normalize=attributes.normalize,
                     packed_dim=getattr(attributes, "packed_dim", 0),
+                    radial_mode="full" if stream_radial else "last",
                 ).train(layer.conv_tp.training)
             )
             radial_features.append(

@@ -6,6 +6,7 @@ import torch
 
 from equivariantx import o2
 
+from ..ops.precision import validate_module_precision
 from .basis import ChangeOfBasis
 from .irreps import Irrep, Irreps
 
@@ -55,6 +56,7 @@ class CartesianHarmonics(torch.nn.Module):
 
     def forward(self, vectors):
         """Evaluate vectors with shape (..., 2)."""
+        validate_module_precision(self, (vectors,))
         values = self.harmonics(vectors)
         result = []
         for m in self.orders:

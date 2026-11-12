@@ -7,10 +7,11 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import torch
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-_programs = WeakValueDictionary()
-_identifiers = count()
-_namespace = uuid4().hex
+PROGRAMS = WeakValueDictionary()
+IDENTIFIERS = count()
+NAMESPACE = uuid4().hex
 
 
 class Replay:
@@ -20,6 +21,8 @@ class Replay:
     path. CUDA graphs amortize launch overhead for repeated tile shapes;
     their input buffers are refreshed on every call, including parameters.
     Returned tensors never alias the reusable graph buffers.
+    Tracing and functional transforms expose the ordinary tensor program;
+    exported graphs do not retain process-local callback identifiers.
     """
 
     def __init__(self, function, output_indices=None, fake_function=None, capture=True):
@@ -30,13 +33,19 @@ class Replay:
         self.saved_outputs = ()
         self.nondifferentiable = ()
         self.resource = None
-        self.key = f"{_namespace}:{next(_identifiers)}"
+        self.key = f"{NAMESPACE}:{next(IDENTIFIERS)}"
         self.derivatives = {}
         self.graphs = OrderedDict()
         self.lock = RLock()
-        _programs[self.key] = self
+        PROGRAMS[self.key] = self
 
     def __call__(self, *inputs):
+        if (
+            torch.compiler.is_compiling()
+            or get_proxy_mode() is not None
+            or torch._C._are_functorch_transforms_active()
+        ):
+            return list(self.function(list(inputs), torch.is_grad_enabled()))
         return replay(list(inputs), self.key)
 
     def transpose(self, active, outputs, num_inputs):
@@ -132,19 +141,19 @@ class Replay:
 
 @torch.library.custom_op("eqx::replay", mutates_args=())
 def replay(inputs: list[torch.Tensor], key: str) -> list[torch.Tensor]:
-    program = _programs.get(key)
+    program = PROGRAMS.get(key)
     if program is None:
         raise RuntimeError(
             "Streaming execution plans belong to the live Python model. "
-            "Reconstruct the model before evaluating this graph; export a "
-            "standalone AOTI package with streaming disabled."
+            "Reconstruct the model before evaluating this graph, or trace "
+            "the tensor program before creating a standalone AOTI package."
         )
     return program.evaluate(inputs)
 
 
 @replay.register_fake
 def replay_fake(inputs, key):
-    program = _programs[key]
+    program = PROGRAMS[key]
     if program.output_indices is not None:
         return [torch.empty_like(inputs[i]) for i in program.output_indices]
     if program.fake_function is not None:
@@ -154,7 +163,7 @@ def replay_fake(inputs, key):
 
 def setup_context(ctx, inputs, output):
     values, key = inputs
-    ctx.program = _programs[key]
+    ctx.program = PROGRAMS[key]
     # A callback may borrow its module weakly to avoid a global cache cycle.
     # Keep that module alive for the lifetime of the derivative graph.
     ctx.resource = None if ctx.program.resource is None else ctx.program.resource()

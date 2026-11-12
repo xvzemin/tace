@@ -6,10 +6,11 @@ from ..utils.autograd import gradient_mask
 from ..utils.metadata import parse_metadata
 from ..utils.outputs import o3_outputs
 from .contraction import adjoint_program
+from .precision import validate_uniform
 
 
 @torch.library.custom_op("eqx::o3_contraction", mutates_args=(), device_types="cuda")
-def contraction(
+def contraction_cuda(
     metadata: str,
     program: str,
     source: torch.Tensor | None,
@@ -19,14 +20,14 @@ def contraction(
     batch_paths: bool = False,
 ) -> list[torch.Tensor]:
     """Run sparse contractions outside the tensor tracing boundary."""
-    from ..backends import get_kernel
+    from . import get_kernel
 
     return get_kernel("o3_contraction", "cuda")(
         metadata, program, source, target, operands, batch_paths=batch_paths
     )
 
 
-contraction.register_fake(o3_outputs)
+contraction_cuda.register_fake(o3_outputs)
 
 
 def contraction_setup_context(ctx, inputs, keyword_only_inputs, output):
@@ -91,6 +92,34 @@ def contraction_backward(ctx, grad_outputs):
     return None, None, None, None, gradients
 
 
-contraction.register_autograd(
+contraction_cuda.register_autograd(
     contraction_backward, setup_context=contraction_setup_context
 )
+
+
+@torch.compiler.allow_in_graph
+def contraction(metadata, program, source, target, operands, *, batch_paths=False):
+    """Expose supported O3 contractions inside functional transformations."""
+    validate_uniform(operands)
+    description = parse_metadata(metadata)
+    if len(description) > 6 and description[6]:
+        offset = description[6]
+        values, directions, terms = list(operands), {}, []
+        for mapping, weighted, pairs in parse_metadata(program):
+            index = mapping[5]
+            if index not in directions:
+                directions[index] = len(values)
+                values.append(operands[index][:, offset : offset + 3])
+            mapping = (*mapping[:5], directions[index], *mapping[6:])
+            terms.append((mapping, weighted, pairs))
+        metadata = repr((*description[:6], 0, *description[7:]))
+        program, operands = repr(tuple(terms)), values
+    if torch._C._are_functorch_transforms_active():
+        from .kernels.torch.o3 import contraction as torch_contraction
+
+        return torch_contraction(
+            metadata, program, source, target, operands, batch_paths=batch_paths
+        )
+    return torch.ops.eqx.o3_contraction(
+        metadata, program, source, target, operands, batch_paths=batch_paths
+    )

@@ -4,6 +4,7 @@ import torch
 
 from equivariantx import o2
 
+from ..ops.precision import validate_module_precision
 from .irreps import Irreps
 from .tensor_product import quarter_turn
 
@@ -28,6 +29,7 @@ class Activation(torch.nn.Module):
 
     def forward(self, features):
         """Activate STF features with trailing size irreps_in.dim."""
+        validate_module_precision(self, (features,))
         values = [
             value if act is None else act(value)
             for value, act in zip(features.split(self.sizes, -1), self.activation.acts)
@@ -113,6 +115,7 @@ class Gate(torch.nn.Module):
         torch.Tensor
             STF features of shape ``(..., irreps_out.dim)``.
         """
+        validate_module_precision(self, (features,))
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if self.backend == "cuda" and features.is_cuda:

@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops.precision import validate_module_precision
 from .basis import path_matrix
 from .irreps import Irrep, Irreps
 
@@ -88,6 +89,7 @@ class CartesianHarmonics(torch.nn.Module):
 
     def forward(self, vectors):
         """Return (..., irreps_out.dim) harmonics from (..., 3) vectors."""
+        validate_module_precision(self, (vectors,))
         if vectors.shape[-1] != 3:
             raise ValueError("Input vectors must have three Cartesian entries.")
         if self.normalize:

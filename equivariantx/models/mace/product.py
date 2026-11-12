@@ -2,7 +2,7 @@
 
 import torch
 
-from ...ace import SymmetricContraction as PolynomialContraction
+from ...mbe.ace import SymmetricContraction as PolynomialContraction
 
 
 class SymmetricContraction(torch.nn.Module):
@@ -18,7 +18,7 @@ class SymmetricContraction(torch.nn.Module):
         Output layout used by the following MACE Linear.
     """
 
-    def __init__(self, module, backend="cuda", layout="mul_ir"):
+    def __init__(self, module, backend="torch", layout="mul_ir"):
         super().__init__()
         self.indexed = not hasattr(module, "contractions")
         self.irreps_in = module.irreps_in

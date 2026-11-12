@@ -6,8 +6,9 @@ from functools import lru_cache
 
 import torch
 
+from ...ops.precision import validate_module_precision
+from ...ops import get_kernel
 from ..ictd.tensor_product import TensorProduct as IctdTensorProduct
-from ..ictd.tensor_product import cartesian_product
 from ..symmetric import SymmetricBasis, symmetric_basis, symmetric_powers
 
 SYMMETRIC_MATRIX_SIZE = 8192
@@ -59,10 +60,15 @@ class CartesianProduct(torch.nn.Module):
     ----------
     l1, l2, l3 : int
         Input and output ranks satisfying the triangle inequality.
+    backend : {"torch", "cuda"}, optional
+        Execution provider for the delta/epsilon products. Defaults to torch.
     """
 
-    def __init__(self, l1, l2, l3):
+    def __init__(self, l1, l2, l3, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         self.l1, self.l2, self.l3 = l1, l2, l3
         k, odd = divmod(l1 + l2 - l3, 2)
         a, b = l1 - k - odd, l2 - k - odd
@@ -101,6 +107,8 @@ class CartesianProduct(torch.nn.Module):
 
     def forward(self, x, y):
         """Return the STF coupling in flattened Cartesian storage."""
+        validate_module_precision(self, (x, y))
+        cartesian_product = get_kernel("cartesian_product", self.backend)
         value = cartesian_product(x, y, self.l1, self.l2, self.l3)
         if not self.symmetric:
             return value
@@ -159,6 +167,8 @@ class TensorProduct(IctdTensorProduct):
     internal_weights, shared_weights : bool, optional
         Store trainable weights and share weights over leading dimensions.
         Internal weights require shared weights.
+    backend : {"torch", "cuda"}, optional
+        Torch or native sparse angular products with analytic trace removal.
 
     Notes
     -----
@@ -190,6 +200,7 @@ class TensorProduct(IctdTensorProduct):
         out_var=None,
         internal_weights=None,
         shared_weights=None,
+        backend="torch",
     ):
         super().__init__(
             irreps_in1,
@@ -204,8 +215,10 @@ class TensorProduct(IctdTensorProduct):
             internal_weights=internal_weights,
             shared_weights=shared_weights,
             project=False,
+            backend=backend,
         )
         self.project = True
+        self.kernel_metadata = None
         self.products = torch.nn.ModuleDict()
         for ins in self.instructions:
             degrees = (
@@ -215,7 +228,7 @@ class TensorProduct(IctdTensorProduct):
             )
             key = "_".join(map(str, degrees))
             if key not in self.products:
-                self.products[key] = CartesianProduct(*degrees)
+                self.products[key] = CartesianProduct(*degrees, backend=backend)
 
     def couple(self, x, y, l1, l2, l3):
         """Evaluate one irreducible angular coupling."""

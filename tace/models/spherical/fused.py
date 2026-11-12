@@ -12,7 +12,7 @@ from e3nn import o3
 
 from equivariantx import co3, o2
 from equivariantx import conv as eqx_conv
-from equivariantx.ace import SymmetricContraction as EqxSymmetricContraction
+from equivariantx.mbe.ace import SymmetricContraction as EqxSymmetricContraction
 from tace.utils.env import acceleration_enabled, select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
@@ -814,7 +814,7 @@ class SymmetricContraction(EqxSymmetricContraction):
         Input and output representations with equal multiplicities.
     coupling_tensors : sequence of tuple
         ``(output_index, degree, tensor)`` entries accepted by
-        :class:`equivariantx.ace.SymmetricContraction`.
+        :class:`equivariantx.mbe.ace.SymmetricContraction`.
 
     Notes
     -----
