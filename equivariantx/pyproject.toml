@@ -85,7 +85,6 @@ packages = [
     "equivariantx.ops.cuda.o3",
     "equivariantx.ops.cuda.o3.cgtp",
     "equivariantx.ops.cuda.o3.wigner6j",
-    "equivariantx.ops.kernels",
     "equivariantx.ops.torch",
     "equivariantx.ops.torch.co2",
     "equivariantx.ops.torch.co3",

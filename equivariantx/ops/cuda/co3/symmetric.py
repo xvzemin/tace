@@ -3,15 +3,14 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 from torch.fx.experimental.symbolic_shapes import statically_known_true
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
 from ... import config
 from ...common.cuda import sparse_axis, tensor_axis
+from ...common.cuda.pointwise import evaluate as pointwise
+from ...common.cuda.pointwise import launch, scalar_type
 from ...common.polynomial import native_polynomial
 from ...common.symmetric import matrix_inputs, matrix_metadata
 from ...common.torch import sparse_axis as torch_sparse
@@ -96,55 +95,7 @@ def use_shared_matrix(module, tensor, matrix):
     )
 
 
-@triton.jit
-def pack_kernel(
-    features,
-    permutation,
-    offsets,
-    norm,
-    output,
-    rows,
-    INNER: tl.constexpr,
-    OUTER: tl.constexpr,
-    ROWS: tl.constexpr,
-    TERMS: tl.constexpr,
-):
-    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)[:, None]
-    component = tl.program_id(1)
-    start = tl.load(offsets + component)
-    stop = tl.load(offsets + component + 1)
-    k = tl.arange(0, TERMS)[None, :]
-    index = tl.load(permutation + start + k, start + k < stop, 0)
-    value = tl.load(
-        features + row * INNER + index, (row < rows) & (start + k < stop), 0
-    )
-    result = tl.sum(value, 1) * tl.load(norm + component)
-    tl.store(
-        output + tl.reshape(row, (ROWS,)) * OUTER + component,
-        result,
-        tl.reshape(row, (ROWS,)) < rows,
-    )
-
-
-@triton.jit
-def unpack_kernel(
-    features,
-    indices,
-    norm,
-    output,
-    size,
-    INNER: tl.constexpr,
-    OUTER: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    source = tl.load(indices + index % OUTER, index < size, 0)
-    value = tl.load(features + (index // OUTER) * INNER + source, index < size, 0)
-    scale = tl.load(norm + source, index < size, 1)
-    tl.store(output + index, value * scale, index < size)
-
-
-@triton_op("eqx::symmetric_map", mutates_args=())
+@torch.library.custom_op("eqx::symmetric_map", mutates_args=(), device_types="cuda")
 def map_operator(
     tensor: torch.Tensor,
     indices: torch.Tensor,
@@ -154,37 +105,67 @@ def map_operator(
     terms: int,
     expand: bool,
 ) -> torch.Tensor:
-    """Evaluate a complete normalized permutation map in a single native launch."""
+    """Apply a normalized permutation map and its transpose."""
     validate_uniform((tensor, norm))
-    expected = norm.numel() if expand else indices.numel()
-    if not tensor.is_cuda or tensor.shape[-1] != expected:
-        raise ValueError("Native symmetric maps require matching CUDA features.")
-    tensor = tensor.contiguous()
-    inverse = norm.reciprocal()
+    inner = norm.numel() if expand else indices.numel()
     outer = indices.numel() if expand else norm.numel()
+    if tensor.shape[-1] != inner:
+        raise ValueError("Symmetric map dimensions do not match the input.")
+    tensor = tensor.contiguous()
+    indices, norm, permutation, offsets = (
+        v.contiguous() for v in (indices, norm, permutation, offsets)
+    )
     result = tensor.new_empty((*tensor.shape[:-1], outer))
-    rows = tensor.numel() // expected
-    if not statically_known_true(result.numel() == 0):
-        if expand:
-            wrap_triton(unpack_kernel)[(triton.cdiv(result.numel(), 256),)](
-                tensor, indices, inverse, result, result.numel(), expected, outer, 256
-            )
-        else:
-            size = triton.next_power_of_2(terms)
-            block = min(64, max(1, 8192 // size))
-            wrap_triton(pack_kernel)[(triton.cdiv(rows, block), outer)](
-                tensor,
-                permutation,
-                offsets,
-                inverse,
-                result,
-                rows,
-                expected,
-                outer,
-                block,
-                size,
-            )
-    return result
+    if not result.numel():
+        return result
+    if not expand and terms >= 128:
+        source = f"""
+        using T={scalar_type(tensor.dtype)}; using I=long long;
+        extern "C" __global__ void run(
+            const T* x,const T* norm,
+            const {scalar_type(permutation.dtype)}* permutation,
+            const {scalar_type(offsets.dtype)}* offsets,T* out,I count) {{
+            int lane=threadIdx.x%32;
+            for(I i=(I(blockIdx.x)*blockDim.x+threadIdx.x)/32;
+                i<count;i+=I(gridDim.x)*blockDim.x/32) {{
+                I row=i/{outer},c=i%{outer};
+                T total=0,correction=0;
+                for(I k=offsets[c]+lane;k<offsets[c+1];k+=32) {{
+                    T value=x[row*{inner}+permutation[k]]-correction;
+                    T next=total+value;
+                    correction=(next-total)-value;
+                    total=next;
+                }}
+                for(int delta=16;delta>0;delta/=2)
+                    total+=__shfl_down_sync(0xffffffff,total,delta);
+                if(lane==0) out[i]=total/norm[c];
+            }}
+        }}
+        """
+        launch(
+            source,
+            (tensor, norm, permutation, offsets, result),
+            (result.numel(),),
+            result.numel() * 32,
+        )
+        return result
+    body = (
+        f"I row=i/{outer},c=i%{outer},src=p1[c]; out[i]=p0[row*{inner}+src]/p2[src];"
+        if expand
+        else f"""
+          I row=i/{outer},c=i%{outer}; T total=0;
+          for(I k=p4[c];k<p4[c+1];++k) total+=p0[row*{inner}+p3[k]];
+          out[i]=total/p2[c];
+          """
+    )
+    return pointwise(result, (tensor, indices, norm, permutation, offsets), body)
+
+
+@map_operator.register_fake
+def map_fake(tensor, indices, norm, permutation, offsets, terms, expand):
+    return tensor.new_empty(
+        (*tensor.shape[:-1], indices.numel() if expand else norm.numel())
+    )
 
 
 def map_context(ctx, inputs, output):
@@ -223,8 +204,6 @@ def map_tensor(module, tensor, expand):
         return tensor
     if inline():
         return (torch_kernel.unpack if expand else torch_kernel.pack)(module, tensor)
-    if not hasattr(module, "permutation"):
-        return torch_kernel.symmetry_map(tensor, module.indices, module.norm, expand)
     terms = math.factorial(module.rank) // math.prod(
         tuple(math.factorial((module.rank + i) // 3) for i in range(3))
     )

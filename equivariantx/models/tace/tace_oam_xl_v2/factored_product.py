@@ -8,56 +8,14 @@ cached between invocations.
 
 from collections import defaultdict
 from functools import lru_cache
-import torch
-import triton
-import triton.language as tl
 
+import torch
+
+from equivariantx.ops.common.cuda.pointwise import evaluate as pointwise
 from equivariantx.ops.common.cuda.runtime import kernels, runtime
 from equivariantx.utils.metadata import parse_metadata
-from .packed_product import run_packed, packed_source, packed_outputs
 
-
-@triton.jit
-def weighted_cotangents(
-    G0,
-    Z0,
-    G1,
-    Z1,
-    INDEX,
-    O,
-    N,
-    WIDTH: tl.constexpr,
-    BLOCKS: tl.constexpr,
-    PAIRS: tl.constexpr,
-    G00: tl.constexpr,
-    G01: tl.constexpr,
-    G10: tl.constexpr,
-    G11: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    first = 0
-    for size in tl.static_range(len(BLOCKS)):
-        count: tl.constexpr
-        count = BLOCKS[size]
-        if (
-            tl.program_id(0) * BLOCK >= first * N * WIDTH
-            and tl.program_id(0) * BLOCK < (first + count) * N * WIDTH
-        ):
-            local = offset - first * N * WIDTH
-            node = local // (count * WIDTH)
-            column = local // WIDTH % count + first
-            channel = local % WIDTH
-            gate = tl.load(INDEX + column, node < N, 0) * WIDTH + channel
-            g = tl.load(G0 + node * G00 + gate * G01, node < N, 0.0)
-            z = tl.load(Z0 + offset, node < N, 0.0)
-            value = g * z
-            if PAIRS == 2:
-                g1 = tl.load(G1 + node * G10 + gate * G11, node < N, 0.0)
-                z1 = tl.load(Z1 + offset, node < N, 0.0)
-                value += g1 * z1
-            tl.store(O + offset, value, node < N)
-        first += count
+from .packed_product import packed_outputs, packed_source, run_packed
 
 
 @lru_cache(maxsize=128)
@@ -142,21 +100,29 @@ def factored_product(metadata, program, operands, tile=4):
         g1, z1 = pair[1] if len(pair) == 2 else pair[0]
         first, second = values[z0].contiguous(), values[z1].contiguous()
         out = values[0].new_empty((nodes, dims[3] * width))
-        weighted_cotangents[(triton.cdiv(out.numel(), 256),)](
-            values[g0],
-            first,
-            values[g1],
-            second,
-            index,
-            out,
-            nodes,
-            width,
-            blocks,
-            len(pair),
-            *values[g0].stride(),
-            *values[g1].stride(),
-            256,
-        )
+        code, first_column = [], 0
+        for block in blocks:
+            start, stop = (
+                first_column * nodes * width,
+                (first_column + block) * nodes * width,
+            )
+            code.append(
+                f"""
+            if(i>={start} && i<{stop}) {{
+                I local=i-{start}, node=local/({block}*{width});
+                I column=(local/{width})%{block}+{first_column};
+                I gate=p4[column]*{width}+local%{width};
+                T total=p0[node*{values[g0].stride(0)}+gate*{values[g0].stride(1)}]*p1[i];
+                """
+                + (
+                    f"total += p2[node*{values[g1].stride(0)}+gate*{values[g1].stride(1)}]*p3[i];"
+                    if len(pair) == 2
+                    else ""
+                )
+                + "out[i]=total;}"
+            )
+            first_column += block
+        pointwise(out, (values[g0], first, values[g1], second, index), "".join(code))
         values.append(out)
     destination, code = dense_slots(contractions)
     result = packed_outputs(bilinear, code, values)

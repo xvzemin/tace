@@ -60,7 +60,7 @@ class EdgeProgram(torch.autograd.Function):
     """Save operands for recursive adjoints and analytic functional transforms."""
 
     @staticmethod
-    def forward(backend, metadata, num_nodes, source, target, *inputs):
+    def forward(backend, inline, metadata, num_nodes, source, target, *inputs):
         if backend == "cuda":
             return tuple(
                 torch.ops.eqx.edge_program(
@@ -76,9 +76,15 @@ class EdgeProgram(torch.autograd.Function):
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        ctx.backend, ctx.kernel_metadata, ctx.num_nodes, source, target, *values = (
-            inputs
-        )
+        (
+            ctx.backend,
+            ctx.inline,
+            ctx.kernel_metadata,
+            ctx.num_nodes,
+            source,
+            target,
+            *values,
+        ) = inputs
         ctx.save_for_backward(source, target, *values)
         ctx.save_for_forward(source, target, *values)
         ctx.set_materialize_grads(False)
@@ -87,7 +93,7 @@ class EdgeProgram(torch.autograd.Function):
     def backward(ctx, *cotangents):
         source, target, *inputs = ctx.saved_tensors
         slots = sorted({slot for _, slot, _ in parse_metadata(ctx.kernel_metadata)[1]})
-        required = torch_gradient_mask(ctx, ctx.needs_input_grad[5:])
+        required = torch_gradient_mask(ctx, ctx.needs_input_grad[6:])
         active = tuple(i for i, needed in enumerate(required) if needed)
         seeds = tuple(
             slot for slot, value in zip(slots, cotangents) if value is not None
@@ -98,7 +104,13 @@ class EdgeProgram(torch.autograd.Function):
         if outputs:
             values = inputs + [value for value in cotangents if value is not None]
             result = edge_program(
-                ctx.backend, metadata, ctx.num_nodes, source, target, *values
+                ctx.backend,
+                metadata,
+                ctx.num_nodes,
+                source,
+                target,
+                *values,
+                inline=ctx.inline,
             )
             for slot, value in zip(sorted({slot for _, slot, _ in outputs}), result):
                 gradients[slot] = value.reshape(inputs[slot].shape)
@@ -106,12 +118,13 @@ class EdgeProgram(torch.autograd.Function):
             torch.zeros_like(value) if needed and gradient is None else gradient
             for value, needed, gradient in zip(inputs, required, gradients)
         ]
-        return None, None, None, None, None, *gradients
+        return None, None, None, None, None, None, *gradients
 
     @staticmethod
     def jvp(
         ctx,
         backend_tangent,
+        inline_tangent,
         metadata_tangent,
         count_tangent,
         source_tangent,
@@ -138,7 +151,9 @@ class EdgeProgram(torch.autograd.Function):
         )
 
     @staticmethod
-    def vmap(info, in_dims, backend, metadata, num_nodes, source, target, *inputs):
+    def vmap(
+        info, in_dims, backend, inline, metadata, num_nodes, source, target, *inputs
+    ):
         from .torch.edge import evaluate_torch
 
         def function(source, target, *values):
@@ -148,23 +163,34 @@ class EdgeProgram(torch.autograd.Function):
                 )
             )
 
-        outputs = torch.vmap(function, in_dims=in_dims[3:], randomness=info.randomness)(
+        outputs = torch.vmap(function, in_dims=in_dims[4:], randomness=info.randomness)(
             source, target, *inputs
         )
         return outputs, (0,) * len(outputs)
 
 
-def evaluate(metadata, inputs, source, target, num_nodes):
+def evaluate(metadata, inputs, source, target, num_nodes, *, inline=True):
     """Evaluate native edge expressions with functional derivative rules."""
-    return list(edge_program("cuda", metadata, num_nodes, source, target, *inputs))
+    return list(
+        edge_program(
+            "cuda",
+            metadata,
+            num_nodes,
+            source,
+            target,
+            *inputs,
+            inline=inline,
+        )
+    )
 
 
 @torch.compiler.allow_in_graph
-def edge_program(backend, metadata, num_nodes, source, target, *inputs):
+def edge_program(backend, metadata, num_nodes, source, target, *inputs, inline=True):
     """Expose compiled programs and nested JVPs while retaining eager CUDA."""
     validate_uniform(inputs)
     if (
         backend == "cuda"
+        and inline
         and config.EDGE_PROGRAM_INLINE
         and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
     ):
@@ -175,4 +201,6 @@ def edge_program(backend, metadata, num_nodes, source, target, *inputs):
         return tuple(
             evaluate_torch(metadata, inputs, source, target, num_nodes, optimized=True)
         )
-    return EdgeProgram.apply(backend, metadata, num_nodes, source, target, *inputs)
+    return EdgeProgram.apply(
+        backend, inline, metadata, num_nodes, source, target, *inputs
+    )

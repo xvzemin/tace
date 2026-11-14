@@ -1,17 +1,15 @@
 """Native sparse chains and their transpose, visible to joint AOT compilation."""
 
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
 from ...precision import validate_uniform
 from ..torch import sparse_chain as torch_kernel
+from .pointwise import launch, scalar_type
 from .sparse_axis import evaluate as axis
 
 
-@triton_op("eqx::sparse_chain", mutates_args=())
+@torch.library.custom_op("eqx::sparse_chain", mutates_args=(), device_types="cuda")
 def contract(
     features: torch.Tensor, lefts: list[int], tables: list[torch.Tensor], reverse: bool
 ) -> torch.Tensor:
@@ -20,6 +18,14 @@ def contract(
         offset = 4 * index + 2 * int(reverse)
         features = axis(features, tables[offset], tables[offset + 1], lefts[index], 1)
     return features.clone() if not lefts else features
+
+
+@contract.register_fake
+def fake(features, lefts, tables, reverse):
+    width = features.shape[-1]
+    for index in range(len(lefts) - 1, -1, -1) if reverse else range(len(lefts)):
+        width = lefts[index] * tables[4 * index + 2 * int(reverse)].shape[0]
+    return features.new_empty((*features.shape[:-1], width))
 
 
 def setup_context(ctx, inputs, output):
@@ -47,46 +53,9 @@ def evaluate(features, lefts, reverse, *tables):
     return contract(features, list(lefts), list(tables), reverse)
 
 
-@triton.jit
-def chain_kernel(
-    features,
-    result,
-    indices,
-    weights,
-    rows,
-    WIDTH: tl.constexpr,
-    OUTERS: tl.constexpr,
-    TERMS: tl.constexpr,
-    OFFSETS: tl.constexpr,
-    BLOCK: tl.constexpr,
-    ROWS: tl.constexpr,
-):
-    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
-    column = tl.arange(0, BLOCK)
-    valid = (row[:, None] < rows) & (column[None, :] < WIDTH)
-    value = tl.load(features + row[:, None] * WIDTH + column[None, :], valid, 0)
-    for stage in tl.static_range(len(OUTERS)):
-        output = tl.full(
-            (ROWS, BLOCK),
-            0,
-            tl.float64 if features.dtype.element_ty == tl.float64 else tl.float32,
-        )
-        for term in tl.static_range(TERMS[stage]):
-            offset = OFFSETS[stage] + (column % OUTERS[stage]) * TERMS[stage] + term
-            source = tl.load(indices + offset, column < WIDTH, 0)
-            weight = tl.load(weights + offset, column < WIDTH, 0)
-            source = tl.where(
-                column < WIDTH, column // OUTERS[stage] * OUTERS[stage] + source, 0
-            )
-            output += (
-                tl.gather(value, tl.broadcast_to(source[None, :], (ROWS, BLOCK)), 1)
-                * weight[None, :]
-            )
-        value = output
-    tl.store(result + row[:, None] * WIDTH + column[None, :], value, valid)
-
-
-@triton_op("eqx::packed_sparse_chain", mutates_args=())
+@torch.library.custom_op(
+    "eqx::packed_sparse_chain", mutates_args=(), device_types="cuda"
+)
 def packed(
     features: torch.Tensor,
     indices: torch.Tensor,
@@ -96,30 +65,79 @@ def packed(
     offsets: list[int],
     reverse: bool,
 ) -> torch.Tensor:
-    """Keep a short square chain in registers, using paired fixed transposes."""
+    """Evaluate a square sparse chain with two shared-memory row buffers."""
     validate_uniform((features, weights))
-    if not features.is_cuda or not features.is_contiguous():
-        raise ValueError("Packed sparse chains require contiguous CUDA features.")
+    if not features.is_contiguous():
+        raise ValueError("Packed sparse chains require contiguous features.")
     result = torch.empty_like(features)
-    if features.numel():
-        width = features.shape[-1]
-        rows = features.numel() // width
-        order = tuple(range(len(outers) - 1, -1, -1) if reverse else range(len(outers)))
-        wrap_triton(chain_kernel)[(triton.cdiv(rows, 4),)](
-            features,
-            result,
-            indices,
-            weights,
-            rows,
-            width,
-            tuple(outers[k] for k in order),
-            tuple(terms[2 * k + int(reverse)] for k in order),
-            tuple(offsets[2 * k + int(reverse)] for k in order),
-            triton.next_power_of_2(width),
-            4,
-            num_warps=4,
+    if not result.numel():
+        return result
+    indices, weights = indices.contiguous(), weights.contiguous()
+    width = features.shape[-1]
+    rows = features.numel() // width
+    order = range(len(outers) - 1, -1, -1) if reverse else range(len(outers))
+    stages = []
+    for k in order:
+        outer, term, offset = (
+            outers[k],
+            terms[2 * k + int(reverse)],
+            offsets[2 * k + int(reverse)],
         )
+        stages.append(f"""
+            for(int c=threadIdx.x;c<{width};c+=blockDim.x) {{
+                T sum=0;
+                for(int q=0;q<{term};++q) {{
+                    I entry={offset}+(c%{outer})*{term}+q;
+                    sum+=a[(c/{outer})*{outer}+indices[entry]]*weights[entry];
+                }}
+                b[c]=sum;
+            }}
+            __syncthreads();
+            {{ T* tmp=a; a=b; b=tmp; }}
+        """)
+    source = f"""
+        using T={scalar_type(features.dtype)}; using I=long long;
+        extern "C" __global__ void run(const T* x,const {scalar_type(indices.dtype)}* indices,const T* weights,T* out,I rows) {{
+            extern __shared__ T storage[];
+            for(I row=blockIdx.x;row<rows;row+=gridDim.x) {{
+                T* a=storage; T* b=storage+{width};
+                for(int c=threadIdx.x;c<{width};c+=blockDim.x) a[c]=x[row*{width}+c];
+                __syncthreads();
+                {"".join(stages)}
+                for(int c=threadIdx.x;c<{width};c+=blockDim.x) out[row*{width}+c]=a[c];
+                __syncthreads();
+            }}
+        }}
+    """
+    if 2 * width * features.element_size() > 48 * 1024:
+        value = features
+        for k in range(len(outers) - 1, -1, -1) if reverse else range(len(outers)):
+            outer, term, offset = (
+                outers[k],
+                terms[2 * k + int(reverse)],
+                offsets[2 * k + int(reverse)],
+            )
+            value = axis(
+                value,
+                indices[offset : offset + outer * term].reshape(outer, term),
+                weights[offset : offset + outer * term].reshape(outer, term),
+                width // outer,
+                1,
+            )
+        return value.clone() if not outers else value
+    launch(
+        source,
+        (features, indices, weights, result),
+        (rows,),
+        rows * 256,
+        shared=2 * width * features.element_size(),
+    )
     return result
+
+
+@packed.register_fake
+def packed_fake(features, indices, weights, outers, terms, offsets, reverse):
+    return torch.empty_like(features, memory_format=torch.contiguous_format)
 
 
 def packed_context(ctx, inputs, output):

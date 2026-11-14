@@ -31,14 +31,10 @@ def dense_project(module, features, index, operation=None):
 
 
 def transform(module, features, reverse=False, operation=sparse_chain.evaluate):
-    if not hasattr(module, "stage_names"):
-        return reference(module, features, reverse)
     return operation(features, module.lefts, reverse, *operands(module))
 
 
 def projection(module, features, index, operation=sparse_chain.evaluate):
-    if not hasattr(module, "transition_names"):
-        return project_reference(module, features, index)
     tables = operands(module, index)
     value = operation(features, module.lefts, False, *tables)
     return operation(value, module.lefts, True, *tables)

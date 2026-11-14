@@ -19,6 +19,7 @@ from equivariantx.tests.ops.torch.o3.test_tensor_product import (
     convolution_training_problem,
     training_problem,
 )
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is unavailable"
@@ -26,7 +27,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("kind", ["gaunt", "matrix"])
-def test_native_joint_package_without_eqx(kind, monkeypatch, tmp_path):
+def test_native_joint_package(kind, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
     monkeypatch.setattr(config, "FACTORIZED_INLINE", False)
     operation, values = training_problem(kind, "cuda", "cuda")
@@ -59,7 +60,7 @@ def test_native_joint_package_without_eqx(kind, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
@@ -67,8 +68,8 @@ for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual), row['outputs'], atol=3e-9, rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],
@@ -82,7 +83,7 @@ assert 'equivariantx' not in sys.modules
 
 @pytest.mark.parametrize("mode", ["last", "full"])
 @pytest.mark.parametrize("width", [64, 128, 1024])
-def test_radial_joint_package_without_eqx(mode, width, monkeypatch, tmp_path):
+def test_radial_joint_package(mode, width, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
     monkeypatch.setattr(config, "EDGE_PROGRAM_INLINE", True)
     dynamic = mode == "full"
@@ -162,7 +163,7 @@ def test_radial_joint_package_without_eqx(mode, width, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
@@ -170,8 +171,8 @@ for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual), row['outputs'], atol=3e-9, rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

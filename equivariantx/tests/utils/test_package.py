@@ -1,6 +1,6 @@
 """Tests for the corresponding EQX source module."""
 
-import equivariantx
+import ast
 import doctest
 import os
 import re
@@ -8,8 +8,11 @@ import subprocess
 import sys
 from importlib import import_module
 from pathlib import Path
+
 import pytest
 import torch
+
+import equivariantx
 from equivariantx.utils.module import default_dtype
 
 ROOT = Path(equivariantx.__file__).resolve().parent
@@ -48,6 +51,7 @@ import sys
 import torch
 
 sys.modules["torch.utils.cpp_extension"] = None
+sys.modules["triton"] = None
 sys.modules["torch_geometric"] = None
 sys.modules["torch_scatter"] = None
 if {allow_slice}:
@@ -72,7 +76,8 @@ frame.to_global(frame.to_local(x, d), di)
 assert set(eqx.__all__).issubset(dir(eqx))
 assert not torch.cuda.is_initialized()
 assert "tace" not in sys.modules
-assert not any(name.startswith("equivariantx.ops.common.cuda") for name in sys.modules)
+from equivariantx.ops.common.cuda.runtime import runtime
+assert runtime.cache_info().currsize == 0
 assert not any(name.startswith("equivariantx.models.") for name in sys.modules)
 """
     result = subprocess.run(
@@ -184,3 +189,20 @@ def test_documentation_examples(path):
         torch.manual_seed(0)
         result = doctest.testmod(module, raise_on_error=True)
     assert result.attempted > 0
+
+
+def test_no_triton_kernels():
+    """EQX kernels must not depend directly on the optional compiler backend."""
+    for path in ROOT.rglob("*.py"):
+        if {"tests", "build"}.intersection(path.relative_to(ROOT).parts):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            names = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+                if isinstance(node, ast.ImportFrom)
+                else []
+            )
+            assert not any(name.split(".")[0] == "triton" for name in names), path

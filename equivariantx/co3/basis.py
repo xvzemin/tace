@@ -156,7 +156,7 @@ class ChangeOfBasis(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
+        if self.backend == "cuda" and features.is_cuda:
             from ..ops.cuda.co3 import basis as cuda_basis
 
             return cuda_basis.change_basis(self, features)
@@ -258,7 +258,7 @@ class Projector(torch.nn.Module):
         """Project blocks of shape (..., mul, 3**l), batching equal ranks."""
         values = list(features)
         validate_module_precision(self, (values,))
-        if getattr(self, "backend", "torch") == "cuda" and values and values[0].is_cuda:
+        if self.backend == "cuda" and values and values[0].is_cuda:
             from ..ops.cuda.co3 import basis as cuda_basis
 
             return cuda_basis.project(self, values)

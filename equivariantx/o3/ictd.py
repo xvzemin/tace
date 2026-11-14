@@ -52,7 +52,7 @@ def path_matrices(rank):
 
 
 def execution(module, features):
-    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+    if module.backend == "cuda" and features.is_cuda:
         from ..ops.cuda.o3 import ictd as cuda_kernel
 
         return cuda_kernel
@@ -160,8 +160,7 @@ class ICTD(torch.nn.Module):
         return f"rank={self.rank}, {self.irreps_out}"
 
     def _apply(self, fn, recurse=True):
-        marker = self._buffers.get("dtype_marker")
-        dtype = self.change_of_basis.dtype if marker is None else marker.dtype
+        dtype = self.dtype_marker.dtype
         super()._apply(fn, recurse)
         restore(self, dtype)
         return self

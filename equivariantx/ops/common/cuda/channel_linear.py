@@ -1,164 +1,77 @@
-"""Native shared channel GEMMs with fused path scaling, summation and layout."""
+"""CUDA shared channel maps with fused path scaling, layout and bias."""
 
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
 from ....utils.metadata import parse_metadata
 from ...precision import validate_uniform
 from ..torch.channel_linear import ChannelLinear
+from .pointwise import evaluate as pointwise
 
 
-@triton.jit
-def channel_kernel(
-    features,
-    weight,
-    bias,
-    output,
-    rows,
-    INPUTS: tl.constexpr,
-    PATHS: tl.constexpr,
-    INPUT_OFFSETS: tl.constexpr,
-    INPUT_DIM: tl.constexpr,
-    OUTPUT_DIM: tl.constexpr,
-    OUTPUT_OFFSET: tl.constexpr,
-    COMPONENTS: tl.constexpr,
-    CHANNELS: tl.constexpr,
-    OUTPUT_INDEX: tl.constexpr,
-    BIAS_OFFSET: tl.constexpr,
-    CARTESIAN: tl.constexpr,
-    PRECISION: tl.constexpr,
-    BM: tl.constexpr,
-    BN: tl.constexpr,
-    BK: tl.constexpr,
-):
-    r = tl.program_id(0) * BM + tl.arange(0, BM)
-    c = tl.program_id(1) * BN + tl.arange(0, BN)
-    node, component = r // COMPONENTS, r % COMPONENTS
-    k = tl.arange(0, BK)
-    accumulator = tl.zeros(
-        (BM, BN), tl.float64 if output.dtype.element_ty == tl.float64 else tl.float32
-    )
-    for p in tl.static_range(len(PATHS)):
-        if PATHS[p][1] == OUTPUT_INDEX:
-            ci = INPUTS[PATHS[p][0]][1]
-            input_offset = INPUT_OFFSETS[PATHS[p][0]]
-            for block in range((ci + BK - 1) // BK):
-                channel = block * BK + k
-                if CARTESIAN:
-                    address = (
-                        node[:, None] * INPUT_DIM
-                        + input_offset
-                        + channel[None, :] * COMPONENTS
-                        + component[:, None]
-                    )
-                else:
-                    address = (
-                        node[:, None] * INPUT_DIM
-                        + input_offset
-                        + component[:, None] * ci
-                        + channel[None, :]
-                    )
-                x = tl.load(
-                    features + address,
-                    (node[:, None] < rows) & (channel[None, :] < ci),
-                    0,
-                )
-                w = tl.load(
-                    weight + PATHS[p][2] + channel[:, None] * CHANNELS + c[None, :],
-                    (channel[:, None] < ci) & (c[None, :] < CHANNELS),
-                    0,
-                )
-                w = w * PATHS[p][3]
-                accumulator = tl.dot(x, w, accumulator, input_precision=PRECISION)
-    if BIAS_OFFSET >= 0:
-        accumulator += tl.load(bias + BIAS_OFFSET + c, c < CHANNELS, 0)[None, :]
-    if CARTESIAN:
-        address = (
-            node[:, None] * OUTPUT_DIM
-            + OUTPUT_OFFSET
-            + c[None, :] * COMPONENTS
-            + component[:, None]
-        )
-    else:
-        address = (
-            node[:, None] * OUTPUT_DIM
-            + OUTPUT_OFFSET
-            + component[:, None] * CHANNELS
-            + c[None, :]
-        )
-    tl.store(
-        output + address, accumulator, (node[:, None] < rows) & (c[None, :] < CHANNELS)
-    )
-
-
-@triton_op("eqx::channel_linear", mutates_args=())
+@torch.library.custom_op("eqx::channel_linear", mutates_args=(), device_types="cuda")
 def evaluate(
     metadata: str, features: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
 ) -> torch.Tensor:
-    """Evaluate shared channel maps with FP32/TF32 or FP64 matrix arithmetic."""
+    """Apply independent shared channel maps without expanded coefficients."""
     validate_uniform((features, weight, bias))
-    if not features.is_cuda or features.ndim != 2 or weight.ndim != 1 or bias.ndim != 1:
-        raise ValueError(
-            "Native channel maps require CUDA matrices and shared parameter vectors."
-        )
+    if features.ndim != 2 or weight.ndim != 1 or bias.ndim != 1:
+        raise ValueError("Channel maps require matrices and shared parameter vectors.")
     storage, (inputs, outputs, paths, biases, groups) = parse_metadata(metadata)
-    features, weight, bias = (
-        features.contiguous(),
-        weight.contiguous(),
-        bias.contiguous(),
-    )
     din = sum(dim * mul for dim, mul in inputs)
     dout = sum(dim * mul for dim, mul in outputs)
-    expected_weight = sum(inputs[i][1] * outputs[j][1] for i, j, start, scale in paths)
-    expected_bias = sum(size for j, start, size in biases)
-    if storage not in ("ir_mul", "mul_ir") or features.shape[1] != din:
+    if storage not in ("ir_mul", "mul_ir") or features.shape[-1] != din:
         raise ValueError("Invalid channel layout or feature dimension.")
-    if weight.numel() != expected_weight or bias.numel() != expected_bias:
-        raise ValueError("Parameter dimensions do not match the channel map.")
+    if weight.numel() != sum(inputs[i][1] * outputs[j][1] for i, j, _, _ in paths):
+        raise ValueError("Invalid channel weight dimension.")
+    if bias.numel() != sum(size for _, _, size in biases):
+        raise ValueError("Invalid channel bias dimension.")
     result = features.new_empty((features.shape[0], dout))
-    if dout:
-        input_offsets = tuple(
-            sum(dim * mul for dim, mul in inputs[:i]) for i in range(len(inputs))
+    if not result.numel():
+        return result
+    offsets = [sum(d * m for d, m in inputs[:i]) for i in range(len(inputs))]
+    cases, start = [], 0
+    for j, (dim, co) in enumerate(outputs):
+        if not dim * co:
+            continue
+        component = (
+            f"(c-{start}) % {dim}" if storage == "mul_ir" else f"(c-{start}) / {co}"
         )
-        offset = 0
-        precision = "tf32" if torch.backends.cuda.matmul.allow_tf32 else "ieee"
-        for j, (dim, mul) in enumerate(outputs):
-            if dim * mul:
-                bias_offset = next(
-                    (start for dest, start, size in biases if dest == j), -1
-                )
-                tf32 = features.dtype == torch.float32 and precision == "tf32"
-                wide = tf32 and storage == "ir_mul" and mul >= 1024
-                bm, bn = (128 if wide else 32), (64 if tf32 and mul >= 64 else 32)
-                wrap_triton(channel_kernel)[
-                    (triton.cdiv(features.shape[0] * dim, bm), triton.cdiv(mul, bn))
-                ](
-                    features,
-                    weight,
-                    bias,
-                    result,
-                    features.shape[0],
-                    inputs,
-                    paths,
-                    input_offsets,
-                    din,
-                    dout,
-                    offset,
-                    dim,
-                    mul,
-                    j,
-                    bias_offset,
-                    storage == "mul_ir",
-                    precision,
-                    bm,
-                    bn,
-                    32,
-                    num_warps=8 if wide else 4,
-                )
-            offset += dim * mul
-    return result
+        channel = (
+            f"(c-{start}) / {dim}" if storage == "mul_ir" else f"(c-{start}) % {co}"
+        )
+        terms = []
+        for index, destination, sw, scale in paths:
+            if destination != j:
+                continue
+            ci = inputs[index][1]
+            pos = f"u*{dim}+m" if storage == "mul_ir" else f"m*{ci}+u"
+            terms.append(f"""
+                for (int u=0; u<{ci}; ++u)
+                    total += p0[row*{features.stride(0)}+({offsets[index]}+{pos})*{features.stride(1)}]
+                        * (p1[({sw}+u*{co}+v)*{weight.stride(0)}] * T({scale:.17g}));
+            """)
+        for destination, offset, size in biases:
+            if destination == j:
+                terms.append(f"total += p2[({offset}+v)*{bias.stride(0)}];")
+        cases.append(f"""
+            if (c>={start} && c<{start + dim * co}) {{
+                int m={component}, v={channel}; T total=0;
+                {"".join(terms)}
+                out[i]=total;
+            }}
+        """)
+        start += dim * co
+    return pointwise(
+        result,
+        (features, weight, bias),
+        f"I row=i/{dout}; int c=i%{dout}; {''.join(cases)}",
+    )
+
+
+@evaluate.register_fake
+def fake(metadata, features, weight, bias):
+    storage, (_, outputs, _, _, _) = parse_metadata(metadata)
+    return features.new_empty((features.shape[0], sum(d * m for d, m in outputs)))
 
 
 def setup_context(ctx, inputs, output):

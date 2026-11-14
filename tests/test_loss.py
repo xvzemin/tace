@@ -1353,7 +1353,6 @@ for optimizer_type in (torch.optim.Adam, torch.optim.AdamW, optimizers.HybridMuo
         optimizer.step()
         assert torch.isfinite(loss)
     if optimizer_type is optimizers.HybridMuonOptimizer:
-        assert not optimizer._use_flash
         assert bool(optimizer._graphs) == (device == "cuda")
 assert not any(name == "triton" or name.startswith("triton.") for name in sys.modules)
 """

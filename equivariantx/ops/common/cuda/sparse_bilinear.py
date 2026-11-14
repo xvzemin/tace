@@ -1,147 +1,60 @@
 """Native fused sparse products with exact recursive transpose kernels."""
 
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
 from ...precision import validate_uniform
 from ..torch import sparse_bilinear as torch_kernel
-from .tensor_axis import broadcast_strides, row_offset
+from .pointwise import broadcast_offset
+from .pointwise import evaluate as pointwise
 
 
-@triton.jit
-def product_kernel(
-    x,
-    y,
-    left,
-    right,
-    coefficient,
-    output,
-    size,
-    d0,
-    d1,
-    d2,
-    d3,
-    d4,
-    d5,
-    d6,
-    d7,
-    x0,
-    x1,
-    x2,
-    x3,
-    x4,
-    x5,
-    x6,
-    x7,
-    y0,
-    y1,
-    y2,
-    y3,
-    y4,
-    y5,
-    y6,
-    y7,
-    x_last,
-    y_last,
-    OUTPUT: tl.constexpr,
-    TERMS: tl.constexpr,
-    BLOCK: tl.constexpr,
-    TERM_BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    row, component = index // OUTPUT, index % OUTPUT
-    shape = (d0, d1, d2, d3, d4, d5, d6, d7)
-    xo = row_offset(row, shape, (x0, x1, x2, x3, x4, x5, x6, x7))
-    yo = row_offset(row, shape, (y0, y1, y2, y3, y4, y5, y6, y7))
-    if TERMS <= 8:
-        value = tl.full(
-            (BLOCK,),
-            0,
-            tl.float64 if output.dtype.element_ty == tl.float64 else tl.float32,
-        )
-        for k in tl.static_range(TERMS):
-            position = component * TERMS + k
-            a = tl.load(left + position, index < size, 0)
-            b = tl.load(right + position, index < size, 0)
-            c = tl.load(coefficient + position, index < size, 0)
-            u = tl.load(x + xo + a * x_last, index < size, 0)
-            v = tl.load(y + yo + b * y_last, index < size, 0)
-            value += u * v * c
-    else:
-        term = tl.arange(0, TERM_BLOCK)
-        mask = (index[:, None] < size) & (term[None, :] < TERMS)
-        position = component[:, None] * TERMS + term[None, :]
-        a = tl.load(left + position, mask, 0)
-        b = tl.load(right + position, mask, 0)
-        c = tl.load(coefficient + position, mask, 0)
-        u = tl.load(x + xo[:, None] + a * x_last, mask, 0)
-        v = tl.load(y + yo[:, None] + b * y_last, mask, 0)
-        value = tl.sum(u * v * c, axis=1)
-    tl.store(output + index, value, index < size)
-
-
-@triton_op("eqx::sparse_bilinear", mutates_args=())
+@torch.library.custom_op("eqx::sparse_bilinear", mutates_args=(), device_types="cuda")
 def contract(
     x: torch.Tensor, y: torch.Tensor, tables: list[torch.Tensor], role: int
 ) -> torch.Tensor:
-    """Fuse input gathers, coefficient products and their output reduction."""
+    """Fuse input gathers, coefficient products and output reductions."""
     if role not in (0, 1, 2) or len(tables) != 9:
-        raise ValueError(
-            "Sparse bilinear maps require three orientations and role 0, 1 or 2."
-        )
+        raise ValueError("Sparse bilinear maps require three orientations.")
     left, right, coefficient = tables[3 * role : 3 * role + 3]
     if (
         left.ndim != 2
         or right.shape != left.shape
         or coefficient.shape != left.shape
-        or left.shape[-1] < 1
-        or left.dtype not in (torch.int32, torch.int64)
-        or right.dtype not in (torch.int32, torch.int64)
+        or left.shape[1] < 1
     ):
-        raise ValueError(
-            "Sparse bilinear indices and coefficients must have matching two-dimensional shapes."
-        )
+        raise ValueError("Sparse tables must have matching two-dimensional shapes.")
+    if left.dtype not in (torch.int32, torch.int64) or right.dtype not in (
+        torch.int32,
+        torch.int64,
+    ):
+        raise ValueError("Sparse indices must be integers.")
     validate_uniform((x, y, coefficient))
-    if not x.is_cuda or any(
-        value.device != x.device for value in (left, right, coefficient)
-    ):
-        raise ValueError(
-            "Native sparse bilinear maps require all tensors on the same CUDA device."
-        )
     shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1])
-    if len(shape) > 8 or not x.shape[-1] or not y.shape[-1]:
-        return torch_kernel.primal(x, y, tables, role)
-    result = x.new_empty((*shape, left.shape[0]))
-    if result.numel():
-        padding = 8 - len(shape)
-        arguments = (
-            tuple(shape)
-            + (1,) * padding
-            + broadcast_strides(x, shape, 1)
-            + (0,) * padding
-            + broadcast_strides(y, shape, 1)
-            + (0,) * padding
-        )
-        block = 256 if left.shape[1] <= 8 else 32
-        wrap_triton(product_kernel)[(triton.cdiv(result.numel(), block),)](
-            x,
-            y,
-            left.contiguous(),
-            right.contiguous(),
-            coefficient.contiguous(),
-            result,
-            result.numel(),
-            *arguments,
-            x.stride(-1),
-            y.stride(-1),
-            left.shape[0],
-            left.shape[1],
-            block,
-            triton.next_power_of_2(left.shape[1]),
-        )
-    return result
+    left, right, coefficient = (v.contiguous() for v in (left, right, coefficient))
+    width, terms = left.shape
+    result = x.new_empty((*shape, width))
+    if not result.numel():
+        return result
+    if not x.shape[-1] or not y.shape[-1]:
+        return result.zero_()
+    body = f"""
+        I row=i/{width},c=i%{width};
+        I xo={broadcast_offset(x, shape, 1)},yo={broadcast_offset(y, shape, 1)};
+        T total=0;
+        for(int k=0;k<{terms};++k) {{
+            I q=c*{terms}+k;
+            total += p0[xo+p2[q]*{x.stride(-1)}]
+                    *p1[yo+p3[q]*{y.stride(-1)}]*p4[q];
+        }}
+        out[i]=total;
+    """
+    return pointwise(result, (x, y, left, right, coefficient), body)
+
+
+@contract.register_fake
+def fake(x, y, tables, role):
+    shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1])
+    return x.new_empty((*shape, tables[3 * role].shape[0]))
 
 
 def setup_context(ctx, inputs, output):

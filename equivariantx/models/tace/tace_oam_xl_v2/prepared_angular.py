@@ -11,9 +11,8 @@ from contextvars import ContextVar
 from functools import lru_cache
 
 import torch
-import triton
-import triton.language as tl
 
+from equivariantx.ops.common.cuda.pointwise import evaluate as pointwise
 from equivariantx.utils.metadata import parse_metadata
 
 GEOMETRY_SCOPE = ContextVar("oam_xl_prepared_angular", default=None)
@@ -84,31 +83,6 @@ def angular_tables(metadata, dtype, device):
     return indices.to(device), coefficients.to(device)
 
 
-@triton.jit
-def angular_kernel(
-    S,
-    I,
-    C,
-    B,
-    E,
-    SW: tl.constexpr,
-    BW: tl.constexpr,
-    SS: tl.constexpr,
-    ST: tl.constexpr,
-    TERMS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    edge, column = offset // BW, offset % BW
-    total = tl.full((BLOCK,), 0, C.dtype.element_ty)
-    for term in tl.static_range(TERMS):
-        index = tl.load(I + term * BW + column)
-        coefficient = tl.load(C + term * BW + column)
-        value = tl.load(S + edge * SS + index * ST, edge < E, 0)
-        total += coefficient * value
-    tl.store(B + offset, total, offset < E * BW)
-
-
 def prepare_angular(metadata, value):
     """Build live angular forms, with optional invocation-scoped reuse."""
     cache = GEOMETRY_SCOPE.get()
@@ -117,19 +91,18 @@ def prepare_angular(metadata, value):
         return cache[key]
     indices, coefficients = angular_tables(metadata, value.dtype, value.device)
     out = value.new_empty((value.shape[0], indices.shape[1]))
-    angular_kernel[(triton.cdiv(out.numel(), 256),)](
-        value,
-        indices,
-        coefficients,
+    width = out.shape[1]
+    pointwise(
         out,
-        value.shape[0],
-        value.shape[1],
-        out.shape[1],
-        value.stride(0),
-        value.stride(1),
-        indices.shape[0],
-        256,
-        enable_fp_fusion=False,
+        (value, indices, coefficients),
+        f"""
+        I row=i/{width}, column=i%{width}; T total=0;
+        for(int term=0; term<{indices.shape[0]}; ++term) {{
+            I at=term*{width}+column;
+            total += p2[at]*p0[row*{value.stride(0)}+p1[at]*{value.stride(1)}];
+        }}
+        out[i]=total;
+        """,
     )
     if cache is not None:
         # Retain the original to prevent its allocator address from being

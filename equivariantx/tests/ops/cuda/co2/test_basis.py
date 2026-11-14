@@ -16,7 +16,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co2
 from equivariantx.ops import config
-from equivariantx.tests.utils.testing import check_forward_ad
+from equivariantx.tests.utils.testing import check_forward_ad, package_script
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
 
@@ -80,7 +80,7 @@ def test_native_transforms_and_high_order(monkeypatch):
 
 
 @pytest.mark.parametrize("kind", ["inline", "native", "basis"])
-def test_dynamic_joint_aoti_without_eqx(kind, monkeypatch, tmp_path):
+def test_dynamic_joint_aoti(kind, monkeypatch, tmp_path):
     native = kind == "native"
     monkeypatch.setattr(config, "PLANAR_PROJECTION_INLINE", not native)
     monkeypatch.setattr(config, "PLANAR_PROJECTION_NATIVE", native)
@@ -162,10 +162,10 @@ run = torch._inductor.aoti_load_package(sys.argv[1])
 for record in torch.load(sys.argv[2], weights_only=True):
     actual = run(*(value.cuda() for value in record['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), record['output'], atol=2e-10, rtol=2e-10)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data)],
+        [sys.executable, "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,

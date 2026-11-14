@@ -25,7 +25,7 @@ def change_basis(module, features):
     if config.TORCH_REFERENCE:
         return change_basis_reference(module, features)
     values = []
-    for mul, degree, dim, section in getattr(module, "basis_groups", module.paths):
+    for mul, degree, dim, section in module.basis_groups:
         matrix = getattr(module, f"basis_{degree}")
         value = features[..., section].reshape(*features.shape[:-1], mul, dim)
         values.append((value @ (matrix if module.inverse else matrix.T)).flatten(-2))

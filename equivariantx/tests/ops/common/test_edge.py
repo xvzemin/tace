@@ -14,6 +14,72 @@ from equivariantx.tests.ops.common.torch.test_edge import program_case
 from equivariantx.utils.program import Program
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA frame fusion")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("channels", [2, 32])
+def test_frame_fusion_derivatives(dtype, channels, monkeypatch):
+    from equivariantx.ops.common.cuda import execution, frame
+    from equivariantx.utils.program import next_adjoint
+
+    width = 3 * channels
+    layout = repr(
+        (
+            width,
+            width,
+            9,
+            (
+                (
+                    0,
+                    channels,
+                    3,
+                    0,
+                    ((0, 0, 1), (channels, 1, -1), (2 * channels, 2, 1)),
+                ),
+            ),
+        )
+    )
+    program = Program()
+    x = program.input(0, "source", width)
+    y = program.input(0, "target", width)
+    rotation = program.input(1, "edge", 9)
+    weights = program.input(2, "edge", width)
+    empty = program.constant(width, 0)
+    left = program.add("frame", width, (x, rotation, empty), (layout, 2))
+    right = program.add("frame", width, (y, rotation, empty), (layout, 2))
+    local = program.binary("mul", program.binary("add", left, right), weights)
+    output = program.add("frame", width, (empty, rotation, local), (layout, 0))
+    metadata = repr((tuple(program.nodes), ((output, 0, "target"),)))
+    backward = next_adjoint(metadata, (0, 1, 2), (0,), 3)
+    assert execution.execution_plan(backward)[-2]
+
+    contract = frame.contract
+
+    def matrix_only(*args, **kwargs):
+        assert args[6] == 1, "Rotations must remain inside their consuming expression"
+        return contract(*args, **kwargs)
+
+    monkeypatch.setattr(frame, "contract", matrix_only)
+    source = torch.tensor([0, 2, 1, 2, 0, 1, 0], device="cuda")
+    target = torch.tensor([1, 0, 2, 2, 1, 1, 2], device="cuda")
+    values = tuple(
+        (torch.randn(shape, device="cuda", dtype=dtype) * 0.2).requires_grad_()
+        for shape in ((4, width), (7, 9), (7, width))
+    )
+    actual = edge_program("cuda", metadata, 4, source, target, *values, inline=False)[0]
+    expected = evaluate_torch(metadata, values, source, target, 4)[0]
+    tolerance = 3e-6 if dtype == torch.float32 else 3e-12
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+        gradients = [
+            torch.autograd.grad(value.sin().sum(), values, create_graph=True)
+            for value in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([x.flatten() for x in gradient]) * 0.1 for gradient in gradients
+        ]
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("edges", [0, 4])
 @pytest.mark.parametrize("compiler", [None, "aot_eager", "inductor"])
@@ -115,8 +181,18 @@ def test_compiled_functional_derivatives(backend, compiler):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA edge programs")
 @pytest.mark.parametrize("edges", [0, 4])
-def test_native_four_derivatives(edges):
+@pytest.mark.parametrize("node_projection", [False, True])
+def test_native_four_derivatives(edges, node_projection):
     metadata, source, target, values = program_case("cuda", edges)
+    if node_projection:
+        program = Program()
+        x = program.input(0, "source", 2)
+        radial = program.input(1, "edge", 2)
+        weight = program.input(2, "shared", 6)
+        local = program.matmul(x, weight, 1, 2, 3)
+        scale = program.gather(radial, (0, 1, 0))
+        output = program.binary("mul", program.unary("silu", local), scale)
+        metadata = repr((tuple(program.nodes), ((output, 0, "target"),)))
     actual = evaluate(metadata, values, source, target, 3)
     expected = evaluate_torch(metadata, values, source, target, 3)
     actual, expected = [

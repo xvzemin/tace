@@ -1,65 +1,14 @@
 """Fused signed permutations and sheet transforms for Fourier grids."""
 
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
 from ...precision import validate_uniform
 from ..torch import grid as torch_kernel
+from .pointwise import evaluate as pointwise
 
 
-@triton.jit
-def sheet_kernel(
-    features,
-    input_index,
-    output_index,
-    input_sign,
-    output_sign,
-    output,
-    size,
-    channels_width,
-    SHEETS: tl.constexpr,
-    WIDTH: tl.constexpr,
-    REVERSE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = index < size
-    local = index % channels_width
-    if REVERSE:
-        destination = tl.load(output_index + local, mask, 0)
-        sign = tl.load(output_sign + local, mask, 0)
-    else:
-        destination = local
-        sign = 1
-    sheet = (destination // WIDTH) % SHEETS
-    base = destination // (SHEETS * WIDTH) * (SHEETS * WIDTH) + destination % WIDTH
-    value = tl.full(
-        (BLOCK,), 0, tl.float64 if output.dtype.element_ty == tl.float64 else tl.float32
-    )
-    for k in tl.static_range(SHEETS):
-        position = base + k * WIDTH
-        if REVERSE:
-            source = position
-            coefficient = sign
-        else:
-            source = tl.load(input_index + position, mask, 0)
-            coefficient = tl.load(input_sign + position, mask, 0)
-        parity = sheet & k
-        parity = (parity & 1) ^ (parity >> 1)
-        coefficient = coefficient * (1 - 2 * parity)
-        value += (
-            tl.load(
-                features + index // channels_width * channels_width + source, mask, 0
-            )
-            * coefficient
-        )
-    tl.store(output + index, value * (SHEETS**-0.5), mask)
-
-
-@triton_op("eqx::grid_sheet", mutates_args=())
+@torch.library.custom_op("eqx::grid_sheet", mutates_args=(), device_types="cuda")
 def contract(
     features: torch.Tensor,
     input_index: torch.Tensor,
@@ -70,36 +19,50 @@ def contract(
     width: int,
     reverse: bool = False,
 ) -> torch.Tensor:
+    """Fuse signed permutations with the two- or four-sheet transform."""
     validate_uniform((features,))
-    if not features.is_cuda or features.ndim < 1 or sheets not in (2, 4) or width < 1:
-        raise ValueError(
-            "Native grid sheets require CUDA features and two or four sheets."
-        )
     size = features.shape[-1]
     tables = input_index, output_index, input_sign, output_sign
-    if size % (sheets * width) or any(
-        value.ndim != 1 or value.numel() != size or value.device != features.device
-        for value in tables
+    if (
+        sheets not in (2, 4)
+        or width < 1
+        or size % (sheets * width)
+        or any(v.ndim != 1 or v.numel() != size for v in tables)
     ):
         raise ValueError("Sheet permutation dimensions do not match the features.")
     features = features.contiguous()
+    tables = tuple(v.contiguous() for v in tables)
     result = torch.empty_like(features)
-    if result.numel():
-        wrap_triton(sheet_kernel)[(triton.cdiv(result.numel(), 256),)](
-            features,
-            input_index,
-            output_index,
-            input_sign,
-            output_sign,
-            result,
-            result.numel(),
-            features.shape[-1],
-            sheets,
-            width,
-            reverse,
-            256,
-        )
-    return result
+    if not result.numel():
+        return result
+    destination = "p2[local]" if reverse else "local"
+    source = "position" if reverse else "p1[position]"
+    sign = "p4[local]" if reverse else "p3[position]"
+    body = f"""
+        I row=i/{size},local=i%{size},dest={destination};
+        I sheet=(dest/{width})%{sheets},base=dest/{sheets * width}*{sheets * width}+dest%{width};
+        T value=0;
+        for(int k=0;k<{sheets};++k) {{
+            I position=base+k*{width}; int parity=(sheet&k); parity=(parity&1)^(parity>>1);
+            value+=p0[row*{size}+{source}]*T({sign})*T(1-2*parity);
+        }}
+        out[i]=value*T({sheets**-0.5:.17g});
+    """
+    return pointwise(result, (features, *tables), body)
+
+
+@contract.register_fake
+def fake(
+    features,
+    input_index,
+    output_index,
+    input_sign,
+    output_sign,
+    sheets,
+    width,
+    reverse=False,
+):
+    return torch.empty_like(features, memory_format=torch.contiguous_format)
 
 
 def setup_context(ctx, inputs, output):
@@ -157,22 +120,17 @@ def evaluate(
     )
 
 
-@triton_op("eqx::grid_linear", mutates_args=())
+@torch.library.custom_op("eqx::grid_linear", mutates_args=(), device_types="cuda")
 def linear_contract(features: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
     """Use the shared native GEMM while retaining a constant-basis adjoint."""
-    from .channel_linear import evaluate as channel_linear
+    from .matmul import matmul
 
-    inputs, outputs = matrix.shape[1], matrix.shape[0]
-    metadata = repr(
-        ("ir_mul", (((1, inputs),), ((1, outputs),), ((0, 0, 0, 1.0),), (), ()))
-    )
-    value = channel_linear(
-        metadata,
-        features.reshape(-1, inputs),
-        matrix.T.contiguous().flatten(),
-        features.new_empty(0),
-    )
-    return value.reshape(*features.shape[:-1], outputs)
+    return matmul(features.unsqueeze(-2), matrix.T).squeeze(-2)
+
+
+@linear_contract.register_fake
+def linear_fake(features, matrix):
+    return features.new_empty((*features.shape[:-1], matrix.shape[0]))
 
 
 def linear_context(ctx, inputs, output):

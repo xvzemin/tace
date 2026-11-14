@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx.o2.o2grid import O2Grid
 from equivariantx.ops import config
 from equivariantx.ops.torch.o2 import o2grid as kernels
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native grids require CUDA"
@@ -18,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("time_odd", [False, True])
-def test_joint_aoti_without_eqx(time_odd, monkeypatch, tmp_path):
+def test_joint_aoti(time_odd, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "O2_GRID_INLINE", False)
     layer = O2Grid(
         "0ee+0oe+2x1me" + ("+0eo+0oo+2x1mo" if time_odd else ""),
@@ -71,15 +72,15 @@ def test_joint_aoti_without_eqx(time_odd, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():actual=run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual),row['outputs'],atol=3e-9,rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

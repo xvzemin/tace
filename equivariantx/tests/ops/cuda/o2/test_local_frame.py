@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import o2
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Indexed native frames require CUDA"
@@ -109,15 +110,15 @@ def test_default_force_loss_package(inverse, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
 for case in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad(): actual = run(*(value.cuda() for value in case['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), case['output'], atol=3e-9, rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

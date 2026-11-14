@@ -4,7 +4,6 @@
 ################################################################################
 
 
-import math
 from typing import Optional
 
 import torch
@@ -16,95 +15,7 @@ from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
-from ..linear import torchLinear
-from ..softmax import GraphSoftmax
 from ..utils import repr_without
-
-
-class RadialRotaryComplexAttention(torch.nn.Module):
-    def __init__(
-        self,
-        irreps: o2.Irreps,
-        message_irreps: o2.Irreps,
-        num_head: int,
-        num_radial_basis: int,
-    ) -> None:
-        super().__init__()
-        self.irreps = o2.Irreps(irreps)
-        self.message_irreps = o2.Irreps(message_irreps)
-        self.num_head = num_head
-        for _, mul in self.irreps:
-            if num_head < 1 or mul % num_head != 0:
-                raise ValueError("num_head must divide every O2 multiplicity.")
-        for _, mul in self.message_irreps:
-            if mul % num_head != 0:
-                raise ValueError("num_head must divide every message multiplicity.")
-        self.q_proj = o2.Linear(
-            self.irreps,
-            self.irreps,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
-        )
-        self.k_proj = o2.Linear(
-            self.irreps,
-            self.irreps,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
-        )
-        self.radial_proj = torchLinear(num_radial_basis, 2 * num_head)
-        torch.nn.init.zeros_(self.radial_proj.weight)
-        torch.nn.init.zeros_(self.radial_proj.bias)
-        self.scale = math.sqrt(num_head / self.irreps.dim)
-        self.graph_softmax = GraphSoftmax()
-
-    def forward(
-        self,
-        message: torch.Tensor,
-        source_features: torch.Tensor,
-        target_features: torch.Tensor,
-        edge_radial_basis: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_cutoff: torch.Tensor,
-        num_nodes: int,
-    ) -> torch.Tensor:
-        query = self.q_proj(target_features)
-        key = self.k_proj(source_features)
-        score = edge_radial_basis.new_zeros(
-            edge_radial_basis.size(0),
-            self.num_head,
-        )
-        for (ir, mul), ir_slice in zip(self.irreps, self.irreps.slices()):
-            shape = (query.size(0), ir.dim, self.num_head, mul // self.num_head)
-            score = score + (
-                query[..., ir_slice].reshape(shape) * key[..., ir_slice].reshape(shape)
-            ).sum(dim=(1, 3))
-        radial_scale, radial_shift = self.radial_proj(edge_radial_basis).chunk(
-            2, dim=-1
-        )
-        score = score * self.scale * (2.0 * torch.sigmoid(radial_scale)) + radial_shift
-        attention = (
-            self.graph_softmax(
-                score,
-                edge_index[1],
-                num_nodes=num_nodes,
-                exp_rescale=edge_cutoff,
-            )
-            * edge_cutoff
-        )
-
-        outputs = []
-        for (ir, mul), ir_slice in zip(
-            self.message_irreps,
-            self.message_irreps.slices(),
-        ):
-            shape = (
-                message.size(0),
-                ir.dim,
-                self.num_head,
-                mul // self.num_head,
-            )
-            output = message[..., ir_slice].reshape(shape)
-            output = output * attention[:, None, :, None]
-            outputs.append(output.reshape(message.size(0), ir.dim * mul))
-        return torch.cat(outputs, dim=-1)
 
 
 def uv_convolution(
@@ -115,18 +26,11 @@ def uv_convolution(
     edge_index,
     wigner,
     wigner_inv,
-    edge_radial_basis,
     edge_cutoff,
     radial_network=None,
 ):
-    """Call the shared UV kernel without changing checkpoint parameter ownership."""
+    """Evaluate radial weighting and the fused local O(2) MLP."""
     linears = [module.linear_up, module.linear_down]
-    radial_attention = None
-    if module.attention is not None:
-        if edge_radial_basis is None:
-            raise ValueError("O2 radial rotary attention requires edge_radial_basis.")
-        linears.extend((module.attention.q_proj, module.attention.k_proj))
-        radial_attention = module.attention.radial_proj(edge_radial_basis)
     message = module.eqx_tp(
         module.reshape_in(node_feats),
         module.reshape_magnetic(magnetic_edge_attrs)
@@ -138,7 +42,6 @@ def uv_convolution(
         wigner_inv,
         edge_cutoff,
         tuple(value for linear in linears for value in (linear.weight, linear.bias)),
-        radial_attention,
         radial_network=radial_network,
     )
     return module.reshape_out.inverse(message)
@@ -146,21 +49,15 @@ def uv_convolution(
 
 def uv_kernel(module):
     """Describe the native paths; unsupported activations keep their Torch path."""
-    attention = module.attention
     try:
         return eqx_conv.UvO2TensorProductConv(
             module.local_frame_in,
-            module.linear_up,
-            module.nonlinearity,
-            module.linear_down,
+            [module.linear_up, module.linear_down],
+            [module.nonlinearity],
             module.local_frame_out,
             backend="cuda",
+            radial_mode="full",
             frame_edge=getattr(module, "magnetic_frame", None),
-            query=attention.q_proj if attention is not None else None,
-            key=attention.k_proj if attention is not None else None,
-            num_heads=module.num_head if attention is not None else 1,
-            attention_scale=attention.scale if attention is not None else 1.0,
-            eps=attention.graph_softmax.eps if attention is not None else 1e-16,
         )
     except NotImplementedError:
         return None
@@ -179,15 +76,13 @@ class UvO2TensorProductConv(torch.nn.Module):
         Maximum local order.
     even_scalar_act, odd_scalar_act, tensor_act : torch.nn.Module
         Even-scalar, odd-scalar and gate activations. ``None`` gates odd scalars.
-    num_head, num_radial_basis : int
-        Attention heads and radial width used by :class:`UvRraO2TensorProductConv`.
 
     Examples
     --------
     >>> conv = UvO2TensorProductConv(
     ...     "2x0e", "2x0e", num_channel=2, mmax=0,
     ...     even_scalar_act=torch.nn.SiLU(), odd_scalar_act=torch.nn.Tanh(),
-    ...     tensor_act=torch.nn.Sigmoid(), num_head=1, num_radial_basis=4,
+    ...     tensor_act=torch.nn.Sigmoid(),
     ... )
     >>> conv.weight_numel
     4
@@ -203,15 +98,12 @@ class UvO2TensorProductConv(torch.nn.Module):
         even_scalar_act: torch.nn.Module,
         odd_scalar_act: Optional[torch.nn.Module],
         tensor_act: torch.nn.Module,
-        num_head: int,
-        num_radial_basis: int,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
         self.irreps_out = o3.Irreps(irreps_out)
         self.num_channel = num_channel
         self.mmax = min(self.irreps_in.lmax, mmax)
-        self.num_head = num_head
         if any(entry.mul != num_channel for entry in self.irreps_in + self.irreps_out):
             raise ValueError("irreps_in/out multiplicity must equal num_channel.")
         self.local_frame_in = o2.LocalFrame(self.irreps_in, mmax=self.mmax)
@@ -274,11 +166,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         )
         self.weight_numel = self.local_irreps_in.num_irreps
 
-        self.attention = self._build_attention(num_head, num_radial_basis)
         self.eqx_tp = uv_kernel(self)
-
-    def _build_attention(self, num_head, num_radial_basis):
-        return None
 
     def __repr__(self) -> str:
         return repr_without(self, "reshape_in", "reshape_out")
@@ -301,10 +189,6 @@ class UvO2TensorProductConv(torch.nn.Module):
         source_features: torch.Tensor,
         target_features: torch.Tensor,
         conv_weights: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_radial_basis: Optional[torch.Tensor],
-        edge_cutoff: torch.Tensor,
-        num_nodes: int,
     ) -> torch.Tensor:
         inputs = []
         offset = 0
@@ -334,20 +218,6 @@ class UvO2TensorProductConv(torch.nn.Module):
         projected = self.linear_up(features)
         hidden = self.nonlinearity(projected)
         message = self.linear_down(hidden)
-        if self.attention is not None:
-            if edge_radial_basis is None:
-                raise ValueError(
-                    "O2 radial rotary attention requires edge_radial_basis."
-                )
-            message = self.attention(
-                message,
-                source_features,
-                target_features,
-                edge_radial_basis,
-                edge_index,
-                edge_cutoff,
-                num_nodes,
-            )
         return message
 
     def _to_global(
@@ -359,8 +229,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         num_nodes: int,
     ) -> torch.Tensor:
         message = self.local_frame_out.to_global(message, wigner_inv)
-        if self.attention is None:
-            message = message * edge_cutoff
+        message = message * edge_cutoff
         message = scatter_sum(message, edge_index[1], dim=0, dim_size=num_nodes)
         return self.reshape_out.inverse(message)
 
@@ -371,7 +240,6 @@ class UvO2TensorProductConv(torch.nn.Module):
         edge_index: torch.Tensor,
         wigner: Optional[torch.Tensor],
         wigner_inv: Optional[torch.Tensor],
-        edge_radial_basis: Optional[torch.Tensor] = None,
         edge_cutoff: Optional[torch.Tensor] = None,
         radial_network=None,
     ) -> torch.Tensor:
@@ -391,7 +259,6 @@ class UvO2TensorProductConv(torch.nn.Module):
                 edge_index,
                 wigner,
                 wigner_inv,
-                edge_radial_basis,
                 edge_cutoff,
                 radial_network=radial_network,
             )
@@ -402,10 +269,6 @@ class UvO2TensorProductConv(torch.nn.Module):
             source_features,
             target_features,
             conv_weights,
-            edge_index,
-            edge_radial_basis,
-            edge_cutoff,
-            node_features.size(0),
         )
         return self._to_global(
             message,
@@ -413,30 +276,4 @@ class UvO2TensorProductConv(torch.nn.Module):
             wigner_inv,
             edge_cutoff,
             node_features.size(0),
-        )
-
-
-class UvRraO2TensorProductConv(UvO2TensorProductConv):
-    """Local O(2) UV convolution with radial rotary attention.
-
-    Parameters are those of :class:`UvO2TensorProductConv`. Attention uses
-    ``num_head`` heads and ``num_radial_basis`` radial features. Scalar-only
-    inputs retain the ordinary UV convolution.
-
-    Examples
-    --------
-    >>> conv = UvRraO2TensorProductConv(
-    ...     "2x0e+2x1o", "2x0e+2x1o", num_channel=2, mmax=1,
-    ...     even_scalar_act=torch.nn.SiLU(), odd_scalar_act=torch.nn.Tanh(),
-    ...     tensor_act=torch.nn.Sigmoid(), num_head=1, num_radial_basis=4,
-    ... )
-    >>> isinstance(conv.attention, RadialRotaryComplexAttention)
-    True
-    """
-
-    def _build_attention(self, num_head, num_radial_basis):
-        if self.node_irreps.mmax == 0:
-            return None
-        return RadialRotaryComplexAttention(
-            self.node_irreps, self.local_irreps_out, num_head, num_radial_basis
         )

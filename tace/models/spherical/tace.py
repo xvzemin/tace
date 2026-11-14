@@ -16,7 +16,7 @@ from ..radial import ZBLBasis
 from ..time_reversal import with_natural_parity
 from ..utils import compute_fixed_charge_dipole, get_target_irreps, stress_from_virials
 from .basis_change import DirectPolarizability, DirectVirials
-from .default import check_model_config, normalize_atomic_basis
+from .default import check_model_config
 from .les import TACELES, required_les_irreps
 from .paths import to_possible_tp_irreps
 from .readout import (
@@ -68,7 +68,6 @@ class SphericalTACE(torch.nn.Module):
         compile_backend: str = "inductor",
         **kwargs,
     ):
-        atomic_basis = normalize_atomic_basis(atomic_basis)
         cfg = {
             k: v
             for k, v in locals().items()

@@ -9,7 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.torch.attention import normalized_exp_reference
-from equivariantx.tests.utils.testing import check_forward_ad
+from equivariantx.tests.utils.testing import check_forward_ad, package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native attention requires CUDA"
@@ -126,6 +126,7 @@ def test_dynamic_force_aoti_updates(dtype, tmp_path):
 import sys
 import torch
 records = torch.load(sys.argv[2], weights_only=True)
+import equivariantx
 run = torch._inductor.aoti_load_package(sys.argv[1])
 parameters = records['initial'].cuda()
 tolerance = 3e-5 if parameters.dtype == torch.float32 else 3e-10
@@ -150,11 +151,19 @@ for count in (0, 1, 65):
         pass
     else:
         raise AssertionError(f'Accepted out-of-contract edges={count}')
-assert not any(name.split('.')[0] in ('equivariantx', 'e3nn', 'tace') for name in sys.modules)
-print('Four sequential dynamic attention updates passed with Torch only.')
+assert 'tace' not in sys.modules
+print('Four sequential dynamic attention updates passed with registered EQX operators.')
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", script, str(package), str(data)],
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            package_script(script),
+            str(package),
+            str(data),
+        ],
         cwd=tmp_path,
         env={**os.environ, "AOTI_RUNTIME_CHECK_INPUTS": "1"},
         capture_output=True,

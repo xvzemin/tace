@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co2
 from equivariantx.ops import config
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native projections require CUDA"
@@ -17,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("rank", [2, 3])
-def test_joint_aoti_without_eqx(monkeypatch, tmp_path, rank):
+def test_joint_aoti(monkeypatch, tmp_path, rank):
     monkeypatch.setattr(config, "TENSOR_AXIS_INLINE", False)
     layers = {
         backend: (
@@ -79,10 +80,10 @@ run=torch._inductor.aoti_load_package(sys.argv[1])
 for record in torch.load(sys.argv[2],weights_only=True):
     with torch.no_grad(): actual=run(*(value.cuda() for value in record['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual),record['output'],atol=3e-9,rtol=3e-9)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data)],
+        [sys.executable, "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,

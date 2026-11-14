@@ -875,7 +875,7 @@ def test_density_accepts_indexed_features(double_precision, key):
 
 @pytest.fixture
 def small_model():
-    def build(key, attention=False):
+    def build(key):
         config = deepcopy(DEFAULT_MODEL_CONFIG)
         config.update(
             num_layers=2,
@@ -887,7 +887,7 @@ def small_model():
             max_neighbors=None,
         )
         config["atomic_basis"].update(
-            type="uv_rra_o2" if attention else "cgtp",
+            type="cgtp",
             scatter_norm=key,
             num_head=1,
         )
@@ -969,19 +969,6 @@ def test_legacy_scatter_norm_loading(
     ]
     for name in ("energy", "forces"):
         torch.testing.assert_close(outputs[0][name], outputs[1][name])
-
-
-def test_attention_owns_normalization(small_model):
-    model = small_model("density", attention=True)
-    uses_attention = False
-    for layer in model.readout_fn.representation.interactions:
-        if layer.rejector.attention is not None:
-            uses_attention = True
-            assert isinstance(layer.scatter_norm, IdentityScatterNorm)
-            assert not any("edge_density" in name for name in layer.state_dict())
-        else:
-            assert isinstance(layer.scatter_norm, DensityScatterNorm)
-    assert uses_attention
 
 
 def test_unknown_scatter_norm(small_model):

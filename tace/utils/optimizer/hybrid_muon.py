@@ -76,7 +76,7 @@ References
        https://arxiv.org/abs/2502.16982
 .. [3] Moonlight GitHub Repository.
        https://github.com/MoonshotAI/Moonlight
-.. [4] Flash-Muon: Triton-accelerated symmetric matmul for Newton-Schulz.
+.. [4] Flash-Muon.
        https://github.com/lintianyang/flash-muon (MIT License, Tianyang Lin)
 .. [5] Magma: Momentum-Aligned Gradient Masking for Stable Optimizer Updates.
        arXiv:2602.15322, 2026.
@@ -119,22 +119,6 @@ if TYPE_CHECKING:
         Mapping,
         Sequence,
     )
-
-# ============================================================================
-# Triton availability detection
-# ============================================================================
-
-# Autotune initializes the Triton driver, so probe it only when CUDA is usable.
-TRITON_AVAILABLE = False
-if torch.cuda.is_available():
-    try:
-        import triton
-        import triton.language as tl
-
-        triton.runtime.driver.active.get_current_target()
-        TRITON_AVAILABLE = True
-    except (ImportError, OSError, RuntimeError):
-        pass
 
 # ============================================================================
 # Constants
@@ -181,8 +165,7 @@ POLAR_EXPRESS_COEFFICIENTS: tuple[tuple[float, float, float], ...] = tuple(
     for a, b, c in _GRAM_NS_UNMODIFIED_POLAR_EXPRESS_COEFFICIENTS
 )
 # Minimum matrix dimension for flash path to be beneficial.
-# Below this threshold, triton kernel launch overhead dominates over compute,
-# and cuBLAS (via torch.mm/addmm) is faster for small matrices.
+# Smaller matrices use the standard workspace-free matrix products.
 FLASH_MIN_DIM: int = 1024
 # Magma-lite constants (Muon path update damping only)
 MAGMA_TAU: float = 2.0
@@ -205,107 +188,13 @@ class _CudaGraphStep:
     static_grads: tuple[torch.Tensor, ...]
 
 
-# ============================================================================
-# Triton-accelerated symmetric matmul kernel (from flash-muon [4])
-# ============================================================================
-
-if TRITON_AVAILABLE:
-
-    def _get_autotune_config():  # noqa: ANN202
-        return [
-            triton.Config(
-                {
-                    "BLOCK_SIZE_M": blk_m,
-                    "BLOCK_SIZE_K": blk_k,
-                    "GROUP_SIZE_M": 8,
-                },
-                num_stages=n_stages,
-                num_warps=n_warps,
-            )
-            for blk_m in [32, 64, 128]
-            for blk_k in [32, 64]
-            for n_stages in [3, 4, 5]
-            for n_warps in [4, 8]
-        ]
-
-    @triton.autotune(configs=_get_autotune_config(), key=["M", "K"])
-    @triton.jit
-    def _mmt_kernel(
-        x,  # noqa: ANN001
-        y,  # noqa: ANN001
-        M,  # noqa: ANN001
-        K,  # noqa: ANN001
-        stride_xm,  # noqa: ANN001
-        stride_xk,  # noqa: ANN001
-        stride_ym,  # noqa: ANN001
-        stride_yn,  # noqa: ANN001
-        BLOCK_SIZE_M: tl.constexpr,
-        BLOCK_SIZE_K: tl.constexpr,
-        GROUP_SIZE_M: tl.constexpr,
-    ) -> None:
-        """Compute y = x @ x.T, exploiting symmetry (upper triangle only)."""
-        pid = tl.program_id(axis=0)
-        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-        num_pid_n = tl.cdiv(M, BLOCK_SIZE_M)
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = pid // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-        pid_n = (pid % num_pid_in_group) // group_size_m
-        # Skip lower triangle — mirror from upper triangle instead
-        if pid_m > pid_n:
-            return
-
-        offs_xm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        offs_xn = (pid_n * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        offs_k = tl.arange(0, BLOCK_SIZE_K)
-        a_ptrs = x + (offs_xm[:, None] * stride_xm + offs_k[None, :] * stride_xk)
-        b_ptrs = x + (offs_xn[:, None] * stride_xm + offs_k[None, :] * stride_xk)
-
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_M), dtype=tl.float32)
-        for k in range(tl.cdiv(K, BLOCK_SIZE_K)):
-            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-            b = tl.load(b_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-            accumulator = tl.dot(a, tl.permute(b, (1, 0)), accumulator)
-            a_ptrs += BLOCK_SIZE_K * stride_xk
-            b_ptrs += BLOCK_SIZE_K * stride_xk
-
-        c = accumulator.to(x.dtype.element_ty)
-        offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        offs_cn = pid_n * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        c_ptrs = y + stride_ym * offs_cm[:, None] + stride_yn * offs_cn[None, :]
-        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < M)
-        tl.store(c_ptrs, c, mask=c_mask)
-
-        # Transpose-and-copy: mirror upper triangle to lower
-        if pid_m < pid_n:
-            ct_ptrs = y + stride_ym * offs_cn[:, None] + stride_yn * offs_cm[None, :]
-            ct_mask = (offs_cn[:, None] < M) & (offs_cm[None, :] < M)
-            tl.store(ct_ptrs, tl.permute(c, (1, 0)), mask=ct_mask)
-
-    def _matmul_transpose_assign(d_in: torch.Tensor, d_out: torch.Tensor) -> None:
-        """Compute d_out = d_in @ d_in.T using triton symmetric matmul kernel."""
-        d_in = d_in.contiguous()
-        M, K = d_in.shape
-        grid = lambda META: (  # noqa: E731
-            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(M, META["BLOCK_SIZE_M"]),
-        )
-        with torch.cuda.device(d_in.device.index):
-            _mmt_kernel[grid](
-                d_in,
-                d_out,
-                M,
-                K,
-                d_in.stride(0),
-                d_in.stride(1),
-                d_out.stride(0),
-                d_out.stride(1),
-            )
+def _matmul_transpose_assign(d_in: torch.Tensor, d_out: torch.Tensor) -> None:
+    """Compute a Gram matrix into the existing workspace."""
+    torch.mm(d_in, d_in.T, out=d_out)
 
 
 # ============================================================================
-# Flash Newton-Schulz orthogonalization (triton-accelerated)
+# Flash Newton-Schulz orthogonalization (buffered)
 # ============================================================================
 
 
@@ -315,7 +204,7 @@ def _flash_newton_schulz_orth(
     buf2: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Orthogonalize a 2D matrix via two-stage Newton-Schulz with triton-accelerated
+    Orthogonalize a 2D matrix via two-stage Newton-Schulz with buffered
     symmetric matmul. Mathematically equivalent to ``_newton_schulz_orth``
     (same DeepSeek-V4 hybrid schedule: ``NS_STEPS_FAST`` fast iters followed
     by ``NS_STEPS_POLISH`` polish iters).
@@ -841,9 +730,8 @@ class HybridMuonOptimizer(Optimizer):
         matrices. Square matrices continue to use the current standard
         Newton-Schulz implementation. Default is True.
     flash_muon : bool
-        Enable triton-accelerated Newton-Schulz orthogonalization.
-        Requires triton and CUDA. Falls back to PyTorch implementation
-        when triton is unavailable or running on CPU. Ignored when
+        Enable buffered Newton-Schulz orthogonalization.
+        Uses PyTorch matrix products and reusable CUDA buffers. Ignored when
         ``enable_gram=True``.
         Default is True.
     magma_muon : bool
@@ -915,7 +803,7 @@ class HybridMuonOptimizer(Optimizer):
         self._routing: list[dict[str, Any]] = []
 
         # === Step 4. Flash-Muon setup ===
-        self._use_flash = flash_muon and TRITON_AVAILABLE
+        self._use_flash = flash_muon
         # Lazily allocated NS iteration buffers, keyed by (M, device)
         self._ns_buffers: dict[
             tuple[int, torch.device],
@@ -2301,7 +2189,7 @@ class HybridMuonOptimizer(Optimizer):
                     offset += bs
                 all_updates = torch.cat(flat_updates, dim=0)
 
-                # Flash path: triton-accelerated symmetric matmul for single
+                # Flash path: buffered symmetric matmul for single
                 # large matrices (min_dim >= FLASH_MIN_DIM).
                 total_batch = all_updates.size(0)
                 M = min(rows, cols)

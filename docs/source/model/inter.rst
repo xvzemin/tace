@@ -136,31 +136,23 @@ O(2) Linear
 
 Set ``atomic_basis.type`` to select the UV interaction:
 
-* ``uv_o2``: Linear--Gate--Linear without attention.
-* ``uv_rra_o2``: Linear--Gate--Linear with radial rotary attention.
-* ``uv_o2_mag``: magnetic Linear--Gate--Linear without attention, supporting
+* ``uv_o2``: radial weighting followed by Linear--Gate--Linear.
+* ``uv_o2_mag``: the magnetic counterpart, supporting
   SOC and non-SOC features.
 
-``uv_rra_o2`` uses attention normalization for local orders above zero;
-scalar-only inputs retain the UV convolution. ``uv_o2`` and ``uv_o2_mag`` use
+``uv_o2`` and ``uv_o2_mag`` use
 ``atomic_basis.scatter_norm``. ``so2`` always enables radial rotary attention.
-There is no attention switch in the model configuration.
 
 ``TACE_USE_EQX=1`` enables CUDA fusion on float32 and float64 inputs.
-``uv_o2`` and ``uv_o2_mag`` fuse rotation, radial weighting,
+``uv_o2`` and ``uv_o2_mag`` fuse the complete radial MLP, rotation, radial weighting,
 Linear--Gate--Linear, inverse rotation and scatter in a tiled convolution.
-``uv_rra_o2`` uses a separate path with query/key projections and graph softmax.
 CPU and unsupported activations use PyTorch. Both paths support force training
 and recursive higher derivatives.
 
-Previous ``o2`` configurations are resolved to ``uv_o2`` or ``uv_rra_o2`` using
-their saved attention setting; the former default was attention enabled.
-Previous magnetic configurations with attention disabled map to ``uv_o2_mag``.
-Magnetic attention models are no longer supported.
+TACE uses one hidden layer. EQX accepts a sequence of Linear maps with a Gate
+between consecutive maps through :class:`equivariantx.conv.UvO2TensorProductConv`.
 
 .. autoclass:: tace.models.spherical.inter.UvO2Interaction
-
-.. autoclass:: tace.models.spherical.inter.UvRraO2Interaction
 
 .. autoclass:: tace.models.spherical.mtace.O2MagneticInteraction
    :no-members:

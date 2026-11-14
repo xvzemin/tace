@@ -234,7 +234,7 @@ def transverse_reference(tensor, direction, rank):
 
 
 def check_ictd_sparse_backend(d, backend, device, monkeypatch):
-    """Check sparse state, derivatives and legacy dense instances."""
+    """Check sparse state, derivatives and forward-mode transforms."""
     from equivariantx.ops import config
 
     monkeypatch.setattr(config, "ICTD_DENSE_MAX_WIDTH", 0)
@@ -289,25 +289,6 @@ def check_ictd_sparse_backend(d, backend, device, monkeypatch):
             assert actual.tangent is not None
             torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
     assert not module.state_dict()
-    legacy = SPACES[d].ICTD(2, backend=backend, dtype=torch.float32, device=device)
-    legacy.change_of_basis
-    for name in tuple(legacy._buffers):
-        if name != "change_of_basis":
-            delattr(legacy, name)
-    for name in (
-        "stage_names",
-        "transition_names",
-        "coefficient_data",
-        "path_plans",
-        "lefts",
-        "backend",
-    ):
-        delattr(legacy, name)
-    legacy.double()
-    value = torch.randn(2, d**2, dtype=torch.float64, device=device)
-    torch.testing.assert_close(
-        legacy.inverse(legacy(value)), value, atol=3e-12, rtol=3e-12
-    )
 
 
 def ictd_training_problem(d, rank, backend, device, dtype=torch.float64):
@@ -387,7 +368,7 @@ def check_ictd_path_cache(d, backend, device, monkeypatch):
 
 
 def check_ictd_native_aoti(d, dtype, monkeypatch, tmp_path):
-    """Load a complete force-loss chain with Torch only and update its weights."""
+    """Load an exported force-loss chain and update its weights."""
     import os
     import subprocess
     import sys
@@ -425,15 +406,15 @@ def check_ictd_native_aoti(d, dtype, monkeypatch, tmp_path):
             [
                 sys.executable,
                 "-c",
-                """
+                package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2],weights_only=True):
     with torch.no_grad():actual=run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.double().cpu() for v in actual),row['outputs'],atol=float(sys.argv[3]),rtol=float(sys.argv[3]))
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
                 str(package),
                 str(data),
                 "3e-5" if dtype == torch.float32 else "3e-9",
@@ -513,3 +494,13 @@ def check_linear_forward_ad(space, kind, device):
     check_forward_ad(
         modules["cuda"], modules["torch"], tuple(v.requires_grad_() for v in values)
     )
+
+
+def package_script(script):
+    """Load the checked-out EQX operators before executing an AOTI package."""
+    from pathlib import Path
+
+    import equivariantx
+
+    root = str(Path(equivariantx.__file__).resolve().parent.parent)
+    return f"import sys\nsys.path.insert(0, {root!r})\nimport equivariantx\n" + script

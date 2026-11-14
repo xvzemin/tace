@@ -34,7 +34,10 @@ def test_high_order(function):
         tangent = torch.randn_like(value) * 0.2
         losses = [(gradient * tangent).sum() for gradient in gradients]
     tangent = torch.randn_like(value)
-    reference = lambda x: x @ matrix
+
+    def reference(x):
+        return x @ matrix
+
     for fn, ref in (
         (function, reference),
         (
@@ -74,15 +77,11 @@ def test_fullgraph_compile():
     )
 
 
-def test_change_basis_legacy_and_precision():
+def test_change_basis_precision():
     from equivariantx.tests.utils.testing import check_method_precision
 
     layer = co3.ChangeOfBasis("2x2e+1x3e").double()
     value = torch.randn(5, layer.input_dim, dtype=torch.float64)
-    expected = layer(value)
-    del layer.backend
-    del layer.basis_groups
-    torch.testing.assert_close(layer(value), expected)
     layer.float().double()
     for rank in (2, 3):
         torch.testing.assert_close(

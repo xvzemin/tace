@@ -175,7 +175,7 @@ EQX in TACE
      - ``equivariantx.conv.UuO2TensorProductConv``
    * - ``w6j_mag``
      - ``equivariantx.conv.Wigner6jTensorProductConv``
-   * - ``uv_o2`` / ``uv_rra_o2`` / ``uv_o2_mag``
+   * - ``uv_o2`` / ``uv_o2_mag``
      - ``equivariantx.conv.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
      - ``equivariantx.models.tace.tece_oam_rra``
@@ -184,8 +184,8 @@ EQX in TACE
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx.models.tace.nonlinear_ace``
 
-By default, EQX-backed convolutions fuse only the final radial MLP projection;
-hidden layers use PyTorch and can be optimized by Inductor. Set
+Except for ``uv_o2`` and ``uv_o2_mag``, EQX-backed convolutions default to fusing
+the final radial MLP projection; hidden layers use PyTorch. Set
 ``TACE_MEMORY_FIRST=1`` to fuse the complete radial MLP instead. See
 :ref:`tace-memory-first` for the supported convolutions and memory tradeoff.
 
@@ -194,10 +194,10 @@ the model's ``mul_ir`` layout.
 Inductor reuses native projections and gates across force derivatives.
 Convolutions retain EQX fusion.
 
-For ``uv_o2`` and ``uv_o2_mag``, EQX evaluates local
+For ``uv_o2`` and ``uv_o2_mag``, EQX evaluates the complete radial MLP, local
 rotation, radial weighting, Linear--Gate--Linear, inverse rotation and node
 aggregation in one differentiable, tiled convolution. Channel maps use GEMM
-within each tile; full-edge hidden features are recomputed for force training
+within each tile; tile-local hidden features are recomputed for force training
 instead of being saved by autograd. This path is enabled by ``TACE_USE_EQX=1``
 and does not require ``torch.compile`` or ``TACE_MEMORY_FIRST=1``. RRA uses a
 separate path with query/key projections and graph softmax.

@@ -436,7 +436,6 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
             backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.weight_numel = self.local_irreps_in.num_irreps
-        self.attention = None
         self.eqx_tp = uv_kernel(self)
 
     def __repr__(self) -> str:
@@ -550,7 +549,6 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
                 edge_index,
                 wigner,
                 wigner_inv,
-                edge_radial_basis,
                 edge_cutoff,
                 radial_network=radial_network,
             )

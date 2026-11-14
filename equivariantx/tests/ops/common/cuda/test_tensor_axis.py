@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.cuda.tensor_axis import evaluate
 from equivariantx.ops.common.torch.tensor_axis import reference
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native tensor axes require CUDA"
@@ -38,7 +39,7 @@ def test_dynamic_inductor():
         )
 
 
-def test_joint_aoti_without_eqx(tmp_path):
+def test_joint_aoti(tmp_path):
     x = (
         torch.randn(2, 3, 27, device="cuda", dtype=torch.float64) * 0.2
     ).requires_grad_()
@@ -75,14 +76,15 @@ def test_joint_aoti_without_eqx(tmp_path):
     script = """
 import sys
 import torch
+import equivariantx
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for record in torch.load(sys.argv[2],weights_only=True):
     with torch.no_grad(): actual=run(*(value.cuda() for value in record['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual),record['output'],atol=3e-10,rtol=3e-10)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data)],
+        [sys.executable, "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,

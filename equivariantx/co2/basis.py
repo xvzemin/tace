@@ -168,7 +168,7 @@ class ChangeOfBasis(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
+        if self.backend == "cuda" and features.is_cuda:
             from ..ops.cuda.co2 import basis as cuda_kernel
 
             return cuda_kernel.change_basis(self, features)

@@ -8,7 +8,6 @@ from e3nn import o3
 
 
 class LayoutTransform(torch.nn.Module):
-
     _LAYOUTS = (
         "ir_mul",
         "mul_ir",
@@ -126,13 +125,3 @@ class LayoutTransform(torch.nn.Module):
             f"{self.__class__.__name__}({self.irreps.simplify()}, "
             f"{self.layout_in} -> {self.layout_out})"
         )
-
-    def __setstate__(self, state) -> None:
-        super().__setstate__(state)
-        if not hasattr(self, "layout_in"):
-            self.layout_in = "flatten_mul_ir"
-            self.layout_out = "ir_mul"
-        if not hasattr(self, "dim"):
-            self.dim = self.irreps.dim
-        if "_forward_index" not in self._buffers:
-            self._setup_indices()

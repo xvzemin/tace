@@ -14,17 +14,12 @@ from tace.utils.env import acceleration_enabled
 
 def _prune_removed_keys(model_config: Dict) -> Dict:
     """Remove legacy architecture keys from a saved model config."""
-    from tace.models.spherical.default import (
-        DEFAULT_MODEL_CONFIG,
-        normalize_atomic_basis,
-    )
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
     pruned_config = model_config.copy()
     for section in ("atomic_basis", "product_basis"):
         saved_section = model_config.get(section)
         if isinstance(saved_section, dict):
-            if section == "atomic_basis":
-                saved_section = normalize_atomic_basis(saved_section)
             allowed_keys = DEFAULT_MODEL_CONFIG[section].keys()
             pruned_config[section] = {
                 key: value

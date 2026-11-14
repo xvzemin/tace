@@ -1,54 +1,36 @@
 """Compiler-visible fused Clenshaw evaluation and exact polynomial adjoints."""
 
 import torch
-import triton
-import triton.language as tl
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
+from ...common.cuda.pointwise import evaluate as pointwise
 from ...precision import validate_uniform
 from ...torch.nn import activation as torch_kernel
 
 
-@triton.jit
-def clenshaw_kernel(
-    source, coefficients, output, size, DEGREE: tl.constexpr, BLOCK: tl.constexpr
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = index < size
-    x = tl.load(source + index, valid, 0)
-    previous = tl.full((BLOCK,), 0, x.dtype)
-    current = tl.full((BLOCK,), 0, x.dtype)
-    for degree in tl.static_range(DEGREE, 0, -1):
-        next_value = tl.load(coefficients + degree) + 2 * x * current - previous
-        previous = current
-        current = next_value
-    value = tl.load(coefficients) + x * current - previous
-    tl.store(output + index, value, valid)
-
-
-@triton_op("eqx::chebyshev", mutates_args=())
+@torch.library.custom_op("eqx::chebyshev", mutates_args=(), device_types="cuda")
 def chebyshev(features: torch.Tensor, coefficients: torch.Tensor) -> torch.Tensor:
-    """Evaluate a fixed or trainable Chebyshev series in FP32 or FP64."""
+    """Evaluate a Chebyshev series using the Clenshaw recurrence."""
     validate_uniform((features, coefficients))
-    if not features.is_cuda or coefficients.ndim != 1 or not coefficients.numel():
-        raise ValueError(
-            "Native Chebyshev evaluation requires CUDA and a coefficient vector."
-        )
+    if coefficients.ndim != 1 or not coefficients.numel():
+        raise ValueError("Chebyshev coefficients must be a nonempty vector.")
     features, coefficients = features.contiguous(), coefficients.contiguous()
     result = torch.empty_like(features)
-    if result.numel():
-        wrap_triton(clenshaw_kernel)[(triton.cdiv(result.numel(), 256),)](
-            features,
-            coefficients,
-            result,
-            result.numel(),
-            coefficients.numel() - 1,
-            256,
-            enable_fp_fusion=False,
-        )
-    return result
+    body = f"""
+        T x=p0[i],previous=0,current=0;
+        for(int k={coefficients.numel() - 1};k>0;--k) {{
+            T value=p1[k]+T(2)*x*current-previous;
+            previous=current; current=value;
+        }}
+        out[i]=p1[0]+x*current-previous;
+    """
+    return pointwise(result, (features, coefficients), body)
+
+
+@chebyshev.register_fake
+def fake(features, coefficients):
+    return torch.empty_like(features, memory_format=torch.contiguous_format)
 
 
 def setup_context(ctx, inputs, output):

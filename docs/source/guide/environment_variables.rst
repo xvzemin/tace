@@ -119,8 +119,11 @@ Radial MLP fusion
 -----------------
 
 ``TACE_MEMORY_FIRST`` selects the radial MLP fusion boundary for EQX-backed
-CGTP, Cartesian CGTP, O2-CGTP, UU-O2, UV-O2 (including magnetic O2), and TECE
+CGTP, Cartesian CGTP, O2-CGTP, UU-O2, and TECE
 convolutions.
+
+``uv_o2`` and ``uv_o2_mag`` always stream the complete radial MLP when EQX is
+enabled, independently of this option. Edge embedding remains unchanged.
 
 .. list-table::
    :header-rows: 1

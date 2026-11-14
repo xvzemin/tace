@@ -476,9 +476,8 @@ def test_uv_convolution_geometry_precision(backend):
     layer = (
         eqx_conv.UvO2TensorProductConv(
             frame,
-            up,
-            gate,
-            down,
+            [up, down],
+            [gate],
             frame,
             backend=backend,
         )

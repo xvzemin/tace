@@ -10,13 +10,14 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import config
 from equivariantx.tests.ops.torch.co3.ictp.test_tensor_product import training_problem
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is unavailable"
 )
 
 
-def test_joint_aoti_without_eqx(monkeypatch, tmp_path):
+def test_joint_aoti(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
     monkeypatch.setattr(config, "ICTP_INLINE", False)
     monkeypatch.setattr(config, "SPHERICAL_INLINE", False)
@@ -47,15 +48,15 @@ def test_joint_aoti_without_eqx(monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2],weights_only=True):
     with torch.no_grad():actual=run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual),row['outputs'],atol=3e-9,rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

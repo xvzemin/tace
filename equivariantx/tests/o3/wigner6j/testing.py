@@ -151,19 +151,22 @@ def check_package(kind, tmp_path, device="cuda", **options):
         )
     data = tmp_path / "data.pt"
     torch.save(records, data)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """
+    from equivariantx.tests.utils.testing import package_script
+
+    script = """
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad(): actual = run(*(value.to(sys.argv[3]) for value in row['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), row['outputs'], atol=3e-9, rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert ('equivariantx' in sys.modules) == (sys.argv[3] == 'cuda')
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            package_script(script) if device == "cuda" else script,
             str(package),
             str(data),
             device,
@@ -266,10 +269,19 @@ run = torch._inductor.aoti_load_package(sys.argv[1])
 for record in torch.load(sys.argv[2], weights_only=True):
     actual = run(*(value.to(sys.argv[3]) for value in record['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), record['outputs'], atol=3e-9, rtol=3e-9)
-assert 'equivariantx' not in sys.modules
+assert ('equivariantx' in sys.modules) == (sys.argv[3] == 'cuda')
 """
+    from equivariantx.tests.utils.testing import package_script
+
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data), device],
+        [
+            sys.executable,
+            "-c",
+            package_script(script) if device == "cuda" else script,
+            str(package),
+            str(data),
+            device,
+        ],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,

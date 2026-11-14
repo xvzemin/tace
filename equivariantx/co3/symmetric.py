@@ -12,7 +12,7 @@ from ..ops.torch.co3 import symmetric as torch_kernel
 
 def execution(module, tensor):
     """Resolve a native backend without loading it for CPU execution."""
-    if getattr(module, "backend", "torch") == "cuda" and tensor.is_cuda:
+    if module.backend == "cuda" and tensor.is_cuda:
         from ..ops.cuda.co3 import symmetric as cuda_kernel
 
         return cuda_kernel
@@ -201,14 +201,7 @@ class SymmetricBasis(torch.nn.Module):
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for name, value in symmetric_basis(self.rank).items():
-            if name not in self._buffers:
-                value = (
-                    value.to(self.norm)
-                    if value.is_floating_point()
-                    else value.to(self.norm.device)
-                )
-                self.register_buffer(name, value.clone(), persistent=False)
-            elif value.is_floating_point():
+            if value.is_floating_point():
                 self._buffers[name] = value.to(self._buffers[name]).clone()
         return self
 

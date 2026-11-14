@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co3
 from equivariantx.ops import config
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
 
@@ -58,7 +59,7 @@ def test_high_order_and_transforms():
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_joint_aoti_without_eqx(tmp_path, backend):
+def test_joint_aoti(tmp_path, backend):
     layer = co3.Projector("2x2e", backend=backend).double().cuda()
     value = torch.randn(5, 18, dtype=torch.float64, device="cuda", requires_grad=True)
     weight = torch.randn(18, dtype=torch.float64, device="cuda", requires_grad=True)
@@ -95,10 +96,10 @@ for record in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = runner(*(value.cuda() for value in record['inputs']))
     torch.testing.assert_close(tuple(x.cpu() for x in actual), record['output'], atol=2e-10, rtol=2e-10)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data)],
+        [sys.executable, "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,
@@ -114,7 +115,7 @@ def test_change_basis_native(inverse, dtype, rows):
     layer = co3.ChangeOfBasis("2x0e+2x1o+3x2e+1x3e", inverse, backend="cuda")
     layer = layer.to(device="cuda", dtype=dtype)
     reference = co3.ChangeOfBasis(
-        layer.irreps_in if inverse else layer.irreps_out, inverse
+        layer.irreps_in if inverse else layer.irreps_out, inverse, backend="torch"
     )
     reference = reference.to(device="cuda", dtype=dtype)
     value = torch.randn(rows, layer.input_dim, 2, device="cuda", dtype=dtype)[..., 0]
@@ -129,7 +130,9 @@ def test_change_basis_native(inverse, dtype, rows):
 @pytest.mark.parametrize("inverse", [False, True])
 def test_change_basis_derivatives(inverse, monkeypatch):
     layer = co3.ChangeOfBasis("2x2e+1x2o+1x3e", inverse, backend="cuda").double().cuda()
-    reference = co3.ChangeOfBasis("2x2e+1x2o+1x3e", inverse).double().cuda()
+    reference = (
+        co3.ChangeOfBasis("2x2e+1x2o+1x3e", inverse, backend="torch").double().cuda()
+    )
     value = (
         torch.randn(3, layer.input_dim, dtype=torch.float64, device="cuda") * 0.2
     ).requires_grad_()
@@ -161,7 +164,7 @@ def test_change_basis_derivatives(inverse, monkeypatch):
     assert layer.backend == "cuda" and reference.backend == "torch"
 
 
-def test_change_basis_dynamic_aoti_without_eqx(tmp_path):
+def test_change_basis_dynamic_aoti(tmp_path):
     from torch.fx.experimental.dynamic_spec import (
         ParamsSpec,
         ShapesSpec,
@@ -241,10 +244,10 @@ run = torch._inductor.aoti_load_package(sys.argv[1])
 for record in torch.load(sys.argv[2], weights_only=True):
     actual = run(*(value.cuda() for value in record['inputs']))
     torch.testing.assert_close(tuple(x.cpu() for x in actual), record['output'], atol=2e-10, rtol=2e-10)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", script, str(package), str(data)],
+        [sys.executable, "-I", "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,

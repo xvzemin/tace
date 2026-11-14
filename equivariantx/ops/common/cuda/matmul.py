@@ -3,91 +3,63 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
-from torch.fx.experimental.symbolic_shapes import statically_known_true
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active, nested_forward_ad
 from ...precision import validate_uniform
 from ..torch.matmul import matmul as torch_matmul
+from .pointwise import launch
 
 
-@triton.jit(do_not_specialize=["M", "N", "K", "A0", "A1", "A2", "B0", "B1", "B2"])
-def kernel(
-    left,
-    right,
-    output,
-    M,
-    N,
-    K,
-    A0,
-    A1,
-    A2,
-    B0,
-    B1,
-    B2,
-    BM: tl.constexpr,
-    BN: tl.constexpr,
-    BK: tl.constexpr,
-):
-    batch = tl.program_id(2)
-    row = tl.program_id(0) * BM + tl.arange(0, BM)
-    col = tl.program_id(1) * BN + tl.arange(0, BN)
-    inner = tl.arange(0, BK)
-    accumulator = tl.zeros((BM, BN), tl.float32)
-    for step in range(tl.cdiv(K, BK)):
-        k = step * BK + inner
-        a = tl.load(
-            left + batch * A0 + row[:, None] * A1 + k[None, :] * A2,
-            (row[:, None] < M) & (k[None, :] < K),
-            0,
-        )
-        b = tl.load(
-            right + batch * B0 + k[:, None] * B1 + col[None, :] * B2,
-            (k[:, None] < K) & (col[None, :] < N),
-            0,
-        )
-        accumulator = tl.dot(a, b, accumulator, input_precision="ieee")
-    tl.store(
-        output + batch * M * N + row[:, None] * N + col[None, :],
-        accumulator,
-        (row[:, None] < M) & (col[None, :] < N),
-    )
-
-
-@triton_op("eqx::ieee_bmm", mutates_args=())
+@torch.library.custom_op("eqx::ieee_bmm", mutates_args=(), device_types="cuda")
 def bmm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-    """Apply a local FP32 policy while exposing kernels to Inductor."""
+    """Multiply strided FP32 batches with IEEE CUDA arithmetic."""
     validate_uniform((left, right))
-    if not left.is_cuda or left.dtype != torch.float32:
-        raise ValueError("The native IEEE kernel requires FP32 CUDA operands.")
-    if (
-        left.ndim != 3
-        or right.ndim != 3
-        or left.shape[0] != right.shape[0]
-        or left.shape[-1] != right.shape[-2]
-    ):
+    if left.dtype != torch.float32 or left.ndim != 3 or right.ndim != 3:
+        raise ValueError("IEEE batched products require FP32 CUDA matrices.")
+    if left.shape[0] != right.shape[0] or left.shape[-1] != right.shape[-2]:
         raise ValueError("Batched matrix dimensions do not match.")
     batch, m, k = left.shape
     n = right.shape[-1]
     output = left.new_empty((batch, m, n))
-    if not statically_known_true(output.numel() == 0):
-        wrap_triton(kernel)[(triton.cdiv(m, 32), triton.cdiv(n, 32), batch)](
-            left,
-            right,
-            output,
-            m,
-            n,
-            k,
-            *left.stride(),
-            *right.stride(),
-            32,
-            32,
-            32,
-            num_warps=4,
-        )
+    if not output.numel():
+        return output
+    source = """
+    using I=long long;
+    extern "C" __global__ void run(const float* a,const float* b,float* out,
+        I batch,I m,I n,I k,I a0,I a1,I a2,I b0,I b1,I b2) {
+        __shared__ float av[16][16],bv[16][16];
+        I tiles_m=(m+15)/16,tiles_n=(n+15)/16;
+        for(I tile=blockIdx.x;tile<batch*tiles_m*tiles_n;tile+=gridDim.x) {
+            I z=tile/(tiles_m*tiles_n);
+            I row=((tile/tiles_n)%tiles_m)*16+threadIdx.x/16;
+            I col=(tile%tiles_n)*16+threadIdx.x%16;
+            int tx=threadIdx.x%16,ty=threadIdx.x/16;
+            float total=0;
+            for(I first=0;first<k;first+=16) {
+                av[ty][tx]=(row<m && first+tx<k) ? a[z*a0+row*a1+(first+tx)*a2] : 0;
+                bv[ty][tx]=(col<n && first+ty<k) ? b[z*b0+(first+ty)*b1+col*b2] : 0;
+                __syncthreads();
+                #pragma unroll
+                for(int q=0;q<16;++q) total=fmaf(av[ty][q],bv[q][tx],total);
+                __syncthreads();
+            }
+            if(row<m && col<n) out[(z*m+row)*n+col]=total;
+            __syncthreads();
+        }
+    }
+    """
+    launch(
+        source,
+        (left, right, output),
+        (batch, m, n, k, *left.stride(), *right.stride()),
+        batch * ((m + 15) // 16) * ((n + 15) // 16) * 256,
+    )
     return output
+
+
+@bmm.register_fake
+def fake(left, right):
+    return left.new_empty((left.shape[0], left.shape[1], right.shape[2]))
 
 
 def setup_context(ctx, inputs, output):

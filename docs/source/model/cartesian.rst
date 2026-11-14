@@ -8,7 +8,7 @@ TACE. ``atomic_basis.type: cgtp`` uses Cartesian contractions based on the
 The node product block also uses Cartesian tensors. Weights, biases, and
 coupling paths are unchanged.
 
-``uv_o2``, ``uv_rra_o2`` and ``uu_o2`` use direct Cartesian plane restriction
+``uv_o2`` and ``uu_o2`` use direct Cartesian plane restriction
 and ``equivariantx.co2`` operators. Each local order stores ``2**m`` Cartesian entries per channel,
 without first constructing ``3**m`` transverse tensors. UV attention evaluates
 Frobenius inner products in the same Cartesian storage.

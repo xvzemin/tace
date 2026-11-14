@@ -73,7 +73,7 @@ def test_model_config_class_names():
 
 @pytest.mark.parametrize("basis", ["spherical", "cartesian"])
 @pytest.mark.parametrize("compiled", [False, True])
-@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2", "uv_rra_o2", "uv_o2_mag"])
+@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2", "uv_o2_mag"])
 def test_model_target_aliases(
     tmp_path, monkeypatch, double_precision, basis, compiled, interaction
 ):
@@ -92,11 +92,6 @@ def test_model_target_aliases(
     path = tmp_path / "model.pt"
     export_tace(reference, str(path))
     saved = torch.load(path, weights_only=False)
-    if interaction != "cgtp":
-        saved["cfg"]["atomic_basis"].update(
-            type=["cgtp", "o2_mag" if interaction == "uv_o2_mag" else "o2"],
-            use_radial_rotary_attention=interaction == "uv_rra_o2",
-        )
     names = [f"tace.models.{old_package}.tace.{old_name}"]
     if basis == "spherical":
         names.append(None)
@@ -121,10 +116,6 @@ def test_model_target_aliases(
             == reference.readout_fn.model_config["atomic_basis"]
         )
         assert (
-            "use_radial_rotary_attention"
-            not in (restored.readout_fn.model_config["atomic_basis"])
-        )
-        assert (
             dict(restored.named_parameters()).keys()
             == dict(reference.named_parameters()).keys()
         )
@@ -142,7 +133,6 @@ def test_model_target_aliases(
         "co3",
         "o2_cgtp",
         "uv_o2",
-        "uv_rra_o2",
         "uu_o2",
         "so2",
         "spherical_tensor",
@@ -268,7 +258,6 @@ def test_native_cartesian_model(
             if hasattr(block.rejector, "eqx_tp"):
                 if interaction in (
                     "uv_o2",
-                    "uv_rra_o2",
                     "uu_o2",
                     "uv_o2_mag",
                     "uv_o2_mag_non_soc",
@@ -735,7 +724,6 @@ def test_nonlinear_product_loading(tmp_path, double_precision, product):
         "cgtp",
         "so2",
         "uv_o2",
-        "uv_rra_o2",
         "uv_o2_mag",
         "mace",
         "nonlinear_cgtp",

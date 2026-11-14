@@ -1,70 +1,60 @@
 """AOT-visible native scalar geometry and recursively generated transpose kernels."""
 
-import hashlib
-import linecache
 from functools import lru_cache
 
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
-from triton.language.extra.cuda import libdevice
 
 from ....utils.autograd import forward_ad_active
 from ....utils.metadata import parse_metadata
 from ..scalar import rotation_program
 from ..torch import scalar as torch_kernel
+from .pointwise import launch
 
 
 @lru_cache(maxsize=128)
-@torch.compiler.assume_constant_result
-def generated_kernel(nodes, outputs, widths):
-    """Emit one scalar expression per statement instead of growing Triton tuples."""
-    inputs = [f"p{i}" for i in range(len(widths))]
-    results = [f"out{i}" for i in range(len(outputs))]
-    lines = [
-        "def geometry("
-        + ", ".join((*inputs, *results, "count", "BLOCK: tl.constexpr"))
-        + "):",
-        "    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)",
-        "    mask = row < count",
-        "    dtype: tl.constexpr = p0.dtype.element_ty",
-    ]
+def generated_kernel(nodes, outputs, widths, dtype):
+    """Generate scalar CUDA expressions for an alignment chart or its adjoint."""
+    scalar = "double" if dtype == torch.float64 else "float"
+    prefix = "d" if dtype == torch.float64 else "f"
+    parameters = [f"const T* p{i}" for i in range(len(widths))]
+    parameters.extend(f"T* out{i}" for i in range(len(outputs)))
+    lines = []
     for index, (op, *args) in enumerate(nodes):
         if op == "constant":
-            value = f"tl.full((BLOCK,), {args[0]!r}, dtype)"
+            expression = f"T({args[0]:.17g})"
         elif op == "input":
-            value = (
-                f"tl.load(p{args[0]} + row * {widths[args[0]]} + {args[1]}, mask, 0)"
-            )
+            expression = f"p{args[0]}[row*{widths[args[0]]}+{args[1]}]"
         else:
             names = [f"v{k}" for k in args]
             if op == "select":
-                value = "tl.where(" + ", ".join(names) + ")"
+                expression = f"({names[0]} ? {names[1]} : {names[2]})"
             elif op == "neg":
-                value = "-" + names[0]
+                expression = f"-{names[0]}"
             elif op in ("sqrt", "exp"):
-                value = f"libdevice.{op}({names[0]})"
+                expression = f"{op}({names[0]})"
+            elif op in ("add", "mul"):
+                expression = f"__{prefix}{op}_rn({names[0]},{names[1]})"
             else:
-                operator = {"add": "+", "mul": "*", "div": "/", "lt": "<", "le": "<="}[
-                    op
-                ]
-                value = f"{names[0]} {operator} {names[1]}"
-        lines.append(f"    v{index} = {value}")
+                expression = (
+                    f"{names[0]} "
+                    + {"div": "/", "lt": "<", "le": "<="}[op]
+                    + f" {names[1]}"
+                )
+        lines.append(f"auto v{index}={expression};")
     for group, output in enumerate(outputs):
         for column, node in enumerate(output):
-            lines.append(
-                f"    tl.store(out{group} + row * {len(output)} + {column}, v{node}, mask)"
-            )
-    source = "\n".join(lines) + "\n"
-    filename = "<eqx_scalar_" + hashlib.sha256(source.encode()).hexdigest() + ">"
-    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
-    namespace = {"tl": tl, "libdevice": libdevice, "__name__": __name__}
-    exec(compile(source, filename, "exec"), namespace)
-    return triton.jit(namespace["geometry"])
+            lines.append(f"out{group}[row*{len(output)}+{column}]=v{node};")
+    return f"""
+            using T={scalar}; using I=long long;
+        extern "C" __global__ void run({",".join(parameters)},I count) {{
+            for(I row=I(blockIdx.x)*blockDim.x+threadIdx.x;row<count;row+=I(gridDim.x)*blockDim.x) {{
+                {"".join(lines)}
+            }}
+        }}
+    """
 
 
-@triton_op("eqx::scalar_geometry", mutates_args=())
+@torch.library.custom_op("eqx::scalar_geometry", mutates_args=(), device_types="cuda")
 def contract(key: str, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
     axis, eps, quaternion, derivative = parse_metadata(key)
     nodes, outputs, widths = rotation_program(
@@ -74,22 +64,25 @@ def contract(key: str, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         "float" if inputs[0].dtype == torch.float32 else "double",
         derivative,
     )
-    if len(nodes) > 2048:
-        return list(torch_kernel.primal(axis, eps, quaternion, derivative, *inputs))
     inputs = [value.contiguous() for value in inputs]
     count = inputs[0].shape[0]
     results = [inputs[0].new_empty((count, len(group))) for group in outputs]
-    if count:
-        wrap_triton(generated_kernel(nodes, outputs, widths))[
-            (triton.cdiv(count, 128),)
-        ](
-            *inputs,
-            *results,
-            count,
-            128,
-            enable_fp_fusion=False,
-        )
+    code = generated_kernel(nodes, outputs, widths, inputs[0].dtype)
+    launch(code, (*inputs, *results), (count,), count, threads=128)
     return results
+
+
+@contract.register_fake
+def fake(key, inputs):
+    axis, eps, quaternion, derivative = parse_metadata(key)
+    _, outputs, _ = rotation_program(
+        axis,
+        eps,
+        quaternion,
+        "float" if inputs[0].dtype == torch.float32 else "double",
+        derivative,
+    )
+    return [inputs[0].new_empty((inputs[0].shape[0], len(group))) for group in outputs]
 
 
 def setup_context(ctx, inputs, output):

@@ -5,58 +5,7 @@ import torch
 from equivariantx.o2.clebsch_gordan import coupling_entries
 
 from ... import config
-from ...common.sparse_coefficients import bilinear_coefficients, bilinear_tables
-from ...common.torch import sparse_bilinear
-
-
-class SparseMap(torch.nn.Module):
-    """Store a fixed sparse bilinear map and its two exact transposes."""
-
-    def __init__(self, dimensions, entries):
-        super().__init__()
-        self.dimensions, self.entries = dimensions, tuple(entries)
-        for index, value in enumerate(bilinear_tables(dimensions, self.entries)):
-            self.register_buffer(f"table_{index}", value, persistent=False)
-
-    def _apply(self, fn, recurse=True):
-        super()._apply(fn, recurse)
-        data = bilinear_coefficients(self.dimensions, self.entries)
-        for index in (2, 5, 8):
-            value = getattr(self, f"table_{index}")
-            setattr(
-                self,
-                f"table_{index}",
-                torch.tensor(data[index], dtype=torch.float64)
-                .reshape(value.shape)
-                .to(value),
-            )
-        return self
-
-    def forward(self, x, y, backend="torch"):
-        shape = torch.broadcast_shapes(x.shape[:-2], y.shape[:-2])
-        if not self.entries:
-            return (
-                x.new_zeros((*shape, self.dimensions[-1], x.shape[-1]))
-                + x[..., :0, :].sum()
-                + y[..., :0, :].sum()
-            )
-        if backend == "cuda":
-            from ...common.cuda.sparse_bilinear import evaluate
-        else:
-            evaluate = (
-                sparse_bilinear.evaluate
-                if config.TORCH_O2_CONTRACTION_ADJOINT
-                else sparse_bilinear.primal
-            )
-        tables = tuple(
-            getattr(self, f"table_{i}").to(dtype=x.dtype)
-            if i % 3 == 2
-            else getattr(self, f"table_{i}")
-            for i in range(9)
-        )
-        return evaluate(x.transpose(-1, -2), y.transpose(-1, -2), tables).transpose(
-            -1, -2
-        )
+from ...common.sparse_coefficients import SparseMap
 
 
 class Coupling(torch.nn.Module):

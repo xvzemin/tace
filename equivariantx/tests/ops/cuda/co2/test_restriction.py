@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import co2
 from equivariantx.co2.restriction import transverse_quarter_turn
 from equivariantx.ops import config
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native restriction maps require CUDA"
@@ -18,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("rank", [2, 4])
-def test_joint_aoti_without_eqx(rank, monkeypatch, tmp_path):
+def test_joint_aoti(rank, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "RESTRICTION_INLINE", False)
     monkeypatch.setattr(config, "SYMMETRIC_INLINE", False)
     layers = {
@@ -75,15 +76,15 @@ def test_joint_aoti_without_eqx(rank, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2],weights_only=True):
     with torch.no_grad():actual=run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual),row['outputs'],atol=3e-9,rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

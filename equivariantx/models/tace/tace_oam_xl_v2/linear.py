@@ -66,83 +66,12 @@ def reference_linear(metadata, program, operands):
 
 
 def run_linear(metadata, program, operands):
-    """Execute grouped native GEMMs without full-node layout temporaries."""
-    if (
-        operands[0].dtype != torch.float32
-        or not operands[0].is_cuda
-        or torch.cuda.get_device_capability(operands[0].device)[0] < 9
-    ):
+    """Execute grouped channel maps with native matrix products."""
+    if not operands[0].is_cuda:
         return reference_linear(metadata, program, operands)
-    from .linear_kernel import node_program, weight_program, weight_reduce
+    from .linear_kernel import run_program
 
-    layout_x, layout_y, width_x, width_y, _ = parse_metadata(metadata)
-    terms = parse_metadata(program)
-    groups = linear_groups(metadata, program)
-    results = linear_outputs(metadata, program, operands)
-    # A mixed derivative seeded at only some weight matrices can leave entire
-    # irreps untouched. Those columns must be explicit zeros.
-    for role in (0, 2):
-        coverage = defaultdict(int)
-        for path, slot, _ in groups[role]:
-            coverage[slot] += path[1 if role == 0 else 3] * path[4]
-        for slot, count in coverage.items():
-            if count != results[slot].size(1):
-                results[slot].zero_()
-    if not operands[terms[0][1][0]].size(0):
-        for result in results:
-            result.zero_()
-        return results
-    rows = operands[terms[0][1][0]].size(0)
-    read = {
-        index
-        for _, mapping, output, _ in terms
-        for role, index in enumerate(mapping)
-        if role != output
-    }
-    operands = tuple(x.contiguous() if i in read else x for i, x in enumerate(operands))
-    precision = "tf32" if torch.backends.cuda.matmul.allow_tf32 else "ieee"
-    for role in (0, 2):
-        group = groups[role]
-        if not group:
-            continue
-        grid = sum(
-            ((rows * path[4] + 63) // 64) * ((path[1 if role == 0 else 3] + 63) // 64)
-            for path, _, _ in group
-        )
-        node_program[(grid,)](
-            operands,
-            tuple(results),
-            rows,
-            group,
-            layout_x,
-            layout_y,
-            width_x,
-            width_y,
-            role,
-            precision,
-        )
-    group = groups[1]
-    if group:
-        partial = tuple(
-            operands[0].new_empty((8, path[1], path[3])) for path, _, _ in group
-        )
-        grid = sum(
-            ((path[1] + 63) // 64) * ((path[3] + 63) // 64) for path, _, _ in group
-        )
-        weight_program[(grid, 8)](
-            operands,
-            partial,
-            rows,
-            group,
-            layout_x,
-            layout_y,
-            width_x,
-            width_y,
-            precision,
-        )
-        grid = sum((path[1] * path[3] + 255) // 256 for path, _, _ in group)
-        weight_reduce[(grid,)](partial, tuple(results), group)
-    return results
+    return run_program(metadata, program, operands)
 
 
 @torch.library.custom_op("eqx_oam_xl::linear", mutates_args=())

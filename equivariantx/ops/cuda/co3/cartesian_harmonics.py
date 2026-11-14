@@ -3,85 +3,58 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
+from ...common.cuda.pointwise import evaluate as pointwise
 from ...precision import validate_precision
 from ...torch.co3 import cartesian_harmonics as torch_kernel
 
 
-@triton.jit
-def harmonic_component(x, y, z, component, DEGREE: tl.constexpr, SCALE: tl.constexpr):
-    if DEGREE == 0:
-        return tl.full(x.shape, SCALE, x.dtype)
-    if DEGREE == 1:
-        return tl.where(component == 0, x, tl.where(component == 1, y, z)) * SCALE
-    i, j = component // 3, component % 3
-    a = tl.where(i == 0, x, tl.where(i == 1, y, z))
-    b = tl.where(j == 0, x, tl.where(j == 1, y, z))
-    trace = (x * x + y * y + z * z) / 3.0
-    return (a * b - tl.where(i == j, trace, 0.0)) * (1.224744871391589 * SCALE)
-
-
-@triton.jit
-def harmonic_kernel(
-    source,
-    output,
-    size,
-    WIDTH: tl.constexpr,
-    ORDERS: tl.constexpr,
-    SCALES: tl.constexpr,
-    OFFSETS: tl.constexpr,
-    WIDTHS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    row, column = index // WIDTH, index % WIDTH
-    valid = index < size
-    x = tl.load(source + 3 * row, valid, 0)
-    y = tl.load(source + 3 * row + 1, valid, 0)
-    z = tl.load(source + 3 * row + 2, valid, 0)
-    for k in tl.static_range(len(ORDERS)):
-        component = column - OFFSETS[k]
-        selected = valid & (component >= 0) & (component < WIDTHS[k])
-        value = harmonic_component(x, y, z, component, ORDERS[k], SCALES[k])
-        tl.store(output + index, value, selected)
-
-
-@triton_op("eqx::cartesian_harmonics_low", mutates_args=())
+@torch.library.custom_op(
+    "eqx::cartesian_harmonics_low", mutates_args=(), device_types="cuda"
+)
 def low_order(
     vectors: torch.Tensor, orders: list[int], normalization: str
 ) -> torch.Tensor:
-    """Evaluate contiguous vectors in one CUDA launch with FP32/FP64 storage."""
+    """Evaluate Cartesian harmonics of degree zero, one and two."""
     validate_precision((vectors,))
-    if not vectors.is_cuda or vectors.ndim < 1 or vectors.shape[-1] != 3:
+    if (
+        vectors.ndim < 1
+        or vectors.shape[-1] != 3
+        or any(l not in (0, 1, 2) for l in orders)
+    ):
         raise ValueError(
-            "Native harmonics require CUDA vectors with trailing size three."
+            "Low-order harmonics require spatial vectors and degrees 0..2."
         )
-    if any(degree not in (0, 1, 2) for degree in orders):
-        raise ValueError("Native low-order harmonics require degrees zero through two.")
     if normalization not in ("norm", "component", "integral"):
         raise ValueError("Unknown harmonic normalization.")
     vectors = vectors.contiguous()
-    width = sum(3**degree for degree in orders)
+    width = sum(3**l for l in orders)
     result = vectors.new_empty((*vectors.shape[:-1], width))
-    if result.numel():
-        scales = tuple(torch_kernel.scale(degree, normalization) for degree in orders)
-        wrap_triton(harmonic_kernel)[(triton.cdiv(result.numel(), 256),)](
-            vectors,
-            result,
-            result.numel(),
-            width,
-            tuple(orders),
-            scales,
-            tuple(sum(3**degree for degree in orders[:i]) for i in range(len(orders))),
-            tuple(3**degree for degree in orders),
-            256,
+    if not result.numel():
+        return result
+    cases, offset = [], 0
+    for degree in orders:
+        scale = torch_kernel.scale(degree, normalization)
+        expression = (
+            "T(1)"
+            if degree == 0
+            else f"p0[row*3+c-{offset}]"
+            if degree == 1
+            else f"(p0[row*3+(c-{offset})/3]*p0[row*3+(c-{offset})%3]-(((c-{offset})/3==(c-{offset})%3)?trace:T(0)))*T(1.224744871391589)"
         )
-    return result
+        cases.append(
+            f"if(c>={offset} && c<{offset + 3**degree}) out[i]=({expression})*T({scale:.17g});"
+        )
+        offset += 3**degree
+    body = f"I row=i/{width}; int c=i%{width}; T x=p0[3*row],y=p0[3*row+1],z=p0[3*row+2]; T trace=(x*x+y*y+z*z)/T(3); {''.join(cases)}"
+    return pointwise(result, (vectors,), body)
+
+
+@low_order.register_fake
+def fake(vectors, orders, normalization):
+    return vectors.new_empty((*vectors.shape[:-1], sum(3**l for l in orders)))
 
 
 def setup_context(ctx, inputs, output):

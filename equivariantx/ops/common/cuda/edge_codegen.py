@@ -191,6 +191,39 @@ def source(
                 indices.extend(groups[j])
                 ptr.append(len(indices))
             return f"scalar sum=0; for(int k={table(ptr)}[i];k<{table(ptr)}[i+1];++k) sum+={get(args[0], f'{table(indices)}[k]')}; return sum;"
+        if op == "frame":
+            layout, role = data
+            _, _, _, entries = parse_metadata(layout)
+            cases = []
+            if role == 2:
+                for start, mul, dim, offset, rows in entries:
+                    for local, row, sign in rows:
+                        cases.append(f"""
+                        if(i>={local} && i<{local + mul}) {{
+                          const int c=i-{local}; scalar sum=0;
+                          #pragma unroll
+                          for(int k=0;k<{dim};++k)
+                            sum+={get(args[1], f"{offset + row * dim}+k")}
+                                *{get(args[0], f"{start}+k*{mul}+c")};
+                          return scalar({sign})*sum;
+                        }}""")
+            elif role == 0:
+                for start, mul, dim, offset, rows in entries:
+                    terms = "".join(
+                        f"sum+=scalar({sign})*{get(args[1], f'{offset + row * dim}+k')}"
+                        f"*{get(args[2], f'{local}+c')};"
+                        for local, row, sign in rows
+                    )
+                    cases.append(f"""
+                    if(i>={start} && i<{start + dim * mul}) {{
+                      const int k=(i-{start})/{mul}, c=(i-{start})%{mul};
+                      scalar sum=0; {terms} return sum;
+                    }}""")
+            else:
+                raise NotImplementedError(
+                    "Matrix adjoints require a channel reduction."
+                )
+            return "".join(cases) + "return scalar(0);"
         if op == "matmul":
             _, inner, columns = data
             return f"scalar sum=0; for(int k=0;k<{inner};++k) sum+={get(args[0], f'(i/{columns})*{inner}+k')}*{get(args[1], f'k*{columns}+i%{columns}')}; return sum;"
@@ -394,10 +427,22 @@ def source(
         if len(outputs) != 1 or kind not in ("source", "target"):
             raise ValueError("Node reductions require one source or target output.")
         width = nodes[root][1]
-        if width > 32:
-            raise ValueError("Node reductions support at most 32 channels.")
         columns = 1 << (max(1, width) - 1).bit_length()
-        body = f"""
+        body = (
+            f"""
+        const long long node=blockIdx.x;
+        const int i=blockIdx.y*blockDim.x+threadIdx.x;
+        if(i>={width}) return;
+        scalar value=0;
+        for(long long j=ptr[node];j<ptr[node+1];++j) {{
+          const long long edge=order[j];
+          State state{{{initializer}, nullptr, edge, source[edge], target[edge]}};
+          value+=state.v{root}(i);
+        }}
+        out0[node*{width}+i]+=value;
+        """
+            if width > 32
+            else f"""
         const long long node=(long long)blockIdx.x*4+threadIdx.x/32;
         const int lane=threadIdx.x%32;
         if(node>=count) return;
@@ -414,6 +459,7 @@ def source(
           value+=__shfl_down_sync(0xffffffffu,value,stride);
         if(lane<{width}) out0[node*{width}+i]+=value;
         """
+        )
         count_outputs = 1
     else:
         destinations = sorted(set(slot for _, slot, _ in outputs))
@@ -533,8 +579,10 @@ def launch(
         threads = 256
         blocks = max(1, min((count * width + threads - 1) // threads, 16 * processors))
     elif node_reduction:
+        nodes, descriptions = parse_metadata(metadata)
+        width = nodes[descriptions[0][0]][1]
         threads = 128
-        blocks = (count + 3) // 4
+        blocks = count if width > 32 else (count + 3) // 4
     workspace = None if shared else inputs[0].new_empty((blocks, storage))
     order = ptr = None
     if online or node_reduction:
@@ -557,7 +605,9 @@ def launch(
                 compiled[code],
                 arguments,
                 blocks,
-                1,
+                (width + threads - 1) // threads
+                if node_reduction and width > 32
+                else 1,
                 threads,
                 bytes_per_block if shared else 0,
             )

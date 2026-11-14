@@ -12,6 +12,7 @@ from equivariantx import o2
 from equivariantx.ops import config
 from equivariantx.ops.torch.o2.o3_tensor_product import reference
 from equivariantx.tests.ops.torch.o2.test_o3_tensor_product import training_problem
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native aligned readouts require CUDA"
@@ -19,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("mode", ["uvu", "uvw"])
-def test_joint_aoti_without_eqx(mode, monkeypatch, tmp_path):
+def test_joint_aoti(mode, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "ALIGNED_PRODUCT_INLINE", False)
     run, values = training_problem(mode, "cuda", "cuda")
     graph = make_fx(lambda *args: run(*args))(*values)
@@ -47,15 +48,15 @@ def test_joint_aoti_without_eqx(mode, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2],weights_only=True):
     with torch.no_grad():actual=run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual),row['outputs'],atol=3e-9,rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

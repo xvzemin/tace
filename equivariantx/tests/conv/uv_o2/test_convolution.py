@@ -9,25 +9,24 @@ from equivariantx.tests.conv.testing import assert_native_autograd
 
 
 class RadialConvolution(torch.nn.Module):
-    """Small non-attention UV operator with explicit learned radial layers."""
+    """Small UV operator with explicit learned radial layers."""
 
-    def __init__(self, backend="torch", radial_mode="last"):
+    def __init__(self, backend="torch", radial_mode="last", channels=2):
         super().__init__()
-        frame = o2.LocalFrame("2x0e+2x1e+2x1o")
+        frame = o2.LocalFrame(f"{channels}x0e+{channels}x1e+{channels}x1o")
         gate = o2.Gate(
-            "2x0e+2x0o",
+            f"{channels}x0e+{channels}x0o",
             [torch.nn.SiLU(), torch.nn.Tanh()],
-            "2x0o",
+            f"{channels}x0o",
             [torch.nn.Tanh()],
-            "2x1m",
+            f"{channels}x1m",
         )
         self.up = o2.Linear((frame.irreps_out * 2).regroup(), gate.irreps_in)
         self.down = o2.Linear(gate.irreps_out, frame.irreps_out)
         self.conv = eqx_conv.UvO2TensorProductConv(
             frame,
-            self.up,
-            gate,
-            self.down,
+            [self.up, self.down],
+            [gate],
             frame,
             backend=backend,
             radial_mode=radial_mode,
@@ -118,7 +117,13 @@ def test_transverse_aoti(radial_mode, tmp_path, monkeypatch, double_precision):
 
     inputs = x, vectors, *parameters
     graph = make_fx(joint)(*inputs)
-    assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
+    assert (
+        sum(
+            node.target == torch.ops.eqx.edge_program.default
+            for node in graph.graph.nodes
+        )
+        >= 3
+    )
     exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
     package = tmp_path / "transverse.pt2"
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
@@ -141,12 +146,12 @@ def test_transverse_aoti(radial_mode, tmp_path, monkeypatch, double_precision):
     script = """
 import sys
 import torch
+import equivariantx
 runner = torch._inductor.aoti_load_package(sys.argv[1])
 for case in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = runner(*(value.cuda() for value in case['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), case['expected'], atol=1e-9, rtol=1e-9)
-assert 'equivariantx' not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-B", "-c", script, str(package), str(data)],
@@ -166,7 +171,6 @@ def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precis
 
     from equivariantx.ops import config
 
-    monkeypatch.setattr(config, "EDGE_PROGRAM_INLINE", False)
     module = RadialConvolution("cuda", "full").cuda()
     index = torch.tensor([[0, 1, 1, 2, 0], [1, 2, 0, 1, 0]], device="cuda")
     names, parameters = zip(*module.named_parameters())
@@ -186,8 +190,12 @@ def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precis
         return loss, force, *torch.autograd.grad(loss, parameters)
 
     graph = make_fx(joint)(*inputs)
-    assert any(
-        node.target == torch.ops.eqx.edge_program.default for node in graph.graph.nodes
+    assert (
+        sum(
+            node.target == torch.ops.eqx.edge_program.default
+            for node in graph.graph.nodes
+        )
+        >= 3
     )
     if compiler == "aoti":
         exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
@@ -214,14 +222,14 @@ def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precis
     "backend,reference", [("torch", False), ("torch", True), ("cuda", False)]
 )
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("depth", [1, 3])
 @pytest.mark.parametrize(
-    "mmax,magnetic,attention,odd",
+    "mmax,magnetic,odd",
     [
-        (0, False, False, False),
-        (2, False, False, False),
-        (2, True, False, True),
-        (1, True, True, False),
-        (2, True, True, True),
+        (0, False, False),
+        (2, False, False),
+        (2, True, True),
+        (1, True, False),
     ],
 )
 def test_uv_o2_transverse(
@@ -230,8 +238,8 @@ def test_uv_o2_transverse(
     reference,
     mmax,
     magnetic,
-    attention,
     odd,
+    depth,
     double_precision,
     monkeypatch,
 ):
@@ -241,14 +249,13 @@ def test_uv_o2_transverse(
     monkeypatch.setattr(config, "TORCH_RECOMPUTE", not reference)
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.conv.attention import graph_softmax
 
     if backend == "cuda" and device == "cuda":
         import equivariantx.ops.common.cuda.execution as execution
 
         launch = execution.launch
         monkeypatch.setattr(
-            execution, "launch", lambda *args: launch(*args, tile_size=3)
+            execution, "launch", lambda *args: launch(*args, tile_size=5)
         )
 
     frame = o2.LocalFrame("2x0e+2x0o+2x1o+2x1e+2x2e+2x2o", mmax).to(device)
@@ -259,50 +266,42 @@ def test_uv_o2_transverse(
         if tensors
         else o2.Irreps("")
     )
-    gate = o2.Gate(
-        scalars,
-        [
-            torch.nn.Tanh() if ir.is_odd_scalar() else torch.nn.SiLU()
-            for ir, _ in scalars
-        ],
-        gates,
-        [torch.nn.Tanh() if odd else torch.nn.Sigmoid()] if tensors else [],
-        tensors,
-    ).to(device)
-    inputs = (frame.irreps_out * (3 if magnetic else 2)).regroup()
-    up = o2.Linear(inputs, gate.irreps_in, biases=True).to(device)
-    down = o2.Linear(gate.irreps_out, frame.irreps_out, biases=True).to(device)
-    query, key = [
-        o2.Linear(frame.irreps_out, frame.irreps_out).to(device) for _ in range(2)
+    nonlinearities = [
+        o2.Gate(
+            scalars * width,
+            [
+                torch.nn.Tanh() if ir.is_odd_scalar() else torch.nn.SiLU()
+                for ir, _ in scalars
+            ],
+            gates * width,
+            [torch.nn.Tanh() if odd else torch.nn.Sigmoid()] if tensors else [],
+            tensors * width,
+        ).to(device)
+        for width in range(1, depth + 1)
     ]
+    inputs = (frame.irreps_out * (3 if magnetic else 2)).regroup()
+    linears, hidden = [], inputs
+    for gate in nonlinearities:
+        linears.append(o2.Linear(hidden, gate.irreps_in, biases=True).to(device))
+        hidden = gate.irreps_out
+    linears.append(o2.Linear(hidden, frame.irreps_out, biases=True).to(device))
     conv = eqx_conv.UvO2TensorProductConv(
         frame,
-        up,
-        gate,
-        down,
+        linears,
+        nonlinearities,
         frame,
         frame_edge=frame if magnetic else None,
-        query=query if attention else None,
-        key=key if attention else None,
-        num_heads=2,
-        attention_scale=0.2,
         backend=backend,
     ).to(device)
-    if backend == "cuda" and device == "cuda" and not attention:
+    if backend == "cuda" and device == "cuda":
         from equivariantx.ops.torch.conv.uv_o2 import convolution as uv_convolution
 
         def no_full_edge_linear(*args, **kwargs):
-            raise AssertionError(
-                "Non-attention O2 must keep channel maps inside edge tiles"
-            )
+            raise AssertionError("O2 must keep channel maps inside edge tiles")
 
         monkeypatch.setattr(uv_convolution, "linear_blocks", no_full_edge_linear)
-    parameters = tuple(
-        p
-        for module in (up, down, *((query, key) if attention else ()))
-        for p in (module.weight, module.bias)
-    )
-    rotation = o2.WignerD(2, 2, method="recursive").to(device)
+    parameters = tuple(p for module in linears for p in (module.weight, module.bias))
+    rotation = o2.WignerD(2, 2, method="recursive", backend="torch").to(device)
     for edges in (8, 0):
 
         def rand(*shape):
@@ -318,10 +317,9 @@ def test_uv_o2_transverse(
             .to(device)[:edges]
             .requires_grad_()
         )
-        weights, cutoff, radial = (
+        weights, cutoff = (
             rand(edges, conv.weight_numel),
             rand(edges, 1).sigmoid(),
-            rand(edges, 4),
         )
         wigner, inverse = rotation(vectors)
         source, target = (
@@ -344,27 +342,11 @@ def test_uv_o2_transverse(
             )
             parts.append((value * weights[:, None, offset : offset + mul]).flatten(1))
             offset += mul
-        message = down(gate(up(torch.cat(parts, -1))))
-        if attention:
-            q, k = query(target), key(source)
-            score = sum(
-                (q[:, s] * k[:, s]).reshape(edges, ir.dim, 2, mul // 2).sum((1, 3))
-                for (ir, mul), s in zip(frame.irreps_out, frame.irreps_out.slices())
-            )
-            score = score * 0.2 * (2 * radial[:, :2].sigmoid()) + radial[:, 2:]
-            scale = graph_softmax(score, index[1], 4, cutoff, fused=False) * cutoff
-            message = torch.cat(
-                [
-                    (
-                        message[:, s].reshape(edges, ir.dim, 2, mul // 2)
-                        * scale[:, None, :, None]
-                    ).flatten(1)
-                    for (ir, mul), s in zip(frame.irreps_out, frame.irreps_out.slices())
-                ],
-                -1,
-            )
-        else:
-            message = message * cutoff
+        message = torch.cat(parts, -1)
+        for linear, gate in zip(linears, nonlinearities):
+            message = gate(linear(message))
+        message = linears[-1](message)
+        message = message * cutoff
         expected = x.new_zeros(4, frame.input_dim).index_add(
             0, index[1], frame.to_global(message, inverse)
         )
@@ -374,7 +356,6 @@ def test_uv_o2_transverse(
             weights,
             cutoff,
             *((extra,) if magnetic else ()),
-            *((radial,) if attention else ()),
         ) + tuple(p for p in parameters if p.requires_grad)
         for transverse in (False, True):
             actual = conv(
@@ -386,7 +367,6 @@ def test_uv_o2_transverse(
                 None if transverse else inverse,
                 cutoff,
                 parameters,
-                radial if attention else None,
                 vectors=vectors if transverse else None,
             )
             torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-10)
@@ -435,7 +415,7 @@ def test_uv_o2_transverse_compile(backend, geometry, double_precision):
     up = o2.Linear((frame.irreps_out * 2).regroup(), gate.irreps_in).cuda()
     down = o2.Linear(gate.irreps_out, frame.irreps_out).cuda()
     module = eqx_conv.UvO2TensorProductConv(
-        frame, up, gate, down, frame, backend=backend
+        frame, [up, down], [gate], frame, backend=backend
     ).cuda()
     rotation = o2.WignerD(1, 1, method="recursive").cuda()
 
@@ -547,7 +527,7 @@ def test_radial_projection(backend, radial_mode, width, monkeypatch, double_prec
     up = o2.Linear((frame.irreps_out * 2).regroup(), gate.irreps_in).to(device)
     down = o2.Linear(gate.irreps_out, frame.irreps_out).to(device)
     module = eqx_conv.UvO2TensorProductConv(
-        frame, up, gate, down, frame, backend=backend, radial_mode=radial_mode
+        frame, [up, down], [gate], frame, backend=backend, radial_mode=radial_mode
     ).to(device)
     network = torch.nn.Sequential(
         torch.nn.Linear(3, width),
@@ -611,6 +591,66 @@ def test_radial_projection(backend, radial_mode, width, monkeypatch, double_prec
         actual, expected = [
             torch.cat([g.flatten() for g in values]) for values in gradients
         ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA precision modes")
+@pytest.mark.parametrize("precision", ["float64", "float32", "tf32"])
+def test_radial_force_precision(precision, monkeypatch, double_precision, request):
+    from equivariantx.ops import config
+
+    previous = torch.backends.cuda.matmul.allow_tf32
+    request.addfinalizer(
+        lambda: setattr(torch.backends.cuda.matmul, "allow_tf32", previous)
+    )
+    torch.backends.cuda.matmul.allow_tf32 = precision == "tf32"
+    dtype = torch.float64 if precision == "float64" else torch.float32
+    module = RadialConvolution("cuda", "full", channels=32)
+    module.radial = torch.nn.Sequential(
+        torch.nn.Linear(3, 64),
+        torch.nn.SiLU(),
+        torch.nn.Linear(64, module.conv.weight_numel),
+    )
+    module = module.cuda().to(dtype)
+    rotation = o2.WignerD(1, 1, backend="torch", method="recursive").cuda().to(dtype)
+    index = torch.randint(7, (2, 31), device="cuda")
+    x = torch.randn(
+        7, module.conv.input_dim, device="cuda", dtype=dtype
+    ).requires_grad_()
+    vectors = torch.randn(31, 3, device="cuda", dtype=dtype).requires_grad_()
+
+    def evaluate():
+        radius = vectors.norm(dim=-1, keepdim=True)
+        basis = torch.cat((radius, radius.sin(), radius.cos()), dim=-1)
+        output = module.conv(
+            x,
+            None,
+            basis,
+            index,
+            rotation.forward_packed(vectors),
+            None,
+            radius.sigmoid(),
+            (module.up.weight, module.up.bias, module.down.weight, module.down.bias),
+            radial_network=module.radial,
+        )
+        energy = output.square().mean()
+        force = -torch.autograd.grad(energy, vectors, create_graph=True)[0]
+        loss = energy + (force - 0.1).square().mean()
+        gradients = torch.autograd.grad(loss, (x, vectors, *module.parameters()))
+        return output, force, *gradients
+
+    actual = evaluate()
+    module.conv.backend = "torch"
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = evaluate()
+    if precision == "tf32":
+        for value, reference in zip(actual, expected):
+            error = value - reference
+            assert error.norm() <= 2e-3 * reference.norm() + 1e-7
+            assert error.abs().max() <= 3e-3 * reference.abs().max() + 1e-7
+    else:
+        atol, rtol = (2e-10, 2e-10) if precision == "float64" else (3e-6, 3e-5)
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+    assert torch.backends.cuda.matmul.allow_tf32 == (precision == "tf32")
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -733,9 +773,8 @@ def test_reference_mixed_children_dynamic_aoti(monkeypatch, tmp_path, double_pre
             self.down = o2.Linear(gate.irreps_out, frame.irreps_out)
             self.conv = eqx_conv.UvO2TensorProductConv(
                 frame,
-                self.up,
-                gate,
-                self.down,
+                [self.up, self.down],
+                [gate],
                 frame,
                 backend=backend,
                 radial_mode="full",

@@ -208,37 +208,10 @@ def get_equivariant_property(ue: dict) -> list[str]:
     return equivariant_property
 
 
-def normalize_atomic_basis(atomic_basis: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the former O(2) attention switch to an interaction type."""
-    result = dict(atomic_basis)
-    attention = result.pop("use_radial_rotary_attention", True)
-
-    def interaction_type(name):
-        if name == "o2":
-            return "uv_rra_o2" if attention else "uv_o2"
-        if name == "o2_mag":
-            if attention:
-                raise ValueError(
-                    "Magnetic radial rotary attention is no longer supported. "
-                    "Use atomic_basis.type='uv_o2_mag' for magnetic UV convolution."
-                )
-            return "uv_o2_mag"
-        return name
-
-    names = result.get("type", DEFAULT_MODEL_CONFIG["atomic_basis"]["type"])
-    result["type"] = (
-        interaction_type(names)
-        if isinstance(names, str)
-        else [interaction_type(name) for name in names]
-    )
-    return result
-
-
 def check_model_config(cfg: dict[str, Any]):
 
     # Update default config with user config
     cfg = recursive_update(cfg)
-    cfg["atomic_basis"] = normalize_atomic_basis(cfg["atomic_basis"])
 
     if cfg["mlp_type"] not in MLP:
         raise ValueError("mlp_type must be 'mlp_v1' or 'mlp_v2'.")

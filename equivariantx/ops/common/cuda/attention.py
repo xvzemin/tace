@@ -4,11 +4,6 @@ import struct
 from functools import lru_cache
 
 import torch
-import triton
-import triton.language as tl
-from torch.fx.experimental.symbolic_shapes import statically_known_true
-from torch.library import triton_op, wrap_triton
-from triton.language.extra.cuda import libdevice
 
 from ....utils.autograd import forward_ad_active
 from ....utils.outputs import attention_adjoint_outputs
@@ -16,54 +11,9 @@ from ...precision import validate_uniform
 from .reduction import prepare_graph
 
 
-@triton.jit
-def maximum_kernel(
-    scores, target, maximum, size, HEADS: tl.constexpr, BLOCK: tl.constexpr
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = index < size
-    node = tl.load(target + index // HEADS, valid, 0)
-    value = tl.load(scores + index, valid, -float("inf"))
-    tl.atomic_max(maximum + node * HEADS + index % HEADS, value, valid, sem="relaxed")
-
-
-@triton.jit
-def normalize_kernel(
-    scores,
-    weight,
-    target,
-    maximum,
-    denominator,
-    output,
-    size,
-    HEADS: tl.constexpr,
-    WEIGHT_HEADS: tl.constexpr,
-    EPS: tl.constexpr,
-    REDUCE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = index < size
-    edge, head = index // HEADS, index % HEADS
-    node = tl.load(target + edge, valid, 0)
-    offset = node * HEADS + head
-    shift = tl.load(maximum + offset, valid, 0)
-    shift = tl.where(shift == -float("inf"), 0, shift)
-    value = tl.load(scores + index, valid, 0) - shift
-    if scores.dtype.element_ty == tl.float64:
-        value = libdevice.exp(value)
-    else:
-        value = tl.exp(value)
-    if REDUCE:
-        weight_head = head if WEIGHT_HEADS != 1 else 0
-        multiplier = tl.load(weight + edge * WEIGHT_HEADS + weight_head, valid, 0)
-        tl.atomic_add(denominator + offset, value * multiplier, valid, sem="relaxed")
-    else:
-        total = tl.load(denominator + offset, valid, 0)
-        tl.store(output + index, value / (total + EPS), valid)
-
-
-@triton_op("eqx::attention_normalized_exp", mutates_args=())
+@torch.library.custom_op(
+    "eqx::attention_normalized_exp", mutates_args=(), device_types="cuda"
+)
 def contract(
     scores: torch.Tensor,
     weight: torch.Tensor,
@@ -71,34 +21,17 @@ def contract(
     num_nodes: int,
     eps: float,
 ) -> torch.Tensor:
-    """Normalize unsorted edges without an edge-sized exponential temporary."""
+    """Normalize destination-owned edge groups without exponential intermediates."""
     validate_uniform((scores, weight))
-    scores, weight, target = (value.contiguous() for value in (scores, weight, target))
-    result = torch.empty_like(scores)
-    if not statically_known_true(scores.numel() == 0):
-        heads = scores.shape[1]
-        maximum = scores.new_full((num_nodes, heads), -torch.inf)
-        denominator = scores.new_zeros((num_nodes, heads))
-        grid = (triton.cdiv(scores.numel(), 256),)
-        wrap_triton(maximum_kernel)[grid](
-            scores, target, maximum, scores.numel(), heads, 256
-        )
-        for reduce in (True, False):
-            wrap_triton(normalize_kernel)[grid](
-                scores,
-                weight,
-                target,
-                maximum,
-                denominator,
-                result,
-                scores.numel(),
-                heads,
-                weight.shape[1],
-                eps,
-                reduce,
-                256,
-            )
-    return result
+    scores, weight, target = (v.contiguous() for v in (scores, weight, target))
+    if not scores.numel():
+        return torch.empty_like(scores)
+    return normalized_exp_forward(scores, weight, target, num_nodes, eps)
+
+
+@contract.register_fake
+def fake(scores, weight, target, num_nodes, eps):
+    return torch.empty_like(scores, memory_format=torch.contiguous_format)
 
 
 def contract_context(ctx, inputs, output):

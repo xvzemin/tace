@@ -122,9 +122,8 @@ SYMMETRIC_PREFIX_MIN_WORK = 1 << 19
 SYMMETRIC_PREFIX_MAX_TERMS = 256
 SYMMETRIC_PREFIX_MAX_NODES = 1024
 
-# Optional compiler-visible ACE packets with bounded generated expression trees.
+# Preserve native ACE calls in compiled graphs.
 SYMMETRIC_NATIVE = False
-SYMMETRIC_NATIVE_MAX_NODES = 2048
 
 # Optional shared representation matrices for measured CUDA channel widths.
 SYMMETRIC_MATRIX_NATIVE = False

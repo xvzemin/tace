@@ -552,9 +552,7 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         cutoff=4.0,
         max_neighbors=None,
     )
-    config["atomic_basis"]["type"] = (
-        "uv_rra_o2" if backend == "cartesian_o2" else "cgtp"
-    )
+    config["atomic_basis"]["type"] = "uv_o2" if backend == "cartesian_o2" else "cgtp"
     config["radial_basis"].update(hidden=[4], apply_cutoff=False)
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"]["enable"] = False
@@ -831,7 +829,6 @@ def test_model_dtype_conversion(space):
     [
         ("cgtp", False, False, False),
         ("uv_o2", False, False, False),
-        ("uv_rra_o2", False, False, False),
         ("cgtp", True, False, False),
         ("cgtp", True, True, False),
         ("cgtp", False, False, True),

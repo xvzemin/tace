@@ -16,12 +16,7 @@ from equivariantx.ops.torch.co2.basis import planar_project
 from equivariantx.tests.utils.testing import check_forward_ad
 
 
-def test_change_basis_legacy_backend():
-    layer = co2.ChangeOfBasis("2x4m").double()
-    x = torch.randn(3, layer.input_dim, dtype=torch.float64)
-    expected = layer(x)
-    del layer.backend
-    torch.testing.assert_close(layer(x), expected)
+def test_change_basis_backend():
     with pytest.raises(ValueError, match="backend"):
         co2.ChangeOfBasis("1m", backend="unsupported")
     features = torch.randn(3, 2)

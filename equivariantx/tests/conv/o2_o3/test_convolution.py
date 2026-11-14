@@ -643,8 +643,11 @@ assert 'equivariantx' not in sys.modules
 def test_transverse_convolution(
     backend, normalization, method, double_precision, monkeypatch
 ):
+    from equivariantx.ops import config
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", backend == "torch")
     a, b, c = "2x3o+2x2e", "1o+2e+3o", "2x3e+2x2e+2x3e+2x4o"
     instructions = [
         (0, 0, 0, "uvu", True),
@@ -657,20 +660,6 @@ def test_transverse_convolution(
         a, b, c, instructions, normalization=normalization, **options
     ).cuda()
     module = eqx_conv.O2O3TensorProductConv(tp, backend=backend, method=method).cuda()
-    calls = []
-    if backend == "torch":
-        for coupling in module.transverse_couplings.values():
-            coupling.register_forward_hook(lambda *_: calls.append("generator"))
-        for harmonic in module.harmonics.values():
-            harmonic.register_forward_hook(lambda *_: calls.append("cg"))
-        forward_packed = module.frame.forward_packed
-
-        def wigner(*args, **kwargs):
-            assert kwargs["method"] == "recursive"
-            calls.append("wigner")
-            return forward_packed(*args, **kwargs)
-
-        monkeypatch.setattr(module.frame, "forward_packed", wigner)
     reference = o3.TensorProduct(a, b, c, instructions, **options).cuda()
     x = torch.randn(4, tp.input_dim, device="cuda", requires_grad=True)
     vectors = (
@@ -686,9 +675,6 @@ def test_transverse_convolution(
     actual = module(x, radial, projection, None, amplitudes, edges, 4, vectors=vectors)
     if backend == "torch":
         assert_native_autograd(actual)
-        assert set(calls) == {
-            "generator" if method in ("baseline", "recurrence") else method
-        }
     harmonics = torch.cat(
         [
             o3.spherical_harmonics(
@@ -730,9 +716,12 @@ def test_transverse_convolution(
 
 @pytest.mark.parametrize("method", ["generator", "recurrence", "cg", "wigner"])
 @pytest.mark.parametrize("shared", [False, True])
-def test_o2_torch_channel_mixing(method, shared, double_precision):
+def test_o2_torch_channel_mixing(method, shared, double_precision, monkeypatch):
+    from equivariantx.ops import config
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     args = (
         "2x2e",
         "1o",
@@ -818,9 +807,12 @@ def test_o2_cgtp_high_degree(backend, degrees, method, double_precision):
 @pytest.mark.parametrize(
     "method", ["baseline", "generator", "recurrence", "cg", "wigner", "auto"]
 )
-def test_o2_cgtp_empty_methods(backend, method, double_precision):
+def test_o2_cgtp_empty_methods(backend, method, double_precision, monkeypatch):
+    from equivariantx.ops import config
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", backend == "torch")
     tp = o2.O3TensorProduct(
         "2x1o",
         "1o",

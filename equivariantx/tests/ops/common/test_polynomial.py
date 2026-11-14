@@ -15,6 +15,7 @@ from equivariantx.mbe.ace import (
     UuuSymmetricContraction,
 )
 from equivariantx.o3 import MoEElementLinear
+from equivariantx.tests.utils.testing import package_script
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AOTInductor")
@@ -66,7 +67,7 @@ def test_gradient_jvp_aoti(kind, native, tmp_path, double_precision, monkeypatch
     exported = torch.export.export(graph, inputs, strict=True)
     assert all(
         not str(node.target).startswith("eqx.")
-        or (native and str(node.target) == "eqx.linear_compiled.default")
+        or (native and str(node.target) == "eqx.element_linear.default")
         for node in exported.graph_module.graph.nodes
     )
     package = tmp_path / "gradient_jvp.pt2"
@@ -94,10 +95,10 @@ for case in torch.load(sys.argv[2], weights_only=True):
         actual = runner(*(value.cuda() for value in case['inputs']))
     for value, expected in zip(actual, case['expected']):
         torch.testing.assert_close(value.cpu(), expected, atol=1e-9, rtol=1e-9)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-B", "-c", script, str(package), str(data)],
+        [sys.executable, "-B", "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env=dict(os.environ),
         capture_output=True,
@@ -198,7 +199,7 @@ def test_default_force_gradient_aoti_updates(
         for node in graph.graph.nodes
         if str(node.target).startswith("eqx.")
     }
-    assert operators == ({"eqx.linear_compiled.default"} if native else set())
+    assert operators == ({"eqx.element_linear.default"} if native else set())
     exported = torch.export.export(graph, tuple(value.detach() for value in values))
     package = tmp_path / "polynomial_force.pt2"
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
@@ -221,15 +222,15 @@ def test_default_force_gradient_aoti_updates(
             sys.executable,
             "-I",
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2],weights_only=True):
     actual=run(*(value.cuda() for value in row['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual),row['expected'],atol=2e-9,rtol=2e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

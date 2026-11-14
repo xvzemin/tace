@@ -26,7 +26,11 @@ def test_dynamic_inductor(monkeypatch, schedule):
 
     args = "2x0e+2x1m", "2x0e+2x1m", 3
     layer = o2.SymmetricContraction(*args, backend="cuda").cuda().double()
-    reference = o2.SymmetricContraction(*args, algorithm="dense", backend="torch").cuda().double()
+    reference = (
+        o2.SymmetricContraction(*args, algorithm="dense", backend="torch")
+        .cuda()
+        .double()
+    )
     weight = torch.randn(layer.weight_numel, device="cuda", dtype=torch.float64) * 0.1
 
     def operation(x):

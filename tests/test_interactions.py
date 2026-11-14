@@ -20,7 +20,7 @@ from tace.models.spherical.mtace import (
     O2MagneticInteraction,
 )
 from tace.models.spherical.node import NODE_UPDATE
-from tace.models.spherical.o2 import UvO2TensorProductConv, UvRraO2TensorProductConv
+from tace.models.spherical.o2 import UvO2TensorProductConv
 from tace.models.spherical.representation import NodeRepresentation
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,12 +69,10 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
         torch.testing.assert_close(value, target, atol=2e-7, rtol=2e-8)
 
 
-@pytest.mark.parametrize(
-    "magnetic,attention", [(False, False), (False, True), (True, False)]
-)
+@pytest.mark.parametrize("magnetic", [False, True])
 @pytest.mark.parametrize("mmax", [0, 2])
 @pytest.mark.parametrize("packed", [False, True])
-def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
+def test_uv_o2_cuda_convolution(monkeypatch, magnetic, mmax, packed):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.manual_seed(401)
@@ -85,11 +83,7 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
         if time
         else "2x0e+2x0o+2x1o+2x1e+2x2e+2x2o"
     )
-    cls = (
-        MagneticUvO2TensorProductConv
-        if magnetic
-        else UvRraO2TensorProductConv if attention else UvO2TensorProductConv
-    )
+    cls = MagneticUvO2TensorProductConv if magnetic else UvO2TensorProductConv
     args = (irreps, irreps, irreps) if magnetic else (irreps, irreps)
     module = (
         cls(
@@ -99,13 +93,11 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
             even_scalar_act=torch.nn.SiLU(),
             odd_scalar_act=torch.nn.Tanh(),
             tensor_act=torch.nn.Sigmoid(),
-            **({} if magnetic else dict(num_head=2, num_radial_basis=3)),
         )
         .cuda()
         .double()
     )
     frame = o2.WignerD(2, 2).cuda().double()
-    assert (module.attention is not None) == (attention and mmax > 0)
     for edges in (9, 0):
 
         def rand(*shape):
@@ -115,13 +107,12 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
 
         x, mag = rand(4, o3.Irreps(irreps).dim), rand(edges, o3.Irreps(irreps).dim)
         vectors = rand(edges, 3)
-        weights, radial, cutoff = (
+        weights, cutoff = (
             rand(edges, module.weight_numel),
-            rand(edges, 3),
             rand(edges, 1).sigmoid(),
         )
         index = torch.randint(4, (2, edges), device="cuda")
-        inputs = (x, vectors, weights, radial, cutoff) + ((mag,) if magnetic else ())
+        inputs = (x, vectors, weights, cutoff) + ((mag,) if magnetic else ())
         inputs += tuple(module.parameters())
 
         def run(enabled):
@@ -136,10 +127,10 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
                 if magnetic
                 else (x, weights, index, w, wi)
             )
-            value = module(*args, edge_radial_basis=radial, edge_cutoff=cutoff)
+            value = module(*args, edge_cutoff=cutoff)
             result = [value]
             if edges:
-                for _ in range(3 if attention and mmax == 2 else 2):
+                for _ in range(2):
                     grads = torch.autograd.grad(
                         value.sin().sum(), inputs, create_graph=True, allow_unused=True
                     )
@@ -158,11 +149,9 @@ def test_uv_o2_cuda_convolution(monkeypatch, magnetic, attention, mmax, packed):
 
 
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize(
-    "magnetic,attention", [(False, False), (False, True), (True, False)]
-)
+@pytest.mark.parametrize("magnetic", [False, True])
 def test_uv_o2_compile_and_force_training(
-    monkeypatch, double_precision, packed, magnetic, attention
+    monkeypatch, double_precision, packed, magnetic
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -171,11 +160,7 @@ def test_uv_o2_compile_and_force_training(
     torch._dynamo.reset()
     monkeypatch.setenv("TACE_USE_EQX", "1")
     irreps = "2x0ee+2x1eo+2x1oe" if hasattr(o3.Irrep("0e"), "t") else "2x0e+2x1e+2x1o"
-    cls = (
-        MagneticUvO2TensorProductConv
-        if magnetic
-        else UvRraO2TensorProductConv if attention else UvO2TensorProductConv
-    )
+    cls = MagneticUvO2TensorProductConv if magnetic else UvO2TensorProductConv
     module = cls(
         *((irreps, irreps, irreps) if magnetic else (irreps, irreps)),
         num_channel=2,
@@ -183,14 +168,15 @@ def test_uv_o2_compile_and_force_training(
         even_scalar_act=torch.nn.SiLU(),
         odd_scalar_act=torch.nn.Tanh(),
         tensor_act=torch.nn.Sigmoid(),
-        **({} if magnetic else dict(num_head=2, num_radial_basis=3)),
     ).cuda()
     frame = o2.WignerD(1, 1).cuda()
 
-    def evaluate(x, mag, weights, vectors, radial, cutoff, index):
+    def evaluate(x, mag, weights, vectors, cutoff, index):
         w, wi = (frame.forward_packed(vectors), None) if packed else frame(vectors)
-        args = (x, mag, weights, index, w, wi) if magnetic else (x, weights, index, w, wi)
-        return module(*args, edge_radial_basis=radial, edge_cutoff=cutoff)
+        args = (
+            (x, mag, weights, index, w, wi) if magnetic else (x, weights, index, w, wi)
+        )
+        return module(*args, edge_cutoff=cutoff)
 
     compiled = torch.compile(
         evaluate, backend="aot_eager", fullgraph=True, dynamic=True
@@ -203,7 +189,6 @@ def test_uv_o2_compile_and_force_training(
                 (nodes, module.irreps_in.dim),
                 (edges, module.irreps_in.dim),
                 (edges, module.weight_numel),
-                (edges, 3),
                 (edges, 3),
                 (edges, 1),
             )
@@ -881,12 +866,16 @@ def test_uu_o2_compile_and_empty_graph(double_precision):
 @pytest.mark.parametrize(
     "interaction,bias,convert",
     [
-        ("cgtp", False, False), ("cgtp", True, False),
-        ("cgtp", False, True), ("cgtp", True, True),
-        ("o2_cgtp", True, True), (["cgtp", "uv_rra_o2"], False, True),
-        ("uv_rra_o2", True, False), ("uv_o2", True, False),
+        ("cgtp", False, False),
+        ("cgtp", True, False),
+        ("cgtp", False, True),
+        ("cgtp", True, True),
+        ("o2_cgtp", True, True),
+        (["cgtp", "uv_o2"], False, True),
+        ("uv_o2", True, False),
         ("uu_o2", True, False),
-        ("co3", True, False), ("so2", True, False),
+        ("co3", True, False),
+        ("so2", True, False),
     ],
 )
 def test_streaming_force_training(
@@ -931,7 +920,9 @@ def test_streaming_force_training(
         config["radial_basis"]["hidden"] = [128 if bias else 4]
         config["radial_basis"]["bias"] = bias
         local = isinstance(interaction, list) or interaction in (
-            "uv_o2", "uv_rra_o2", "uu_o2", "so2"
+            "uv_o2",
+            "uu_o2",
+            "so2",
         )
         if local:
             config["radial_basis"]["apply_cutoff"] = False
@@ -1076,7 +1067,7 @@ def test_tace_radial_bias_cutoff_and_force_training(
 
 @pytest.mark.parametrize(
     "interaction",
-    ["cgtp", "o2_cgtp", "uu_o2", "uv_o2", "uv_rra_o2", ["uu_o2", "uv_o2"]],
+    ["cgtp", "o2_cgtp", "uu_o2", "uv_o2", ["uu_o2", "uv_o2"]],
 )
 @pytest.mark.parametrize(
     "mlp_type,mlp_norm",
@@ -1168,6 +1159,12 @@ def test_tace_model_force_training(
         )
 
     for layer in model.readout_fn.representation.interactions:
+        if getattr(layer.rejector, "eqx_tp", None) is not None and hasattr(
+            layer.rejector, "linear_up"
+        ):
+            assert layer.rejector.eqx_tp.radial_mode == "full"
+            for radial_layer in layer.edge_info.mlp:
+                monkeypatch.setattr(radial_layer, "forward", no_edge_message)
         if hasattr(layer.rejector, "tp"):
             monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)
         elif isinstance(layer.rejector, UuO2TensorProductConv):
@@ -1208,7 +1205,7 @@ def time_reverse_features(features: torch.Tensor, irreps) -> torch.Tensor:
     return output
 
 
-@pytest.mark.parametrize("interaction", ["uv_o2", "uv_rra_o2", "uu_o2"])
+@pytest.mark.parametrize("interaction", ["uv_o2", "uu_o2"])
 @pytest.mark.parametrize(("Lmax", "lmax"), [(2, 3), (3, 2)])
 def test_o2_representation_uses_common_angular_coverage(Lmax, lmax, interaction):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -1394,14 +1391,13 @@ def test_magnetic_info_is_independent_per_interaction(
             )
 
 
-def _scatter_module(use_attention, linear_type="uv"):
+def _scatter_module(linear_type="uv"):
     irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e")
     if linear_type == "uu":
         return UuO2TensorProductConv(irreps, irreps, num_channel=2, mmax=1).to(
             DEVICE, DTYPE
         )
-    cls = UvRraO2TensorProductConv if use_attention else UvO2TensorProductConv
-    return cls(
+    return UvO2TensorProductConv(
         irreps,
         irreps,
         num_channel=2,
@@ -1409,24 +1405,18 @@ def _scatter_module(use_attention, linear_type="uv"):
         even_scalar_act=torch.nn.SiLU(),
         odd_scalar_act=torch.nn.Tanh(),
         tensor_act=torch.nn.Sigmoid(),
-        num_head=1,
-        num_radial_basis=4,
     ).to(DEVICE, DTYPE)
 
 
-@pytest.mark.parametrize(
-    ("use_attention", "linear_type"), [(False, "uv"), (True, "uv"), (False, "uu")]
-)
+@pytest.mark.parametrize("linear_type", ["uv", "uu"])
 @pytest.mark.parametrize("reflected", [False, True])
-def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
+def test_o2_scatter_is_o3_equivariant(linear_type, reflected):
     torch.manual_seed(7)
-    module = _scatter_module(use_attention, linear_type)
+    module = _scatter_module(linear_type)
     edge_index = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=DEVICE)
     node_features = module.irreps_in.randn(3, -1, dtype=DTYPE, device=DEVICE)
     edge_vectors = torch.randn(4, 3, dtype=DTYPE, device=DEVICE)
     weights = torch.randn(4, module.weight_numel, dtype=DTYPE, device=DEVICE)
-    radial = torch.randn(4, 4, dtype=DTYPE, device=DEVICE)
-    kwargs = {"edge_radial_basis": radial} if linear_type == "uv" else {}
     cutoff = torch.rand(4, 1, dtype=DTYPE, device=DEVICE)
     wigner_module = o2.WignerD(1, 1).to(DEVICE, DTYPE)
     wigner, wigner_inv = wigner_module(edge_vectors)
@@ -1437,7 +1427,6 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
         wigner,
         wigner_inv,
         edge_cutoff=cutoff,
-        **kwargs,
     )
     if linear_type == "uu":
         torch.testing.assert_close(
@@ -1448,7 +1437,6 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
                 wigner,
                 wigner_inv,
                 edge_cutoff=cutoff,
-                **kwargs,
             ),
             2 * output,
         )
@@ -1465,7 +1453,6 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
         rotated_wigner,
         rotated_wigner_inv,
         edge_cutoff=cutoff,
-        **kwargs,
     )
     torch.testing.assert_close(
         rotated_output,
@@ -1477,7 +1464,7 @@ def test_o2_scatter_is_o3_equivariant(use_attention, linear_type, reflected):
 
 def test_uu_o2_scatter_uses_only_source_features(monkeypatch):
     torch.manual_seed(8)
-    module = _scatter_module(False, "uu")
+    module = _scatter_module("uu")
     assert module.linear.irreps_in == module.local_frame_in.irreps_out
     assert not hasattr(module, "attention")
     assert not hasattr(module, "linear_type")
@@ -1531,7 +1518,7 @@ def test_uu_o2_scatter_uses_only_source_features(monkeypatch):
 @pytest.mark.parametrize("linear_type", ["uv", "uu"])
 @pytest.mark.parametrize("num_nodes", [0, 3])
 def test_o2_scatter_supports_empty_edges(linear_type, num_nodes):
-    module = _scatter_module(False, linear_type)
+    module = _scatter_module(linear_type)
     assert "reshape_in" not in repr(module)
     assert "reshape_out" not in repr(module)
     edge_index = torch.empty(2, 0, dtype=torch.long, device=DEVICE)
@@ -1641,7 +1628,7 @@ def _magnetic_scatter_module():
 )
 def test_o2_magnetic_scatter_is_time_reversal_invariant():
     module, irreps, magnetic_edge_irreps = _magnetic_scatter_module()
-    assert module.attention is None
+    assert not hasattr(module, "attention")
     edge_index = torch.tensor([[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE)
     num_edges = edge_index.size(1)
     node_features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)

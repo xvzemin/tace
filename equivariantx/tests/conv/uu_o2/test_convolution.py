@@ -26,6 +26,7 @@ from equivariantx.tests.conv.testing import assert_native_autograd
 )
 def test_uu_o2_convolution_derivatives(
     double_precision,
+    monkeypatch,
     device,
     backend,
     direction,
@@ -34,15 +35,19 @@ def test_uu_o2_convolution_derivatives(
     projected,
     radial_channels,
 ):
+    from equivariantx.ops import config
+
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    if backend == "torch":
+        monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     frame_in = o2.LocalFrame("2x0e+2x1o+2x1e+2x2o", mmax=mmax).to(device)
     frame_out = o2.LocalFrame("2x0o+2x1e+2x1o+2x2e", mmax=mmax).to(device)
     linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, 2)
     module = eqx_conv.UuO2TensorProductConv(
         frame_in, linear, frame_out, backend=backend
     ).to(device)
-    frame = o2.WignerD(2, 2, method="recursive").to(device)
+    frame = o2.WignerD(2, 2, method="recursive", backend="torch").to(device)
     index = torch.tensor([[0, 1, 2, 0, 1], [1, 2, 0, 2, 0]], device=device)
     rows = 1 if shared else index.size(1)
 

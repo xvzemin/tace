@@ -49,7 +49,8 @@ def _asymmetric_contractions(correlation=3, path_mode="sum"):
         irreps_out,
         correlation,
         algorithm="dense",
-        path_mode=path_mode, backend="torch",
+        path_mode=path_mode,
+        backend="torch",
     ).to(DEVICE, DTYPE)
     return recursive, dense
 
@@ -106,7 +107,9 @@ def operator_training_problem(kind, backend, device):
             .double()
         )
         reference = (
-            o2.SymmetricContraction("2x0e+2x1m", "2x0e+2x1m", 3, algorithm="dense", backend="torch")
+            o2.SymmetricContraction(
+                "2x0e+2x1m", "2x0e+2x1m", 3, algorithm="dense", backend="torch"
+            )
             .to(device)
             .double()
         )
@@ -131,12 +134,14 @@ def operator_training_problem(kind, backend, device):
 
 
 def check_joint_o2_aoti(kind, tmp_path):
-    """Load a native force-loss package with Torch only and update its parameters."""
+    """Load a native force-loss package with registered EQX operators and update its parameters."""
     import os
     import subprocess
     import sys
 
     from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.tests.utils.testing import package_script
 
     operation, values = operator_training_problem(kind, "cuda", "cuda")
     graph = make_fx(lambda *args: operation(*args))(*values)
@@ -165,15 +170,15 @@ def check_joint_o2_aoti(kind, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad(): actual = run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual), row['outputs'], atol=3e-9, rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

@@ -5,20 +5,8 @@ ownership; node sums use FP32/FP64 atomics across disjoint row segments.
 """
 
 import re
+
 import torch
-import triton
-import triton.language as tl
-
-
-@triton.jit
-def segment_prefix(P, J, N: tl.constexpr, CAP: tl.constexpr, BLOCK: tl.constexpr):
-    i = tl.arange(0, BLOCK)
-    start = tl.load(P + i, i < N, 0)
-    end = tl.load(P + i + 1, i < N, 0)
-    count = tl.where(i < N, (end - start + CAP - 1) // CAP, 0)
-    prefix = tl.cumsum(count)
-    tl.store(J, 0)
-    tl.store(J + i + 1, prefix, i < N)
 
 
 def split_source(code, cap, receiver=False):
@@ -71,9 +59,7 @@ def prepare_segments(pointers, cap):
     """Build a live task prefix, including empty nodes, on the current stream."""
     if cap <= 0:
         raise ValueError("Segment length must be positive")
-    nodes = pointers.numel() - 1
-    jobs = torch.empty_like(pointers)
-    segment_prefix[(1,)](
-        pointers, jobs, nodes, cap, triton.next_power_of_2(max(nodes, 1))
+    counts = torch.div(
+        pointers[1:] - pointers[:-1] + cap - 1, cap, rounding_mode="floor"
     )
-    return jobs
+    return torch.cat((pointers.new_zeros(1), counts.cumsum(0)))

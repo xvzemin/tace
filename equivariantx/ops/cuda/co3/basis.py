@@ -1,11 +1,9 @@
 """CUDA Cartesian projection with compiler-visible rank-two kernels."""
 
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
+from ...common.cuda.pointwise import evaluate as pointwise
 from ...common.torch.basis import map_blocks, project_dense
 from ...precision import validate_precision
 from ...torch.co3.basis import rank_two
@@ -18,7 +16,7 @@ def change_basis(module, features):
     if not features.is_cuda:
         raise ValueError("backend='cuda' requires CUDA inputs.")
     values = []
-    for mul, degree, dim, section in getattr(module, "basis_groups", module.paths):
+    for mul, degree, dim, section in module.basis_groups:
         matrix = getattr(module, f"basis_{degree}")
         value = features[..., section].reshape(*features.shape[:-1], mul, dim)
         values.append(linear(value, matrix.T if module.inverse else matrix).flatten(-2))
@@ -27,36 +25,29 @@ def change_basis(module, features):
     return values[0] if len(values) == 1 else torch.cat(values, dim=-1)
 
 
-@triton.jit
-def rank_two_kernel(source, result, size, BLOCK: tl.constexpr):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    row, component = index // 9, index % 9
-    i, j = component // 3, component % 3
-    valid = index < size
-    a = tl.load(source + index, valid, other=0)
-    b = tl.load(source + row * 9 + j * 3 + i, valid, other=0)
-    diagonal = valid & (i == j)
-    x = tl.load(source + row * 9, diagonal, other=0)
-    y = tl.load(source + row * 9 + 4, diagonal, other=0)
-    z = tl.load(source + row * 9 + 8, diagonal, other=0)
-    value = (a + b) * 0.5 - (x + y + z) / 3.0
-    tl.store(result + index, value, valid)
-
-
-@triton_op("eqx::stf_rank_two", mutates_args=())
+@torch.library.custom_op("eqx::stf_rank_two", mutates_args=(), device_types="cuda")
 def project_rank_two(features: torch.Tensor) -> torch.Tensor:
-    """Project contiguous rows in one CUDA launch; preserve FP32 or FP64."""
+    """Project rank-two Cartesian tensors onto their symmetric traceless part."""
     validate_precision((features,))
-    if not features.is_cuda:
-        raise ValueError("The native projector requires CUDA features.")
     if features.ndim < 1 or features.shape[-1] != 9:
-        raise ValueError("Rank-two Cartesian features must end in nine components.")
+        raise ValueError("Rank-two Cartesian tensors must end in nine components.")
     features = features.contiguous()
     result = torch.empty_like(features)
-    wrap_triton(rank_two_kernel)[(triton.cdiv(features.numel(), 256),)](
-        features, result, features.numel(), 256
+    return pointwise(
+        result,
+        (features,),
+        """
+        I row=i/9; int a=(i%9)/3,b=i%3;
+        T value=(p0[i]+p0[row*9+b*3+a])*T(0.5);
+        if(a==b) value-=(p0[row*9]+p0[row*9+4]+p0[row*9+8])/T(3);
+        out[i]=value;
+    """,
     )
-    return result
+
+
+@project_rank_two.register_fake
+def fake(features):
+    return torch.empty_like(features, memory_format=torch.contiguous_format)
 
 
 def project_backward(ctx, gradient):

@@ -20,6 +20,9 @@ The default `backend=None` uses `equivariantx.ops.config.DEFAULT_BACKEND`,
 set once at import to CUDA when available and optimized PyTorch otherwise.
 Select `backend="torch"` to use PyTorch explicitly, including on GPUs.
 
+Operators support FP32 and FP64 storage and follow PyTorch's TF32 matrix
+multiplication setting. FP16 and BF16 are not supported.
+
 Eligible CUDA row-product programs automatically replay CUDA Graphs, including
 their registered derivatives. Shape buckets and shared temporary storage limit
 capture overhead for changing batch sizes. Set `EQX_USE_CUDA_GRAPH=0` to compare

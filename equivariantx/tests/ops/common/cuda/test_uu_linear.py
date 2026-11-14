@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.cuda.uu_linear import evaluate
 from equivariantx.tests.ops.common.torch.test_uu_linear import linear_case
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native UuLinear requires CUDA"
@@ -95,7 +96,7 @@ def test_unbacked_empty_force_graph(space, mode, weights):
         ("co2", "sum", "shared"),
     ],
 )
-def test_joint_aoti_without_eqx(tmp_path, space, mode, weights):
+def test_joint_aoti(tmp_path, space, mode, weights):
     pytest.importorskip("torch.fx.experimental.dynamic_spec")
     from torch.fx.experimental.dynamic_spec import (
         ParamsSpec,
@@ -184,6 +185,7 @@ def test_joint_aoti_without_eqx(tmp_path, space, mode, weights):
 import sys
 import torch
 torch.set_num_threads(2)
+import equivariantx
 run = torch._inductor.aoti_load_package(sys.argv[1])
 record = torch.load(sys.argv[2], weights_only=True)
 parameters = [value.cuda() for value in record['initial']]
@@ -210,10 +212,10 @@ for count in (0, 1, 17):
         assert ('>= 2' if count < 2 else '<= 16') in str(error)
     else:
         raise AssertionError('AOTI input bounds must remain enforced.')
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data)],
+        [sys.executable, "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={
             **{k: v for k, v in os.environ.items() if k != "PYTHONPATH"},

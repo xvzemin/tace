@@ -420,9 +420,8 @@ model:
       use_first_pre_norm: false
 
     atomic_basis:
-      # uv_o2 has no attention; uv_rra_o2 uses attention; uu_o2 is a separate UU interaction.
       # Magnetic UV-O2 uses uv_o2_mag. Interaction choices can change the model architecture.
-      type: cgtp # str or per-layer list: cgtp, o2_cgtp, so2, uv_o2, uv_rra_o2, uu_o2, uv_o2_mag
+      type: cgtp # str or per-layer list: cgtp, o2_cgtp, so2, uv_o2, uu_o2, uv_o2_mag
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density]
       nonlinear: gate # [null, gate]
@@ -430,7 +429,7 @@ model:
       scalar_act: null # (str or list[str]), name for 0e, or [0e, 0o]
       tensor_act: null # name for tensor-irrep 0e gates
       use_asymmetric_contraction: false
-      num_head: 2 # so2 / uv_rra_o2 attention heads; requires compatible channel count
+      num_head: 2 # so2 attention heads; requires compatible channel count
       edge_ace_hidden: null # SO2 asymmetric-contraction width
       gate_m0: false # always use false, legacy option for whether gating m=0 
 

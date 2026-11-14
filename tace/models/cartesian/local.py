@@ -9,6 +9,7 @@ import torch
 
 from equivariantx import co2, co3, o2
 from equivariantx.o2.rotation_matrix import rotation_matrix_to_y_axis
+from equivariantx.ops.common.gate import gate_program
 from equivariantx.ops.common.radial import materialize
 from tace.models.layout import LayoutTransform
 from tace.models.spherical.tece_oam_rra import Convolution
@@ -21,9 +22,7 @@ class RotationMatrices(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.backend = (
-            "cuda" if acceleration_enabled("eqx", kernel="conv") else "torch"
-        )
+        self.backend = "cuda" if acceleration_enabled("eqx", kernel="conv") else "torch"
 
     def forward(self, vectors):
         backend = self.backend if vectors.is_cuda else "torch"
@@ -67,6 +66,8 @@ def gate(module):
     result.act_scalars, result.act_gates = module.act_scalars, module.act_gates
     result._paths = module._paths
     result.irreps_out = co2.Irreps(module.irreps_out)
+    if result.backend == "cuda":
+        result.cuda_program = gate_program(result, cartesian=True)
     return result
 
 
@@ -82,45 +83,6 @@ def inverse_scale(frame):
             for mul, ir in frame.irreps_in
         ]
     )
-
-
-class RadialAttention(torch.nn.Module):
-    """Apply invariant radial attention to Cartesian planar features."""
-
-    def __init__(self, reference):
-        super().__init__()
-        self.irreps = co2.Irreps(reference.irreps)
-        self.message_irreps = co2.Irreps(reference.message_irreps)
-        self.q_proj, self.k_proj = linear(reference.q_proj), linear(reference.k_proj)
-        self.radial_proj = reference.radial_proj
-        self.graph_softmax = reference.graph_softmax
-        self.num_head, self.scale = reference.num_head, reference.scale
-
-    def forward(self, message, source, target, radial, edge_index, cutoff, num_nodes):
-        query, key = self.q_proj(target), self.k_proj(source)
-        score = radial.new_zeros(radial.shape[0], self.num_head)
-        for (mul, ir), section in zip(self.irreps, self.irreps.slices()):
-            shape = (query.shape[0], self.num_head, mul // self.num_head, ir.dim)
-            score = score + (
-                query[:, section].reshape(shape) * key[:, section].reshape(shape)
-            ).sum(dim=(-2, -1))
-        scale, shift = self.radial_proj(radial).chunk(2, dim=-1)
-        score = score * self.scale * (2 * torch.sigmoid(scale)) + shift
-        attention = (
-            self.graph_softmax(
-                score, edge_index[1], num_nodes=num_nodes, exp_rescale=cutoff
-            )
-            * cutoff
-        )
-        values = []
-        for (mul, ir), section in zip(
-            self.message_irreps, self.message_irreps.slices()
-        ):
-            value = message[:, section].reshape(
-                message.shape[0], self.num_head, mul // self.num_head, ir.dim
-            )
-            values.append((value * attention[:, :, None, None]).flatten(1))
-        return torch.cat(values, dim=-1)
 
 
 class UuConvolution(torch.nn.Module):
@@ -223,11 +185,6 @@ class UvConvolution(torch.nn.Module):
                 if acceleration_enabled("eqx", kernel="conv")
                 else "torch",
             )
-        self.attention = (
-            RadialAttention(reference.attention)
-            if reference.attention is not None
-            else None
-        )
         self.register_buffer(
             "scale", inverse_scale(self.local_frame_out), persistent=False
         )
@@ -294,19 +251,8 @@ class UvConvolution(torch.nn.Module):
         local = self.linear_down(
             self.nonlinearity(self.linear_up(torch.cat(values, -1)))
         )
-        if self.attention is not None:
-            local = self.attention(
-                local,
-                source,
-                target,
-                edge_radial_basis,
-                edge_index,
-                edge_cutoff,
-                features.shape[0],
-            )
         message = self.local_frame_out.to_global(local, rotation_inv) * self.scale
-        if self.attention is None:
-            message = message * edge_cutoff
+        message = message * edge_cutoff
         return scatter_sum(message, edge_index[1], dim=0, dim_size=features.shape[0])
 
 

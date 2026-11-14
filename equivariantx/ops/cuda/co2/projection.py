@@ -1,44 +1,36 @@
 """Native plane polynomials and broadcast tensor-axis projection."""
 
-import math
-
 import torch
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
-from ...common.cuda.tensor_axis import broadcast_arguments, inline, row_offset
+from ...common.cuda.pointwise import broadcast_offset
+from ...common.cuda.pointwise import evaluate as pointwise
 from ...common.cuda.tensor_axis import evaluate as tensor_axis
+from ...common.cuda.tensor_axis import inline
 from ...precision import validate_uniform
 from ...torch.co2 import projection as torch_kernel
 
 
-@triton.jit
-def plane_kernel(direction, output, rows, BLOCK: tl.constexpr):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    for i in tl.static_range(3):
-        a = tl.load(direction + row * 3 + i, row < rows, 0)
-        for j in tl.static_range(3):
-            b = tl.load(direction + row * 3 + j, row < rows, 0)
-            tl.store(
-                output + row * 9 + i * 3 + j, (1 if i == j else 0) - a * b, row < rows
-            )
-
-
-@triton_op("eqx::plane_projector", mutates_args=())
+@torch.library.custom_op("eqx::plane_projector", mutates_args=(), device_types="cuda")
 def plane_operator(direction: torch.Tensor) -> torch.Tensor:
-    """Form native I - n n.T matrices in a single launch."""
+    """Form I - n n.T in one CUDA launch."""
     validate_uniform((direction,))
-    if not direction.is_cuda or direction.ndim < 1 or direction.shape[-1] != 3:
-        raise ValueError("Native plane projectors require CUDA vectors of size three.")
+    if direction.ndim < 1 or direction.shape[-1] != 3:
+        raise ValueError("Plane projectors require vectors of size three.")
     direction = direction.contiguous()
     result = direction.new_empty((*direction.shape[:-1], 3, 3))
-    rows = direction.numel() // 3
-    if rows:
-        wrap_triton(plane_kernel)[(triton.cdiv(rows, 128),)](
-            direction, result, rows, 128
-        )
-    return result
+    return pointwise(
+        result,
+        (direction,),
+        """
+        I row=i/9; int a=(i%9)/3,b=i%3;
+        out[i]=T(a==b)-p0[row*3+a]*p0[row*3+b];
+    """,
+    )
+
+
+@plane_operator.register_fake
+def plane_fake(direction):
+    return direction.new_empty((*direction.shape[:-1], 3, 3))
 
 
 def plane_context(ctx, inputs, output):
@@ -53,197 +45,48 @@ def plane_backward(ctx, gradient):
 plane_operator.register_autograd(plane_backward, setup_context=plane_context)
 
 
-@triton.jit
-def detrace_kernel(
-    features,
-    plane,
-    output,
-    rows,
-    d0,
-    d1,
-    d2,
-    d3,
-    d4,
-    d5,
-    d6,
-    d7,
-    x0,
-    x1,
-    x2,
-    x3,
-    x4,
-    x5,
-    x6,
-    x7,
-    m0,
-    m1,
-    m2,
-    m3,
-    m4,
-    m5,
-    m6,
-    m7,
-    feature_last,
-    plane_row,
-    plane_column,
-    RANK: tl.constexpr,
-    COEFFICIENT: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    shape = (d0, d1, d2, d3, d4, d5, d6, d7)
-    x_offset = row_offset(row, shape, (x0, x1, x2, x3, x4, x5, x6, x7))
-    p_offset = row_offset(row, shape, (m0, m1, m2, m3, m4, m5, m6, m7))
-    if RANK == 2:
-        trace = tl.full(
-            (BLOCK,),
-            0,
-            tl.float64 if output.dtype.element_ty == tl.float64 else tl.float32,
-        )
-        for i in tl.static_range(3):
-            for j in tl.static_range(3):
-                x = tl.load(
-                    features + x_offset + (3 * i + j) * feature_last, row < rows, 0
-                )
-                a = tl.load(
-                    plane + p_offset + i * plane_row + j * plane_column, row < rows, 0
-                )
-                b = tl.load(
-                    plane + p_offset + j * plane_row + i * plane_column, row < rows, 0
-                )
-                trace += x * ((a + b) * 0.5)
-        for i in tl.static_range(3):
-            for j in tl.static_range(3):
-                x = tl.load(
-                    features + x_offset + (3 * i + j) * feature_last, row < rows, 0
-                )
-                a = tl.load(
-                    plane + p_offset + i * plane_row + j * plane_column, row < rows, 0
-                )
-                b = tl.load(
-                    plane + p_offset + j * plane_row + i * plane_column, row < rows, 0
-                )
-                tl.store(
-                    output + row * 9 + i * 3 + j,
-                    x + COEFFICIENT * trace * ((a + b) * 0.5),
-                    row < rows,
-                )
-    else:
-        traces = ()
-        for k in tl.static_range(3):
-            trace = tl.full(
-                (BLOCK,),
-                0,
-                tl.float64 if output.dtype.element_ty == tl.float64 else tl.float32,
-            )
-            for i in tl.static_range(3):
-                for j in tl.static_range(3):
-                    a = tl.load(
-                        plane + p_offset + i * plane_row + j * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    b = tl.load(
-                        plane + p_offset + j * plane_row + i * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    x = tl.load(
-                        features + x_offset + (9 * i + 3 * j + k) * feature_last,
-                        row < rows,
-                        0,
-                    )
-                    y = tl.load(
-                        features + x_offset + (9 * i + 3 * k + j) * feature_last,
-                        row < rows,
-                        0,
-                    )
-                    z = tl.load(
-                        features + x_offset + (9 * k + 3 * i + j) * feature_last,
-                        row < rows,
-                        0,
-                    )
-                    trace += (x + y + z) * ((a + b) * 0.5)
-            traces += (trace / 3,)
-        for i in tl.static_range(3):
-            for j in tl.static_range(3):
-                for k in tl.static_range(3):
-                    a = tl.load(
-                        plane + p_offset + i * plane_row + j * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    b = tl.load(
-                        plane + p_offset + j * plane_row + i * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    c = tl.load(
-                        plane + p_offset + i * plane_row + k * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    d = tl.load(
-                        plane + p_offset + k * plane_row + i * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    e = tl.load(
-                        plane + p_offset + j * plane_row + k * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    f = tl.load(
-                        plane + p_offset + k * plane_row + j * plane_column,
-                        row < rows,
-                        0,
-                    )
-                    x = tl.load(
-                        features + x_offset + (9 * i + 3 * j + k) * feature_last,
-                        row < rows,
-                        0,
-                    )
-                    correction = (
-                        (a + b) * traces[k] + (c + d) * traces[j] + (e + f) * traces[i]
-                    ) / 6
-                    tl.store(
-                        output + row * 27 + 9 * i + 3 * j + k,
-                        x + COEFFICIENT * correction,
-                        row < rows,
-                    )
-
-
 def native_detrace(tensor, plane, rank, coefficient):
-    """Launch the shared rank-two/three polynomial with broadcast strides."""
+    """Apply rank-two or rank-three trace corrections with broadcast strides."""
     validate_uniform((tensor, plane))
-    if not tensor.is_cuda or tensor.shape[-1] != 3**rank or plane.shape[-2:] != (3, 3):
-        raise ValueError(
-            "Native detracing requires matching CUDA tensors and 3x3 planes."
-        )
+    if tensor.shape[-1] != 3**rank or plane.shape[-2:] != (3, 3):
+        raise ValueError("Detracing requires matching tensors and 3x3 planes.")
     shape = torch.broadcast_shapes(tensor.shape[:-1], plane.shape[:-2])
-    if len(shape) > 8:
-        function = torch_kernel.detrace_two if rank == 2 else torch_kernel.detrace_three
-        return function(tensor, plane, coefficient)
     result = tensor.new_empty((*shape, 3**rank))
-    rows = math.prod(shape)
-    if rows:
-        wrap_triton(detrace_kernel)[(triton.cdiv(rows, 128),)](
-            tensor,
-            plane,
-            result,
-            rows,
-            *broadcast_arguments(tensor, plane, shape),
-            tensor.stride(-1),
-            plane.stride(-2),
-            plane.stride(-1),
-            rank,
-            coefficient,
-            128,
-        )
-    return result
+    if not result.numel():
+        return result
+    prepare = f"""
+        I row=i/{3**rank},xo={broadcast_offset(tensor, shape, 1)},po={broadcast_offset(plane, shape, 2)};
+        T p[9];
+        for(int a=0;a<3;++a) for(int b=0;b<3;++b)
+            p[a*3+b]=(p1[po+a*{plane.stride(-2)}+b*{plane.stride(-1)}]
+                       +p1[po+b*{plane.stride(-2)}+a*{plane.stride(-1)}])*T(0.5);
+    """
+    if rank == 2:
+        body = f"""
+            T trace=0;
+            for(int k=0;k<9;++k) trace+=p0[xo+k*{tensor.stride(-1)}]*p[k];
+            out[i]=p0[xo+(i%9)*{tensor.stride(-1)}]+T({coefficient:.17g})*trace*p[i%9];
+        """
+    else:
+        body = f"""
+            T traces[3]={{0,0,0}};
+            for(int k=0;k<3;++k) {{
+                for(int a=0;a<3;++a) for(int b=0;b<3;++b)
+                    traces[k]+=(p0[xo+(9*a+3*b+k)*{tensor.stride(-1)}]
+                               +p0[xo+(9*a+3*k+b)*{tensor.stride(-1)}]
+                               +p0[xo+(9*k+3*a+b)*{tensor.stride(-1)}])*p[a*3+b];
+                traces[k]/=T(3);
+            }}
+            int a=(i%27)/9,b=(i%9)/3,c=i%3;
+            T correction=(p[a*3+b]*traces[c]+p[a*3+c]*traces[b]+p[b*3+c]*traces[a])/T(3);
+            out[i]=p0[xo+(i%27)*{tensor.stride(-1)}]+T({coefficient:.17g})*correction;
+        """
+    return pointwise(result, (tensor, plane), prepare + body)
 
 
-@triton_op("eqx::planar_detrace_two", mutates_args=())
+@torch.library.custom_op(
+    "eqx::planar_detrace_two", mutates_args=(), device_types="cuda"
+)
 def detrace_two(
     tensor: torch.Tensor, plane: torch.Tensor, coefficient: float = -0.5
 ) -> torch.Tensor:
@@ -251,12 +94,21 @@ def detrace_two(
     return native_detrace(tensor, plane, 2, coefficient)
 
 
-@triton_op("eqx::planar_detrace_three", mutates_args=())
+@torch.library.custom_op(
+    "eqx::planar_detrace_three", mutates_args=(), device_types="cuda"
+)
 def detrace_three(
     tensor: torch.Tensor, plane: torch.Tensor, coefficient: float = -0.75
 ) -> torch.Tensor:
     """Fuse rank-three trace correction without dense basis contractions."""
     return native_detrace(tensor, plane, 3, coefficient)
+
+
+@detrace_two.register_fake
+@detrace_three.register_fake
+def detrace_fake(tensor, plane, coefficient=-0.5):
+    shape = torch.broadcast_shapes(tensor.shape[:-1], plane.shape[:-2])
+    return tensor.new_empty((*shape, tensor.shape[-1]))
 
 
 def detrace_context(ctx, inputs, output):

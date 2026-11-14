@@ -579,7 +579,7 @@ def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
         monkeypatch.delenv(name, raising=False)
     config = _time_reversal_model_config() if time_reversal else _model_config()
     config["mmax"] = 1
-    config["atomic_basis"]["type"] = ["uv_rra_o2"]
+    config["atomic_basis"]["type"] = ["uv_o2"]
     config["atomic_basis"]["edge_nonlinear"] = ["silu"]
     model = SphericalTACE(**config)
 

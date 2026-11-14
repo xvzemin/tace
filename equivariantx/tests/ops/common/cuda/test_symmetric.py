@@ -15,9 +15,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.mbe.ace import UuuSymmetricContraction
 from equivariantx.ops import config
-from equivariantx.ops.common.polynomial import polynomial_prefix
-from equivariantx.ops.common.symmetric import symmetric_inputs
-from equivariantx.tests.utils.testing import check_forward_ad
+from equivariantx.tests.utils.testing import check_forward_ad, package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native ACE polynomials require CUDA"
@@ -46,10 +44,8 @@ def contraction(degree=4, channels=2, backend="cuda"):
 
 
 @pytest.mark.parametrize("degree", [2, 4])
-@pytest.mark.parametrize("budget", [4, 2048])
-def test_recursive_derivatives(degree, budget, monkeypatch):
+def test_recursive_derivatives(degree, monkeypatch):
     monkeypatch.setattr(config, "SYMMETRIC_NATIVE", True)
-    monkeypatch.setattr(config, "SYMMETRIC_NATIVE_MAX_NODES", budget)
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     module = contraction(degree)
     reference = contraction(degree, backend="torch")
@@ -76,13 +72,12 @@ def test_recursive_derivatives(degree, budget, monkeypatch):
             for result in (actual, expected)
         ]
     torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
-    if budget == 2048:
-        assert torch.autograd.gradcheck(
-            lambda x, w: module(x, w, types), (x, w), fast_mode=True
-        )
-        assert torch.autograd.gradgradcheck(
-            lambda x, w: module(x, w, types), (x, w), fast_mode=True
-        )
+    assert torch.autograd.gradcheck(
+        lambda x, w: module(x, w, types), (x, w), fast_mode=True
+    )
+    assert torch.autograd.gradgradcheck(
+        lambda x, w: module(x, w, types), (x, w), fast_mode=True
+    )
 
 
 def test_functional_transforms(monkeypatch):
@@ -127,29 +122,8 @@ def test_strides_indices_and_empty(nodes, dtype, monkeypatch):
     torch.testing.assert_close(*values, atol=tolerance, rtol=tolerance)
 
 
-def test_packet_budget(monkeypatch):
-    from equivariantx.ops.common.cuda.symmetric import compiled_packets
-
-    monkeypatch.setattr(config, "SYMMETRIC_NATIVE", True)
-    module = contraction()
-    x = torch.randn(3, 2, 9, device="cuda")
-    w = torch.randn(2, module.num_paths, 2, device="cuda")
-    program, _ = symmetric_inputs(x, w, module.correlation, module.output_dim)
-    groups = compiled_packets(module.metadata, program, 2048)
-    assert groups is not None
-    for chunks in groups:
-        for packets in chunks:
-            assert sum(len(polynomial_prefix(packet)[0]) for packet in packets) <= 2048
-    assert compiled_packets(module.metadata, program, 4) is None
-
-
 def test_split_output_force_loss(monkeypatch):
-    from collections import Counter
-
-    from equivariantx.ops.common.cuda.symmetric import compiled_packets
-
     monkeypatch.setattr(config, "SYMMETRIC_NATIVE", True)
-    monkeypatch.setattr(config, "SYMMETRIC_NATIVE_MAX_NODES", 32)
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     module, reference = contraction(6), contraction(6, backend="torch")
     x = (
@@ -159,16 +133,6 @@ def test_split_output_force_loss(monkeypatch):
         torch.randn(3, module.num_paths, 2, device="cuda", dtype=torch.float64) * 0.1
     ).requires_grad_()
     types = torch.tensor([2, 0, 1, 0, 0, 0], device="cuda")[::2]
-    program, _ = symmetric_inputs(x, weight, module.correlation, module.output_dim)
-    groups = compiled_packets(module.metadata, program, 32)
-    assert groups is not None
-    destinations = Counter()
-    for chunks in groups:
-        for packets in chunks:
-            assert sum(len(polynomial_prefix(packet)[0]) for packet in packets) <= 32
-            for packet in packets:
-                destinations.update(key for key, _ in packet)
-    assert max(destinations.values()) > 1
 
     def evaluate(layer):
         energy = layer(x, weight, types).sin().sum()
@@ -199,10 +163,9 @@ def test_partial_gradient(trainable, monkeypatch):
     torch.testing.assert_close(*gradients, atol=2e-10, rtol=2e-9)
 
 
-@pytest.mark.parametrize("budget,strided", [(4, False), (2048, False), (2048, True)])
-def test_dynamic_force_loss_aoti(budget, strided, monkeypatch, tmp_path):
+@pytest.mark.parametrize("strided", [False, True])
+def test_dynamic_force_loss_aoti(strided, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SYMMETRIC_NATIVE", True)
-    monkeypatch.setattr(config, "SYMMETRIC_NATIVE_MAX_NODES", budget)
     module, reference = (
         contraction(channels=64),
         contraction(channels=64, backend="torch"),
@@ -238,8 +201,8 @@ def test_dynamic_force_loss_aoti(budget, strided, monkeypatch, tmp_path):
     graph.graph.eliminate_dead_code()
     graph.recompile()
     assert any(
-        "eqx.symmetric_compiled" in str(node.target) for node in graph.graph.nodes
-    ) == (budget == 2048)
+        "eqx.symmetric_contract" in str(node.target) for node in graph.graph.nodes
+    )
     nodes = torch.export.Dim("nodes", min=2, max=8192)
     exported = torch.export.export(
         graph,
@@ -270,14 +233,15 @@ def test_dynamic_force_loss_aoti(budget, strided, monkeypatch, tmp_path):
             sys.executable,
             "-I",
             "-c",
-            """
+            package_script("""
 import sys, torch
+import equivariantx
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2],weights_only=True):
     actual=run(*(value.cuda() for value in row['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual),row['outputs'],atol=2e-9,rtol=2e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],

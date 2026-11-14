@@ -1,7 +1,6 @@
 """Symmetric matrix actions and their complete compiled derivatives."""
 
 import os
-import pickle
 import subprocess
 import sys
 
@@ -190,13 +189,6 @@ def test_shared_transform_buffers_and_switches(monkeypatch):
             context.setattr(config, flag, value)
             graph = make_fx(module)(x, a)
             torch.testing.assert_close(graph(x, a), expected, atol=3e-10, rtol=3e-9)
-    del module.transform_identity
-    legacy = pickle.loads(pickle.dumps(module)).float().double()
-    assert not hasattr(legacy, "transform_identity")
-    assert not kernel.use_shared_matrix(legacy, x, a)
-    torch.testing.assert_close(
-        make_fx(legacy)(x, a)(x, a), expected, atol=3e-10, rtol=3e-9
-    )
 
 
 @pytest.mark.parametrize("unknown_channels", [False, True])

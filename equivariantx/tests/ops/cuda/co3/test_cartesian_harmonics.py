@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co3
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
 
@@ -31,7 +32,7 @@ def test_native_values(dtype, rows):
     "degree, backend",
     [(2, "torch"), (2, "cuda"), (2, "native"), (4, "torch"), (4, "cuda")],
 )
-def test_joint_aoti_without_eqx(tmp_path, backend, degree):
+def test_joint_aoti(tmp_path, backend, degree):
     from equivariantx.ops.torch.co3.cartesian_harmonics import reference
 
     layer = (
@@ -94,10 +95,10 @@ for record in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = run(*(value.cuda() for value in record['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), record['output'], atol=2e-10, rtol=2e-10)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, str(package), str(data)],
+        [sys.executable, "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
         capture_output=True,

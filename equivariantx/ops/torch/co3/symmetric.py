@@ -102,10 +102,6 @@ def transform_reference(module, tensor, matrix):
 
 def sparse_pack(module, tensor, operation):
     """Project successive index groups with bounded three-term rows."""
-    if any(
-        not hasattr(module, f"output_{k}_indices") for k in range(2, module.rank + 1)
-    ):
-        return pack_factorized(module, tensor)
     for k in range(2, module.rank + 1):
         tensor = operation(
             tensor,
@@ -146,10 +142,6 @@ def sparse_transform(module, tensor, matrix, operation, axis):
     """Transform compact left/right symmetric groups with sparse index maps."""
     if module.rank == 0:
         return tensor
-    if any(
-        not hasattr(module, f"output_{k}_indices") for k in range(1, module.rank + 1)
-    ):
-        return transform_compact(module, tensor, matrix)
     for k in range(1, module.rank + 1):
         rank = module.rank - k
         left = k * (k + 1) // 2

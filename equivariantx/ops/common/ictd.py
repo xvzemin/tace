@@ -84,7 +84,7 @@ def schedules(rank, scalar, vector, coupling):
 
 
 def initialize(module, rank, scalar, vector, coupling, dtype, device):
-    """Register immutable sparse maps; leave the compatibility matrix lazy."""
+    """Register sparse maps and construct the dense basis only on demand."""
     paths, plans, stages, transitions = schedules(rank, scalar, vector, coupling)
     module.paths = paths
     # The scalar-to-vector stage is exactly the identity in both spaces.
@@ -185,8 +185,6 @@ def rectangular_basis(rank, dimension, index, dtype, device):
 
 def path_basis(module, index):
     """Cache a requested rectangular map, keeping the public dense view lazy."""
-    if not hasattr(module, "path_cache_names"):
-        return module.path_matrix(index)
     if index < 0:
         index += len(module.paths)
     if not 0 <= index < len(module.paths):
@@ -204,7 +202,7 @@ def path_basis(module, index):
 
 def restore(module, previous_dtype):
     """Regenerate floating coefficients after dtype/device changes."""
-    for name, value in getattr(module, "coefficient_data", {}).items():
+    for name, value in module.coefficient_data.items():
         setattr(module, name, value.to(getattr(module, name), copy=True))
     matrix = module._buffers.get("change_of_basis")
     if (
@@ -214,7 +212,7 @@ def restore(module, previous_dtype):
         module.change_of_basis = dense_basis(
             module.rank, module.dimension, matrix.dtype, matrix.device
         )
-    for index, name in enumerate(getattr(module, "path_cache_names", ())):
+    for index, name in enumerate(module.path_cache_names):
         matrix = module._buffers.get(name)
         if (
             matrix is not None

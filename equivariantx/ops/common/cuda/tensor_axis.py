@@ -1,146 +1,47 @@
 """Native matrix actions on tensor axes without expanding broadcast operands."""
 
 import torch
-import triton
-import triton.language as tl
-from torch.fx.experimental.symbolic_shapes import statically_known_true
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
 from ...precision import validate_uniform
 from ..torch.tensor_axis import TensorAxis, primal
+from .pointwise import broadcast_offset
+from .pointwise import evaluate as pointwise
 
 
-def broadcast_strides(tensor, shape, trailing):
-    """Describe leading broadcast coordinates without copying the tensor."""
-    padding = len(shape) - (tensor.ndim - trailing)
-    return (0,) * padding + tuple(
-        0 if statically_known_true(size == 1) else stride
-        for size, stride in zip(tensor.shape[:-trailing], tensor.stride()[:-trailing])
-    )
-
-
-def broadcast_arguments(features, matrix, shape):
-    """Use scalar runtime sizes/strides in the Inductor Triton ABI."""
-    padding = 8 - len(shape)
-    return (
-        tuple(shape)
-        + (1,) * padding
-        + broadcast_strides(features, shape, 1)
-        + (0,) * padding
-        + broadcast_strides(matrix, shape, 2)
-        + (0,) * padding
-    )
-
-
-@triton.jit
-def row_offset(row, shape, strides):
-    """Locate broadcast rows in arbitrary leading storage."""
-    offset = tl.full(row.shape, 0, tl.int64)
-    for d in tl.static_range(len(shape) - 1, -1, -1):
-        offset += (row % shape[d]) * strides[d]
-        row = row // shape[d]
-    return offset
-
-
-@triton.jit
-def axis_kernel(
-    features,
-    matrix,
-    output,
-    size,
-    d0,
-    d1,
-    d2,
-    d3,
-    d4,
-    d5,
-    d6,
-    d7,
-    x0,
-    x1,
-    x2,
-    x3,
-    x4,
-    x5,
-    x6,
-    x7,
-    m0,
-    m1,
-    m2,
-    m3,
-    m4,
-    m5,
-    m6,
-    m7,
-    feature_last,
-    matrix_row,
-    matrix_column,
-    LEFT: tl.constexpr,
-    RIGHT: tl.constexpr,
-    INNER: tl.constexpr,
-    OUTER: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    inner_index = index % (LEFT * OUTER * RIGHT)
-    row = index // (LEFT * OUTER * RIGHT)
-    a = inner_index // (OUTER * RIGHT)
-    o = (inner_index // RIGHT) % OUTER
-    b = inner_index % RIGHT
-    shape = (d0, d1, d2, d3, d4, d5, d6, d7)
-    feature_offset = row_offset(row, shape, (x0, x1, x2, x3, x4, x5, x6, x7))
-    matrix_offset = row_offset(row, shape, (m0, m1, m2, m3, m4, m5, m6, m7))
-    value = tl.full(
-        (BLOCK,), 0, tl.float64 if output.dtype.element_ty == tl.float64 else tl.float32
-    )
-    for i in range(INNER):
-        x = tl.load(
-            features + feature_offset + ((a * INNER + i) * RIGHT + b) * feature_last,
-            index < size,
-            0,
-        )
-        w = tl.load(
-            matrix + matrix_offset + o * matrix_row + i * matrix_column, index < size, 0
-        )
-        value += x * w
-    tl.store(output + index, value, index < size)
-
-
-@triton_op("eqx::tensor_axis", mutates_args=())
+@torch.library.custom_op("eqx::tensor_axis", mutates_args=(), device_types="cuda")
 def contract(
     features: torch.Tensor, matrix: torch.Tensor, left: int = 1, right: int = 1
 ) -> torch.Tensor:
-    """Apply a broadcast matrix to a flattened left-by-input-by-right tensor."""
+    """Apply a broadcast matrix without copying its leading dimensions."""
     validate_uniform((features, matrix))
-    if not features.is_cuda or features.ndim < 1 or matrix.ndim < 2:
-        raise ValueError("Native tensor axes require CUDA features and matrices.")
-    if (
-        min(left, right, *matrix.shape[-2:]) < 1
-        or features.shape[-1] != left * matrix.shape[-1] * right
-    ):
-        raise ValueError("Matrix dimensions do not match the flattened tensor axis.")
+    if features.ndim < 1 or matrix.ndim < 2:
+        raise ValueError("Tensor axes require feature vectors and matrices.")
+    inner, outer = matrix.shape[-1], matrix.shape[-2]
+    if min(left, right, inner, outer) < 1 or features.shape[-1] != left * inner * right:
+        raise ValueError("Matrix dimensions do not match the tensor axis.")
     shape = torch.broadcast_shapes(features.shape[:-1], matrix.shape[:-2])
-    if len(shape) > 8:
-        return primal(features, matrix, left, right)
-    result = features.new_empty((*shape, left * matrix.shape[-2] * right))
-    if not statically_known_true(result.numel() == 0):
-        wrap_triton(axis_kernel)[(triton.cdiv(result.numel(), 256),)](
-            features,
-            matrix,
-            result,
-            result.numel(),
-            *broadcast_arguments(features, matrix, shape),
-            features.stride(-1),
-            matrix.stride(-2),
-            matrix.stride(-1),
-            left,
-            right,
-            matrix.shape[-1],
-            matrix.shape[-2],
-            256,
-        )
-    return result
+    result = features.new_empty((*shape, left * outer * right))
+    if not result.numel():
+        return result
+    body = f"""
+        I row=i/{left * outer * right}, a=(i/{outer * right})%{left};
+        int o=(i/{right})%{outer},b=i%{right};
+        I xo={broadcast_offset(features, shape, 1)};
+        I wo={broadcast_offset(matrix, shape, 2)};
+        T value=0;
+        for(int k=0;k<{inner};++k)
+            value+=p0[xo+((a*{inner}+k)*{right}+b)*{features.stride(-1)}]
+                  *p1[wo+o*{matrix.stride(-2)}+k*{matrix.stride(-1)}];
+        out[i]=value;
+    """
+    return pointwise(result, (features, matrix), body)
+
+
+@contract.register_fake
+def fake(features, matrix, left=1, right=1):
+    shape = torch.broadcast_shapes(features.shape[:-1], matrix.shape[:-2])
+    return features.new_empty((*shape, left * matrix.shape[-2] * right))
 
 
 def setup_context(ctx, inputs, output):

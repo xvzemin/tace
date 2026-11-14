@@ -188,18 +188,16 @@ class NativePolynomial(torch.autograd.Function):
         if kind == "symmetric_matrix" or (
             kind == "symmetric" and config.SYMMETRIC_NATIVE
         ):
-            from .cuda.symmetric import compiled_evaluate
-
             return tuple(
                 value.view_as(value)
-                for value in compiled_evaluate(metadata, program, node_type, operands)
+                for value in torch.ops.eqx.symmetric_contract(
+                    metadata, program, node_type, list(operands)
+                )
             )
         if kind == "linear" and config.LINEAR_NATIVE and operands[0].is_cuda:
-            from .cuda.linear import compiled_contract
-
             return tuple(
                 evaluate_linear(
-                    compiled_contract, metadata, program, node_type, operands
+                    torch.ops.eqx.element_linear, metadata, program, node_type, operands
                 )
             )
         if config.POLYNOMIAL_INLINE and (

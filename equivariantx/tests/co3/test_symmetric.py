@@ -42,7 +42,7 @@ def test_native_shared_matrix_force_loss(rank, channels, monkeypatch):
     graph.graph.eliminate_dead_code()
     graph.recompile()
     targets = [str(node.target) for node in graph.graph.nodes]
-    assert targets.count("eqx.symmetric_compiled.default") == 3
+    assert targets.count("eqx.symmetric_contract.default") == 3
     assert targets.count("eqx.ieee_bmm.default") == 5
     assert not any(
         target in targets for target in ("aten.mm.default", "aten.bmm.default")
@@ -79,6 +79,7 @@ def test_native_shared_matrix_dynamic_aoti(rank, channels, monkeypatch, tmp_path
 
     from equivariantx.ops import config
     from equivariantx.ops.torch.co3.symmetric import transform_reference
+    from equivariantx.tests.utils.testing import package_script
 
     monkeypatch.setattr(config, "SYMMETRIC_MATRIX_NATIVE", True)
     module = SymmetricBasis(rank, backend="cuda").cuda().float()
@@ -121,7 +122,7 @@ def test_native_shared_matrix_dynamic_aoti(rank, channels, monkeypatch, tmp_path
     graph.graph.eliminate_dead_code()
     graph.recompile()
     targets = [str(node.target) for node in graph.graph.nodes]
-    assert targets.count("eqx.symmetric_compiled.default") == 3
+    assert targets.count("eqx.symmetric_contract.default") == 3
     assert targets.count("eqx.ieee_bmm.default") == 5
     dim = torch.export.Dim("nodes", min=2, max=32)
     exported = torch.export.export(
@@ -139,6 +140,7 @@ import sys
 import torch
 
 torch.backends.cuda.matmul.allow_tf32 = True
+import equivariantx
 run = torch._inductor.aoti_load_package(sys.argv[1])
 records = torch.load(sys.argv[2], weights_only=True)
 weight = records['initial'].cuda()
@@ -170,11 +172,19 @@ except RuntimeError:
 else:
     raise AssertionError('Accepted inconsistent dynamic batch dimensions')
 assert torch.backends.cuda.matmul.allow_tf32
-assert not any(name.split('.')[0] in ('equivariantx', 'e3nn', 'tace') for name in sys.modules)
-print('Five dynamic force-loss parameter updates passed with Torch only.')
+assert 'tace' not in sys.modules
+print('Five dynamic force-loss parameter updates passed with registered EQX operators.')
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", script, str(package), str(records)],
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            package_script(script),
+            str(package),
+            str(records),
+        ],
         cwd=tmp_path,
         env={**os.environ, "AOTI_RUNTIME_CHECK_INPUTS": "1"},
         capture_output=True,
@@ -320,25 +330,6 @@ def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision
         assert selected.call_count == (device == "cuda")
         torch.testing.assert_close(actual, reference.pack(x))
     assert module.backend == "cuda" and config.TORCH_REFERENCE is True
-
-
-def test_legacy_sparse_metadata(double_precision, monkeypatch):
-    from equivariantx.ops import config
-
-    module = SymmetricBasis(3).to(DEVICE)
-    x = torch.randn(2, 27, device=DEVICE)
-    compact = torch.randn(2, module.dim, device=DEVICE)
-    matrix = torch.randn(2, 3, 3, device=DEVICE)
-    expected = module.pack(x), module(compact, matrix)
-    for name in list(module._buffers):
-        if name.startswith("output_") and name.endswith(("_indices", "_weights")):
-            delattr(module, name)
-    del module.backend
-    del module.permutation
-    del module.offsets
-    module.float().double()
-    monkeypatch.setattr(config, "TORCH_SYMMETRIC_KERNELS", True)
-    torch.testing.assert_close((module.pack(x), module(compact, matrix)), expected)
 
 
 @pytest.mark.parametrize("expand", [False, True])

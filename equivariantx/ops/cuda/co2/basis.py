@@ -1,13 +1,11 @@
 """Native planar symmetric-traceless projection and compiler-visible reduction."""
 
 import torch
-import triton
-import triton.language as tl
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
-from torch.library import triton_op, wrap_triton
 
 from ....utils.autograd import forward_ad_active
 from ... import config
+from ...common.cuda.pointwise import evaluate as pointwise
 from ...precision import validate_precision
 from ...torch.co2 import basis as torch_kernel
 
@@ -34,42 +32,31 @@ def change_basis(module, features):
     return torch.cat(values, -1) if values else features[..., :0]
 
 
-@triton.jit
-def planar_kernel(source, output, rows, RANK: tl.constexpr, ROWS: tl.constexpr):
-    row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
-    column = tl.arange(0, 2**RANK)
-    count = tl.full((2**RANK,), 0, tl.int32)
-    for bit in tl.static_range(RANK):
-        count += (column >> bit) & 1
-    real = tl.where(count % 4 == 0, 1.0, tl.where(count % 4 == 2, -1.0, 0.0))
-    imag = tl.where(count % 4 == 1, 1.0, tl.where(count % 4 == 3, -1.0, 0.0))
-    index = row[:, None] * (2**RANK) + column[None, :]
-    value = tl.load(source + index, row[:, None] < rows, other=0)
-    a = tl.sum(value * real[None, :], 1)
-    b = tl.sum(value * imag[None, :], 1)
-    result = (a[:, None] * real[None, :] + b[:, None] * imag[None, :]) * 2.0 ** (
-        1 - RANK
-    )
-    tl.store(output + index, result, row[:, None] < rows)
-
-
-@triton_op("eqx::planar_project", mutates_args=())
+@torch.library.custom_op("eqx::planar_project", mutates_args=(), device_types="cuda")
 def project_native(features: torch.Tensor, rank: int) -> torch.Tensor:
-    """Project in one CUDA launch with an exact self-adjoint transpose."""
+    """Apply the self-adjoint planar symmetric-traceless projector."""
     validate_precision((features,))
-    if not features.is_cuda or not 2 <= rank <= 8:
-        raise ValueError("Native planar projection requires CUDA and rank 2..8.")
-    if features.ndim < 1 or features.shape[-1] != 2**rank:
-        raise ValueError("The trailing dimension does not match the tensor rank.")
+    if not 2 <= rank <= 8 or features.ndim < 1 or features.shape[-1] != 2**rank:
+        raise ValueError("Planar projection requires rank 2..8 and matching storage.")
     features = features.contiguous()
     result = torch.empty_like(features)
-    rows = features.numel() // (2**rank)
-    if rows:
-        block = max(1, 512 // (2**rank))
-        wrap_triton(planar_kernel)[(triton.cdiv(rows, block),)](
-            features, result, rows, rank, block
-        )
-    return result
+    width = 2**rank
+    body = f"""
+        I row=i/{width}; int c=i%{width};
+        int phase=__popc(unsigned(c))%4;
+        T total=0;
+        for(int k=0;k<{width};++k) {{
+            int q=__popc(unsigned(k))%4;
+            if(q%2==phase%2) total+=p0[row*{width}+k]*T(q<2?1:-1);
+        }}
+        out[i]=total*T(phase<2?1:-1)*T({2.0 ** (1 - rank):.17g});
+    """
+    return pointwise(result, (features,), body)
+
+
+@project_native.register_fake
+def fake(features, rank):
+    return torch.empty_like(features, memory_format=torch.contiguous_format)
 
 
 def project_context(ctx, inputs, output):

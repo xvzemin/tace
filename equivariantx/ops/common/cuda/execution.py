@@ -37,6 +37,16 @@ def can_inline_matmul(nodes, i, dependent):
     )
 
 
+def can_inline_frame(nodes, i):
+    """Fuse indexed rotations while retaining cooperative matrix adjoints."""
+    return nodes[i][0] == "frame" and nodes[i][3][1] in (0, 2)
+
+
+def matrix_input(nodes, i):
+    """Keep matrix transposes as BLAS views rather than flattened copies."""
+    return nodes[i][2][0] if nodes[i][0] == "transpose" else i
+
+
 @lru_cache(maxsize=128)
 def execution_plan(metadata):
     nodes, outputs = parse_metadata(metadata)
@@ -57,16 +67,36 @@ def execution_plan(metadata):
 
     for root, _, _ in outputs:
         visit(root)
-    boundaries = frozenset(
-        i
-        for i in live
-        if result[i]
-        and consumers[i] > 1
-        and (
-            nodes[i][0]
-            in ("product", "scatter", "add", "mul", "silu", "sigmoid", "tanh", "exp")
-            or can_inline_matmul(nodes, i, result)
+    frame_terms = {}
+    for i in sorted(live):
+        op, _, args, data = nodes[i]
+        if op == "frame" and data[1] == 1:
+            frame_terms[i] = (i,)
+        elif op == "add" and all(j in frame_terms and consumers[j] == 1 for j in args):
+            frame_terms[i] = tuple(k for j in args for k in frame_terms[j])
+    frame_sums = {i: terms for i, terms in frame_terms.items() if len(terms) > 1}
+    boundaries = (
+        frozenset(
+            i
+            for i in live
+            if result[i]
+            and consumers[i] > 1
+            and (
+                nodes[i][0]
+                in (
+                    "product",
+                    "scatter",
+                    "add",
+                    "mul",
+                    "silu",
+                    "sigmoid",
+                    "tanh",
+                    "exp",
+                )
+                or can_inline_matmul(nodes, i, result)
+            )
         )
+        | frame_sums.keys()
     )
     expressions, dependencies, uses = {}, {}, Counter()
 
@@ -81,12 +111,24 @@ def execution_plan(metadata):
                 children = ()
             elif node_projection(nodes, i):
                 children = (("value", args[1]),)
+            elif i in frame_sums:
+                children = tuple(
+                    ("value", j)
+                    for term in frame_sums[i]
+                    for role, j in enumerate(nodes[term][2])
+                    if role != 1
+                    and not (
+                        role == 0
+                        and nodes[j][0] == "input"
+                        and nodes[j][3][1] in ("source", "target")
+                    )
+                )
             elif op == "product":
                 output = nodes[i][3][1]
                 children = tuple(
                     ("value", j) for role, j in enumerate(args) if role != output
                 )
-            elif op == "frame":
+            elif op == "frame" and not can_inline_frame(nodes, i):
                 children = tuple(
                     ("value", j)
                     for role, j in enumerate(args)
@@ -108,10 +150,10 @@ def execution_plan(metadata):
                         and nodes[j][3][1] in ("source", "target")
                     )
                 )
+            elif op == "matmul" and not can_inline_matmul(nodes, i, result):
+                children = tuple(("value", matrix_input(nodes, j)) for j in args)
             elif (
-                op == "matmul"
-                and not can_inline_matmul(nodes, i, result)
-                or not result[i]
+                not result[i]
                 or op == "slice"
                 and (args[0] in boundaries or nodes[args[0]][0] == "matmul")
             ):
@@ -124,7 +166,7 @@ def execution_plan(metadata):
         elif op in ("convolution", "frame"):
             children = (("value", i),)
         elif op == "matmul" and all(result[j] for j in args):
-            children = tuple(("value", j) for j in args)
+            children = tuple(("value", matrix_input(nodes, j)) for j in args)
         elif op in (
             "add",
             "slice",
@@ -156,7 +198,7 @@ def execution_plan(metadata):
             accumulate(root)
         else:
             require("value", root)
-    return nodes, outputs, tuple(result), expressions, dependencies, uses
+    return nodes, outputs, tuple(result), expressions, dependencies, frame_sums, uses
 
 
 @lru_cache(maxsize=128)
@@ -185,7 +227,9 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
         if i not in translated:
             op, size, args, data = nodes[i]
             if (
-                op in ("input", "convolution", "product", "frame")
+                op in ("input", "convolution", "product")
+                or op == "frame"
+                and not can_inline_frame(nodes, i)
                 or op == "matmul"
                 and not can_inline_matmul(nodes, i, dependent)
                 or not dependent[i]
@@ -229,6 +273,16 @@ def expression_kernel(metadata, dtype, device):
     size = storage * (8 if dtype == torch.float64 else 4)
     processors = torch.cuda.get_device_properties(device).multi_processor_count
     return kernel, storage, slots, size, processors, mode
+
+
+@lru_cache(maxsize=128)
+def reduces_frames(metadata):
+    """Whether an expression contains inverse rotations suitable for CSR reduction."""
+    nodes, _ = parse_metadata(metadata)
+    return any(op == "frame" and data[1] == 0 for op, _, _, data in nodes) and not any(
+        op in ("normalize", "inv_norm", "mean", "scatter", "matmul", "product")
+        for op, _, _, _ in nodes
+    )
 
 
 @lru_cache(maxsize=256)
@@ -277,7 +331,15 @@ class TiledProgram:
     """Evaluate one edge tile, sharing parameter expressions across tiles."""
 
     def __init__(self, plan, inputs, source, target, begin, end, shared):
-        self.nodes, _, self.dependent, self.expressions, self.dependencies, uses = plan
+        (
+            self.nodes,
+            _,
+            self.dependent,
+            self.expressions,
+            self.dependencies,
+            self.frame_sums,
+            uses,
+        ) = plan
         self.uses = uses.copy()
         self.inputs = inputs
         self.source, self.target = source[begin:end], target[begin:end]
@@ -329,7 +391,9 @@ class TiledProgram:
                 )
             elif op == "convolution":
                 x = self.convolution(i)
-            elif op == "frame":
+            elif i in self.frame_sums:
+                x = self.frame_sum(i)
+            elif op == "frame" and not can_inline_frame(self.nodes, i):
                 x = self.frame(i)
             elif op == "product":
                 from .channel_product import channel_product
@@ -362,29 +426,23 @@ class TiledProgram:
                         normal = value * inverse
                     self.values[key] = normal, inverse.expand_as(value)
                 x = self.values[key][op == "inv_norm"]
-            elif (
-                op == "matmul"
-                and not can_inline_matmul(self.nodes, i, self.dependent)
-                or not self.dependent[i]
-                or op == "slice"
-                and i not in self.expressions
+            elif op == "matmul" and not can_inline_matmul(
+                self.nodes, i, self.dependent
             ):
+                rows, inner, columns = data
+                a = self.matrix(args[0], rows, inner)
+                b = self.matrix(args[1], inner, columns)
+                x = (
+                    (a.reshape(a.shape[0] * rows, inner) @ b[0]).reshape(
+                        a.shape[0], size
+                    )
+                    if b.shape[0] == 1
+                    else torch.matmul(a, b).flatten(1)
+                )
+            elif not self.dependent[i] or op == "slice" and i not in self.expressions:
                 x = transform(op, size, [self.value(j) for j in args], data)
             else:
-                if i not in self.expressions:
-                    self.expressions[i] = expression(self.nodes, i, self.dependent)
-                metadata, leaves = self.expressions[i]
-                values = [
-                    (
-                        self.inputs[self.nodes[j][3][0]]
-                        if self.nodes[j][0] == "input"
-                        and self.nodes[j][3][1] in ("source", "target")
-                        else self.project_node(j)
-                        if node_projection(self.nodes, j)
-                        else self.value(j)
-                    ).contiguous()
-                    for j in leaves
-                ]
+                metadata, values = self.expression_inputs(i)
                 x = self.inputs[0].new_empty((self.end - self.begin, size))
                 kernel, storage, slots, nbytes, processors, mode = expression_kernel(
                     metadata, x.dtype, x.device
@@ -425,7 +483,45 @@ class TiledProgram:
                     self.release(*child)
         return cache[i]
 
-    def frame(self, i):
+    def matrix(self, i, rows, columns):
+        """Return a batched matrix, retaining a transposed input's strides."""
+        op, _, args, data = self.nodes[i]
+        if op == "transpose":
+            value = self.value(args[0])
+            return value.reshape(value.shape[0], *data).transpose(1, 2)
+        value = self.value(i)
+        return value.reshape(value.shape[0], rows, columns)
+
+    def expression_inputs(self, i):
+        """Resolve expression leaves without expanding indexed node arrays."""
+        if i not in self.expressions:
+            self.expressions[i] = expression(self.nodes, i, self.dependent)
+        metadata, leaves = self.expressions[i]
+        values = [
+            (
+                self.inputs[self.nodes[j][3][0]]
+                if self.nodes[j][0] == "input"
+                and self.nodes[j][3][1] in ("source", "target")
+                else self.project_node(j)
+                if node_projection(self.nodes, j)
+                else self.value(j)
+            ).contiguous()
+            for j in leaves
+        ]
+        return metadata, values
+
+    def reduce_expression(self, i, output, kind):
+        """Consume local expressions directly in a CSR node reduction."""
+        from .edge_codegen import launch
+
+        metadata, values = self.expression_inputs(i)
+        nodes, descriptions = parse_metadata(metadata)
+        metadata = repr((nodes, ((descriptions[0][0], 0, kind),)))
+        launch(metadata, values, self.source, self.target, [output], mode="node")
+        for child in self.dependencies["value", i]:
+            self.release(*child)
+
+    def frame(self, i, destination=None, destination_index=None):
         """Run the frame and its adjoints without saving full-edge rotations."""
         from .frame import contract
 
@@ -448,7 +544,38 @@ class TiledProgram:
                         self.local = torch.arange(rows, device=self.source.device)
                     index = self.local
             values.append(value)
-        return contract(*values, index, count, layout, role, rowwise=role == 0)
+        if destination is not None:
+            index, count = destination_index, destination.shape[0]
+        return contract(
+            *values,
+            index,
+            count,
+            layout,
+            role,
+            rowwise=role == 0 and destination is None,
+            output=destination,
+        )
+
+    def frame_sum(self, i):
+        """Accumulate shared rotation adjoints before writing an edge array."""
+        from .frame import matrix_sum
+
+        layouts, operands = [], []
+        for term in self.frame_sums[i]:
+            _, _, args, (layout, _) = self.nodes[term]
+            op, _, _, data = self.nodes[args[0]]
+            if op == "input" and data[1] in ("source", "target"):
+                nodes = self.inputs[data[0]].flatten(1)
+                index = self.source if data[1] == "source" else self.target
+            else:
+                nodes = self.value(args[0]).expand(self.end - self.begin, -1)
+                if self.local is None:
+                    self.local = torch.arange(nodes.shape[0], device=nodes.device)
+                index = self.local
+            layouts.append(layout)
+            edges = self.value(args[2]).expand(self.end - self.begin, -1)
+            operands.append((nodes, edges, index))
+        return matrix_sum(tuple(layouts), operands)
 
     def convolution(self, i, destination=None):
         """Dispatch a tensor-product tile without gathering node features."""
@@ -598,11 +725,10 @@ class TiledProgram:
                     x = x.sum(0, keepdim=True)
             elif op == "matmul" and all(self.dependent[j] for j in args):
                 rows, inner, columns = data
-                a, b = self.value(args[0]), self.value(args[1])
-                a = a.reshape(a.shape[0], rows, inner)
-                b = b.reshape(b.shape[0], inner, columns)
+                a = self.matrix(args[0], rows, inner)
+                b = self.matrix(args[1], inner, columns)
                 x = (
-                    a.permute(1, 0, 2).reshape(rows, a.shape[0] * inner)
+                    a.transpose(1, 2).reshape(a.shape[0] * inner, rows).T
                     @ b.reshape(b.shape[0] * inner, columns)
                 ).reshape(1, size)
             elif op in (
@@ -648,7 +774,7 @@ class TiledProgram:
 @lru_cache(maxsize=128)
 def tile_width(metadata):
     """Estimate peak per-row storage using the tile's evaluation/release order."""
-    nodes, outputs, dependent, expressions, dependencies, counts = execution_plan(
+    nodes, outputs, dependent, expressions, dependencies, _, counts = execution_plan(
         metadata
     )
     uses, values, references = counts.copy(), {}, Counter()
@@ -826,17 +952,25 @@ def launch(metadata, inputs, source, target, outputs, tile_size=None):
                     if key not in node_adjoints:
                         node_adjoints[key] = (
                             output.new_zeros((output.shape[0], data[1])),
-                            tile.value(args[1]).reshape(data[1:]),
+                            tile.matrix(args[1], data[1], data[2])[0],
                         )
                     node_adjoints[key][0].index_add_(
                         0,
                         tile.source if kind == "source" else tile.target,
-                        tile.value(args[0]),
+                        tile.matrix(args[0], 1, data[1]).reshape(-1, data[1]),
                     )
                     for child in tile.dependencies["value", root]:
                         tile.release(*child)
                 elif op == "convolution":
                     tile.convolution(root, output)
+                elif (
+                    root in tile.expressions
+                    and reduces_frames(tile.expressions[root][0])
+                    and plan[-1]["value", root] == 1
+                    and end - begin >= output.shape[0]
+                ):
+                    # Sparse tiles avoid scanning the entire node output.
+                    tile.reduce_expression(root, output, kind)
                 else:
                     output.index_add_(
                         0,

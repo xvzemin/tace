@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx.o3.s2grid import S2Grid
 from equivariantx.ops import config
 from equivariantx.ops.torch.o3 import s2grid as kernels
+from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native grids require CUDA"
@@ -18,7 +19,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("quadrature", ["lebedev", "gauss_legendre", "equiangular"])
-def test_joint_aoti_without_eqx(quadrature, monkeypatch, tmp_path):
+def test_joint_aoti(quadrature, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "S2_GRID_INLINE", False)
     layer = S2Grid(
         2, quadrature=quadrature, backend="cuda", dtype=torch.float64, device="cuda"
@@ -68,15 +69,15 @@ def test_joint_aoti_without_eqx(quadrature, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
 for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():actual=run(*(v.cuda() for v in row['inputs']))
     torch.testing.assert_close(tuple(v.cpu() for v in actual),row['outputs'],atol=3e-9,rtol=3e-9)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],
