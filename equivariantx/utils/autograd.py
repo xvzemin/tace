@@ -3,6 +3,14 @@
 import torch
 
 
+def forward_ad_active():
+    """Detect functional transforms and ordinary forward-AD dual contexts."""
+    return (
+        torch._C._are_functorch_transforms_active()
+        or torch.autograd.forward_ad._current_level >= 0
+    )
+
+
 def nested_forward_ad():
     """Detect nested JVPs whose outer tangent PyTorch disables in Function.jvp."""
     from torch._C._functorch import TransformType, get_interpreter_stack
@@ -46,7 +54,7 @@ def gradient_mask(operands, required, offset=2, trailing=0):
     """Select input adjoints requested by the current autograd task."""
     if not operands[0].is_cuda or torch.compiler.is_compiling():
         return required
-    from ..ops.kernels.cuda.runtime import runtime
+    from ..ops.common.cuda.runtime import runtime
 
     active = runtime().gradient_mask(offset, len(operands) + trailing)
     return [a and b for a, b in zip(required, active)] if active else required

@@ -4,9 +4,9 @@ import torch
 
 from equivariantx import o2
 
+from ..ops.torch.co2 import gate as torch_kernel
 from ..ops.precision import validate_module_precision
 from .irreps import Irreps
-from .tensor_product import quarter_turn
 
 
 class Activation(torch.nn.Module):
@@ -18,6 +18,14 @@ class Activation(torch.nn.Module):
         Input representations. Non-scalars require a None activation.
     acts : sequence of callable or None
         One activation per entry, respecting reflection and time parity.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.Activation("2x0e + 1x1m", [torch.tanh, None])
+    >>> layer(torch.randn(4, 4)).shape
+    torch.Size([4, 4])
     """
 
     def __init__(self, irreps_in, acts):
@@ -30,11 +38,7 @@ class Activation(torch.nn.Module):
     def forward(self, features):
         """Activate STF features with trailing size irreps_in.dim."""
         validate_module_precision(self, (features,))
-        values = [
-            value if act is None else act(value)
-            for value, act in zip(features.split(self.sizes, -1), self.activation.acts)
-        ]
-        return torch.cat(values, -1) if values else features[..., :0]
+        return torch_kernel.activate(self, features)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"
@@ -98,7 +102,7 @@ class Gate(torch.nn.Module):
         self._paths = reference._paths
         self.sizes = tuple(entry.dim for entry in self.irreps_in)
         if backend == "cuda":
-            from ..ops.gate import gate_program
+            from ..ops.common.gate import gate_program
 
             self.cuda_program = gate_program(self, cartesian=True)
 
@@ -119,31 +123,10 @@ class Gate(torch.nn.Module):
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if self.backend == "cuda" and features.is_cuda:
-            from ..ops.gate import gate
+            from ..ops.cuda.co2.gate import evaluate
 
-            return gate(features, self.cuda_program, self.irreps_out.dim)
-        inputs = features.split(self.sizes, -1)
-        outputs = [
-            inputs[i] if act is None else act(inputs[i])
-            for i, act in zip(self._scalar_locations, self.act_scalars.acts)
-        ]
-        gates = [
-            inputs[i] if act is None else act(inputs[i])
-            for i, act in zip(self._gate_locations, self.act_gates.acts)
-        ]
-        for path in self._paths:
-            ir = self.irreps_gated[path.i_gated]
-            value = inputs[self._gated_locations[path.i_gated]].reshape(
-                *features.shape[:-1], ir.mul, ir.ir.dim
-            )
-            value = value[..., path.gated_start : path.gated_start + path.mul, :]
-            if path.ir_gate.is_odd_scalar() and path.ir_gated.m:
-                value = quarter_turn(value)
-            scalar = gates[path.i_gate][
-                ..., path.gate_start : path.gate_start + path.mul
-            ]
-            outputs.append((value * scalar.unsqueeze(-1)).flatten(-2))
-        return torch.cat(outputs, -1) if outputs else features[..., :0]
+            return evaluate(self, features)
+        return torch_kernel.evaluate(self, features)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"

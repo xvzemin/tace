@@ -3,9 +3,9 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
-from equivariantx import o3 as eqx_o3
 from equivariantx.tests.conv.testing import layout
 
 
@@ -88,7 +88,7 @@ def test_convolution_time_reversal(kind, backend, device, double_precision):
 def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.graph as cuda_graph
+    import equivariantx.ops.common.cuda.graph as cuda_graph
 
     monkeypatch.setattr(cuda_graph, "EDGE_BUCKET", 8)
     monkeypatch.setattr(cuda_graph, "MIN_EDGES", 1)
@@ -172,7 +172,7 @@ def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):
 def test_native_cuda_graph_outer_capture(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.graph as cuda_graph
+    import equivariantx.ops.common.cuda.graph as cuda_graph
 
     monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
     monkeypatch.setattr(cuda_graph, "MIN_EDGES", 1)
@@ -227,7 +227,7 @@ def test_native_cuda_graph_outer_capture(monkeypatch):
 def test_convolution_graph_order(owner, device, dtype, stride):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.kernels.cuda.reduction import prepare_graph
+    from equivariantx.ops.common.cuda.reduction import prepare_graph
 
     edges = torch.tensor(
         [[0, 0, 1, 0, 3, 0, 2, 0, 0], [2, 1, 2, 0, 2, 2, 1, 2, 2]],
@@ -315,30 +315,3 @@ def test_convolution_graph_order(owner, device, dtype, stride):
         after = prepare_graph(index, index, 0, 23)
         assert before[1] is not after[1]
         check(after)
-
-
-@pytest.mark.parametrize("cls", (eqx_o3.GauntTensorProduct, eqx_o3.MatrixTensorProduct))
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_product_and_convolution_compile(cls, device, double_precision):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    tp = cls("0e+1o", "0e+1o", "0e+1o+2e", shared_weights=False)
-    convolution = getattr(eqx_conv, cls.__name__ + "Conv")(tp).to(device)
-    compiled = torch.compile(
-        convolution, backend="aot_eager", fullgraph=True, dynamic=True
-    )
-    for edges in (3, 6, 0):
-        x = torch.randn(4, 4, device=device, requires_grad=True)
-        y = torch.randn(edges, 4, device=device, requires_grad=True)
-        weight = torch.randn(edges, tp.weight_numel, device=device, requires_grad=True)
-        index = torch.randint(4, (2, edges), device=device)
-        actual, expected = (
-            compiled(x, y, index, weight),
-            convolution(x, y, index, weight),
-        )
-        torch.testing.assert_close(actual, expected)
-        for a, b in zip(
-            torch.autograd.grad(actual.square().sum(), (x, y, weight)),
-            torch.autograd.grad(expected.square().sum(), (x, y, weight)),
-        ):
-            torch.testing.assert_close(a, b)

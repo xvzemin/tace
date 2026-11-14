@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ...ops.torch.o3.mtp import tensor_product as torch_kernel
 from ..tensor_product import FactorizedTensorProduct
 
 __all__ = ["MatrixTensorProduct"]
@@ -29,6 +30,8 @@ class MatrixTensorProduct(FactorizedTensorProduct):
     matrix_degree : int, optional
         Auxiliary angular degree. Matrices have size ``2 * matrix_degree + 1``.
         Defaults to half the largest requested degree, rounded up.
+    backend : {"torch", "cuda"}, optional
+        Differentiable Torch or native sparse angular kernels.
 
     Notes
     -----
@@ -59,6 +62,7 @@ class MatrixTensorProduct(FactorizedTensorProduct):
         internal_weights=None,
         shared_weights=None,
         matrix_degree=None,
+        backend="torch",
     ):
         super().__init__(
             irreps_in1,
@@ -67,6 +71,7 @@ class MatrixTensorProduct(FactorizedTensorProduct):
             irrep_normalization,
             internal_weights,
             shared_weights,
+            backend,
         )
         lmax = max(
             irreps.lmax
@@ -115,9 +120,7 @@ class MatrixTensorProduct(FactorizedTensorProduct):
         return self.input_basis(irreps).T
 
     def transform(self, features, basis):
-        return (features @ basis).reshape(
-            features.shape[:-1] + (self.matrix_dim, self.matrix_dim)
-        )
+        return torch_kernel.transform(self, features, basis)
 
     def product(self, x, y, name):
-        return (x @ y).flatten(-2) @ getattr(self, f"{name}_basis")
+        return torch_kernel.product(self, x, y, name)

@@ -1,11 +1,12 @@
 """Node--edge--node convolutions with Wigner-6j recoupling."""
 
 from ...ops.precision import validate_module_precision
+from ...ops.torch.o3.wigner6j import convolution as torch_kernel
 from .tensor_product import Wigner6jTensorProduct
 
 
 class Wigner6jTensorProductConv(Wigner6jTensorProduct):
-    """Recouple node inputs before the edge product and destination reduction.
+    """Sum node--edge--node products using shared angular coupling schedules.
 
     Parameters
     ----------
@@ -83,33 +84,22 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
             if value.shape[-1] != width:
                 raise ValueError("Input widths must match their irreps.")
         weight1, weight2 = self.get_weights(weight1, weight2)
-        weight = self.combine_weights(weight1, weight2)
-        if weight.ndim > 2 or (
-            weight.ndim == 2 and weight.shape[0] not in (1, x2.shape[0])
+        if any(
+            weight.ndim > 2
+            or (weight.ndim == 2 and weight.shape[0] not in (1, x2.shape[0]))
+            for weight in (weight1, weight2)
         ):
             raise ValueError("Weights must be shared or have one row per edge.")
         backend = self.backend if backend is None else backend
         if backend not in ("cuda", "torch"):
             raise ValueError("backend must be cuda or torch.")
-        intermediate = self.couple_inputs(x1, x3, backend)
         num_nodes = x1.shape[0] if num_nodes is None else num_nodes
+        values = x1, x2, x3, weight1, weight2
         if backend == "cuda" and x1.is_cuda:
-            return self.conv132(
-                intermediate,
-                x2.index_select(-1, self.input2_index),
-                weight.unsqueeze(0) if weight.ndim == 1 else weight,
-                weight.new_empty((0, self.tp132.weight_numel)),
-                edge_index,
-                num_nodes,
-            ).index_select(-1, self.output_index)
-        message = self.tp132(
-            intermediate[edge_index[0]],
-            x2,
-            weight.unsqueeze(0) if weight.ndim == 1 else weight,
-        )
-        return message.new_zeros((num_nodes, self.output_dim)).index_add(
-            0, edge_index[1], message
-        )
+            from ...ops.cuda.o3.wigner6j import convolution as cuda_kernel
+
+            return cuda_kernel.evaluate(self, values, edge_index, num_nodes)
+        return torch_kernel.evaluate(self, values, edge_index, num_nodes)
 
     def forward_reference(
         self, x1, x2, x3, edge_index, weight1=None, weight2=None, num_nodes=None

@@ -7,11 +7,11 @@ import torch
 from ...co3.basis import path_matrix
 from ...co3.linear import Linear as CartesianLinear
 from ...ops.precision import validate_module_precision
-from ...utils.layout import permute
+from ...ops.torch.conv.co3 import linear as torch_kernel
 
 
 class Linear(CartesianLinear):
-    """Mix compact Cartesian channels before irreducible projection.
+    """Mix and project compact Cartesian channels.
 
     Parameters
     ----------
@@ -26,6 +26,15 @@ class Linear(CartesianLinear):
         Angular storage after projection, in flattened ``mul_ir`` layout.
     **kwargs
         Weight, bias and normalization arguments of :class:`equivariantx.co3.Linear`.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx.conv.co3 import Linear
+    >>> indices = [0, 1, 2, 1, 3, 4, 2, 4, 5]
+    >>> layer = Linear("1x2e", "2x2e", indices)
+    >>> layer(torch.randn(4, 6)).shape
+    torch.Size([4, 10])
     """
 
     def __init__(
@@ -128,9 +137,50 @@ class Linear(CartesianLinear):
         self.register_buffer("input_index", index, persistent=False)
         self.register_buffer("input_inverse", index.argsort(), persistent=False)
         self.group_widths = repr(tuple(s.stop - s.start for s in self.input_sections))
+        self.set_reference(indices)
+
+    def set_reference(self, indices=None):
+        """Retain ordinary Cartesian coordinates, including older cached modules."""
+        if indices is None and not hasattr(self, "input_expansion"):
+            indices = torch.zeros(self.irreps_in.dim, dtype=torch.long, device="cpu")
+            packed = self.input_index.detach().cpu()
+            for i, (dest, dim, count, mul_out) in enumerate(self.compact_groups):
+                rows = packed[self.input_sections[i]].reshape(dim, count).T
+                section = self.weight_sections[i]
+                offsets = getattr(self, f"weight_index_{i}").detach().cpu()
+                offsets = (
+                    offsets * mul_out if self.weight_rows[i] else offsets[::mul_out]
+                ) + section.start
+                expansion = self.expansions[i][1]
+                for row, offset in zip(rows, offsets.tolist()):
+                    for ins, path in self.groups[dest]:
+                        if ins.i_in >= 0 and path.start <= offset < path.stop:
+                            width = self.irreps_in[ins.i_in].ir.dim
+                            channel = (offset - path.start) // mul_out
+                            start = self.slices_in[ins.i_in].start + channel * width
+                            indices[start : start + width] = row[list(expansion)]
+                            break
+        if indices is not None:
+            self.register_buffer(
+                "input_expansion",
+                indices.to(self.input_index).clone(),
+                persistent=False,
+            )
+        degrees = {self.cartesian_out[dest].ir.l for dest, *_ in self.compact_groups}
+        for degree in sorted(degrees):
+            self.register_buffer(
+                f"reference_basis_{degree}",
+                path_matrix(degree).to(self.weight).clone(),
+                persistent=False,
+            )
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        if not hasattr(self, "input_expansion"):
+            self.set_reference()
 
     def forward(self, features, weight=None, bias=None):
-        """Apply channel weights to compact coordinates and then project."""
+        """Apply channel weights and irreducible projection to compact coordinates."""
         validate_module_precision(self, (features, weight, bias))
         if features.shape[-1] != self.input_dim:
             raise ValueError(
@@ -142,68 +192,11 @@ class Linear(CartesianLinear):
             raise ValueError("Weight or bias size does not match the instructions.")
         if self.shared_weights and (weight.ndim != 1 or bias.ndim != 1):
             raise ValueError("Shared weights and biases must be one-dimensional.")
-        shape = torch.broadcast_shapes(
-            features.shape[:-1], weight.shape[:-1], bias.shape[:-1]
-        )
-        zero = features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
-        grouped = (
-            self.backend == "cuda"
-            and features.is_cuda
-            and features.ndim == 2
-            and self.input_permutation
-        )
-        if grouped:
-            from ...ops.layout import grouped_permute
+        if self.backend == "cuda" and features.is_cuda:
+            from ...ops.cuda.conv.co3 import linear as cuda_kernel
 
-            features = grouped_permute(
-                features, self.input_index, self.input_inverse, self.group_widths
-            )
-        elif not self.input_identity:
-            features = (
-                permute(features, self.input_index, self.input_inverse)
-                if self.input_permutation
-                else features.index_select(-1, self.input_index)
-            )
-        outputs = [None] * len(self.cartesian_out)
-        for i, (dest, dim, mul_in, mul_out) in enumerate(self.compact_groups):
-            section = self.input_sections[i]
-            x = (
-                features.flatten()[
-                    features.size(0) * section.start : features.size(0) * section.stop
-                ]
-                if grouped
-                else features[..., section]
-            )
-            x = x.reshape(*features.shape[:-1], dim, mul_in)
-            w = weight[..., self.weight_sections[i]]
-            if self.weight_rows[i]:
-                rows = (
-                    self.weight_sections[i].stop - self.weight_sections[i].start
-                ) // mul_out
-                w = w.reshape(*weight.shape[:-1], rows, mul_out)
-            if not self.weight_identity[i]:
-                w = w.index_select(
-                    -2 if self.weight_rows[i] else -1,
-                    getattr(self, f"weight_index_{i}"),
-                )
-            w = w.reshape(*weight.shape[:-1], mul_in, mul_out)
-            if not self.uniform_scales[i]:
-                w = w * getattr(self, f"weight_scale_{i}")
-            mixed = x @ w
-            # Project only after reducing the input channel multiplicity.
-            value = mixed.transpose(-1, -2) @ getattr(self, f"basis_{i}")
-            outputs[dest] = value if outputs[dest] is None else outputs[dest] + value
-        for i, ((mul, ir), group) in enumerate(zip(self.irreps_out, self.groups)):
-            if outputs[i] is None:
-                outputs[i] = features.new_zeros((*shape, mul, ir.dim)) + zero
-            for ins, section in group:
-                if ins.i_in < 0:
-                    outputs[i] = outputs[i] + bias[..., section].unsqueeze(-1)
-        return (
-            torch.cat([value.flatten(-2) for value in outputs], -1) + zero
-            if outputs
-            else features[..., :0] + zero
-        )
+            return cuda_kernel.evaluate(self, features, weight, bias)
+        return torch_kernel.evaluate(self, features, weight, bias)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
@@ -225,4 +218,5 @@ class Linear(CartesianLinear):
                 .unsqueeze(-1)
                 .to(self._buffers[name])
             )
+        self.set_reference()
         return self

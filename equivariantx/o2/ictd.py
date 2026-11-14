@@ -2,7 +2,9 @@
 
 import torch
 
+from ..ops.common.ictd import dense_basis, initialize, restore
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import ictd as torch_kernel
 from .clebsch_gordan import clebsch_gordan_product
 from .irreps import Irrep, Irreps
 
@@ -53,6 +55,24 @@ def path_matrices(rank):
             stack.append((path + (ir_out,), output))
 
 
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.o2 import ictd as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
+
+
+def coupling_matrix(ir, out):
+    return clebsch_gordan_product(
+        torch.eye(2, dtype=torch.float64, device="cpu"),
+        Irrep(1, 0),
+        torch.eye(ir.dim, dtype=torch.float64, device="cpu"),
+        ir,
+        out,
+    ).permute(1, 2, 0)
+
+
 class ICTD(torch.nn.Module):
     """Decompose a two-dimensional Cartesian tensor into O(2) irreps.
 
@@ -60,6 +80,8 @@ class ICTD(torch.nn.Module):
     ----------
     rank : int
         Non-negative Cartesian tensor rank.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Buffer dtype. Defaults to torch.get_default_dtype().
     device : torch.device or str, optional
@@ -72,14 +94,14 @@ class ICTD(torch.nn.Module):
     irreps_out : Irreps
         One multiplicity-one entry per path. Repeated irreps remain separate.
     change_of_basis : torch.Tensor
-        Orthogonal matrix of shape (2**rank, 2**rank).
+        Orthogonal matrix of shape (2**rank, 2**rank), created on first access.
 
     Notes
     -----
     Inputs have shape (..., 2**rank) and need not be symmetric or traceless.
     Batch and channel dimensions precede the flattened Cartesian indices.
     Constants are constructed in float64 by successive CG contractions [#ictd-o2]_.
-    Full matrix storage scales as 2**(2*rank).
+    Execution uses sparse CG stages. The optional full matrix requires 2**(2*rank) entries.
     Unlike :func:`equivariantx.co2.path_matrix`, this decomposition retains every
     irreducible path, not only the highest-order STF subspace.
 
@@ -99,7 +121,9 @@ class ICTD(torch.nn.Module):
     >>> torch.testing.assert_close(decomposition.inverse(decomposition(x)), x)
     """
 
-    def __init__(self, rank, *, dtype=None, device=None):
+    dimension = 2
+
+    def __init__(self, rank, *, backend="torch", dtype=None, device=None):
         super().__init__()
         if not isinstance(rank, int) or rank < 0:
             raise ValueError("rank must be a non-negative integer.")
@@ -107,33 +131,29 @@ class ICTD(torch.nn.Module):
             raise TypeError("dtype must be a real floating-point dtype.")
         self.rank = rank
         self.dim = 2**rank
-        change_of_basis = torch.empty(
-            self.dim, self.dim, dtype=torch.float64, device="cpu"
-        )
-        paths, slices = [], []
-        offset = 0
-        for path, matrix in path_matrices(rank):
-            paths.append(path)
-            slices.append(slice(offset, offset + matrix.shape[1]))
-            change_of_basis[:, slices[-1]] = matrix
-            offset += matrix.shape[1]
-        self.paths = tuple(paths)
-        self.slices = tuple(slices)
-        self.irreps_out = Irreps([(path[-1], 1) for path in paths])
-        self.register_buffer(
-            "change_of_basis",
-            change_of_basis.to(dtype=dtype or torch.get_default_dtype(), device=device),
-            persistent=False,
-        )
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
+        initialize(self, rank, Irrep(0, 1), Irrep(1, 0), coupling_matrix, dtype, device)
+        self.irreps_out = Irreps([(path[-1], 1) for path in self.paths])
+
+    def __getattr__(self, name):
+        value = super().__getattr__(name)
+        if name == "change_of_basis" and value is None:
+            marker = self._buffers["dtype_marker"]
+            value = dense_basis(self.rank, self.dimension, marker.dtype, marker.device)
+            self._buffers[name] = value
+        return value
 
     def forward(self, features):
         """Extract irreducible features from tensors of shape (..., 2**rank)."""
         validate_module_precision(self, (features,))
-        return features @ self.change_of_basis
+        return execution(self, features).forward(self, features)
 
     def inverse(self, features):
         """Reconstruct flattened Cartesian tensors from irreducible features."""
-        return features @ self.change_of_basis.T
+        validate_module_precision(self, (features,))
+        return execution(self, features).inverse(self, features)
 
     def path_matrix(self, index):
         """Return the rectangular matrix for a path index as a buffer view."""
@@ -141,18 +161,15 @@ class ICTD(torch.nn.Module):
 
     def project(self, features, index):
         """Project a flattened Cartesian tensor onto one irreducible path."""
-        matrix = self.path_matrix(index)
-        return (features @ matrix) @ matrix.T
+        validate_module_precision(self, (features,))
+        return execution(self, features).project(self, features, index)
 
     def extra_repr(self):
         return f"rank={self.rank}, {self.irreps_out}"
 
     def _apply(self, fn, recurse=True):
-        dtype = self.change_of_basis.dtype
+        marker = self._buffers.get("dtype_marker")
+        dtype = self.change_of_basis.dtype if marker is None else marker.dtype
         super()._apply(fn, recurse)
-        if torch.finfo(self.change_of_basis.dtype).eps < torch.finfo(dtype).eps:
-            for index, (_, matrix) in enumerate(path_matrices(self.rank)):
-                self.change_of_basis[:, self.slices[index]].copy_(
-                    matrix.to(self.change_of_basis)
-                )
+        restore(self, dtype)
         return self

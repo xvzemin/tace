@@ -6,7 +6,7 @@ import torch
 from e3nn import o3
 
 from ...o2.wigner import WignerD
-from ...ops.wigner import wigner_D
+from ...ops.common.wigner import wigner_D
 from ...utils.module import copy_model, default_dtype
 from ..convolution import Convolution, RadialFeatures
 from .product import SymmetricContraction

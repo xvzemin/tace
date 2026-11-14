@@ -258,13 +258,12 @@ class AsymmetricContraction(torch.nn.Module):
             self._base_input_slices,
             self._base_output_slices,
         )
-        if self.backend == "torch":
-            from ..ops.kernels.torch.o2_contraction import Contraction
+        from ..ops.torch.o2.contraction import Contraction
 
-            self.contraction = Contraction(*arguments, self._base_irreps_out.dim).to(
-                self._basis_reference
-            )
-        else:
+        self.contraction = Contraction(*arguments, self._base_irreps_out.dim).to(
+            self._basis_reference
+        )
+        if self.backend == "cuda":
             self.kernel_metadata = contraction_metadata(
                 *arguments,
                 self._base_input_dim,
@@ -378,28 +377,9 @@ class AsymmetricContraction(torch.nn.Module):
         return features.flatten(-2)
 
     def _forward_dense(self, inputs, order_weights):
-        letters = "abdefghijklmnqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        if self.correlation > len(letters):
-            raise ValueError("correlation exceeds the number of einsum indices.")
-        output = None
-        for order_index in range(self.correlation):
-            order = order_index + 1
-            indices = letters[:order]
-            coefficient = getattr(self, f"generalized_cg_{order}").to(inputs[0])
-            # Weight the generalized tensor, then contract one input at a time.
-            contribution = torch.einsum(
-                f"o{indices}p,...pc->...o{indices}c",
-                coefficient,
-                order_weights[order_index],
-            )
-            for i in reversed(range(order)):
-                contribution = torch.einsum(
-                    f"...o{indices[: i + 1]}c,...{indices[i]}c->...o{indices[:i]}c",
-                    contribution,
-                    inputs[i],
-                )
-            output = contribution if output is None else output + contribution
-        return self._flatten_output(output)
+        from ..ops.torch.o2.contraction import dense
+
+        return dense(self, inputs, order_weights)
 
     def forward(
         self,
@@ -442,35 +422,10 @@ class AsymmetricContraction(torch.nn.Module):
             *(features.shape[:-1] for features in inputs), weight.shape[:-1]
         )
         if self.backend == "cuda":
-            from ..ops.channel_product import polynomial_contraction
-
-            output = polynomial_contraction(
-                self.kernel_metadata, inputs, weight, leading_shape, self.irreps_out.dim
-            )
-            return self._flatten_output(
-                output.reshape(
-                    *leading_shape, self._base_irreps_out.dim, self.num_channels
-                )
-            )
-        inputs = tuple(
-            features.expand(*leading_shape, self.irreps_in.dim).reshape(
-                *leading_shape, self._base_input_dim, self.num_channels
-            )
-            for features in inputs
-        )
-        weight = weight.expand(*leading_shape, self.weight_numel)
-        order_weights = tuple(
-            weight[..., weight_slice].reshape(
-                *leading_shape, num_paths, self.num_channels
-            )
-            for weight_slice, num_paths in zip(
-                self._order_weight_slices, self.order_num_paths
-            )
-        )
-        if self.algorithm == "recursive":
-            output = self.contraction(inputs, order_weights)
-            return self._flatten_output(output)
-        return self._forward_dense(inputs, order_weights)
+            from ..ops.cuda.o2.contraction import evaluate
+        else:
+            from ..ops.torch.o2.contraction import evaluate
+        return evaluate(self, inputs, weight, leading_shape)
 
     def extra_repr(self) -> str:
         return (

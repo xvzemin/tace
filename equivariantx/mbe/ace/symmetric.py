@@ -5,9 +5,8 @@ from collections import defaultdict
 import torch
 from e3nn import o3
 
-from ...ops import config, get_kernel
+from ...ops.torch.mbe.ace import symmetric as torch_kernel
 from ...ops.precision import validate_module_precision, validate_precision
-from ...ops.symmetric import symmetric_contract
 
 
 class SymmetricContraction(torch.nn.Module):
@@ -184,49 +183,11 @@ class SymmetricContraction(torch.nn.Module):
             )
         if node_type.dtype not in (torch.int32, torch.int64):
             raise TypeError("Element indices must be integers.")
-        x = features.transpose(1, 2)
-        if (features.is_cuda and self.backend == "cuda") or not config.TORCH_REFERENCE:
-            role = self.correlation + 1
-            mapping = (*([0] * self.correlation), 1, 2)
-            placeholder = x.new_empty((0, self.output_dim, self.num_channels))
-            function = (
-                symmetric_contract
-                if features.is_cuda and self.backend == "cuda"
-                else get_kernel("symmetric_contract", "torch")
-            )
-            output = function(
-                self.metadata,
-                repr(((mapping, role, 0, 0),)),
-                node_type,
-                [x, weight, placeholder],
-            )[0]
-        else:
-            output = x.new_zeros((x.shape[0], self.output_dim, self.num_channels))
-            selected = weight[node_type.long()]
-            for degree in range(1, self.correlation + 1):
-                indices = getattr(self, f"indices_{degree}")
-                if not indices.shape[0]:
-                    continue
-                values = x[:, indices[:, 0], :]
-                for k in range(1, degree):
-                    values = values * x[:, indices[:, k], :]
-                values = values * selected[:, getattr(self, f"weights_{degree}"), :]
-                values = (
-                    values
-                    * getattr(self, f"coefficients_{degree}").to(x.dtype)[None, :, None]
-                )
-                output = output.index_add(1, getattr(self, f"outputs_{degree}"), values)
-            if not self.has_terms:
-                output = output + (x.sum() + weight.sum()) * 0
-        if self.layout == "ir_mul" or not self.output_dims:
-            return output.flatten(1)
-        return torch.cat(
-            [
-                part.transpose(1, 2).flatten(1)
-                for part in output.split(self.output_dims, dim=1)
-            ],
-            dim=1,
-        )
+        if features.is_cuda and self.backend == "cuda":
+            from ...ops.cuda.mbe.ace import symmetric as cuda_kernel
+
+            return cuda_kernel.evaluate(self, features, weight, node_type)
+        return torch_kernel.evaluate(self, features, weight, node_type)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}, correlation={self.correlation}, {self.num_paths} paths"

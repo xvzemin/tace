@@ -5,10 +5,19 @@ import torch
 from e3nn import o3
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import o3_tensor_product as torch_kernel
 from .local_frame import LocalFrame
 
 
-def _entry_components(frame: LocalFrame, index: int):
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.o2 import o3_tensor_product
+
+        return o3_tensor_product
+    return torch_kernel
+
+
+def entry_components(frame: LocalFrame, index: int):
     """Locate magnetic components in regrouped spherical harmonic storage."""
     entry = frame._entries[index]
     slices = frame.local_irreps.slices()
@@ -52,6 +61,8 @@ class O3TensorProduct(torch.nn.Module):
         Share one weight vector across edges. Defaults to ``True``.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization. Defaults to ``"component"``.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
 
     Notes
     -----
@@ -60,6 +71,15 @@ class O3TensorProduct(torch.nn.Module):
     ``basis_change=False`` and must retain every required angular order.
     ``forward_scatter(..., vectors=...)`` instead evaluates the coupling
     without constructing a frame. Both forms preserve the requested paths.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import o2
+    >>> layer = o2.O3TensorProduct("2x1o", "1o", "2x0e", [(0, 0, 0, "uvu", True)])
+    >>> rotation, inverse = o2.WignerD(1, 1, method="recursive")(torch.randn(4, 3))
+    >>> layer(torch.randn(4, 6), rotation, inverse).shape
+    torch.Size([4, 2])
     """
 
     def __init__(
@@ -77,8 +97,12 @@ class O3TensorProduct(torch.nn.Module):
         shared_weights: Optional[bool] = None,
         *,
         normalization: str = "component",
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)
         self.irreps_out = o3.Irreps(irreps_out)
@@ -161,11 +185,11 @@ class O3TensorProduct(torch.nn.Module):
         self._has_unweighted = any(not ins.has_weight for ins in self.instructions)
 
         input_components = tuple(
-            _entry_components(self.local_frame_in, i)
+            entry_components(self.local_frame_in, i)
             for i in range(len(self.irreps_in1))
         )
         output_components = tuple(
-            _entry_components(output_frame, i) for i in range(len(self.irreps_out))
+            entry_components(output_frame, i) for i in range(len(self.irreps_out))
         )
         contractions = {}
         offset = 0
@@ -210,6 +234,9 @@ class O3TensorProduct(torch.nn.Module):
                     contraction["harmonic"].append(ins.i_in2)
 
         self._contractions = tuple(contractions)
+        self.scale_values = tuple(
+            tuple(item["scale"]) for item in contractions.values()
+        )
         for index, contraction in enumerate(contractions.values()):
             for name, values in contraction.items():
                 self.register_buffer(
@@ -223,9 +250,24 @@ class O3TensorProduct(torch.nn.Module):
                     persistent=False,
                 )
 
+        torch_kernel.initialize(self, input_components, output_components)
+
         from ..conv.o2_o3.convolution import O2O3TensorProductConv
 
-        self.convolution = O2O3TensorProductConv(self, backend="torch")
+        self.convolution = O2O3TensorProductConv(self, backend=backend)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        for index, values in enumerate(getattr(self, "scale_values", ())):
+            current = getattr(self, f"scale_{index}")
+            setattr(
+                self,
+                f"scale_{index}",
+                torch.tensor(values, dtype=torch.float64, device="cpu").to(current),
+            )
+        for name, value in getattr(self, "coefficient_data", {}).items():
+            setattr(self, name, value.to(getattr(self, name), copy=True))
+        return self
 
     def __repr__(self) -> str:
         return (
@@ -259,6 +301,7 @@ class O3TensorProduct(torch.nn.Module):
         torch.Tensor
             Features with shape ``(..., local_frame_out.irreps_out.dim)``.
         """
+        validate_module_precision(self, (features, weight, harmonic_scale))
         if features.ndim < 1 or features.shape[-1] != self.local_frame_in.output_dim:
             raise ValueError(
                 f"Local feature trailing dimension must be {self.local_frame_in.output_dim}."
@@ -277,42 +320,7 @@ class O3TensorProduct(torch.nn.Module):
             raise ValueError(
                 "harmonic_scale must contain one value per harmonic entry."
             )
-        leading_shape = torch.broadcast_shapes(
-            features.shape[:-1],
-            weight.shape[:-1],
-            () if harmonic_scale is None else harmonic_scale.shape[:-1],
-        )
-        if self._has_unweighted:
-            weight = torch.cat(
-                (weight, weight.new_ones((*weight.shape[:-1], 1))), dim=-1
-            )
-        output = None
-        for index, (mode, mul1, mul_out) in enumerate(self._contractions):
-            scale = getattr(self, f"scale_{index}")
-            count = scale.numel()
-            values = features.index_select(-1, getattr(self, f"input_{index}"))
-            values = values.reshape(*features.shape[:-1], count, mul1)
-            weights = weight.index_select(-1, getattr(self, f"weight_{index}"))
-            if mode == "uvu":
-                values = values * weights.reshape(*weight.shape[:-1], count, mul1)
-            else:
-                weights = weights.reshape(*weight.shape[:-1], count, mul1, mul_out)
-                values = torch.matmul(values.unsqueeze(-2), weights).squeeze(-2)
-            if harmonic_scale is not None:
-                scale = scale * harmonic_scale.index_select(
-                    -1, getattr(self, f"harmonic_{index}")
-                )
-            values = (values * scale.unsqueeze(-1)).flatten(-2)
-            contribution = values.new_zeros(
-                (*values.shape[:-1], self.local_output_dim)
-            ).index_add_(-1, getattr(self, f"output_{index}"), values)
-            output = contribution if output is None else output + contribution
-        if output is None:
-            zero = features[..., :0].sum() + weight[..., :0].sum()
-            if harmonic_scale is not None:
-                zero = zero + harmonic_scale[..., :0].sum()
-            return features.new_zeros((*leading_shape, self.local_output_dim)) + zero
-        return output.expand(*leading_shape, self.local_output_dim)
+        return execution(self, features).local(self, features, weight, harmonic_scale)
 
     def forward(
         self,
@@ -348,12 +356,9 @@ class O3TensorProduct(torch.nn.Module):
         validate_module_precision(
             self, (features, wigner, wigner_inv, weight, harmonic_scale)
         )
-        features = self.local_frame_in.to_local(features, wigner)
-        features = self.forward_local(features, weight, harmonic_scale)
-        features = self.local_frame_out.to_global(features, wigner_inv)
-        if self._simplify_output:
-            features = features.index_select(-1, self.output_index)
-        return features
+        return execution(self, features).forward(
+            self, features, wigner, wigner_inv, weight, harmonic_scale
+        )
 
     def forward_scatter(
         self,
@@ -405,9 +410,8 @@ class O3TensorProduct(torch.nn.Module):
 
         Notes
         -----
-        Execution uses PyTorch operations on CPU and CUDA, including higher
-        derivatives used in force training. The optional fused implementation
-        is available separately through :class:`equivariantx.conv.O2O3TensorProductConv`.
+        Uses :class:`equivariantx.conv.O2O3TensorProductConv` with the selected
+        backend and supports higher derivatives used in force training.
         """
         if features.ndim != 2 or features.size(1) != self.input_dim:
             raise ValueError("Expected two-dimensional node features in ir_mul layout.")

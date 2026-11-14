@@ -4,6 +4,7 @@ import torch
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ..utils.metadata import parse_metadata
+from . import config
 
 SYMMETRIC_INLINE_LIMIT = 65536
 
@@ -15,22 +16,20 @@ def torch_decompositions():
     -------
     dict
         Explicit make_fx lowerings before differentiation and AOTI export.
-        Edge programs containing nested native convolution nodes are excluded.
-        O3 paths support explicit attributes and solid harmonics; transverse
-        generator and Lie-derivative programs are not lowered yet.
+        O3 paths support explicit attributes, solid harmonics and transverse
+        polynomials, including ordered Lie derivatives.
         Large expanded programs may use more memory than native kernels.
     """
-    from .kernels.torch.attention import evaluate_adjoint, normalized_exp
-    from .kernels.torch.convolution import contraction
-    from .kernels.torch.edge import evaluate_torch
-    from .kernels.torch.frame import frame_rotation, indexed_frame, rotary_product
-    from .kernels.torch.layout import gather_sum, grouped_permute, indexed_sum
-    from .kernels.torch.quaternion import quaternion_polynomial
-    from .kernels.torch.wigner import alignment, packed_wigner, rotation
+    from .common.torch.attention import evaluate_adjoint, normalized_exp
+    from .common.torch.convolution import contraction
+    from .common.torch.frame import frame_rotation, indexed_frame, rotary_product
+    from .common.torch.layout import gather_sum, grouped_permute, indexed_sum
+    from .common.torch.quaternion import quaternion_polynomial
+    from .common.torch.wigner import alignment, packed_wigner, rotation
 
     return {
         **polynomial_decompositions(),
-        torch.ops.eqx.edge_program.default: evaluate_torch,
+        torch.ops.eqx.edge_program.default: edge_decomposition,
         torch.ops.eqx.alignment_cuda.default: alignment,
         torch.ops.eqx.packed_wigner.default: packed_wigner,
         torch.ops.eqx.rotation.default: rotation,
@@ -50,18 +49,46 @@ def torch_decompositions():
 
 def o3_decomposition(metadata, program, source, target, operands, *, batch_paths=False):
     """Retain native calls for geometric programs without an exact Torch lowering."""
+    if not o3_lowerable(metadata):
+        return NotImplemented
+    from .common.torch.o3 import contraction
+
+    return contraction(
+        metadata, program, source, target, operands, batch_paths=batch_paths
+    )
+
+
+def o3_lowerable(metadata):
+    """Whether a native description has the same polynomial in both providers."""
     description = parse_metadata(metadata)
     if len(description) > 3 and (
         isinstance(description[3], tuple)
         and description[3][0] == "transverse"
-        or len(description) > 5
-        and description[5]
+        and (
+            len(description[3]) >= 3
+            and description[3][2] not in ("baseline", "generator", "recurrence")
+        )
     ):
-        return NotImplemented
-    from .kernels.torch.o3 import contraction
+        return False
+    return True
 
-    return contraction(
-        metadata, program, source, target, operands, batch_paths=batch_paths
+
+def edge_decomposition(metadata, inputs, source, target, num_nodes):
+    """Expose radial networks and supported embedded convolution expressions."""
+    from .common.torch.edge import evaluate_torch
+
+    for op, _, _, data in parse_metadata(metadata)[0]:
+        if op == "convolution" and (
+            data[0] not in ("o3", "o2") or data[0] == "o3" and not o3_lowerable(data[1])
+        ):
+            return NotImplemented
+    return evaluate_torch(
+        metadata,
+        inputs,
+        source,
+        target,
+        num_nodes,
+        optimized=not config.TORCH_REFERENCE,
     )
 
 
@@ -77,10 +104,10 @@ def polynomial_decompositions():
         retains its measured dispatch policy.
     """
     from . import registration  # noqa: F401 - Ensure the schemas exist.
-    from .kernels.torch.ace import ace_contract, bilinear_contract
-    from .kernels.torch.channel_product import channel_product
-    from .kernels.torch.linear import contract
-    from .kernels.torch.symmetric import evaluate_torch
+    from .common.torch.ace import ace_contract, bilinear_contract
+    from .common.torch.channel_product import channel_product
+    from .common.torch.linear import contract
+    from .common.torch.symmetric import evaluate_torch
 
     return {
         torch.ops.eqx.ace_contract.default: ace_contract,
@@ -101,7 +128,7 @@ def symmetric_forward(metadata, program, node_type, operands):
         node_type.shape[0] * operands[0].shape[-1] <= SYMMETRIC_INLINE_LIMIT
     ):
         return NotImplemented
-    from .kernels.torch.symmetric import evaluate_torch
+    from .common.torch.symmetric import evaluate_torch
 
     return evaluate_torch(metadata, program, node_type, operands)
 

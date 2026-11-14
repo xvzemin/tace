@@ -82,4 +82,6 @@ Module utilities
 Compilation
 -----------
 
+.. autoclass:: equivariantx.ops.compiler.JointCSE
+
 .. autofunction:: equivariantx.ops.decompositions.torch_decompositions

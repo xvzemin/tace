@@ -47,7 +47,7 @@ def angular_metadata(metadata):
         rows = []
         for (i, k), terms in by_pair.items():
             terms = sorted(terms)
-            sign = -1. if terms[0][1] < 0 else 1.
+            sign = -1.0 if terms[0][1] < 0 else 1.0
             canonical = tuple((j, coefficient * sign) for j, coefficient in terms)
             if canonical not in lookup:
                 lookup[canonical] = len(forms)
@@ -58,8 +58,17 @@ def angular_metadata(metadata):
     for group, values in sorted(forms_by_group.items()):
         offsets[group] = len(forms)
         forms.extend(values)
-    mapped = tuple((path[0], offsets[path[1]], *path[2:6], len(forms_by_group[path[1]]),
-                    *path[7:-1], rows) for path, rows in mapped)
+    mapped = tuple(
+        (
+            path[0],
+            offsets[path[1]],
+            *path[2:6],
+            len(forms_by_group[path[1]]),
+            *path[7:-1],
+            rows,
+        )
+        for path, rows in mapped
+    )
     return repr((mapped, width, weighted, *extra)), tuple(forms)
 
 
@@ -76,18 +85,28 @@ def angular_tables(metadata, dtype, device):
 
 
 @triton.jit
-def angular_kernel(S, I, C, B, E, SW:tl.constexpr, BW:tl.constexpr,
-                   SS:tl.constexpr, ST:tl.constexpr, TERMS:tl.constexpr,
-                   BLOCK:tl.constexpr):
-    offset = tl.program_id(0)*BLOCK + tl.arange(0, BLOCK)
-    edge, column = offset//BW, offset%BW
+def angular_kernel(
+    S,
+    I,
+    C,
+    B,
+    E,
+    SW: tl.constexpr,
+    BW: tl.constexpr,
+    SS: tl.constexpr,
+    ST: tl.constexpr,
+    TERMS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    edge, column = offset // BW, offset % BW
     total = tl.full((BLOCK,), 0, C.dtype.element_ty)
     for term in tl.static_range(TERMS):
-        index = tl.load(I + term*BW + column)
-        coefficient = tl.load(C + term*BW + column)
-        value = tl.load(S + edge*SS + index*ST, edge<E, 0)
-        total += coefficient*value
-    tl.store(B + offset, total, offset<E*BW)
+        index = tl.load(I + term * BW + column)
+        coefficient = tl.load(C + term * BW + column)
+        value = tl.load(S + edge * SS + index * ST, edge < E, 0)
+        total += coefficient * value
+    tl.store(B + offset, total, offset < E * BW)
 
 
 def prepare_angular(metadata, value):
@@ -99,14 +118,24 @@ def prepare_angular(metadata, value):
     indices, coefficients = angular_tables(metadata, value.dtype, value.device)
     out = value.new_empty((value.shape[0], indices.shape[1]))
     angular_kernel[(triton.cdiv(out.numel(), 256),)](
-        value, indices, coefficients, out, value.shape[0], value.shape[1], out.shape[1],
-        value.stride(0), value.stride(1), indices.shape[0], 256,
-        enable_fp_fusion=False)
+        value,
+        indices,
+        coefficients,
+        out,
+        value.shape[0],
+        value.shape[1],
+        out.shape[1],
+        value.stride(0),
+        value.stride(1),
+        indices.shape[0],
+        256,
+        enable_fp_fusion=False,
+    )
     if cache is not None:
         # Retain the original to prevent its allocator address from being
         # reused while this invocation still holds a prepared value.
         cache[key] = out
-        cache['input', key] = value
+        cache["input", key] = value
     return out
 
 

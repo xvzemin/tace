@@ -4,8 +4,8 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
+from ..ops.torch.o2 import local_frame as torch_kernel
 from ..ops.precision import validate_module_precision
-from ..utils.layout import permute
 from .irreps import Irrep, Irreps
 from .layout import wigner_indices, wigner_orders
 
@@ -370,6 +370,7 @@ class LocalFrame(torch.nn.Module):
         torch.Tensor
             Local features with shape ``(batch, ..., irreps_out.dim)``.
         """
+        validate_module_precision(self, (features, wigner))
         if features.ndim < 2 or features.size(-1) != self.input_dim:
             raise ValueError(
                 "LocalFrame input trailing dimension must be "
@@ -377,29 +378,7 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner.ndim not in (2, 3) or features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        matrices = self._rotation_matrices(wigner.to(features))
-        if not self._global_identity:
-            features = permute(features, self._global_index, self._global_inverse)
-        outputs = []
-        for degree, mul, matrix, values in zip(
-            self._degrees,
-            self._multiplicities,
-            matrices,
-            features.split(self._global_sizes, dim=-1),
-        ):
-            values = values.view(*features.shape[:-1], 2 * degree + 1, mul)
-            values = (
-                torch.bmm(matrix, values)
-                if features.ndim == 2
-                else torch.einsum("bij,b...jk->b...ik", matrix, values)
-            )
-            outputs.append(values.flatten(-2))
-        if not outputs:
-            return features[..., :0]
-        features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        if not self._local_identity:
-            features = permute(features, self._local_index, self._local_inverse)
-        return features * self._local_sign.to(features) if self._has_signs else features
+        return torch_kernel.to_local(self, features, wigner)
 
     def forward(
         self,
@@ -407,7 +386,6 @@ class LocalFrame(torch.nn.Module):
         wigner: torch.Tensor,
     ) -> torch.Tensor:
         """Alias for :meth:`to_local`."""
-        validate_module_precision(self, (features, wigner))
         return self.to_local(features, wigner)
 
     def to_global(
@@ -435,6 +413,7 @@ class LocalFrame(torch.nn.Module):
             Global features with shape ``(batch, ..., irreps_in.dim)`` in
             flattened ``ir_mul`` order.
         """
+        validate_module_precision(self, (features, wigner_inv))
         if features.ndim < 2 or features.size(-1) != self.output_dim:
             raise ValueError(
                 "LocalFrame input trailing dimension must be "
@@ -442,34 +421,7 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner_inv.ndim not in (2, 3) or features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
-        matrices = self._rotation_matrices(wigner_inv.to(features), inverse=True)
-        if self._has_signs:
-            features = features * self._local_sign.to(features)
-        if not self._local_identity:
-            features = permute(features, self._local_inverse, self._local_index)
-        outputs = []
-        for degree, mul, matrix, values in zip(
-            self._degrees,
-            self._multiplicities,
-            matrices,
-            features.split(self._local_sizes, dim=-1),
-        ):
-            retained = 2 * min(degree, self.mmax) + 1
-            values = values.view(*features.shape[:-1], retained, mul)
-            values = (
-                torch.bmm(matrix, values)
-                if features.ndim == 2
-                else torch.einsum("bij,b...jk->b...ik", matrix, values)
-            )
-            outputs.append(values.flatten(-2))
-        if not outputs:
-            return features[..., :0]
-        features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        return (
-            features
-            if self._global_identity
-            else permute(features, self._global_inverse, self._global_index)
-        )
+        return torch_kernel.to_global(self, features, wigner_inv)
 
     def gather(
         self,
@@ -500,12 +452,12 @@ class LocalFrame(torch.nn.Module):
             Edge features of shape ``(num_edges, irreps_out.dim)``.
         """
         if backend == "torch":
-            return self.to_local(features.index_select(0, index), wigner)
+            return torch_kernel.gather(self, features, wigner, index)
         if backend != "cuda":
-            raise ValueError("backend must be 'torch' or 'cuda'.")
-        from ..ops.frame import transform
+            raise ValueError("backend must be torch or cuda.")
+        from ..ops.cuda.o2 import local_frame as cuda_kernel
 
-        return transform(self, features, wigner, index, features.size(0), False)
+        return cuda_kernel.gather(self, features, wigner, index)
 
     def scatter(
         self,
@@ -542,12 +494,9 @@ class LocalFrame(torch.nn.Module):
             local orders follow the inverse scaling of :meth:`to_global`.
         """
         if backend == "torch":
-            messages = self.to_global(features, wigner_inv)
-            return messages.new_zeros((num_nodes, self.input_dim)).index_add(
-                0, index, messages
-            )
+            return torch_kernel.scatter(self, features, wigner_inv, index, num_nodes)
         if backend != "cuda":
-            raise ValueError("backend must be 'torch' or 'cuda'.")
-        from ..ops.frame import transform
+            raise ValueError("backend must be torch or cuda.")
+        from ..ops.cuda.o2 import local_frame as cuda_kernel
 
-        return transform(self, features, wigner_inv, index, num_nodes, True)
+        return cuda_kernel.scatter(self, features, wigner_inv, index, num_nodes)

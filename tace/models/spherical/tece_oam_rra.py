@@ -14,8 +14,8 @@ from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.conv.attention import graph_softmax
 from equivariantx.models.tace.tece_oam_rra import LocalSplit
 from equivariantx.o2.clebsch_gordan import clebsch_gordan_product
-from equivariantx.ops.channel_product import local_product
-from equivariantx.ops.rotation import rotate
+from equivariantx.ops.common.channel_product import local_product
+from equivariantx.ops.common.rotation import rotate
 from tace.utils.env import acceleration_enabled, select_acceleration
 
 from ..lammps import Graph
@@ -392,7 +392,7 @@ class Convolution(torch.nn.Module):
         radial_bias, radial_phase = self.radial_proj(radial_basis).split(heads, dim=-1)
         radial_phase = math.pi * radial_phase.tanh()
         if fused:
-            from equivariantx.ops.rotary import rotary_product
+            from equivariantx.ops.common.rotary import rotary_product
 
             orders = torch.arange(self.mmax + 1, device=query.device, dtype=query.dtype)
             angle = radial_phase[:, None, :] * orders[None, :, None]

@@ -8,6 +8,7 @@ import torch
 from e3nn import o3
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co3 import basis as torch_basis
 from .irreps import Irreps
 from .symmetric import SymmetricBasis
 
@@ -95,6 +96,9 @@ class ChangeOfBasis(torch.nn.Module):
     inverse : bool, optional
         False maps spherical features to Cartesian tensors. True extracts
         spherical features and discards non-STF components.
+    backend : {"torch", "cuda"}, optional
+        Torch matrix operations or compiler-visible native matrix kernels.
+        Defaults to ``"torch"``.
 
     Examples
     --------
@@ -108,8 +112,11 @@ class ChangeOfBasis(torch.nn.Module):
     >>> torch.testing.assert_close(to_spherical(tensor), x)
     """
 
-    def __init__(self, irreps, inverse=False):
+    def __init__(self, irreps, inverse=False, *, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         cartesian = Irreps(irreps)
         spherical = cartesian.spherical()
         self.inverse = inverse
@@ -121,6 +128,21 @@ class ChangeOfBasis(torch.nn.Module):
             (mul, ir.l, ir.dim, section)
             for (mul, ir), section in zip(self.irreps_in, self.slices_in)
         )
+        groups = []
+        for mul, degree, dim, section in self.paths:
+            if groups and groups[-1][1] == degree:
+                previous = groups.pop()
+                groups.append(
+                    (
+                        previous[0] + mul,
+                        degree,
+                        dim,
+                        slice(previous[3].start, section.stop),
+                    )
+                )
+            else:
+                groups.append((mul, degree, dim, section))
+        self.basis_groups = tuple(groups)
         for l in sorted({ir.l for _, ir in cartesian}):
             self.register_buffer(
                 f"basis_{l}",
@@ -133,12 +155,11 @@ class ChangeOfBasis(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        values = []
-        for mul, l, dim, section in self.paths:
-            matrix = getattr(self, f"basis_{l}")
-            x = features[..., section].reshape(*features.shape[:-1], mul, dim)
-            values.append((x @ (matrix if self.inverse else matrix.T)).flatten(-2))
-        return torch.cat(values, dim=-1) if values else features[..., :0]
+        if getattr(self, "backend", "torch") == "cuda":
+            from ..ops.cuda.co3 import basis as cuda_basis
+
+            return cuda_basis.change_basis(self, features)
+        return torch_basis.change_basis(self, features)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
@@ -161,6 +182,8 @@ class Projector(torch.nn.Module):
     instructions : sequence of int, optional
         Entries to project. Other entries are passed through unchanged.
         Defaults to all entries. Scalar and vector projections are identities.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch. Defaults to ``"torch"``.
 
     Examples
     --------
@@ -172,8 +195,11 @@ class Projector(torch.nn.Module):
     >>> torch.testing.assert_close(result, expected, atol=1e-6, rtol=1e-6)
     """
 
-    def __init__(self, irreps, instructions=None):
+    def __init__(self, irreps, instructions=None, *, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         self.irreps_in = self.irreps_out = Irreps(irreps)
         self.slices = self.irreps_in.slices()
         instructions = (
@@ -223,30 +249,19 @@ class Projector(torch.nn.Module):
         ]
         values = self.forward_blocks(values)
         values = [value.flatten(-2) for value in values]
-        return torch.cat(values, dim=-1) if values else features[..., :0]
+        if not values:
+            return features[..., :0]
+        return values[0] if len(values) == 1 else torch.cat(values, dim=-1)
 
     def forward_blocks(self, features):
         """Project blocks of shape (..., mul, 3**l), batching equal ranks."""
         values = list(features)
-        for l, entries in self.groups:
-            x = (
-                values[entries[0][0]]
-                if len(entries) == 1
-                else torch.cat([values[i] for i, _ in entries], dim=-2)
-            )
-            matrix = getattr(self, f"basis_{l}")
-            if str(l) in self.symmetric_bases:
-                x = self.symmetric_bases[str(l)].pack(x)
-            x = x @ matrix
-            if l != 2:
-                x = x @ matrix.T
-            if str(l) in self.symmetric_bases:
-                x = self.symmetric_bases[str(l)].unpack(x)
-            for (i, _), value in zip(
-                entries, x.split([mul for _, mul in entries], dim=-2)
-            ):
-                values[i] = value
-        return values
+        validate_module_precision(self, (values,))
+        if getattr(self, "backend", "torch") == "cuda" and values and values[0].is_cuda:
+            from ..ops.cuda.co3 import basis as cuda_basis
+
+            return cuda_basis.project(self, values)
+        return torch_basis.project(self, values)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

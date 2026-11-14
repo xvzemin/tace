@@ -431,7 +431,7 @@ def test_nonlinear_product(
     monkeypatch, asymmetric, correlation, dtype, compiled_training
 ):
     import tace.models.spherical.prod as prod
-    from equivariantx.ops.kernels.cuda import graph
+    from equivariantx.ops.common.cuda import graph
     from tace.models.linear import e3nnLinear
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -598,7 +598,7 @@ def test_nonlinear_product(
             rtol=tolerance,
         )
     if correlation == 3 and asymmetric and dtype == torch.float64 and x.is_cuda:
-        import equivariantx.ops.kernels.cuda.execution as execution
+        import equivariantx.ops.common.cuda.execution as execution
 
         with monkeypatch.context() as patch:
             patch.setattr(execution, "launch", partial(execution.launch, tile_size=2))

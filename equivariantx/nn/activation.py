@@ -6,6 +6,7 @@ import torch
 from torch.nn import functional
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.nn import activation as torch_kernel
 
 
 class PolynomialActivation(torch.nn.Module):
@@ -20,6 +21,8 @@ class PolynomialActivation(torch.nn.Module):
     bound : float, optional
         Positive endpoint of the approximation interval ``[-bound, bound]``.
         Defaults to three. Inputs are not clipped to this interval.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Coefficient dtype. Defaults to the default floating-point dtype.
     device : torch.device or str, optional
@@ -48,8 +51,20 @@ class PolynomialActivation(torch.nn.Module):
     torch.Size([5, 6])
     """
 
-    def __init__(self, act="silu", degree=8, bound=3.0, *, dtype=None, device=None):
+    def __init__(
+        self,
+        act="silu",
+        degree=8,
+        bound=3.0,
+        *,
+        backend="torch",
+        dtype=None,
+        device=None,
+    ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         activations = {
             "silu": functional.silu,
             "gelu": functional.gelu,
@@ -99,15 +114,11 @@ class PolynomialActivation(torch.nn.Module):
     def forward(self, features):
         """Evaluate the polynomial elementwise, preserving the input shape."""
         validate_module_precision(self, (features,))
-        features = features / self.bound
-        previous = torch.zeros_like(features)
-        current = torch.zeros_like(features)
-        for i in range(self.degree, 0, -1):
-            previous, current = (
-                current,
-                (self.coefficients[i] + 2 * features * current - previous),
-            )
-        return self.coefficients[0] + features * current - previous
+        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
+            from ..ops.cuda.nn import activation as cuda_kernel
+
+            return cuda_kernel.evaluate(self, features)
+        return torch_kernel.evaluate(self, features)
 
     def extra_repr(self):
         return f"act={self.act}, degree={self.degree}, bound={self.bound}"

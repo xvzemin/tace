@@ -5,10 +5,9 @@ from collections import defaultdict
 import torch
 from e3nn import o3
 
-from ...ops.ace import contract
-from ...ops import config
-from ...ops.precision import validate_module_precision
 from ...o3.linear import ElementLinear
+from ...ops.torch.mbe.ace import semi_coupled as torch_kernel
+from ...ops.precision import validate_module_precision
 
 
 def make_metadata(rows, dims, weighted):
@@ -49,6 +48,7 @@ class SemiCoupledSymmetricContraction(torch.nn.Module):
         External-weight coefficient maps for orders one through the maximum
         correlation, including the linear contribution of the original input.
         All maps must have the same output layout. Biases are applied by the caller.
+        Weights are indexed by element regardless of ``shared_weights``.
     backend : {"cuda", "torch"}, optional
         CUDA contracts sparse CG entries without expanded product tensors and
         fuses the final product with its coefficient map. CPU inputs use torch.
@@ -94,7 +94,7 @@ class SemiCoupledSymmetricContraction(torch.nn.Module):
         self.tensor_products = tuple(tensor_products)
         self.linears = tuple(linears)
         self.input_dim = tensor_products[0].irreps_in1.dim
-        self.output_dim = linears[0].irreps_out.dim
+        self.output_dim = self.contraction_dim = linears[0].irreps_out.dim
         self.product_dims = tuple(tp.irreps_out.dim for tp in tensor_products)
         self.weight_numels = tuple(linear.weight_numel for linear in linears)
         self.metadata = []
@@ -267,60 +267,16 @@ class SemiCoupledSymmetricContraction(torch.nn.Module):
                 raise ValueError("Weights must have shape (elements, weight_numel).")
             if weight.device != features.device or weight.dtype != features.dtype:
                 raise ValueError("Weights and features must share a device and dtype.")
-        corr = features
-        output = self.linear(features, weights[0], node_type, 0)
-        for stage, weight in enumerate(weights[1:]):
-            if features.is_cuda and self.backend == "cuda":
-                if stage == len(self.product_dims) - 1:
-                    operands = [
-                        corr,
-                        features,
-                        weight,
-                        features.new_empty((0, self.output_dim)),
-                    ]
-                else:
-                    operands = [
-                        corr,
-                        features,
-                        features.new_empty((0, self.product_dims[stage])),
-                    ]
-                result = contract(
-                    self.metadata[stage],
-                    repr(((tuple(range(len(operands))), len(operands) - 1, 0),)),
-                    node_type,
-                    operands,
-                )[0]
-                if stage == len(self.product_dims) - 1:
-                    output = output + self.project_output(result)
-                    continue
-                corr = self.project_product(result, stage)
-            else:
-                corr = self.tensor_products[stage](corr, features)
-            output = output + self.linear(corr, weight, node_type, stage + 1)
-        return output
+        if features.is_cuda and self.backend == "cuda":
+            from ...ops.cuda.mbe.ace import semi_coupled as cuda_kernel
+
+            return cuda_kernel.evaluate(self, features, weights, node_type)
+        return torch_kernel.evaluate(self, features, weights, node_type)
 
     def linear(self, features, weight, node_type, stage):
         """Apply element coefficients without gathering per-node matrices."""
-        if not features.is_cuda or self.backend == "torch":
-            coefficient = self.coefficient_maps[stage]
-            if (
-                features.is_cuda
-                and coefficient is not None
-                and not config.TORCH_REFERENCE
-            ):
-                output = coefficient(features, weight, node_type)
-                projection = getattr(self.linears[stage], "projection", None)
-                return output if projection is None else projection(output)
-            return self.linears[stage](features, weight[node_type])
-        operands = [
-            features,
-            features.new_ones((features.shape[0], 1)),
-            weight,
-            features.new_empty((0, self.output_dim)),
-        ]
-        return contract(
-            self.linear_metadata[stage],
-            repr((((0, 1, 2, 3), 3, 0),)),
-            node_type,
-            operands,
-        )[0]
+        if features.is_cuda and self.backend == "cuda":
+            from ...ops.cuda.mbe.ace import semi_coupled as cuda_kernel
+
+            return cuda_kernel.linear(self, features, weight, node_type, stage)
+        return torch_kernel.linear(self, features, weight, node_type, stage)

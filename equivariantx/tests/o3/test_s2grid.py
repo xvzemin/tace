@@ -3,9 +3,52 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx.o3.s2grid import S2Grid
 
 IRREPS = "0e+0o+1e+1o+2e+2o"
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision):
+    from unittest.mock import patch
+
+    from equivariantx.ops import config
+    from equivariantx.ops.cuda.o3 import s2grid as kernel
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = S2Grid(2, quadrature="gauss_legendre", backend="cuda").to(device)
+    reference = S2Grid(2, quadrature="gauss_legendre").to(device)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for count in (3, 0):
+        x = torch.randn(count, module.dim, device=device)
+        with patch.object(kernel, "to_grid", wraps=kernel.to_grid) as selected:
+            grid = module(x)
+        assert selected.call_count == (device == "cuda")
+        torch.testing.assert_close(grid, reference(x))
+        with patch.object(kernel, "from_grid", wraps=kernel.from_grid) as selected:
+            actual = module.from_grid(grid.sin())
+        assert selected.call_count == (device == "cuda")
+        torch.testing.assert_close(actual, reference.from_grid(grid.sin()))
+    assert module.backend == "cuda" and config.TORCH_REFERENCE is True
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_public_method_precision(device, double_precision):
+    from equivariantx.tests.utils.testing import check_method_precision
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    layer = S2Grid(2, quadrature="gauss_legendre", device=device)
+    features = torch.randn(3, layer.dim, device=device)
+    check_method_precision(
+        layer,
+        [
+            ("to_grid", (features,), {}),
+            ("from_grid", (layer(features),), {}),
+        ],
+    )
 
 
 @pytest.fixture(params=["lebedev", "gauss_legendre", "equiangular"])
@@ -132,3 +175,104 @@ def test_s2_invalid_inputs():
         grid(torch.empty(2, grid.dim + 1))
     with pytest.raises(ValueError):
         grid.from_grid(torch.empty(2, 1))
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("quadrature", ["lebedev", "gauss_legendre", "equiangular"])
+def test_grid_backend(backend, quadrature, monkeypatch, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o3 import s2grid as kernels
+
+    monkeypatch.setattr(config, "TORCH_S2_GRID", True)
+    layer = S2Grid(
+        2, quadrature=quadrature, backend=backend, device=device, dtype=torch.float64
+    )
+    x = (
+        torch.randn(2, layer.dim, device=device, dtype=torch.float64) * 0.1
+    ).requires_grad_()
+    actual = layer.from_grid(layer(x).sin())
+    expected = kernels.from_grid_reference(
+        layer, kernels.to_grid_reference(layer, x).sin()
+    )
+    for _ in range(5):
+        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+        actual, expected = [
+            torch.autograd.grad(v.sin().sum(), x, create_graph=True)[0]
+            for v in (actual, expected)
+        ]
+
+    def run(value):
+        return layer.from_grid(layer(value).sin())
+
+    tangent = torch.randn_like(x)
+    with torch.autograd.forward_ad.dual_level():
+        dual = torch.autograd.forward_ad.make_dual(x, tangent)
+        primal, actual_tangent = torch.autograd.forward_ad.unpack_dual(run(dual))
+    expected_primal, expected_tangent = torch.autograd.functional.jvp(run, x, tangent)
+    assert actual_tangent is not None
+    torch.testing.assert_close(primal, expected_primal, atol=3e-10, rtol=3e-10)
+    torch.testing.assert_close(actual_tangent, expected_tangent, atol=3e-10, rtol=3e-10)
+    torch.testing.assert_close(
+        torch.func.jvp(run, (x,), (tangent,)),
+        torch.autograd.functional.jvp(run, x, tangent),
+        atol=3e-10,
+        rtol=3e-10,
+    )
+    torch.testing.assert_close(torch.vmap(run)(x), run(x))
+    assert torch.autograd.gradcheck(run, (x,))
+    assert torch.autograd.gradgradcheck(run, (x,))
+    assert not layer.state_dict()
+    empty = torch.empty(0, layer.dim, device=device, dtype=torch.float64)
+    assert run(empty).shape == empty.shape
+
+
+@pytest.mark.parametrize("lmax", [0, 6, 13])
+@pytest.mark.parametrize("quadrature", ["gauss_legendre", "equiangular"])
+def test_grid_high_order(lmax, quadrature, monkeypatch, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o3 import s2grid as kernels
+
+    monkeypatch.setattr(config, "TORCH_S2_GRID", True)
+    layer = S2Grid(lmax, quadrature=quadrature, device=device, dtype=torch.float64)
+    x = torch.randn(2, layer.dim, device=device, dtype=torch.float64)
+    actual = layer(x)
+    torch.testing.assert_close(
+        actual, kernels.to_grid_reference(layer, x), atol=3e-12, rtol=3e-12
+    )
+    torch.testing.assert_close(layer.from_grid(actual), x, atol=3e-12, rtol=3e-12)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("quadrature", ["lebedev", "gauss_legendre", "equiangular"])
+def test_fp32_backend(backend, quadrature, monkeypatch, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o3 import s2grid as kernels
+
+    monkeypatch.setattr(config, "TORCH_S2_GRID", True)
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    try:
+        layer = S2Grid(
+            3,
+            quadrature=quadrature,
+            backend=backend,
+            dtype=torch.float32,
+            device=device,
+        )
+        oracle = S2Grid(3, quadrature=quadrature, dtype=torch.float64, device=device)
+        x = (
+            torch.randn(2, layer.dim, device=device, dtype=torch.float32) * 0.1
+        ).requires_grad_()
+        precise = x.detach().double().requires_grad_()
+        actual = layer.from_grid(layer(x).sin())
+        expected = kernels.from_grid_reference(
+            oracle, kernels.to_grid_reference(oracle, precise).sin()
+        )
+        for _ in range(3):
+            torch.testing.assert_close(actual.double(), expected, atol=3e-7, rtol=1e-5)
+            actual, expected = [
+                torch.autograd.grad(value.sin().sum(), source, create_graph=True)[0]
+                for value, source in ((actual, x), (expected, precise))
+            ]
+    finally:
+        torch.set_float32_matmul_precision(precision)

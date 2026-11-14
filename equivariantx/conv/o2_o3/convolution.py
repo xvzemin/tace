@@ -6,8 +6,10 @@ import torch
 from e3nn import o3
 
 from ...ops import config
-from ...ops.o2_o3 import contraction
 from ...ops.precision import validate_module_precision
+from ...ops.torch.conv.o2_o3 import convolution as torch_kernel
+from ...ops.torch.o2 import wigner as torch_wigner
+from ...utils.autograd import forward_ad_active
 from ...utils.metadata import parse_metadata
 
 
@@ -22,8 +24,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         Execution backend. ``"torch"`` evaluates the selected algorithm with
         optimized PyTorch operations and automatic differentiation by default.
         ``"cuda"`` selects native kernels for CUDA tensors.
-        The CUDA backend supports ``"uvu"`` instructions only. Use ``"torch"``
-        for channel-mixing ``"uvw"`` instructions.
+        Both support ``"uvu"`` and channel-mixing ``"uvw"`` instructions.
     method : {"auto", "baseline", "generator", "recurrence", "cg", "wigner"}, optional
         ``"baseline"`` retains static path-wise expression selection.
         ``"generator"`` uses a Chebyshev expansion of the squared generator.
@@ -36,7 +37,8 @@ class O2O3TensorProductConv(torch.nn.Module):
     radial_mode : {"last", "full"}, optional
         ``"last"`` retains hidden MLP activations. ``"full"`` includes all
         radial layers in the derivative program and recomputes activations.
-        The full Torch path uses explicit CG polynomials or Wigner rotations.
+        CUDA eager evaluation keeps ``"full"`` tiled. Compilation exposes
+        the selected differentiable Torch expression program.
 
     Notes
     -----
@@ -71,13 +73,9 @@ class O2O3TensorProductConv(torch.nn.Module):
         super().__init__()
         if backend not in ("torch", "cuda"):
             raise ValueError("backend must be torch or cuda.")
-        if backend == "cuda" and any(
+        self.channel_mixing = any(
             ins.connection_mode != "uvu" for ins in tensor_product.instructions
-        ):
-            raise NotImplementedError(
-                "The CUDA convolution supports only 'uvu' instructions. "
-                "Use backend='torch' for other connection modes."
-            )
+        )
         self.backend = backend
         if radial_mode not in ("last", "full"):
             raise ValueError("radial_mode must be last or full.")
@@ -125,6 +123,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         offset = 0
         self.path_data = []
         self.sparse_paths = []
+        self.coefficient_data = {}
         scalar_paths = []
         harmonic_degrees = []
         for ins in self.instructions:
@@ -150,13 +149,15 @@ class O2O3TensorProductConv(torch.nn.Module):
                 ir.l, ir_sh.l, ir_out.l, dtype=torch.float64, device="cpu"
             )
             cg = coefficients[:, ir_sh.l, :]
-            # Static coefficients and tensor buffers use the same construction
-            # precision, including when the module is later promoted to float64.
-            cg = (cg * (pole * ins.path_weight)).to(torch.get_default_dtype())
+            cg = cg * (pole * ins.path_weight)
             # Each row and column of the real m2=0 slice has at most one nonzero.
             if (cg.count_nonzero(0) > 1).any() or (cg.count_nonzero(1) > 1).any():
                 raise ValueError("Expected a signed-order-diagonal CG slice.")
-            self.register_buffer(f"cg_{len(self.path_data)}", cg, persistent=False)
+            cg_name = f"cg_{len(self.path_data)}"
+            self.coefficient_data[cg_name] = cg
+            self.register_buffer(
+                cg_name, cg.to(tensor_product.weight, copy=True), persistent=False
+            )
             path = (
                 input_slices[ins.i_in1].start,
                 output_slices[ins.i_out].start,
@@ -180,9 +181,10 @@ class O2O3TensorProductConv(torch.nn.Module):
                 ).to(tensor_product.weight)
                 self.register_buffer(
                     f"full_cg_{name}",
-                    coefficients.to(tensor_product.weight),
+                    coefficients.to(tensor_product.weight, copy=True),
                     persistent=False,
                 )
+                self.coefficient_data[f"full_cg_{name}"] = coefficients
             if str(ir_sh.l) not in self.harmonics:
                 self.harmonics[str(ir_sh.l)] = o3.SphericalHarmonics(
                     ir_sh.l, normalize=False, normalization=self.normalization
@@ -256,6 +258,12 @@ class O2O3TensorProductConv(torch.nn.Module):
                 self.normalization,
             )
         )
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        for name, value in getattr(self, "coefficient_data", {}).items():
+            setattr(self, name, value.to(getattr(self, name), copy=True))
+        return self
 
     def forward(
         self,
@@ -332,20 +340,25 @@ class O2O3TensorProductConv(torch.nn.Module):
                 radial_network,
             ),
         )
-        from ...ops.radial import cast_radial
+        from ...ops.common.radial import cast_radial
 
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         amplitudes = amplitudes.to(features)
         if radial_network is not None and (
-            self.radial_mode == "last" or config.TORCH_REFERENCE
+            self.radial_mode == "last"
+            or (
+                (self.backend == "torch" or not features.is_cuda)
+                and config.TORCH_REFERENCE
+            )
+            or forward_ad_active()
         ):
-            from ...ops.radial import radial_features
+            from ...ops.common.radial import radial_features
 
             radial = radial_features(radial_network, radial, edge_index, projection)
             radial_network = None
         if self.backend == "cuda" and radial_network is None:
-            from ...ops.radial import align_projection
+            from ...ops.common.radial import align_projection
 
             radial, projection = align_projection(radial, projection)
         method = getattr(self, "method", "baseline") if method is None else method
@@ -362,29 +375,49 @@ class O2O3TensorProductConv(torch.nn.Module):
             )
         if vectors is None and method in ("generator", "recurrence", "cg"):
             raise ValueError(f"method={method!r} requires vectors.")
+        reference = (
+            self.backend == "torch" or not features.is_cuda
+        ) and config.TORCH_REFERENCE
         if vectors is not None and vectors.dtype != features.dtype:
-            wigner = self.frame.forward_packed(
-                vectors, method="auto" if self.backend == "cuda" else "recursive"
+            wigner = (
+                torch_wigner.packed(self.frame, vectors, "recursive")
+                if reference
+                else self.frame.forward_packed(
+                    vectors,
+                    method="auto"
+                    if self.backend == "cuda" and not forward_ad_active()
+                    else "recursive",
+                )
             ).to(features)
             vectors = None
         if vectors is not None:
             if method == "auto":
-                from .autotune import select_method
+                if forward_ad_active():
+                    method = "baseline"
+                else:
+                    from .autotune import select_method
 
-                method = select_method(
-                    self,
-                    features,
-                    radial,
-                    projection,
-                    amplitudes,
-                    edge_index,
-                    num_nodes,
-                    vectors,
-                    radial_network=radial_network,
-                )
+                    method = select_method(
+                        self,
+                        features,
+                        radial,
+                        projection,
+                        amplitudes,
+                        edge_index,
+                        num_nodes,
+                        vectors,
+                        radial_network=radial_network,
+                    )
             if method == "wigner":
-                wigner = self.frame.forward_packed(
-                    vectors, method="auto" if self.backend == "cuda" else "recursive"
+                wigner = (
+                    torch_wigner.packed(self.frame, vectors, "recursive")
+                    if reference
+                    else self.frame.forward_packed(
+                        vectors,
+                        method="auto"
+                        if self.backend == "cuda" and not forward_ad_active()
+                        else "recursive",
+                    )
                 )
             elif method in ("baseline", "generator", "recurrence", "cg"):
                 return self.forward_transverse(
@@ -401,65 +434,33 @@ class O2O3TensorProductConv(torch.nn.Module):
         if wigner is None:
             raise ValueError("Supply vectors or packed Wigner matrices.")
         wigner = wigner.to(features)
-        if self.backend == "torch" or not features.is_cuda:
-            if self.radial_mode == "full" and not config.TORCH_REFERENCE:
-                from ...ops.convolution import convolve_torch
+        if self.backend == "cuda" and features.is_cuda and not forward_ad_active():
+            from ...ops.cuda.conv.o2_o3 import convolution as cuda_kernel
 
-                result = convolve_torch(
-                    self.kernel_metadata,
-                    features,
-                    wigner,
-                    radial,
-                    projection,
-                    edge_index,
-                    num_nodes,
-                    self.output_dim,
-                    network=radial_network,
-                    recompute=True,
-                    amplitudes=amplitudes,
-                )
-            else:
-                result = self.reference(
-                    features,
-                    radial,
-                    projection,
-                    wigner,
-                    amplitudes,
-                    edge_index,
-                    num_nodes,
-                )
-            return result if vectors is None else result + vectors.sum() * 0
-        # A zero-stride placeholder supplies the output shape without allocating
-        # a second node output. It is never read by the forward contraction.
-        output = features.new_empty(1).expand(num_nodes, self.output_dim)
-        # Both rotations depend on the same tensor. Keep one operand so their
-        # adjoints accumulate together, including in recursively transposed calls.
-        program = (((0, 1, 2, 3, 3, 4, 5), False, ((6, 0),)),)
-        operands = [
+            return cuda_kernel.evaluate(
+                self,
+                features,
+                radial,
+                projection,
+                wigner,
+                amplitudes,
+                edge_index,
+                num_nodes,
+                vectors,
+                radial_network,
+            )
+        return torch_kernel.evaluate(
+            self,
             features,
             radial,
             projection,
             wigner,
             amplitudes,
-            output,
-        ]
-        if radial_network is not None:
-            from ...ops.radial import convolve
-
-            return convolve(
-                "o2",
-                self.kernel_metadata,
-                [features, radial, projection, wigner, wigner, amplitudes, output],
-                edge_index,
-                radial_network,
-            )
-        return contraction(
-            self.kernel_metadata,
-            repr(program),
-            edge_index[0],
-            edge_index[1],
-            operands,
-        )[0]
+            edge_index,
+            num_nodes,
+            vectors,
+            radial_network,
+        )
 
     def forward_transverse(
         self,
@@ -475,210 +476,51 @@ class O2O3TensorProductConv(torch.nn.Module):
         radial_network=None,
     ):
         """Contract transverse tensors in spherical storage without alignment."""
-        if self.backend == "cuda" and features.is_cuda:
-            from ...ops.o3 import contraction as spherical_contraction
-            from ...ops.wigner import alignment_cuda
+        if self.backend == "cuda" and features.is_cuda and not forward_ad_active():
+            from ...ops.cuda.conv.o2_o3 import convolution as cuda_kernel
 
-            if torch.compiler.is_compiling():
-                torch._dynamo.mark_static(vectors, -1)
-            direction = alignment_cuda(repr("normalize"), [vectors])[0]
-            operands = [
+            return cuda_kernel.transverse(
+                self,
                 features,
                 radial,
                 projection,
                 amplitudes,
-                features.new_empty(1).expand(num_nodes, self.output_dim),
-                direction,
-            ]
-            if radial_network is not None:
-                from ...ops.radial import convolve
-
-                return convolve(
-                    "o3",
-                    self.transverse_metadata
-                    if method == "baseline"
-                    else getattr(self, f"{method}_metadata"),
-                    operands,
-                    edge_index,
-                    radial_network,
-                )
-            return spherical_contraction(
-                self.transverse_metadata
-                if method == "baseline"
-                else getattr(self, f"{method}_metadata"),
-                repr(((tuple(range(6)), False, ((4, 0),)),)),
-                edge_index[0],
-                edge_index[1],
-                operands,
-            )[0]
-        direction = vectors / vectors.norm(dim=-1, keepdim=True)
-        if self.radial_mode == "full" and not config.TORCH_REFERENCE:
-            from ...ops.convolution import convolve_torch
-
-            if any(mode != "uvu" for mode, _ in self.transverse_layout):
-                wigner = self.frame.forward_packed(vectors, method="recursive")
-                return convolve_torch(
-                    self.kernel_metadata,
-                    features,
-                    wigner,
-                    radial,
-                    projection,
-                    edge_index,
-                    num_nodes,
-                    self.output_dim,
-                    network=radial_network,
-                    recompute=True,
-                    amplitudes=amplitudes,
-                )
-            attributes, paths, offsets = [], [], {}
-            for path in self.transverse_paths:
-                harmonic, dimension = path[1], path[6]
-                key = harmonic, dimension
-                if key not in offsets:
-                    offsets[key] = sum(value.shape[-1] for value in attributes)
-                    value = o3.spherical_harmonics(
-                        (dimension - 1) // 2,
-                        direction,
-                        normalize=False,
-                        normalization=self.normalization,
-                    )
-                    attributes.append(value * amplitudes[:, harmonic : harmonic + 1])
-                paths.append((path[0], offsets[key], *path[2:]))
-            metadata = repr((tuple(paths), projection.shape[1], False))
-            attributes = torch.cat(attributes, -1) if attributes else vectors[:, :0]
-            return convolve_torch(
-                metadata,
-                features,
-                attributes,
-                radial,
-                projection,
                 edge_index,
                 num_nodes,
-                self.output_dim,
-                network=radial_network,
-                recompute=True,
+                vectors,
+                method,
+                radial_network,
             )
-        source, target = edge_index
-        edges = source.numel()
-        weights = radial @ projection if projection.numel() else radial
-        zero = sum(
-            value[..., :0].sum()
-            for value in (features, radial, projection, amplitudes, direction)
+        return torch_kernel.transverse(
+            self,
+            features,
+            radial,
+            projection,
+            amplitudes,
+            edge_index,
+            num_nodes,
+            vectors,
+            method,
+            radial_network,
         )
-        inputs, harmonics, outputs = {}, {}, {}
-        for (mode, mul_out), path in zip(self.transverse_layout, self.transverse_paths):
-            (
-                start,
-                harmonic,
-                end,
-                mul,
-                _,
-                dim,
-                harmonic_dim,
-                dim_out,
-                weight,
-                factor,
-                _,
-            ) = path
-            key = (start, dim, mul)
-            if key not in inputs:
-                inputs[key] = (
-                    features[source, start : start + dim * mul]
-                    .reshape(edges, dim, mul)
-                    .transpose(-1, -2)
-                )
-            x = inputs[key]
-            name = f"{(dim - 1) // 2}_{(harmonic_dim - 1) // 2}_{(dim_out - 1) // 2}"
-            if method == "cg":
-                degree = str((harmonic_dim - 1) // 2)
-                if degree not in harmonics:
-                    harmonics[degree] = self.harmonics[degree](direction)
-                value = torch.einsum(
-                    "eua,eb,abc->ecu",
-                    x,
-                    harmonics[degree],
-                    getattr(self, f"full_cg_{name}"),
-                )
-            else:
-                value = self.transverse_couplings[name](
-                    x,
-                    direction.unsqueeze(-2),
-                    method="recurrence" if method == "recurrence" else "chebyshev",
-                ).transpose(-1, -2)
-            if weight >= 0:
-                width = mul if mode == "uvu" else mul * mul_out
-                w = weights[:, weight : weight + width]
-                value = (
-                    value * w.unsqueeze(-2)
-                    if mode == "uvu"
-                    else value @ w.reshape(-1, mul, mul_out)
-                )
-            value = value * (factor * amplitudes[:, harmonic : harmonic + 1]).unsqueeze(
-                -1
-            )
-            outputs[end] = value if end not in outputs else outputs[end] + value
-        return self.scatter_outputs(outputs, features, target, num_nodes, zero)
 
     def reference(
         self, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
     ):
         """Rotate, contract order-zero CG slices, rotate back and aggregate."""
-        source, target = edge_index
-        edges = source.numel()
-        weights = radial @ projection if projection.numel() else radial
-        zero = sum(
-            value[..., :0].sum()
-            for value in (features, radial, projection, wigner, amplitudes)
+        return torch_kernel.reference(
+            self,
+            features,
+            radial,
+            projection,
+            wigner,
+            amplitudes,
+            edge_index,
+            num_nodes,
         )
-        inputs, matrices, outputs, groups = {}, {}, {}, {}
-        for index, (mode, path) in enumerate(self.path_data):
-            start, end, mul, mul_out, dim, dim_out, dstart, dend, weight, harmonic = (
-                path
-            )
-            key = (start, dim, mul, dstart)
-            if key not in inputs:
-                x = features[source, start : start + dim * mul].reshape(edges, dim, mul)
-                din = wigner[:, dstart : dstart + dim * dim].reshape(
-                    wigner.size(0), dim, dim
-                )
-                inputs[key] = din @ x
-            value = getattr(self, f"cg_{index}").to(features).T @ inputs[key]
-            if weight >= 0:
-                if mode == "uvu":
-                    value = value * weights[:, None, weight : weight + mul]
-                else:
-                    value = value @ weights[:, weight : weight + mul * mul_out].reshape(
-                        weights.size(0), mul, mul_out
-                    )
-            value = value * amplitudes[:, harmonic, None, None]
-            if end not in outputs:
-                groups.setdefault((dend, dim_out), []).append((end, mul_out))
-                matrices[dend] = wigner[:, dend : dend + dim_out * dim_out].reshape(
-                    wigner.size(0), dim_out, dim_out
-                )
-                outputs[end] = value
-            else:
-                outputs[end] = outputs[end] + value
-        for (dend, _), entries in groups.items():
-            values = [outputs[end] for end, _ in entries]
-            values = values[0] if len(values) == 1 else torch.cat(values, -1)
-            values = matrices[dend].transpose(-1, -2) @ values
-            for (end, _), value in zip(
-                entries, values.split([mul for _, mul in entries], -1)
-            ):
-                outputs[end] = value
-        return self.scatter_outputs(outputs, features, target, num_nodes, zero)
 
     def scatter_outputs(self, outputs, features, target, num_nodes, zero):
         """Aggregate each declared output block without merging path channels."""
-        values = []
-        for start, width in self.output_sections:
-            value = features.new_zeros((num_nodes, width)) + zero
-            if start in outputs:
-                value = value.index_add(0, target, outputs[start].flatten(1))
-            values.append(value)
-        return (
-            torch.cat(values, -1)
-            if values
-            else features.new_zeros((num_nodes, 0)) + zero
+        return torch_kernel.scatter_outputs(
+            self, outputs, features, target, num_nodes, zero
         )

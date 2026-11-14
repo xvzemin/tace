@@ -2,10 +2,9 @@
 
 import torch
 
-from ..ops import get_kernel
-from ..ops.attention import normalized_exp
+from ..ops.torch.conv import attention as torch_kernel
 from ..ops.precision import validate_precision
-from ..ops.recompute import Replay
+from ..ops.common.recompute import Replay
 
 
 def graph_softmax(
@@ -76,18 +75,10 @@ def graph_softmax(
         raise ValueError("Target indices must match the edges and device of scores.")
     target = target.long()
     if backend == "cuda" and scores.is_cuda:
-        return (
-            normalized_exp(
-                scores.contiguous(), weight.contiguous(), target, num_nodes, eps
-            )
-            * weight
-        )
-    return (
-        get_kernel("graph_normalized_exp", "torch")(
-            scores, weight, target, num_nodes, eps
-        )
-        * weight
-    )
+        from ..ops.cuda.conv import attention as cuda_kernel
+
+        return cuda_kernel.graph_softmax(scores, target, num_nodes, weight, eps)
+    return torch_kernel.graph_softmax(scores, target, num_nodes, weight, eps)
 
 
 class StreamingGraphAttention(Replay):
@@ -125,6 +116,26 @@ class StreamingGraphAttention(Replay):
     Tracing exposes the tensor program for compiler fusion and standalone
     export. The number of tiles is specialized; compiled activation memory
     can differ from eager CUDA replay.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx.conv import StreamingGraphAttention
+    >>> def output_shapes(inputs):
+    ...     nodes = inputs[0].shape[0]
+    ...     return (inputs[2].new_empty(nodes, 1, 2),
+    ...             inputs[1].new_empty(nodes, 1), inputs[1].new_empty(nodes, 1))
+    >>> layer = StreamingGraphAttention(
+    ...     lambda inputs: (inputs[1], inputs[2]), output_shapes,
+    ...     edge_axes={i: 0 for i in range(1, 6)}, target_slot=3,
+    ...     normalizer_slot=4, value_weight_slot=4, valid_slot=5,
+    ...     tile_size=2, eps=1e-8,
+    ... )
+    >>> inputs = [torch.empty(2, 0), torch.zeros(3, 1), torch.ones(3, 1, 2),
+    ...           torch.tensor([0, 1, 0]), torch.ones(3, 1), torch.ones(3, dtype=torch.bool)]
+    >>> result, denominator, maximum = layer(*inputs)
+    >>> result.shape
+    torch.Size([2, 1, 2])
     """
 
     def __init__(
@@ -174,146 +185,9 @@ class StreamingGraphAttention(Replay):
 
     def forward(self, inputs, create_graph):
         validate_precision(inputs)
-        result, denominator, maximum = self.fake_function(inputs)
-        result.zero_()
-        denominator.zero_()
-        maximum.fill_(-torch.inf)
-        nodes, angular, channels = result.shape
-        heads = denominator.shape[1]
-        for values in self.tiles(inputs):
-            index = values[self.target_slot]
-            target = index[1] if index.ndim == 2 else index
-            scores, value = self.edge_function(values)
-            scores = torch.where(values[self.valid_slot][:, None], scores, -torch.inf)
-            local_max = torch.full_like(maximum, -torch.inf).scatter_reduce(
-                0, target[:, None].expand_as(scores), scores.detach(), reduce="amax"
-            )
-            next_max = torch.maximum(maximum, local_max)
-            shift = torch.where(torch.isneginf(next_max), 0, next_max)
-            scale = (maximum - shift).exp()
-            exp = (scores - shift[target]).exp()
-            weight = exp * values[self.normalizer_slot]
-            weighted_value = value.view(-1, angular, heads, channels // heads)
-            weighted_value = (
-                weighted_value
-                * (weight * values[self.value_weight_slot])[:, None, :, None]
-            )
-            result = (
-                result.view(nodes, angular, heads, channels // heads)
-                * scale[:, None, :, None]
-            ).reshape_as(result)
-            result = result.index_add(0, target, weighted_value.reshape_as(value))
-            denominator = (denominator * scale).index_add(0, target, weight)
-            maximum = next_max
-        denominator = denominator + self.eps
-        result = (
-            result.view(nodes, angular, heads, channels // heads)
-            / denominator[:, None, :, None]
-        ).reshape_as(result)
-        return result, denominator, torch.where(torch.isneginf(maximum), 0, maximum)
+        return torch_kernel.stream(self, inputs, create_graph)
 
     def transpose(self, active, outputs, num_inputs):
-        key = active, outputs, num_inputs
-        if key not in self.derivatives:
+        from ..ops.cuda.conv import attention as cuda_kernel
 
-            def tile_adjoint(values, create_graph):
-                arguments = values[:num_inputs]
-                result, denominator, maximum, grad_result, grad_denominator = values[
-                    num_inputs:
-                ]
-                nodes, angular, channels = result.shape
-                heads = denominator.shape[1]
-                index = arguments[self.target_slot]
-                target = index[1] if index.ndim == 2 else index
-                scores, value = self.edge_function(arguments)
-                scores = torch.where(
-                    arguments[self.valid_slot][:, None], scores, -torch.inf
-                )
-                normalizer = arguments[self.normalizer_slot]
-                value_weight = arguments[self.value_weight_slot]
-                exp = (scores - maximum[target]).exp()
-                quotient = exp / denominator[target]
-                incoming = grad_result[target].view(
-                    -1, angular, heads, channels // heads
-                )
-                dot_value = (value.view_as(incoming) * incoming).sum((1, 3))
-                dot_result = (
-                    (result * grad_result)
-                    .view(nodes, angular, heads, channels // heads)
-                    .sum((1, 3))[target]
-                )
-                grad_normalizer = (
-                    quotient * (value_weight * dot_value - dot_result)
-                    + exp * grad_denominator[target]
-                )
-                grad_value_weight = quotient * normalizer * dot_value
-                grad_scores = grad_normalizer * normalizer
-                grad_value = (
-                    incoming * (quotient * normalizer * value_weight)[:, None, :, None]
-                ).reshape_as(value)
-                pairs = [
-                    (x, g)
-                    for x, g in (
-                        (scores, grad_scores),
-                        (value, grad_value),
-                        (normalizer, grad_normalizer.sum_to_size(normalizer.shape)),
-                        (
-                            value_weight,
-                            grad_value_weight.sum_to_size(value_weight.shape),
-                        ),
-                    )
-                    if x.requires_grad
-                ]
-                if pairs:
-                    result_values, vectors = zip(*pairs)
-                    gradients = torch.autograd.grad(
-                        result_values,
-                        [arguments[i] for i in active],
-                        vectors,
-                        create_graph=create_graph,
-                        allow_unused=True,
-                    )
-                else:
-                    gradients = (None,) * len(active)
-                return tuple(
-                    torch.zeros_like(arguments[i]) if g is None else g
-                    for i, g in zip(active, gradients)
-                )
-
-            tile_program = Replay(tile_adjoint, active, capture=False)
-            tile_program.resource = self.resource
-
-            def adjoint(values, create_graph):
-                arguments = values[:num_inputs]
-                result, denominator, maximum = values[num_inputs : num_inputs + 3]
-                vectors = dict(zip(outputs, values[num_inputs + 3 :]))
-                grad_result = vectors.get(0, torch.zeros_like(result))
-                grad_denominator = vectors.get(1, torch.zeros_like(denominator))
-                shared = [None] * len(active)
-                edges = [[] for _ in active]
-                for chunk in self.tiles(arguments):
-                    gradients = tile_program(
-                        *chunk,
-                        result,
-                        denominator,
-                        maximum,
-                        grad_result,
-                        grad_denominator,
-                    )
-                    for slot, (i, grad) in enumerate(zip(active, gradients)):
-                        if i in self.edge_axes:
-                            edges[slot].append(grad)
-                        else:
-                            shared[slot] = (
-                                grad if shared[slot] is None else shared[slot] + grad
-                            )
-                return tuple(
-                    torch.cat(edges[slot], dim=self.edge_axes[i])
-                    if i in self.edge_axes
-                    else shared[slot]
-                    for slot, i in enumerate(active)
-                )
-
-            self.derivatives[key] = Replay(adjoint, active)
-            self.derivatives[key].resource = self.resource
-        return self.derivatives[key]
+        return cuda_kernel.transpose(self, active, outputs, num_inputs)

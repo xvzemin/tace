@@ -43,3 +43,37 @@ def test_shared_metadata_cache():
     assert parse_metadata("None") is None
     with pytest.raises(ValueError):
         parse_metadata("tuple()")
+
+
+def test_dimension_specialization_inside_nested_transforms():
+    def loss(value):
+        width = static_dimensions(value, (-1,))[0]
+        assert repr(width) == "3"
+        return (value * width).sin().sum()
+
+    def function(value, tangent):
+        return torch.func.jvp(torch.func.grad(loss), (value,), (tangent,))
+
+    compiled = torch.compile(
+        function, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    for rows in (7, 11):
+        value, tangent = torch.randn(rows, 3), torch.randn(rows, 3)
+        torch.testing.assert_close(compiled(value, tangent), function(value, tangent))
+
+
+def test_compressed_plans_compilation():
+    from equivariantx.utils.metadata import decode_plans, encode_plans
+
+    def function(value, specification):
+        scale, offset = decode_plans(specification)[0]
+        return value * scale + offset
+
+    decode_plans.cache_clear()
+    compiled = torch.compile(function, backend="eager", fullgraph=True)
+    value = torch.randn(3, 5)
+    for plan in ((2, 3), (4, -1)):
+        specification = encode_plans([repr(plan)])
+        torch.testing.assert_close(
+            compiled(value, specification), value * plan[0] + plan[1]
+        )

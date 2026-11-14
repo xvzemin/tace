@@ -1,4 +1,7 @@
-"""TACE in irreducible Cartesian tensor storage."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 from copy import deepcopy
 

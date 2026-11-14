@@ -3,10 +3,636 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
-from equivariantx.tests.conv.testing import assert_native_autograd
-from equivariantx.tests.conv.testing import layout
+from equivariantx.tests.conv.testing import assert_native_autograd, layout
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("method", ["wigner", "baseline"])
+@pytest.mark.parametrize("radial_mode", ["last", "full"])
+def test_reference_preserves_cuda_provider(
+    device, method, radial_mode, monkeypatch, double_precision
+):
+    import copy
+    from unittest.mock import patch
+
+    from equivariantx.ops import config
+    from equivariantx.ops.cuda.conv.o2_o3 import convolution as kernel
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    product = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x2e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    module = eqx_conv.O2O3TensorProductConv(
+        product, backend="cuda", method=method, radial_mode=radial_mode
+    ).to(device)
+    reference = copy.deepcopy(module)
+    reference.backend = "torch"
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    network = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.SiLU()).to(device)
+    projection = torch.randn(5, product.weight_numel, device=device)
+    name = "evaluate" if method == "wigner" else "transverse"
+    for count in (5, 0):
+        edge_index = torch.stack(
+            (
+                torch.arange(count, device=device) % 3,
+                (torch.arange(count, device=device) + 1) % 3,
+            )
+        )
+        x, vectors = (
+            torch.randn(3, 6, device=device),
+            torch.randn(count, 3, device=device) + 1,
+        )
+        radial = torch.randn(count, 3, device=device)
+        args = (
+            x,
+            radial,
+            projection,
+            None,
+            radial.new_ones(count, 1),
+            edge_index,
+            3,
+        )
+        with patch.object(kernel, name, wraps=getattr(kernel, name)) as selected:
+            actual = module(*args, vectors=vectors, radial_network=network)
+        assert selected.call_count == (device == "cuda")
+        if device == "cuda":
+            assert selected.call_args.args[-1] is (
+                network if radial_mode == "full" else None
+            )
+        torch.testing.assert_close(
+            actual,
+            reference(*args, vectors=vectors, radial_network=network),
+            atol=2e-11,
+            rtol=2e-11,
+        )
+    assert module.backend == "cuda" and config.TORCH_REFERENCE is True
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("promoted", [False, True])
+def test_reference_bypasses_transverse_children(
+    device, promoted, monkeypatch, double_precision
+):
+    import copy
+
+    from equivariantx.ops import config
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    dtype = torch.float32 if promoted else torch.float64
+    tolerance = 3e-5 if promoted else 2e-10
+    product = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    module = eqx_conv.O2O3TensorProductConv(
+        product, backend="torch", method="baseline"
+    ).to(device, dtype)
+    reference = copy.deepcopy(module)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("An ordinary convolution dispatched its angular child.")
+
+    for child in module.transverse_couplings.values():
+        child.backend = "cuda"
+        monkeypatch.setattr(child, "forward", forbidden)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for count in (5, 0):
+        edge_index = torch.stack(
+            (
+                torch.arange(count, device=device) % 3,
+                (torch.arange(count, device=device) + 1) % 3,
+            )
+        )
+        inputs = (
+            (torch.randn(3, 6, device=device, dtype=dtype) * 0.1).requires_grad_(),
+            (
+                torch.randn(count, 3, device=device, dtype=torch.float64) + 1
+            ).requires_grad_(),
+            (
+                torch.randn(count, product.weight_numel, device=device, dtype=dtype)
+                * 0.1
+            ).requires_grad_(),
+        )
+
+        def run(layer, x, vectors, weights):
+            return layer(
+                x,
+                weights,
+                weights.new_empty((0, product.weight_numel)),
+                None,
+                weights.new_ones(count, 1),
+                edge_index,
+                3,
+                vectors=vectors,
+            )
+
+        actual, expected = run(module, *inputs), run(reference, *inputs)
+        for _ in range(4):
+            torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+            assert_native_autograd(actual)
+            actual, expected = [
+                sum(
+                    g.sin().sum()
+                    for g in torch.autograd.grad(
+                        value.sin().sum(), inputs, create_graph=True
+                    )
+                )
+                for value in (actual, expected)
+            ]
+        tangents = tuple(torch.randn_like(value) for value in inputs)
+        with torch.autograd.forward_ad.dual_level():
+            duals = tuple(
+                torch.autograd.forward_ad.make_dual(value, tangent)
+                for value, tangent in zip(inputs, tangents)
+            )
+            actual = torch.autograd.forward_ad.unpack_dual(run(module, *duals))
+        expected = torch.autograd.functional.jvp(
+            lambda *xs: run(reference, *xs), inputs, tangents
+        )
+        assert actual.tangent is not None
+        torch.testing.assert_close(
+            tuple(actual), expected, atol=tolerance, rtol=tolerance
+        )
+    assert all(
+        child.backend == "cuda" for child in module.transverse_couplings.values()
+    )
+    assert config.TORCH_REFERENCE is True
+
+
+@pytest.mark.parametrize("mode", ["uvu", "uvw"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("method", ["packed", "cg", "baseline"])
+@pytest.mark.parametrize("radial_mode", ["last", "full"])
+def test_promoted_precision_and_forward_ad(mode, backend, method, radial_mode, device):
+    args = (
+        "2x1o",
+        "1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, mode, True) for i in range(3)],
+    )
+    options = dict(internal_weights=False, shared_weights=False)
+    torch.set_default_dtype(torch.float32)
+    product = o2.O3TensorProduct(*args, **options)
+    promoted = eqx_conv.O2O3TensorProductConv(
+        product,
+        backend=backend,
+        radial_mode=radial_mode,
+        method="wigner" if method == "packed" else method,
+    ).to(device=device, dtype=torch.float64)
+    torch.set_default_dtype(torch.float64)
+    precise_product = o2.O3TensorProduct(*args, **options)
+    precise = eqx_conv.O2O3TensorProductConv(
+        precise_product,
+        backend="torch",
+        radial_mode=radial_mode,
+        method="wigner" if method == "packed" else method,
+    ).to(device)
+    assert promoted.kernel_metadata == precise.kernel_metadata
+    assert promoted.sparse_paths == precise.sparse_paths
+    for name in promoted.coefficient_data:
+        torch.testing.assert_close(
+            promoted.get_buffer(name), precise.get_buffer(name), atol=0, rtol=0
+        )
+    network = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.SiLU()).to(device)
+    inputs = tuple(
+        (torch.randn(*shape, device=device) * 0.1 + 0.2).requires_grad_()
+        for shape in ((3, 6), (4, 3), (4, 3), (4, product.weight_numel), (4, 1))
+    )
+    edges = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
+    frame = o2.WignerD(2, 2, method="recursive").to(device)
+
+    def run(module, x, r, radial, projection, amplitudes):
+        return module(
+            x,
+            radial,
+            projection,
+            frame.forward_packed(r) if method == "packed" else None,
+            amplitudes,
+            edges,
+            3,
+            vectors=None if method == "packed" else r,
+            radial_network=network,
+        )
+
+    actual, expected = run(promoted, *inputs), run(precise, *inputs)
+    torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+    for a, b in zip(
+        torch.autograd.grad(actual.sin().sum(), inputs),
+        torch.autograd.grad(expected.sin().sum(), inputs),
+    ):
+        torch.testing.assert_close(a, b, atol=3e-9, rtol=3e-9)
+    tangents = tuple(torch.randn_like(value) for value in inputs)
+    with torch.autograd.forward_ad.dual_level():
+        duals = tuple(
+            torch.autograd.forward_ad.make_dual(value, tangent)
+            for value, tangent in zip(inputs, tangents)
+        )
+        primal, tangent = torch.autograd.forward_ad.unpack_dual(run(promoted, *duals))
+    expected_primal, expected_tangent = torch.autograd.functional.jvp(
+        lambda *args: run(precise, *args), inputs, tangents
+    )
+    assert tangent is not None
+    torch.testing.assert_close(primal, expected_primal, atol=3e-10, rtol=3e-10)
+    torch.testing.assert_close(tangent, expected_tangent, atol=3e-9, rtol=3e-9)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_forward_ad_skips_autotuning(backend, device, monkeypatch, double_precision):
+    from equivariantx.conv.o2_o3 import autotune
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Forward AD must not benchmark or cache dual tensors.")
+
+    monkeypatch.setattr(autotune, "select_method", forbidden)
+    product = o2.O3TensorProduct("2x1o", "1o", "2x1e", [(0, 0, 0, "uvu", True)])
+    module = eqx_conv.O2O3TensorProductConv(product, backend=backend).to(device)
+    x = torch.randn(3, 6, device=device)
+    r = torch.randn(4, 3, device=device)
+    tangent = torch.randn_like(r)
+    radial = torch.randn(4, product.weight_numel, device=device)
+    projection = torch.empty(0, product.weight_numel, device=device)
+    amplitudes = torch.ones(4, 1, device=device)
+    edges = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
+
+    def run(vectors, method):
+        return module(
+            x,
+            radial,
+            projection,
+            None,
+            amplitudes,
+            edges,
+            3,
+            vectors=vectors,
+            method=method,
+        )
+
+    with torch.autograd.forward_ad.dual_level():
+        dual = torch.autograd.forward_ad.make_dual(r, tangent)
+        result = torch.autograd.forward_ad.unpack_dual(run(dual, "auto"))
+    expected = torch.autograd.functional.jvp(lambda v: run(v, "cg"), (r,), (tangent,))
+    assert result.tangent is not None
+    torch.testing.assert_close(tuple(result), expected, atol=3e-10, rtol=3e-10)
+
+
+def channel_mixing_case(backend, radial_mode, method, width=4, edges=7, shared=False):
+    a, b, c = "2x0e+3x1o+2x1o", "0e+1o+2e", "3x0e+4x1o+2x1o+4x1o"
+    instructions = [
+        (0, 0, 0, "uvw", True),
+        (1, 2, 1, "uvw", True),
+        (2, 0, 2, "uvu", False),
+        (0, 1, 3, "uvw", True),
+    ]
+    options = dict(internal_weights=False, shared_weights=False)
+    tp = o2.O3TensorProduct(a, b, c, instructions, **options).cuda()
+    module = eqx_conv.O2O3TensorProductConv(
+        tp, backend=backend, radial_mode=radial_mode, method=method
+    ).cuda()
+    reference = o3.TensorProduct(a, b, c, instructions, **options).cuda()
+    network = torch.nn.Sequential(torch.nn.Linear(3, width), torch.nn.SiLU()).cuda()
+    index = torch.stack(
+        (torch.arange(edges, device="cuda") % 3, torch.arange(edges, device="cuda") % 5)
+    )
+    inputs = tuple(
+        (torch.randn(*shape, device="cuda") * 0.2).requires_grad_()
+        for shape in (
+            (3, tp.input_dim),
+            (1 if shared else edges, 3),
+            (1 if shared else edges, 3),
+            (width + 1, tp.weight_numel),
+            (1 if shared else edges, 3),
+        )
+    )
+
+    def actual(x, vectors, radial, projection, amplitudes, *, edge_index=None):
+        edge_index = index if edge_index is None else edge_index
+        return module(
+            x,
+            radial,
+            projection,
+            None,
+            amplitudes,
+            edge_index,
+            5,
+            vectors=vectors,
+            radial_network=network,
+        )
+
+    def expected(x, vectors, radial, projection, amplitudes, *, edge_index=None):
+        edge_index = index if edge_index is None else edge_index
+        harmonics = torch.cat(
+            [
+                o3.spherical_harmonics(
+                    ir.l, vectors, normalize=True, normalization="component"
+                )
+                * amplitudes[:, i : i + 1]
+                for i, (_, ir) in enumerate(tp.irreps_in2)
+            ],
+            -1,
+        )
+        hidden = network(radial)
+        weights = torch.cat((hidden, torch.ones_like(hidden[:, :1])), -1) @ projection
+        message = layout(
+            reference(
+                layout(x, tp.irreps_in1, inverse=True)[edge_index[0]],
+                harmonics,
+                weights,
+            ),
+            tp.irreps_out,
+        )
+        return message.new_zeros((5, tp.irreps_out.dim)).index_add(
+            0, edge_index[1], message
+        )
+
+    return actual, expected, inputs, network
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA channel mixing")
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("radial_mode", ["last", "full"])
+@pytest.mark.parametrize(
+    "method", ["baseline", "generator", "recurrence", "cg", "wigner"]
+)
+def test_channel_mixing_methods(backend, radial_mode, method, double_precision):
+    actual, expected, inputs, network = channel_mixing_case(
+        backend, radial_mode, method
+    )
+    outputs = actual(*inputs), expected(*inputs)
+    torch.testing.assert_close(*outputs, atol=2e-12, rtol=2e-12)
+    variables = (*inputs, *network.parameters())
+    directions = tuple(torch.randn_like(value) * 0.01 for value in variables)
+    outputs = [value.sin().sum() for value in outputs]
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(value, variables, create_graph=True)
+            for value in outputs
+        ]
+        torch.testing.assert_close(*gradients, atol=2e-10, rtol=2e-10)
+        outputs = [
+            sum((g * d).sum() for g, d in zip(gs, directions)) for gs in gradients
+        ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA channel mixing")
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("radial_mode", ["last", "full"])
+@pytest.mark.parametrize(
+    "method", ["baseline", "generator", "recurrence", "cg", "wigner"]
+)
+def test_unweighted_channel_mixing(backend, radial_mode, method, double_precision):
+    representations = "2x0e+2x1o", "0e+1o", "3x0e+4x1o"
+    paths = [(0, 0, 0, "uvw", False), (0, 1, 1, "uvw", False)]
+    options = dict(internal_weights=False, shared_weights=False)
+    tp = o2.O3TensorProduct(*representations, paths, **options).cuda()
+    layer = eqx_conv.O2O3TensorProductConv(
+        tp, backend=backend, radial_mode=radial_mode, method=method
+    ).cuda()
+    reference = o3.TensorProduct(
+        *representations, [(*path[:4], True) for path in paths], **options
+    ).cuda()
+    x = torch.randn(3, tp.input_dim, device="cuda", requires_grad=True)
+    vectors = torch.randn(5, 3, device="cuda", requires_grad=True)
+    amplitudes = torch.randn(5, 2, device="cuda", requires_grad=True)
+    index = torch.arange(5, device="cuda").repeat(2, 1) % 3
+    actual = layer(
+        x,
+        x.new_empty(5, 0),
+        x.new_empty(0, 0),
+        None,
+        amplitudes,
+        index,
+        3,
+        vectors=vectors,
+    )
+    harmonics = torch.cat(
+        [
+            o3.spherical_harmonics(ir.l, vectors, True, "component")
+            * amplitudes[:, i : i + 1]
+            for i, (_, ir) in enumerate(tp.irreps_in2)
+        ],
+        -1,
+    )
+    messages = layout(
+        reference(
+            layout(x, tp.irreps_in1, inverse=True)[index[0]],
+            harmonics,
+            x.new_ones(5, reference.weight_numel),
+        ),
+        tp.irreps_out,
+    )
+    expected = torch.zeros_like(actual).index_add(0, index[1], messages)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    values = x, vectors, amplitudes
+    for _ in range(2):
+        gradients = [
+            torch.autograd.grad(value.sin().sum(), values, create_graph=True)
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(*gradients, atol=2e-10, rtol=2e-10)
+        actual, expected = [
+            sum(g.square().sum() for g in gs) * 0.01 for gs in gradients
+        ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA channel mixing")
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("method", ["generator", "wigner", "cg"])
+@pytest.mark.parametrize(
+    "width,edges,shared",
+    [
+        (64, 7, False),
+        (128, 7, True),
+        (1024, 7, False),
+        (1024, 7, True),
+        (4, 0, False),
+        (4, 0, True),
+        (1024, 0, False),
+        (1024, 0, True),
+    ],
+)
+def test_channel_mixing_fourth_derivatives(
+    backend, method, width, edges, shared, double_precision
+):
+    actual, expected, inputs, network = channel_mixing_case(
+        backend, "full", method, width, edges, shared
+    )
+    outputs = actual(*inputs), expected(*inputs)
+    torch.testing.assert_close(*outputs, atol=2e-12, rtol=2e-12)
+    variables = (*inputs, *network.parameters())
+    directions = tuple(torch.randn_like(value) * 0.01 for value in variables)
+    outputs = [value.sin().sum() for value in outputs]
+    for _ in range(4):
+        gradients = [
+            torch.autograd.grad(value, variables, create_graph=True)
+            for value in outputs
+        ]
+        torch.testing.assert_close(*gradients, atol=2e-9, rtol=2e-9)
+        outputs = [
+            sum((g * d).sum() for g, d in zip(gs, directions)) for gs in gradients
+        ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA channel mixing")
+@pytest.mark.parametrize(
+    "backend,method,width",
+    [
+        ("torch", "cg", 4),
+        ("cuda", "cg", 4),
+        ("torch", "wigner", 4),
+        ("cuda", "wigner", 4),
+        ("torch", "cg", 1024),
+        ("cuda", "cg", 1024),
+    ],
+)
+def test_channel_mixing_functional_compilation(
+    backend, method, width, double_precision
+):
+    from equivariantx.tests.ops.testing import assert_functional_derivatives
+
+    actual, expected, inputs, _ = channel_mixing_case(backend, "full", method, width)
+    source = torch.arange(7, device="cuda") % 3
+    target = torch.arange(7, device="cuda") % 5
+
+    def function(*args):
+        return actual(*args[:-1], edge_index=torch.stack((args[-1], target)))
+
+    def reference(*args):
+        return expected(*args[:-1], edge_index=torch.stack((args[-1], target)))
+
+    assert_functional_derivatives(
+        function, reference, (*inputs, source), compiler="inductor"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA channel mixing")
+@pytest.mark.parametrize(
+    "backend,method,radial_mode,width",
+    [
+        ("cuda", "generator", "full", 4),
+        ("cuda", "wigner", "full", 4),
+        ("cuda", "cg", "full", 4),
+        ("torch", "cg", "full", 4),
+        ("cuda", "cg", "last", 4),
+        ("cuda", "cg", "full", 1024),
+    ],
+)
+@pytest.mark.parametrize("compiler", ["inductor", "aoti"])
+def test_channel_mixing_joint_export(
+    backend, method, radial_mode, width, compiler, tmp_path, double_precision
+):
+    import os
+    import subprocess
+    import sys
+
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.ops import config
+
+    actual, expected, inputs, network = channel_mixing_case(
+        backend, radial_mode, method, width
+    )
+
+    class Workload(torch.nn.Module):
+        def __init__(self, function):
+            super().__init__()
+            self.network = network
+            self.function = function
+
+        def forward(self, *values, edge_index):
+            return self.function(*values, edge_index=edge_index)
+
+    module, reference = Workload(actual), Workload(expected)
+    names, parameters = zip(*module.named_parameters())
+    source = torch.arange(7, device="cuda") % 3
+    target = torch.arange(7, device="cuda") % 5
+    values = (*inputs, *parameters, source)
+
+    def joint(module, *values):
+        state = dict(zip(names, values[5:-1]))
+        output = torch.func.functional_call(
+            module, state, values[:5], {"edge_index": torch.stack((values[-1], target))}
+        )
+        energy = output.square().mean()
+        force = -torch.autograd.grad(energy, values[1], create_graph=True)[0]
+        loss = energy + (force - 0.01).square().sum()
+        gradients = torch.autograd.grad(loss, (values[3], *values[5:-1]))
+        return loss, force, *gradients
+
+    graph = make_fx(lambda *values: joint(module, *values))(*values)
+    assert any(
+        str(node.target).startswith("eqx.edge_program") for node in graph.graph.nodes
+    ) == (
+        backend == "cuda" and radial_mode == "full" and not config.EDGE_PROGRAM_INLINE
+    )
+    detached = tuple(value.detach() for value in values)
+    if compiler == "inductor":
+        runner = torch.compile(graph, fullgraph=True)
+    else:
+        assert not any(
+            str(node.target).startswith("eqx.") for node in graph.graph.nodes
+        )
+        exported = torch.export.export(graph, detached)
+        package = tmp_path / "channel_mixing.pt2"
+        torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    cases = []
+    changed = tuple(value.detach().requires_grad_() for value in values[:-1])
+    for step in range(3):
+        indices = source.roll(step)
+        expected = joint(reference, *changed, indices)
+        arguments = (*[value.detach() for value in changed], indices)
+        if compiler == "inductor":
+            with torch.no_grad():
+                actual = runner(*arguments)
+            torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+        else:
+            cases.append(
+                {
+                    "inputs": tuple(value.cpu() for value in arguments),
+                    "expected": tuple(value.detach().cpu() for value in expected),
+                }
+            )
+        updated = list(changed)
+        for index, gradient in zip((3, *range(5, len(changed))), expected[2:]):
+            updated[index] = (
+                (changed[index] - 0.001 * gradient).detach().requires_grad_()
+            )
+        changed = tuple(updated)
+    if compiler == "aoti":
+        data = tmp_path / "cases.pt"
+        torch.save(cases, data)
+        script = """
+import sys
+import torch
+runner = torch._inductor.aoti_load_package(sys.argv[1])
+for case in torch.load(sys.argv[2], weights_only=True):
+    with torch.no_grad():
+        actual = runner(*(value.cuda() for value in case['inputs']))
+    torch.testing.assert_close(tuple(value.cpu() for value in actual), case['expected'], atol=2e-10, rtol=2e-9)
+assert 'equivariantx' not in sys.modules
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script, str(package), str(data)],
+            cwd=tmp_path,
+            env=dict(os.environ),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -238,8 +864,8 @@ def test_cg_generator_constraints(degrees, double_precision):
 @pytest.mark.parametrize("degree", [1, 5, 10, 16])
 @pytest.mark.parametrize("normalization", ["component", "integral", "norm"])
 def test_generator_polynomials(degree, normalization, double_precision):
-    from equivariantx.ops.kernels.cuda.angular import generator_scale
     from equivariantx.o3.rotation import so3_generators
+    from equivariantx.ops.common.cuda.angular import generator_scale
 
     torch.manual_seed(91)
     vectors = torch.randn(19, 3)
@@ -442,7 +1068,7 @@ def test_low_degree_couplings_fourth_derivatives(
 def test_hybrid_direction_derivatives(monkeypatch, shared, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.o2_o3.convolution as cuda
+    import equivariantx.ops.common.cuda.o2_o3.convolution as cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 2)
     torch.manual_seed(107)
@@ -509,14 +1135,13 @@ def test_hybrid_direction_derivatives(monkeypatch, shared, double_precision):
 
 
 def test_convolution_backends_and_modes():
-    from equivariantx.ops.wigner import wigner_D
+    from equivariantx.ops.common.wigner import wigner_D
 
     # Exported graphs can resolve the operator before any frame is evaluated.
     assert torch.ops.eqx.quaternion_polynomial.default is not None
     tp = o2.O3TensorProduct("2x0e", "0e", "3x0e", [(0, 0, 0, "uvw", True)])
     assert tp.convolution.instructions[0].connection_mode == "uvw"
-    with pytest.raises(NotImplementedError, match="only 'uvu'"):
-        eqx_conv.O2O3TensorProductConv(tp, backend="cuda")
+    assert eqx_conv.O2O3TensorProductConv(tp, backend="cuda").channel_mixing
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
         eqx_conv.O2O3TensorProductConv(tp, backend="triton")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
@@ -594,7 +1219,7 @@ def test_same_degree_output_rotations(channels, edge_count, merge_paths):
 
 
 def test_shared_path_rotation_schedule():
-    from equivariantx.ops.kernels.cuda.o2_o3.schedule import rotation_groups
+    from equivariantx.ops.common.cuda.o2_o3.schedule import rotation_groups
 
     # Three instructions sum into one output, while the fourth writes an
     # independent entry of the same degree. Do not split or merge those roles.
@@ -611,7 +1236,7 @@ def test_shared_path_rotation_schedule():
 def test_projected_weight_only_workspace(monkeypatch, shared, contributions, inactive):
     from types import SimpleNamespace
 
-    from equivariantx.ops.kernels.cuda.o2_o3.schedule import project
+    from equivariantx.ops.common.cuda.o2_o3.schedule import project
 
     torch.manual_seed(46)
     rows = 1 if shared else 7
@@ -694,7 +1319,7 @@ def test_projected_weight_only_workspace(monkeypatch, shared, contributions, ina
 
 @pytest.mark.parametrize("shared", [False, True])
 def test_projected_adjoint_reuse(shared):
-    from equivariantx.ops.kernels.cuda.radial import project
+    from equivariantx.ops.common.cuda.radial import project
 
     torch.manual_seed(47)
     edges = torch.arange(7)
@@ -730,7 +1355,7 @@ def test_projected_adjoint_reuse(shared):
 
 
 def test_derivative_partition_reuses_rotations():
-    from equivariantx.ops.kernels.cuda.o2_o3.schedule import split_program
+    from equivariantx.ops.common.cuda.o2_o3.schedule import split_program
 
     x, w, projection, din, dout, s = (object() for _ in range(6))
     cotangents = (object(), object())
@@ -751,7 +1376,7 @@ def test_derivative_partition_reuses_rotations():
 def test_cuda_streams_capture_compile(monkeypatch, row_size):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.o2_o3.convolution as cuda
+    import equivariantx.ops.common.cuda.o2_o3.convolution as cuda
 
     monkeypatch.setattr(cuda, "ROW_SIZE", row_size)
     tp = (
@@ -818,7 +1443,7 @@ def test_streaming_derivatives(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     if backend == "cuda":
-        import equivariantx.ops.kernels.cuda.o2_o3.convolution as cuda
+        import equivariantx.ops.common.cuda.o2_o3.convolution as cuda
 
         monkeypatch.setattr(cuda, "CHUNK_SIZE", 3)
     previous_dtype = torch.get_default_dtype()
@@ -1116,7 +1741,7 @@ def test_streaming_high_degree(degree):
 def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.o2_o3.convolution as convolution_kernel
+    import equivariantx.ops.common.cuda.o2_o3.convolution as convolution_kernel
 
     monkeypatch.setattr(convolution_kernel, "CHUNK_SIZE", 1024)
     previous_dtype = torch.get_default_dtype()
@@ -1189,7 +1814,7 @@ def test_streaming_projected_tiles(monkeypatch, degree, edges_count):
 def test_o2_requested_gradients(monkeypatch, directions, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.kernels.cuda.runtime import runtime
+    from equivariantx.ops.common.cuda.runtime import runtime
 
     tp = o2.O3TensorProduct(
         "3x1o", "1o", "3x0e+3x1e+3x2e", [(0, 0, i, "uvu", True) for i in range(3)]
@@ -1236,3 +1861,116 @@ def test_o2_requested_gradients(monkeypatch, directions, double_precision):
     expected = torch.autograd.grad(expected.square().sum(), inputs)
     for value, target in zip(actual, expected):
         torch.testing.assert_close(value, target, atol=2e-9, rtol=2e-9)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("promoted", [False, True])
+@pytest.mark.parametrize("method", ["wigner", "baseline"])
+def test_reference_bypasses_wigner_child(
+    device, promoted, method, monkeypatch, double_precision
+):
+    import copy
+
+    from equivariantx.ops import config
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    dtype = torch.float32 if promoted else torch.float64
+    tolerance = 3e-5 if promoted else 2e-10
+    product = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x2e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    module = eqx_conv.O2O3TensorProductConv(
+        product, backend="torch", method=method, radial_mode="full"
+    ).to(device=device, dtype=dtype)
+    reference = copy.deepcopy(module)
+    module.frame.backend = "cuda"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("The parent reference called its Wigner child.")
+
+    monkeypatch.setattr(module.frame, "forward_packed", forbidden)
+    backends = {
+        name: child.backend
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    }
+    for edges in (5, 0):
+        index = torch.stack(
+            (
+                torch.arange(edges, device=device) % 3,
+                (torch.arange(edges, device=device) + 1) % 3,
+            )
+        )
+        inputs = (
+            torch.randn(3, 6, device=device, dtype=dtype).requires_grad_(),
+            (
+                torch.randn(edges, 3, device=device, dtype=torch.float64) + 1
+            ).requires_grad_(),
+            torch.randn(
+                edges, product.weight_numel, device=device, dtype=dtype
+            ).requires_grad_(),
+        )
+
+        def run(layer, x, vectors, weights):
+            return layer(
+                x,
+                weights,
+                weights.new_empty((0, product.weight_numel)),
+                None,
+                weights.new_ones((edges, 1)),
+                index,
+                3,
+                vectors=vectors,
+            )
+
+        a, b = run(module, *inputs), run(reference, *inputs)
+        torch.testing.assert_close(a, b, atol=tolerance, rtol=tolerance)
+        assert_native_autograd(a)
+        for _ in range(3):
+            gradients = [
+                torch.autograd.grad(
+                    value.sin().sum(), inputs, create_graph=True, allow_unused=True
+                )
+                for value in (a, b)
+            ]
+            gradients = [
+                tuple(
+                    torch.zeros_like(x) if g is None else g
+                    for x, g in zip(inputs, values)
+                )
+                for values in gradients
+            ]
+            torch.testing.assert_close(*gradients, atol=tolerance, rtol=tolerance)
+            a, b = [
+                sum(g.sum() / max(1, g.numel()) for g in values)
+                + sum(x.sum() * 0 for x in inputs)
+                for values in gradients
+            ]
+            assert_native_autograd(a)
+        tangents = tuple(torch.randn_like(x) for x in inputs)
+        with torch.autograd.forward_ad.dual_level():
+            duals = tuple(
+                torch.autograd.forward_ad.make_dual(x, v)
+                for x, v in zip(inputs, tangents)
+            )
+            actual = torch.autograd.forward_ad.unpack_dual(run(module, *duals))
+        expected = torch.autograd.functional.jvp(
+            lambda *args: run(reference, *args), inputs, tangents
+        )
+        assert actual.tangent is not None
+        torch.testing.assert_close(
+            tuple(actual), expected, atol=tolerance, rtol=tolerance
+        )
+        assert backends == {
+            name: child.backend
+            for name, child in module.named_modules()
+            if hasattr(child, "backend")
+        }
+        assert config.TORCH_REFERENCE is True

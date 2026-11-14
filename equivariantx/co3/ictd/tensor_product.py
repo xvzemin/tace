@@ -7,13 +7,13 @@ from typing import NamedTuple
 
 import torch
 from e3nn import o3
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-from ...ops.precision import validate_module_precision
 from ...ops import config, get_kernel
-from ...ops.kernels.torch.cartesian import cartesian_product, normalized_coefficients
-from ...ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ...ops.kernels.torch.tensor_product import instruction_groups
+from ...ops.common.torch.cartesian import cartesian_product, normalized_coefficients
+from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ...ops.common.torch.tensor_product import instruction_groups
+from ...ops.torch.co3.ictd import tensor_product as torch_kernel
+from ...ops.precision import validate_module_precision
 from ..basis import Projector, path_matrix
 from ..basis import path_normalization as coupling_scale
 from ..irreps import Irreps
@@ -375,110 +375,12 @@ class TensorProduct(torch.nn.Module):
             raise ValueError("Weight size does not match the instructions.")
         if self.shared_weights and weight.ndim != 1:
             raise ValueError("Shared weights must be one-dimensional.")
-        shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        if self.backend == "cuda" and self.kernel_metadata is not None:
-            from ...ops.channel_product import tensor_product
+        torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
+        if self.backend == "cuda":
+            from ...ops.cuda.co3.ictd import tensor_product as cuda_kernel
 
-            return self.projection(
-                tensor_product(self.kernel_metadata, x, y, weight, self.output_dim)
-            )
-        if self.backend == "torch" and config.TORCH_REFERENCE:
-            zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
-            return (
-                self.projection(self.reference(x, y, weight, self.path_scales)) + zero
-            )
-        if (
-            self.backend == "torch"
-            and x.is_cuda
-            and self.kernel_metadata is not None
-            and self.product_degree <= config.CARTESIAN_POLYNOMIAL_DEGREE
-            and not config.TORCH_RECOMPUTE
-            and (
-                torch.compiler.is_compiling()
-                or get_proxy_mode() is not None
-                or torch._C._are_functorch_transforms_active()
-            )
-        ):
-            from ...ops.channel_product import tensor_product
-
-            return self.projection(
-                tensor_product(
-                    self.kernel_metadata, x, y, weight, self.output_dim, backend="torch"
-                )
-            )
-        zero = x[..., :0].sum() + y[..., :0].sum() + weight[..., :0].sum()
-        outputs = [None] * len(self.irreps_out)
-        inputs = [
-            [
-                value[..., section].reshape(*value.shape[:-1], mul, ir.dim)
-                for (mul, ir), section in zip(irreps, sections)
-            ]
-            for value, irreps, sections in (
-                (x, self.irreps_in1, self.slices_in1),
-                (y, self.irreps_in2, self.slices_in2),
-            )
-        ]
-        for group in self.groups:
-            operands = []
-            for blocks, indices in (
-                (inputs[0], group.i_in1),
-                (inputs[1], group.i_in2),
-            ):
-                operands.append(
-                    blocks[indices[0]].unsqueeze(-3)
-                    if len(indices) == 1
-                    else torch.stack([blocks[i] for i in indices], dim=-3)
-                )
-            left, right = operands
-            mode = group.connection_mode
-            if mode not in ("uuu", "uuw"):
-                left, right = left.unsqueeze(-2), right.unsqueeze(-3)
-            value = self.couple(left, right, *group.degrees)
-            if group.weight_slices:
-                if group.weight_slice is not None:
-                    w = weight[..., group.weight_slice].reshape(
-                        *weight.shape[:-1], len(group.i_out), *group.path_shape
-                    )
-                else:
-                    w = torch.stack(
-                        [
-                            weight[..., section].reshape(
-                                *weight.shape[:-1], *group.path_shape
-                            )
-                            for section in group.weight_slices
-                        ],
-                        dim=-len(group.path_shape) - 1,
-                    )
-                if mode == "uvw":
-                    value = torch.einsum("...puvd,...puvw->...pwd", value, w)
-                elif mode == "uuw":
-                    value = torch.einsum("...pud,...puw->...pwd", value, w)
-                else:
-                    value = value * w.unsqueeze(-1)
-            elif mode == "uuw":
-                value = value.sum(-2, keepdim=True)
-            if mode == "uvu":
-                value = value.sum(-2)
-            elif mode == "uvv":
-                value = value.sum(-3)
-            elif mode == "uvuv":
-                value = value.flatten(-3, -2)
-            value = value * self.path_scales[group.scale_slice, None, None]
-            for dest, block in zip(group.i_out, value.unbind(-3)):
-                previous = outputs[dest]
-                outputs[dest] = block if previous is None else previous + block
-        outputs = [
-            x.new_zeros((*shape, mul, ir.dim))
-            if block is None
-            else block.expand(*shape, mul, ir.dim)
-            for block, (mul, ir) in zip(outputs, self.irreps_out)
-        ]
-        outputs = self.projection.forward_blocks(outputs)
-        return (
-            torch.cat([v.flatten(-2) for v in outputs], -1)
-            if outputs
-            else x.new_zeros((*shape, 0))
-        ) + zero
+            return cuda_kernel.evaluate(self, x, y, weight)
+        return torch_kernel.evaluate(self, x, y, weight)
 
     def couple(self, x, y, l1, l2, l3):
         """Contract one angular path before output projection."""
@@ -557,6 +459,14 @@ class FullyConnectedTensorProduct(TensorProduct):
         Input and output representations.
     **kwargs
         Weight, normalization, and projection options for TensorProduct.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co3
+    >>> layer = co3.FullyConnectedTensorProduct("2x1o", "2x1o", "0e + 2e")
+    >>> layer(torch.randn(4, 6), torch.randn(4, 6)).shape
+    torch.Size([4, 10])
     """
 
     def __init__(self, irreps_in1, irreps_in2, irreps_out, **kwargs):
@@ -584,6 +494,14 @@ class ElementwiseTensorProduct(TensorProduct):
         Allowed output irrep labels. Defaults to all allowed couplings.
     **kwargs
         Normalization and projection options for TensorProduct.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co3
+    >>> layer = co3.ElementwiseTensorProduct("2x1o", "2x1o", filter_ir_out=["0e"])
+    >>> layer(torch.randn(4, 6), torch.randn(4, 6)).shape
+    torch.Size([4, 2])
     """
 
     def __init__(self, irreps_in1, irreps_in2, filter_ir_out=None, **kwargs):

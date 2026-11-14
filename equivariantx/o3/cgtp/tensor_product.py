@@ -1,13 +1,10 @@
 """Clebsch--Gordan tensor products with e3nn instructions and normalization."""
 
-import math
-
 import torch
 from e3nn import o3
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-from ...ops import config
-from ...ops.kernels.torch.spherical_product import SphericalProduct
+from ...ops.common.torch.spherical_product import SphericalProduct
+from ...ops.torch.o3.cgtp import tensor_product as torch_kernel
 from ...ops.precision import validate_module_precision
 
 __all__ = [
@@ -76,22 +73,14 @@ class TensorProduct(o3.TensorProduct):
         validate_module_precision(self, (x, y, weight))
         if x.shape[-1] != self._in1_dim or y.shape[-1] != self._in2_dim:
             raise ValueError("Input feature dimensions do not match the irreps.")
+        supplied_weight = weight is not None
         weight = self._get_weights(weight)
         validate_module_precision(self, (weight,))
         if self.backend == "cuda":
-            if not all(value.is_cuda for value in (x, y, weight)):
-                raise ValueError("backend='cuda' requires CUDA inputs and weights.")
-            return self.contraction(x, y, weight)
-        if (
-            not config.TORCH_REFERENCE
-            and config.TORCH_GROUPED_CG
-            and x.is_cuda
-            and 0 < self.maximum_channels <= 16
-            and math.prod(x.shape[:-1]) >= 512
-            and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
-        ):
-            return self.contraction(x, y, weight)
-        return super().forward(x, y, weight)
+            from ...ops.cuda.o3.cgtp import tensor_product as cuda_kernel
+
+            return cuda_kernel.evaluate(self, x, y, weight, supplied_weight)
+        return torch_kernel.evaluate(self, x, y, weight, supplied_weight)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

@@ -12,8 +12,70 @@ from equivariantx.mbe.ace import SymmetricContraction
 from equivariantx.ops.decompositions import symmetric_forward
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA edge lowering")
+@pytest.mark.parametrize("reference", [False, True])
+@pytest.mark.parametrize("edges", [0, 7])
+def test_edge_projection_joint(reference, edges, monkeypatch, double_precision):
+    from equivariantx.ops import config
+    from equivariantx.ops.common.edge import evaluate
+    from equivariantx.ops.decompositions import torch_decompositions
+    from equivariantx.utils.program import Program
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", reference)
+    program = Program()
+    x = program.input(0, "source", 4)
+    radial = program.input(1, "edge", 3)
+    weight = program.input(2, "shared", 12)
+    coefficients = program.unary("tanh", program.matmul(radial, weight, 1, 3, 4))
+    output = program.binary("mul", x, coefficients)
+    metadata = repr((tuple(program.nodes), ((output, 0, "target"),)))
+    source, target = (
+        torch.arange(edges, device="cuda") % 3,
+        torch.arange(edges, device="cuda") % 5,
+    )
+    values = tuple(
+        torch.randn(shape, device="cuda").requires_grad_()
+        for shape in ((3, 4), (edges, 3), (1, 12))
+    )
+
+    def joint(function, *inputs):
+        result = function(*inputs)
+        energy = result.square().mean()
+        forces = -torch.autograd.grad(energy, inputs[1], create_graph=True)[0]
+        loss = energy + (forces - 0.1).square().sum()
+        return result, forces, *torch.autograd.grad(loss, (inputs[0], inputs[2]))
+
+    def native(*inputs):
+        return evaluate(metadata, inputs, source, target, 5)[0]
+
+    def oracle(x, radial, weight):
+        message = x[source] * (radial @ weight.reshape(3, 4)).tanh()
+        return x.new_zeros((5, 4)).index_add(0, target, message)
+
+    graph = make_fx(
+        lambda *inputs: joint(native, *inputs),
+        decomposition_table=torch_decompositions(),
+    )(*values)
+    assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
+    if edges and not reference:
+        assert any(
+            node.target == torch.ops.aten.mm.default for node in graph.graph.nodes
+        )
+    run = torch.compile(graph, fullgraph=True)
+    for scale in (1.0, 0.7):
+        changed = tuple((x.detach() * scale).requires_grad_() for x in values)
+        expected = joint(oracle, *changed)
+        with torch.no_grad():
+            actual = run(*(x.detach() for x in changed))
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA decomposition")
-def test_cuda_primal_aoti_without_eqx(tmp_path):
+@pytest.mark.parametrize("inline", [False, True])
+def test_cuda_primal_aoti_without_eqx(inline, tmp_path, monkeypatch):
+    from equivariantx.ops import config
+
+    monkeypatch.setattr(config, "POLYNOMIAL_INLINE", inline)
     module = (
         SymmetricContraction.from_entries(
             "2x0e",
@@ -31,9 +93,12 @@ def test_cuda_primal_aoti_without_eqx(tmp_path):
     inputs = x, weight, species
     reference = module(*inputs)
     graph = make_fx(module)(*inputs)
-    assert any(
-        node.target == torch.ops.eqx.symmetric_contract.default
-        for node in graph.graph.nodes
+    assert (
+        any(
+            node.target == torch.ops.eqx.symmetric_contract.default
+            for node in graph.graph.nodes
+        )
+        is not inline
     )
     lowered = make_fx(
         module,
@@ -76,7 +141,7 @@ assert 'equivariantx' not in sys.modules
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA compiled adjoints")
-def test_cuda_adjoint_retains_native_lowering():
+def test_cuda_adjoint_joint_compilation():
     module = (
         SymmetricContraction.from_entries(
             "3x0e",

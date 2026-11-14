@@ -4,7 +4,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx.ops.kernels.torch.edge import evaluate_torch
+from equivariantx.ops.common.torch.edge import evaluate_torch
 from equivariantx.utils.harmonics import harmonic_program
 from equivariantx.utils.program import Program
 

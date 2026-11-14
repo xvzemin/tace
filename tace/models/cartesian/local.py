@@ -1,4 +1,7 @@
-"""Cartesian local-frame interactions."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import math
 
@@ -6,7 +9,7 @@ import torch
 
 from equivariantx import co2, co3, o2
 from equivariantx.o2.rotation_matrix import rotation_matrix_to_y_axis
-from equivariantx.ops.radial import materialize
+from equivariantx.ops.common.radial import materialize
 from tace.models.layout import LayoutTransform
 from tace.models.spherical.tece_oam_rra import Convolution
 from tace.utils.torch_scatter import scatter_sum

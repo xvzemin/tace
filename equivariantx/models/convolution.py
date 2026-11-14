@@ -8,7 +8,7 @@ import torch
 from ..conv import O2O3TensorProductConv, O3TensorProductConv
 from ..o2.o3_tensor_product import O3TensorProduct
 from ..o2.wigner import WignerD
-from ..ops.wigner import wigner_D
+from ..ops.common.wigner import wigner_D
 
 
 def harmonic_convention(model):

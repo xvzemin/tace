@@ -7,7 +7,17 @@ import torch
 from e3nn import o3
 
 from ..o3.rotation import so3_generators
+from ..ops.common.sparse import bilinear_rows
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co2 import spherical as torch_kernel
+
+
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.co2 import spherical as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
 
 
 @lru_cache(maxsize=256)
@@ -134,16 +144,39 @@ class SphericalCoupling(torch.nn.Module):
     method : {"chebyshev", "recurrence"}, optional
         Evaluate a Chebyshev expansion or a CG recurrence at fixed parity.
 
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
+
     Notes
     -----
     Features remain spherical. A minimum-degree coupling and a polynomial
     of the rotation generator implement the transverse restriction and lift.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.SphericalCoupling(1, 1, 0)
+    >>> layer(torch.randn(4, 3), torch.randn(4, 3)).shape
+    torch.Size([4, 1])
     """
 
-    def __init__(self, l1, l2, l3, normalization="component", method="chebyshev"):
+    def __init__(
+        self,
+        l1,
+        l2,
+        l3,
+        normalization="component",
+        method="chebyshev",
+        *,
+        backend="torch",
+    ):
         super().__init__()
         if method not in ("chebyshev", "recurrence"):
             raise ValueError("method must be chebyshev or recurrence.")
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.method = method
         self.l1, self.l2, self.l3 = l1, l2, l3
         self.normalization = normalization
@@ -170,13 +203,30 @@ class SphericalCoupling(torch.nn.Module):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
-        self.cg = o3.wigner_3j(
+        cg = o3.wigner_3j(
             self.l1, self.delta, self.l3, dtype=torch.float64, device="cpu"
-        ).to(self.cg)
-        self.generator = (
-            so3_generators(self.degree)
-            / math.sqrt(max(1, self.degree * (self.degree + 1)))
-        ).to(self.generator)
+        )
+        generator = so3_generators(self.degree) / math.sqrt(
+            max(1, self.degree * (self.degree + 1))
+        )
+        self.cg = cg.to(self.cg)
+        self.generator = generator.to(self.generator)
+        for name, coefficients in (
+            ("bridge", cg),
+            ("generator", generator.permute(2, 0, 1)),
+        ):
+            for suffix, value in zip(
+                ("indices", "columns", "coefficients"), bilinear_rows(coefficients)
+            ):
+                key = name + "_" + suffix
+                value = value.to(
+                    device=self.cg.device,
+                    dtype=self.cg.dtype if value.is_floating_point() else torch.long,
+                )
+                if key in self._buffers:
+                    setattr(self, key, value)
+                else:
+                    self.register_buffer(key, value, persistent=False)
         return self
 
     def forward(self, features, vectors, method=None):
@@ -185,61 +235,7 @@ class SphericalCoupling(torch.nn.Module):
         method = self.method if method is None else method
         if method not in ("chebyshev", "recurrence"):
             raise ValueError("method must be chebyshev or recurrence.")
-        direction = vectors / vectors.norm(dim=-1, keepdim=True)
-        harmonic = self.harmonics(direction)
-
-        def bridge(value):
-            projected = (value @ self.cg.flatten(1)).unflatten(
-                -1, (2 * self.delta + 1, 2 * self.l3 + 1)
-            )
-            return (projected * harmonic.unsqueeze(-1)).sum(-2)
-
-        value = features if self.l1 < self.l3 else bridge(features)
-
-        def apply_generator(value):
-            projected = (value @ self.generator.flatten(0, 1).T).unflatten(
-                -1, (3, 2 * self.degree + 1)
-            )
-            return (projected * direction.unsqueeze(-1)).sum(-2)
-
-        if method == "recurrence":
-            value = math.sqrt(2 * self.delta + 1) * value
-            if self.odd:
-                value = apply_generator(value) / self.recurrence[0]
-            previous = None
-            for k in range(self.odd, self.l2 - self.delta, 2):
-                diagonal = self.recurrence[k] ** 2
-                if k:
-                    diagonal += self.recurrence[k - 1] ** 2
-                following = apply_generator(apply_generator(value)) + diagonal * value
-                if k >= 2:
-                    following = following - (
-                        self.recurrence[k - 1] * self.recurrence[k - 2] * previous
-                    )
-                previous, value = (
-                    value,
-                    following / (self.recurrence[k] * self.recurrence[k + 1]),
-                )
-            if self.normalization == "norm":
-                value = value / math.sqrt(2 * self.l2 + 1)
-            elif self.normalization == "integral":
-                value = value / math.sqrt(4 * math.pi)
-            return bridge(value) if self.l1 < self.l3 else value
-
-        if self.odd:
-            value = apply_generator(value)
-        previous = value
-        result = self.coefficients[0] * value
-        for k, coefficient in enumerate(self.coefficients[1:], start=1):
-            following = (
-                -2 * self.spectral_scale * apply_generator(apply_generator(value))
-                - value
-            )
-            if k > 1:
-                following = 2 * following - previous
-            previous, value = value, following
-            result = result + coefficient * value
-        return bridge(result) if self.l1 < self.l3 else result
+        return execution(self, features).forward(self, features, vectors, method)
 
     def extra_repr(self):
         return (

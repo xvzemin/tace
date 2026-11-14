@@ -9,6 +9,7 @@ from ...co2.spherical import SphericalCoupling
 from ...o2.irreps import Irrep
 from ...o2.wigner import WignerD
 from ...ops import config
+from ...ops.torch.conv.uu_o2 import convolution as torch_kernel
 from ...ops.precision import validate_module_precision
 from ..o2_o3.convolution import O2O3TensorProductConv
 
@@ -66,6 +67,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         if radial_mode not in ("last", "full"):
             raise ValueError("radial_mode must be last or full.")
         self.radial_mode = radial_mode
+        self.channel_mixing = False
         self.normalization = "norm"
         self.irreps_in = frame_in.irreps_in
         self.irreps_out = frame_out.irreps_in
@@ -277,27 +279,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     def transform_weights(self, weights):
         """Express local order weights in the directional coupling basis."""
         if self.backend == "cuda" and weights.is_cuda:
-            from ...ops.channel_product import local_product
+            from ...ops.cuda.conv.uu_o2 import convolution as cuda_kernel
 
-            return local_product(self.weight_metadata, weights)
-        values = weights.reshape(
-            weights.shape[0], self.weight_numel // self.num_channel, self.num_channel
-        )
-        result = []
-        for index, (shape, _) in enumerate(self.weight_transforms):
-            count, outputs, inputs = shape
-            selected = values.index_select(1, getattr(self, f"weight_index_{index}"))
-            selected = selected.reshape(
-                weights.shape[0], count, inputs, self.num_channel
-            )
-            result.append(
-                torch.einsum(
-                    "goi,bgic->bgoc",
-                    getattr(self, f"weight_transform_{index}"),
-                    selected,
-                ).reshape(weights.shape[0], count * outputs * self.num_channel)
-            )
-        return torch.cat(result, dim=-1) if result else weights[..., :0]
+            return cuda_kernel.transform_weights(self, weights)
+        return torch_kernel.transform_weights(self, weights)
 
     def forward_wigner(
         self,
@@ -317,16 +302,11 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         With vectors, the PyTorch backend constructs differentiable matrices
         from them. CUDA uses the supplied matrices and generator derivatives.
         """
-        if (
-            vectors is None
-            or vectors.dtype != features.dtype
-            or self.backend == "torch"
-            or not features.is_cuda
-            or radial_network is not None
-        ):
-            if vectors is not None:
-                wigner = self.frame.forward_packed(vectors, method="recursive")
-            result = super().forward(
+        if self.backend == "cuda" and features.is_cuda:
+            from ...ops.cuda.conv.uu_o2 import convolution as cuda_kernel
+
+            return cuda_kernel.wigner(
+                self,
                 features,
                 radial,
                 projection,
@@ -334,28 +314,21 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                 cutoff,
                 edge_index,
                 num_nodes,
-                radial_network=radial_network,
+                vectors,
+                radial_network,
             )
-            return result if vectors is None else result + vectors.sum() * 0
-        from ...ops.geometry import direction_contraction
-
-        operands = [
+        return torch_kernel.wigner(
+            self,
             features,
             radial,
             projection,
-            wigner.detach(),
+            wigner,
             cutoff,
-            features.new_empty(1).expand(num_nodes, self.output_dim),
-        ]
-        return direction_contraction(
-            self.direction_metadata,
-            repr(((0, (0, 1, 2, 3, 3, 4, 5), False, ((6, 0),)),)),
+            edge_index,
+            num_nodes,
             vectors,
-            edge_index[0],
-            edge_index[1],
-            operands,
-            self.backend == "cuda",
-        )[0]
+            radial_network,
+        )
 
     def forward_transverse(
         self,
@@ -468,7 +441,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                 radial_network,
             ),
         )
-        from ...ops.radial import cast_radial
+        from ...ops.common.radial import cast_radial
 
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
@@ -476,7 +449,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         if radial_network is not None and (
             self.radial_mode == "last" or config.TORCH_REFERENCE
         ):
-            from ...ops.radial import radial_features
+            from ...ops.common.radial import radial_features
 
             radial = radial_features(radial_network, radial, edge_index, projection)
             radial_network = None

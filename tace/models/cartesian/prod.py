@@ -1,7 +1,9 @@
-"""Nonlinear products in irreducible Cartesian tensor storage."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 from ..spherical.prod import NonlinearCgtpACE
-
 
 class NonlinearIctdACE(NonlinearCgtpACE):
     """Channel-wise ICTD products with invariant path gates.

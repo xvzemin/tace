@@ -1528,7 +1528,7 @@ sys.modules["torch.utils.cpp_extension"] = None
 from tace.interface.ase import TACEAseCalc
 from tace.lightning import load_tace
 from tace.scripts.train import main
-from equivariantx.ops.kernels.cuda import runtime as cuda
+from equivariantx.ops.common.cuda import runtime as cuda
 
 assert not hasattr(os, "sched_getaffinity")
 assert not cuda._POOL._threads

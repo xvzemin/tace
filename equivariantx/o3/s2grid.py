@@ -7,12 +7,21 @@ from e3nn import o3
 from scipy.integrate import lebedev_rule
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o3 import s2grid as torch_kernel
 from .rotation import so3_generators
 
 __all__ = ["S2Grid"]
 
 
-def _sphere_grid(resolution, quadrature):
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.o3 import s2grid
+
+        return s2grid
+    return torch_kernel
+
+
+def sphere_grid(resolution, quadrature):
     """Return CPU float64 sphere points, normalized weights, and exactness degree."""
     if quadrature == "lebedev":
         orders = (*range(3, 32, 2), *range(35, 132, 6))
@@ -46,7 +55,7 @@ def _sphere_grid(resolution, quadrature):
     return points, weights, resolution
 
 
-def _wigner_basis(lmax, alpha, beta):
+def wigner_basis(lmax, alpha, beta):
     """Yield real Wigner D matrices without changing the default dtype."""
     for l in range(lmax + 1):
         generator = so3_generators(l)
@@ -71,6 +80,8 @@ class S2Grid(torch.nn.Module):
         respectively. ``"integral"`` uses surface-orthonormal harmonics.
     quadrature : {"lebedev", "gauss_legendre", "equiangular"}, optional
         Sphere integration rule. Defaults to ``"lebedev"``.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Buffer dtype. Defaults to the default floating-point dtype.
     device : torch.device or str, optional
@@ -114,10 +125,14 @@ class S2Grid(torch.nn.Module):
         *,
         normalization="component",
         quadrature="lebedev",
+        backend="torch",
         dtype=None,
         device=None,
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         if not isinstance(lmax, int) or lmax < 0:
             raise ValueError("lmax must be a non-negative integer.")
         resolution = max(1, 3 * lmax) if resolution is None else resolution
@@ -163,7 +178,7 @@ class S2Grid(torch.nn.Module):
             analysis = (synthesis * weights[:, None] / scale.square()).T
             self.degree = min(res_beta - 1, res_alpha - 1)
         else:
-            points, weights, self.degree = _sphere_grid(resolution, quadrature)
+            points, weights, self.degree = sphere_grid(resolution, quadrature)
             if lmax <= 12:
                 basis = o3.spherical_harmonics(
                     list(range(lmax + 1)),
@@ -176,7 +191,7 @@ class S2Grid(torch.nn.Module):
                 basis = torch.cat(
                     [
                         matrix[:, :, l] * math.sqrt(2 * l + 1)
-                        for l, matrix in enumerate(_wigner_basis(lmax, alpha, beta))
+                        for l, matrix in enumerate(wigner_basis(lmax, alpha, beta))
                     ],
                     dim=-1,
                 )
@@ -213,7 +228,6 @@ class S2Grid(torch.nn.Module):
         torch.Tensor
             Grid values of shape ``(..., n_points)``.
         """
-        validate_module_precision(self, (features,))
         return self.to_grid(features)
 
     def to_grid(self, features):
@@ -230,9 +244,10 @@ class S2Grid(torch.nn.Module):
         torch.Tensor
             Grid values of shape ``(..., n_points)``.
         """
+        validate_module_precision(self, (features,))
         if features.ndim < 1 or features.shape[-1] != self.dim:
             raise ValueError(f"Expected {self.dim} coefficients on the last axis.")
-        return features @ self.synthesis.T
+        return execution(self, features).to_grid(self, features)
 
     def from_grid(self, features):
         """Project grid values onto spherical-harmonic coefficients.
@@ -247,11 +262,12 @@ class S2Grid(torch.nn.Module):
         torch.Tensor
             Coefficients of shape ``(..., (lmax + 1)**2)``.
         """
+        validate_module_precision(self, (features,))
         if features.ndim < 1 or features.shape[-1] != self.weights.numel():
             raise ValueError(
                 f"Expected {self.weights.numel()} grid values on the last axis."
             )
-        return features @ self.analysis.T
+        return execution(self, features).from_grid(self, features)
 
     def extra_repr(self):
         return (

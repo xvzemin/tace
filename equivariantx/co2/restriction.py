@@ -8,9 +8,18 @@ from e3nn import o3
 
 from ..co3.basis import path_matrix as spherical_path_matrix
 from ..co3.symmetric import SymmetricBasis
-from ..ops.precision import validate_module_precision
+from ..ops.precision import validate_module_precision, validate_precision
+from ..ops.torch.co2 import restriction as torch_kernel
 from .basis import path_matrix
 from .projection import detracing_coefficients
+
+
+def execution(module, tensor):
+    if getattr(module, "backend", "torch") == "cuda" and tensor.is_cuda:
+        from ..ops.cuda.co2 import restriction as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
 
 
 @lru_cache(maxsize=None)
@@ -92,12 +101,25 @@ class TransverseProjector(torch.nn.Module):
     ----------
     m : int
         Non-negative Cartesian rank. Storage has size 3**m.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.TransverseProjector(1)
+    >>> layer(torch.tensor([1., 2., 3.]), torch.tensor([0., 1., 0.])).tolist()
+    [1.0, 0.0, 3.0]
     """
 
-    def __init__(self, m):
+    def __init__(self, m, *, backend="torch"):
         super().__init__()
         if not isinstance(m, int) or m < 0:
             raise ValueError("The order must be a non-negative integer.")
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.m = m
         self.bases = torch.nn.ModuleList(
             SymmetricBasis(rank) for rank in (range(m, -1, -2) if m > 2 else ())
@@ -114,29 +136,7 @@ class TransverseProjector(torch.nn.Module):
         validate_module_precision(self, (tensor, direction))
         if tensor.shape[-1] != 3**self.m or direction.shape[-1] != 3:
             raise ValueError("Tensor or direction has an incorrect trailing size.")
-        if self.m == 0:
-            shape = torch.broadcast_shapes(tensor.shape[:-1], direction.shape[:-1])
-            return tensor.expand(*shape, 1)
-        plane = self.identity - direction.unsqueeze(-1) * direction.unsqueeze(-2)
-        if self.m == 1:
-            return torch.einsum("...ij,...j->...i", plane, tensor)
-        if self.m == 2:
-            value = plane @ tensor.unflatten(-1, (3, 3)) @ plane
-            trace = value.diagonal(dim1=-2, dim2=-1).sum(-1)
-            return (value - 0.5 * trace[..., None, None] * plane).flatten(-2)
-        basis = self.bases[0]
-        traces = [basis(basis.pack(tensor), plane)]
-        entries = torch.cat(
-            (plane[..., 0, :], plane[..., 1, 1:], plane[..., 2, 2:]), -1
-        )
-        for basis in self.bases[:-1]:
-            traces.append(basis.trace(traces[-1]))
-        value = traces[-1] * self.coefficients[-1]
-        for k in range(len(traces) - 2, -1, -1):
-            value = self.coefficients[k] * traces[k] + self.bases[k].multiply(
-                value, entries
-            )
-        return self.bases[0].unpack(value)
+        return execution(self, tensor).transverse(self, tensor, direction)
 
     def extra_repr(self):
         return f"m={self.m}"
@@ -149,17 +149,31 @@ class Restriction(torch.nn.Module):
     ----------
     l : int
         Three-dimensional angular degree. Inputs have Cartesian size 3**l.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
 
     Notes
     -----
     Order m uses 3**m global Cartesian entries, with one independent
     coordinate at m=0 and two at m>0. No transverse axes are selected.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.Restriction(1)
+    >>> parts = layer(torch.ones(2, 3), torch.tensor([0., 1., 0.]))
+    >>> tuple(part.shape[-1] for part in parts)
+    (1, 3)
     """
 
-    def __init__(self, l):
+    def __init__(self, l, *, backend="torch"):
         super().__init__()
         if not isinstance(l, int) or l < 0:
             raise ValueError("The degree must be a non-negative integer.")
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.l = l
         self.bases = torch.nn.ModuleList(
             SymmetricBasis(m) for m in (range(l + 1) if l > 2 else ())
@@ -181,65 +195,14 @@ class Restriction(torch.nn.Module):
         validate_module_precision(self, (tensor, direction))
         if tensor.shape[-1] != 3**self.l or direction.shape[-1] != 3:
             raise ValueError("Tensor or direction has an incorrect trailing size.")
-        if self.l == 0:
-            shape = torch.broadcast_shapes(tensor.shape[:-1], direction.shape[:-1])
-            return (tensor.expand(*shape, 1),)
-        if self.l == 1:
-            scalar = (tensor * direction).sum(-1, keepdim=True)
-            return scalar, tensor - scalar * direction
-        plane = self.identity - direction.unsqueeze(-1) * direction.unsqueeze(-2)
-        if self.l == 2:
-            tensor = tensor.unflatten(-1, (3, 3))
-            vector = torch.einsum("...ij,...j->...i", tensor, direction)
-            scalar = (vector * direction).sum(-1, keepdim=True)
-            transverse = plane @ tensor @ plane + 0.5 * scalar.unsqueeze(-1) * plane
-            return (
-                self.scales[0] * scalar,
-                self.scales[1] * (vector - scalar * direction),
-                transverse.flatten(-2),
-            )
-        contractions = [self.bases[-1].pack(tensor)]
-        for m in range(self.l, 0, -1):
-            contractions.append(self.bases[m].contract(contractions[-1], direction))
-        contractions.reverse()
-        transverse = [basis(x, plane) for basis, x in zip(self.bases, contractions)]
-        entries = torch.cat(
-            (plane[..., 0, :], plane[..., 1, 1:], plane[..., 2, 2:]), -1
-        )
-        values = []
-        for m, (basis, scale, coefficients) in enumerate(
-            zip(self.bases, self.scales, self.coefficients)
-        ):
-            # Tr^k(U_lm) = (-1)^k U_l,m-2k for a three-dimensional STF input.
-            # Nested symmetric products avoid repeated trace and permutation sums.
-            k = len(coefficients) - 1
-            value = coefficients[k] * transverse[m - 2 * k]
-            for k in range(k - 1, -1, -1):
-                value = coefficients[k] * transverse[m - 2 * k] + self.bases[
-                    m - 2 * k
-                ].multiply(value, entries)
-            values.append(basis.unpack(value * scale))
-        return tuple(values)
+        return execution(self, tensor).restrict(self, tensor, direction)
 
     def inverse(self, tensors, direction, *, project=True):
         """Reconstruct Cartesian features, optionally deferring STF projection."""
+        validate_module_precision(self, (tensors, direction))
         if len(tensors) != self.l + 1:
             raise ValueError("One transverse tensor is required for every order.")
-        result = None
-        for m, (tensor, scale) in enumerate(zip(tensors, self.scales)):
-            if tensor.shape[-1] != 3**m:
-                raise ValueError("A transverse tensor has an incorrect trailing size.")
-            value = scale * tensor
-            result = (
-                value
-                if result is None
-                else (direction.unsqueeze(-1) * result.unsqueeze(-2)).flatten(-2)
-                + value
-            )
-        if self.l == 0:
-            shape = torch.broadcast_shapes(result.shape[:-1], direction.shape[:-1])
-            result = result.expand(*shape, 1)
-        return (result @ self.basis) @ self.basis.T if project else result
+        return execution(self, tensors[0]).inverse(self, tensors, direction, project)
 
     def extra_repr(self):
         return f"l={self.l}"
@@ -250,8 +213,13 @@ class Restriction(torch.nn.Module):
         return self
 
 
-def transverse_quarter_turn(tensor, direction):
-    """Apply the normalized rotation generator to a positive-order transverse STF tensor."""
-    value = tensor.reshape(*tensor.shape[:-1], 3, tensor.shape[-1] // 3)
-    value = torch.linalg.cross(direction.unsqueeze(-2), value.transpose(-1, -2), dim=-1)
-    return value.transpose(-1, -2).flatten(-2)
+def transverse_quarter_turn(tensor, direction, *, backend="torch"):
+    """Apply the normalized rotation generator to a transverse STF tensor."""
+    validate_precision((tensor, direction))
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be torch or cuda.")
+    if backend == "cuda" and tensor.is_cuda:
+        from ..ops.cuda.co2 import restriction as cuda_kernel
+
+        return cuda_kernel.quarter_turn(tensor, direction)
+    return torch_kernel.quarter_turn(tensor, direction)

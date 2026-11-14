@@ -74,7 +74,7 @@ def test_gradcheck_and_transforms(monkeypatch, backend, compiler):
 
 
 def test_functional_constants_do_not_escape():
-    from equivariantx.ops.kernels.torch.symmetric import polynomial_indices
+    from equivariantx.ops.common.torch.symmetric import polynomial_indices
 
     polynomial_indices.cache_clear()
     module, x, weight, types = contraction()

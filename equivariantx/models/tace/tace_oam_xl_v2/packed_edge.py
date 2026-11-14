@@ -47,8 +47,10 @@ def packed_address(blocks, row, column):
                 raise ValueError("Expected a channel-aligned angular column")
             path, magnetic = divmod(offset // channels, degree)
             total_channels = channels * paths
-            return (f"packed_nodes*{start}+({row})*{total_channels*degree}"
-                    f"+{magnetic*total_channels+path*channels}+u")
+            return (
+                f"packed_nodes*{start}+({row})*{total_channels * degree}"
+                f"+{magnetic * total_channels + path * channels}+u"
+            )
     raise ValueError(f"Output column {column} is outside the packed layout")
 
 
@@ -77,23 +79,27 @@ def pack_edge_source(source, blocks, program):
 
     def replace(match):
         nonlocal replacements
-        kind, slot = match['kind'], int(match['slot'])
-        roles = (input_roles if kind == 'p' else output_roles).get(slot, set())
+        kind, slot = match["kind"], int(match["slot"])
+        roles = (input_roles if kind == "p" else output_roles).get(slot, set())
         if roles != {4}:
             return match[0]
         replacements += 1
-        address = packed_address(blocks, match['row'], int(match['column']))
-        operator = '[' if match['operator'] == '[' else ' + '
+        address = packed_address(blocks, match["row"], int(match["column"]))
+        operator = "[" if match["operator"] == "[" else " + "
         return f"{kind}{slot}{operator}({address})"
 
     source = pattern.sub(replace, source)
     # A phase may exclusively compute angular/radial outputs but still reads
     # role four. If it neither reads nor writes that role, the argument remains
     # harmless and all launch signatures still agree.
-    source = re.sub(r'(void (?:run|phase\d+)\([^)]*)(\)\s*\{)',
-                    r'\1, long long packed_nodes\2', source)
-    source = re.sub(r'(case \d+: phase\d+\([^;]+)(\); break;)',
-                    r'\1, packed_nodes\2', source)
-    if 'packed_nodes' not in source:
+    source = re.sub(
+        r"(void (?:run|phase\d+)\([^)]*)(\)\s*\{)",
+        r"\1, long long packed_nodes\2",
+        source,
+    )
+    source = re.sub(
+        r"(case \d+: phase\d+\([^;]+)(\); break;)", r"\1, packed_nodes\2", source
+    )
+    if "packed_nodes" not in source:
         raise ValueError("No native CUDA entry point was transformed")
     return source

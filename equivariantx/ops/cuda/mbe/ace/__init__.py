@@ -1,0 +1,1 @@
+"""CUDA atom-centred expansions."""

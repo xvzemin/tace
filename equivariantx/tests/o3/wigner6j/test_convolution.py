@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from equivariantx import conv as eqx_conv
 
 

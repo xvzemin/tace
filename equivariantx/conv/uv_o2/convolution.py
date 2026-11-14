@@ -3,20 +3,22 @@
 from functools import lru_cache
 
 import torch
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...o2.layout import irrep_layout
 from ...o2.wigner import WignerD
-from ...ops import config, get_kernel
-from ...ops.edge import evaluate
-from ...ops.gate import gate_program
-from ...ops.kernels.torch.linear import linear as linear_blocks
-from ...ops.kernels.torch.linear import linear_layout
+from ...ops import config
+from ...ops.common.gate import gate_program
+from ...ops.common.linear import linear_program
+from ...ops.common.torch.linear import (
+    linear_flat as linear,  # noqa: F401 - compatibility alias
+)
+from ...ops.common.torch.linear import linear_layout
 from ...ops.precision import validate_module_precision
+from ...ops.torch.conv.uv_o2 import convolution as torch_kernel
+from ...ops.torch.o2 import wigner as torch_wigner
 from ...utils.frame_program import frame_description, rotate
 from ...utils.metadata import parse_metadata
 from ...utils.program import Program
-from ..attention import graph_softmax
 from .transverse import TransverseFrame
 
 
@@ -26,89 +28,6 @@ def linear_description(linear, transverse=False):
         [(dim, mul) for dim, mul, _ in irrep_layout(linear.irreps_out, transverse)],
         linear.instructions,
     )
-
-
-def linear(features, weight, bias, description):
-    """Keep channel contractions in batched GEMM, including parameter adjoints."""
-    inputs = description[0]
-    values = [
-        value.reshape(features.shape[0], dim, mul)
-        for value, (dim, mul) in zip(
-            features.split([dim * mul for dim, mul in inputs], -1), inputs
-        )
-    ]
-    result = linear_blocks(values, weight, bias, description, features.shape[:-1])
-    return (
-        torch.cat([value.flatten(-2) for value in result], -1)
-        if result
-        else features[..., :0]
-    )
-
-
-def linear_program(program, inputs, weight, bias, description):
-    """Encode grouped channel GEMMs without materializing edge intermediates."""
-    input_shapes, output_shapes, paths, biases, groups = description
-    uniform = bool(paths) and all(path[3] == paths[0][3] for path in paths)
-    if uniform:
-        weight = program.scale(weight, paths[0][3])
-    matrices = [
-        program.scale(
-            program.slice(weight, start, input_shapes[i][1] * output_shapes[j][1]),
-            1 if uniform else scale,
-        )
-        for i, j, start, scale in paths
-    ]
-
-    def columns(values, rows, widths):
-        if len(values) == 1:
-            return values[0]
-        return program.transpose(
-            program.concatenate(
-                [
-                    program.transpose(value, rows, width)
-                    for value, width in zip(values, widths)
-                ]
-            ),
-            sum(widths),
-            rows,
-        )
-
-    outputs = [None] * len(output_shapes)
-    for entries in groups:
-        selected = entries[0][1]
-        if not selected:
-            for j, _ in entries:
-                dim, mul = output_shapes[j]
-                outputs[j] = program.constant(dim * mul, 0)
-            continue
-        sources = [paths[k][0] for k in selected]
-        widths = [input_shapes[i][1] for i in sources]
-        dim = output_shapes[entries[0][0]][0]
-        out_widths = [output_shapes[j][1] for j, _ in entries]
-        value = columns([inputs[i] for i in sources], dim, widths)
-        matrix = program.concatenate(
-            [
-                columns(
-                    [matrices[indices[row]] for _, indices in entries], ci, out_widths
-                )
-                for row, ci in enumerate(widths)
-            ]
-        )
-        result = program.matmul(value, matrix, dim, sum(widths), sum(out_widths))
-        offset = 0
-        for (j, _), width in zip(entries, out_widths):
-            outputs[j] = program.concatenate(
-                [
-                    program.slice(result, row * sum(out_widths) + offset, width)
-                    for row in range(dim)
-                ]
-            )
-            offset += width
-    for j, start, size in biases:
-        value = program.slice(bias, start, size)
-        value = program.gather(value, tuple(range(size)) * output_shapes[j][0])
-        outputs[j] = program.binary("add", outputs[j], value)
-    return outputs
 
 
 class UvO2TensorProductConv(torch.nn.Module):
@@ -140,7 +59,8 @@ class UvO2TensorProductConv(torch.nn.Module):
         ``"last"`` evaluates hidden layers with Torch and fuses the final
         projection and its pointwise tail into the edge program.
         ``"full"`` composes all radial layers into that program and recomputes
-        activations during differentiation.
+        activations during differentiation. CUDA keeps this mode tiled during
+        compilation; ``"last"`` permits automatic polynomial expansion.
 
     Examples
     --------
@@ -543,8 +463,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                 radial_network,
             ),
         )
-        source, target = edge_index[0], edge_index[1]
-        from ...ops.radial import cast_radial
+        from ...ops.common.radial import cast_radial
 
         conv_weights = cast_radial(conv_weights, features.dtype)
         cutoff = cutoff.to(features)
@@ -553,8 +472,12 @@ class UvO2TensorProductConv(torch.nn.Module):
         if radial_attention is not None:
             radial_attention = radial_attention.to(features)
         if vectors is not None and vectors.dtype != features.dtype:
-            wigner = self.wigner.forward_packed(
-                vectors, method="auto" if self.backend == "cuda" else "recursive"
+            wigner = (
+                torch_wigner.packed(self.wigner, vectors, "recursive")
+                if self.backend == "torch" and config.TORCH_REFERENCE
+                else self.wigner.forward_packed(
+                    vectors, method="auto" if self.backend == "cuda" else "recursive"
+                )
             ).to(features)
             wigner_inv = None
             vectors = None
@@ -562,199 +485,34 @@ class UvO2TensorProductConv(torch.nn.Module):
             wigner = wigner.to(features)
         if wigner_inv is not None:
             wigner_inv = wigner_inv.to(features)
-        transverse = vectors is not None
-        fused = self.backend == "cuda" and features.is_cuda
-        expanded = (
-            transverse
-            and not self.attention
-            and not config.TORCH_REFERENCE
-            and self.degree <= config.TRANSVERSE_POLYNOMIAL_DEGREE
-            and (
-                torch.compiler.is_compiling()
-                or get_proxy_mode() is not None
-                or torch._C._are_functorch_transforms_active()
-            )
-        )
-        execute = evaluate if fused else get_kernel("edge_program", "torch")
-        if not fused and self.radial_mode == "full" and not config.TORCH_REFERENCE:
-            from ...ops.kernels.torch.edge import evaluate_recomputed
+        if self.backend == "cuda" and features.is_cuda:
+            from ...ops.cuda.conv.uv_o2 import convolution as cuda_kernel
 
-            execute = evaluate_recomputed
-        if radial_network is not None:
-            from ...ops.radial import radial_features, split_radial
-
-            if config.TORCH_REFERENCE:
-                conv_weights = radial_features(radial_network, conv_weights, edge_index)
-                radial_network = None
-            elif self.radial_mode == "last":
-                hidden, projection = split_radial(radial_network)
-                if hidden or not projection:
-                    conv_weights = radial_features(hidden, conv_weights, edge_index)
-                radial_network = projection or None
-        if edge_features is None:
-            edge_features = features.new_empty((source.shape[0], 0))
-        if (fused or expanded) and not self.attention:
-            if transverse:
-                if any(
-                    f is None and description is not None
-                    for f, description in zip(self.transverse_frames, self.frames)
-                ):
-                    raise ValueError(
-                        "Transverse evaluation requires canonical O(2) frames."
-                    )
-                from ...ops.wigner import alignment_cuda
-
-                geometry = (
-                    vectors / vectors.norm(dim=-1, keepdim=True)
-                    if expanded
-                    else alignment_cuda(repr("normalize"), [vectors])[0]
-                )
-                inverse = features.new_empty((source.numel(), 0))
-                local_dim = global_dim = 0
-                packed = False
-            else:
-                if wigner is None:
-                    raise ValueError("Supply Wigner matrices or vectors.")
-                packed = wigner.ndim == 2
-                local_dim, global_dim = (
-                    (wigner.shape[1], 1) if packed else wigner.shape[1:]
-                )
-                geometry, inverse = wigner, wigner if packed else wigner_inv
-            metadata = self.convolution_program(
-                local_dim, global_dim, packed, transverse, native=not expanded
-            )
-            inputs = [features, edge_features, conv_weights, geometry, inverse, cutoff]
-            inputs.extend(value.reshape(1, -1) for value in parameters[:4])
-            if radial_network is not None:
-                from ...ops.radial import compose_radial
-
-                metadata, inputs = compose_radial(metadata, inputs, 2, radial_network)
-            if expanded:
-                from ...ops.kernels.torch.edge import evaluate_torch
-
-                return evaluate_torch(
-                    metadata, inputs, source, target, features.shape[0], optimized=True
-                )[0]
-            return evaluate(metadata, inputs, source, target, features.shape[0])[0]
-        if transverse:
-            if any(
-                f is None and description is not None
-                for f, description in zip(self.transverse_frames, self.frames)
-            ):
-                raise ValueError(
-                    "Transverse evaluation requires canonical O(2) frames."
-                )
-            if fused:
-                from ...ops.wigner import alignment_cuda
-
-                direction = alignment_cuda(repr("normalize"), [vectors])[0]
-            else:
-                direction = vectors / vectors.norm(dim=-1, keepdim=True)
-            edges = source.numel()
-            edge_ids = torch.arange(edges, device=source.device)
-            node_frame, edge_frame, _ = self.transverse_frames
-            projected_source = node_frame(features, direction, source, edge_ids, edges)
-            projected_target = node_frame(features, direction, target, edge_ids, edges)
-            projected_edge = (
-                edge_frame(edge_features, direction, edge_ids, edge_ids, edges)
-                if edge_frame is not None
-                else edge_features
-            )
-            local_inputs = [
-                projected_source,
-                projected_target,
-                projected_edge,
+            return cuda_kernel.evaluate(
+                self,
+                features,
+                edge_features,
                 conv_weights,
-            ]
-            local_dim = global_dim = 0
-            packed = False
-            linears = self.transverse_linears
-        else:
-            if wigner is None:
-                raise ValueError("Supply Wigner matrices or vectors.")
-            packed = wigner.ndim == 2
-            local_dim, global_dim = (wigner.shape[1], 1) if packed else wigner.shape[1:]
-            if packed:
-                wigner_inv = wigner
-            local_inputs = [features, edge_features, conv_weights, wigner]
-            linears = self.linears
-        metadata = self.prepare_program(local_dim, global_dim, packed, transverse)
-        if radial_network is not None:
-            from ...ops.radial import compose_radial
-
-            metadata, local_inputs = compose_radial(
-                metadata, local_inputs, 3 if transverse else 2, radial_network
+                wigner,
+                wigner_inv,
+                cutoff,
+                parameters,
+                radial_attention,
+                edge_index,
+                vectors,
+                radial_network,
             )
-        local = execute(
-            metadata,
-            local_inputs,
-            source,
-            target,
-            features.shape[0],
+        return torch_kernel.evaluate(
+            self,
+            features,
+            edge_features,
+            conv_weights,
+            wigner,
+            wigner_inv,
+            cutoff,
+            parameters,
+            radial_attention,
+            edge_index,
+            vectors,
+            radial_network,
         )
-        values = [
-            value.reshape(source.shape[0], dim, mul)
-            for value, (dim, mul) in zip(
-                local[0].split([dim * mul for dim, mul in linears[0][0]], -1),
-                linears[0][0],
-            )
-        ]
-        message = linear_blocks(values, *parameters[:2], linears[0], (source.shape[0],))
-        message = execute(
-            self.transverse_gate_metadata if transverse else self.gate_metadata,
-            [value.flatten(-2) for value in message]
-            + ([direction] if transverse else []),
-            source,
-            target,
-            features.shape[0],
-        )
-        message = linear_blocks(
-            [
-                value.reshape(source.shape[0], dim, mul)
-                for value, (dim, mul) in zip(message, linears[1][0])
-            ],
-            *parameters[2:4],
-            linears[1],
-            (source.shape[0],),
-        )
-        message = torch.cat([value.flatten(-2) for value in message], -1)
-        scale = cutoff
-        if self.attention:
-            if radial_attention is None:
-                raise ValueError("Attention requires radial scale and shift.")
-            query = linear(local[2], *parameters[4:6], linears[2])
-            key = linear(local[1], *parameters[6:8], linears[3])
-            score = execute(
-                self.transverse_score_metadata if transverse else self.score_metadata,
-                [query, key, radial_attention],
-                source,
-                target,
-                features.shape[0],
-            )[0]
-            scale = (
-                graph_softmax(
-                    score,
-                    target,
-                    features.shape[0],
-                    cutoff,
-                    self.eps,
-                    backend=self.backend,
-                )
-                * cutoff
-            )
-        output = execute(
-            self.output_program(local_dim, global_dim, packed, transverse),
-            [
-                message,
-                message.new_empty((source.numel(), 0)) if transverse else wigner_inv,
-                scale,
-            ],
-            source,
-            target,
-            features.shape[0],
-        )[0]
-        if transverse:
-            output = self.transverse_frames[2](
-                output, direction, edge_ids, target, features.shape[0], inverse=True
-            )
-        return output

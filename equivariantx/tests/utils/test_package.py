@@ -16,6 +16,20 @@ ROOT = Path(equivariantx.__file__).resolve().parent
 from equivariantx.tests.utils.testing import has_documentation_examples
 
 
+def test_package_modules():
+    """Every runtime package must also be present in the standalone wheel."""
+    tomllib = pytest.importorskip("tomllib")
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    actual = {
+        ".".join(("equivariantx", *path.parent.relative_to(ROOT).parts))
+        for path in ROOT.rglob("__init__.py")
+        if not {"tests", "docs", "build", "__pycache__"}.intersection(
+            path.relative_to(ROOT).parts
+        )
+    }
+    assert set(metadata["tool"]["setuptools"]["packages"]) == actual
+
+
 @pytest.mark.parametrize("allow_slice", [False, True])
 def test_import(tmp_path, allow_slice):
     names = sorted(
@@ -58,7 +72,7 @@ frame.to_global(frame.to_local(x, d), di)
 assert set(eqx.__all__).issubset(dir(eqx))
 assert not torch.cuda.is_initialized()
 assert "tace" not in sys.modules
-assert not any(name.startswith("equivariantx.ops.kernels.cuda") for name in sys.modules)
+assert not any(name.startswith("equivariantx.ops.common.cuda") for name in sys.modules)
 assert not any(name.startswith("equivariantx.models.") for name in sys.modules)
 """
     result = subprocess.run(
@@ -112,8 +126,8 @@ for _ in range(2):
         torch.testing.assert_close(left, right, atol=1e-8, rtol=1e-8)
     actual = torch.cat([value.flatten() for value in a])
     expected = torch.cat([value.flatten() for value in b])
-assert "equivariantx.ops.kernels.cuda.o2_o3.convolution" not in sys.modules
-from equivariantx.ops.kernels.cuda import runtime as cuda
+assert "equivariantx.ops.common.cuda.o2_o3.convolution" not in sys.modules
+from equivariantx.ops.common.cuda import runtime as cuda
 assert not cuda.runtime.cache_info().currsize
 assert "tace" not in sys.modules
 accelerated = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)

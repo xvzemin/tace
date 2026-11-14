@@ -303,7 +303,7 @@ class mlpLinear(torch.nn.Module):
                 and len(input) > 1
                 and acceleration_enabled("eqx", kernel="linear")
             ):
-                from equivariantx.ops.layout import gather_sum
+                from equivariantx.ops.common.layout import gather_sum
 
                 projected = [
                     torch.addmm(self.bias, value, part)

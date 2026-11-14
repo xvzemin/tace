@@ -3,9 +3,16 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import co3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def test_forward_ad(device):
+    from equivariantx.tests.utils.testing import check_linear_forward_ad
+
+    check_linear_forward_ad(co3, "linear", device)
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -96,3 +103,34 @@ def test_linear_disconnected_paths(double_precision):
         assert not result.count_nonzero()
         assert not linear.output_mask.count_nonzero()
         assert not torch.autograd.grad(result.sum(), feats)[0].count_nonzero()
+
+
+@pytest.mark.parametrize("normalization", ["element", "path"])
+def test_compiled_shared_normalization(monkeypatch, normalization, double_precision):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.ops import config
+
+    layer = co3.Linear(
+        "2x0e+1x0e+2x1o", "3x0e+2x1o", path_normalization=normalization, biases=True
+    ).to(DEVICE)
+    inputs = (
+        torch.randn(5, layer.irreps_in.dim, device=DEVICE, requires_grad=True) * 0.2,
+        torch.randn(layer.weight_numel, device=DEVICE, requires_grad=True) * 0.2,
+        torch.randn(layer.bias_numel, device=DEVICE, requires_grad=True) * 0.2,
+    )
+
+    def operation(x, w, b):
+        energy = layer(x, w, b).sin().sum()
+        force = -torch.autograd.grad(energy, x, create_graph=True)[0]
+        loss = force.square().sum() + energy.square()
+        return loss, force, *torch.autograd.grad(loss, (w, b))
+
+    monkeypatch.setattr(config, "TORCH_LINEAR_POSTSCALE", True)
+    graph = make_fx(operation)(*inputs)
+    graph.graph.eliminate_dead_code()
+    graph.recompile()
+    actual = torch.compile(graph, fullgraph=True)(*(v.detach() for v in inputs))
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = operation(*inputs)
+    torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)

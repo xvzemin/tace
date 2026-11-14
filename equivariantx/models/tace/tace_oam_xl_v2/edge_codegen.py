@@ -11,7 +11,7 @@ import os
 PATH_GROUPING = os.environ.get("EQX_XL_CG_GROUPING", "native")
 GROUPING_PHASE = os.environ.get("EQX_XL_CG_GROUPING_PHASE", "all")
 
-from equivariantx.ops.kernels.cuda.codegen import HEADER
+from equivariantx.ops.common.cuda.codegen import HEADER
 from .cg_codegen import angular_source
 
 
@@ -33,21 +33,38 @@ def edge_groups(paths, program, path_tile=0):
             # An output block belongs to exactly one kernel. For edge
             # derivatives, grouping by angular degree shares its reduction.
             key = path[0 if owner == 0 else 2 if owner == 4 else 1]
-            if (owner == -1 and PATH_GROUPING != "native"
-                    and (GROUPING_PHASE == "all" or roles == {0,1})):
-                key = {"output_degree": (path[7],),
-                       "output_input": (path[7],path[0]),
-                       "output_angular": (path[7],path[1])}[PATH_GROUPING]
+            if (
+                owner == -1
+                and PATH_GROUPING != "native"
+                and (GROUPING_PHASE == "all" or roles == {0, 1})
+            ):
+                key = {
+                    "output_degree": (path[7],),
+                    "output_input": (path[7], path[0]),
+                    "output_angular": (path[7], path[1]),
+                }[PATH_GROUPING]
             by_column[key].append(path)
         for group in by_column.values():
-            tile=path_tile or len(group)
-            groups.extend((tuple(group[start:start+tile]),terms,owner)
-                          for start in range(0,len(group),tile))
+            tile = path_tile or len(group)
+            groups.extend(
+                (tuple(group[start : start + tile]), terms, owner)
+                for start in range(0, len(group), tile)
+            )
     return tuple(groups)
 
 
-def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accumulate=False,
-                node_warps=0, edge_block=False):
+def edge_source(
+    paths,
+    program,
+    dimensions,
+    shared,
+    dtype,
+    outputs,
+    owner,
+    accumulate=False,
+    node_warps=0,
+    edge_block=False,
+):
     """Emit one complete node row or one edge/channel tile.
 
     The supported contract is weighted ``uvu``, angular multiplicity one, and
@@ -68,12 +85,21 @@ def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accum
         HEADER.replace("SCALAR", dtype),
         'extern "C" __global__ void run(' + ", ".join(arguments) + ") {",
         "const int lane = threadIdx.x % 32;",
-        ("const int u = threadIdx.x;" if owner < 0 and edge_block
-         else "const int u = int(blockIdx.y) * 32 + lane;"),
-        ("const bool active = true;" if channels == 128 and os.environ.get('EQX_XL_LAUNCH_CONTRACT', '0') == '1'
-         else f"const bool active = u < {channels};"),
-        ("const int64_t row = blockIdx.x;" if node_warps and owner >= 0 or edge_block and owner < 0
-         else "const int64_t row = int64_t(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;"),
+        (
+            "const int u = threadIdx.x;"
+            if owner < 0 and edge_block
+            else "const int u = int(blockIdx.y) * 32 + lane;"
+        ),
+        (
+            "const bool active = true;"
+            if channels == 128 and os.environ.get("EQX_XL_LAUNCH_CONTRACT", "0") == "1"
+            else f"const bool active = u < {channels};"
+        ),
+        (
+            "const int64_t row = blockIdx.x;"
+            if node_warps and owner >= 0 or edge_block and owner < 0
+            else "const int64_t row = int64_t(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;"
+        ),
         "if (row >= rows) return;",
     ]
     cache, body, accumulators = {}, [], {}
@@ -121,8 +147,11 @@ def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accum
     if owner >= 0:
         lines.extend(f"T sum{i} = 0;" for i in range(len(accumulators)))
         lines += [
-            ("for (int64_t k = pointers[row] + threadIdx.x/32; k < pointers[row + 1]; k += blockDim.x/32) {"
-             if node_warps else "for (int64_t k = pointers[row]; k < pointers[row + 1]; ++k) {"),
+            (
+                "for (int64_t k = pointers[row] + threadIdx.x/32; k < pointers[row + 1]; k += blockDim.x/32) {"
+                if node_warps
+                else "for (int64_t k = pointers[row]; k < pointers[row + 1]; ++k) {"
+            ),
             "const int64_t edge = order[k];",
         ]
     else:
@@ -133,10 +162,14 @@ def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accum
     ]
     body_start = len(lines)
     lines.extend(body)
-    angular_slots = {key: index for index, key in enumerate(k for k in accumulators if k[3] == 3)}
+    angular_slots = {
+        key: index for index, key in enumerate(k for k in accumulators if k[3] == 3)
+    }
     if owner < 0 and edge_block and angular_slots:
-        lines.append(f"__shared__ T angular_sums[{(channels+31)//32}][{len(angular_slots)}];")
-    sink_prefix = lines[body_start+len(body):]
+        lines.append(
+            f"__shared__ T angular_sums[{(channels + 31) // 32}][{len(angular_slots)}];"
+        )
+    sink_prefix = lines[body_start + len(body) :]
     sinks = []
     for i, (key, terms) in enumerate(accumulators.items()):
         slot, width, column, role, is_shared = key
@@ -150,19 +183,23 @@ def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accum
             if role == 3:
                 lines.append(f"sum{i} = warp_sum(sum{i});")
                 if edge_block:
-                    lines.append(f"if (lane == 0) angular_sums[threadIdx.x/32][{angular_slots[key]}] = sum{i};")
+                    lines.append(
+                        f"if (lane == 0) angular_sums[threadIdx.x/32][{angular_slots[key]}] = sum{i};"
+                    )
                 else:
                     lines.append(f"if (lane == 0) atomicAdd({address}, sum{i});")
             elif is_shared:
                 lines.append(f"if (active) atomicAdd({address} + u, sum{i});")
             else:
                 lines.append(f"if (active) *({address} + u) = sum{i};")
-    mode = os.environ.get('EQX_XL_STREAM_ANGULAR_OUTPUTS', 'off')
-    if mode == 'auto':
+    mode = os.environ.get("EQX_XL_STREAM_ANGULAR_OUTPUTS", "off")
+    if mode == "auto":
         from .angular_schedule import schedule_mode
+
         mode = schedule_mode(mode, program)
-    if mode != 'off' and sinks:
+    if mode != "off" and sinks:
         from .angular_schedule import stream_body
+
         ends = [start for start, _ in sinks[1:]] + [len(lines)]
         chunks = [(lines[start:end], role) for (start, role), end in zip(sinks, ends)]
         lines = lines[:body_start] + sink_prefix + stream_body(body, chunks, mode)
@@ -170,8 +207,10 @@ def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accum
         lines.append("__syncthreads();")
         for key, index in angular_slots.items():
             slot, width, column, _, is_shared = key
-            lines += [f"if (threadIdx.x == {index}) {{ T total=0;",
-                      f"for (int warp=0;warp<{(channels+31)//32};++warp) total+=angular_sums[warp][{index}];"]
+            lines += [
+                f"if (threadIdx.x == {index}) {{ T total=0;",
+                f"for (int warp=0;warp<{(channels + 31) // 32};++warp) total+=angular_sums[warp][{index}];",
+            ]
             address = f"g{slot} + {'0' if is_shared else 'row'}*{width}+{column}"
             if is_shared or accumulate:
                 lines.append(f"atomicAdd({address},total);}}")
@@ -180,18 +219,27 @@ def edge_source(paths, program, dimensions, shared, dtype, outputs, owner, accum
     if owner >= 0:
         lines.append("}")
         if node_warps:
-            lines.append(f"__shared__ T node_sums[{len(accumulators)}][{node_warps*32}];")
+            lines.append(
+                f"__shared__ T node_sums[{len(accumulators)}][{node_warps * 32}];"
+            )
             for i in range(len(accumulators)):
                 lines.append(f"node_sums[{i}][threadIdx.x]=sum{i};")
             lines.append("__syncthreads();")
             lines.append("if (threadIdx.x < 32) {")
             for i in range(len(accumulators)):
-                lines += [f"sum{i}=0;", f"for (int warp=0;warp<{node_warps};++warp) sum{i}+=node_sums[{i}][warp*32+lane];"]
+                lines += [
+                    f"sum{i}=0;",
+                    f"for (int warp=0;warp<{node_warps};++warp) sum{i}+=node_sums[{i}][warp*32+lane];",
+                ]
         for i, (slot, width, column, _, _) in enumerate(accumulators):
             if accumulate:
-                lines.append(f"if (active) atomicAdd(g{slot}+row*{width}+{column}+u,sum{i});")
+                lines.append(
+                    f"if (active) atomicAdd(g{slot}+row*{width}+{column}+u,sum{i});"
+                )
             else:
-                lines.append(f"if (active) g{slot}[row * {width} + {column} + u] = sum{i};")
+                lines.append(
+                    f"if (active) g{slot}[row * {width} + {column} + u] = sum{i};"
+                )
         if node_warps:
             lines.append("}")
     lines.append("}")

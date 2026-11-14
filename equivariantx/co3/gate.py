@@ -3,6 +3,7 @@
 import torch
 from e3nn.nn import Activation as ScalarActivation
 
+from ..ops.torch.co3 import gate as torch_kernel
 from ..ops.precision import validate_module_precision
 from .ictd import ElementwiseTensorProduct
 from .irreps import Irreps
@@ -18,6 +19,14 @@ class Activation(torch.nn.Module):
     acts : sequence of callable or None
         One activation per entry. Activations on odd scalars must have
         definite parity. None leaves an entry unchanged.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co3
+    >>> layer = co3.Activation("2x0e + 1x0o", [torch.sigmoid, torch.tanh])
+    >>> layer(torch.randn(4, 3)).shape
+    torch.Size([4, 3])
     """
 
     def __init__(self, irreps_in, acts):
@@ -31,7 +40,7 @@ class Activation(torch.nn.Module):
     def forward(self, features):
         """Activate scalar features of shape (..., irreps_in.dim)."""
         validate_module_precision(self, (features,))
-        return self.activation(features)
+        return torch_kernel.activate(self, features)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"
@@ -54,6 +63,14 @@ class Gate(torch.nn.Module):
         Symmetric traceless tensors multiplied by the activated gates.
     backend : {"cuda", "torch"}, optional
         Execution backend. Unsupported activations and CPU inputs use PyTorch.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co3
+    >>> layer = co3.Gate("2x0e", [torch.tanh], "2x0e", [torch.sigmoid], "2x1o")
+    >>> layer(torch.randn(4, layer.irreps_in.dim)).shape
+    torch.Size([4, 8])
     """
 
     def __init__(
@@ -109,7 +126,7 @@ class Gate(torch.nn.Module):
         """Describe scalar activations and channel-wise gate products."""
         from ..utils.program import Program, activate
 
-        if self.backend == "torch" or not self.irreps_out.dim:
+        if not self.irreps_out.dim:
             return None
         program = Program()
         features = program.input(0, "edge", self.irreps_in.dim)
@@ -158,26 +175,15 @@ class Gate(torch.nn.Module):
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if (
-            self.metadata is not None
+            self.backend == "cuda"
+            and self.metadata is not None
             and features.is_cuda
-            and features.dtype in (torch.float32, torch.float64)
+            and (features.dtype in (torch.float32, torch.float64))
         ):
-            from ..ops.edge import evaluate
+            from ..ops.cuda.co3.gate import evaluate
 
-            values = features.reshape(-1, self.irreps_in.dim)
-            indices = torch.zeros(
-                values.shape[0], dtype=torch.int64, device=values.device
-            )
-            output = evaluate(
-                self.metadata, [values], indices, indices, values.shape[0]
-            )[0]
-            return output.reshape(*features.shape[:-1], self.irreps_out.dim)
-        scalars = self.act_scalars(features.index_select(-1, self.indices_scalars))
-        if not self.irreps_gates.dim:
-            return scalars
-        gates = self.act_gates(features.index_select(-1, self.indices_gates))
-        gated = self.mul(features.index_select(-1, self.indices_gated), gates)
-        return torch.cat((scalars, gated), dim=-1)
+            return evaluate(self, features)
+        return torch_kernel.evaluate(self, features)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"

@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ...ops.torch.o3.gtp import tensor_product as torch_kernel
 from ..s2grid import S2Grid
 from ..tensor_product import FactorizedTensorProduct
 
@@ -32,6 +33,8 @@ class GauntTensorProduct(FactorizedTensorProduct):
     method : {"quadrature", "coefficients"}, optional
         Exact-degree sphere quadrature or direct coefficient contraction.
         Defaults to ``"quadrature"``.
+    backend : {"torch", "cuda"}, optional
+        Differentiable Torch or native sparse angular kernels.
 
     Notes
     -----
@@ -62,6 +65,7 @@ class GauntTensorProduct(FactorizedTensorProduct):
         internal_weights=None,
         shared_weights=None,
         method="quadrature",
+        backend="torch",
     ):
         super().__init__(
             irreps_in1,
@@ -70,6 +74,7 @@ class GauntTensorProduct(FactorizedTensorProduct):
             irrep_normalization,
             internal_weights,
             shared_weights,
+            backend,
         )
         if method not in ("quadrature", "coefficients"):
             raise ValueError("method must be quadrature or coefficients.")
@@ -149,11 +154,7 @@ class GauntTensorProduct(FactorizedTensorProduct):
         return coefficients
 
     def transform(self, features, basis):
-        return features if self.method == "coefficients" else features @ basis
+        return torch_kernel.transform(self, features, basis)
 
     def product(self, x, y, name):
-        if self.method == "coefficients":
-            return torch.einsum(
-                "...ci,...cj,ijk->...ck", x, y, getattr(self, f"{name}_coupling")
-            )
-        return (x * y) @ getattr(self, f"{name}_basis")
+        return torch_kernel.product(self, x, y, name)

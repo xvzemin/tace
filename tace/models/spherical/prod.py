@@ -412,7 +412,7 @@ class NonlinearCgtpACE(Product):
                 and acceleration_enabled("compile")
             )
             if fused_products:
-                from equivariantx.ops.channel_product import channel_product
+                from equivariantx.ops.common.channel_product import channel_product
             for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
                 factor = factors[:, index + 1 if self.asymmetric else 0]
                 if fused_products:

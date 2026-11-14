@@ -3,9 +3,121 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import co3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision):
+    from unittest.mock import patch
+
+    from equivariantx.co3.ictp.tensor_product import CartesianProduct
+    from equivariantx.ops import config
+    from equivariantx.ops.cuda.co3.ictp import tensor_product as kernel
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module, reference = (
+        CartesianProduct(1, 1, 2, backend="cuda").to(device),
+        CartesianProduct(1, 1, 2).to(device),
+    )
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for count in (3, 0):
+        values = (
+            torch.randn(count, 3, device=device),
+            torch.randn(count, 3, device=device),
+        )
+        with patch.object(kernel, "angular", wraps=kernel.angular) as selected:
+            actual = module(*values)
+        assert selected.call_count == (device == "cuda")
+        torch.testing.assert_close(actual, reference(*values))
+    assert module.backend == "cuda" and config.TORCH_REFERENCE is True
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_reference_bypasses_children(device, grouped, monkeypatch, double_precision):
+    import copy
+
+    from equivariantx.co3.ictp.tensor_product import CartesianProduct
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.co3.ictp import tensor_product as kernel
+    from equivariantx.tests.conv.testing import assert_native_autograd
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = (
+        co3.ictp.TensorProduct("2x1o", "2x1o", "2x2e", [(0, 0, 0, "uvu", True)])
+        if grouped
+        else CartesianProduct(3, 3, 6)
+    ).to(device)
+    reference = copy.deepcopy(module)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("The ordinary product dispatched a child backend.")
+
+    for child in module.modules():
+        if child is not module and hasattr(child, "backend"):
+            child.backend = "cuda"
+            if child is getattr(module, "projection", None) and not child.groups:
+                continue
+            for method in ("forward", "pack", "unpack"):
+                if hasattr(child, method):
+                    monkeypatch.setattr(child, method, forbidden)
+    state = [
+        (name, child.backend)
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    ]
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    matrix = co3.path_matrix(3).to(device)
+    for count in (2, 0):
+        values = tuple(
+            (
+                torch.randn(count, 6 if grouped else 7, device=device) * 0.1
+            ).requires_grad_()
+            for _ in range(2)
+        )
+
+        def run(layer, x, y):
+            return layer(x, y) if grouped else layer(x @ matrix.T, y @ matrix.T)
+
+        actual, expected = run(module, *values), run(reference, *values)
+        for _ in range(4):
+            torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+            assert_native_autograd(actual)
+            actual, expected = [
+                sum(
+                    g.sin().sum()
+                    for g in torch.autograd.grad(
+                        value.sin().sum(), values, create_graph=True
+                    )
+                )
+                for value in (actual, expected)
+            ]
+        tangents = tuple(torch.randn_like(value) for value in values)
+        torch.testing.assert_close(
+            torch.func.jvp(lambda *xs: run(module, *xs), values, tangents),
+            torch.func.jvp(lambda *xs: run(reference, *xs), values, tangents),
+        )
+    assert state == [
+        (name, child.backend)
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    ]
+    assert config.TORCH_REFERENCE is True
+    if not grouped:
+        module.backend = "cuda"
+        monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+        values = tuple(
+            torch.randn(2, 7, device=device, requires_grad=True) @ matrix.T
+            for _ in range(2)
+        )
+        actual = kernel.reference(module, *values)
+        torch.testing.assert_close(actual, kernel.reference(reference, *values))
+        assert_native_autograd(actual)
 
 
 @pytest.mark.parametrize(
@@ -256,4 +368,48 @@ def test_tensor_product_grouping(double_precision, weighted, tp_type):
         0,
         3,
         module.irreps_out.dim,
+    )
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("degrees", [(1, 1, 2), (2, 2, 2), (3, 2, 3), (3, 3, 4)])
+def test_sparse_cartesian_product(backend, degrees, double_precision, monkeypatch):
+    from equivariantx.co3.ictp.tensor_product import CartesianProduct
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.co3.ictp.tensor_product import reference
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    layer = CartesianProduct(*degrees, backend=backend).double().to(device)
+    x = (torch.randn(2, 1, 3 ** degrees[0], device=device) * 0.1).requires_grad_()
+    y = (torch.randn(1, 3, 3 ** degrees[1], device=device) * 0.1).requires_grad_()
+    actual, expected = layer(x, y), reference(layer, x, y)
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    for _ in range(4):
+        probe = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    v.flatten()
+                    for v in torch.autograd.grad(
+                        (value.sin() * probe).sum(), (x, y), create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+    torch.testing.assert_close(
+        torch.func.jvp(layer, (x, y), (x, y)),
+        torch.func.jvp(lambda a, b: reference(layer, a, b), (x, y), (x, y)),
+    )
+    layer.float().double()
+    torch.testing.assert_close(
+        layer(x, y), reference(layer, x, y), atol=3e-12, rtol=3e-12
+    )
+    assert layer(x[:0], y).shape == (0, 3, 3 ** degrees[2])
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    torch.testing.assert_close(
+        layer(x, y), reference(layer, x, y), atol=3e-12, rtol=3e-12
     )

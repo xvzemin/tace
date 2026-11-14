@@ -2,7 +2,7 @@
 
 import math
 
-from ...co3 import Projector
+from ...co3 import ChangeOfBasis, Linear, Projector
 from ...conv.co3.polynomials import coupling_coefficients
 from .semi_coupled import SemiCoupledSymmetricContraction
 
@@ -23,6 +23,22 @@ def coupling_entries(tensor_product, index):
     ]
 
 
+def cartesian_coefficient(linear):
+    """Return the same coefficient paths before their output basis change."""
+    if linear.output_basis == "cartesian":
+        return linear
+    if linear.internal_weights or linear.bias_numel:
+        raise ValueError("Provide unbiased external coefficient maps.")
+    return Linear(
+        linear.irreps_in,
+        linear.cartesian_out,
+        internal_weights=False,
+        shared_weights=linear.shared_weights,
+        instructions=[(ins.i_in, ins.i_out) for ins in linear.instructions],
+        path_normalization=linear.path_normalization,
+    )
+
+
 class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
     """Evaluate ICTD products and element-dependent coefficient maps.
 
@@ -32,6 +48,8 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
         Unweighted channel-wise products retaining every coupling path.
     linears : sequence of co3.Linear
         External-weight coefficient maps, including the order-one term.
+        All maps must use the same ``output_basis``; Cartesian and spherical
+        outputs are supported without changing the coefficient weights.
     backend : {"cuda", "torch"}, optional
         Execution backend. CPU inputs use PyTorch.
 
@@ -47,8 +65,8 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
     >>> from equivariantx import co3
     >>> irreps = co3.Irreps("2x0e + 2x1o")
     >>> tp = co3.ElementwiseTensorProduct(irreps, irreps)
-    >>> linears = [co3.Linear(layout, "2x0e", internal_weights=False,
-    ...                       shared_weights=False)
+    >>> linears = [co3.Linear(layout, "2x2e", internal_weights=False,
+    ...                       shared_weights=False, output_basis="spherical")
     ...            for layout in (irreps, tp.irreps_out)]
     >>> layer = ace.IctdSemiCoupledSymmetricContraction(
     ...     [tp], linears, backend="torch"
@@ -56,14 +74,34 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
     >>> weights = [torch.randn(2, linear.weight_numel) for linear in linears]
     >>> node_type = torch.tensor([0, 1, 0])
     >>> layer(irreps.randn(3, -1), weights, node_type).shape
-    torch.Size([3, 2])
+    torch.Size([3, 10])
     """
 
     coupling_entries = staticmethod(coupling_entries)
 
     def __init__(self, tensor_products, linears, backend="torch"):
-        super().__init__(tensor_products, linears, backend)
-        self.projection = Projector(linears[0].irreps_out)
+        linears = tuple(linears)
+        if len({linear.output_basis for linear in linears}) > 1:
+            raise ValueError("Coefficient maps must use the same output basis.")
+        super().__init__(
+            tensor_products,
+            [cartesian_coefficient(linear) for linear in linears],
+            backend,
+        )
+        self.projection = Projector(self.linears[0].irreps_out)
+        self.output_transform = (
+            ChangeOfBasis(self.linears[0].irreps_out, inverse=True)
+            if linears[0].output_basis == "spherical"
+            else None
+        )
+        self.output_dim = linears[0].irreps_out.dim
+
+    def forward(self, features, weights, node_type):
+        """Return indexed coefficients in the declared output basis."""
+        output = super().forward(features, weights, node_type)
+        return (
+            output if self.output_transform is None else self.output_transform(output)
+        )
 
     def project_product(self, features, stage):
         return self.tensor_products[stage].projection(features)

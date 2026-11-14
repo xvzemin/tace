@@ -14,10 +14,15 @@ class PaddedSphericalTACE(SphericalTACE):
 
     def readout_fn(self, data, graph, representation, edge_features):
         result = super().readout_fn(data, graph, representation, edge_features)
-        valid = torch.arange(data["positions"].shape[0], device=data["positions"].device) < data["ptr"][-1]
+        valid = (
+            torch.arange(data["positions"].shape[0], device=data["positions"].device)
+            < data["ptr"][-1]
+        )
         node_energy = torch.where(valid, result["node_energy"], 0)
         result["node_energy"] = node_energy
-        result["energy"] = node_energy.new_zeros((data["ptr"].numel() - 1,)).index_add(0, data["batch"], node_energy)
+        result["energy"] = node_energy.new_zeros((data["ptr"].numel() - 1,)).index_add(
+            0, data["batch"], node_energy
+        )
         return result
 
 
@@ -45,7 +50,14 @@ def pad_batch(batch, node_multiple, edge_multiple):
     padded_edges = ((edges + edge_multiple - 1) // edge_multiple) * edge_multiple
     extra_nodes, extra_edges = padded_nodes - nodes, padded_edges - edges
     result = dict(batch)
-    node_keys = {"atomic_numbers", "positions", "node_type", "num_neighbors", "forces", "batch"}
+    node_keys = {
+        "atomic_numbers",
+        "positions",
+        "node_type",
+        "num_neighbors",
+        "forces",
+        "batch",
+    }
     for key in node_keys & batch.keys():
         value = batch[key]
         if value.shape[0] != nodes:
@@ -56,8 +68,13 @@ def pad_batch(batch, node_multiple, edge_multiple):
         elif key == "batch":
             extra[:] = batch["ptr"].numel() - 2
         result[key] = torch.cat((value, extra))
-    dummy = torch.arange(extra_edges, device=batch["edge_index"].device) % extra_nodes + nodes
-    result["edge_index"] = torch.cat((batch["edge_index"], torch.stack((dummy, dummy))), dim=1)
+    dummy = (
+        torch.arange(extra_edges, device=batch["edge_index"].device) % extra_nodes
+        + nodes
+    )
+    result["edge_index"] = torch.cat(
+        (batch["edge_index"], torch.stack((dummy, dummy))), dim=1
+    )
     shifts = batch["edge_shifts"].new_zeros((extra_edges, 3))
     shifts[:, 0] = 1
     result["edge_shifts"] = torch.cat((batch["edge_shifts"], shifts))
@@ -72,14 +89,22 @@ def register_padded_force_loss(loss):
 
     @register_loss(key="oam_xl_padded_l2mae_forces")
     def padded_force_loss(pred, label, element_weights=None):
-        valid = torch.arange(pred["forces"].shape[0], device=pred["forces"].device) < label["ptr"][-1]
+        valid = (
+            torch.arange(pred["forces"].shape[0], device=pred["forces"].device)
+            < label["ptr"][-1]
+        )
         error = torch.where(valid[:, None], pred["forces"] - label["forces"], 1)
         weight = (label["entropy"] * label["forces_weight"])[label["batch"]]
         weight = apply_element_weights(weight, label, element_weights)
-        return (torch.linalg.vector_norm(error, dim=-1) * weight * valid).sum() / label["ptr"][-1]
+        return (torch.linalg.vector_norm(error, dim=-1) * weight * valid).sum() / label[
+            "ptr"
+        ][-1]
 
     names = list(loss.loss_function_name)
     if "l2mae_forces" not in names:
         raise ValueError("Padding requires the original L2MAE force objective")
-    loss.loss_function_name = ["oam_xl_padded_l2mae_forces" if name == "l2mae_forces" else name for name in names]
+    loss.loss_function_name = [
+        "oam_xl_padded_l2mae_forces" if name == "l2mae_forces" else name
+        for name in names
+    ]
     return loss

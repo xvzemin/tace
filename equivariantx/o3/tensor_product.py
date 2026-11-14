@@ -5,10 +5,14 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops.common.sparse_coefficients import bilinear_tables
 from ..ops.precision import validate_module_precision
-from ..ops.radial import materialize
+from ..ops.torch.o3 import tensor_product as torch_kernel
 
 __all__ = ["FactorizedTensorProduct"]
+
+SPARSE_PRODUCT_SIZE = 32768
+LITERAL_PRODUCT_SIZE = 64
 
 
 def irrep_layout(irreps):
@@ -42,8 +46,12 @@ class FactorizedTensorProduct(torch.nn.Module):
         irrep_normalization,
         internal_weights,
         shared_weights,
+        backend="torch",
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)
         self.irreps_out = o3.Irreps(irreps_out)
@@ -162,6 +170,8 @@ class FactorizedTensorProduct(torch.nn.Module):
                     routes.append((i, j, tuple(outputs)))
 
         self.routes = []
+        self.compact_routes = {}
+        self.program_entries = {}
         mask = torch.zeros(self.irreps_out.dim, dtype=torch.float64, device="cpu")
         for i, j, irreps in routes:
             name = f"output_{len(self.routes)}"
@@ -199,6 +209,24 @@ class FactorizedTensorProduct(torch.nn.Module):
                         self.inputs[0][i][2], self.inputs[1][j][2], irreps
                     ),
                 )
+            dimensions = (self.inputs[0][i][-1], self.inputs[1][j][-1], index.shape[-1])
+            if math.prod(dimensions) <= SPARSE_PRODUCT_SIZE:
+                entries = self.coupling_entries(
+                    self.inputs[0][i][2], self.inputs[1][j][2], irreps
+                )
+                scales1 = self.constants[f"{self.inputs[0][i][0]}_scale"]
+                scales2 = self.constants[f"{self.inputs[1][j][0]}_scale"]
+                entries = tuple(
+                    (a, b, c, coefficient * float(scales1[a] * scales2[b]) * scales[c])
+                    for a, b, c, coefficient in entries
+                )
+                for k, table in enumerate(bilinear_tables(dimensions, entries)):
+                    self.add_constant(f"{name}_sparse_{k}", table)
+                self.compact_routes[name] = (
+                    dimensions,
+                    entries if len(entries) <= LITERAL_PRODUCT_SIZE else (),
+                )
+                self.program_entries[name] = entries
             self.routes.append((i, j, name, index.shape[-1]))
         self.add_constant("output_mask", mask)
         self.inputs = tuple(
@@ -211,6 +239,35 @@ class FactorizedTensorProduct(torch.nn.Module):
             self.weight = torch.nn.Parameter(torch.randn(self.weight_numel))
         else:
             self.register_buffer("weight", torch.empty(0), persistent=False)
+
+    def coupling_entries(self, irreps1, irreps2, irreps_out):
+        """Exact nonzero spherical coefficients, before normalization."""
+        entries = []
+        a = 0
+        for ir1 in irreps1:
+            b = 0
+            for ir2 in irreps2:
+                c = 0
+                for ir in irreps_out:
+                    if (
+                        ir.p == ir1.p * ir2.p
+                        and getattr(ir, "t", 1)
+                        == getattr(ir1, "t", 1) * getattr(ir2, "t", 1)
+                        and abs(ir1.l - ir2.l) <= ir.l <= ir1.l + ir2.l
+                    ):
+                        coefficient = self.reduced_coefficient(ir1.l, ir2.l, ir.l)
+                        if coefficient:
+                            block = coefficient * o3.wigner_3j(
+                                ir1.l, ir2.l, ir.l, dtype=torch.float64, device="cpu"
+                            )
+                            entries.extend(
+                                (a + x, b + y, c + z, float(block[x, y, z]))
+                                for x, y, z in block.nonzero().tolist()
+                            )
+                    c += ir.dim
+                b += ir2.dim
+            a += ir1.dim
+        return tuple(entries)
 
     def forward(self, x, y, weight=None):
         """Evaluate the tensor product.
@@ -243,36 +300,11 @@ class FactorizedTensorProduct(torch.nn.Module):
             raise ValueError("Weights must end with weight_numel.")
         if self.shared_weights and weight.ndim != 1:
             raise ValueError("Shared weights must be one-dimensional.")
-        shape = torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        x, y, weight = (
-            value.expand(shape + (value.shape[-1],)) for value in (x, y, weight)
-        )
-        result = x.new_zeros(shape + (self.output_dim,))
-        if not self.routes:
-            # Keep zero outputs differentiable when no requested coupling exists.
-            return result + (x.sum(-1) + y.sum(-1) + weight.sum(-1)).unsqueeze(-1) * 0
-        inputs = []
-        for value, entries in zip((x, y), self.inputs):
-            transformed = []
-            for name, mul, dim in entries:
-                features = value.index_select(-1, getattr(self, f"{name}_index"))
-                factors = weight.index_select(-1, getattr(self, f"{name}_weight_index"))
-                features = (features * factors).reshape(shape + (mul, dim))
-                features = features * getattr(self, f"{name}_scale")
-                transformed.append(
-                    self.transform(features, getattr(self, f"{name}_basis"))
-                )
-            inputs.append(transformed)
-        mul = self.num_channels
-        for i, j, name, dim in self.routes:
-            value = self.product(inputs[0][i], inputs[1][j], name)
-            factors = weight.index_select(-1, getattr(self, f"{name}_weight_index"))
-            value = value * factors.reshape(shape + (mul, dim))
-            value = value * getattr(self, f"{name}_scale")
-            result = result.index_add(
-                -1, getattr(self, f"{name}_index"), value.reshape(shape + (mul * dim,))
-            )
-        return result
+        if getattr(self, "backend", "torch") == "cuda":
+            from ..ops.cuda.o3 import tensor_product as cuda_kernel
+
+            return cuda_kernel.evaluate(self, x, y, weight)
+        return torch_kernel.evaluate(self, x, y, weight)
 
     def extra_repr(self):
         return (
@@ -284,8 +316,16 @@ class FactorizedTensorProduct(torch.nn.Module):
 class TensorProductConv(torch.nn.Module):
     """Gather source features, couple edge attributes and sum at destinations."""
 
-    def __init__(self, tensor_product):
+    def __init__(self, tensor_product, *, backend=None, radial_mode="last"):
         super().__init__()
+        backend = (
+            getattr(tensor_product, "backend", "torch") if backend is None else backend
+        )
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.backend, self.radial_mode = backend, radial_mode
         self.tensor_product = tensor_product
         self.irreps_in1 = tensor_product.irreps_in1
         self.irreps_in2 = tensor_product.irreps_in2
@@ -294,6 +334,7 @@ class TensorProductConv(torch.nn.Module):
         self.input_dim = self.irreps_in1.dim
         self.edge_dim = self.irreps_in2.dim
         self.output_dim = self.irreps_out.dim
+        self.program_metadata = torch_kernel.convolution_program(tensor_product)
 
     def forward(
         self,
@@ -366,7 +407,6 @@ class TensorProductConv(torch.nn.Module):
                 or self.tensor_product.internal_weights
             ):
                 raise ValueError("radial_network requires external, unshared weights.")
-            weight = radial_network(materialize(radial, edge_index))
         elif radial is not None:
             raise ValueError("radial inputs require radial_network.")
         if (
@@ -375,10 +415,33 @@ class TensorProductConv(torch.nn.Module):
             and weight.shape != (edge_index.shape[1], self.weight_numel)
         ):
             raise ValueError("Edge weights must have shape (edges, weight_numel).")
-        messages = self.tensor_product(features[edge_index[0]], edge_attrs, weight)
         num_nodes = features.shape[0] if num_nodes is None else num_nodes
-        return messages.new_zeros((num_nodes, self.output_dim)).index_add(
-            0, edge_index[1], messages
+        if (
+            weight is None
+            and radial_network is None
+            and not self.tensor_product.internal_weights
+        ):
+            raise ValueError("External weights are required.")
+        if weight is not None and (
+            weight.ndim < 1
+            or weight.shape[-1] != self.weight_numel
+            or self.tensor_product.shared_weights
+            and weight.ndim != 1
+        ):
+            raise ValueError("Weights must match weight_numel and shared_weights.")
+        kernel = torch_kernel
+        if self.backend == "cuda":
+            from ..ops.cuda.o3 import tensor_product as kernel
+
+        return kernel.convolve(
+            self,
+            features,
+            edge_attrs,
+            edge_index,
+            weight,
+            num_nodes,
+            radial,
+            radial_network,
         )
 
     def extra_repr(self):

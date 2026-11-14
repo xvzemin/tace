@@ -75,6 +75,7 @@ def test_tensor_product(
 @pytest.mark.parametrize("space", [o2, co2])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_tensor_product_export(space, backend, double_precision):
+    torch.compiler.reset()
     if backend == "cuda" and DEVICE.type != "cuda":
         pytest.skip("CUDA is unavailable")
     module = space.TensorProduct(

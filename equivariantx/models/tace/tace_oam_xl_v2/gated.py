@@ -2,7 +2,7 @@
 
 import torch
 
-from equivariantx.ops.channel_product import channel_product
+from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.utils.metadata import channel_product_layout
 
 

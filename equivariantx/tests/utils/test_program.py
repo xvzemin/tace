@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from equivariantx.ops.kernels.torch.edge import evaluate_torch
+from equivariantx.ops.common.torch.edge import evaluate_torch
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.program import Program, next_adjoint, next_tangent
 
@@ -79,6 +79,50 @@ def test_multilinear_direction_program(operation, role, transpose):
 
     actual = evaluate_torch(
         tangent, values + directions, index, index, 3, optimized=True
+    )
+    expected = torch.func.jvp(function, values, directions)[1]
+    torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+
+
+@pytest.mark.parametrize("geometric", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_convolution_direction_program(geometric, shared, transpose, double_precision):
+    from equivariantx.tests.ops.common.torch.test_o3 import convolution_case
+
+    _, description, values, source, target = convolution_case(
+        geometric, shared=shared, device="cpu"
+    )
+    projection_shape = tuple(values[2].shape)
+    values = (*values[:2], values[2].reshape(1, -1), *values[3:])
+    kinds = ("source", "shared" if shared else "edge", "shared", "edge", "target")
+    if geometric:
+        kinds += ("edge",)
+    program = Program()
+    operands = tuple(
+        program.input(slot, kind, value.shape[1])
+        for slot, (kind, value) in enumerate(zip(kinds, values))
+    )
+    root = program.add(
+        "convolution",
+        values[4].shape[1],
+        operands,
+        ("o3", description, 4, False, projection_shape, 0),
+    )
+    metadata = repr((tuple(program.nodes), ((root, 0, "target"),)))
+    if transpose:
+        metadata = next_adjoint(metadata, tuple(range(len(values))), (0,), len(values))
+        values += (torch.randn_like(values[4]),)
+    directions = tuple(torch.randn_like(value) for value in values)
+    tangent = next_tangent(metadata, len(values))
+    nodes, _ = parse_metadata(tangent)
+    assert all(data[0] < 2 * len(values) for op, _, _, data in nodes if op == "input")
+
+    def function(*values):
+        return evaluate_torch(metadata, values, source, target, 5, optimized=True)
+
+    actual = evaluate_torch(
+        tangent, values + directions, source, target, 5, optimized=True
     )
     expected = torch.func.jvp(function, values, directions)[1]
     torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)

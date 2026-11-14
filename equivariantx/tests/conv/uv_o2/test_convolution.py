@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
 from equivariantx.tests.conv.testing import assert_native_autograd
@@ -67,7 +68,10 @@ def test_transverse_functional(backend, radial_mode, monkeypatch, double_precisi
         torch.randn(5, 3, device=device),
     )
     directions = tuple(torch.randn_like(value) for value in inputs)
-    function = lambda x, v: module(x, v, index)
+
+    def function(x, v):
+        return module(x, v, index)
+
     actual = torch.func.jvp(function, inputs, directions)
     batched = tuple(torch.stack((value, value * 0.9)) for value in inputs)
     batch_actual = torch.vmap(function)(*batched)
@@ -90,7 +94,9 @@ def test_transverse_aoti(radial_mode, tmp_path, monkeypatch, double_precision):
     import os
     import subprocess
     import sys
+
     from torch.fx.experimental.proxy_tensor import make_fx
+
     from equivariantx.ops import config
 
     module = RadialConvolution("cuda", radial_mode).cuda()
@@ -153,9 +159,61 @@ assert 'equivariantx' not in sys.modules
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA tiled compilation")
+@pytest.mark.parametrize("compiler", ["inductor", "aoti"])
+def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precision):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.ops import config
+
+    monkeypatch.setattr(config, "EDGE_PROGRAM_INLINE", False)
+    module = RadialConvolution("cuda", "full").cuda()
+    index = torch.tensor([[0, 1, 1, 2, 0], [1, 2, 0, 1, 0]], device="cuda")
+    names, parameters = zip(*module.named_parameters())
+    inputs = (
+        torch.randn(3, module.conv.input_dim, device="cuda", requires_grad=True),
+        torch.randn(5, 3, device="cuda", requires_grad=True),
+        *parameters,
+    )
+
+    def joint(x, vectors, *parameters):
+        output = torch.func.functional_call(
+            module, dict(zip(names, parameters)), (x, vectors, index)
+        )
+        energy = output.square().mean()
+        force = -torch.autograd.grad(energy, vectors, create_graph=True)[0]
+        loss = energy + (force - 0.1).square().sum()
+        return loss, force, *torch.autograd.grad(loss, parameters)
+
+    graph = make_fx(joint)(*inputs)
+    assert any(
+        node.target == torch.ops.eqx.edge_program.default for node in graph.graph.nodes
+    )
+    if compiler == "aoti":
+        exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
+        package = torch._inductor.aoti_compile_and_package(
+            exported, package_path=str(tmp_path / "tiled.pt2")
+        )
+        run = torch._inductor.aoti_load_package(package)
+    else:
+        run = torch.compile(graph, fullgraph=True)
+    module.conv.backend = "torch"
+    for frame in module.conv.transverse_frames:
+        if frame is not None:
+            frame.backend = "torch"
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for scale in (1.0, 0.8):
+        values = tuple((value.detach() * scale).requires_grad_() for value in inputs)
+        expected = joint(*values)
+        with torch.no_grad():
+            actual = run(*(value.detach() for value in values))
+        torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
+
+
+@pytest.mark.parametrize(
+    "backend,reference", [("torch", False), ("torch", True), ("cuda", False)]
+)
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("reference", [False, True])
 @pytest.mark.parametrize(
     "mmax,magnetic,attention,odd",
     [
@@ -179,8 +237,6 @@ def test_uv_o2_transverse(
 ):
     from equivariantx.ops import config
 
-    if reference and backend == "cuda":
-        pytest.skip("The reference switch applies only to Torch.")
     monkeypatch.setattr(config, "TORCH_REFERENCE", reference)
     monkeypatch.setattr(config, "TORCH_RECOMPUTE", not reference)
     if device == "cuda" and not torch.cuda.is_available():
@@ -188,7 +244,7 @@ def test_uv_o2_transverse(
     from equivariantx.conv.attention import graph_softmax
 
     if backend == "cuda" and device == "cuda":
-        import equivariantx.ops.kernels.cuda.execution as execution
+        import equivariantx.ops.common.cuda.execution as execution
 
         launch = execution.launch
         monkeypatch.setattr(
@@ -233,7 +289,7 @@ def test_uv_o2_transverse(
         backend=backend,
     ).to(device)
     if backend == "cuda" and device == "cuda" and not attention:
-        import equivariantx.conv.uv_o2.convolution as uv_convolution
+        from equivariantx.ops.torch.conv.uv_o2 import convolution as uv_convolution
 
         def no_full_edge_linear(*args, **kwargs):
             raise AssertionError(
@@ -474,7 +530,8 @@ def test_uv_o2_transverse_compile(backend, geometry, double_precision):
 @pytest.mark.parametrize("radial_mode", ["last", "full"])
 @pytest.mark.parametrize("width", [64, 128, 1024])
 def test_radial_projection(backend, radial_mode, width, monkeypatch, double_precision):
-    from equivariantx.ops import config, radial as radial_ops
+    from equivariantx.ops import config
+    from equivariantx.ops.common import radial as radial_ops
 
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -554,3 +611,309 @@ def test_radial_projection(backend, radial_mode, width, monkeypatch, double_prec
         actual, expected = [
             torch.cat([g.flatten() for g in values]) for values in gradients
         ]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("promoted", [False, True])
+@pytest.mark.parametrize("radial_mode", ["last", "full"])
+def test_reference_bypasses_geometry_children(
+    device, promoted, radial_mode, monkeypatch, double_precision
+):
+    from equivariantx.ops import config
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    dtype = torch.float32 if promoted else torch.float64
+    tolerance = 3e-5 if promoted else 2e-10
+    module = RadialConvolution("cuda", radial_mode).to(device=device, dtype=dtype)
+    module.conv.backend = "torch"
+    module.conv.wigner.backend = "cuda"
+    reference = RadialConvolution("torch", radial_mode).to(device=device, dtype=dtype)
+    reference.load_state_dict(module.state_dict())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("The parent reference called a geometry child.")
+
+    monkeypatch.setattr(module.conv.wigner, "forward_packed", forbidden)
+    for frame in module.conv.transverse_frames:
+        if frame is not None:
+            monkeypatch.setattr(frame, "forward", forbidden)
+            for coupling in frame.couplings.values():
+                coupling.backend = "cuda"
+                monkeypatch.setattr(coupling, "forward", forbidden)
+    backends = {
+        name: child.backend
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    }
+    for edges in (5, 0):
+        index = torch.stack(
+            (
+                torch.arange(edges, device=device) % 3,
+                (torch.arange(edges, device=device) + 1) % 3,
+            )
+        )
+        inputs = (
+            torch.randn(
+                3, module.conv.input_dim, device=device, dtype=dtype
+            ).requires_grad_(),
+            (
+                torch.randn(edges, 3, device=device, dtype=torch.float64) + 1
+            ).requires_grad_(),
+        )
+        a, b = module(*inputs, index), reference(*inputs, index)
+        torch.testing.assert_close(a, b, atol=tolerance, rtol=tolerance)
+        assert_native_autograd(a)
+        for _ in range(3):
+            gradients = [
+                torch.autograd.grad(
+                    value.sin().sum(), inputs, create_graph=True, allow_unused=True
+                )
+                for value in (a, b)
+            ]
+            gradients = [
+                tuple(
+                    torch.zeros_like(x) if g is None else g
+                    for x, g in zip(inputs, values)
+                )
+                for values in gradients
+            ]
+            torch.testing.assert_close(*gradients, atol=tolerance, rtol=tolerance)
+            a, b = [
+                sum(g.sum() / max(1, g.numel()) for g in values)
+                + sum(x.sum() * 0 for x in inputs)
+                for values in gradients
+            ]
+            assert_native_autograd(a)
+        tangents = tuple(torch.randn_like(x) for x in inputs)
+        with torch.autograd.forward_ad.dual_level():
+            duals = tuple(
+                torch.autograd.forward_ad.make_dual(x, v)
+                for x, v in zip(inputs, tangents)
+            )
+            actual = torch.autograd.forward_ad.unpack_dual(module(*duals, index))
+        expected = torch.autograd.functional.jvp(
+            lambda *args: reference(*args, index), inputs, tangents
+        )
+        assert actual.tangent is not None
+        torch.testing.assert_close(
+            tuple(actual), expected, atol=tolerance, rtol=tolerance
+        )
+        assert backends == {
+            name: child.backend
+            for name, child in module.named_modules()
+            if hasattr(child, "backend")
+        }
+        assert config.TORCH_REFERENCE is True
+
+
+def test_reference_mixed_children_dynamic_aoti(monkeypatch, tmp_path, double_precision):
+    import os
+    import subprocess
+    import sys
+    import zipfile
+
+    from torch.fx.experimental.dynamic_spec import (
+        ParamsSpec,
+        ShapesSpec,
+        ShapeVar,
+        TensorSpec,
+    )
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.ops import config
+
+    class ScalarConvolution(RadialConvolution):
+        def __init__(self, backend):
+            torch.nn.Module.__init__(self)
+            frame = o2.LocalFrame("0e+1o", mmax=0)
+            gate = o2.Gate(frame.irreps_out, [torch.nn.SiLU()], "", [], "")
+            self.up = o2.Linear((frame.irreps_out * 2).regroup(), gate.irreps_in)
+            self.down = o2.Linear(gate.irreps_out, frame.irreps_out)
+            self.conv = eqx_conv.UvO2TensorProductConv(
+                frame,
+                self.up,
+                gate,
+                self.down,
+                frame,
+                backend=backend,
+                radial_mode="full",
+            )
+            self.radial = torch.nn.Sequential(
+                torch.nn.Linear(3, 2),
+                torch.nn.SiLU(),
+                torch.nn.Linear(2, self.conv.weight_numel),
+            )
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    module = ScalarConvolution("cuda").double()
+    module.conv.backend = "torch"
+    reference = ScalarConvolution("torch").double()
+    reference.load_state_dict(module.state_dict())
+    backends = {
+        name: child.backend
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    }
+    names, parameters = zip(*module.named_parameters())
+
+    def joint(layer, x, vectors, index, parameters):
+        output = torch.func.functional_call(
+            layer, dict(zip(names, parameters)), (x, vectors, index)
+        )
+        energy = output.square().sum() / 10
+        force = -torch.autograd.grad(energy, vectors, create_graph=True)[0]
+        loss = energy + (force - 0.1).square().sum() / 10
+        return energy, force, *torch.autograd.grad(loss, parameters)
+
+    def actual(x, vectors, index, *parameters):
+        return joint(module, x, vectors, index, parameters)
+
+    def expected(x, vectors, index, *parameters):
+        return joint(reference, x, vectors, index, parameters)
+
+    def inputs(edges):
+        return (
+            (torch.randn(3, module.conv.input_dim) / 5).requires_grad_(),
+            (torch.randn(edges, 3) / 5 + 1).requires_grad_(),
+            torch.stack((torch.arange(edges) % 3, (torch.arange(edges) + 1) % 3)),
+        )
+
+    values = (*inputs(7), *parameters)
+    probe = actual(*values)
+    assert torch.count_nonzero(probe[1]) > 0
+    assert all(torch.count_nonzero(gradient) > 0 for gradient in probe[2:])
+    edges = ShapeVar("edges", min=2, optimization_hint=7)
+    shapes = ShapesSpec(
+        ParamsSpec(
+            {
+                "x": TensorSpec([None, None]),
+                "vectors": TensorSpec([edges, None]),
+                "index": TensorSpec([None, edges]),
+            }
+        )
+    )
+    graph = make_fx(
+        actual,
+        tracing_mode="fake",
+        _allow_non_fake_inputs=True,
+        dynamic_shapes=shapes,
+    )(*values)
+    oracle = make_fx(
+        expected,
+        tracing_mode="fake",
+        _allow_non_fake_inputs=True,
+        dynamic_shapes=shapes,
+    )(*values)
+    graph.graph.eliminate_dead_code()
+    graph.recompile()
+    assert not any("eqx." in str(node.target) for node in graph.graph.nodes)
+    for count in (0, 1, 7, 11):
+        batch = (*inputs(count), *parameters)
+        torch.testing.assert_close(
+            actual(*batch), expected(*batch), atol=2e-9, rtol=2e-9
+        )
+        if count >= 2:
+            torch.testing.assert_close(
+                graph(*batch), oracle(*batch), atol=2e-9, rtol=2e-9
+            )
+    dynamic_edges = torch.export.Dim("edges", min=2, max=16)
+    arguments = tuple(x.detach() for x in values)
+    dynamic_shapes = (
+        None,
+        {0: dynamic_edges},
+        {1: dynamic_edges},
+        *(None for _ in parameters),
+    )
+    exported = torch.export.export(
+        graph,
+        arguments,
+        strict=True,
+        dynamic_shapes=dynamic_shapes,
+    )
+    reference_program = torch.export.export(
+        oracle,
+        arguments,
+        strict=True,
+        dynamic_shapes=dynamic_shapes,
+    )
+    package = tmp_path / "reference.pt2"
+    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    with zipfile.ZipFile(package) as archive:
+        assert any(name.endswith(".so") for name in archive.namelist())
+        assert not any(name.endswith((".cubin", ".ptx")) for name in archive.namelist())
+        source = "\n".join(
+            archive.read(name).decode()
+            for name in archive.namelist()
+            if name.endswith(".cpp")
+        )
+        assert source and "eqx::" not in source
+    torch.export.save(reference_program, tmp_path / "oracle.pt2")
+    torch.save(
+        (
+            tuple(p.detach() for p in parameters),
+            [tuple(x.detach() for x in inputs(n)) for n in (7, 11, 5)],
+            [tuple(x.detach() for x in inputs(n)) for n in (0, 1, 17)],
+        ),
+        tmp_path / "inputs.pt",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            """
+import sys, torch
+torch.set_num_threads(2)
+run = torch._inductor.aoti_load_package(sys.argv[1])
+oracle = torch.export.load(sys.argv[2]).module()
+weights, cases, invalid = torch.load(sys.argv[3], weights_only=True)
+expected_weights = tuple(p.clone() for p in weights)
+updates = 0
+for inputs in cases:
+    for _ in range(2):
+        actual = run(*inputs, *weights)
+        expected = oracle(*inputs, *expected_weights)
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        previous = weights
+        if inputs[1].numel():
+            assert torch.count_nonzero(actual[1]) > 0
+            assert all(torch.count_nonzero(gradient) > 0 for gradient in actual[2:])
+        weights = tuple(p - 0.001 * g for p, g in zip(weights, actual[2:]))
+        if inputs[1].numel():
+            assert any(not torch.equal(p, q) for p, q in zip(previous, weights))
+            updates += 1
+        expected_weights = tuple(p - 0.001 * g for p, g in zip(expected_weights, expected[2:]))
+        torch.testing.assert_close(weights, expected_weights, atol=2e-9, rtol=2e-9)
+for inputs in invalid:
+    try:
+        run(*inputs, *weights)
+    except RuntimeError as error:
+        assert ('too small' if inputs[1].shape[0] < 2 else 'too large') in str(error)
+    else:
+        raise AssertionError('The exported edge bounds were not enforced')
+assert 'equivariantx' not in sys.modules and 'e3nn' not in sys.modules
+print(f'{len(cases) * 2} steps checked, {updates} nonzero force/parameter updates')
+""",
+            str(package),
+            str(tmp_path / "oracle.pt2"),
+            str(tmp_path / "inputs.pt"),
+        ],
+        cwd=tmp_path,
+        env={
+            **{key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+            "AOTI_RUNTIME_CHECK_INPUTS": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    (tmp_path / "independent.log").write_text(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert backends == {
+        name: child.backend
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    }
+    assert config.TORCH_REFERENCE is True

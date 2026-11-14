@@ -387,7 +387,8 @@ def next_tangent(metadata, num_inputs):
         if slot not in present:
             results.append((program.constant(program.size(root), 0), slot, kind))
             present.add(slot)
-    # Cotangent placeholders cancel algebraically; never allocate them at runtime.
+    # The transposed linear map is independent of its cotangent. Evaluate it
+    # at zero while preserving convolution operands' source/target domains.
     used = set()
 
     def visit(node):
@@ -408,7 +409,9 @@ def next_tangent(metadata, num_inputs):
     selected = sorted(used)
     remap = {node: i for i, node in enumerate(selected)}
     compact = tuple(
-        (op, width, tuple(remap[arg] for arg in args), data)
+        ("constant", width, (), 0.0)
+        if op == "input" and data[0] in seed_slots
+        else (op, width, tuple(remap[arg] for arg in args), data)
         for node in selected
         for op, width, args, data in (program.nodes[node],)
     )

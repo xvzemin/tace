@@ -5,6 +5,7 @@ import torch
 from e3nn import o3
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
+from equivariantx.ops import config
 from equivariantx.tests.conv.o2_o3.test_convolution import (
     test_streaming_projected_tiles as check_streaming_projected_tiles,
 )
@@ -65,9 +66,9 @@ def test_partitioned_paths(monkeypatch, double_precision, implementation):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     if implementation == "o3":
-        from equivariantx.ops.kernels.cuda.o3 import convolution
+        from equivariantx.ops.common.cuda.o3 import convolution
     else:
-        from equivariantx.ops.kernels.cuda.o2_o3 import convolution
+        from equivariantx.ops.common.cuda.o2_o3 import convolution
 
     monkeypatch.setattr(convolution, "SOURCE_SIZE_LIMIT", 0)
     convolution.execution_plan.cache_clear()
@@ -94,10 +95,15 @@ def test_partitioned_paths(monkeypatch, double_precision, implementation):
         "uu_transverse",
     ],
 )
-def test_torch_scalar_direction_gradient(algorithm, edges, double_precision):
+@pytest.mark.parametrize("ordinary", [False, True])
+def test_torch_scalar_direction_gradient(
+    algorithm, edges, ordinary, double_precision, monkeypatch
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx import co3
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", ordinary)
 
     args = ("2x0e", "0e", "2x0e", [(0, 0, 0, "uvu", True)])
     options = dict(internal_weights=False, shared_weights=False)
@@ -133,7 +139,8 @@ def test_torch_scalar_direction_gradient(algorithm, edges, double_precision):
         actual = evaluate(
             x, radial, projection, None, amplitude, index, 3, vectors=vectors
         )
-    assert_native_autograd(actual)
+    if ordinary:
+        assert_native_autograd(actual)
     grads = torch.autograd.grad(
         actual.square().sum(), (x, radial, projection, vectors, amplitude)
     )
@@ -367,7 +374,14 @@ def test_o3_cartesian_compile_and_empty_graph(
 
 
 @pytest.mark.parametrize(
-    "device,backend", [("cpu", "torch"), ("cuda", "torch"), ("cuda", "cuda")]
+    "device,backend,ordinary",
+    [
+        ("cpu", "torch", False),
+        ("cpu", "torch", True),
+        ("cuda", "torch", False),
+        ("cuda", "torch", True),
+        ("cuda", "cuda", False),
+    ],
 )
 @pytest.mark.parametrize(
     "shared,direct,merge,unweighted",
@@ -378,10 +392,19 @@ def test_o3_cartesian_compile_and_empty_graph(
     ],
 )
 def test_values_and_recursive_derivatives(
-    device, backend, shared, direct, merge, unweighted, double_precision
+    device,
+    backend,
+    ordinary,
+    shared,
+    direct,
+    merge,
+    unweighted,
+    double_precision,
+    monkeypatch,
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", ordinary)
     tp = tensor_product(merge=merge, unweighted=unweighted).to(device)
     conv = eqx_conv.O3TensorProductConv(tp, backend=backend).to(device)
     edges = torch.randint(5, (2, 19), device=device)
@@ -402,7 +425,7 @@ def test_values_and_recursive_derivatives(
     actual = conv(x, attrs, radial, projection, edges)
     expected = reference(tp, x, attrs, radial, projection, edges)
     torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
-    if backend == "torch":
+    if ordinary:
         assert_native_autograd(actual)
     for _ in range(3):
         seed = torch.randn_like(actual) / actual.numel() ** 0.5
@@ -415,7 +438,7 @@ def test_values_and_recursive_derivatives(
         actual, expected = (
             torch.cat([value.flatten() for value in values]) for values in (a, b)
         )
-        if backend == "torch":
+        if ordinary:
             assert_native_autograd(actual)
 
 
@@ -504,7 +527,7 @@ def test_cuda_unequal_channels(edge_count, double_precision):
 def test_cuda_requested_gradients(monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.kernels.cuda.runtime import runtime
+    from equivariantx.ops.common.cuda.runtime import runtime
 
     tp = tensor_product().cuda()
     module = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
@@ -646,7 +669,7 @@ def test_o3_chunked_shared_gradients(
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.o3.convolution as cuda
+    import equivariantx.ops.common.cuda.o3.convolution as cuda
 
     # Two grouped chunks and a one-edge tail exercise private and broadcast
     # gradients without mistaking the tail for a shared operand.
@@ -682,7 +705,7 @@ def test_o3_chunked_shared_gradients(
 
 
 def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
-    from equivariantx.ops.kernels.cuda.o3.codegen import angular_source
+    from equivariantx.ops.common.cuda.o3.codegen import angular_source
 
     tp = tensor_product()
     conv = eqx_conv.O3TensorProductConv(tp, backend="cuda")
@@ -709,7 +732,7 @@ def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
 def test_o3_mixed_node_adjoint_destination(double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.o3 import contraction
+    from equivariantx.ops.common.o3 import contraction
 
     tp = o3.TensorProduct(
         "3x0e",
@@ -749,10 +772,10 @@ def test_row_product_cuda_graph(
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.kernels.cuda import graph
-    from equivariantx.ops.kernels.cuda.edge import product_graph_layout
-    from equivariantx.ops.kernels.torch.edge import evaluate_torch
-    from equivariantx.ops.edge import evaluate
+    from equivariantx.ops.common.cuda import graph
+    from equivariantx.ops.common.cuda.edge import product_graph_layout
+    from equivariantx.ops.common.torch.edge import evaluate_torch
+    from equivariantx.ops.common.edge import evaluate
     from equivariantx.utils.program import Program
 
     worker = None
@@ -797,7 +820,7 @@ def test_row_product_cuda_graph(
     unsafe = repr((tuple(program.nodes), ((value, 0, "shared"),)))
     assert product_graph_layout(unsafe) is None
     assert product_graph_layout(metadata) is not None
-    from equivariantx.ops.kernels.cuda.execution import uses_matrix_products
+    from equivariantx.ops.common.cuda.execution import uses_matrix_products
 
     assert uses_matrix_products(metadata)
     assert graph.enabled("product") and not graph.enabled("o3")

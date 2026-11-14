@@ -11,6 +11,13 @@ from equivariantx.tests.o2.testing import _transform
 from equivariantx.tests.o2.testing import _time_reverse
 
 
+@pytest.mark.parametrize("kind", ["linear", "uu"])
+def test_forward_ad(kind, device):
+    from equivariantx.tests.utils.testing import check_linear_forward_ad
+
+    check_linear_forward_ad(o2, kind, device)
+
+
 @pytest.mark.parametrize("normalization", ["element", "path"])
 @pytest.mark.parametrize("weight_batch", [(), (1,), (3,)])
 def test_linear_grouped_instructions(double_precision, normalization, weight_batch):

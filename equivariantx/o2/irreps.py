@@ -3,6 +3,8 @@ from typing import Iterator, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
+from ..ops.precision import validate_precision
+
 Parity = Union[int, str]
 TimeParity = Union[int, str]
 IrrepLike = Union[
@@ -40,6 +42,12 @@ class Irrep:
     reflection-odd time-even irreps. Every positive order is a two-dimensional
     real irrep denoted by ``m``. The final ``e`` or ``o`` denotes time parity.
     Names such as ``0e``, ``0o``, and ``1m`` omit the even time parity.
+
+    Examples
+    --------
+    >>> from equivariantx import o2
+    >>> o2.Irrep("2m").dim
+    2
     """
 
     m: int
@@ -203,7 +211,7 @@ class Irrep:
             Compose the rotation with the canonical reflection.
         time_reversal : bool, optional
             Apply time reversal to the representation.
-        dtype : torch.dtype, optional
+        dtype : {torch.float32, torch.float64}, optional
             Requested floating-point dtype.
         device : torch.device, optional
             Requested output device.
@@ -219,8 +227,9 @@ class Irrep:
         if not isinstance(time_reversal, bool):
             raise TypeError("time_reversal must be a bool.")
         angle = torch.as_tensor(angle, dtype=dtype, device=device)
-        if not angle.is_floating_point():
+        if not angle.is_floating_point() and not angle.is_complex():
             angle = angle.to(dtype=torch.get_default_dtype())
+        validate_precision((angle,))
         if self.m == 0:
             sign = -1.0 if reflected and self.p == -1 else 1.0
             if time_reversal:
@@ -274,6 +283,13 @@ class Irreps:
     Iteration yields ``(irrep, multiplicity)`` pairs. Use :meth:`expanded`
     when one entry per irrep copy is required. Feature slices use flattened
     ``ir_mul`` order.
+
+    Examples
+    --------
+    >>> from equivariantx import o2
+    >>> irreps = o2.Irreps("2x0e + 1x2m")
+    >>> irreps.dim
+    4
     """
 
     __slots__ = ("_irreps",)
@@ -546,7 +562,7 @@ class Irreps:
             Compose the rotation with the canonical reflection.
         time_reversal : bool, optional
             Apply time reversal to every irrep.
-        dtype : torch.dtype, optional
+        dtype : {torch.float32, torch.float64}, optional
             Requested floating-point dtype.
         device : torch.device, optional
             Requested output device.
@@ -562,8 +578,9 @@ class Irreps:
         if not isinstance(time_reversal, bool):
             raise TypeError("time_reversal must be a bool.")
         angle = torch.as_tensor(angle, dtype=dtype, device=device)
-        if not angle.is_floating_point():
+        if not angle.is_floating_point() and not angle.is_complex():
             angle = angle.to(dtype=torch.get_default_dtype())
+        validate_precision((angle,))
         output = angle.new_zeros(angle.shape + (self.dim, self.dim))
         for (ir, mul), ir_slice in zip(self, self.slices()):
             matrix = ir.D_from_angle(angle, reflected, time_reversal)

@@ -30,3 +30,39 @@ def test_harmonics(double_precision, normalization, normalize):
         zero = torch.zeros(1, 3, device=DEVICE, requires_grad=True)
         result = module(zero)
         assert torch.isfinite(torch.autograd.grad(result.sum(), zero)[0]).all()
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize("normalization", ["norm", "component", "integral"])
+def test_low_order_high_derivatives(backend, normalize, normalization):
+    from equivariantx.ops.torch.co3.cartesian_harmonics import reference
+
+    layer = (
+        co3.CartesianHarmonics([2, 0, 1, 2], normalize, normalization, backend=backend)
+        .to(DEVICE)
+        .double()
+    )
+    value = (
+        torch.randn(3, 3, dtype=torch.float64, device=DEVICE) * 0.1 + 0.5
+    ).requires_grad_()
+    actual, expected = layer(value), reference(layer, value)
+    for _ in range(5):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        seed = torch.randn_like(actual) * 0.1
+        actual, expected = [
+            torch.autograd.grad((output.sin() * seed).sum(), value, create_graph=True)[
+                0
+            ]
+            for output in (actual, expected)
+        ]
+    direction = torch.randn_like(value)
+    torch.testing.assert_close(
+        torch.func.jvp(layer, (value,), (direction,)),
+        torch.func.jvp(lambda x: reference(layer, x), (value,), (direction,)),
+        atol=2e-11,
+        rtol=2e-11,
+    )
+    torch.testing.assert_close(
+        torch.vmap(layer)(value), reference(layer, value), atol=2e-11, rtol=2e-11
+    )

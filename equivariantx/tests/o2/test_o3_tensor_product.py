@@ -3,9 +3,31 @@
 import pytest
 import torch
 from e3nn import o3
-from equivariantx import o2
 
+from equivariantx import o2
 from equivariantx.tests.o2.testing import spherical_layout
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_public_method_precision(device, double_precision):
+    from equivariantx.tests.utils.testing import check_method_precision
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    layer = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    inputs = (
+        torch.randn(3, layer.local_frame_in.output_dim, device=device),
+        torch.randn(3, layer.weight_numel, device=device),
+        torch.randn(3, layer.num_harmonics, device=device),
+    )
+    check_method_precision(layer, [("forward_local", inputs, {})])
 
 
 @pytest.mark.parametrize("wigner_lmax", [2, 4])
@@ -198,3 +220,241 @@ def test_o3_tensor_product_time_reversal(double_precision):
     x = torch.randn(4, irreps_in.dim)
     d, di = o2.WignerD(2, 2)(torch.randn(4, 3))
     torch.testing.assert_close(module(-x, d, di), -module(x, d, di))
+
+
+@pytest.mark.parametrize("mode", ["uvu", "uvw"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_local_kernel_derivatives(mode, backend, monkeypatch, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o2.o3_tensor_product import handwritten, reference
+
+    monkeypatch.setattr(config, "TORCH_ALIGNED_PRODUCT", True)
+    module = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, mode, i != 0 if mode == "uvu" else True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+        backend=backend,
+    ).to(device=device, dtype=torch.float64)
+    x = (
+        torch.randn(
+            2, 1, module.local_frame_in.output_dim, device=device, dtype=torch.float64
+        )
+        * 0.1
+    ).requires_grad_()
+    w = (
+        torch.randn(1, 3, module.weight_numel, device=device, dtype=torch.float64) * 0.1
+    ).requires_grad_()
+    h = (
+        torch.randn(2, 3, 1, device=device, dtype=torch.float64) * 0.1 + 1
+    ).requires_grad_()
+    values = x, w, h
+    run = (
+        (lambda *args: handwritten(module, *args))
+        if backend == "torch"
+        else module.forward_local
+    )
+    torch.testing.assert_close(run(*values), module.forward_local(*values))
+    actual = run(*values).sin().sum()
+    expected = reference(module, *values).sin().sum()
+    for _ in range(5):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        da, db = [
+            torch.autograd.grad(value, values, create_graph=True)
+            for value in (actual, expected)
+        ]
+        for a, b in zip(da, db):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
+        actual = sum(v.sin().sum() for v in da)
+        expected = sum(v.sin().sum() for v in db)
+    tangent = tuple(torch.randn_like(v) for v in values)
+    with torch.autograd.forward_ad.dual_level():
+        duals = tuple(
+            torch.autograd.forward_ad.make_dual(v, t) for v, t in zip(values, tangent)
+        )
+        primal, actual_tangent = torch.autograd.forward_ad.unpack_dual(run(*duals))
+    expected_primal, expected_tangent = torch.autograd.functional.jvp(
+        lambda *args: reference(module, *args), values, tangent
+    )
+    assert actual_tangent is not None
+    torch.testing.assert_close(primal, expected_primal, atol=3e-10, rtol=3e-10)
+    torch.testing.assert_close(actual_tangent, expected_tangent, atol=3e-10, rtol=3e-10)
+    torch.testing.assert_close(
+        torch.func.jvp(run, values, tangent),
+        torch.autograd.functional.jvp(run, values, tangent),
+        atol=3e-10,
+        rtol=3e-10,
+    )
+    small = tuple(
+        v.detach().reshape(-1, v.shape[-1])[:1].requires_grad_() for v in values
+    )
+    assert torch.autograd.gradcheck(run, small)
+    assert torch.autograd.gradgradcheck(run, small)
+    torch.testing.assert_close(torch.vmap(run)(*small), run(*small))
+    empty = tuple(v[:0] for v in small)
+    assert run(*empty).shape == (0, module.local_output_dim)
+    del module.local_paths
+    torch.testing.assert_close(module.forward_local(*small), reference(module, *small))
+
+
+def test_local_precision_restoration(device):
+    previous = torch.get_default_dtype()
+    try:
+        args = (
+            "2x1o",
+            "1o",
+            "2x0e+2x1e+2x2e",
+            [(0, 0, i, "uvw", True) for i in range(3)],
+        )
+        kwargs = dict(internal_weights=False, shared_weights=False)
+        torch.set_default_dtype(torch.float32)
+        promoted = o2.O3TensorProduct(*args, **kwargs).to(
+            device=device, dtype=torch.float64
+        )
+        torch.set_default_dtype(torch.float64)
+        precise = o2.O3TensorProduct(*args, **kwargs).to(device=device)
+        for name, value in promoted.named_buffers():
+            if name.startswith("scale_") or name.startswith("readout_"):
+                torch.testing.assert_close(
+                    value, precise.get_buffer(name), atol=0, rtol=0
+                )
+        x = torch.randn(2, promoted.local_frame_in.output_dim, device=device)
+        w = torch.randn(2, promoted.weight_numel, device=device)
+        torch.testing.assert_close(
+            promoted.forward_local(x, w),
+            precise.forward_local(x, w),
+            atol=2e-12,
+            rtol=2e-12,
+        )
+    finally:
+        torch.set_default_dtype(previous)
+
+
+@pytest.mark.parametrize("mode", ["uvu", "uvw"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_local_strict_fp32(mode, backend, monkeypatch, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o2.o3_tensor_product import reference
+
+    monkeypatch.setattr(config, "TORCH_ALIGNED_PRODUCT", True)
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    try:
+        args = (
+            "2x1o",
+            "1o",
+            "2x0e+2x1e+2x2e",
+            [(0, 0, i, mode, True) for i in range(3)],
+        )
+        kwargs = dict(internal_weights=False, shared_weights=False)
+        module = o2.O3TensorProduct(*args, **kwargs, backend=backend).to(
+            device=device, dtype=torch.float32
+        )
+        oracle = o2.O3TensorProduct(*args, **kwargs).to(
+            device=device, dtype=torch.float64
+        )
+        x = (
+            torch.randn(
+                2, module.local_frame_in.output_dim, device=device, dtype=torch.float32
+            )
+            * 0.1
+        ).requires_grad_()
+        w = (
+            torch.randn(2, module.weight_numel, device=device, dtype=torch.float32)
+            * 0.1
+        ).requires_grad_()
+        h = (
+            torch.randn(2, 1, device=device, dtype=torch.float32) * 0.1 + 1
+        ).requires_grad_()
+        values = (x, w, h)
+        precise = tuple(v.detach().double().requires_grad_() for v in values)
+        actual = module.forward_local(*values)
+        expected = reference(oracle, *precise)
+        for _ in range(3):
+            torch.testing.assert_close(actual.double(), expected, atol=3e-7, rtol=2e-5)
+            actual = torch.autograd.grad(actual.sin().sum(), x, create_graph=True)[0]
+            expected = torch.autograd.grad(
+                expected.sin().sum(), precise[0], create_graph=True
+            )[0]
+    finally:
+        torch.set_float32_matmul_precision(precision)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("active", [False, True])
+def test_mixed_and_inactive_paths(backend, active, device):
+    from equivariantx.ops.torch.o2.o3_tensor_product import handwritten, reference
+
+    module = o2.O3TensorProduct(
+        "2x0e+3x1o",
+        "0e+1o",
+        "2x0e+4x1o+3x2e",
+        [
+            (0, 0, 0, "uvu", False),
+            (0, 1, 1, "uvw", True),
+            (1, 0, 1, "uvw", True),
+            (1, 1, 2, "uvu", True),
+        ]
+        if active
+        else [],
+        internal_weights=False,
+        shared_weights=False,
+        backend=backend,
+    ).to(device=device, dtype=torch.float64)
+    inputs = tuple(
+        (torch.randn(*shape, device=device, dtype=torch.float64) * 0.1).requires_grad_()
+        for shape in (
+            (2, 1, module.local_frame_in.output_dim),
+            (1, 3, module.weight_numel),
+            (2, 3, module.num_harmonics),
+        )
+    )
+    actual = module.forward_local(*inputs)
+    expected = reference(module, *inputs)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    torch.testing.assert_close(
+        handwritten(module, *inputs), expected, atol=2e-12, rtol=2e-12
+    )
+    for a, b in zip(
+        torch.autograd.grad(actual.square().sum(), inputs),
+        torch.autograd.grad(expected.square().sum(), inputs),
+    ):
+        torch.testing.assert_close(a, b, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision):
+    import copy
+    from unittest.mock import patch
+
+    from equivariantx import o2
+    from equivariantx.ops import config
+    from equivariantx.ops.cuda.o2 import o3_tensor_product as kernel
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = o2.O3TensorProduct(
+        "2x1o",
+        "1o",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        backend="cuda",
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    reference = copy.deepcopy(module)
+    reference.backend = "torch"
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for count in (3, 0):
+        values = (
+            torch.randn(count, module.local_frame_in.output_dim, device=device),
+            torch.randn(count, module.weight_numel, device=device),
+            torch.randn(count, module.num_harmonics, device=device),
+        )
+        with patch.object(kernel, "local", wraps=kernel.local) as selected:
+            actual = module.forward_local(*values)
+        assert selected.call_count == (device == "cuda")
+        torch.testing.assert_close(actual, reference.forward_local(*values))
+    assert module.backend == "cuda" and config.TORCH_REFERENCE is True

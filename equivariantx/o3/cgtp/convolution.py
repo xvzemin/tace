@@ -6,11 +6,11 @@ import torch
 from e3nn import o3
 
 from ...ops import config
-from ...ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ...ops.kernels.torch.tensor_product import instruction_groups
-from ...ops.o3 import contraction
+from ...ops.torch.o3.cgtp import convolution as torch_kernel
+from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ...ops.common.torch.tensor_product import instruction_groups
 from ...ops.precision import validate_module_precision
-from ...ops.radial import cast_radial, radial_features
+from ...ops.common.radial import cast_radial, radial_features
 
 
 class O3TensorProductConv(torch.nn.Module):
@@ -335,148 +335,44 @@ class O3TensorProductConv(torch.nn.Module):
         if not indexed and num_nodes != features.size(0):
             raise ValueError("Row-wise products require one output row per input row.")
         if self.backend == "cuda" and radial_network is None:
-            from ...ops.radial import align_projection
+            from ...ops.common.radial import align_projection
 
             radial, projection = align_projection(radial, projection)
-        operands = [
-            features,
-            radial,
-            projection,
-            edge_attrs,
-            features.new_empty(1).expand(
-                num_nodes,
-                self.harmonic_output_dim if vectors is not None else self.output_dim,
-            ),
-        ]
         if self.backend == "cuda" and features.is_cuda:
-            if vectors is not None:
-                operands.append(vectors)
-            if radial_network is not None:
-                from ...ops.radial import convolve
+            from ...ops.cuda.o3.cgtp import convolution as cuda_kernel
 
-                return convolve(
-                    "o3",
-                    self.harmonic_metadata
-                    if vectors is not None
-                    else self.kernel_metadata,
-                    operands,
-                    edge_index,
-                    radial_network,
-                )
-            return contraction(
-                self.harmonic_metadata if vectors is not None else self.kernel_metadata,
-                repr(((tuple(range(len(operands))), False, ((4, 0),)),)),
-                edge_index[0] if indexed else None,
-                edge_index[1] if indexed else None,
-                operands,
-                batch_paths=self.batch_paths,
-            )[0]
-        if vectors is not None:
-            sections, offset = [], 0
-            for mul, degree in self.harmonic_entries:
-                harmonic = o3.spherical_harmonics(
-                    degree, vectors, normalize=False, normalization=self.normalization
-                )
-                sections.append(
-                    (
-                        harmonic.unsqueeze(-1)
-                        * amplitudes[:, None, offset : offset + mul]
-                    ).flatten(1)
-                )
-                offset += mul
-            edge_attrs = torch.cat(sections, dim=-1)
-        edge_attrs = edge_attrs.to(features)
-        if config.TORCH_REFERENCE:
-            result = self.reference(
-                features, edge_attrs, radial, projection, edge_index, num_nodes
-            )
-        else:
-            from ...ops.convolution import convolve_torch
-
-            result = convolve_torch(
-                self.kernel_metadata,
+            return cuda_kernel.evaluate(
+                self,
                 features,
                 edge_attrs,
                 radial,
                 projection,
                 edge_index,
                 num_nodes,
-                self.output_dim,
-                network=radial_network,
-                recompute=self.radial_mode == "full",
+                vectors,
+                amplitudes,
+                radial_network,
             )
-        return result if vectors is None else result + vectors.sum() * 0
+        return torch_kernel.evaluate(
+            self,
+            features,
+            edge_attrs,
+            radial,
+            projection,
+            edge_index,
+            num_nodes,
+            vectors,
+            amplitudes,
+            radial_network,
+        )
 
     def reference(
         self, features, edge_attrs, radial, projection, edge_index, num_nodes
     ):
         """Evaluate the same paths with ordinary tensor operations."""
-        indexed = edge_index is not None
-        edges = edge_index.size(1) if indexed else features.size(0)
-        if indexed:
-            source, target = edge_index
-        weights = radial @ projection if projection.numel() else radial
-        weights = weights.expand(edges, -1)
-        attrs = edge_attrs.expand(edges, -1)
-        # Keep zero derivatives defined for empty graphs and unused operands.
-        zero = sum(
-            value.sum() * 0 for value in (features, edge_attrs, radial, projection)
+        return torch_kernel.reference(
+            self, features, edge_attrs, radial, projection, edge_index, num_nodes
         )
-        if self.grouped_reference:
-            message = self.reference_contraction(
-                features[source] if indexed else features,
-                attrs,
-                weights,
-                self.reference_scales.to(features),
-            )
-        else:
-            inputs, angular, outputs = {}, {}, {}
-            for index, path in enumerate(self.paths):
-                start, attr, end, mul1, mul2, dim1, dim2, dim_out, weight, factor, _ = (
-                    path
-                )
-                key = start, mul1, dim1
-                if key not in inputs:
-                    x = features[:, start : start + dim1 * mul1]
-                    inputs[key] = (x[source] if indexed else x).reshape(
-                        edges, dim1, mul1
-                    )
-                other = attr, mul2, dim2
-                if other not in angular:
-                    angular[other] = attrs[:, attr : attr + dim2 * mul2].reshape(
-                        edges, dim2, mul2
-                    )
-                x, y = inputs[key], angular[other]
-                cg = getattr(self, f"cg_{index}").to(features)
-                if weight >= 0:
-                    w = weights[:, weight : weight + mul1 * mul2].reshape(
-                        edges, mul1, mul2
-                    )
-                    angular_value = torch.bmm(y, w.transpose(1, 2)).transpose(1, 2)
-                else:
-                    angular_value = y.sum(-1).unsqueeze(1)
-                coupled = (x.transpose(1, 2) @ cg.flatten(1)).reshape(
-                    edges, mul1, dim2, dim_out
-                )
-                value = (coupled * angular_value.unsqueeze(-1)).sum(2).transpose(1, 2)
-                value = (factor * value).flatten(1)
-                outputs[end] = value if end not in outputs else outputs[end] + value
-            blocks = [
-                outputs[start]
-                if start in outputs
-                else features.new_zeros((edges, width))
-                for start, width in self.output_sections
-            ]
-            message = (
-                torch.cat(blocks, -1) if blocks else features.new_zeros((edges, 0))
-            )
-        return (
-            features.new_zeros((num_nodes, self.output_dim)).index_add(
-                0, target, message
-            )
-            if indexed
-            else message
-        ) + zero
 
     def couple(self, x, y, l1, l2, l3):
         """Contract angular indices while retaining independent channels."""

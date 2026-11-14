@@ -23,19 +23,28 @@ def matrix_stream(device, parent_stream=0):
     return torch.cuda.Stream(device=device)
 
 
-@torch.library.custom_op('eqx_oam_xl::parallel_edge_mm', mutates_args=(), device_types='cuda')
-def parallel_edge_mm(metadata: str, program: str, source: torch.Tensor,
-                     target: torch.Tensor, operands: list[torch.Tensor],
-                     left: list[torch.Tensor], right: list[torch.Tensor]) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+@torch.library.custom_op(
+    "eqx_oam_xl::parallel_edge_mm", mutates_args=(), device_types="cuda"
+)
+def parallel_edge_mm(
+    metadata: str,
+    program: str,
+    source: torch.Tensor,
+    target: torch.Tensor,
+    operands: list[torch.Tensor],
+    left: list[torch.Tensor],
+    right: list[torch.Tensor],
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Return complete edge results and independent matrix products."""
     if len(left) != len(right):
-        raise ValueError('Each independent matrix product needs two operands')
+        raise ValueError("Each independent matrix product needs two operands")
     current = torch.cuda.current_stream(source.device)
     side = matrix_stream(source.device, current.cuda_stream)
     side.wait_stream(current)
-    count = int(os.environ.get('EQX_XL_PARALLEL_SM_TARGET', '0'))
+    count = int(os.environ.get("EQX_XL_PARALLEL_SM_TARGET", "0"))
     from .blas import sm_target
-    with torch.cuda.stream(side), (sm_target(count) if count else nullcontext()):
+
+    with torch.cuda.stream(side), sm_target(count) if count else nullcontext():
         products = [selected_mm(a, b) for a, b in zip(left, right)]
     outputs = scheduled_edges(metadata, program, source, target, operands)
     current.wait_stream(side)
@@ -47,23 +56,31 @@ def parallel_edge_mm(metadata: str, program: str, source: torch.Tensor,
 @parallel_edge_mm.register_fake
 def fake_parallel(metadata, program, source, target, operands, left, right):
     return o3_outputs(metadata, program, source, target, operands), [
-        a.new_empty((a.shape[0], b.shape[1])) for a, b in zip(left, right)]
+        a.new_empty((a.shape[0], b.shape[1])) for a, b in zip(left, right)
+    ]
 
 
-@torch.library.custom_op('eqx_oam_xl::parallel_product_mm', mutates_args=(), device_types='cuda')
-def parallel_product_mm(metadata: str, program: str, operands: list[torch.Tensor],
-                        left: list[torch.Tensor], right: list[torch.Tensor]
-                        ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+@torch.library.custom_op(
+    "eqx_oam_xl::parallel_product_mm", mutates_args=(), device_types="cuda"
+)
+def parallel_product_mm(
+    metadata: str,
+    program: str,
+    operands: list[torch.Tensor],
+    left: list[torch.Tensor],
+    right: list[torch.Tensor],
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Overlap the complete node-product program and independent GEMMs."""
     from .packed_product import run_packed
     from .blas import sm_target
+
     if len(left) != len(right):
-        raise ValueError('Each independent matrix product needs two operands')
+        raise ValueError("Each independent matrix product needs two operands")
     current = torch.cuda.current_stream(operands[0].device)
     side = matrix_stream(operands[0].device, current.cuda_stream)
     side.wait_stream(current)
-    count = int(os.environ.get('EQX_XL_PARALLEL_SM_TARGET', '0'))
-    with torch.cuda.stream(side), (sm_target(count) if count else nullcontext()):
+    count = int(os.environ.get("EQX_XL_PARALLEL_SM_TARGET", "0"))
+    with torch.cuda.stream(side), sm_target(count) if count else nullcontext():
         products = [selected_mm(a, b) for a, b in zip(left, right)]
     outputs = run_packed(metadata, program, operands)
     current.wait_stream(side)
@@ -75,8 +92,10 @@ def parallel_product_mm(metadata: str, program: str, operands: list[torch.Tensor
 @parallel_product_mm.register_fake
 def fake_parallel_product(metadata, program, operands, left, right):
     from .packed_product import packed_outputs
+
     return packed_outputs(metadata, program, operands), [
-        a.new_empty((a.shape[0], b.shape[1])) for a, b in zip(left, right)]
+        a.new_empty((a.shape[0], b.shape[1])) for a, b in zip(left, right)
+    ]
 
 
 def hint(value):
@@ -94,12 +113,14 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
     Earlier consumers can move after the edge call only when their complete
     dependency closure excludes that edge. Chosen GEMMs must be independent.
     """
-    maximum_matrices = int(os.environ.get('EQX_XL_PARALLEL_MATRIX_LIMIT', str(maximum_matrices)))
+    maximum_matrices = int(
+        os.environ.get("EQX_XL_PARALLEL_MATRIX_LIMIT", str(maximum_matrices))
+    )
     if maximum_matrices < 1:
-        raise ValueError('The parallel matrix limit must be positive')
-    targets = {'eqx_oam_xl.edge.default', 'eqx_oam_xl.pipeline_edge_matrix.default'}
-    if os.environ.get('EQX_XL_PARALLEL_PRODUCTS', '0') == '1':
-        targets.add('eqx_oam_xl.packed_product.default')
+        raise ValueError("The parallel matrix limit must be positive")
+    targets = {"eqx_oam_xl.edge.default", "eqx_oam_xl.pipeline_edge_matrix.default"}
+    if os.environ.get("EQX_XL_PARALLEL_PRODUCTS", "0") == "1":
+        targets.add("eqx_oam_xl.packed_product.default")
     edge_nodes = [node for node in graph.nodes if str(node.target) in targets]
     count, pairs = 0, []
     for edge in edge_nodes:
@@ -107,10 +128,14 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
         position = positions[edge]
         candidates = []
         for node in graph.nodes:
-            if node.target != torch.ops.aten.mm.default or node.kwargs or len(node.args) != 2:
+            if (
+                node.target != torch.ops.aten.mm.default
+                or node.kwargs
+                or len(node.args) != 2
+            ):
                 continue
             a, b = node.args
-            av, bv = a.meta.get('val'), b.meta.get('val')
+            av, bv = a.meta.get("val"), b.meta.get("val")
             if av is None or bv is None or av.ndim != 2 or bv.ndim != 2:
                 continue
             if not isinstance(av.shape[0], int) or not isinstance(bv.shape[1], int):
@@ -135,7 +160,12 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
                 pending.extend(child.users)
             if not dependent:
                 candidates.append((node, descendants))
-        candidates.sort(key=lambda item: hint(item[0].args[0].meta['val'].shape[1]) * item[0].meta['val'].numel(), reverse=True)
+        candidates.sort(
+            key=lambda item: (
+                hint(item[0].args[0].meta["val"].shape[1]) * item[0].meta["val"].numel()
+            ),
+            reverse=True,
+        )
         selected, moved = [], set()
         for node, descendants in candidates:
             if node in moved or any(old in descendants for old in selected):
@@ -147,29 +177,44 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
         candidates = selected
         if not candidates:
             continue
-        pipeline = str(edge.target) == 'eqx_oam_xl.pipeline_edge_matrix.default'
-        product = str(edge.target) == 'eqx_oam_xl.packed_product.default'
+        pipeline = str(edge.target) == "eqx_oam_xl.pipeline_edge_matrix.default"
+        product = str(edge.target) == "eqx_oam_xl.packed_product.default"
         if pipeline:
             from .pipeline import pipeline_edge_matrices
         with graph.inserting_before(edge):
-            joint = graph.call_function(torch.ops.eqx_oam_xl.pipeline_edge_matrices.default if pipeline
-                                        else torch.ops.eqx_oam_xl.parallel_product_mm.default if product
-                                        else torch.ops.eqx_oam_xl.parallel_edge_mm.default,
-                                        (*edge.args, [n.args[0] for n in candidates], [n.args[1] for n in candidates]))
-            joint.meta['val'] = ((*edge.meta['val'], [n.meta['val'] for n in candidates]) if pipeline
-                                 else (edge.meta['val'], [n.meta['val'] for n in candidates]))
-            joint.meta['eager_input_vals'] = torch.fx.map_arg((joint.args, joint.kwargs), lambda n: n.meta['val'])
+            joint = graph.call_function(
+                torch.ops.eqx_oam_xl.pipeline_edge_matrices.default
+                if pipeline
+                else torch.ops.eqx_oam_xl.parallel_product_mm.default
+                if product
+                else torch.ops.eqx_oam_xl.parallel_edge_mm.default,
+                (
+                    *edge.args,
+                    [n.args[0] for n in candidates],
+                    [n.args[1] for n in candidates],
+                ),
+            )
+            joint.meta["val"] = (
+                (*edge.meta["val"], [n.meta["val"] for n in candidates])
+                if pipeline
+                else (edge.meta["val"], [n.meta["val"] for n in candidates])
+            )
+            joint.meta["eager_input_vals"] = torch.fx.map_arg(
+                (joint.args, joint.kwargs), lambda n: n.meta["val"]
+            )
             if pipeline:
                 values = joint
             else:
                 values = graph.call_function(operator.getitem, (joint, 0))
-                values.meta['val'] = edge.meta['val']
-            matrices = graph.call_function(operator.getitem, (joint, 2 if pipeline else 1))
-            matrices.meta['val'] = [n.meta['val'] for n in candidates]
+                values.meta["val"] = edge.meta["val"]
+            matrices = graph.call_function(
+                operator.getitem, (joint, 2 if pipeline else 1)
+            )
+            matrices.meta["val"] = [n.meta["val"] for n in candidates]
             replacements = []
             for slot, node in enumerate(candidates):
                 result = graph.call_function(operator.getitem, (matrices, slot))
-                result.meta['val'] = node.meta['val']
+                result.meta["val"] = node.meta["val"]
                 replacements.append(result)
         anchor = edge
         for node in sorted(moved, key=positions.__getitem__):

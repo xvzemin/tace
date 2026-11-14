@@ -1,0 +1,1 @@
+"""Torch irreducible Cartesian products."""

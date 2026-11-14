@@ -15,10 +15,15 @@ from dataclasses import dataclass
 import torch
 from torch.nn import functional as F
 
-from equivariantx.ops.channel_product import channel_product
+from equivariantx.ops.common.channel_product import channel_product
 from .angular import aligned_convolution, packed_frame
 from .gated import gated_product, gated_product_metadata
-from .packed_product import packed_contract, packed_linear, packed_metadata, composed_linear
+from .packed_product import (
+    packed_contract,
+    packed_linear,
+    packed_metadata,
+    composed_linear,
+)
 from .layout import channel_contiguous_metadata, ir_mul_order
 
 
@@ -58,12 +63,18 @@ class LinearMap(torch.nn.Module):
         input_blocks = None
         if os.environ.get("EQX_XL_LAYOUT_ADJOINTS", "0") == "1":
             from .layout_adjoint import ColumnSlices
-            input_blocks = ColumnSlices.apply(inputs, tuple(c * ir.dim for c, ir in self.irreps_in))
+
+            input_blocks = ColumnSlices.apply(
+                inputs, tuple(c * ir.dim for c, ir in self.irreps_in)
+            )
         for matrix, instruction in zip(matrices, self.linear.instructions):
             ci, ir = self.irreps_in[instruction.i_in]
             co, _ = self.irreps_out[instruction.i_out]
-            block = (input_blocks[instruction.i_in] if input_blocks is not None
-                     else inputs[:, input_slices[instruction.i_in]])
+            block = (
+                input_blocks[instruction.i_in]
+                if input_blocks is not None
+                else inputs[:, input_slices[instruction.i_in]]
+            )
             if getattr(self, "input_layout", "mul_ir") == "ir_mul":
                 block = block.reshape(-1, ir.dim, ci)
             else:
@@ -89,7 +100,17 @@ class LinearMap(torch.nn.Module):
         return torch.cat(outputs, dim=-1)
 
 
-def grouped_networks(networks, updates, radial, source_types, target_types, *, hidden, embedding=None, basis=None):
+def grouped_networks(
+    networks,
+    updates,
+    radial,
+    source_types,
+    target_types,
+    *,
+    hidden,
+    embedding=None,
+    basis=None,
+):
     """Evaluate geometry-only MLPs with one batched matrix product per stage.
 
     Parameters and element embeddings remain differentiable runtime tensors.
@@ -144,11 +165,15 @@ def grouped_networks(networks, updates, radial, source_types, target_types, *, h
             projection = embedding.radial_proj
             if len(projection.weight) != 1 or len(projection.linear.instructions) != 1:
                 raise ValueError("Expected one scalar embedding matrix")
-            embedding_weight = projection.weight[0] * projection.linear.instructions[0].path_weight
+            embedding_weight = (
+                projection.weight[0] * projection.linear.instructions[0].path_weight
+            )
             combined = torch.matmul(embedding_weight.unsqueeze(0), radial_weight)
             values = torch.matmul(basis.unsqueeze(0), combined)
             if projection.bias is not None:
-                values = values + torch.matmul(projection.bias[None,None,:], radial_weight)
+                values = values + torch.matmul(
+                    projection.bias[None, None, :], radial_weight
+                )
         if first[0].bias is not None:
             values = values + torch.stack([layer.bias for layer in first])[:, None, :]
         values = values + torch.bmm(target_embedding, target_weight)[:, target_types]
@@ -193,7 +218,9 @@ def grouped_networks(networks, updates, radial, source_types, target_types, *, h
     return outputs
 
 
-def grouped_projections(interactions, updates, hidden, radial, source_types, target_types, mode):
+def grouped_projections(
+    interactions, updates, hidden, radial, source_types, target_types, mode
+):
     """Project all geometry-only layers together with live parameter matrices.
 
     Single-layer radial heads factor their shared radial input from compact
@@ -203,8 +230,11 @@ def grouped_projections(interactions, updates, hidden, radial, source_types, tar
     outputs, groups = [None] * len(interactions), {}
     for index, inter in enumerate(interactions):
         layer = inter.edge_info.mlp[-1]
-        key = (tuple(layer.get_weight().shape), layer.bias is not None,
-               len(inter.edge_info.mlp) == 1)
+        key = (
+            tuple(layer.get_weight().shape),
+            layer.bias is not None,
+            len(inter.edge_info.mlp) == 1,
+        )
         groups.setdefault(key, []).append(index)
     for (_, has_bias, direct), indices in groups.items():
         layers = [interactions[i].edge_info.mlp[-1] for i in indices]
@@ -217,14 +247,27 @@ def grouped_projections(interactions, updates, hidden, radial, source_types, tar
             if weight.shape[1] != width + 2 * channels:
                 raise ValueError("Unexpected direct radial conditioning width")
             if mode == "split":
-                elements = torch.cat((target[:, target_types], source[:, source_types]), -1)
+                elements = torch.cat(
+                    (target[:, target_types], source[:, source_types]), -1
+                )
                 conditioning = torch.bmm(elements, weight[:, width:])
-                value = torch.baddbmm(conditioning, radial.unsqueeze(0).expand(len(indices),-1,-1),
-                                     weight[:, :width])
+                value = torch.baddbmm(
+                    conditioning,
+                    radial.unsqueeze(0).expand(len(indices), -1, -1),
+                    weight[:, :width],
+                )
             else:
                 value = torch.matmul(radial.unsqueeze(0), weight[:, :width])
-                value = value + torch.bmm(target, weight[:, width:width+channels])[:, target_types]
-                value = value + torch.bmm(source, weight[:, width+channels:])[:, source_types]
+                value = (
+                    value
+                    + torch.bmm(target, weight[:, width : width + channels])[
+                        :, target_types
+                    ]
+                )
+                value = (
+                    value
+                    + torch.bmm(source, weight[:, width + channels :])[:, source_types]
+                )
         else:
             value = torch.bmm(torch.stack([hidden[i] for i in indices]), weight)
         if has_bias:
@@ -239,13 +282,16 @@ class NodeProduct(torch.nn.Module):
 
     def forward(self, node_feats, node_type, sc, batch, preprojected=None):
         projected = self.linear_up(node_feats) if preprojected is None else preprojected
-        if getattr(self,'layout_adjoints',False):
+        if getattr(self, "layout_adjoints", False):
             from .layout_adjoint import ColumnSlices, Permutation
-            projected = Permutation.apply(projected,self.factor_index,self.factor_inverse_index)
+
+            projected = Permutation.apply(
+                projected, self.factor_index, self.factor_inverse_index
+            )
             widths = (self.num_hidden_channel,) + (self.factor_dim,) * self.num_inputs
             scalars, *factor_blocks = ColumnSlices.apply(projected, widths)
         else:
-            projected = projected.index_select(-1,self.factor_index)
+            projected = projected.index_select(-1, self.factor_index)
             scalars = projected[:, : self.num_hidden_channel]
             factors = projected[:, self.num_hidden_channel :].reshape(
                 node_feats.shape[0], self.num_inputs, self.factor_dim
@@ -264,7 +310,7 @@ class NodeProduct(torch.nn.Module):
             for weight_index, start, width, out_width, factor in self.gate_scalar_paths:
                 matrix = self.linear_up.weight[weight_index].reshape(width, out_width)
                 combined = matrix[:, index] @ scalar_weight.T
-                gate = gate + (node_feats[:, start:start+width] @ combined) * factor
+                gate = gate + (node_feats[:, start : start + width] @ combined) * factor
             if self.linear_up.bias is not None:
                 bias = self.linear_up.bias[self.gate_scalar_bias_start + index]
                 gate = gate + F.linear(bias, scalar_weight)
@@ -272,16 +318,22 @@ class NodeProduct(torch.nn.Module):
                 gate = gate + affine.bias
             gate = gate + species_values[node_type]
         else:
-            gate = F.linear(scalars, scalar_weight, affine.bias) + species_values[node_type]
+            gate = (
+                F.linear(scalars, scalar_weight, affine.bias)
+                + species_values[node_type]
+            )
         gate = self.gate[1](gate)
-        if getattr(self, 'layout_adjoints', False):
+        if getattr(self, "layout_adjoints", False):
             gate_blocks = ColumnSlices.apply(gate, self.gate_partition_widths)
         else:
             gate_blocks = tuple(gate[:, start:stop] for start, stop in self.gate_slices)
         corr = factor_blocks[0]
         first_gated = corr * gate_blocks[0][:, self.gate_index_1]
-        output = (composed_linear(self.coefs[0], self.linear, first_gated, final_bias=True)
-                  if self.compose_products else self.coefs[0](first_gated))
+        output = (
+            composed_linear(self.coefs[0], self.linear, first_gated, final_bias=True)
+            if self.compose_products
+            else self.coefs[0](first_gated)
+        )
         for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
             factor = factor_blocks[index + 1 if self.asymmetric else 0]
             gate_block = gate_blocks[index + 1]
@@ -293,16 +345,19 @@ class NodeProduct(torch.nn.Module):
                     operands = [corr, gate_block, corr.new_empty((0, output_dim))]
                     mapping = (0, 0, 1, 2)
                 gated = packed_contract(
-                    metadata, repr(((mapping, 3, 0, 0),)), operands,
+                    metadata,
+                    repr(((mapping, 3, 0, 0),)),
+                    operands,
                 )[0]
-                output = output + (composed_linear(linear, self.linear, gated, packed=True)
-                                   if self.compose_products else packed_linear(linear, gated))
+                output = output + (
+                    composed_linear(linear, self.linear, gated, packed=True)
+                    if self.compose_products
+                    else packed_linear(linear, gated)
+                )
                 continue
             if node_feats.is_cuda and self.fused_gate:
                 metadata, output_dim = self.gated_products[index]
-                gated = gated_product(
-                    metadata, corr, factor, gate_block, output_dim
-                )
+                gated = gated_product(metadata, corr, factor, gate_block, output_dim)
             elif node_feats.is_cuda:
                 metadata, output_dim = self.eqx_products[index]
                 corr = channel_product(
@@ -327,8 +382,11 @@ class NodeProduct(torch.nn.Module):
                     -1, getattr(self, f"gate_index_{index + 2}")
                 )
                 gated = corr * expanded
-            output = output + (composed_linear(linear, self.linear, gated)
-                               if self.compose_products else linear(gated))
+            output = output + (
+                composed_linear(linear, self.linear, gated)
+                if self.compose_products
+                else linear(gated)
+            )
         if not self.compose_products:
             output = self.linear(output)
         return output if sc is None else output + sc
@@ -385,24 +443,41 @@ class Representation(torch.nn.Module):
             native_attrs = torch.cat(sections, -1).to(nodes)
         source_types, target_types = node_type[edge_index[0]], node_type[edge_index[1]]
         radial_map = data.get("oam_radial_map")
-        compressed_radial = (radial_map is not None and self.edge_mode == "scheduled"
-                             and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1")
+        compressed_radial = (
+            radial_map is not None
+            and self.edge_mode == "scheduled"
+            and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1"
+        )
         radial_cutoff = cutoff
         if radial_map is not None:
             if self.radial_mode != "materialize":
-                raise ValueError("Reciprocal radial sharing requires materialized heads")
+                raise ValueError(
+                    "Reciprocal radial sharing requires materialized heads"
+                )
             representatives = data["oam_radial_representatives"]
             radial = radial[representatives]
             radial_basis = radial_basis[representatives]
-            source_types, target_types = source_types[representatives], target_types[representatives]
+            source_types, target_types = (
+                source_types[representatives],
+                target_types[representatives],
+            )
             radial_cutoff = cutoff[representatives] if cutoff is not None else None
         radial_jet = os.environ.get("EQX_XL_RADIAL_JET", "0") == "1"
         if radial_jet:
-            if (not self.training or self.radial_mode != "materialize"
-                    or self.radial_projection != "individual" or radial_map is not None):
-                raise ValueError("Radial jets require training, individual materialized heads, and ordinary edges")
+            if (
+                not self.training
+                or self.radial_mode != "materialize"
+                or self.radial_projection != "individual"
+                or radial_map is not None
+            ):
+                raise ValueError(
+                    "Radial jets require training, individual materialized heads, and ordinary edges"
+                )
             from .radial_jet import hidden_jets
-            hidden, hidden_slopes = hidden_jets(self, graph.edge_length, node_type, edge_index)
+
+            hidden, hidden_slopes = hidden_jets(
+                self, graph.edge_length, node_type, edge_index
+            )
         else:
             hidden = grouped_networks(
                 [layer.edge_info for layer in self.interactions],
@@ -411,13 +486,20 @@ class Representation(torch.nn.Module):
                 source_types,
                 target_types,
                 hidden=True,
-                embedding=self.edge_embedding if self.radial_projection == "composed" else None,
+                embedding=self.edge_embedding
+                if self.radial_projection == "composed"
+                else None,
                 basis=radial_basis,
             )
         projected = None
         if self.radial_projection in ("batched", "split"):
             projected = grouped_projections(
-                self.interactions, self.edge_updates, hidden, radial, source_types, target_types,
+                self.interactions,
+                self.edge_updates,
+                hidden,
+                radial,
+                source_types,
+                target_types,
                 self.radial_projection,
             )
         densities = grouped_networks(
@@ -427,7 +509,9 @@ class Representation(torch.nn.Module):
             source_types,
             target_types,
             hidden=False,
-            embedding=self.edge_embedding if self.radial_projection == "composed" else None,
+            embedding=self.edge_embedding
+            if self.radial_projection == "composed"
+            else None,
             basis=radial_basis,
         )
         edge_density = torch.cat(
@@ -447,7 +531,9 @@ class Representation(torch.nn.Module):
             [layer.scatter_norm.alpha for layer in self.interactions]
         )
         descriptors = []
-        flash_indices = edge_index.to(torch.int32) if self.edge_mode == "flashtp" else None
+        flash_indices = (
+            edge_index.to(torch.int32) if self.edge_mode == "flashtp" else None
+        )
         for index, (inter, product) in enumerate(zip(self.interactions, self.products)):
             packed_message = False
             res_bb = inter.resnetBB(nodes) if hasattr(inter, "resnetBB") else None
@@ -455,7 +541,10 @@ class Representation(torch.nn.Module):
             associate_norm = os.environ.get("EQX_XL_ASSOCIATE_NORM", "0") == "1"
             if associate_norm and hasattr(inter, "norm1"):
                 from .normalized_linear import normalized_linear
-                nodes = normalized_linear(inter.linear_up, inter.norm1, inter.reshape1, nodes)
+
+                nodes = normalized_linear(
+                    inter.linear_up, inter.norm1, inter.reshape1, nodes
+                )
             else:
                 if hasattr(inter, "norm1"):
                     nodes = inter.reshape1.inverse(inter.norm1(inter.reshape1(nodes)))
@@ -468,7 +557,11 @@ class Representation(torch.nn.Module):
                 projection = last.get_weight()
                 features = hidden[index]
                 if self.affine_radial and self.radial_mode == "materialize":
-                    features = torch.addmm(last.bias, features, projection) if last.bias is not None else features @ projection
+                    features = (
+                        torch.addmm(last.bias, features, projection)
+                        if last.bias is not None
+                        else features @ projection
+                    )
                     projection = projection.new_empty((0, projection.shape[-1]))
                 elif last.bias is not None:
                     projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
@@ -480,6 +573,7 @@ class Representation(torch.nn.Module):
                     projection = projection.new_empty((0, projection.shape[-1]))
             if radial_jet:
                 from .radial_jet import AttachRadialJet
+
                 slope = hidden_slopes[index] @ last.get_weight()
                 features = AttachRadialJet.apply(features, slope, graph.edge_length)
             if radial_map is not None and not compressed_radial:
@@ -493,7 +587,12 @@ class Representation(torch.nn.Module):
 
                 packed_message = PACKED_EDGES
                 message = native_message(
-                    inter.rejector, nodes, native_attrs, features, edge_index, packed=packed_message,
+                    inter.rejector,
+                    nodes,
+                    native_attrs,
+                    features,
+                    edge_index,
+                    packed=packed_message,
                     radial_map=radial_map if compressed_radial else None,
                 )
             elif self.angular_mode == "aligned":
@@ -521,8 +620,11 @@ class Representation(torch.nn.Module):
                     cutoff,
                     edge_vector=direction,
                 )
-            message = (packed_linear(inter.linear_down, message) if packed_message
-                       else inter.linear_down(message)) / density[:, index : index + 1]
+            message = (
+                packed_linear(inter.linear_down, message)
+                if packed_message
+                else inter.linear_down(message)
+            ) / density[:, index : index + 1]
             message = inter.linear_nonlinearity(inter.nonlinearity(message))
             if res_ba is not None:
                 message = message + res_ba
@@ -530,13 +632,20 @@ class Representation(torch.nn.Module):
             preprojected = None
             if associate_norm and hasattr(inter, "norm2"):
                 if product.compose_gate:
-                    raise ValueError("Associated normalization and composed scalar gate are separate experiments")
+                    raise ValueError(
+                        "Associated normalization and composed scalar gate are separate experiments"
+                    )
                 from .normalized_linear import normalized_linear
-                preprojected = normalized_linear(product.linear_up, inter.norm2, inter.reshape2, message)
+
+                preprojected = normalized_linear(
+                    product.linear_up, inter.norm2, inter.reshape2, message
+                )
             elif hasattr(inter, "norm2"):
                 message = inter.reshape2.inverse(inter.norm2(inter.reshape2(message)))
             sc = res_bb if res_bb is not None else res_ab
-            nodes = product(message, node_type, sc, data["batch"], preprojected=preprojected)
+            nodes = product(
+                message, node_type, sc, data["batch"], preprojected=preprojected
+            )
             if index == self.num_layers - 1 and hasattr(self, "final_norm"):
                 nodes = self.final_reshape.inverse(
                     self.final_norm(self.final_reshape(nodes))
@@ -743,6 +852,7 @@ class TACEOAMXLV2(torch.nn.Module):
         ):
             raise ValueError("Scheduled edges require materialized CG contractions")
         from .precision import validate_environment, require_tensors
+
         validate_environment()
         require_tensors((*model.parameters(), *model.buffers()))
         architecture = validate(model)
@@ -750,6 +860,7 @@ class TACEOAMXLV2(torch.nn.Module):
         readout = copy.deepcopy(model.readout_fn, memo)
         if padded_batches:
             from .padding import enable_padded_readout
+
             enable_padded_readout(readout)
         # Included in the adapter's compiled module contract and artifact key.
         readout.oam_xl_gradient_schedule = gradient_schedule
@@ -800,12 +911,18 @@ class TACEOAMXLV2(torch.nn.Module):
                 )
         if edge_mode == "flashtp":
             from .flash import FlashConvolution
+
             parameter = next(model.parameters())
-            representation.flash_convolutions = torch.nn.ModuleList([
-                FlashConvolution(inter.rejector.eqx_tp.kernel_metadata,
-                                 parameter.device, parameter.dtype)
-                for inter in representation.interactions
-            ])
+            representation.flash_convolutions = torch.nn.ModuleList(
+                [
+                    FlashConvolution(
+                        inter.rejector.eqx_tp.kernel_metadata,
+                        parameter.device,
+                        parameter.dtype,
+                    )
+                    for inter in representation.interactions
+                ]
+            )
         if angular_mode == "aligned":
             device = next(model.parameters()).device
             representation.aligned = torch.nn.ModuleList(
@@ -829,22 +946,60 @@ class TACEOAMXLV2(torch.nn.Module):
             product.compose_products = compose_products
             product.compose_gate = compose_gate
             if compose_gate:
-                scalar_columns = product.factor_index[:product.num_hidden_channel].cpu()
+                scalar_columns = product.factor_index[
+                    : product.num_hidden_channel
+                ].cpu()
                 output_slices = product.linear_up.irreps_out.slices()
-                candidates = [i for i,((channels,ir),sl) in enumerate(zip(product.linear_up.irreps_out,output_slices))
-                              if ir.is_scalar() and bool(((scalar_columns>=sl.start)&(scalar_columns<sl.stop)).all())]
-                if len(candidates)!=1:
-                    raise ValueError("Scalar gate composition needs one scalar output block")
+                candidates = [
+                    i
+                    for i, ((channels, ir), sl) in enumerate(
+                        zip(product.linear_up.irreps_out, output_slices)
+                    )
+                    if ir.is_scalar()
+                    and bool(
+                        (
+                            (scalar_columns >= sl.start) & (scalar_columns < sl.stop)
+                        ).all()
+                    )
+                ]
+                if len(candidates) != 1:
+                    raise ValueError(
+                        "Scalar gate composition needs one scalar output block"
+                    )
                 output_index = candidates[0]
-                product.register_buffer("gate_scalar_columns", (scalar_columns-output_slices[output_index].start).to(product.factor_index.device), persistent=False)
-                product.gate_scalar_paths=[]
-                for wi,instruction in enumerate(product.linear_up.linear.instructions):
-                    if instruction.i_out!=output_index:continue
-                    ci,ir=product.linear_up.irreps_in[instruction.i_in]
-                    if not ir.is_scalar():raise ValueError("Gate scalar projection must have scalar inputs")
-                    co,_=product.linear_up.irreps_out[output_index]
-                    product.gate_scalar_paths.append((wi,product.linear_up.irreps_in.slices()[instruction.i_in].start,ci,co,instruction.path_weight))
-                product.gate_scalar_bias_start=sum(c for c,ir in product.linear_up.irreps_out[:output_index] if ir.is_scalar())
+                product.register_buffer(
+                    "gate_scalar_columns",
+                    (scalar_columns - output_slices[output_index].start).to(
+                        product.factor_index.device
+                    ),
+                    persistent=False,
+                )
+                product.gate_scalar_paths = []
+                for wi, instruction in enumerate(product.linear_up.linear.instructions):
+                    if instruction.i_out != output_index:
+                        continue
+                    ci, ir = product.linear_up.irreps_in[instruction.i_in]
+                    if not ir.is_scalar():
+                        raise ValueError(
+                            "Gate scalar projection must have scalar inputs"
+                        )
+                    co, _ = product.linear_up.irreps_out[output_index]
+                    product.gate_scalar_paths.append(
+                        (
+                            wi,
+                            product.linear_up.irreps_in.slices()[
+                                instruction.i_in
+                            ].start,
+                            ci,
+                            co,
+                            instruction.path_weight,
+                        )
+                    )
+                product.gate_scalar_bias_start = sum(
+                    c
+                    for c, ir in product.linear_up.irreps_out[:output_index]
+                    if ir.is_scalar()
+                )
             if product_mode == "packed" and len(product.aces) != 1:
                 raise ValueError("Packed products currently require correlation two")
             if product_layout == "ir_mul":
@@ -882,22 +1037,30 @@ class TACEOAMXLV2(torch.nn.Module):
                 product.register_buffer(
                     "product_output_order", output_order.to(device), persistent=False
                 )
-            product.layout_adjoints = os.environ.get('EQX_XL_LAYOUT_ADJOINTS','0') == '1'
+            product.layout_adjoints = (
+                os.environ.get("EQX_XL_LAYOUT_ADJOINTS", "0") == "1"
+            )
             if product.layout_adjoints:
                 index = product.factor_index
                 columns = product.linear_up.irreps_out.dim
-                if index.numel()!=columns or not torch.equal(index.sort().values,torch.arange(columns,device=index.device)):
-                    raise ValueError('The factor layout must be a complete permutation')
-                product.register_buffer('factor_inverse_index',index.argsort(),persistent=False)
+                if index.numel() != columns or not torch.equal(
+                    index.sort().values, torch.arange(columns, device=index.device)
+                ):
+                    raise ValueError("The factor layout must be a complete permutation")
+                product.register_buffer(
+                    "factor_inverse_index", index.argsort(), persistent=False
+                )
                 end = 0
                 widths = []
                 for start, stop in product.gate_slices:
                     if start != end or stop < start:
-                        raise ValueError('Gate blocks must partition the complete output')
+                        raise ValueError(
+                            "Gate blocks must partition the complete output"
+                        )
                     widths.append(stop - start)
                     end = stop
                 if end != product.gate[0].weight.shape[0]:
-                    raise ValueError('Gate partition does not match its affine output')
+                    raise ValueError("Gate partition does not match its affine output")
                 product.gate_partition_widths = tuple(widths)
             product.gated_products = []
             product.packed_products = []
@@ -908,16 +1071,25 @@ class TACEOAMXLV2(torch.nn.Module):
                     (gated_product_metadata(metadata, mapping, stop - start), width)
                 )
                 if product_mode == "packed":
-                    blocks = [mul * ir.dim // product.num_hidden_channel
-                              for mul, ir in product.coefs[index + 1].irreps_in]
+                    blocks = [
+                        mul * ir.dim // product.num_hidden_channel
+                        for mul, ir in product.coefs[index + 1].irreps_in
+                    ]
                     product.packed_products.append(
-                        (packed_metadata(metadata, mapping, stop - start, blocks), width)
+                        (
+                            packed_metadata(metadata, mapping, stop - start, blocks),
+                            width,
+                        )
                     )
         readout.representation = representation
         from .adapter import OAMCompileAdapter
         from tace.models.compile.wrapper import CompileTensorModel
-        adapter = (OAMCompileAdapter(readout) if isinstance(model, CompileTensorModel)
-                   else type(model)(readout))
+
+        adapter = (
+            OAMCompileAdapter(readout)
+            if isinstance(model, CompileTensorModel)
+            else type(model)(readout)
+        )
         adapter.reset_fidelity_idx(model.get_fidelity_idx())
         adapter.train(model.training)
         result = cls(adapter, architecture)
@@ -940,6 +1112,7 @@ class TACEOAMXLV2(torch.nn.Module):
         # The adapter owns precision bookkeeping and compiled-cache invalidation.
         self.adapter._apply(fn, recurse)
         from .precision import require_tensors
+
         require_tensors((*self.parameters(), *self.buffers()))
         return self
 
@@ -957,14 +1130,17 @@ class TACEOAMXLV2(torch.nn.Module):
 
     def forward(self, data):
         from .precision import validate_call
+
         validate_call(data)
         return self.adapter(data)
 
     def forward_loss(self, data, loss_fn):
         """Evaluate the complete joint training program for the original loss."""
         from .precision import validate_call
+
         validate_call(data)
         from .extensions import extension_identity
+
         extension_identity()
         if hasattr(self.adapter, "forward_loss"):
             if self.readout_fn.oam_xl_gradient_schedule == "fused":

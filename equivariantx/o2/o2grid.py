@@ -6,9 +6,18 @@ from collections import Counter
 import torch
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import o2grid as torch_kernel
 from .irreps import Irrep, Irreps
 
 __all__ = ["O2Grid"]
+
+
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.o2 import o2grid
+
+        return o2grid
+    return torch_kernel
 
 
 class O2Grid(torch.nn.Module):
@@ -31,6 +40,8 @@ class O2Grid(torch.nn.Module):
         order. ``"integral"`` uses harmonics orthonormal under ``d alpha``.
         Two sets are combined by an orthogonal sum-and-difference transform.
         For ``"integral"``, the measure is ``d alpha`` summed over the grids.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Buffer dtype. Defaults to the default floating-point dtype.
     device : torch.device or str, optional
@@ -88,10 +99,14 @@ class O2Grid(torch.nn.Module):
         resolution=None,
         *,
         normalization="component",
+        backend="torch",
         dtype=None,
         device=None,
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.irreps = Irreps(irreps)
         self.time_parities = (
             (1, -1) if any(ir.t == -1 for ir, _ in self.irreps) else (1,)
@@ -231,7 +246,6 @@ class O2Grid(torch.nn.Module):
         torch.Tensor
             Values of shape ``(..., num_channels, num_sheets, resolution)``.
         """
-        validate_module_precision(self, (features, features2))
         return self.to_grid(features, features2)
 
     def to_grid(self, features, features2=None):
@@ -252,11 +266,10 @@ class O2Grid(torch.nn.Module):
         torch.Tensor
             Values of shape ``(..., num_channels, num_sheets, resolution)``.
         """
+        validate_module_precision(self, (features, features2))
         if features2 is None:
             if features.ndim < 1 or features.shape[-1] != self.dim:
                 raise ValueError(f"Expected {self.dim} features on the last axis.")
-            coefficients = features.index_select(-1, self.input_index) * self.input_sign
-            coefficients = coefficients.unflatten(-1, self._coefficient_shape)
         else:
             if features.ndim < 1 or features.shape[-1] != self.irreps_in1.dim:
                 raise ValueError(
@@ -264,19 +277,7 @@ class O2Grid(torch.nn.Module):
                 )
             if features2.shape != features.shape:
                 raise ValueError("Both coefficient sets must have the same shape.")
-            shape = (len(self.time_parities), 2 * self.mmax + 1, self.num_channels)
-            first = features.unflatten(-1, shape).movedim(-1, -3)
-            second = features2.unflatten(-1, shape).movedim(-1, -3)
-            second = second.index_select(-1, self.second_index) * self.second_sign
-            coefficients = torch.stack((first, second), dim=-2).flatten(-3, -2)
-        values = coefficients @ self.synthesis.T
-        values = values.unflatten(-2, (len(self.time_parities), 2))
-        even, odd = values.unbind(-2)
-        values = torch.stack((even + odd, even - odd), dim=-2) / math.sqrt(2)
-        if len(self.time_parities) == 2:
-            even, odd = values.unbind(-3)
-            values = torch.stack((even + odd, even - odd), dim=-3) / math.sqrt(2)
-        return values.flatten(-3, -2)
+        return execution(self, features).to_grid(self, features, features2)
 
     def from_grid(self, features, *, split=False):
         """Project grid values onto the original O(2) irreps.
@@ -295,25 +296,10 @@ class O2Grid(torch.nn.Module):
             with trailing dimensions ``irreps_in1.dim`` and ``irreps_in2.dim``
             when ``split=True``. All use flattened ``ir_mul`` order.
         """
+        validate_module_precision(self, (features,))
         if features.ndim < 3 or features.shape[-3:] != self.grid_shape:
             raise ValueError(f"Expected trailing grid dimensions {self.grid_shape}.")
-        features = features.unflatten(-2, (len(self.time_parities), 2))
-        if len(self.time_parities) == 2:
-            positive, negative = features.unbind(-3)
-            features = torch.stack(
-                (positive + negative, positive - negative), dim=-3
-            ) / math.sqrt(2)
-        positive, negative = features.unbind(-2)
-        features = torch.stack(
-            (positive + negative, positive - negative), dim=-2
-        ) / math.sqrt(2)
-        coefficients = features @ self.analysis.T
-        if split:
-            first, second = coefficients.unbind(-2)
-            second = (second * self.second_sign).index_select(-1, self.second_index)
-            return first.movedim(-3, -1).flatten(-3), second.movedim(-3, -1).flatten(-3)
-        coefficients = coefficients.flatten(-4)
-        return coefficients.index_select(-1, self.output_index) * self.output_sign
+        return execution(self, features).from_grid(self, features, split)
 
     def extra_repr(self):
         return (

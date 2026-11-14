@@ -1,4 +1,4 @@
-"""Three-input tensor products evaluated by Racah recoupling."""
+"""Three-input tensor products with equivalent Racah coupling trees."""
 
 import math
 from functools import lru_cache
@@ -7,6 +7,7 @@ import torch
 from e3nn import o3
 
 from ...ops.precision import validate_module_precision
+from ...ops.torch.o3.wigner6j import tensor_product as torch_kernel
 
 
 @lru_cache(maxsize=None)
@@ -33,7 +34,7 @@ def layout_indices(irreps):
 
 
 class Wigner6jTensorProduct(torch.nn.Module):
-    r"""Evaluate ``(x1 x x2) x x3`` in the order ``(x1 x x3) x x2``.
+    r"""Evaluate ``(x1 x x2) x x3`` with optional ``(x1 x x3) x x2`` recoupling.
 
     Parameters
     ----------
@@ -59,6 +60,8 @@ class Wigner6jTensorProduct(torch.nn.Module):
     -----
     Each weight vector retains the ordering and normalization of its standard
     tensor product. Repeated irreps and paths retain independent channels.
+    The optimized schedule selects an equivalent tree from its sparse angular
+    work and, for convolutions, the node and edge counts.
 
     Examples
     --------
@@ -270,12 +273,25 @@ class Wigner6jTensorProduct(torch.nn.Module):
             self.register_buffer(name, index, persistent=False)
         from ..cgtp.convolution import O3TensorProductConv
 
-        self.conv13 = O3TensorProductConv(self.tp13, batch_paths=True)
-        self.conv132 = O3TensorProductConv(self.tp132, batch_paths=True)
+        self.conv13 = O3TensorProductConv(self.tp13, backend="cuda", batch_paths=True)
+        self.conv132 = O3TensorProductConv(self.tp132, backend="cuda", batch_paths=True)
+        self.schedule = torch_kernel.Schedule(self)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
         self.coefficients = self.coefficients.new_tensor(self.coefficient_values)
+        for product in (self.tp1, self.tp2, self.tp13, self.tp132):
+            for module in product.modules():
+                for name, value in tuple(module._buffers.items()):
+                    if name.startswith("_w3j_"):
+                        degrees = tuple(map(int, name[5:].split("_")))
+                        setattr(
+                            module,
+                            name,
+                            o3.wigner_3j(
+                                *degrees, dtype=torch.float64, device="cpu"
+                            ).to(value),
+                        )
         return self
 
     def get_weights(self, weight1, weight2):
@@ -344,34 +360,16 @@ class Wigner6jTensorProduct(torch.nn.Module):
         for value, width in zip((x1, x2, x3), self.input_dims):
             if value.ndim < 1 or value.shape[-1] != width:
                 raise ValueError("Input widths must match their irreps.")
-        shape = torch.broadcast_shapes(
-            *(v.shape[:-1] for v in (x1, x2, x3, weight1, weight2))
-        )
-        values = [
-            v.expand(shape + (v.shape[-1],)).reshape(math.prod(shape), v.shape[-1])
-            for v in (x1, x2, x3)
-        ]
-        x1, x2, x3 = values
-        weight = (
-            self.combine_weights(weight1, weight2)
-            .expand(shape + (self.tp132.weight_numel,))
-            .reshape(math.prod(shape), self.tp132.weight_numel)
-        )
-        intermediate = self.couple_inputs(x1, x3)
+        values = x1, x2, x3, weight1, weight2
         if self.backend == "cuda" and x1.is_cuda:
-            output = self.conv132(
-                intermediate,
-                x2.index_select(-1, self.input2_index),
-                weight,
-                weight.new_empty((0, self.tp132.weight_numel)),
-                None,
-            ).index_select(-1, self.output_index)
-        else:
-            output = self.tp132(intermediate, x2, weight)
-        return output.reshape(shape + (self.output_dim,))
+            from ...ops.cuda.o3.wigner6j import tensor_product as cuda_kernel
+
+            return cuda_kernel.evaluate(self, values)
+        return torch_kernel.evaluate(self, values)
 
     def forward_reference(self, x1, x2, x3, weight1=None, weight2=None):
         """Evaluate the two standard tensor products without recoupling."""
+        validate_module_precision(self, (x1, x2, x3, weight1, weight2))
         weight1, weight2 = self.get_weights(weight1, weight2)
         return self.tp2(self.tp1(x1, x2, weight1), x3, weight2)
 

@@ -1,8 +1,10 @@
 """Tests for the corresponding EQX source module."""
 
 from copy import deepcopy
+
 import pytest
 import torch
+
 from equivariantx import o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -122,3 +124,55 @@ def test_o2_direct_sum_matrix_uses_ir_mul_layout():
     torch.testing.assert_close(actual[:, 0, 0], torch.ones_like(angle))
     torch.testing.assert_close(actual[:, 1, 1], -torch.ones_like(angle))
     torch.testing.assert_close(actual[:, 2:, 2:], expected)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_rotation_precision(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    representations = (o2.Irrep("0e"), o2.Irrep("2m"), o2.Irreps("2x2m"), o2.Irreps())
+    for representation in representations:
+        for dtype in (torch.float16, torch.bfloat16, torch.complex64):
+            angle = torch.tensor(0.3, device=device, dtype=dtype)
+            with pytest.raises(TypeError, match="float32 or float64"):
+                representation.D_from_angle(angle)
+        for dtype in (torch.float32, torch.float64):
+            angle = torch.tensor(0.3, device=device, dtype=dtype)
+            assert representation.D_from_angle(angle).dtype == dtype
+            with torch.autocast(device, dtype=torch.bfloat16):
+                with pytest.raises(TypeError, match="autocast"):
+                    representation.D_from_angle(angle)
+        assert representation.D_from_angle(1).dtype == torch.get_default_dtype()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_rotation_derivatives_and_compile(device, double_precision):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    angle = torch.randn(3, device=device, requires_grad=True)
+    representation = o2.Irrep("2m")
+    actual = representation.D_from_angle(angle, reflected=True)
+    expected = torch.stack(
+        (
+            (2 * angle).cos(),
+            -(2 * angle).sin(),
+            -(2 * angle).sin(),
+            -(2 * angle).cos(),
+        ),
+        -1,
+    ).reshape(3, 2, 2)
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected)
+        actual, expected = [
+            torch.autograd.grad(value.sin().sum(), angle, create_graph=True)[0]
+            for value in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected)
+    compiled = torch.compile(
+        representation.D_from_angle, backend="aot_eager", fullgraph=True
+    )
+    torch.testing.assert_close(compiled(angle), representation.D_from_angle(angle))
+    torch.testing.assert_close(
+        torch.func.vmap(representation.D_from_angle)(angle),
+        representation.D_from_angle(angle),
+    )

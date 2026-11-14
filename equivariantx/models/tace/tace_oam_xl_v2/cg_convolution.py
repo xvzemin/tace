@@ -8,9 +8,9 @@ import torch
 
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.outputs import o3_outputs
-from equivariantx.ops.kernels.cuda.radial import project
+from equivariantx.ops.common.cuda.radial import project
 from .graph import prepare_graph
-from equivariantx.ops.kernels.cuda.runtime import SOURCE_SIZE_LIMIT, kernels, runtime
+from equivariantx.ops.common.cuda.runtime import SOURCE_SIZE_LIMIT, kernels, runtime
 from .cg_codegen import convolution_source, fused_source
 
 CHUNK_SIZE = 131072
@@ -42,6 +42,7 @@ def execution_plan(
     packed = geometry[0][1] if geometry and geometry[0][0] == "packed_output" else None
     if packed is not None:
         from .packed_edge import pack_edge_source
+
         geometry = []
     outputs = 1 + max(slot for _, _, pairs in program for _, slot in pairs)
     group_attrs = any(role == 3 for _, _, pairs in program for role, _ in pairs)
@@ -60,8 +61,11 @@ def execution_plan(
             else (path[3], path[1 if group_attrs else 0])
         )
         roles = {role for _, _, pairs in program for role, _ in pairs}
-        if (PATH_GROUPING != "native" and not geometry
-                and (GROUPING_PHASE == "all" or roles == {0,1})):
+        if (
+            PATH_GROUPING != "native"
+            and not geometry
+            and (GROUPING_PHASE == "all" or roles == {0, 1})
+        ):
             if PATH_GROUPING == "output_degree":
                 key = path[3], path[7]
             elif PATH_GROUPING == "output_input":
@@ -74,9 +78,19 @@ def execution_plan(
         if ANGULAR_TILE > 0 and roles == {4} and not geometry:
             for first in range(0, path[7], ANGULAR_TILE):
                 count = min(ANGULAR_TILE, path[7] - first)
-                cg = tuple((i, j, k-first, coefficient) for i, j, k, coefficient in path[-1]
-                           if first <= k < first+count)
-                piece = (*path[:2], path[2]+first*path[3], *path[3:7], count, *path[8:-1], cg)
+                cg = tuple(
+                    (i, j, k - first, coefficient)
+                    for i, j, k, coefficient in path[-1]
+                    if first <= k < first + count
+                )
+                piece = (
+                    *path[:2],
+                    path[2] + first * path[3],
+                    *path[3:7],
+                    count,
+                    *path[8:-1],
+                    cg,
+                )
                 groups[(*key, first)].append(piece)
         else:
             groups[key].append(path)
@@ -90,7 +104,10 @@ def execution_plan(
         and geometry[0][0] in ("cartesian", "cartesian_symmetric")
     )
     if cartesian:
-        from equivariantx.conv.co3.polynomials import ANGULAR_TILE_SIZE, FUSED_TILE_LIMIT
+        from equivariantx.conv.co3.polynomials import (
+            ANGULAR_TILE_SIZE,
+            FUSED_TILE_LIMIT,
+        )
 
         # Cartesian angular tiles may share a weight column. Keep their live
         # accumulators separate; compatible tiles are fused into one grid below.
@@ -142,9 +159,11 @@ def execution_plan(
                 code = pack_edge_source(code, packed, terms)
             if radial_indexed:
                 from .compressed import compressed_source
+
                 code = compressed_source(code, terms)
             from .cache_policy import source_policy
-            code=source_policy(code,terms,dtype)
+
+            code = source_policy(code, terms, dtype)
             # Bound compiler work before querying the kernel's register usage.
             if len(code) > SOURCE_SIZE_LIMIT:
                 if len(terms) > 1:
@@ -227,12 +246,22 @@ def execution_plan(
                 indexed=indexed,
             )
             if packed is not None:
-                code = pack_edge_source(code, packed, tuple(term for _, terms, _ in phases for term in terms))
+                code = pack_edge_source(
+                    code,
+                    packed,
+                    tuple(term for _, terms, _ in phases for term in terms),
+                )
             if radial_indexed:
                 from .compressed import compressed_source
-                code = compressed_source(code, tuple(term for _, terms, _ in phases for term in terms))
+
+                code = compressed_source(
+                    code, tuple(term for _, terms, _ in phases for term in terms)
+                )
             from .cache_policy import source_policy
-            code=source_policy(code,tuple(term for _,terms,_ in phases for term in terms),dtype)
+
+            code = source_policy(
+                code, tuple(term for _, terms, _ in phases for term in terms), dtype
+            )
             if len(code) > SOURCE_SIZE_LIMIT:
                 half = len(indices) // 2
                 pending.extend((indices[:half], indices[half:]))
@@ -270,7 +299,13 @@ def execution_plan(
 
 
 def contract_direct(
-    metadata, source, target, calls, shared=None, initialize=(), batch_paths=False,
+    metadata,
+    source,
+    target,
+    calls,
+    shared=None,
+    initialize=(),
+    batch_paths=False,
     radial_map=None,
 ):
     """Share angular factors across derivative terms and reduce on their owners."""
@@ -324,6 +359,7 @@ def contract_direct(
     }
     pointers = [value.data_ptr() for value in (*operands, *results)]
     from .packed_edge import packed_description
+
     packed = packed_description(metadata) is not None
     extra = [operands[program[0][0][0]].shape[0]] if packed else []
     if radial_map is not None:
@@ -469,7 +505,7 @@ def contraction(
     batch_paths: bool = False,
 ) -> list[torch.Tensor]:
     """Run sparse contractions outside the tensor tracing boundary."""
-    from equivariantx.ops.kernels.cuda.graph import convolution
+    from equivariantx.ops.common.cuda.graph import convolution
 
     results = o3_outputs(metadata, program, source, target, operands)
     terms = parse_metadata(program)

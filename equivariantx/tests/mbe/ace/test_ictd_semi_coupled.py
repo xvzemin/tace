@@ -2,110 +2,174 @@
 
 import pytest
 import torch
-from equivariantx.mbe.ace import (
-    IctdBilinearContraction,
-    IctdSemiCoupledSymmetricContraction,
+
+from .testing import (
+    check_ictd_contraction,
+    check_parent_aoti,
+    check_parent_provider,
+    check_spherical_compile,
 )
+
+
+@pytest.mark.parametrize("normalization", ["element", "path"])
+def test_coefficient_basis_normalization(normalization, double_precision):
+    from equivariantx import co3
+    from equivariantx.mbe.ace.ictd_semi_coupled import cartesian_coefficient
+
+    linear = co3.Linear(
+        "2x0e+3x0e+2x2e+1x2e",
+        "3x2e+2x0e",
+        instructions=[(0, 1), (1, 1), (2, 0), (3, 0), (2, 0)],
+        internal_weights=False,
+        shared_weights=False,
+        path_normalization=normalization,
+        output_basis="spherical",
+    )
+    raw = cartesian_coefficient(linear)
+    assert raw.instructions == linear.instructions
+    assert linear.output_basis == "spherical" and raw.output_basis == "cartesian"
+    assert cartesian_coefficient(raw) is raw
+    transform = co3.ChangeOfBasis(raw.irreps_out, inverse=True)
+    x = torch.randn(5, linear.irreps_in.dim, requires_grad=True)
+    weight = torch.randn(5, linear.weight_numel, requires_grad=True)
+    actual, expected = transform(raw(x, weight)), linear(x, weight)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        value.sin().sum(), (x, weight), create_graph=True
+                    )
+                ]
+            )
+            * 0.1
+            for value in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_spherical_compile(backend, double_precision, monkeypatch):
+    check_spherical_compile("semi", backend, monkeypatch)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_spherical_force_gradient_aoti(
+    backend, tmp_path, double_precision, monkeypatch
+):
+    check_parent_aoti(
+        "co3",
+        "semi",
+        tmp_path,
+        monkeypatch,
+        shared_weights=True,
+        output_basis="spherical",
+        backend=backend,
+    )
 
 
 @pytest.mark.parametrize(
-    "kind",
+    "device,nodes,backend,child_backend",
     [
-        "ace",
-        "ace_split",
-        "bilinear",
-        "bilinear_split",
-        "bilinear_wide",
-        "moe",
-        "moe_split",
+        ("cpu", 0, "torch", "cuda"),
+        ("cpu", 7, "torch", "torch"),
+        ("cpu", 7, "cuda", "cuda"),
+        ("cuda", 0, "cuda", "cuda"),
+        ("cuda", 7, "torch", "cuda"),
+        ("cuda", 7, "cuda", "torch"),
     ],
 )
-def test_ictd_contractions(kind, double_precision, monkeypatch):
+@pytest.mark.parametrize("shared_weights", [False, True])
+@pytest.mark.parametrize("reference", [False, True])
+def test_spherical_output(
+    device,
+    nodes,
+    backend,
+    child_backend,
+    shared_weights,
+    reference,
+    double_precision,
+    monkeypatch,
+):
+    check_parent_provider(
+        "co3",
+        "semi",
+        device,
+        nodes,
+        child_backend,
+        reference,
+        monkeypatch,
+        shared_weights=shared_weights,
+        output_basis="spherical",
+        backend=backend,
+    )
+
+
+@pytest.mark.parametrize("invalid", ["basis", "bias", "internal"])
+def test_coefficient_contract(invalid):
     from equivariantx import co3
+    from equivariantx.mbe import ace
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    if kind == "ace_split":
-        from equivariantx.ops.kernels.cuda import ace
-
-        batches = ace.schedule_batches
-        monkeypatch.setattr(ace, "schedule_batches", lambda groups: batches(groups, 7))
-        monkeypatch.setattr(ace, "weighted_source", lambda *args: None)
-    elif kind.endswith("_split"):
-        from equivariantx.ops.kernels.cuda import bilinear
-
-        batches = bilinear.metadata_batches
-        monkeypatch.setattr(
-            bilinear, "metadata_batches", lambda value: batches(value, 1)
-        )
-    channels = 256 if kind == "bilinear_wide" else 4
-    irreps = co3.Irreps(f"{channels}x0e+{channels}x1o+{channels}x2e")
-    output = co3.Irreps(f"{channels}x0e+{channels}x1e+{channels}x2e+{channels}x3o")
-    weighted = not kind.startswith("ace")
-    tp = co3.TensorProduct(
+    irreps = "2x0e+2x2e"
+    product = co3.TensorProduct(
         irreps,
         irreps,
-        output,
-        [
-            (1, 1, 0, "uuu", weighted),
-            (1, 1, 1, "uuu", weighted),
-            (1, 1, 2, "uuu", weighted),
-            (1, 2, 3, "uuu", weighted),
-        ],
+        irreps,
+        [(0, 0, 0, "uuu", False), (0, 1, 1, "uuu", False)],
         internal_weights=False,
         shared_weights=False,
     )
-    experts = 2 if kind.startswith("moe") else 1
-    coefficient = co3.Linear(
-        [(mul // experts, ir) for mul, ir in output],
-        [(mul // experts, ir) for mul, ir in output],
-        internal_weights=False,
-        shared_weights=False,
-    )
-    if weighted:
-        modules = [
-            IctdBilinearContraction(tp, coefficient, experts, backend=backend)
-            for backend in ("torch", "cuda")
-        ]
-    else:
-        first = co3.Linear(irreps, output, internal_weights=False, shared_weights=False)
-        modules = [
-            IctdSemiCoupledSymmetricContraction(
-                [tp], [first, coefficient], backend=backend
-            )
-            for backend in ("torch", "cuda")
-        ]
-    modules = [module.cuda() for module in modules]
-    transform = co3.ChangeOfBasis(irreps).cuda()
-    source = torch.randn(5, irreps.spherical().dim, device="cuda", requires_grad=True)
-    features = transform(source)
-    types = torch.tensor([0, 1, 0, 2, 1], device="cuda")
-    if weighted:
-        gates = torch.randn(5, tp.weight_numel, device="cuda", requires_grad=True)
-        weight = torch.randn(
-            3, experts, coefficient.weight_numel, device="cuda", requires_grad=True
+    linears = [
+        co3.Linear(irreps, irreps, internal_weights=False, output_basis="spherical")
+    ]
+    linears.append(
+        co3.Linear(
+            irreps,
+            irreps,
+            output_basis="cartesian" if invalid == "basis" else "spherical",
+            internal_weights=invalid == "internal",
+            biases=invalid == "bias",
         )
-        inputs = (source, gates, weight)
-        outputs = [
-            module(features, features, gates, weight, types) for module in modules
-        ]
-    else:
-        weights = [
-            torch.randn(3, linear.weight_numel, device="cuda", requires_grad=True)
-            for linear in (first, coefficient)
-        ]
-        inputs = (source, *weights)
-        outputs = [module(features, weights, types) for module in modules]
-    torch.testing.assert_close(*outputs, atol=1e-11, rtol=1e-11)
-    losses = [output.sin().sum() for output in outputs]
-    for _ in range(3):
-        gradients = [
-            torch.autograd.grad(loss, inputs, create_graph=True) for loss in losses
-        ]
-        for expected, actual in zip(*gradients):
-            torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)
-        tangents = [torch.randn_like(value) for value in inputs]
-        losses = [
-            sum((value * tangent).sum() for value, tangent in zip(grad, tangents))
-            for grad in gradients
-        ]
+    )
+    with pytest.raises(ValueError, match="output basis|unbiased external"):
+        ace.IctdSemiCoupledSymmetricContraction([product], linears)
+
+
+@pytest.mark.parametrize("shared_weights", [False, True])
+def test_force_gradient_aoti(shared_weights, tmp_path, double_precision, monkeypatch):
+    check_parent_aoti(
+        "co3", "semi", tmp_path, monkeypatch, shared_weights=shared_weights
+    )
+
+
+@pytest.mark.parametrize("device,nodes", [("cpu", 0), ("cpu", 7), ("cuda", 7)])
+@pytest.mark.parametrize("reference", [False, True])
+def test_shared_descriptors(device, nodes, reference, double_precision, monkeypatch):
+    check_parent_provider(
+        "co3",
+        "semi",
+        device,
+        nodes,
+        "torch",
+        reference,
+        monkeypatch,
+        shared_weights=True,
+    )
+
+
+@pytest.mark.parametrize("device,nodes", [("cpu", 0), ("cpu", 7), ("cuda", 7)])
+@pytest.mark.parametrize("child_backend", ["torch", "cuda"])
+@pytest.mark.parametrize("reference", [False, True])
+def test_parent_provider(
+    device, nodes, child_backend, reference, double_precision, monkeypatch
+):
+    check_parent_provider(
+        "co3", "semi", device, nodes, child_backend, reference, monkeypatch
+    )
+
+
+@pytest.mark.parametrize("kind", ["ace", "ace_split"])
+def test_ictd_contractions(kind, double_precision, monkeypatch):
+    check_ictd_contraction(kind, monkeypatch)

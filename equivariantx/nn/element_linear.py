@@ -1,11 +1,8 @@
 """Indexed channel maps shared by the representation modules."""
 
-import math
-
 import torch
 
-from ..ops.kernels.torch.linear import element_linear
-from ..ops.linear import contract
+from ..ops.torch.nn import element_linear as torch_kernel
 from ..ops.precision import validate_module_precision
 
 
@@ -118,29 +115,11 @@ class ElementLinear(torch.nn.Module):
         fused = features.is_cuda and self.backend == "cuda"
         if weight.dtype != features.dtype:
             raise ValueError("Features and weights must share their dtype.")
-        if pair:
-            node_type = node_type * weight.shape[1] + target_type
-        weight = weight.reshape(
-            math.prod(weight.shape[:axes]), self.num_experts, self.weight_numel
-        )
         if fused:
-            return contract(
-                self.metadata,
-                2,
-                node_type,
-                features,
-                weight,
-                features.new_empty((0, self.output_dim)),
-            )
-        return element_linear(
-            features,
-            weight,
-            node_type,
-            self.paths,
-            self.output_dim,
-            self.layout,
-            self.expand_weights,
-        )
+            from ..ops.cuda.nn import element_linear as cuda_kernel
+
+            return cuda_kernel.evaluate(self, features, weight, node_type, target_type)
+        return torch_kernel.evaluate(self, features, weight, node_type, target_type)
 
     def extra_repr(self):
         return (

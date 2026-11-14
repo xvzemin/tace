@@ -1,6 +1,7 @@
 import torch
 
-from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import circular_harmonics as torch_kernel
+from ..ops.precision import validate_module_precision, validate_precision
 from .irreps import Irrep, Irreps
 
 
@@ -9,6 +10,7 @@ def circular_harmonics(
     mmax: int,
     *,
     normalize: bool = True,
+    backend: str = "torch",
 ) -> torch.Tensor:
     """Evaluate real circular harmonics through order ``mmax``.
 
@@ -21,6 +23,9 @@ def circular_harmonics(
     normalize : bool, optional
         Normalize each nonzero vector before constructing the harmonics. If
         ``False``, order ``m`` is homogeneous of degree ``m`` in the input.
+
+    backend : {"torch", "cuda"}, optional
+        Torch recurrence or native CUDA expression. CPU inputs use Torch.
 
     Returns
     -------
@@ -39,21 +44,14 @@ def circular_harmonics(
             f"got {tuple(input.shape)}."
         )
 
-    if normalize:
-        input = torch.nn.functional.normalize(input, dim=-1)
-    real = input[..., 0]
-    imaginary = input[..., 1]
-    outputs = [torch.ones_like(real).unsqueeze(-1)]
+    validate_precision((input,))
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be torch or cuda.")
+    if backend == "cuda" and input.is_cuda:
+        from ..ops.cuda.o2 import circular_harmonics as cuda_kernel
 
-    order_real = torch.ones_like(real)
-    order_imaginary = torch.zeros_like(imaginary)
-    for _ in range(1, mmax + 1):
-        next_real = order_real * real - order_imaginary * imaginary
-        next_imaginary = order_real * imaginary + order_imaginary * real
-        order_real = next_real
-        order_imaginary = next_imaginary
-        outputs.append(torch.stack((order_real, order_imaginary), dim=-1))
-    return torch.cat(outputs, dim=-1)
+        return cuda_kernel.evaluate(input, mmax, normalize)
+    return torch_kernel.evaluate(input, mmax, normalize)
 
 
 class CircularHarmonics(torch.nn.Module):
@@ -70,10 +68,21 @@ class CircularHarmonics(torch.nn.Module):
         If ``True``, treat the input vector as time odd. Order ``m`` then has
         time parity ``(-1)**m``.
 
+    backend : {"torch", "cuda"}, optional
+        Execution backend; joint compilation exposes exact tensor algebra.
+
     Notes
     -----
     The output follows flattened ``ir_mul`` order from ``0ee`` through
     ``mmax`` and has representation metadata in ``irreps_out``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import o2
+    >>> layer = o2.CircularHarmonics(2)
+    >>> layer(torch.randn(4, 2)).shape
+    torch.Size([4, 5])
     """
 
     def __init__(
@@ -82,8 +91,12 @@ class CircularHarmonics(torch.nn.Module):
         *,
         normalize: bool = True,
         time_reversal: bool = False,
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")
         if mmax < 0:
@@ -119,6 +132,7 @@ class CircularHarmonics(torch.nn.Module):
             input,
             self.mmax,
             normalize=self.normalize,
+            backend=getattr(self, "backend", "torch"),
         )
 
     def extra_repr(self) -> str:

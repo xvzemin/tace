@@ -28,7 +28,7 @@ def test_cartesian_harmonic_polynomials(degree, normalization, double_precision)
 
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
 def test_cartesian_harmonic_tables(normalization):
-    from equivariantx.ops.kernels.cuda.o3.harmonics import polynomial_coefficients
+    from equivariantx.ops.common.cuda.o3.harmonics import polynomial_coefficients
 
     vectors = torch.randn(7, 3, dtype=torch.float64)
     vectors = torch.nn.functional.normalize(vectors, dim=-1)

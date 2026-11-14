@@ -7,7 +7,7 @@ from e3nn import o3
 
 from ...mbe.ace.ictd_semi_coupled import coupling_entries
 from ...co3 import Projector
-from ...ops.edge import evaluate
+from ...ops.common.edge import evaluate
 from ...utils.program import Program, activate
 
 
@@ -79,7 +79,11 @@ def tensor_product(program, product, left, right):
         program.constant(width * dimensions[2], 0),
     )
     result = program.product(values, metadata, 2)
-    if hasattr(product, "path_factors") and product.project and product.projection_indices:
+    if (
+        hasattr(product, "path_factors")
+        and product.project
+        and product.projection_indices
+    ):
         paths = []
         for index, (_, ir) in enumerate(irreps[2]):
             start = irreps[2].slices()[index].start // width

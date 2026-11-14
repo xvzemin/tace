@@ -6,6 +6,8 @@ from typing import NamedTuple
 import torch
 from e3nn import o3
 
+from ..ops.precision import validate_precision
+
 
 class Irrep(tuple):
     """An O(3) irrep stored as a rank-l Cartesian tensor.
@@ -24,6 +26,12 @@ class Irrep(tuple):
     ``dim`` is the storage size, ``3**l``. The symmetric traceless
     subspace has ``2*l+1`` independent coordinates. Spatial parity is
     independent of tensor rank.
+
+    Examples
+    --------
+    >>> from equivariantx import co3
+    >>> co3.Irrep("2e").dim
+    9
     """
 
     def __new__(cls, l, p=None, t=1):
@@ -88,10 +96,13 @@ class Irrep(tuple):
         Parameters
         ----------
         matrix : torch.Tensor
-            Orthogonal matrices of shape (..., 3, 3).
+            FP32 or FP64 orthogonal matrices of shape (..., 3, 3).
         time_reversal : bool, optional
             Apply time reversal independently of the spatial transformation.
         """
+        validate_precision((matrix,))
+        if matrix.shape[-2:] != (3, 3):
+            raise ValueError("An O(3) matrix must have trailing shape (3, 3).")
         value = matrix.new_ones((*matrix.shape[:-2], 1, 1))
         for _ in range(self.l):
             value = (
@@ -113,6 +124,7 @@ class Irrep(tuple):
         k, kt : torch.Tensor, optional
             Exponents of spatial inversion and time reversal.
         """
+        validate_precision((alpha, beta, gamma, k, kt))
         value = self.D_from_matrix(o3.angles_to_matrix(alpha, beta, gamma))
         if k is not None:
             value = value * self.p ** k[..., None, None]
@@ -120,6 +132,7 @@ class Irrep(tuple):
 
     def D_from_quaternion(self, quaternion, k=None, kt=None):
         """Return a quaternion rotation multiplied by ``p**k * t**kt``."""
+        validate_precision((quaternion, k, kt))
         value = self.D_from_matrix(o3.quaternion_to_matrix(quaternion))
         if k is not None:
             value = value * self.p ** k[..., None, None]
@@ -127,6 +140,7 @@ class Irrep(tuple):
 
     def D_from_axis_angle(self, axis, angle):
         """Return the representation of an axis-angle rotation."""
+        validate_precision((axis, angle))
         return self.D_from_matrix(o3.axis_angle_to_matrix(axis, angle))
 
 
@@ -155,6 +169,13 @@ class Irreps(tuple):
     -----
     Each entry occupies ``mul * 3**l`` consecutive values and is viewed
     as ``(..., mul, 3**l)``. Iteration yields ``(mul, ir)``.
+
+    Examples
+    --------
+    >>> from equivariantx import co3
+    >>> irreps = co3.Irreps("2x0e + 1x2e")
+    >>> irreps.dim
+    11
     """
 
     def __new__(cls, irreps=None):
@@ -276,6 +297,9 @@ class Irreps(tuple):
 
     def D_from_matrix(self, matrix, time_reversal=False):
         """Return Cartesian blocks with optional independent time reversal."""
+        validate_precision((matrix,))
+        if matrix.shape[-2:] != (3, 3):
+            raise ValueError("An O(3) matrix must have trailing shape (3, 3).")
         result = matrix.new_zeros((*matrix.shape[:-2], self.dim, self.dim))
         offset = 0
         for mul, ir in self:

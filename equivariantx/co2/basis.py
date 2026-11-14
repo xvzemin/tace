@@ -6,6 +6,7 @@ from functools import lru_cache
 import torch
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co2 import basis as torch_kernel
 from .irreps import Irreps
 
 
@@ -117,6 +118,9 @@ class ChangeOfBasis(torch.nn.Module):
     inverse : bool, optional
         False embeds compact O(2) features. True extracts compact features
         and discards components outside the symmetric traceless subspace.
+    backend : {"torch", "cuda"}, optional
+        Execution provider. CUDA uses a fixed-matrix kernel with an exact
+        transpose for derivatives.
 
     Notes
     -----
@@ -135,8 +139,11 @@ class ChangeOfBasis(torch.nn.Module):
     >>> torch.testing.assert_close(to_spherical(tensor), x)
     """
 
-    def __init__(self, irreps, inverse=False):
+    def __init__(self, irreps, inverse=False, *, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be 'torch' or 'cuda'.")
+        self.backend = backend
         cartesian = Irreps(irreps)
         self.inverse = inverse
         self.irreps_in = cartesian if inverse else cartesian.circular()
@@ -160,18 +167,11 @@ class ChangeOfBasis(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        values = []
-        for mul, m, dim, circular_dim, section in self.paths:
-            matrix = getattr(self, f"basis_{m}")
-            x = features[..., section]
-            if self.inverse:
-                x = x.reshape(*features.shape[:-1], mul, dim) @ matrix
-                x = x.transpose(-1, -2)
-            else:
-                x = x.reshape(*features.shape[:-1], circular_dim, mul)
-                x = x.transpose(-1, -2) @ matrix.T
-            values.append(x.flatten(-2))
-        return torch.cat(values, -1) if values else features[..., :0]
+        if getattr(self, "backend", "torch") == "cuda":
+            from ..ops.cuda.co2 import basis as cuda_kernel
+
+            return cuda_kernel.change_basis(self, features)
+        return torch_kernel.change_basis(self, features)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}, inverse={self.inverse}"
@@ -245,32 +245,10 @@ class Projector(torch.nn.Module):
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         if self.backend == "cuda":
-            from ..ops.channel_product import project
+            from ..ops.cuda.co2 import basis as cuda_kernel
 
-            return project(self.kernel_metadata, features)
-        values = [
-            features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
-            for (mul, ir), section in zip(self.irreps_in, self.irreps_in.slices())
-        ]
-        for m, entries in self.groups:
-            value = (
-                values[entries[0][0]]
-                if len(entries) == 1
-                else torch.cat([values[i] for i, _ in entries], dim=-2)
-            )
-            matrix = getattr(self, f"matrix_{m}")
-            value = value @ matrix
-            if self.method == "factorized":
-                value = value @ matrix.T
-            for (i, _), part in zip(
-                entries, value.split([mul for _, mul in entries], -2)
-            ):
-                values[i] = part
-        return (
-            torch.cat([x.flatten(-2) for x in values], -1)
-            if values
-            else features[..., :0]
-        )
+            return cuda_kernel.project(self, features)
+        return torch_kernel.project(self, features)
 
     def extra_repr(self):
         return f"{self.irreps_in}, method={self.method}"

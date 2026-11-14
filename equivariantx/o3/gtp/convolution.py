@@ -11,6 +11,11 @@ class GauntTensorProductConv(TensorProductConv):
     ----------
     tensor_product : equivariantx.o3.GauntTensorProduct
         Defines the irreps, factors and normalization.
+    backend : {"torch", "cuda"}, optional
+        Defaults to the tensor product backend.
+    radial_mode : {"last", "full"}, optional
+        Fuse the last radial projection, or recompute all radial layers in
+        the convolution adjoints. Defaults to ``"last"``.
 
     Examples
     --------
@@ -25,7 +30,7 @@ class GauntTensorProductConv(TensorProductConv):
     torch.Size([3, 8])
     """
 
-    def __init__(self, tensor_product):
+    def __init__(self, tensor_product, *, backend=None, radial_mode="last"):
         if not isinstance(tensor_product, GauntTensorProduct):
             raise TypeError("tensor_product must be a GauntTensorProduct.")
-        super().__init__(tensor_product)
+        super().__init__(tensor_product, backend=backend, radial_mode=radial_mode)

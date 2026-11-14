@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
 license = "Apache-2.0"
 license-files = ["LICENSE.md"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4",
     "e3nn>=0.4.4",
@@ -31,24 +31,19 @@ Documentation = "https://tace.readthedocs.io/en/latest/equivariantx/api.html"
 [tool.setuptools]
 packages = [
     "equivariantx",
-    "equivariantx.mbe",
-    "equivariantx.mbe.ace",
-    "equivariantx.ops.kernels",
-    "equivariantx.ops.kernels.cuda",
-    "equivariantx.ops.kernels.cuda.models",
-    "equivariantx.ops.kernels.cuda.models.tace",
-    "equivariantx.ops.kernels.cuda.o2_o3",
-    "equivariantx.ops.kernels.cuda.o3",
-    "equivariantx.ops.kernels.torch",
     "equivariantx.co2",
     "equivariantx.co3",
-    "equivariantx.co3.ictp",
     "equivariantx.co3.ictd",
+    "equivariantx.co3.ictp",
     "equivariantx.conv",
     "equivariantx.conv.co3",
     "equivariantx.conv.o2_o3",
     "equivariantx.conv.uu_o2",
     "equivariantx.conv.uv_o2",
+    "equivariantx.mbe",
+    "equivariantx.mbe.ace",
+    "equivariantx.mbe.bce",
+    "equivariantx.mbe.ece",
     "equivariantx.models",
     "equivariantx.models.equflash",
     "equivariantx.models.mace",
@@ -56,8 +51,8 @@ packages = [
     "equivariantx.models.prophet",
     "equivariantx.models.sevennet",
     "equivariantx.models.tace",
-    "equivariantx.models.tace.tece_oam_rra",
     "equivariantx.models.tace.tace_oam_xl_v2",
+    "equivariantx.models.tace.tece_oam_rra",
     "equivariantx.nn",
     "equivariantx.o2",
     "equivariantx.o3",
@@ -66,12 +61,56 @@ packages = [
     "equivariantx.o3.mtp",
     "equivariantx.o3.wigner6j",
     "equivariantx.ops",
+    "equivariantx.ops.common",
+    "equivariantx.ops.common.cuda",
+    "equivariantx.ops.common.cuda.models",
+    "equivariantx.ops.common.cuda.models.tace",
+    "equivariantx.ops.common.cuda.o2_o3",
+    "equivariantx.ops.common.cuda.o3",
+    "equivariantx.ops.common.torch",
+    "equivariantx.ops.cuda",
+    "equivariantx.ops.cuda.co2",
+    "equivariantx.ops.cuda.co3",
+    "equivariantx.ops.cuda.co3.ictd",
+    "equivariantx.ops.cuda.co3.ictp",
+    "equivariantx.ops.cuda.conv",
+    "equivariantx.ops.cuda.conv.co3",
+    "equivariantx.ops.cuda.conv.o2_o3",
+    "equivariantx.ops.cuda.conv.uu_o2",
+    "equivariantx.ops.cuda.conv.uv_o2",
+    "equivariantx.ops.cuda.mbe",
+    "equivariantx.ops.cuda.mbe.ace",
+    "equivariantx.ops.cuda.nn",
+    "equivariantx.ops.cuda.o2",
+    "equivariantx.ops.cuda.o3",
+    "equivariantx.ops.cuda.o3.cgtp",
+    "equivariantx.ops.cuda.o3.wigner6j",
+    "equivariantx.ops.kernels",
+    "equivariantx.ops.torch",
+    "equivariantx.ops.torch.co2",
+    "equivariantx.ops.torch.co3",
+    "equivariantx.ops.torch.co3.ictd",
+    "equivariantx.ops.torch.co3.ictp",
+    "equivariantx.ops.torch.conv",
+    "equivariantx.ops.torch.conv.co3",
+    "equivariantx.ops.torch.conv.o2_o3",
+    "equivariantx.ops.torch.conv.uu_o2",
+    "equivariantx.ops.torch.conv.uv_o2",
+    "equivariantx.ops.torch.mbe",
+    "equivariantx.ops.torch.mbe.ace",
+    "equivariantx.ops.torch.nn",
+    "equivariantx.ops.torch.o2",
+    "equivariantx.ops.torch.o3",
+    "equivariantx.ops.torch.o3.cgtp",
+    "equivariantx.ops.torch.o3.gtp",
+    "equivariantx.ops.torch.o3.mtp",
+    "equivariantx.ops.torch.o3.wigner6j",
     "equivariantx.utils",
 ]
 package-dir = { equivariantx = "." }
 
 [tool.setuptools.package-data]
-equivariantx = ["README.md", "ops/kernels/cuda/csrc/*.cpp", "models/tace/tace_oam_xl_v2/README.rst"]
+equivariantx = ["README.md", "ops/common/cuda/csrc/*.cpp", "models/tace/tace_oam_xl_v2/README.rst"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

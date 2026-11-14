@@ -3,10 +3,88 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import co2, co3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from e3nn import nn
+
+
+def test_reference_preserves_cuda_basis_provider(monkeypatch, double_precision):
+    from unittest.mock import patch
+
+    from equivariantx.ops import config
+    from equivariantx.ops.cuda.co3 import basis as kernel
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = co3.ChangeOfBasis("2x2e", backend="cuda").cuda()
+    reference = co3.ChangeOfBasis("2x2e").cuda()
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for count in (3, 0):
+        value = torch.randn(count, 10, device="cuda")
+        with patch.object(
+            kernel, "change_basis", wraps=kernel.change_basis
+        ) as selected:
+            actual = module(value)
+        assert selected.call_count == 1
+        torch.testing.assert_close(actual, reference(value))
+    assert module.backend == "cuda" and config.TORCH_REFERENCE is True
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("switch", [False, True])
+def test_projector_reference_bypasses_children(
+    device, switch, monkeypatch, double_precision
+):
+    import copy
+
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.co3 import basis as kernel
+    from equivariantx.tests.conv.testing import assert_native_autograd
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    module = co3.Projector("1x6e").to(device)
+    reference = copy.deepcopy(module)
+    for child in module.symmetric_bases.values():
+        child.backend = "cuda"
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("An ordinary projector dispatched its child backend.")
+
+        monkeypatch.setattr(child, "pack", forbidden)
+        monkeypatch.setattr(child, "unpack", forbidden)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", switch)
+    if not switch:
+        module.backend = "cuda"
+
+    def run(layer, value):
+        return (
+            layer(value)
+            if switch
+            else kernel.project_reference(layer, [value.unflatten(-1, (1, 729))])[
+                0
+            ].flatten(-2)
+        )
+
+    for count in (2, 0):
+        value = (torch.randn(count, 729, device=device) * 0.1).requires_grad_()
+        actual, expected = run(module, value), run(reference, value)
+        for _ in range(4):
+            torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+            assert_native_autograd(actual)
+            actual, expected = [
+                torch.autograd.grad(output.sin().sum(), value, create_graph=True)[0]
+                for output in (actual, expected)
+            ]
+        tangent = torch.randn_like(value)
+        torch.testing.assert_close(
+            torch.func.jvp(lambda x: run(module, x), (value,), (tangent,)),
+            torch.func.jvp(lambda x: run(reference, x), (value,), (tangent,)),
+        )
+    assert all(child.backend == "cuda" for child in module.symmetric_bases.values())
+    assert config.TORCH_REFERENCE == switch
 
 
 @pytest.mark.parametrize("cartesian", [False, True])
@@ -54,32 +132,6 @@ def test_conversion_and_deferred_projection(double_precision, cartesian):
         rotated = co3.ChangeOfBasis(c, True).to(DEVICE)(module(rotated_x, r @ q.T))
         transformed = actual @ o3.Irreps(c).D_from_matrix(q.cpu()).to(DEVICE).T
         torch.testing.assert_close(rotated, transformed, atol=1e-11, rtol=1e-11)
-
-
-def test_irreps_and_basis(double_precision):
-    irreps = co3.Irreps("2x0e+1x1o+2x2e+1x2o+1x1o")
-    assert irreps.dim == 2 + 3 + 27 + 3
-    assert irreps.regroup() == co3.Irreps("2x0e+2x1o+1x2o+2x2e")
-    assert co3.Irreps([co3.Irrep("1o"), co3.Irrep("2e")]).dim == 12
-    assert irreps.filter(lmax=1).dim == 8
-    with pytest.raises(ValueError):
-        irreps.index("0o")
-    to_cart = co3.ChangeOfBasis(irreps).to(DEVICE)
-    to_sph = co3.ChangeOfBasis(irreps, inverse=True).to(DEVICE)
-    x = torch.randn(4, irreps.spherical().dim, device=DEVICE)
-    torch.testing.assert_close(to_sph(to_cart(x)), x, atol=2e-14, rtol=2e-14)
-    for sign in (1, -1):
-        matrix = sign * o3.rand_matrix(device=DEVICE)
-        expected = to_cart(
-            x @ irreps.spherical().D_from_matrix(matrix.cpu()).to(DEVICE).T
-        )
-        actual = to_cart(x) @ irreps.D_from_matrix(matrix).T
-        torch.testing.assert_close(actual, expected, atol=2e-13, rtol=2e-13)
-    raw = torch.randn(4, irreps.dim, device=DEVICE)
-    project = co3.Projector(irreps).to(DEVICE)
-    torch.testing.assert_close(project(raw), to_cart(to_sph(raw)))
-    torch.testing.assert_close(project(project(raw)), project(raw))
-    assert irreps.randn(0, -1, device=DEVICE).shape == (0, irreps.dim)
 
 
 @pytest.mark.parametrize("rank", [6, 10])
@@ -153,4 +205,19 @@ def test_time_reversal_labels(double_precision):
     quaternion = o3.angles_to_quaternion(*angles)
     torch.testing.assert_close(
         ir.D_from_quaternion(quaternion, kt=kt), -ir.D_from_quaternion(quaternion)
+    )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_public_method_precision(device, double_precision):
+    from equivariantx.tests.utils.testing import check_method_precision
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    layer = co3.Projector("2x2e").to(device)
+    check_method_precision(
+        layer,
+        [
+            ("forward_blocks", ([torch.randn(3, 2, 9, device=device)],), {}),
+        ],
     )

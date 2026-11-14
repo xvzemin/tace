@@ -10,7 +10,7 @@ from equivariantx import o2
 @pytest.mark.parametrize("inverse", [False, True])
 def test_polynomial_program(degree, mmax, inverse, double_precision):
     from equivariantx.conv.uv_o2.transverse import TransverseFrame
-    from equivariantx.ops.kernels.torch.edge import evaluate_torch
+    from equivariantx.ops.common.torch.edge import evaluate_torch
     from equivariantx.utils.program import Program
 
     frame = o2.LocalFrame(f"2x{degree}e+3x{degree}o", mmax)

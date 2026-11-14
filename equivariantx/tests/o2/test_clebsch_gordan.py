@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from equivariantx import o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,3 +105,62 @@ def test_o2_shared_couplings(mode, order, backend, double_precision):
                     for value in (actual, expected)
                 ]
                 torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("elementwise", [False, True])
+@pytest.mark.parametrize("types", [("0o", "3m"), ("2m", "2m"), ("2m", "3m")])
+def test_native_shared_coupling(types, elementwise, backend, monkeypatch):
+    from equivariantx.o2.clebsch_gordan import clebsch_gordan_products
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o2.clebsch_gordan import reference
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_O2_COUPLING", True, raising=False)
+    device = "cuda" if backend == "cuda" else "cpu"
+    ir1, ir2 = map(o2.Irrep, types)
+    outputs = tuple(ir1 * ir2)
+    x = (
+        torch.randn(2, ir1.dim, 3, device=device, dtype=torch.float64) * 0.2
+    ).requires_grad_()
+    y = (
+        torch.randn(1, ir2.dim, 3, device=device, dtype=torch.float64) * 0.2
+    ).requires_grad_()
+
+    def call(a, b):
+        return torch.cat(
+            clebsch_gordan_products(
+                a, ir1, b, ir2, outputs, elementwise=elementwise, backend=backend
+            ),
+            dim=-2 if elementwise else -3,
+        )
+
+    def ordinary(a, b):
+        return torch.cat(
+            tuple(
+                reference(a, ir1, b, ir2, ir, elementwise=elementwise) for ir in outputs
+            ),
+            dim=-2 if elementwise else -3,
+        )
+
+    actual, expected = call(x, y), ordinary(x, y)
+    for order in range(5):
+        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+        if order < 4:
+            probe = torch.randn_like(actual) / actual.numel() ** 0.5
+            actual, expected = [
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (v.sin() * probe).sum(), (x, y), create_graph=True
+                        )
+                    ]
+                )
+                for v in (actual, expected)
+            ]
+    torch.testing.assert_close(
+        torch.func.jvp(call, (x, y), (x, y)), torch.func.jvp(ordinary, (x, y), (x, y))
+    )
+    torch.testing.assert_close(call(x[:0], y), ordinary(x[:0], y))

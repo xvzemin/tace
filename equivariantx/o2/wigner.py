@@ -3,6 +3,7 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops.torch.o2 import wigner as torch_kernel
 from ..ops.precision import validate_module_precision
 
 
@@ -132,18 +133,7 @@ class WignerD(torch.nn.Module):
             the variance-preserving inverse scale.
         """
         validate_module_precision(self, (vectors,))
-        packed = self.forward_packed(vectors)
-        dim = (self.lmax + 1) ** 2
-        if self.mmax < self.lmax:
-            packed = packed.index_select(1, self._packed_indices)
-        wigner = vectors.new_zeros((vectors.size(0), self.local_indices.numel() * dim))
-        wigner = wigner.index_copy(1, self._dense_indices, packed).view(
-            vectors.size(0), self.local_indices.numel(), dim
-        )
-        wigner_inv = wigner.transpose(1, 2).contiguous()
-        if self.mmax < self.lmax:
-            wigner_inv = wigner_inv * self.inverse_scale.to(wigner_inv)
-        return wigner, wigner_inv
+        return torch_kernel.dense(self, vectors)
 
     def forward_packed(self, vectors: torch.Tensor, *, method=None) -> torch.Tensor:
         """Construct packed degree matrices without local-order truncation.
@@ -161,7 +151,7 @@ class WignerD(torch.nn.Module):
             Matrices in increasing degree order, flattened to
             ``(batch, sum((2*l+1)**2 for l in range(lmax+1)))``.
         """
-        from ..ops.wigner import wigner_D
+        from ..ops.common.wigner import wigner_D
 
         return wigner_D(
             self, vectors, backend=getattr(self, "backend", "torch"), method=method
@@ -204,18 +194,7 @@ class WignerD(torch.nn.Module):
             Proper rotation matrices of shape ``(batch, 3, 3)``.
         """
         validate_module_precision(self, (rotation,))
-        batch = rotation.shape[0]
-        matrices = [rotation.new_ones((batch, 1, 1))]
-        if self.lmax >= 1:
-            matrices.append(rotation)
-        for l in range(2, self.lmax + 1):
-            cg = getattr(self, f"cg_{l}").to(rotation)
-            matrix = torch.einsum("abm,eac->ebmc", cg, rotation)
-            matrix = torch.einsum("ebmc,ebd->emcd", matrix, matrices[-1])
-            matrix = torch.einsum("emcd,cdn->emn", matrix, cg)
-            matrices.append(matrix * (2 * l + 1))
-
-        return matrices
+        return torch_kernel.from_matrix(self, rotation)
 
     def extra_repr(self) -> str:
         return f"mmax={self.mmax}, lmax={self.lmax}"

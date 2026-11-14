@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn.nn import Gate as E3nnGate
 
+from ..ops.torch.o3 import gate as torch_kernel
 from ..ops.precision import validate_module_precision
 
 
@@ -26,6 +27,14 @@ class Gate(E3nnGate):
     backend : {"cuda", "torch"}, optional
         CUDA fuses supported activations and products. CPU inputs and
         unsupported activations use torch operations.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import o3
+    >>> layer = o3.Gate("2x0e", [torch.tanh], "2x0e", [torch.sigmoid], "2x1o")
+    >>> layer(torch.randn(4, layer.irreps_in.dim)).shape
+    torch.Size([4, 8])
     """
 
     def __init__(
@@ -46,7 +55,7 @@ class Gate(E3nnGate):
         self.input_dim = self.irreps_in.dim
         self.output_dim = self.irreps_out.dim
         self.metadata = None
-        if backend == "torch" or not self.irreps_out.dim:
+        if not self.irreps_out.dim:
             return
 
         from ..utils.program import Program, activate
@@ -96,16 +105,14 @@ class Gate(E3nnGate):
         """Return gated features with shape ``(..., irreps_out.dim)``."""
         validate_module_precision(self, (features,))
         if (
-            self.metadata is None
+            self.backend == "torch"
+            or self.metadata is None
             or not features.is_cuda
             or features.dtype not in (torch.float32, torch.float64)
         ):
-            return super().forward(features)
-        from ..ops.edge import evaluate
+            return torch_kernel.evaluate(self, features)
+        from ..ops.cuda.o3.gate import evaluate
 
         if features.shape[-1] != self.input_dim:
             raise ValueError("The last feature dimension must equal irreps_in.dim.")
-        values = features.reshape(-1, self.input_dim)
-        indices = torch.zeros(values.shape[0], dtype=torch.int64, device=values.device)
-        output = evaluate(self.metadata, [values], indices, indices, values.shape[0])[0]
-        return output.reshape(*features.shape[:-1], self.output_dim)
+        return evaluate(self, features)

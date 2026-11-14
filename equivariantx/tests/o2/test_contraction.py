@@ -2,13 +2,16 @@
 
 import pytest
 import torch
+
 from equivariantx import o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
-from equivariantx.tests.o2.testing import _asymmetric_contractions
-from equivariantx.tests.o2.testing import _transform
-from equivariantx.tests.o2.testing import _time_reverse
+from equivariantx.tests.o2.testing import (
+    _asymmetric_contractions,
+    _time_reverse,
+    _transform,
+)
 
 
 @pytest.mark.parametrize("correlation", [2, 3])
@@ -222,3 +225,67 @@ def test_contraction_high_orders_and_broadcast(backend, empty):
     ]
     for a, b in zip(*gradients):
         torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-10)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("symmetric", [False, True])
+@pytest.mark.parametrize("path_mode", ["sum", "expand"])
+def test_staged_sparse_contraction(backend, symmetric, path_mode, monkeypatch):
+    from equivariantx.ops import config
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_O2_CONTRACTION", True, raising=False)
+    monkeypatch.setattr(config, "O2_CONTRACTION_STAGED", True, raising=False)
+    monkeypatch.setattr(config, "O2_CONTRACTION_EAGER_STAGED", True)
+    device = "cuda" if backend == "cuda" else "cpu"
+    cls = o2.SymmetricContraction if symmetric else o2.AsymmetricContraction
+    args = "2x0e+2x1m", "2x0e+2x0o+2x1m+2x2m", 3
+    layer = (
+        cls(*args, algorithm="recursive", path_mode=path_mode, backend=backend)
+        .to(device)
+        .float()
+        .double()
+    )
+    ordinary = cls(*args, algorithm="dense", path_mode=path_mode).to(device).double()
+    x = (
+        torch.randn(2, 4, 6, dtype=torch.float64, device=device)[..., ::2] * 0.2
+    ).requires_grad_()
+    w = (
+        torch.randn(1, layer.weight_numel, dtype=torch.float64, device=device) * 0.2
+    ).requires_grad_()
+
+    def call(a, b):
+        return layer(a if symmetric else (a, a.sin(), a.cos()), b)
+
+    def reference(a, b):
+        return ordinary(a if symmetric else (a, a.sin(), a.cos()), b)
+
+    # Noncontiguous feature batches and shared weights exercise all broadcasts.
+    x = (
+        x.transpose(-1, -2)
+        .reshape(2, 12)[..., : layer.irreps_in.dim]
+        .detach()
+        .requires_grad_()
+    )
+    actual, expected = call(x, w), reference(x, w)
+    for order in range(4):
+        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+        if order < 3:
+            probe = torch.randn_like(actual) / actual.numel() ** 0.5
+            actual, expected = [
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (value.sin() * probe).sum(), (x, w), create_graph=True
+                        )
+                    ]
+                )
+                for value in (actual, expected)
+            ]
+    torch.testing.assert_close(
+        torch.func.jvp(call, (x, w), (x, w)), torch.func.jvp(reference, (x, w), (x, w))
+    )
+    torch.testing.assert_close(call(x[:0], w), reference(x[:0], w))
+    assert not layer.state_dict()

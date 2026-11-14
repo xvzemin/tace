@@ -12,8 +12,17 @@ def register_runtime_ops():
     >>> register_runtime_ops()
     """
     for name in (
-        "edge", "packed_product", "product", "linear", "compressed", "parallel",
-        "pipeline", "lt_matrix", "packed_fragments", "ordered_reductions",
-        "precise_matrix", "tabulated",
+        "edge",
+        "packed_product",
+        "product",
+        "linear",
+        "compressed",
+        "parallel",
+        "pipeline",
+        "lt_matrix",
+        "packed_fragments",
+        "ordered_reductions",
+        "precise_matrix",
+        "tabulated",
     ):
         importlib.import_module(f"{__package__}.{name}")

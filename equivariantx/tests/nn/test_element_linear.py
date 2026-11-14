@@ -3,11 +3,11 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import co3, o2
 from equivariantx import o3 as eqx_o3
-from equivariantx.utils.module import copy_model
-
 from equivariantx.tests.o2.testing import _transform
+from equivariantx.utils.module import copy_model
 
 
 @pytest.mark.parametrize("mode", ["single", "pair"])
@@ -183,3 +183,191 @@ def test_element_linear_compile(
                 ),
             ):
                 torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-10)
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize(
+    "channels,rows,dtype", [(64, 256, torch.float64), (128, 257, torch.float32)]
+)
+def test_moe_cpu_force_aoti_updates(
+    tmp_path, monkeypatch, double_precision, dynamic, channels, rows, dtype
+):
+    import os
+    import subprocess
+    import sys
+
+    from torch.fx.experimental.dynamic_spec import (
+        ParamsSpec,
+        ShapesSpec,
+        ShapeVar,
+        TensorSpec,
+    )
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.ops import config
+    from equivariantx.ops.compiler import JointCSE
+    from equivariantx.ops.torch.nn.element_linear import reference
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+    monkeypatch.setattr(config, "TORCH_GROUPED_LINEAR", True)
+    module = eqx_o3.MoEElementLinear(
+        o3.Linear(
+            f"{channels}x0e+{channels}x1o",
+            f"{channels}x0e+{channels}x1o",
+            internal_weights=False,
+            shared_weights=False,
+        ),
+        4,
+        element_mode="pair",
+    )
+    features = (
+        torch.randn(module.input_dim, rows, dtype=dtype).T * 0.1
+    ).requires_grad_()
+    weight = (
+        torch.randn(module.weight_numel, 4, 4, 4, dtype=dtype).permute(1, 2, 3, 0) * 0.1
+    ).requires_grad_()
+    source = torch.arange(rows) % 4
+    target = (torch.arange(rows) // 4) % 4
+
+    def joint(function, x, w, source, target):
+        prediction = function(x, w, source, target)
+        energy = prediction.sin().sum() / (x.shape[0] + 1)
+        force = -torch.autograd.grad(energy, x, create_graph=True)[0]
+        loss = energy.square() + (force - 0.01).square().sum()
+        return prediction, force, loss, torch.autograd.grad(loss, w)[0]
+
+    options = {}
+    if dynamic:
+        count = ShapeVar("nodes", min=256, max=1024, optimization_hint=rows)
+        options = {
+            "tracing_mode": "fake",
+            "dynamic_shapes": ShapesSpec(
+                ParamsSpec(
+                    {
+                        "*args": [
+                            TensorSpec((count, None)),
+                            TensorSpec((None, None, None, None)),
+                            TensorSpec((count,)),
+                            TensorSpec((count,)),
+                        ]
+                    }
+                )
+            ),
+        }
+    graph = make_fx(lambda *args: joint(module, *args), **options)(
+        features, weight, source, target
+    )
+    sorted_rows = [
+        node.args[0].meta["val"].shape[0]
+        for node in graph.graph.nodes
+        if node.target == torch.ops.aten.sort.default
+    ]
+    if dynamic:
+        assert len(sorted_rows) == 1 and str(sorted_rows[0]) == "4*u0"
+    else:
+        assert sorted_rows == [rows]
+    inputs = tuple(value.detach() for value in (features, weight, source, target))
+    shapes = None
+    if dynamic:
+        count = torch.export.Dim("nodes", min=256, max=1024)
+        shapes = ({0: count}, {}, {0: count}, {0: count})
+    exported = torch.export.export(graph, inputs, dynamic_shapes=shapes, strict=True)
+    package = tmp_path / "moe.pt2"
+    torch._inductor.aoti_compile_and_package(
+        exported,
+        package_path=str(package),
+        inductor_configs={"joint_custom_pre_pass": JointCSE()},
+    )
+
+    parameter = torch.nn.Parameter(weight.detach().clone())
+    cases = []
+    for step, count in enumerate((256, 511, 1024) if dynamic else (rows,) * 3):
+        case_features = (
+            features
+            if count == rows
+            else (
+                torch.randn(module.input_dim, count, dtype=dtype).T * 0.1
+            ).requires_grad_()
+        )
+        sources = torch.arange(count) % 4
+        targets = (torch.arange(count) // 4) % 4
+        if step == 1:
+            sources = torch.zeros_like(sources)
+        elif step == 2:
+            sources, targets = sources.roll(3), targets.roll(7)
+        values = joint(
+            lambda *args: reference(module, *args),
+            case_features.double(),
+            parameter.double(),
+            sources,
+            targets,
+        )
+        expected = tuple(value.detach().clone() for value in values)
+        parameter.grad = values[-1].to(parameter)
+        torch.nn.utils.clip_grad_norm_([parameter], 0.05, foreach=True)
+        with torch.no_grad():
+            parameter.add_(parameter.grad, alpha=-0.01)
+        cases.append(
+            {
+                "features": case_features.detach(),
+                "source": sources,
+                "target": targets,
+                "expected": expected,
+                "updated": parameter.detach().clone(),
+            }
+        )
+    data = tmp_path / "cases.pt"
+    torch.save(
+        {"inputs": inputs, "cases": cases, "dynamic": dynamic, "rows": rows}, data
+    )
+    script = """
+import sys
+import torch
+torch.set_num_threads(4)
+runner = torch._inductor.aoti_load_package(sys.argv[1], run_single_threaded=True)
+data = torch.load(sys.argv[2], weights_only=True)
+x, w, _, _ = data['inputs']
+parameter = torch.nn.Parameter(w.clone())
+atol, rtol = (3e-6, 3e-4) if w.dtype == torch.float32 else (5e-10, 5e-10)
+
+def interval(value):
+    size = 1 + sum((n - 1) * stride for n, stride in zip(value.shape, value.stride()))
+    return value.data_ptr(), value.data_ptr() + size * value.element_size()
+
+for case in data['cases']:
+    args = case['features'], parameter.detach(), case['source'], case['target']
+    saved_inputs = tuple(value.clone() for value in args)
+    actual = tuple(runner(*args))
+    torch.testing.assert_close(args, saved_inputs, atol=0, rtol=0)
+    torch.testing.assert_close(actual, case['expected'], atol=atol, rtol=rtol, check_dtype=False)
+    intervals = [interval(value) for value in actual]
+    for i, bounds in enumerate(intervals):
+        for other in [interval(value) for value in args] + intervals[:i]:
+            assert bounds[1] <= other[0] or other[1] <= bounds[0]
+    saved_outputs = tuple(value.clone() for value in actual[:-1])
+    parameter.grad = actual[-1]
+    torch.nn.utils.clip_grad_norm_([parameter], 0.05, foreach=True)
+    torch.testing.assert_close(actual[:-1], saved_outputs, atol=0, rtol=0)
+    with torch.no_grad():
+        parameter.add_(parameter.grad, alpha=-0.01)
+    torch.testing.assert_close(parameter, case['updated'], atol=atol, rtol=rtol)
+for nodes in (255, 1025) if data['dynamic'] else (data['rows']-1, data['rows']+1):
+    bad_x = x.new_empty((x.shape[1], nodes)).T
+    bad_types = data['cases'][0]['source'].new_zeros(nodes)
+    try:
+        runner(bad_x, parameter.detach(), bad_types, bad_types)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('The checked package accepted a node count outside its contract')
+assert not any(name.startswith(('equivariantx', 'e3nn', 'tace')) for name in sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script, str(package), str(data)],
+        cwd=tmp_path,
+        env={**os.environ, "AOTI_RUNTIME_CHECK_INPUTS": "1"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

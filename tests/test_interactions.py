@@ -575,8 +575,8 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
     if edges == 1025:
         from functools import partial
 
-        import equivariantx.ops.kernels.cuda.execution as convolution_execution
-        import equivariantx.ops.kernels.cuda.models.tace.attention as execution
+        import equivariantx.ops.common.cuda.execution as convolution_execution
+        import equivariantx.ops.common.cuda.models.tace.attention as execution
 
         monkeypatch.setattr(execution, "BACKWARD_TILE_SIZE", 256)
         monkeypatch.setattr(
@@ -721,7 +721,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
 def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    import equivariantx.ops.recompute as recompute
+    import equivariantx.ops.common.recompute as recompute
     from equivariantx.models.tace.tece_oam_rra.interaction import stream
     from tace.models.mlp import get_scaled_activation
     from tace.models.spherical.tece_oam_rra import Convolution

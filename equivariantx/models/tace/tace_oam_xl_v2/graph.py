@@ -7,7 +7,7 @@ from weakref import ref
 
 import torch
 
-from equivariantx.ops.kernels.cuda.reduction import csr_source
+from equivariantx.ops.common.cuda.reduction import csr_source
 
 _GRAPHS = OrderedDict()
 _GRAPH_SCOPE = ContextVar("eqx_graph_plan_scope", default=None)
@@ -29,7 +29,6 @@ def graph_plan_scope():
         yield
     finally:
         _GRAPH_SCOPE.reset(token)
-
 
 
 def prepare_graph(source, target, owner, num_nodes=None):
@@ -97,7 +96,7 @@ def prepare_graph(source, target, owner, num_nodes=None):
             and index.dtype in (torch.int32, torch.int64)
             and num_nodes >= 0
         ):
-            from equivariantx.ops.kernels.cuda.runtime import kernels, runtime
+            from equivariantx.ops.common.cuda.runtime import kernels, runtime
 
             pointers = order.new_empty(num_nodes + 1)
             code = csr_source(index.dtype)

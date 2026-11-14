@@ -999,7 +999,7 @@ def test_unknown_scatter_norm(small_model):
 def test_element2_projects_nodes_before_gather(
     bias, lora, hidden, num_edges, use_eqx, memory_first, monkeypatch
 ):
-    from equivariantx.ops.radial import materialize
+    from equivariantx.ops.common.radial import materialize
     from tace.models.linear import enable_lora
     from tace.models.mlp import MLP, convolution_radial
 

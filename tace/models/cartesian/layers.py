@@ -1,4 +1,7 @@
-"""Cartesian operators with the parameter layout of spherical TACE."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import torch
 from e3nn import o3

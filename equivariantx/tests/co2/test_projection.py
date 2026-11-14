@@ -2,60 +2,12 @@
 
 import pytest
 import torch
+
 from equivariantx import co2
 from equivariantx.co3.symmetric import SymmetricBasis
+from equivariantx.tests.utils.testing import transverse_reference
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def transverse_reference(tensor, direction, rank):
-    """Independent transverse projection using the two helicity projectors."""
-    if rank == 0:
-        return tensor + 0 * direction[..., :1]
-    x, y, z = direction.unbind(-1)
-    zero = torch.zeros_like(x)
-    cross = torch.stack((zero, -z, y, z, zero, -x, -y, x, zero), -1).unflatten(
-        -1, (3, 3)
-    )
-    plane = torch.eye(
-        3, device=direction.device, dtype=direction.dtype
-    ) - direction.unsqueeze(-1) * direction.unsqueeze(-2)
-    matrix = (plane + 1j * cross) * 0.5
-    value = tensor.to(matrix.dtype)
-    for axis in range(rank):
-        value = torch.einsum(
-            "...aib,...ji->...ajb",
-            value.unflatten(-1, (3**axis, 3, 3 ** (rank - axis - 1))),
-            matrix,
-        ).flatten(-3)
-    return 2 * value.real
-
-
-@pytest.mark.parametrize("rank", [0, 1, 2, 3, 4, 6, 8, 10])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_transverse_projector(rank, dtype):
-    basis = SymmetricBasis(rank).to(device=DEVICE, dtype=dtype)
-    module = co2.TransverseProjector(rank).to(device=DEVICE, dtype=dtype)
-    compact = torch.randn(3, basis.dim, device=DEVICE, dtype=dtype)
-    tensor = basis.unpack(compact)
-    vectors = torch.tensor(
-        [[0, 1, 0], [0, -1, 0], [0.2, -0.7, 0.6]], device=DEVICE, dtype=dtype
-    )
-    direction = vectors / vectors.norm(dim=-1, keepdim=True)
-    tol = 3e-5 if dtype == torch.float32 else 2e-12
-    torch.testing.assert_close(basis.pack(tensor), compact, atol=tol, rtol=tol)
-    torch.testing.assert_close(
-        tensor.square().sum(-1), compact.square().sum(-1), atol=tol, rtol=tol
-    )
-    actual = module(tensor, direction)
-    expected = transverse_reference(
-        tensor.double(),
-        direction.double() / direction.double().norm(dim=-1, keepdim=True),
-        rank,
-    ).to(dtype)
-    torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
-    torch.testing.assert_close(module(actual, direction), actual, atol=tol, rtol=tol)
-    assert module(tensor[:0], direction[:0]).shape == (0, 3**rank)
 
 
 @pytest.mark.parametrize("rank", [0, 1, 2, 3, 4, 6])
@@ -170,3 +122,59 @@ def test_planar_projection_validation(rank):
         co2.PlaneProjector(rank)
     with pytest.raises(ValueError):
         co2.PlanarDetracer(rank)
+
+
+@pytest.mark.parametrize("rank", [2, 3, 4])
+@pytest.mark.parametrize("kind", ["project", "detrace"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_backend_high_derivatives(monkeypatch, rank, kind, backend, double_precision):
+    from copy import deepcopy
+
+    from equivariantx.ops import config
+
+    monkeypatch.setattr(config, "TORCH_TENSOR_AXIS", True)
+    monkeypatch.setattr(config, "TORCH_PLANAR_DETRACING", True)
+    monkeypatch.setattr(config, "TORCH_PLANAR_CUBIC", True)
+    cls = co2.PlaneProjector if kind == "project" else co2.PlanarDetracer
+    layer = cls(rank, backend=backend).to(DEVICE)
+    reference = deepcopy(layer)
+    reference.backend = "torch"
+    x = (torch.randn(2, 3, 3**rank, device=DEVICE) * 0.2).requires_grad_()
+    plane = (torch.randn(2, 1, 3, 3, device=DEVICE) * 0.2).requires_grad_()
+    values = x, plane
+    actual = layer(*values)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = reference(*values)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+    torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
+    losses = [v.sin().sum() for v in (actual, expected)]
+    for _ in range(5):
+        gradients = [
+            torch.autograd.grad(loss, values, create_graph=True) for loss in losses
+        ]
+        torch.testing.assert_close(*gradients, atol=3e-9, rtol=3e-9)
+        tangents = tuple(torch.randn_like(v) * 0.1 for v in values)
+        losses = [sum((g * t).sum() for g, t in zip(gs, tangents)) for gs in gradients]
+    tangents = tuple(torch.randn_like(v) * 0.1 for v in values)
+    actual = torch.func.jvp(layer, values, tangents)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = torch.func.jvp(reference, values, tangents)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+    torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
+    torch.testing.assert_close(
+        torch.vmap(layer)(x, plane), layer(x, plane), atol=3e-11, rtol=3e-11
+    )
+    assert layer(x[:0], plane[:0]).shape == (0, 3, 3**rank)
+
+
+def test_detracer_retained_storage():
+    for rank in (6, 8):
+        module = co2.PlanarDetracer(rank, dtype=torch.float64)
+        assert sum(value.numel() for value in module.buffers()) < 4 * 3**rank * rank**2
+    legacy = co2.PlanarDetracer(2, dtype=torch.float64)
+    legacy.identity = torch.eye(9, dtype=torch.float64)
+    plane = torch.diag(torch.tensor([1.0, 0.0, 1.0], dtype=torch.float64))
+    torch.testing.assert_close(
+        legacy.matrix(plane),
+        co2.PlanarDetracer(2, dtype=torch.float64).matrix(plane),
+    )

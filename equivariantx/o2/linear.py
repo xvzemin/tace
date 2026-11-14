@@ -4,8 +4,9 @@ from typing import Iterator, NamedTuple, Optional, Sequence, Union
 import torch
 
 from ..nn.element_linear import ElementLinear as ElementLinearBase
-from ..ops.kernels.torch.linear import linear, linear_layout
+from ..ops.common.torch.linear import linear_layout
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import linear as torch_kernel
 from .irreps import Irreps, IrrepsLike
 
 
@@ -42,6 +43,10 @@ class Linear(torch.nn.Module):
         ``"element"`` normalizes by the total input multiplicity, while
         ``"path"`` assigns equal variance to each path.
 
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Native kernels fuse shared channel maps; CPU
+        and general broadcasted parameters use Torch.
+
     Examples
     --------
     >>> from equivariantx import o2
@@ -63,8 +68,12 @@ class Linear(torch.nn.Module):
         instructions: Optional[Sequence[tuple[int, int]]] = None,
         biases: Union[bool, Sequence[bool]] = False,
         path_normalization: str = "element",
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
 
         if path_normalization not in ("element", "path"):
             raise ValueError("path_normalization must be 'element' or 'path'.")
@@ -191,6 +200,7 @@ class Linear(torch.nn.Module):
             [(ir.dim, mul) for ir, mul in self.irreps_out],
             self.instructions,
         )
+        self.channel_metadata = repr(("ir_mul", self.layout))
 
         output_mask = []
         for i_out, ir_mul in enumerate(self.irreps_out):
@@ -274,23 +284,11 @@ class Linear(torch.nn.Module):
                 "Linear feature, weight, and bias batch dimensions do not broadcast."
             ) from error
 
-        inputs = [
-            value.reshape(*features.shape[:-1], ir.dim, mul)
-            for (ir, mul), value in zip(
-                self.irreps_in, features.split(self._input_sizes, dim=-1)
-            )
-        ]
-        outputs = [
-            value.flatten(-2)
-            for value in linear(inputs, weight, bias, self.layout, leading_shape)
-        ]
-        if not inputs:
-            outputs = [value + features[..., :0].sum() for value in outputs]
-        if outputs:
-            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        return features.new_empty((*leading_shape, 0)) + (
-            features[..., :0].sum() + weight[..., :0].sum() + bias[..., :0].sum()
-        )
+        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
+            from ..ops.cuda.o2 import linear as cuda_kernel
+
+            return cuda_kernel.linear(self, features, weight, bias, leading_shape)
+        return torch_kernel.linear(self, features, weight, bias, leading_shape)
 
     def weight_view_for_instruction(
         self,
@@ -403,6 +401,10 @@ class UuLinear(torch.nn.Module):
     input irrep copies. Expanded paths have unit normalization. Weights are
     external; biases are not supported.
 
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Native kernels accept shared or per-node weights.
+        CPU tensors and general broadcasts use Torch.
+
     Examples
     --------
     >>> from equivariantx import o2
@@ -420,8 +422,12 @@ class UuLinear(torch.nn.Module):
         num_channel: int,
         *,
         path_mode: str = "sum",
+        backend: str = "torch",
     ) -> None:
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)
         self.num_channel = num_channel
@@ -476,6 +482,17 @@ class UuLinear(torch.nn.Module):
                 for j, (ir, _) in enumerate(self.requested_irreps_out)
             )
 
+        from ..ops.common.torch.uu_linear import layout
+
+        self.uu_metadata = layout(
+            "ir_mul",
+            [(ir.dim, mul) for ir, mul in self.irreps_in],
+            [(ir.dim, mul) for ir, mul in self.irreps_out],
+            self.instructions,
+            num_channel,
+            path_mode,
+        )
+
     def forward(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Apply externally weighted channelwise paths.
 
@@ -499,53 +516,11 @@ class UuLinear(torch.nn.Module):
             raise ValueError(f"UuLinear features must end in {self.irreps_in.dim}.")
         if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
             raise ValueError(f"UuLinear weights must end in {self.weight_numel}.")
-        leading_shape = torch.broadcast_shapes(features.shape[:-1], weight.shape[:-1])
-        inputs = [
-            values.reshape(
-                *features.shape[:-1], ir.dim, mul // self.num_channel, self.num_channel
-            )
-            for (ir, mul), values in zip(
-                self.irreps_in, features.split(self._input_sizes, dim=-1)
-            )
-        ]
-        weights = weight.split(self._weight_sizes, dim=-1)
-        outputs = []
-        zero = None
-        for i_out, (ir, mul) in enumerate(self.irreps_out):
-            contributions = []
-            for index in self._instructions_by_output[i_out]:
-                instruction = self.instructions[index]
-                matrix = weights[index].reshape(
-                    *weight.shape[:-1], *instruction.path_shape
-                )
-                contributions.append(
-                    torch.einsum(
-                        "...diu,...iou->...diou"
-                        if self.path_mode == "expand"
-                        else "...diu,...iou->...dou",
-                        inputs[instruction.i_in],
-                        matrix,
-                    )
-                    * instruction.path_weight
-                )
-            if contributions:
-                output = (
-                    torch.cat([x.flatten(-3) for x in contributions], dim=-1)
-                    if self.path_mode == "expand"
-                    else sum(contributions[1:], contributions[0])
-                )
-                outputs.append(output.reshape(*leading_shape, ir.dim * mul))
-            else:
-                if zero is None:
-                    zero = features[..., :0].sum() + weight[..., :0].sum()
-                outputs.append(
-                    features.new_zeros((*leading_shape, ir.dim * mul)) + zero
-                )
-        if outputs:
-            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        return features.new_empty((*leading_shape, 0)) + (
-            features[..., :0].sum() + weight[..., :0].sum()
-        )
+        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
+            from ..ops.cuda.o2 import linear as cuda_kernel
+
+            return cuda_kernel.uu_linear(self, features, weight)
+        return torch_kernel.uu_linear(self, features, weight)
 
     def __repr__(self) -> str:
         return (

@@ -1,4 +1,7 @@
-"""Conversion between spherical and Cartesian TACE models."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 from copy import deepcopy
 

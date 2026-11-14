@@ -8,12 +8,21 @@ from e3nn import o3
 from equivariantx import co3
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co2 import o3_tensor_product as torch_kernel
 from .restriction import (
     Restriction,
     coupling_coefficients,
     restriction_scale,
-    transverse_quarter_turn,
 )
+from .spherical import SphericalCoupling
+
+
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.co2 import o3_tensor_product as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
 
 
 class O3TensorProduct(torch.nn.Module):
@@ -42,11 +51,22 @@ class O3TensorProduct(torch.nn.Module):
     project : bool, optional
         Project Cartesian output. Spherical output always includes projection.
 
+    backend : {"torch", "cuda"}, optional
+        Execution backend for angular couplings. CPU tensors use Torch.
+
     Notes
     -----
-    Each path retains its own weights and output entry. Inputs must be STF
-    when input_basis="cartesian". Directions must be nonzero. This PyTorch
-    reference uses redundant Cartesian intermediates, not a fused kernel.
+    Inputs must be STF when input_basis="cartesian". Directions must be nonzero.
+    Projected paths use compact spherical coordinates; contract returns the raw
+    Cartesian paths and preserves deferred projection.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.O3TensorProduct("2x1o", "1o", "2x0e", [(0, 0, 0, "uvu", True)])
+    >>> layer(torch.randn(4, 6), torch.randn(4, 3)).shape
+    torch.Size([4, 2])
     """
 
     def __init__(
@@ -67,8 +87,12 @@ class O3TensorProduct(torch.nn.Module):
         input_basis="cartesian",
         output_basis="cartesian",
         project=True,
+        backend="torch",
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         if normalization not in ("component", "norm", "integral"):
             raise ValueError("Unknown harmonic normalization.")
         if input_basis not in ("cartesian", "spherical") or output_basis not in (
@@ -106,6 +130,7 @@ class O3TensorProduct(torch.nn.Module):
         )
         self.cartesian_in, self.cartesian_out = a, c
         self.input_dim, self.output_dim = a.dim, c.dim
+        self.feature_dim = a.spherical().dim if input_basis == "spherical" else a.dim
         self.input_multiplicities = tuple(mul for mul, _ in a)
         self.output_shapes = tuple((mul, ir.dim) for mul, ir in c)
         self.irreps_in1 = a.spherical() if input_basis == "spherical" else a
@@ -137,13 +162,13 @@ class O3TensorProduct(torch.nn.Module):
         self.projection = (
             co3.ChangeOfBasis(c, inverse=True)
             if output_basis == "spherical"
-            else co3.Projector(c)
+            else co3.Projector(c, backend=backend)
             if project
             else torch.nn.Identity()
         )
         degrees = sorted({a[ins.i_in1].ir.l for ins in self.instructions})
         self.restrictions = torch.nn.ModuleDict(
-            {str(l): Restriction(l) for l in degrees}
+            {str(l): Restriction(l, backend=backend) for l in degrees}
         )
         self.paths = tuple(
             (a[ins.i_in1].ir.l, b[ins.i_in2].ir.l, c[ins.i_out].ir.l)
@@ -162,6 +187,35 @@ class O3TensorProduct(torch.nn.Module):
             for index in sorted({ins.i_in1 for ins in self.instructions})
         )
 
+        self.compact_embedding = (
+            co3.ChangeOfBasis(a, inverse=True)
+            if input_basis == "cartesian"
+            else torch.nn.Identity()
+        )
+        self.compact_projection = (
+            co3.ChangeOfBasis(c) if output_basis == "cartesian" else torch.nn.Identity()
+        )
+        self.compact_product = any(max(degrees) > 1 for degrees in self.paths)
+        self.couplings = torch.nn.ModuleDict(
+            {
+                "_".join(map(str, degrees)): SphericalCoupling(
+                    *degrees, normalization=normalization, backend=backend
+                )
+                for degrees in dict.fromkeys(self.paths)
+            }
+        )
+        spherical = a.spherical()
+        self.spherical_input_paths = tuple(
+            (
+                index,
+                spherical[index].mul,
+                spherical[index].ir.dim,
+                spherical.slices()[index],
+            )
+            for index in sorted({ins.i_in1 for ins in self.instructions})
+        )
+        self.spherical_output_shapes = tuple((mul, ir.dim) for mul, ir in c.spherical())
+
     @classmethod
     def from_tensor_product(
         cls,
@@ -171,6 +225,7 @@ class O3TensorProduct(torch.nn.Module):
         input_basis="cartesian",
         output_basis="cartesian",
         project=True,
+        backend="torch",
     ):
         """Copy paths, normalized coefficients, and weights from an O(3) tensor product.
 
@@ -199,6 +254,7 @@ class O3TensorProduct(torch.nn.Module):
             input_basis=input_basis,
             output_basis=output_basis,
             project=project,
+            backend=backend,
         ).to(tensor_product.weight)
         # These path weights already include all variance and normalization factors.
         result.instructions = tuple(tensor_product.instructions)
@@ -214,92 +270,45 @@ class O3TensorProduct(torch.nn.Module):
 
     def forward(self, features, vectors, weight=None):
         """Return edge features for nonzero (..., 3) vectors and broadcast weights."""
-        validate_module_precision(self, (features, vectors, weight))
-        return self.projection(self.contract(self.embedding(features), vectors, weight))
+        input_dim = (
+            self.feature_dim if hasattr(self, "feature_dim") else self.irreps_in1.dim
+        )
+        weight = self.check_inputs(features, vectors, weight, input_dim)
+        return execution(self, features).forward(self, features, vectors, weight)
 
-    def contract(self, features, vectors, weight=None):
-        """Return raw Cartesian path outputs from Cartesian STF input features."""
-        if features.shape[-1] != self.input_dim or vectors.shape[-1] != 3:
+    def check_inputs(self, features, vectors, weight, input_dim):
+        """Validate public tensor dimensions and resolve shared weights."""
+        validate_module_precision(self, (features, vectors, weight))
+        if features.shape[-1] != input_dim or vectors.shape[-1] != 3:
             raise ValueError("Input feature or vector dimension is incorrect.")
         weight = self.weight if weight is None else weight
         if weight.ndim < 1 or weight.shape[-1] != self.weight_numel:
             raise ValueError("Weights must have trailing size weight_numel.")
         if self.shared_weights and weight.ndim != 1:
             raise ValueError("Shared weights must be one-dimensional.")
-        direction = (
-            vectors / torch.linalg.vector_norm(vectors, dim=-1, keepdim=True)
-        ).unsqueeze(-2)
-        shape = torch.broadcast_shapes(
-            features.shape[:-1], vectors.shape[:-1], weight.shape[:-1]
-        )
-        zero = features[..., :0].sum() + vectors[..., :0].sum() + weight[..., :0].sum()
-        outputs = [
-            features.new_zeros((*shape, mul, dim)) + zero
-            for mul, dim in self.output_shapes
-        ]
-        inputs = {}
-        for index, mul, l, dim, section in self.input_paths:
-            x = features[..., section].reshape(*features.shape[:-1], mul, dim)
-            inputs[index] = self.restrictions[str(l)](x, direction)
-        offset = 0
-        for ins, (l1, l2, l3), coefficients in zip(
-            self.instructions, self.paths, self.coefficients
-        ):
-            value = None
-            for m, coefficient in enumerate(coefficients):
-                if value is not None:
-                    value = (direction.unsqueeze(-1) * value.unsqueeze(-2)).flatten(-2)
-                if coefficient == 0.0:
-                    continue
-                local = inputs[ins.i_in1][m]
-                if (l1 + l2 + l3) % 2:
-                    local = transverse_quarter_turn(local, direction)
-                term = local * (coefficient * ins.path_weight)
-                value = term if value is None else value + term
-            if value is not None:
-                for _ in range(l3 - len(coefficients) + 1):
-                    value = (direction.unsqueeze(-1) * value.unsqueeze(-2)).flatten(-2)
-            if value is None:
-                value = (
-                    features.new_zeros(
-                        (*shape, self.input_multiplicities[ins.i_in1], 3**l3)
-                    )
-                    + zero
-                )
-            if ins.has_weight:
-                size = math.prod(ins.path_shape)
-                w = weight[..., offset : offset + size].reshape(
-                    *weight.shape[:-1], *ins.path_shape
-                )
-                offset += size
-                value = (
-                    torch.einsum("...ud,...uw->...wd", value, w.squeeze(-2))
-                    if ins.connection_mode == "uvw"
-                    else value * w
-                )
-            outputs[ins.i_out] = outputs[ins.i_out] + value
-        return (
-            torch.cat([v.flatten(-2) for v in outputs], -1)
-            if outputs
-            else features.new_zeros((*shape, 0)) + zero
-        )
+        return weight
+
+    def contract(self, features, vectors, weight=None):
+        """Return raw Cartesian path outputs from Cartesian STF input features."""
+        weight = self.check_inputs(features, vectors, weight, self.input_dim)
+        return execution(self, features).contract(self, features, vectors, weight)
 
     def forward_scatter(
         self, features, vectors, edge_index, weight=None, num_nodes=None
     ):
-        """Embed nodes, gather edges, sum raw Cartesian paths, then project.
+        """Gather node features, sum edge paths, then expand the output basis.
 
         Features have shape (nodes, irreps_in1.dim); vectors have shape
         (edges, 3). edge_index[0] and edge_index[1] are source and target.
         """
-        source, target = edge_index
-        num_nodes = features.shape[0] if num_nodes is None else num_nodes
-        cartesian = self.embedding(features)
-        message = self.contract(cartesian[source], vectors, weight)
-        nodes = message.new_zeros((num_nodes, self.output_dim)).index_add(
-            0, target, message
+        input_dim = (
+            self.feature_dim if hasattr(self, "feature_dim") else self.irreps_in1.dim
         )
-        return self.projection(nodes)
+        weight = self.check_inputs(features, vectors, weight, input_dim)
+        num_nodes = features.shape[0] if num_nodes is None else num_nodes
+        return execution(self, features).scatter(
+            self, features, vectors, edge_index, weight, num_nodes
+        )
 
     def weight_view_for_instruction(self, instruction, weight=None):
         """Return an instruction-shaped view of the parameter storage."""

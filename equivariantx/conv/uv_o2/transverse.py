@@ -7,6 +7,7 @@ from e3nn import o3
 
 from ...co2.spherical import SphericalCoupling
 from ...o2.layout import irrep_layout
+from ...ops.torch.conv.uv_o2 import transverse as torch_kernel
 from ...ops.precision import validate_module_precision
 from ...utils.harmonics import harmonic_program
 
@@ -124,7 +125,7 @@ class TransverseFrame(torch.nn.Module):
             features = program.gather(features, self.inverse_indices)
         width = self.input_dim if inverse else self.output_dim
         if not native:
-            from ...ops.convolution import tensor_product_program
+            from ...ops.common.convolution import tensor_product_program
 
             harmonics, offsets, position = [], {}, 0
             for degree in sorted({(path[6] - 1) // 2 for path in self.paths[inverse]}):
@@ -168,54 +169,12 @@ class TransverseFrame(torch.nn.Module):
         validate_module_precision(
             self, (features, direction, source, target, num_nodes, inverse)
         )
-        if inverse:
-            features = features.index_select(1, self.inverse_permutation)
-        width = self.input_dim if inverse else self.output_dim
         if self.backend == "cuda" and features.is_cuda:
-            from ...ops.o3 import contraction
+            from ...ops.cuda.conv.uv_o2 import transverse as cuda_kernel
 
-            values = [
-                features,
-                features.new_empty((1, 0)),
-                features.new_empty((0, 0)),
-                features.new_ones((1, 1)),
-                features.new_empty(1).expand(num_nodes, width),
-                direction,
-            ]
-            result = contraction(
-                self.metadata[inverse],
-                repr(((tuple(range(6)), False, ((4, 0),)),)),
-                source,
-                target,
-                values,
-            )[0]
-        else:
-            result = (
-                features.new_zeros((num_nodes, width))
-                + (features.sum() + direction.sum()) * 0
+            return cuda_kernel.evaluate(
+                self, features, direction, source, target, num_nodes, inverse
             )
-            for (
-                start,
-                _,
-                end,
-                mul,
-                _,
-                dim,
-                harmonic_dim,
-                dim_out,
-                _,
-                scale,
-                _,
-            ) in self.paths[inverse]:
-                x = features[source, start : start + mul * dim].reshape(
-                    source.numel(), dim, mul
-                )
-                name = (
-                    f"{(dim - 1) // 2}_{(harmonic_dim - 1) // 2}_{(dim_out - 1) // 2}"
-                )
-                value = self.couplings[name](x.transpose(1, 2), direction[:, None, :])
-                value = value.transpose(1, 2).flatten(1) * scale
-                result[:, end : end + mul * dim_out] += value.new_zeros(
-                    (num_nodes, mul * dim_out)
-                ).index_add(0, target, value)
-        return result if inverse else result.index_select(1, self.permutation)
+        return torch_kernel.evaluate(
+            self, features, direction, source, target, num_nodes, inverse
+        )

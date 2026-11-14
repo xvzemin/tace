@@ -46,6 +46,18 @@ class MoEElementLinear(ElementLinear):
         Execution backend. Defaults to ``"torch"``. CPU tensors use PyTorch.
     element_mode : {"single", "pair"}, optional
         Single or two-endpoint element dependence. Defaults to ``"single"``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from e3nn import o3
+    >>> from equivariantx.o3 import MoEElementLinear
+    >>> linear = o3.Linear("2x0e + 1x1o", "0e + 1o")
+    >>> layer = MoEElementLinear(linear, num_experts=2)
+    >>> weights = torch.randn(3, 2, layer.weight_numel)
+    >>> features = torch.randn(4, layer.irreps_in.dim)
+    >>> layer(features, weights, torch.tensor([0, 1, 2, 0])).shape
+    torch.Size([4, 8])
     """
 
     def __init__(self, linear, num_experts, backend="torch", *, element_mode="single"):

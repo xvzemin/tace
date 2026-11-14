@@ -11,8 +11,10 @@ from functools import lru_cache
 
 import torch
 
-from equivariantx.ops.kernels.cuda.channel_product import channel_product as reference_product
-from equivariantx.ops.kernels.cuda.runtime import kernels, runtime
+from equivariantx.ops.common.cuda.channel_product import (
+    channel_product as reference_product,
+)
+from equivariantx.ops.common.cuda.runtime import kernels, runtime
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.outputs import channel_product_outputs
 

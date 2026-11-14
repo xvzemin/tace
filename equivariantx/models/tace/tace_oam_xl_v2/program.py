@@ -72,8 +72,10 @@ def selected_terms(node, slot):
 
 def remap_terms(terms, linear, pointers, slots, packed=False):
     if packed:
-        return tuple((tuple(pointers[i] for i in mapping), role, slots[slot], required)
-                     for mapping, role, slot, required in terms)
+        return tuple(
+            (tuple(pointers[i] for i in mapping), role, slots[slot], required)
+            for mapping, role, slot, required in terms
+        )
     if linear:
         return tuple(
             (path, tuple(pointers[i] for i in mapping), role, slots[slot])
@@ -131,7 +133,10 @@ def fuse_gradient_sums(graph):
         offset = OPERANDS[str(first.target)]
         if offset == 4 and first.args[2:4] != second.args[2:4]:
             continue
-        if str(first.target) == "eqx_oam_xl.compressed_edge.default" and first.args[5] != second.args[5]:
+        if (
+            str(first.target) == "eqx_oam_xl.compressed_edge.default"
+            and first.args[5] != second.args[5]
+        ):
             continue
         if any(
             user.target != operator.getitem or not isinstance(user.args[1], int)
@@ -145,7 +150,11 @@ def fuse_gradient_sums(graph):
         other_selected, _, other_owners = selected_terms(second, second_slot)
         packed = str(first.target) == "eqx_oam_xl.packed_product.default"
         linear = str(first.target) == "eqx_oam_xl.linear.default"
-        allowed = (bool(owners) and (owners <= {0, 1} or owners == {2})) if packed else (len(owners) == 1 and owners <= {0, 1})
+        allowed = (
+            (bool(owners) and (owners <= {0, 1} or owners == {2}))
+            if packed
+            else (len(owners) == 1 and owners <= {0, 1})
+        )
         if not allowed or other_owners != owners:
             continue
         if linear and {term[0] for term in selected} != {
@@ -167,7 +176,9 @@ def fuse_gradient_sums(graph):
             if value not in values:
                 values.append(value)
             pointers[i] = values.index(value)
-        moved = remap_terms(selected, linear, pointers, {first_slot: second_slot}, packed)
+        moved = remap_terms(
+            selected, linear, pointers, {first_slot: second_slot}, packed
+        )
         arguments = list(second.args)
         arguments[1] = repr(parse_metadata(arguments[1]) + moved)
         arguments[offset] = values
@@ -180,7 +191,9 @@ def fuse_gradient_sums(graph):
             graph.erase_node(first)
         else:
             slots = sorted(
-                {term[2] for term in remaining} if packed else {term[3] for term in remaining}
+                {term[2] for term in remaining}
+                if packed
+                else {term[3] for term in remaining}
                 if linear
                 else {slot for _, _, pairs in remaining for _, slot in pairs}
             )
@@ -222,19 +235,30 @@ class MixedGradientPass(CustomGraphPass):
         validate_graph(graph)
         count = fuse_gradient_sums(graph)
         logging.info("TACE-OAM-XL-v2 fused %d mixed-gradient sums", count)
-        if os.environ.get('EQX_XL_ORDERED_REDUCTIONS', '0') == '1':
+        if os.environ.get("EQX_XL_ORDERED_REDUCTIONS", "0") == "1":
             from .ordered_reductions import order_reductions
-            logging.info('TACE-OAM-XL-v2 stable node reductions: %s', order_reductions(graph))
-        if os.environ.get('EQX_XL_PACKED_FRAGMENTS', '0') == '1':
+
+            logging.info(
+                "TACE-OAM-XL-v2 stable node reductions: %s", order_reductions(graph)
+            )
+        if os.environ.get("EQX_XL_PACKED_FRAGMENTS", "0") == "1":
             from .packed_fragments import fragment_packed_graph
-            logging.info('TACE-OAM-XL-v2 direct cotangent blocks: %s', fragment_packed_graph(graph))
-        if os.environ.get('EQX_XL_JOIN_MATRICES', '0') == '1':
+
+            logging.info(
+                "TACE-OAM-XL-v2 direct cotangent blocks: %s",
+                fragment_packed_graph(graph),
+            )
+        if os.environ.get("EQX_XL_JOIN_MATRICES", "0") == "1":
             from .joined_matrix import join_matrix_graph
-            logging.info('TACE-OAM-XL-v2 joined live matrices: %s', join_matrix_graph(graph))
+
+            logging.info(
+                "TACE-OAM-XL-v2 joined live matrices: %s", join_matrix_graph(graph)
+            )
         matrices = os.environ.get("EQX_XL_PARALLEL_MATRICES", "0") == "1"
         pipeline = os.environ.get("EQX_XL_PIPELINE_MATRICES", "0") == "1"
         if matrices or pipeline:
             from torch._inductor import config
+
             if config.shape_padding:
                 raise RuntimeError(
                     "TACE-OAM-XL-v2 parallel scheduling requires shape_padding=False: "
@@ -243,41 +267,59 @@ class MixedGradientPass(CustomGraphPass):
                 )
             if pipeline:
                 from .pipeline import overlap_future_matrices
+
                 pairs = overlap_future_matrices(graph)
-                logging.info("TACE-OAM-XL-v2 pipelined %d future GEMMs: %s", len(pairs), pairs)
+                logging.info(
+                    "TACE-OAM-XL-v2 pipelined %d future GEMMs: %s", len(pairs), pairs
+                )
             if matrices:
                 from .parallel import overlap_parameter_matrices
+
                 count, pairs = overlap_parameter_matrices(graph)
-                logging.info("TACE-OAM-XL-v2 overlapped %d parameter GEMMs in %s groups", count, pairs)
-        if os.environ.get('EQX_XL_LT_RADIAL','0') == '1':
+                logging.info(
+                    "TACE-OAM-XL-v2 overlapped %d parameter GEMMs in %s groups",
+                    count,
+                    pairs,
+                )
+        if os.environ.get("EQX_XL_LT_RADIAL", "0") == "1":
             from .lt_matrix import select_radial_matrices
-            logging.info('TACE-OAM-XL-v2 calibrated radial GEMMs: %s',select_radial_matrices(graph))
+
+            logging.info(
+                "TACE-OAM-XL-v2 calibrated radial GEMMs: %s",
+                select_radial_matrices(graph),
+            )
 
     def uuid(self):
         from .extensions import extension_identity
-        sources = [Path(__file__).read_bytes(), Path(__file__).with_name("parallel.py").read_bytes(),
-                   Path(__file__).with_name("pipeline.py").read_bytes()]
+
+        sources = [
+            Path(__file__).read_bytes(),
+            Path(__file__).with_name("parallel.py").read_bytes(),
+            Path(__file__).with_name("pipeline.py").read_bytes(),
+        ]
         sources.append(Path(__file__).with_name("node_sweep.py").read_bytes())
         sources.append(Path(__file__).with_name("packed_fragments.py").read_bytes())
         sources.append(Path(__file__).with_name("ordered_reductions.py").read_bytes())
-        sources.append(os.environ.get('EQX_XL_ORDERED_REDUCTIONS', '0').encode())
-        sources.append(os.environ.get('EQX_XL_PACKED_FRAGMENTS', '0').encode())
-        sources.append(os.environ.get('EQX_XL_NODE_SWEEP', '0').encode())
-        sources.append(os.environ.get('EQX_XL_NODE_TANGENT', '0').encode())
+        sources.append(os.environ.get("EQX_XL_ORDERED_REDUCTIONS", "0").encode())
+        sources.append(os.environ.get("EQX_XL_PACKED_FRAGMENTS", "0").encode())
+        sources.append(os.environ.get("EQX_XL_NODE_SWEEP", "0").encode())
+        sources.append(os.environ.get("EQX_XL_NODE_TANGENT", "0").encode())
         sources.append(Path(__file__).with_name("source_vjp.py").read_bytes())
-        sources.append(os.environ.get('EQX_XL_SOURCE_VJP', '0').encode())
-        sources.append(os.environ.get('EQX_XL_SOURCE_VJP_REGISTER_LIMIT', '255').encode())
-        sources.append(os.environ.get('EQX_XL_MIXED_REUSE_ANGULAR', '0').encode())
-        sources.append(Path(__file__).with_name('row_schedule.py').read_bytes())
-        sources.append(Path(__file__).with_name('lt_matrix.py').read_bytes())
-        sources.append(os.environ.get('EQX_XL_LT_RADIAL','0').encode())
-        sources.append(os.environ.get('EQX_XL_LT_SM_TARGET','0').encode())
-        sources.append(os.environ.get('EQX_XL_LT_ALGORITHM','-1').encode())
-        sources.append(os.environ.get('EQX_XL_SOURCE_ROW_LIMIT', '0').encode())
-        sources.append(os.environ.get('EQX_XL_MIXED_ROW_LIMIT', '0').encode())
-        sources.append(os.environ.get('EQX_XL_MIXED_OWNER', 'off').encode())
+        sources.append(os.environ.get("EQX_XL_SOURCE_VJP", "0").encode())
+        sources.append(
+            os.environ.get("EQX_XL_SOURCE_VJP_REGISTER_LIMIT", "255").encode()
+        )
+        sources.append(os.environ.get("EQX_XL_MIXED_REUSE_ANGULAR", "0").encode())
+        sources.append(Path(__file__).with_name("row_schedule.py").read_bytes())
+        sources.append(Path(__file__).with_name("lt_matrix.py").read_bytes())
+        sources.append(os.environ.get("EQX_XL_LT_RADIAL", "0").encode())
+        sources.append(os.environ.get("EQX_XL_LT_SM_TARGET", "0").encode())
+        sources.append(os.environ.get("EQX_XL_LT_ALGORITHM", "-1").encode())
+        sources.append(os.environ.get("EQX_XL_SOURCE_ROW_LIMIT", "0").encode())
+        sources.append(os.environ.get("EQX_XL_MIXED_ROW_LIMIT", "0").encode())
+        sources.append(os.environ.get("EQX_XL_MIXED_OWNER", "off").encode())
         sources.append(Path(__file__).with_name("joined_matrix.py").read_bytes())
-        sources.append(os.environ.get('EQX_XL_JOIN_MATRICES', '0').encode())
+        sources.append(os.environ.get("EQX_XL_JOIN_MATRICES", "0").encode())
         sources.append(os.environ.get("EQX_XL_PARALLEL_MATRICES", "0").encode())
         sources.append(os.environ.get("EQX_XL_PARALLEL_PRODUCTS", "0").encode())
         sources.append(os.environ.get("EQX_XL_EDGE_ANGULAR_BLOCK", "0").encode())
@@ -285,8 +327,15 @@ class MixedGradientPass(CustomGraphPass):
         sources.append(os.environ.get("EQX_XL_PARALLEL_MATRIX_LIMIT", "32").encode())
         sources.append(os.environ.get("EQX_XL_CG_THREADS", "0").encode())
         sources.append(os.environ.get("EQX_XL_PIPELINE_MATRICES", "0").encode())
-        sources.extend(Path(__file__).with_name(name).read_bytes() for name in (
-            "precision.py", "extensions.py", "cg_codegen.py", "cg_convolution.py", "graph.py"
-        ))
+        sources.extend(
+            Path(__file__).with_name(name).read_bytes()
+            for name in (
+                "precision.py",
+                "extensions.py",
+                "cg_codegen.py",
+                "cg_convolution.py",
+                "graph.py",
+            )
+        )
         sources.append(extension_identity().encode())
         return hashlib.sha256(b"\0".join(sources)).hexdigest()

@@ -4,20 +4,44 @@ import torch
 
 from equivariantx import co3, o2
 
-from ..ops.precision import validate_module_precision
+from ..ops.precision import validate_module_precision, validate_precision
+from ..ops.torch.co2 import local_frame as torch_kernel
 from .basis import path_matrix
 from .irreps import Irrep, Irreps
 from .restriction import Restriction, restriction_matrix, restriction_scale
-from .tensor_product import quarter_turn
 
 
-def transform_tensor(tensor, matrix, rank):
-    """Apply a rectangular matrix to every index of a flattened tensor."""
-    a, b = matrix.shape[-2:]
-    for k in range(rank):
-        tensor = tensor.reshape(*tensor.shape[:-1], b ** (rank - k - 1), b, a**k)
-        tensor = torch.einsum("...uiv,...ji->...ujv", tensor, matrix).flatten(-3)
-    return tensor
+def execution(module, features):
+    """Resolve the frame backend without importing native kernels on CPU."""
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ..ops.cuda.co2 import local_frame as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
+
+
+def transform_tensor(tensor, matrix, rank, *, backend="torch"):
+    """Apply a rectangular map to all indices of a Cartesian tensor.
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Flattened tensors of shape (..., input_size**rank).
+    matrix : torch.Tensor
+        Broadcastable maps of shape (..., output_size, input_size).
+    rank : int
+        Non-negative Cartesian rank.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
+    """
+    validate_precision((tensor, matrix))
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be torch or cuda.")
+    if backend == "cuda" and tensor.is_cuda:
+        from ..ops.cuda.co2 import local_frame as cuda_kernel
+
+        return cuda_kernel.transform_tensor(tensor, matrix, rank)
+    return torch_kernel.transform_tensor(tensor, matrix, rank)
 
 
 class LocalFrame(torch.nn.Module):
@@ -35,6 +59,8 @@ class LocalFrame(torch.nn.Module):
     method : {"direct", "rotation", "projection"}, optional
         Direct rectangular contractions, full Cartesian rotation, or
         three-dimensional transverse projection. Defaults to "direct".
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
 
     Notes
     -----
@@ -55,10 +81,15 @@ class LocalFrame(torch.nn.Module):
     >>> torch.testing.assert_close(frame.to_global(frame(x, rotation), rotation), x)
     """
 
-    def __init__(self, irreps, mmax=None, basis_change=True, *, method="direct"):
+    def __init__(
+        self, irreps, mmax=None, basis_change=True, *, method="direct", backend="torch"
+    ):
         super().__init__()
         if method not in ("direct", "rotation", "projection"):
             raise ValueError("method must be 'direct', 'rotation', or 'projection'.")
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.method = method
         self.irreps_in = co3.Irreps(irreps)
         self.lmax = max((ir.l for _, ir in self.irreps_in), default=0)
@@ -144,21 +175,10 @@ class LocalFrame(torch.nn.Module):
 
     def rotate(self, features, rotation):
         """Rotate every Cartesian index, retaining the full input layout."""
+        validate_module_precision(self, (features, rotation))
         if features.shape[-1] != self.input_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
-        rotation = rotation.to(features)
-        shape = torch.broadcast_shapes(features.shape[:-1], rotation.shape[:-2])
-        values = [
-            transform_tensor(
-                features[..., section]
-                .reshape(*features.shape[:-1], mul, 3**l)
-                .expand(*shape, mul, 3**l),
-                rotation.unsqueeze(-3),
-                l,
-            ).flatten(-2)
-            for section, mul, l, _, _ in self.entries
-        ]
-        return torch.cat(values, -1) if values else features[..., :0]
+        return execution(self, features).rotate(self, features, rotation)
 
     def to_local(self, features, rotation):
         """Extract each planar STF order in two-dimensional Cartesian storage.
@@ -170,92 +190,19 @@ class LocalFrame(torch.nn.Module):
         rotation : torch.Tensor
             Proper alignment matrices of shape ``(..., 3, 3)``.
         """
+        validate_module_precision(self, (features, rotation))
         if features.shape[-1] != self.input_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
-        rotation = rotation.to(features)
-        direction = rotation[..., 1, :].unsqueeze(-2)
-        axes = torch.stack((rotation[..., 2, :], rotation[..., 0, :]), -2).unsqueeze(-3)
-        shape = torch.broadcast_shapes(features.shape[:-1], rotation.shape[:-2])
-        outputs = [[] for _ in self.irreps_out]
-        for section, mul, l, odd, paths in self.entries:
-            tensor = (
-                features[..., section]
-                .reshape(*features.shape[:-1], mul, 3**l)
-                .expand(*shape, mul, 3**l)
-            )
-            if self.method == "projection":
-                values = self.restrictions[str(l)](tensor, direction)
-            elif self.method == "rotation":
-                tensor = transform_tensor(tensor, rotation.unsqueeze(-3), l)
-            else:
-                values = [tensor]
-                for rank in range(l, 0, -1):
-                    value = values[-1].unflatten(-1, (3 ** (rank - 1), 3))
-                    values.append((value @ direction.unsqueeze(-1)).squeeze(-1))
-                values.reverse()
-            for m, (index, _) in enumerate(paths):
-                if self.method == "rotation":
-                    value = tensor.index_select(-1, getattr(self, f"indices_{l}_{m}"))
-                else:
-                    value = transform_tensor(values[m], axes, m)
-                value = value @ getattr(self, f"basis_{l}_{m}").to(features).T
-                if odd and m and self.basis_change:
-                    value = quarter_turn(value)
-                outputs[index].append(value)
-        return (
-            torch.cat([torch.cat(parts, -2).flatten(-2) for parts in outputs], -1)
-            if outputs
-            else features[..., :0]
-        )
+        return execution(self, features).to_local(self, features, rotation)
 
     def to_global(self, features, rotation):
         """Reconstruct global STF features from the retained planar orders."""
+        validate_module_precision(self, (features, rotation))
         if features.shape[-1] != self.output_dim or rotation.shape[-2:] != (3, 3):
             raise ValueError("Incorrect feature or rotation shape.")
-        rotation = rotation.to(features)
-        direction = rotation[..., 1, :].unsqueeze(-2)
-        axes = (
-            torch.stack((rotation[..., 2, :], rotation[..., 0, :]), -2)
-            .transpose(-1, -2)
-            .unsqueeze(-3)
-        )
-        local = [
-            features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
-            for (mul, ir), section in zip(self.irreps_out, self.irreps_out.slices())
-        ]
-        outputs = []
-        shape = torch.broadcast_shapes(features.shape[:-1], rotation.shape[:-2])
-        for _, mul, l, odd, paths in self.entries:
-            values = []
-            orders = l + 1 if self.method == "projection" else len(paths)
-            for m in range(orders):
-                if m >= len(paths):
-                    values.append(features.new_zeros((*shape, mul, 3**m)))
-                    continue
-                index, section = paths[m]
-                value = local[index][..., section, :]
-                if odd and m and self.basis_change:
-                    value = -quarter_turn(value)
-                if self.method == "projection":
-                    value = value @ getattr(self, f"basis_{l}_{m}").to(features)
-                    value = transform_tensor(value, axes, m)
-                values.append(value)
-            if self.method == "projection":
-                value = self.restrictions[str(l)].inverse(values, direction)
-            else:
-                value = (
-                    torch.cat(values, -1)
-                    @ getattr(self, f"synthesis_{l}").to(features).T
-                )
-                value = value.expand(*shape, mul, 3**l)
-                value = transform_tensor(
-                    value, rotation.transpose(-1, -2).unsqueeze(-3), l
-                )
-            outputs.append(value.flatten(-2))
-        return torch.cat(outputs, -1) if outputs else features[..., :0]
+        return execution(self, features).to_global(self, features, rotation)
 
     def forward(self, features, rotation):
-        validate_module_precision(self, (features, rotation))
         return self.to_local(features, rotation)
 
     def extra_repr(self):

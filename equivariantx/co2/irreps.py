@@ -7,6 +7,8 @@ import torch
 
 from equivariantx import o2
 
+from ..ops.precision import validate_precision
+
 
 class Irrep(o2.Irrep):
     """An O(2) irrep in symmetric traceless Cartesian storage.
@@ -24,6 +26,12 @@ class Irrep(o2.Irrep):
     -----
     ``dim`` is the storage size ``2**m``. The irreducible subspace has
     dimension one at order zero and two at every positive order.
+
+    Examples
+    --------
+    >>> from equivariantx import co2
+    >>> co2.Irrep("2m").dim
+    4
     """
 
     @property
@@ -50,7 +58,8 @@ class Irrep(o2.Irrep):
         return Irreps(self) + Irreps(other)
 
     def D_from_matrix(self, matrix, time_reversal=False):
-        """Return Cartesian matrices for (..., 2, 2) orthogonal inputs."""
+        """Return Cartesian matrices for FP32/FP64 (..., 2, 2) orthogonal inputs."""
+        validate_precision((matrix,))
         if matrix.shape[-2:] != (2, 2):
             raise ValueError("An O(2) matrix must have trailing shape (2, 2).")
         value = matrix.new_ones((*matrix.shape[:-2], 1, 1))
@@ -91,6 +100,13 @@ class Irreps(tuple):
     irreps : str, Irrep or iterable, optional
         Representation string or (multiplicity, irrep) entries. Compact
         O(2) metadata is accepted and converted without regrouping.
+
+    Examples
+    --------
+    >>> from equivariantx import co2
+    >>> irreps = co2.Irreps("2x0e + 1x2m")
+    >>> irreps.dim
+    6
     """
 
     def __new__(cls, irreps=None):
@@ -228,6 +244,9 @@ class Irreps(tuple):
 
     def D_from_matrix(self, matrix, time_reversal=False):
         """Return the block-diagonal Cartesian representation matrix."""
+        validate_precision((matrix,))
+        if matrix.shape[-2:] != (2, 2):
+            raise ValueError("An O(2) matrix must have trailing shape (2, 2).")
         result = matrix.new_zeros((*matrix.shape[:-2], self.dim, self.dim))
         offset = 0
         for mul, ir in self:

@@ -1,0 +1,1 @@
+"""Native irreducible Cartesian products."""

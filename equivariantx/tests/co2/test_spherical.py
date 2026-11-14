@@ -1,12 +1,40 @@
 """Tests for the corresponding EQX source module."""
 
 import math
+
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import co2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision):
+    from unittest.mock import patch
+
+    from equivariantx.ops import config
+    from equivariantx.ops.cuda.co2 import spherical as kernel
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    module = co2.SphericalCoupling(2, 1, 2, backend="cuda").to(device)
+    reference = co2.SphericalCoupling(2, 1, 2).to(device)
+    for count in (3, 0):
+        x, vectors = (
+            torch.randn(count, 5, device=device),
+            torch.randn(count, 3, device=device),
+        )
+        with patch.object(kernel, "forward", wraps=kernel.forward) as selected:
+            actual = module(x, vectors)
+        assert selected.call_count == (device == "cuda")
+        torch.testing.assert_close(
+            actual, reference(x, vectors), atol=2e-11, rtol=2e-11
+        )
+    assert module.backend == "cuda" and config.TORCH_REFERENCE is True
 
 
 def test_coupling_recurrence_phase(monkeypatch, double_precision):
@@ -174,3 +202,153 @@ def test_spherical_recurrence_float32(degrees, wigner_3j):
             )
             for value in (actual, expected)
         ]
+
+
+@pytest.mark.parametrize("backend", ["torch", "reference", "cuda"])
+@pytest.mark.parametrize("method", ["chebyshev", "recurrence"])
+@pytest.mark.parametrize("degrees", [(1, 1, 1), (2, 3, 3), (3, 4, 2)])
+def test_sparse_coupling_derivatives(
+    backend, method, degrees, monkeypatch, double_precision, device
+):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.co2.spherical import reference
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", backend == "reference")
+    monkeypatch.setattr(config, "TORCH_SPHERICAL_COUPLING", True)
+    monkeypatch.setattr(config, "TORCH_SPHERICAL_ADJOINT", True)
+    layer = co2.SphericalCoupling(
+        *degrees, method=method, backend="cuda" if backend == "cuda" else "torch"
+    ).to(device)
+    x = (torch.randn(2, 3, 2 * (2 * degrees[0] + 1), device=device) * 0.1)[
+        ..., ::2
+    ].requires_grad_()
+    v = (torch.randn(2, 1, 3, device=device) + 0.5).requires_grad_()
+    actual, expected = layer(x, v), reference(layer, x, v, method)
+    for _ in range(5):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        actual, expected = [
+            sum(
+                g.square().sum()
+                for g in torch.autograd.grad(y.sin().sum(), (x, v), create_graph=True)
+            )
+            * 0.01
+            for y in (actual, expected)
+        ]
+    directions = tuple(torch.randn_like(t) for t in (x, v))
+    torch.testing.assert_close(
+        torch.func.jvp(layer, (x, v), directions),
+        torch.func.jvp(lambda a, b: reference(layer, a, b, method), (x, v), directions),
+        atol=2e-10,
+        rtol=2e-10,
+    )
+    torch.testing.assert_close(
+        torch.vmap(layer)(x, v), layer(x, v), atol=2e-10, rtol=2e-10
+    )
+    assert layer(x[:0], v[:0]).shape == (0, 3, 2 * degrees[2] + 1)
+
+
+def test_sparse_coupling_mixed_modes_and_legacy(monkeypatch, double_precision):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.co2.spherical import reference
+
+    monkeypatch.setattr(config, "TORCH_SPHERICAL_COUPLING", True)
+    layer = co2.SphericalCoupling(2, 3, 2)
+    x = (torch.randn(2, 5) * 0.1).requires_grad_()
+    v = (torch.randn(2, 3) + 0.5).requires_grad_()
+
+    def oracle(a, b):
+        return reference(layer, a, b, layer.method)
+
+    assert torch.autograd.gradcheck(layer, (x, v))
+    assert torch.autograd.gradgradcheck(layer, (x, v))
+    direction = (torch.randn_like(x), torch.randn_like(v))
+
+    def fn(a, b):
+        return layer(a, b).sin().sum()
+
+    def ref(a, b):
+        return oracle(a, b).sin().sum()
+
+    torch.testing.assert_close(
+        torch.func.jvp(torch.func.grad(fn, argnums=(0, 1)), (x, v), direction),
+        torch.func.jvp(torch.func.grad(ref, argnums=(0, 1)), (x, v), direction),
+        atol=2e-9,
+        rtol=2e-9,
+    )
+    del layer.generator_indices
+    torch.testing.assert_close(layer(x, v), oracle(x, v))
+    layer.float().double()
+    assert layer.generator_indices.dtype == torch.long
+    torch.testing.assert_close(layer(x, v), oracle(x, v), atol=2e-11, rtol=2e-11)
+    assert not layer.state_dict()
+
+
+@pytest.mark.parametrize("degrees", [(2, 3, 2), (2, 3, 3), (3, 4, 2)])
+@pytest.mark.parametrize("shape", [(3,), (2, 1, 3)])
+def test_channel_shared_matrix(degrees, shape, monkeypatch, double_precision, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.co2.spherical import reference
+
+    monkeypatch.setattr(config, "SPHERICAL_MATRIX_MIN_CHANNELS", 16)
+    monkeypatch.setattr(config, "TORCH_SPHERICAL_COUPLING", False)
+    layer = co2.SphericalCoupling(*degrees, method="recurrence").to(device)
+    x = (torch.randn(2, 16, 2 * (2 * degrees[0] + 1), device=device) * 0.1)[
+        ..., ::2
+    ].requires_grad_()
+    v = (torch.randn(*shape, device=device) + 0.5).requires_grad_()
+    actual, expected = layer(x, v), reference(layer, x, v, layer.method)
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-9)
+        actual, expected = [
+            sum(
+                g.square().sum()
+                for g in torch.autograd.grad(y.sin().sum(), (x, v), create_graph=True)
+            )
+            * 0.001
+            for y in (actual, expected)
+        ]
+    tangents = tuple(torch.randn_like(t) for t in (x, v))
+    torch.testing.assert_close(
+        torch.func.jvp(layer, (x, v), tangents),
+        torch.func.jvp(
+            lambda a, b: reference(layer, a, b, layer.method), (x, v), tangents
+        ),
+        atol=2e-10,
+        rtol=2e-10,
+    )
+    assert layer(x[:0], v if v.ndim == 1 else v[:0]).shape == (
+        0,
+        16,
+        2 * degrees[2] + 1,
+    )
+
+
+@pytest.mark.parametrize("degrees", [(2, 3, 2), (2, 3, 3), (6, 6, 6)])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_shared_matrix_fp32(degrees, backend, device):
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    try:
+        layer = co2.SphericalCoupling(*degrees, backend=backend).to(device)
+        oracle = co2.SphericalCoupling(*degrees).to(device=device, dtype=torch.float64)
+        x = torch.randn(3, 16, 2 * degrees[0] + 1, device=device) * 0.1
+        v = torch.randn(3, 1, 3, device=device) + 0.5
+        w = torch.randn(16, 1, device=device) * 0.1
+        results = []
+        for module, dtype in ((layer, torch.float32), (oracle, torch.float64)):
+            a = x.to(dtype).detach().requires_grad_()
+            b = v.to(dtype).detach().requires_grad_()
+            c = w.to(dtype).detach().requires_grad_()
+            y = module(a * c, b)
+            energy = 1 + y.sin().sum() / y.numel() ** 0.5
+            force = -torch.autograd.grad(energy, b, create_graph=True)[0]
+            loss = (force + 0.01).square().sum() + energy.square()
+            gradient = torch.autograd.grad(loss, c)[0]
+            results.append((y, force, gradient))
+        for actual, expected in zip(*results):
+            error = (actual.double() - expected).norm() / expected.norm().clamp_min(
+                1e-20
+            )
+            assert error < 5e-5
+    finally:
+        torch.set_float32_matmul_precision(precision)

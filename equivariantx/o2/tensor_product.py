@@ -3,13 +3,13 @@ from typing import Iterator, Optional, Sequence
 
 import torch
 
-from ..ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ..ops.kernels.torch.tensor_product import instruction_groups
+from ..ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ..ops.common.torch.tensor_product import instruction_groups
 from ..ops.precision import validate_module_precision
-from ..ops import config
+from ..ops.torch.o2 import tensor_product as torch_kernel
 from ..utils.tensor_product import tensor_product_instructions
 from .clebsch_gordan import channel_product as couple_channels
-from .clebsch_gordan import clebsch_gordan_products, coupling_entries, coupling_type
+from .clebsch_gordan import coupling_entries, coupling_type
 from .irreps import Irreps, IrrepsLike
 
 
@@ -214,9 +214,7 @@ class TensorProduct(torch.nn.Module):
             for irreps in (self.irreps_in1, self.irreps_in2, self.irreps_out)
             for _, mul in irreps
         }
-        if backend == "cuda" and all(
-            ins.connection_mode != "uvw" for ins in self.instructions
-        ):
+        if all(ins.connection_mode != "uvw" for ins in self.instructions):
             channels = next(iter(multiplicities)) if len(multiplicities) == 1 else 0
             slices1 = self.irreps_in1.slices()
             slices2 = self.irreps_in2.slices()
@@ -334,101 +332,16 @@ class TensorProduct(torch.nn.Module):
             ) from error
 
         if self.backend == "cuda":
-            from ..ops.channel_product import tensor_product as cuda_product
+            from ..ops.cuda.o2 import tensor_product as cuda_kernel
 
-            if self.kernel_metadata is None:
-                return self.forward_paths(input1, input2, weight, native=True)
-            return cuda_product(
-                self.kernel_metadata, input1, input2, weight, self.irreps_out.dim
-            )
-
-        if config.TORCH_REFERENCE:
-            return self.forward_paths(input1, input2, weight, reference=True)
-        if self.contraction.indexed:
-            return self.contraction(input1, input2, weight, self.path_scales.to(input1))
-        return self.forward_paths(input1, input2, weight)
+            return cuda_kernel.evaluate(self, input1, input2, weight)
+        return torch_kernel.evaluate(self, input1, input2, weight)
 
     def forward_paths(self, input1, input2, weight, *, reference=False, native=False):
         """Reuse angular products when instruction batches are too small to pack."""
-        shape = torch.broadcast_shapes(
-            input1.shape[:-1], input2.shape[:-1], weight.shape[:-1]
+        return torch_kernel.forward_paths(
+            self, input1, input2, weight, reference=reference, native=native
         )
-        inputs = [
-            [
-                block.reshape(*value.shape[:-1], ir.dim, mul)
-                for block, (ir, mul) in zip(
-                    value.split([entry.dim for entry in irreps], -1), irreps
-                )
-            ]
-            for value, irreps in ((input1, self.irreps_in1), (input2, self.irreps_in2))
-        ]
-        weights = weight.split(self._weight_sizes, -1)
-        outputs = [None] * len(self.irreps_out)
-        for i, j, elementwise, irreps, paths in (
-            self.reference_couplings if reference else self.couplings
-        ):
-            if native:
-                from ..ops.channel_product import angular_product
-
-                x, y = inputs[0][i].transpose(-1, -2), inputs[1][j].transpose(-1, -2)
-                if not elementwise:
-                    x, y = x.unsqueeze(-2), y.unsqueeze(-3)
-                values = tuple(
-                    angular_product(
-                        x,
-                        y,
-                        coupling_entries(
-                            self.irreps_in1[i].ir, self.irreps_in2[j].ir, ir
-                        ),
-                        ir.dim,
-                    ).movedim(-1, -2 if elementwise else -3)
-                    for ir in irreps
-                )
-            else:
-                values = clebsch_gordan_products(
-                    inputs[0][i],
-                    self.irreps_in1[i].ir,
-                    inputs[1][j],
-                    self.irreps_in2[j].ir,
-                    irreps,
-                    elementwise=elementwise,
-                )
-            for index, angular in paths:
-                ins = self.instructions[index]
-                value = values[angular]
-                if ins.has_weight:
-                    w = weights[index] * ins.path_weight
-                    if ins.connection_mode == "uvw":
-                        value = torch.einsum(
-                            "...duv,...uvw->...dw",
-                            value,
-                            w.reshape(*weight.shape[:-1], *ins.path_shape),
-                        )
-                    else:
-                        value = value * w.unsqueeze(-2)
-                else:
-                    value = value * ins.path_weight
-                previous = outputs[ins.i_out]
-                outputs[ins.i_out] = value if previous is None else previous + value
-        zero = (
-            input1[..., :0].sum() + input2[..., :0].sum() + weight[..., :0].sum()
-            if not self.contraction.complete or not outputs
-            else None
-        )
-        if not outputs:
-            return input1.new_zeros((*shape, 0)) + zero
-        result = torch.cat(
-            [
-                (
-                    input1.new_zeros((*shape, ir.dim, mul))
-                    if value is None
-                    else value.expand(*shape, ir.dim, mul)
-                ).flatten(-2)
-                for value, (ir, mul) in zip(outputs, self.irreps_out)
-            ],
-            -1,
-        )
-        return result if zero is None else result + zero
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)

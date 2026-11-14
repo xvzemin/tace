@@ -6,16 +6,19 @@ from functools import lru_cache
 import torch
 
 from ..co3.symmetric import symmetric_basis
-from ..ops.precision import validate_module_precision
+from ..ops.precision import validate_module_precision, validate_precision
+from ..ops.torch.co2 import projection as torch_kernel
 
 
-def plane_projector(direction):
+def plane_projector(direction, *, backend="torch"):
     """Return the orthogonal projector perpendicular to a unit direction.
 
     Parameters
     ----------
     direction : torch.Tensor
         Unit vectors of shape (..., 3). Normalization is not performed.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Defaults to Torch.
 
     Returns
     -------
@@ -24,8 +27,14 @@ def plane_projector(direction):
     """
     if direction.shape[-1] != 3:
         raise ValueError("Directions must have trailing size 3.")
-    identity = torch.eye(3, dtype=direction.dtype, device=direction.device)
-    return identity - direction.unsqueeze(-1) * direction.unsqueeze(-2)
+    validate_precision((direction,))
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be torch or cuda.")
+    if backend == "cuda" and direction.is_cuda:
+        from ..ops.cuda.co2 import projection as cuda_kernel
+
+        return cuda_kernel.plane_projector(direction)
+    return torch_kernel.plane_projector(direction)
 
 
 @lru_cache(maxsize=None)
@@ -65,10 +74,25 @@ class PlaneProjector(torch.nn.Module):
     ----------
     rank : int
         Non-negative Cartesian tensor rank. Tensors need not be symmetric.
+
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> plane = torch.diag(torch.tensor([1., 0., 1.]))
+    >>> result = co2.PlaneProjector(2)(torch.eye(3).flatten(), plane)
+    >>> result.reshape(3, 3).diagonal().tolist()
+    [1.0, 0.0, 1.0]
     """
 
-    def __init__(self, rank):
+    def __init__(self, rank, *, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         if not isinstance(rank, int) or rank < 0:
             raise ValueError("rank must be a non-negative integer.")
         self.rank = rank
@@ -83,16 +107,11 @@ class PlaneProjector(torch.nn.Module):
         validate_module_precision(self, (tensor, plane))
         if tensor.shape[-1] != self.dim or plane.shape[-2:] != (3, 3):
             raise ValueError("Tensor or plane has an incorrect trailing shape.")
-        if self.rank == 0:
-            shape = torch.broadcast_shapes(tensor.shape[:-1], plane.shape[:-2])
-            return tensor.expand(*shape, 1)
-        for axis in range(self.rank):
-            tensor = torch.einsum(
-                "...ij,...ajb->...aib",
-                plane,
-                tensor.unflatten(-1, (3**axis, 3, 3 ** (self.rank - axis - 1))),
-            ).flatten(-3)
-        return tensor
+        if getattr(self, "backend", "torch") == "cuda" and tensor.is_cuda:
+            from ..ops.cuda.co2 import projection as cuda_kernel
+
+            return cuda_kernel.project(self, tensor, plane)
+        return torch_kernel.project(self, tensor, plane)
 
     def extra_repr(self):
         return f"rank={self.rank}"
@@ -109,6 +128,8 @@ class PlanarDetracer(torch.nn.Module):
         Buffer dtype. Defaults to torch.get_default_dtype().
     device : torch.device or str, optional
         Buffer device. Defaults to CPU.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
 
     Notes
     -----
@@ -122,10 +143,23 @@ class PlanarDetracer(torch.nn.Module):
     .. [#planar-stf] V. T. Toth and S. G. Turyshev, "Efficient trace-free decomposition
        of symmetric tensors of arbitrary rank", 2022, Eq. (38).
        https://arxiv.org/abs/2109.11743
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> plane = torch.diag(torch.tensor([1., 0., 1.]))
+    >>> tensor = torch.diag(torch.tensor([1., 0., 0.])).flatten()
+    >>> result = co2.PlanarDetracer(2)(tensor, plane)
+    >>> result.reshape(3, 3).diagonal().tolist()
+    [0.5, 0.0, -0.5]
     """
 
-    def __init__(self, rank, *, dtype=None, device=None):
+    def __init__(self, rank, *, dtype=None, device=None, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.coefficients = detracing_coefficients(rank)
         if dtype is not None and not dtype.is_floating_point:
             raise TypeError("dtype must be a real floating-point dtype.")
@@ -134,8 +168,10 @@ class PlanarDetracer(torch.nn.Module):
         device = "cpu" if device is None else device
         self.register_buffer(
             "identity",
-            torch.eye(
-                self.dim, dtype=dtype or torch.get_default_dtype(), device=device
+            torch.eye(self.dim, dtype=dtype or torch.get_default_dtype(), device=device)
+            if rank < 2
+            else torch.empty(
+                0, dtype=dtype or torch.get_default_dtype(), device=device
             ),
             persistent=False,
         )
@@ -156,17 +192,8 @@ class PlanarDetracer(torch.nn.Module):
         """Return (..., 3**rank, 3**rank) detracing matrices for (..., 3, 3) planes."""
         if plane.shape[-2:] != (3, 3):
             raise ValueError("Plane matrices must have trailing shape (3, 3).")
-        if self.rank < 2:
-            return self.identity.expand(*plane.shape[:-2], self.dim, self.dim)
-        trace = self.trace_identity
-        correction = torch.zeros_like(self.trace_identity)
-        for k, coefficient in enumerate(self.coefficients[1:]):
-            contraction = torch.einsum(
-                "...ab,abij->...ij", plane, getattr(self, f"trace_{k}")
-            )
-            trace = contraction @ trace
-            correction = correction + coefficient * (trace.transpose(-1, -2) @ trace)
-        return self.identity + self.basis @ correction @ self.basis.T
+        validate_module_precision(self, (plane,))
+        return torch_kernel.matrix(self, plane)
 
     def forward(self, tensor, plane):
         """Detrace (..., 3**rank) tensors using broadcastable (..., 3, 3) planes."""
@@ -175,26 +202,11 @@ class PlanarDetracer(torch.nn.Module):
             raise ValueError("Tensor has an incorrect trailing size.")
         if plane.shape[-2:] != (3, 3):
             raise ValueError("Plane matrices must have trailing shape (3, 3).")
-        if self.rank < 2:
-            shape = torch.broadcast_shapes(tensor.shape[:-1], plane.shape[:-2])
-            return tensor.expand(*shape, self.dim)
-        value = (tensor @ self.basis).unsqueeze(-1)
-        contractions, traces = [], []
-        for k in range(len(self.coefficients) - 1):
-            contraction = torch.einsum(
-                "...ab,abij->...ij", plane, getattr(self, f"trace_{k}")
-            )
-            value = contraction @ value
-            contractions.append(contraction)
-            traces.append(value)
-        correction = self.coefficients[-1] * traces[-1]
-        for k in range(len(contractions) - 1, 0, -1):
-            correction = (
-                contractions[k].transpose(-1, -2) @ correction
-                + self.coefficients[k] * traces[k - 1]
-            )
-        correction = contractions[0].transpose(-1, -2) @ correction
-        return tensor + (self.basis @ correction).squeeze(-1)
+        if getattr(self, "backend", "torch") == "cuda" and tensor.is_cuda:
+            from ..ops.cuda.co2 import projection as cuda_kernel
+
+            return cuda_kernel.detrace(self, tensor, plane)
+        return torch_kernel.detrace(self, tensor, plane)
 
     def extra_repr(self):
         return f"rank={self.rank}"

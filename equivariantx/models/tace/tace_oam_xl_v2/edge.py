@@ -7,7 +7,7 @@ import os
 
 import torch
 
-from equivariantx.ops.contraction import adjoint_program
+from equivariantx.ops.common.contraction import adjoint_program
 from equivariantx.utils.autograd import gradient_mask
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.outputs import o3_outputs
@@ -26,7 +26,7 @@ COTANGENT_RESIDENT = os.environ.get("EQX_XL_COTANGENT_RESIDENT", "0") == "1"
 def complete_weight_columns(metadata, width):
     """Require disjoint paths that assign the entire radial result row."""
     offset = 0
-    for path in sorted(parse_metadata(metadata)[0], key=lambda item:item[8]):
+    for path in sorted(parse_metadata(metadata)[0], key=lambda item: item[8]):
         if path[8] != offset:
             return False
         offset += path[3] * path[4]
@@ -34,28 +34,57 @@ def complete_weight_columns(metadata, width):
 
 
 @lru_cache(maxsize=256)
-def edge_plan(metadata, program, dimensions, shared, dtype, device, node_warps=0, edge_block=False, radial_indexed=False, radial_scale=0):
+def edge_plan(
+    metadata,
+    program,
+    dimensions,
+    shared,
+    dtype,
+    device,
+    node_warps=0,
+    edge_block=False,
+    radial_indexed=False,
+    radial_scale=0,
+):
     """Compile static path groups, retaining weights as runtime arguments."""
     require_unscaled(radial_scale, "radial_scale")
-    from equivariantx.ops.kernels.cuda.runtime import kernels
+    from equivariantx.ops.common.cuda.runtime import kernels
 
     paths = parse_metadata(metadata)[0]
     outputs = 1 + max(slot for _, _, pairs in program for _, slot in pairs)
     groups = edge_groups(paths, program, path_tile=EDGE_PATH_TILE)
     codes = [
-        edge_source(paths, terms, dimensions, shared, dtype, outputs, owner,
-                    accumulate=EDGE_PATH_TILE > 0, node_warps=node_warps, edge_block=edge_block)
+        edge_source(
+            paths,
+            terms,
+            dimensions,
+            shared,
+            dtype,
+            outputs,
+            owner,
+            accumulate=EDGE_PATH_TILE > 0,
+            node_warps=node_warps,
+            edge_block=edge_block,
+        )
         for paths, terms, owner in groups
     ]
     packing = packed_description(metadata)
     if packing is not None:
-        codes = [pack_edge_source(code, packing, terms)
-                 for code, (_, terms, _) in zip(codes, groups)]
+        codes = [
+            pack_edge_source(code, packing, terms)
+            for code, (_, terms, _) in zip(codes, groups)
+        ]
     if radial_indexed:
         from .compressed import compressed_source
-        codes = [compressed_source(code, terms) for code, (_, terms, _) in zip(codes, groups)]
+
+        codes = [
+            compressed_source(code, terms) for code, (_, terms, _) in zip(codes, groups)
+        ]
     from .cache_policy import source_policy
-    codes = [source_policy(code,terms,dtype) for code,(_,terms,_) in zip(codes,groups)]
+
+    codes = [
+        source_policy(code, terms, dtype) for code, (_, terms, _) in zip(codes, groups)
+    ]
     compiled = kernels(codes, device)
     result = []
     for code, (paths, _, owner) in zip(codes, groups):
@@ -67,23 +96,38 @@ def edge_plan(metadata, program, dimensions, shared, dtype, device, node_warps=0
         if owner >= 0 and node_warps:
             threads = node_warps * 32
         elif owner < 0 and edge_block:
-            threads = (paths[0][3]+31)//32*32
+            threads = (paths[0][3] + 31) // 32 * 32
         elif not node_warps:
-            requested = int(os.environ.get('EQX_XL_CG_THREADS', '0'))
+            requested = int(os.environ.get("EQX_XL_CG_THREADS", "0"))
             if requested:
-                if requested not in (64, 128, 256) or not kernel.active_blocks(requested, 0):
-                    raise ValueError('Requested CG thread count exceeds kernel resource limits')
+                if requested not in (64, 128, 256) or not kernel.active_blocks(
+                    requested, 0
+                ):
+                    raise ValueError(
+                        "Requested CG thread count exceeds kernel resource limits"
+                    )
                 threads = requested
         result.append((kernel, paths[0][3], owner, threads))
     return tuple(result)
 
 
-def run_edges(metadata, program, source, target, operands, *, node_warps=0, edge_block=False, radial_map=None, radial_scale=0):
+def run_edges(
+    metadata,
+    program,
+    source,
+    target,
+    operands,
+    *,
+    node_warps=0,
+    edge_block=False,
+    radial_map=None,
+    radial_scale=0,
+):
     """Execute owner-separated native kernels for the OAM-XL contract."""
     require_unscaled(radial_scale, "radial_scale")
     require_tensors(operands)
     from .graph import prepare_graph
-    from equivariantx.ops.kernels.cuda.runtime import runtime
+    from equivariantx.ops.common.cuda.runtime import runtime
 
     meta, terms = parse_metadata(metadata), parse_metadata(program)
     if node_warps not in (0, 1, 2, 4, 8):
@@ -105,29 +149,53 @@ def run_edges(metadata, program, source, target, operands, *, node_warps=0, edge
         and len({p[3] for p in meta[0]}) == 1
     )
     if not supported:
-        if radial_scale:raise ValueError('Scaled storage requires the native independent-path contract')
+        if radial_scale:
+            raise ValueError(
+                "Scaled storage requires the native independent-path contract"
+            )
         from .cg_convolution import contraction
 
         return contraction(
             metadata, program, source, target, operands, batch_paths=True
         )
-    if (os.environ.get('EQX_XL_SOURCE_VJP', '0') == '1'
-            and roles == {0, 1, 3} and len(meta[0]) > 5
-            and meta[0][0][3] == 128 and radial_map is None
-            and all(operands[m[1]].shape[0] != 1 for m, _, _ in terms)
-            and all(complete_weight_columns(metadata, operands[m[1]].shape[1])
-                    for m, _, _ in terms)):
+    if (
+        os.environ.get("EQX_XL_SOURCE_VJP", "0") == "1"
+        and roles == {0, 1, 3}
+        and len(meta[0]) > 5
+        and meta[0][0][3] == 128
+        and radial_map is None
+        and all(operands[m[1]].shape[0] != 1 for m, _, _ in terms)
+        and all(
+            complete_weight_columns(metadata, operands[m[1]].shape[1])
+            for m, _, _ in terms
+        )
+    ):
         from .source_vjp import source_vjp_edges
-        return source_vjp_edges(metadata, program, source, target, operands,
-                                grouping='angular', full_row=True, radial_scale=radial_scale)
+
+        return source_vjp_edges(
+            metadata,
+            program,
+            source,
+            target,
+            operands,
+            grouping="angular",
+            full_row=True,
+            radial_scale=radial_scale,
+        )
     results = o3_outputs(metadata, program, source, target, operands)
     for slot, value in enumerate(results):
         # Every edge weight column is assigned by exactly one path group.
         # Keep all other initialization unchanged, including zero-edge graphs.
         complete_weights = (
-            radial_map is None and SKIP_EDGE_ZERO and source.numel() > 0
+            radial_map is None
+            and SKIP_EDGE_ZERO
+            and source.numel() > 0
             and destinations[slot] == {1}
-            and all(operands[mapping[1]].shape[0] != 1 for mapping, _, pairs in terms if (1, slot) in pairs)
+            and all(
+                operands[mapping[1]].shape[0] != 1
+                for mapping, _, pairs in terms
+                if (1, slot) in pairs
+            )
             and complete_weight_columns(metadata, value.shape[1])
         )
         if not complete_weights:
@@ -185,7 +253,8 @@ def run_edges(metadata, program, source, target, operands, *, node_warps=0, edge
             (
                 kernel,
                 arguments,
-                rows if node_warps and owner >= 0 or edge_block and owner < 0
+                rows
+                if node_warps and owner >= 0 or edge_block and owner < 0
                 else (rows + threads // 32 - 1) // (threads // 32),
                 1 if edge_block and owner < 0 else (width + 31) // 32,
                 threads,
@@ -206,23 +275,43 @@ def scheduled_edges(metadata, program, source, target, operands):
     shared-path schedule, including all parameter derivatives.
     """
     roles = {role for _, _, pairs in parse_metadata(program) for role, _ in pairs}
-    mixed_owner=os.environ.get('EQX_XL_MIXED_OWNER','off') != 'off'
-    if (COTANGENT_RESIDENT or mixed_owner) and roles == {0, 1} and (source.numel() >= 1024 or mixed_owner):
+    mixed_owner = os.environ.get("EQX_XL_MIXED_OWNER", "off") != "off"
+    if (
+        (COTANGENT_RESIDENT or mixed_owner)
+        and roles == {0, 1}
+        and (source.numel() >= 1024 or mixed_owner)
+    ):
         paths = parse_metadata(metadata)[0]
-        if len(paths) > 5 and all(p[3] == 128 and p[4] == 1 and p[8] >= 0 for p in paths):
+        if len(paths) > 5 and all(
+            p[3] == 128 and p[4] == 1 and p[8] >= 0 for p in paths
+        ):
             from .cotangent import cotangent_edges
+
             return cotangent_edges(metadata, program, source, target, operands)
     if RECEIVER_PIPELINE != "off" and roles == {4}:
         from .receiver import receiver_edges
+
         paths = parse_metadata(metadata)[0]
         if paths and all(p[3] == 128 and p[4] == 1 and p[8] >= 0 for p in paths):
             asynchronous = RECEIVER_PIPELINE == "async" or (
-                RECEIVER_PIPELINE == "auto" and len(parse_metadata(program)) == 1)
-            return receiver_edges(metadata, program, source, target, operands, asynchronous)
-    if (source.numel() >= 1024 or os.environ.get('EQX_XL_SOURCE_VJP', '0') == '1') and roles in ({0, 1, 3}, {1, 3}):
-        return run_edges(metadata, program, source, target, operands,
-                         node_warps=CSR_NODE_WARPS,
-                         edge_block=bool(CSR_NODE_WARPS) or os.environ.get('EQX_XL_EDGE_ANGULAR_BLOCK', '0') == '1')
+                RECEIVER_PIPELINE == "auto" and len(parse_metadata(program)) == 1
+            )
+            return receiver_edges(
+                metadata, program, source, target, operands, asynchronous
+            )
+    if (
+        source.numel() >= 1024 or os.environ.get("EQX_XL_SOURCE_VJP", "0") == "1"
+    ) and roles in ({0, 1, 3}, {1, 3}):
+        return run_edges(
+            metadata,
+            program,
+            source,
+            target,
+            operands,
+            node_warps=CSR_NODE_WARPS,
+            edge_block=bool(CSR_NODE_WARPS)
+            or os.environ.get("EQX_XL_EDGE_ANGULAR_BLOCK", "0") == "1",
+        )
     from .cg_convolution import contraction
 
     return contraction(metadata, program, source, target, operands, batch_paths=True)
@@ -274,14 +363,25 @@ def edge_backward(ctx, grad_outputs):
 edge_contract.register_autograd(edge_backward, setup_context=edge_context)
 
 
-def native_message(rejector, nodes, attrs, weights, edge_index, packed=False, radial_map=None):
+def native_message(
+    rejector, nodes, attrs, weights, edge_index, packed=False, radial_map=None
+):
     """Use the original CG metadata and parameter-independent angular layout."""
     convolution = rejector.eqx_tp
-    metadata = pack_edge_metadata(convolution.kernel_metadata) if packed else convolution.kernel_metadata
+    metadata = (
+        pack_edge_metadata(convolution.kernel_metadata)
+        if packed
+        else convolution.kernel_metadata
+    )
     if packed:
-        layout = [(channels*paths, degree) for _, channels, degree, paths in packed_description(metadata)]
+        layout = [
+            (channels * paths, degree)
+            for _, channels, degree, paths in packed_description(metadata)
+        ]
         if layout != [(mul, ir.dim) for mul, ir in rejector.irreps_out.simplify()]:
-            raise ValueError("Packed convolution groups do not match the following irreps")
+            raise ValueError(
+                "Packed convolution groups do not match the following irreps"
+            )
     features = rejector.reshape_in(nodes)
     operands = [
         features,
@@ -293,6 +393,7 @@ def native_message(rejector, nodes, attrs, weights, edge_index, packed=False, ra
     operation = edge_contract
     if radial_map is not None:
         from .compressed import compressed_edge
+
         operation = compressed_edge
     message = operation(
         metadata,

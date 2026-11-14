@@ -37,7 +37,7 @@ def test_graph_softmax_backend():
 def test_online_attention_merge(dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from equivariantx.ops.kernels.cuda.attention import merge_attention
+    from equivariantx.ops.common.cuda.attention import merge_attention
 
     torch.manual_seed(6)
     scores = torch.randn(3, 5, 7, 2, device="cuda", dtype=dtype) * 20 + 1000
@@ -145,7 +145,7 @@ def test_streaming_attention_torch(tile_size, edges, double_precision):
 def test_graph_softmax_derivatives(heads, weight_heads, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.kernels.cuda.attention import normalized_exp_forward
+    from equivariantx.ops.common.cuda.attention import normalized_exp_forward
     from equivariantx.conv.attention import graph_softmax
 
     target = torch.randint(4, (146,), device="cuda")[::2]
@@ -184,7 +184,7 @@ def test_graph_softmax_derivatives(heads, weight_heads, dtype):
 def test_graph_softmax_adjoint(heads, weight_heads, output, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.attention import evaluate_adjoint
+    from equivariantx.ops.common.attention import evaluate_adjoint
 
     target = torch.randint(4, (73,), device="cuda")
     inputs = [

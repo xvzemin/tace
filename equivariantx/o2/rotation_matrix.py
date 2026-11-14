@@ -1,156 +1,115 @@
+"""Smooth O(2) frame alignment charts."""
+
 import torch
 
 from ..ops.precision import validate_precision
 
 
-def _normalize(x: torch.Tensor, eps: float) -> torch.Tensor:
-    return x / torch.sqrt(torch.sum(x * x, dim=-1, keepdim=True) + eps * eps)
-
-
-def _smooth_step(x: torch.Tensor) -> torch.Tensor:
-    x = x.clamp(0.0, 1.0)
-    eps = torch.finfo(x.dtype).eps
-    left = torch.exp(-1.0 / torch.clamp(x, min=eps))
-    right = torch.exp(-1.0 / torch.clamp(1.0 - x, min=eps))
-    interior = left / (left + right)
-    return torch.where(
-        x <= 0.0,
-        torch.zeros_like(x),
-        torch.where(x >= 1.0, torch.ones_like(x), interior),
-    )
-
-
-def _interpolate_quaternions(
-    q0: torch.Tensor,
-    q1: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float = 1e-7,
-) -> torch.Tensor:
-    dot = torch.sum(q0 * q1, dim=-1, keepdim=True)
-    q1 = torch.where(dot < 0.0, -q1, q1)
-    blended = (1.0 - weight.unsqueeze(-1)) * q0 + weight.unsqueeze(-1) * q1
-    return _normalize(blended, eps)
-
-
-def _quaternion_to_matrix(q: torch.Tensor) -> torch.Tensor:
-    w, x, y, z = q.unbind(dim=-1)
-    x2, y2, z2 = x * x, y * y, z * z
-    xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * y, w * z
-    return torch.stack(
-        [
-            torch.stack(
-                [1.0 - 2.0 * (y2 + z2), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-                dim=-1,
-            ),
-            torch.stack(
-                [2.0 * (xy + wz), 1.0 - 2.0 * (x2 + z2), 2.0 * (yz - wx)],
-                dim=-1,
-            ),
-            torch.stack(
-                [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (x2 + y2)],
-                dim=-1,
-            ),
-        ],
-        dim=-2,
-    )
-
-
-def alignment_quaternion(vector: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-    """Return the smooth, regularized quaternion aligning vectors with y."""
+def execute(vector, axis, eps, quaternion, backend):
     validate_precision((vector,))
-    unit_vector = _normalize(vector, eps)
-    x, y, z = unit_vector.unbind(dim=-1)
-    q_pos = _normalize(torch.stack([1.0 + y, -z, torch.zeros_like(x), x], dim=-1), eps)
-    q_neg = _normalize(torch.stack([-z, 1.0 - y, x, torch.zeros_like(x)], dim=-1), eps)
-    blend = _smooth_step(0.5 * (y + 1.0))
-    return _interpolate_quaternions(q_neg, q_pos, blend, eps)
+    if vector.shape[-1] != 3:
+        raise ValueError("Alignment vectors must have three components.")
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be 'torch' or 'cuda'.")
+    if backend == "cuda":
+        if not vector.is_cuda:
+            raise ValueError("backend='cuda' requires CUDA vectors.")
+        from ..ops.cuda.o2.rotation_matrix import evaluate
+    else:
+        from ..ops.torch.o2.rotation_matrix import evaluate
+    return evaluate(vector, axis, eps, quaternion)
 
 
-def rotation_matrix_to_y_axis(
-    vector: torch.Tensor,
-    eps: float = 1e-7,
+def alignment_quaternion(
+    vector: torch.Tensor, eps: float = 1e-7, *, backend="torch"
 ) -> torch.Tensor:
-    """Return rotations that align nonzero vectors with the positive y-axis.
+    """Return the regularized quaternion aligning vectors with y.
 
     Parameters
     ----------
     vector : torch.Tensor
-        Nonzero three-dimensional vectors with shape ``(..., 3)``.
+        Vectors with shape ``(..., 3)``.
     eps : float, optional
-        Positive regularization used by vector and quaternion normalization.
+        Normalization regularization.
+    backend : {"torch", "cuda"}, optional
+        Execution provider.
 
     Returns
     -------
     torch.Tensor
-        Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
-        its corresponding input vector aligns the result with ``[0, 1, 0]``.
+        Quaternions of shape ``(..., 4)`` in ``(w, x, y, z)`` order.
+    """
+    return execute(vector, 1, eps, True, backend)
+
+
+def rotation_matrix_to_y_axis(
+    vector: torch.Tensor, eps: float = 1e-7, *, backend="torch"
+) -> torch.Tensor:
+    """Return smooth rotations aligning vectors with the positive y-axis.
+
+    Parameters
+    ----------
+    vector : torch.Tensor
+        Nonzero vectors with shape ``(..., 3)``.
+    eps : float, optional
+        Normalization regularization.
+    backend : {"torch", "cuda"}, optional
+        Execution provider.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotation matrices with shape ``(..., 3, 3)``.
 
     Examples
     --------
     >>> from equivariantx import o2
     >>> vector = torch.tensor([1.0, 2.0, 3.0])
     >>> rotation = o2.rotation_matrix_to_y_axis(vector)
-    >>> aligned = rotation @ vector
-    >>> expected = vector.norm() * vector.new_tensor([0.0, 1.0, 0.0])
-    >>> torch.testing.assert_close(aligned, expected, atol=1e-6, rtol=1e-6)
+    >>> torch.testing.assert_close(rotation @ vector, vector.norm() * vector.new_tensor([0.0, 1.0, 0.0]), atol=1e-6, rtol=1e-6)
     """
-    return _quaternion_to_matrix(alignment_quaternion(vector, eps))
+    return execute(vector, 1, eps, False, backend)
 
 
 def rotation_matrix_to_x_axis(
-    vector: torch.Tensor,
-    eps: float = 1e-7,
+    vector: torch.Tensor, eps: float = 1e-7, *, backend="torch"
 ) -> torch.Tensor:
-    """Return rotations that align nonzero vectors with the positive x-axis.
+    """Return smooth rotations aligning vectors with the positive x-axis.
 
     Parameters
     ----------
     vector : torch.Tensor
-        Nonzero three-dimensional vectors with shape ``(..., 3)``.
+        Nonzero vectors with shape ``(..., 3)``.
     eps : float, optional
-        Positive regularization used by vector and quaternion normalization.
+        Normalization regularization.
+    backend : {"torch", "cuda"}, optional
+        Execution provider.
 
     Returns
     -------
     torch.Tensor
-        Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
-        its corresponding input vector aligns the result with ``[1, 0, 0]``.
+        Rotation matrices with shape ``(..., 3, 3)``.
     """
-    validate_precision((vector,))
-    unit_vector = _normalize(vector, eps)
-    x, y, z = unit_vector.unbind(dim=-1)
-    q_pos = _normalize(torch.stack([1.0 + x, torch.zeros_like(x), z, -y], dim=-1), eps)
-    q_neg = _normalize(torch.stack([-y, z, torch.zeros_like(x), 1.0 - x], dim=-1), eps)
-    blend = _smooth_step(0.5 * (x + 1.0))
-    quaternion = _interpolate_quaternions(q_neg, q_pos, blend, eps)
-    return _quaternion_to_matrix(quaternion)
+    return execute(vector, 0, eps, False, backend)
 
 
 def rotation_matrix_to_z_axis(
-    vector: torch.Tensor,
-    eps: float = 1e-7,
+    vector: torch.Tensor, eps: float = 1e-7, *, backend="torch"
 ) -> torch.Tensor:
-    """Return rotations that align nonzero vectors with the positive z-axis.
+    """Return smooth rotations aligning vectors with the positive z-axis.
 
     Parameters
     ----------
     vector : torch.Tensor
-        Nonzero three-dimensional vectors with shape ``(..., 3)``.
+        Nonzero vectors with shape ``(..., 3)``.
     eps : float, optional
-        Positive regularization used by vector and quaternion normalization.
+        Normalization regularization.
+    backend : {"torch", "cuda"}, optional
+        Execution provider.
 
     Returns
     -------
     torch.Tensor
-        Rotation matrices with shape ``(..., 3, 3)``. Applying each matrix to
-        its corresponding input vector aligns the result with ``[0, 0, 1]``.
+        Rotation matrices with shape ``(..., 3, 3)``.
     """
-    validate_precision((vector,))
-    unit_vector = _normalize(vector, eps)
-    x, y, z = unit_vector.unbind(dim=-1)
-    q_pos = _normalize(torch.stack([1.0 + z, y, -x, torch.zeros_like(x)], dim=-1), eps)
-    q_neg = _normalize(torch.stack([-x, torch.zeros_like(x), 1.0 - z, y], dim=-1), eps)
-    blend = _smooth_step(0.5 * (z + 1.0))
-    quaternion = _interpolate_quaternions(q_neg, q_pos, blend, eps)
-    return _quaternion_to_matrix(quaternion)
+    return execute(vector, 2, eps, False, backend)

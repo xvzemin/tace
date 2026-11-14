@@ -3,9 +3,34 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import o3 as eqx_o3
 
 IRREPS = "0e+0o+1e+1o+2e+2o"
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_public_method_precision(device, double_precision):
+    from equivariantx.tests.utils.testing import check_method_precision
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    layer = eqx_o3.Wigner6jTensorProduct(
+        "2x0e",
+        "0e",
+        "0e",
+        "2x0e",
+        "2x0e",
+        [(0, 0, 0, "uvu", True)],
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    inputs = tuple(
+        torch.randn(3, width, device=device)
+        for width in (2, 1, 1, layer.weight_numel1, layer.weight_numel2)
+    )
+    check_method_precision(layer, [("forward_reference", inputs, {})])
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -91,3 +116,28 @@ def test_wigner6j_shared_weights(degrees, backend, double_precision):
         torch.autograd.grad(expected.square().sum(), tuple(module.parameters())),
     ):
         torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
+
+
+def test_double_restores_coefficient_precision(monkeypatch):
+    from equivariantx.ops import config
+    from equivariantx.tests.o3.wigner6j.testing import problem
+
+    monkeypatch.setattr(config, "TORCH_WIGNER6J", True)
+    module, values, _, _ = problem("tensor_product", "torch", "cpu")
+    expected = module.forward_reference(*values)
+    module.float().double()
+    torch.testing.assert_close(module(*values), expected, atol=3e-12, rtol=3e-12)
+    torch.testing.assert_close(
+        module.forward_reference(*values), expected, atol=3e-12, rtol=3e-12
+    )
+
+
+def test_reference_switch(monkeypatch):
+    from equivariantx.ops import config
+    from equivariantx.tests.o3.wigner6j.testing import problem
+
+    module, values, _, _ = problem("tensor_product", "torch", "cpu")
+    expected = module.forward_reference(*values)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    monkeypatch.setattr(config, "TORCH_WIGNER6J", True)
+    torch.testing.assert_close(module(*values), expected, atol=0, rtol=0)

@@ -3,6 +3,7 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -303,3 +304,30 @@ def test_indexed_o2_pipeline_compile(double_precision):
     ]
     for a, b in zip(*gradients):
         torch.testing.assert_close(a, b, rtol=1e-8, atol=1e-9)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_public_method_precision(device, double_precision):
+    from equivariantx import o2
+    from equivariantx.tests.utils.testing import check_method_precision
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    layer = o2.LocalFrame("2x1o+2x2e").to(device)
+    frame = o2.WignerD(2, 2).to(device)
+    matrices = frame.forward_packed(torch.randn(3, 3, device=device))
+    features = torch.randn(3, layer.input_dim, device=device)
+    local = layer(features, matrices)
+    index = torch.arange(3, device=device)
+    cases = [
+        ("to_local", (features, matrices), {}),
+        ("to_global", (local, matrices), {}),
+    ]
+    for backend in ("torch", "cuda") if device == "cuda" else ("torch",):
+        cases.extend(
+            (
+                ("gather", (features, matrices, index), {"backend": backend}),
+                ("scatter", (local, matrices, index, 3), {"backend": backend}),
+            )
+        )
+    check_method_precision(layer, cases)

@@ -6,6 +6,16 @@ from functools import lru_cache
 import torch
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co3 import symmetric as torch_kernel
+
+
+def execution(module, tensor):
+    """Resolve a native backend without loading it for CPU execution."""
+    if getattr(module, "backend", "torch") == "cuda" and tensor.is_cuda:
+        from ..ops.cuda.co3 import symmetric as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
 
 
 @lru_cache(maxsize=None)
@@ -36,6 +46,10 @@ def symmetric_basis(rank):
             device="cpu",
         ),
     }
+
+    data["permutation"] = torch.argsort(data["indices"], stable=True)
+    counts = torch.bincount(data["indices"], minlength=len(powers))
+    data["offsets"] = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
 
     def add(name, indices, weights):
         data[f"{name}_indices"] = torch.tensor(indices, dtype=torch.long, device="cpu")
@@ -102,6 +116,7 @@ def symmetric_basis(rank):
                 ]
             )
             weights.append([math.sqrt(v / k) for v in p])
+        add(f"output_{k}", indices, weights)
         data[f"output_{k}"] = torch.zeros(
             len(indices), 3 * len(left), dtype=torch.float64, device="cpu"
         ).scatter_add_(
@@ -119,10 +134,22 @@ class SymmetricBasis(torch.nn.Module):
     ----------
     rank : int
         Non-negative Cartesian rank.
+    backend : {"torch", "cuda"}, optional
+        Execution backend. CPU tensors use Torch.
+
+    Examples
+    --------
+    >>> from equivariantx.co3.symmetric import SymmetricBasis
+    >>> basis = SymmetricBasis(2)
+    >>> tensor = torch.eye(3).flatten()
+    >>> torch.testing.assert_close(basis.unpack(basis.pack(tensor)), tensor)
     """
 
-    def __init__(self, rank):
+    def __init__(self, rank, *, backend="torch"):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         self.rank = rank
         self.dim = (rank + 1) * (rank + 2) // 2
         for name, value in symmetric_basis(rank).items():
@@ -133,85 +160,54 @@ class SymmetricBasis(torch.nn.Module):
                 else value.clone(),
                 persistent=False,
             )
+        if rank in (2, 4, 6):
+            self.register_buffer(
+                "transform_identity",
+                torch.eye(self.dim, dtype=self.norm.dtype, device=self.norm.device),
+                persistent=False,
+            )
 
     def pack(self, tensor):
         """Symmetrize full Cartesian entries and return normalized coordinates."""
-        if self.rank < 2:
-            return tensor
-        # Each row is a normalized sum of at most three coordinates.
-        # This avoids long atomic sums over all equivalent index permutations.
-        for k in range(2, self.rank + 1):
-            tensor = tensor.unflatten(-1, (3 * k * (k + 1) // 2, 3 ** (self.rank - k)))
-            tensor = (getattr(self, f"output_{k}") @ tensor).flatten(-2)
-        return tensor
+        validate_module_precision(self, (tensor,))
+        return execution(self, tensor).pack(self, tensor)
 
     def unpack(self, tensor):
         """Expand normalized coordinates to full Cartesian storage."""
-        if self.rank < 2:
-            return tensor
-        if self.rank >= 6:
-            # Apply the transpose of pack in short reductions. A single gather
-            # would accumulate thousands of repeated indices in its backward.
-            for k in range(self.rank, 1, -1):
-                tensor = tensor.unflatten(
-                    -1, ((k + 1) * (k + 2) // 2, 3 ** (self.rank - k))
-                )
-                tensor = (getattr(self, f"output_{k}").T @ tensor).flatten(-2)
-            return tensor
-        return (tensor / self.norm).index_select(-1, self.indices)
+        validate_module_precision(self, (tensor,))
+        return execution(self, tensor).unpack(self, tensor)
 
     def contract(self, tensor, vector):
         """Contract one index with a vector, lowering the rank by one."""
-        if self.rank == 1:
-            return (tensor * vector).sum(-1, keepdim=True)
-        value = tensor[..., self.contraction_indices]
-        return (value * (self.contraction_weights * vector.unsqueeze(-2))).sum(-1)
+        validate_module_precision(self, (tensor, vector))
+        return execution(self, tensor).contract(self, tensor, vector)
 
     def trace(self, tensor):
         """Contract two indices, lowering the rank by two."""
-        return (tensor[..., self.trace_indices] * self.trace_weights).sum(-1)
+        validate_module_precision(self, (tensor,))
+        return execution(self, tensor).trace(self, tensor)
 
     def multiply(self, tensor, matrix):
         """Multiply symmetrically by matrix entries (xx, xy, xz, yy, yz, zz)."""
-        if self.rank == 2:
-            return tensor * (matrix * self.norm)
-        return (
-            tensor[..., self.product_indices]
-            * (self.product_weights * matrix.unsqueeze(-2))
-        ).sum(-1)
+        validate_module_precision(self, (tensor, matrix))
+        return execution(self, tensor).multiply(self, tensor, matrix)
 
     def forward(self, tensor, matrix):
         """Apply a 3-by-3 matrix to every index in normalized storage."""
         validate_module_precision(self, (tensor, matrix))
-        if self.rank == 1:
-            return torch.einsum("...ij,...j->...i", matrix, tensor)
-        for k in range(1, self.rank + 1):
-            rank = self.rank - k
-            tensor = tensor.unflatten(
-                -1, (k * (k + 1) // 2, (rank + 2) * (rank + 3) // 2)
-            )
-            if rank == 0:
-                tensor = torch.einsum("...ij,...aj->...ai", matrix, tensor).flatten(-2)
-                tensor = torch.nn.functional.linear(
-                    tensor, getattr(self, f"output_{k}")
-                )
-            else:
-                indices = getattr(self, f"input_{k}_indices")
-                weights = getattr(self, f"input_{k}_weights")
-                tensor = tensor[..., indices] * weights
-                tensor = torch.einsum("...ij,...aqj->...aiq", matrix, tensor)
-                if k == 1:
-                    tensor = tensor.flatten(-3)
-                else:
-                    tensor = (
-                        getattr(self, f"output_{k}") @ tensor.flatten(-3, -2)
-                    ).flatten(-2)
-        return tensor
+        return execution(self, tensor).transform(self, tensor, matrix)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
         for name, value in symmetric_basis(self.rank).items():
-            if value.is_floating_point():
+            if name not in self._buffers:
+                value = (
+                    value.to(self.norm)
+                    if value.is_floating_point()
+                    else value.to(self.norm.device)
+                )
+                self.register_buffer(name, value.clone(), persistent=False)
+            elif value.is_floating_point():
                 self._buffers[name] = value.to(self._buffers[name]).clone()
         return self
 

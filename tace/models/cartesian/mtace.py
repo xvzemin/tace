@@ -1,4 +1,7 @@
-"""Cartesian magnetic interactions."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 from .local import UvConvolution
 

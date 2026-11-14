@@ -7,9 +7,7 @@ from functools import lru_cache
 from itertools import product
 
 from ...co3.symmetric import symmetric_powers
-from ...ops.kernels.torch.cartesian import (
-    coupling_coefficients as coupling_coefficients,
-)
+from ...ops.common.torch.cartesian import coupling_coefficients as coupling_coefficients
 
 ANGULAR_TILE_SIZE = 27
 FUSED_TILE_LIMIT = 16

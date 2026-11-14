@@ -3,10 +3,9 @@ from typing import Callable, NamedTuple, Optional, Sequence
 import torch
 from e3nn.math import normalize2mom
 
-from ..ops import config
-from ..ops.precision import validate_module_precision, validate_precision
-from ..utils.autograd import nested_forward_ad
-from ..utils.layout import permute
+from ..ops.torch.o2 import gate as torch_kernel
+from ..ops.precision import validate_module_precision
+from ..ops.common.torch.gate import GateExpand, expand_gates
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
@@ -22,6 +21,14 @@ class Activation(torch.nn.Module):
         One activation per input entry. ``None`` leaves that entry unchanged.
         Each activation is rescaled to unit second moment for standard-normal
         inputs. Its parity determines the output reflection and time parity.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import o2
+    >>> layer = o2.Activation("2x0e + 1x1m", [torch.tanh, None])
+    >>> layer(torch.randn(4, 4)).shape
+    torch.Size([4, 4])
     """
 
     def __init__(
@@ -111,12 +118,7 @@ class Activation(torch.nn.Module):
                 "Activation feature trailing dimension must be "
                 f"{self.irreps_in.dim}, got {tuple(features.shape)}."
             )
-        outputs = []
-        for values, act in zip(features.split(self._sizes, dim=-1), self.acts):
-            outputs.append(values if act is None else act(values))
-        if outputs:
-            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
-        return features[..., :0]
+        return torch_kernel.activate(self, features)
 
     def __repr__(self) -> str:
         acts = "".join("x" if act is not None else " " for act in self.acts)
@@ -132,70 +134,6 @@ class _GatePath(NamedTuple):
     ir_gate: Irrep
     ir_gated: Irrep
     ir_out: Irrep
-
-
-@torch.compiler.allow_in_graph
-def expand_gates(gates, index, *layout):
-    """Broadcast gates while preserving nested forward derivatives."""
-    if config.TORCH_REFERENCE or nested_forward_ad():
-        return gates.index_select(-1, index)
-    return GateExpand.apply(gates, index, *layout)
-
-
-@torch.compiler.allow_in_graph
-class GateExpand(torch.autograd.Function):
-    """Broadcast gates and sum component gradients in the backward pass."""
-
-    generate_vmap_rule = True
-
-    @staticmethod
-    def forward(
-        gates, index, output_index, output_inverse, gate_index, gate_inverse, layout
-    ):
-        validate_precision(
-            (
-                gates,
-                index,
-                output_index,
-                output_inverse,
-                gate_index,
-                gate_inverse,
-                layout,
-            )
-        )
-        return gates.index_select(-1, index)
-
-    @staticmethod
-    def setup_context(ctx, inputs, output):
-        _, index, output_index, output_inverse, gate_index, gate_inverse, layout = (
-            inputs
-        )
-        ctx.save_for_backward(output_index, output_inverse, gate_index, gate_inverse)
-        ctx.save_for_forward(index)
-        ctx.layout = layout
-
-    @staticmethod
-    def backward(ctx, gradient):
-        output_index, output_inverse, gate_index, gate_inverse = ctx.saved_tensors
-        sizes, dimensions, output_identity, gate_identity = ctx.layout
-        if not output_identity:
-            gradient = permute(gradient, output_inverse, output_index)
-        widths = tuple(dim * mul for dim, mul in zip(dimensions, sizes))
-        values = [
-            value.view(*gradient.shape[:-1], dim, mul).sum(-2)
-            for value, dim, mul in zip(
-                gradient.split(widths, dim=-1), dimensions, sizes
-            )
-        ]
-        gradient = values[0] if len(values) == 1 else torch.cat(values, dim=-1)
-        if not gate_identity:
-            gradient = permute(gradient, gate_inverse, gate_index)
-        return gradient, None, None, None, None, None, None
-
-    @staticmethod
-    def jvp(ctx, tangent, *unused):
-        (index,) = ctx.saved_tensors
-        return tangent.index_select(-1, index)
 
 
 class Gate(torch.nn.Module):
@@ -417,7 +355,7 @@ class Gate(torch.nn.Module):
             self._gate_identity,
         )
         if backend == "cuda":
-            from ..ops.gate import gate_program
+            from ..ops.common.gate import gate_program
 
             self.cuda_program = gate_program(self)
 
@@ -459,37 +397,10 @@ class Gate(torch.nn.Module):
         if not self.irreps_in:
             return features
         if self.backend == "cuda":
-            from ..ops.gate import gate
+            from ..ops.cuda.o2.gate import evaluate
 
-            return gate(features, self.cuda_program, self.irreps_out.dim)
-        inputs = features.split(self._input_sizes, dim=-1)
-        scalars = self.act_scalars(self._select_entries(inputs, self._selections[0]))
-        if not self._paths:
-            return scalars
-        gates = self.act_gates(self._select_entries(inputs, self._selections[1]))
-        values = self._select_entries(inputs, self._selections[2])
-        if self._broadcast_shape is not None:
-            count, dim, mul = self._broadcast_shape
-            output = (
-                values.reshape(*features.shape[:-1], count, dim, mul)
-                * gates.reshape(*features.shape[:-1], count, 1, mul)
-            ).flatten(-3)
-            return torch.cat((scalars, output), -1) if scalars.size(-1) else output
-        if not self._gated_identity:
-            values = permute(values, self._gated_indices, self._gated_inverse)
-        if self._has_signs:
-            values = values * self._gated_signs
-        gates = expand_gates(
-            gates,
-            self._expanded_indices,
-            self._output_indices,
-            self._output_inverse,
-            self._gate_indices,
-            self._gate_inverse,
-            self._gate_layout,
-        )
-        output = values * gates
-        return torch.cat((scalars, output), dim=-1) if scalars.size(-1) else output
+            return evaluate(self, features)
+        return torch_kernel.evaluate(self, features)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__} ({self.irreps_in} -> {self.irreps_out})"

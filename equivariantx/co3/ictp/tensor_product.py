@@ -6,12 +6,24 @@ from functools import lru_cache
 
 import torch
 
+from ...ops import config
+from ...ops.common.irreducible_product import coefficients as sparse_coefficients
 from ...ops.precision import validate_module_precision
-from ...ops import get_kernel
+from ...ops.torch.co3.ictp import tensor_product as torch_kernel
 from ..ictd.tensor_product import TensorProduct as IctdTensorProduct
 from ..symmetric import SymmetricBasis, symmetric_basis, symmetric_powers
 
 SYMMETRIC_MATRIX_SIZE = 8192
+SPARSE_PRODUCT_SIZE = 262144
+LITERAL_PRODUCT_SIZE = 256
+
+
+def execution(module, features):
+    if getattr(module, "backend", "torch") == "cuda" and features.is_cuda:
+        from ...ops.cuda.co3.ictp import tensor_product as cuda_kernel
+
+        return cuda_kernel
+    return torch_kernel
 
 
 @lru_cache(maxsize=None)
@@ -105,27 +117,48 @@ class CartesianProduct(torch.nn.Module):
                 persistent=False,
             )
 
+        self.sparse_product = (
+            self.packed
+            and 3 ** (l1 + l2) * (l3 + 1) * (l3 + 2) // 2 <= SPARSE_PRODUCT_SIZE
+        )
+        if self.sparse_product:
+            self.sparse_coefficients = sparse_coefficients(
+                l1,
+                l2,
+                l3,
+                tuple(
+                    symmetric_expansion(l3, t) * scale
+                    for t, scale in enumerate(self.coefficients)
+                ),
+            )
+            left, right, values = [
+                value.tolist() for value in self.sparse_coefficients[-3:]
+            ]
+            entries = []
+            for c, row in enumerate(self.indices.tolist()):
+                entries.extend(
+                    (a, b, c, coefficient)
+                    for a, b, coefficient in zip(left[row], right[row], values[row])
+                    if coefficient
+                )
+                if len(entries) > LITERAL_PRODUCT_SIZE:
+                    entries = []
+                    break
+            self.literal_entries = tuple(entries)
+            self.literal_dimensions = (3**l1, 3**l2, 3**l3)
+            for k, value in enumerate(self.sparse_coefficients):
+                self.register_buffer(
+                    f"sparse_{k}",
+                    value.to(dtype=torch.get_default_dtype())
+                    if value.is_floating_point()
+                    else value.clone(),
+                    persistent=False,
+                )
+
     def forward(self, x, y):
         """Return the STF coupling in flattened Cartesian storage."""
         validate_module_precision(self, (x, y))
-        cartesian_product = get_kernel("cartesian_product", self.backend)
-        value = cartesian_product(x, y, self.l1, self.l2, self.l3)
-        if not self.symmetric:
-            return value
-        if self.packed:
-            result = value @ self.expansion_0
-            for t in range(1, len(self.coefficients)):
-                value = cartesian_product(x, y, self.l1, self.l2, self.l3 - 2 * t)
-                result = result + value @ getattr(self, f"expansion_{t}")
-            return result.index_select(-1, self.indices)
-        result = self.bases[0].pack(value)
-        for t, basis in enumerate(self.bases):
-            if t:
-                value = basis.pack(
-                    cartesian_product(x, y, self.l1, self.l2, self.l3 - 2 * t)
-                )
-                result = result + value @ getattr(self, f"expansion_{t}")
-        return self.bases[0].unpack(result)
+        return execution(self, x).angular(self, x, y)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
@@ -145,6 +178,13 @@ class CartesianProduct(torch.nn.Module):
                 name,
                 (matrix * scale).to(getattr(self, name)),
             )
+        if getattr(self, "sparse_product", False):
+            for k, value in enumerate(self.sparse_coefficients):
+                setattr(
+                    self,
+                    f"sparse_{k}",
+                    value.to(getattr(self, f"sparse_{k}"), copy=True),
+                )
         return self
 
 
@@ -230,6 +270,21 @@ class TensorProduct(IctdTensorProduct):
             if key not in self.products:
                 self.products[key] = CartesianProduct(*degrees, backend=backend)
 
+    def forward(self, x, y, weight=None):
+        """Couple STF inputs with optional shared or batched channel weights."""
+        validate_module_precision(self, (x, y, weight))
+        if x.shape[-1] != self.input_dims[0] or y.shape[-1] != self.input_dims[1]:
+            raise ValueError("Input feature dimensions do not match the irreps.")
+        weight = self.weight if weight is None else weight
+        if weight.shape[-1] != self.weight_numel:
+            raise ValueError("Weight size does not match the instructions.")
+        if self.shared_weights and weight.ndim != 1:
+            raise ValueError("Shared weights must be one-dimensional.")
+        return execution(self, x).evaluate(self, x, y, weight)
+
     def couple(self, x, y, l1, l2, l3):
         """Evaluate one irreducible angular coupling."""
-        return self.products[f"{l1}_{l2}_{l3}"](x, y)
+        product = self.products[f"{l1}_{l2}_{l3}"]
+        if getattr(self, "backend", "torch") == "torch" and config.TORCH_REFERENCE:
+            return torch_kernel.reference(product, x, y)
+        return product(x, y)

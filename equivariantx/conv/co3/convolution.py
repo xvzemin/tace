@@ -10,9 +10,8 @@ from equivariantx import co3
 from ...co3.basis import path_normalization
 from ...co3.ictd.tensor_product import coupling_phase
 from ...o3.cgtp.convolution import O3TensorProductConv
-from ...ops import config
+from ...ops.torch.conv.co3 import convolution as torch_kernel
 from ...ops.precision import validate_module_precision
-from ...utils.layout import permute
 from .polynomials import (
     ANGULAR_TILE_SIZE,
     coupling_coefficients,
@@ -339,106 +338,33 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 radial_network,
             ),
         )
-        fused = self.backend == "cuda" and features.is_cuda
-        fused_geometry = fused and (vectors is None or vectors.dtype == features.dtype)
-        packed_input = (
-            self.input_basis == "spherical" and vectors is not None and fused_geometry
-        )
-        if self.input_basis == "spherical":
-            if packed_input:
-                if features.size(-1) != self.to_cartesian.input_dim:
-                    raise ValueError(
-                        "The spherical feature dimension does not match irreps_in1."
-                    )
-                values = []
-                for mul, l, dim, section in self.to_cartesian.paths:
-                    value = features[:, section].reshape(features.size(0), mul, dim)
-                    value = value @ getattr(self, f"input_basis_{l}").T
-                    values.append(value.transpose(-1, -2).flatten(1))
-                features = torch.cat(values, -1) if values else features[:, :0]
-            else:
-                features = self.to_cartesian(features)
-        if self.symmetric_inputs and (vectors is None or not fused_geometry):
-            values = features.new_zeros(
-                (features.size(0), self.symmetric_dim)
-            ).index_add(-1, self.symmetric_index, features)
-            features = (values / self.symmetric_count).index_select(
-                -1, self.symmetric_index
-            )
-        if vectors is not None and not fused_geometry:
-            vectors = (
-                torch.nn.functional.normalize(vectors, dim=-1)
-                if self.normalize
-                else vectors
-            )
-            attrs, offset = [], 0
-            for mul, ir in self.irreps_in2:
-                harmonic = self.harmonics[str(ir.l)](vectors)
-                amplitude = (
-                    features.new_ones((1, mul))
-                    if amplitudes is None
-                    else amplitudes.expand(amplitudes.size(0), self.amplitude_dim)[
-                        :, offset : offset + mul
-                    ]
-                )
-                attrs.append(
-                    (amplitude.unsqueeze(-1) * harmonic.unsqueeze(-2)).flatten(1)
-                )
-                offset += mul
-            edge_attrs = torch.cat(attrs, dim=-1) if attrs else vectors[:, :0]
-            edge_attrs = edge_attrs + vectors.sum() * 0
-            vectors = None
-        if vectors is not None and self.pack_inputs and not packed_input:
-            from ...ops.layout import indexed_sum
+        if self.backend == "cuda" and features.is_cuda:
+            from ...ops.cuda.conv.co3 import convolution as cuda_kernel
 
-            if features.size(-1) != self.input_dim:
-                raise ValueError(
-                    "Feature dimensions do not match the tensor-product irreps."
-                )
-            features = indexed_sum(
+            return cuda_kernel.evaluate(
+                self,
                 features,
-                self.harmonic_input_index,
-                self.harmonic_input_ptr,
-                self.harmonic_input_transpose_index,
-                self.harmonic_input_transpose_ptr,
-                self.harmonic_input_count,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
             )
-        elif not packed_input and not self.input_identity:
-            features = (
-                permute(features, self.input_index, self.input_inverse)
-                if fused
-                else features.index_select(-1, self.input_index)
-            )
-        if vectors is None and not self.attrs_identity:
-            edge_attrs = (
-                permute(edge_attrs, self.attrs_index, self.attrs_inverse)
-                if fused
-                else edge_attrs.index_select(-1, self.attrs_index)
-            )
-        output = super().forward(
+        return torch_kernel.evaluate(
+            self,
             features,
             edge_attrs,
             radial,
             projection,
             edge_index,
             num_nodes,
-            vectors=vectors,
-            amplitudes=amplitudes,
-            radial_network=radial_network,
+            vectors,
+            amplitudes,
+            radial_network,
         )
-        if vectors is not None and self.compact_output:
-            return output
-        if vectors is not None:
-            output = output.index_select(-1, self.harmonic_output_index)
-        elif not self.output_identity:
-            output = (
-                permute(output, self.output_inverse, self.output_index)
-                if fused
-                else output.index_select(-1, self.output_inverse)
-            )
-        if self.compact_output:
-            return output.index_select(-1, self.output_pack_index)
-        return self.projector(output) if fused or not config.TORCH_REFERENCE else output
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
@@ -454,26 +380,6 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self, features, edge_attrs, radial, projection, edge_index, num_nodes
     ):
         """Evaluate the same instructions using PyTorch Cartesian operations."""
-        features = (
-            features
-            if self.input_identity
-            else features.index_select(-1, self.input_inverse)
-        )
-        edge_attrs = (
-            edge_attrs
-            if self.attrs_identity
-            else edge_attrs.index_select(-1, self.attrs_inverse)
-        )
-        weights = radial @ projection if projection.numel() else radial
-        message = self.tp(features[edge_index[0]], edge_attrs, weights)
-        output = message.new_zeros((num_nodes, self.output_dim)).index_add(
-            0, edge_index[1], message
-        )
-        output = output + sum(
-            x.sum() * 0 for x in (features, edge_attrs, radial, projection)
-        )
-        return (
-            output
-            if self.output_identity
-            else output.index_select(-1, self.output_index)
+        return torch_kernel.reference(
+            self, features, edge_attrs, radial, projection, edge_index, num_nodes
         )

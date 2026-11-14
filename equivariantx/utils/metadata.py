@@ -4,16 +4,11 @@ import zlib
 from ast import literal_eval
 from dataclasses import dataclass
 from functools import lru_cache
+from operator import index
 
 import torch
 
 __all__ = ["KernelPlan", "compact_metadata", "kernel_plan", "parse_metadata"]
-
-
-@torch.compiler.assume_constant_result
-def dimension_values(tensor, dimensions):
-    """Read dimensions already specialized by :func:`static_dimensions`."""
-    return tuple(int(tensor.shape[dimension]) for dimension in dimensions)
 
 
 def static_dimensions(tensor, dimensions=None):
@@ -22,7 +17,7 @@ def static_dimensions(tensor, dimensions=None):
     if torch.compiler.is_compiling():
         for dimension in dimensions:
             torch._dynamo.mark_static(tensor, dimension)
-    return dimension_values(tensor, dimensions)
+    return tuple(index(tensor.shape[dimension]) for dimension in dimensions)
 
 
 @lru_cache(maxsize=256)
@@ -82,6 +77,7 @@ def encode_plans(plans):
 
 
 @lru_cache(maxsize=128)
+@torch.compiler.assume_constant_result
 def decode_plans(metadata):
     """Decode compressed contraction plans."""
     return tuple(

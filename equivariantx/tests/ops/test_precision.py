@@ -1,8 +1,14 @@
 """Tests for the corresponding EQX source module."""
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
 from equivariantx.ops.precision import (
@@ -43,6 +49,258 @@ def test_validation_is_traceable():
     compiled = torch.compile(function, backend="eager", fullgraph=True)
     value = torch.randn(3, requires_grad=True)
     torch.testing.assert_close(compiled(value), function(value))
+
+
+def run_precision_process(code, tmp_path):
+    """Keep policy mutations outside the pytest process."""
+    env = dict(os.environ)
+    root = str(Path(__file__).resolve().parents[3])
+    env["PYTHONPATH"] = os.pathsep.join((root, env.get("PYTHONPATH", "")))
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cpu_matrix_precision_policy(tmp_path):
+    if not hasattr(torch._C, "_get_fp32_precision_getter"):
+        pytest.skip("Per-backend matrix precision is unavailable")
+    run_precision_process(
+        """
+import pytest
+import torch
+from equivariantx import o2
+from equivariantx.ops.precision import validate_precision
+
+torch.set_num_threads(2)
+get = torch._C._get_fp32_precision_getter
+set_precision = torch._C._set_fp32_precision_setter
+x, w = torch.randn(7, 4), torch.randn(2, 12)
+indices = torch.arange(7) % 2
+linear = o2.Linear('4x0ee', '3x0ee', internal_weights=False, shared_weights=False)
+module = o2.ElementLinear(linear, backend='torch', element_mode='single')
+for setting in ('medium', 'explicit', 'inherited'):
+    set_precision('generic', 'all', 'none')
+    set_precision('mkldnn', 'all', 'none')
+    set_precision('mkldnn', 'matmul', 'none')
+    if setting == 'medium':
+        torch.set_float32_matmul_precision('medium')
+    elif setting == 'explicit':
+        torch.backends.mkldnn.matmul.fp32_precision = 'bf16'
+    else:
+        torch.backends.fp32_precision = 'bf16'
+    before = tuple(get(b, o) for b, o in (
+        ('generic', 'all'), ('mkldnn', 'all'), ('mkldnn', 'matmul')))
+    with pytest.raises(TypeError, match='MKLDNN BF16'):
+        validate_precision([{'x': [x], 'weight': w}])
+    with pytest.raises(TypeError, match='MKLDNN BF16'):
+        module(x, w, indices)
+    assert before == tuple(get(b, o) for b, o in (
+        ('generic', 'all'), ('mkldnn', 'all'), ('mkldnn', 'matmul')))
+    validate_precision([x.double(), w.double()])
+    module(x.double(), w.double(), indices)
+    torch.backends.mkldnn.enabled = False
+    module(x, w, indices)
+    torch.backends.mkldnn.enabled = True
+    for allowed in ('ieee', 'tf32'):
+        torch.backends.mkldnn.matmul.fp32_precision = allowed
+        validate_precision([x, w])
+        module(x, w, indices)
+torch.set_float32_matmul_precision('high')
+validate_precision([x, w])
+module(x, w, indices)
+""",
+        tmp_path,
+    )
+
+
+def test_cpu_policy_checked_once(monkeypatch):
+    from equivariantx.ops import precision
+
+    if not hasattr(torch._C, "_get_fp32_precision_getter"):
+        pytest.skip("Per-backend matrix precision is unavailable")
+    calls = []
+
+    def policy():
+        calls.append(True)
+        return True
+
+    monkeypatch.setattr(precision, "cpu_matmul_allowed", policy)
+    precision.validate_precision([torch.ones(2), {"weight": [torch.ones(3)]}])
+    assert calls == [True]
+    calls.clear()
+    precision.validate_precision([torch.ones(3, dtype=torch.float64)])
+    assert not calls
+
+
+def test_cpu_policy_compiler_guard(tmp_path):
+    if not hasattr(torch._C, "_get_fp32_precision_getter"):
+        pytest.skip("Per-backend matrix precision is unavailable")
+    run_precision_process(
+        """
+import pytest
+import torch
+from torch.fx.experimental.proxy_tensor import make_fx
+from equivariantx import o2
+from equivariantx.ops.precision import validate_precision
+
+torch.set_num_threads(2)
+graphs = []
+def backend(graph, inputs):
+    graphs.append(graph)
+    return graph.forward
+def function(x, w):
+    validate_precision([x, w])
+    return (x @ w).sin()
+x, w = torch.randn(7, 4), torch.randn(4, 3)
+compiled = torch.compile(function, backend=backend, fullgraph=True, dynamic=True)
+expected = function(x, w)
+torch.testing.assert_close(compiled(x, w), expected)
+assert len(graphs) == 1
+linear = o2.Linear('4x0ee', '3x0ee', internal_weights=False, shared_weights=False)
+module = o2.ElementLinear(linear, backend='torch', element_mode='single')
+module_run = torch.compile(module, backend='eager', fullgraph=True, dynamic=True)
+indices = torch.zeros(7, dtype=torch.long)
+torch.testing.assert_close(module_run(x, w.reshape(1, -1), indices), module(x, w.reshape(1, -1), indices))
+torch.backends.mkldnn.matmul.fp32_precision = 'tf32'
+torch.testing.assert_close(compiled(x, w), function(x, w))
+assert len(graphs) == 1
+torch.backends.mkldnn.matmul.fp32_precision = 'bf16'
+with pytest.raises(torch._dynamo.exc.Unsupported, match='MKLDNN BF16'):
+    compiled(x, w)
+with pytest.raises(torch._dynamo.exc.Unsupported, match='MKLDNN BF16'):
+    module_run(x, w.reshape(1, -1), indices)
+with pytest.raises(TypeError, match='MKLDNN BF16'):
+    make_fx(function)(x, w)
+assert torch.backends.mkldnn.matmul.fp32_precision == 'bf16'
+assert len(graphs) == 1
+torch.testing.assert_close(compiled(x.double(), w.double()), function(x.double(), w.double()))
+torch.backends.mkldnn.enabled = False
+torch.testing.assert_close(compiled(x, w), expected)
+torch.backends.mkldnn.enabled = True
+with pytest.raises(torch._dynamo.exc.Unsupported, match='MKLDNN BF16'):
+    compiled(x, w)
+torch.backends.mkldnn.matmul.fp32_precision = 'none'
+torch.backends.fp32_precision = 'bf16'
+with pytest.raises(torch._dynamo.exc.Unsupported, match='MKLDNN BF16'):
+    compiled(x, w)
+torch.backends.mkldnn.matmul.fp32_precision = 'ieee'
+torch.testing.assert_close(compiled(x, w), expected)
+assert torch.backends.fp32_precision == 'bf16'
+assert torch.backends.mkldnn.matmul.fp32_precision == 'ieee'
+""",
+        tmp_path,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_matrix_precision_policy(tmp_path):
+    run_precision_process(
+        """
+import torch
+from equivariantx.ops.precision import validate_precision
+
+torch.set_num_threads(2)
+x, w = torch.randn(7, 4, device='cuda'), torch.randn(4, 3, device='cuda')
+def function(x, w):
+    validate_precision([x, w])
+    return x @ w
+compiled = torch.compile(function, backend='eager', fullgraph=True)
+for policy in ('high', 'medium'):
+    torch.set_float32_matmul_precision(policy)
+    torch.testing.assert_close(compiled(x, w), function(x, w))
+    assert torch.get_float32_matmul_precision() == policy
+""",
+        tmp_path,
+    )
+
+
+def test_cpu_dynamic_joint_aoti(tmp_path):
+    pytest.importorskip("torch.fx.experimental.dynamic_spec")
+    from torch.fx.experimental.dynamic_spec import (
+        ParamsSpec,
+        ShapesSpec,
+        ShapeVar,
+        TensorSpec,
+    )
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    linear = o2.Linear("4x0ee", "3x0ee", internal_weights=False, shared_weights=False)
+    module = o2.ElementLinear(linear, backend="torch", element_mode="single")
+
+    def operation(x, weight, indices):
+        energy = module(x, weight, indices).sin().square().mean()
+        force = torch.autograd.grad(energy, x, create_graph=True)[0]
+        loss = energy.square() + force.square().sum()
+        return loss, force, *torch.autograd.grad(loss, weight)
+
+    def inputs(rows, weight):
+        return torch.randn(rows, 4).requires_grad_(), weight, torch.arange(rows) % 2
+
+    weight = (torch.randn(2, linear.weight_numel) * 0.1).requires_grad_()
+    values = inputs(7, weight)
+    rows = ShapeVar("rows", min=2)
+    shapes = ShapesSpec(
+        ParamsSpec({"x": TensorSpec((rows, None)), "indices": TensorSpec((rows,))})
+    )
+    graph = make_fx(
+        operation,
+        tracing_mode="fake",
+        _allow_non_fake_inputs=True,
+        dynamic_shapes=shapes,
+    )(*values)
+    rows = torch.export.Dim("rows", min=2)
+    exported = torch.export.export(
+        graph,
+        tuple(v.detach() for v in values),
+        strict=True,
+        dynamic_shapes=({0: rows}, None, {0: rows}),
+    )
+    package = tmp_path / "precision.pt2"
+    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    records = []
+    for count in (7, 11, 5):
+        values = inputs(count, weight)
+        expected = operation(*values)
+        records.append(
+            {
+                "inputs": tuple(v.detach() for v in values),
+                "outputs": tuple(v.detach() for v in expected),
+            }
+        )
+        weight = (weight - 0.01 * expected[-1]).detach().requires_grad_()
+    data = tmp_path / "states.pt"
+    torch.save(records, data)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+import torch
+torch.set_num_threads(2)
+run = torch._inductor.aoti_load_package(sys.argv[1])
+for row in torch.load(sys.argv[2], weights_only=True):
+    with torch.no_grad():
+        actual = run(*row['inputs'])
+    torch.testing.assert_close(tuple(actual), row['outputs'], atol=3e-6, rtol=3e-5)
+assert 'equivariantx' not in sys.modules
+""",
+            str(package),
+            str(data),
+        ],
+        cwd=tmp_path,
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_autocast_rejected():

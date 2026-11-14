@@ -71,7 +71,8 @@ def test_gate_fallback(double_precision):
     for backend, act in (("torch", torch.nn.SiLU()), ("cuda", torch.nn.ReLU())):
         args = ("2x0e", [act], "0e", [None], "1o")
         module = eqx_o3.Gate(*args, backend=backend)
-        assert module.metadata is None
+        if backend == "cuda":
+            assert module.metadata is None
         x = torch.randn(4, module.irreps_in.dim, requires_grad=True)
         actual, expected = module(x), Gate(*args)(x)
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)

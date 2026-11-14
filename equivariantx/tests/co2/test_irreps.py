@@ -2,9 +2,25 @@
 
 import pytest
 import torch
+
 from equivariantx import co2
 
+from ..utils.testing import (
+    check_cartesian_representation_precision,
+    check_cartesian_representation_transforms,
+)
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_representation_precision(device):
+    check_cartesian_representation_precision(co2, device)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_representation_transforms(device, double_precision):
+    check_cartesian_representation_transforms(co2, device)
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])

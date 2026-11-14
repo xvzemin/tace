@@ -92,7 +92,8 @@ def test_polynomial_grid_equivariance(representation, act, double_precision, dev
             )
 
 
-def test_polynomial_compile_and_clenshaw(double_precision, device):
+@pytest.mark.parametrize("compiler", ["aot_eager", "inductor"])
+def test_polynomial_compile_and_clenshaw(double_precision, device, compiler):
     polynomial = PolynomialActivation(degree=12).to(device)
     x = torch.linspace(-5, 5, 61, device=device, requires_grad=True)
     z = x / polynomial.bound
@@ -104,9 +105,7 @@ def test_polynomial_compile_and_clenshaw(double_precision, device):
         previous, current = current, 2 * z * current - previous
         expected = expected + polynomial.coefficients[i] * current
     torch.testing.assert_close(polynomial(x), expected, atol=2e-12, rtol=2e-12)
-    compiled = torch.compile(
-        polynomial, backend="aot_eager", fullgraph=True, dynamic=True
-    )
+    compiled = torch.compile(polynomial, backend=compiler, fullgraph=True, dynamic=True)
     actual = compiled(x)
     torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
     torch.testing.assert_close(
@@ -134,3 +133,42 @@ def test_polynomial_compile_and_clenshaw(double_precision, device):
 def test_polynomial_invalid_inputs(kwargs):
     with pytest.raises(ValueError):
         PolynomialActivation(**kwargs)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("degree", [4, 8, 16])
+def test_analytic_derivatives(monkeypatch, backend, degree, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.nn.activation import reference
+
+    monkeypatch.setattr(config, "TORCH_POLYNOMIAL_ADJOINT", True)
+    layer = PolynomialActivation(
+        degree=degree, backend=backend, dtype=torch.float64, device=device
+    )
+    x = (torch.randn(5, device=device, dtype=torch.float64) * 0.2).requires_grad_()
+    ordinary = lambda x: reference(x / layer.bound, layer.coefficients)
+    actual, expected = layer(x), ordinary(x)
+    for _ in range(5):
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        seed = torch.randn_like(actual) * 0.1
+        actual, expected = [
+            torch.autograd.grad((y.sin() * seed).sum(), x, create_graph=True)[0]
+            for y in (actual, expected)
+        ]
+    tangent = torch.randn_like(x)
+    torch.testing.assert_close(
+        torch.func.jvp(layer, (x,), (tangent,)),
+        torch.func.jvp(ordinary, (x,), (tangent,)),
+        atol=2e-11,
+        rtol=2e-11,
+    )
+    torch.testing.assert_close(
+        torch.vmap(layer)(x), ordinary(x), atol=2e-11, rtol=2e-11
+    )
+    actual = torch.func.jvp(
+        torch.func.grad(lambda x: layer(x).sin().sum()), (x,), (tangent,)
+    )
+    expected = torch.func.jvp(
+        torch.func.grad(lambda x: ordinary(x).sin().sum()), (x,), (tangent,)
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)

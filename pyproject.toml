@@ -134,7 +134,7 @@ exclude = [
 
 [tool.setuptools.package-data]
 "tace.utils" = ["*.yaml"]
-"equivariantx" = ["README.md", "LICENSE.md", "ops/kernels/cuda/csrc/*.cpp", "models/tace/tace_oam_xl_v2/README.rst"]
+"equivariantx" = ["README.md", "LICENSE.md", "ops/common/cuda/csrc/*.cpp", "models/tace/tace_oam_xl_v2/README.rst"]
 
 [tool.ruff]
 target-version = "py39"

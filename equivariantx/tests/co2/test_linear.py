@@ -7,6 +7,13 @@ from equivariantx import co2, o2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize("kind", ["linear", "uu"])
+def test_forward_ad(kind, device):
+    from equivariantx.tests.utils.testing import check_linear_forward_ad
+
+    check_linear_forward_ad(co2, kind, device)
+
+
 @pytest.mark.parametrize("path_mode", ["sum", "expand"])
 def test_cartesian_uu_linear(double_precision, path_mode):
     a, b = "4x0e+4x0o+6x1m+2x3m", "2x0e+2x0o+4x1m+2x3m"

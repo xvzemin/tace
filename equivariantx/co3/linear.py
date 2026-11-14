@@ -5,8 +5,9 @@ from typing import NamedTuple
 
 import torch
 
-from ..ops.kernels.torch.linear import cartesian_linear
+from ..ops.common.torch.linear import linear_layout
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co3 import linear as torch_kernel
 from .basis import ChangeOfBasis, Projector
 from .irreps import Irreps
 
@@ -40,6 +41,18 @@ class Linear(torch.nn.Module):
     output_basis : {"cartesian", "spherical"}, optional
         Output storage. Spherical output applies the transposed path matrix
         after channel mixing, including projection of raw Cartesian inputs.
+
+    backend : {"torch", "cuda"}, optional
+        Execution backend. Native kernels fuse shared channel maps; CPU
+        and general broadcasted parameters use Torch.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co3
+    >>> layer = co3.Linear("2x1o", "3x1o")
+    >>> layer(torch.randn(4, 6)).shape
+    torch.Size([4, 9])
     """
 
     def __init__(
@@ -54,8 +67,12 @@ class Linear(torch.nn.Module):
         path_normalization="element",
         project=False,
         output_basis="cartesian",
+        backend="torch",
     ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         if path_normalization not in ("element", "path"):
             raise ValueError("path_normalization must be 'element' or 'path'.")
         if output_basis not in ("cartesian", "spherical"):
@@ -153,6 +170,12 @@ class Linear(torch.nn.Module):
             )
         self.cartesian_out = cartesian_out
         self.output_shapes = tuple((mul, ir.dim) for mul, ir in cartesian_out)
+        self.channel_layout = linear_layout(
+            [(ir.dim, mul) for mul, ir in self.irreps_in],
+            [(ir.dim, mul) for mul, ir in cartesian_out],
+            self.instructions,
+        )
+        self.channel_metadata = repr(("mul_ir", self.channel_layout))
         if output_basis == "spherical":
             self.projection = ChangeOfBasis(cartesian_out, inverse=True)
         elif project:
@@ -200,16 +223,11 @@ class Linear(torch.nn.Module):
             raise ValueError("Weight or bias size does not match the instructions.")
         if self.shared_weights and (weight.ndim != 1 or bias.ndim != 1):
             raise ValueError("Shared weights and biases must be one-dimensional.")
-        output, zero = cartesian_linear(
-            features,
-            weight,
-            bias,
-            self.output_shapes,
-            self.groups,
-            self.slices_in,
-            self.group_sections,
-        )
-        return self.projection(output) + zero
+        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
+            from ..ops.cuda.co3 import linear as cuda_kernel
+
+            return cuda_kernel.linear(self, features, weight, bias)
+        return torch_kernel.linear(self, features, weight, bias)
 
     def weight_view_for_instruction(self, instruction, weight=None):
         """Return the channel-weight view for a weighted instruction."""

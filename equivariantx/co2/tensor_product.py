@@ -4,10 +4,10 @@ import math
 
 import torch
 
-from ..ops.kernels.torch.tensor_product import TensorProduct as GroupedTensorProduct
-from ..ops.kernels.torch.tensor_product import instruction_groups
+from ..ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
+from ..ops.common.torch.tensor_product import instruction_groups
 from ..ops.precision import validate_module_precision
-from ..ops import config
+from ..ops.torch.co2 import tensor_product as torch_kernel
 from ..utils.tensor_product import tensor_product_instructions
 from .basis import Projector
 from .irreps import Irrep, Irreps
@@ -222,9 +222,7 @@ class TensorProduct(torch.nn.Module):
             self.contraction.shapes, reference_groups, cartesian_product
         )
         self.kernel_metadata = None
-        if backend == "cuda" and all(
-            p.connection_mode != "uvw" for p in self.instructions
-        ):
+        if all(p.connection_mode != "uvw" for p in self.instructions):
             rows, offset = [], 0
             sections = tuple(
                 irs.slices()
@@ -305,21 +303,14 @@ class TensorProduct(torch.nn.Module):
             raise TypeError("Cartesian O(2) products require real inputs and weights.")
         torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
         if self.backend == "cuda":
-            from ..ops.channel_product import tensor_product as cuda_product
+            from ..ops.cuda.co2 import tensor_product as cuda_kernel
 
-            output = (
-                cuda_product(self.kernel_metadata, x, y, weight, self.irreps_out.dim)
-                if self.kernel_metadata is not None
-                else self.contraction(x, y, weight, self.path_scales.to(x))
-            )
-            return self.projection(output)
-        contract = self.reference if config.TORCH_REFERENCE else self.contraction
-        output = contract(x, y, weight, self.path_scales.to(x))
-        return self.projection(output)
+            return cuda_kernel.evaluate(self, x, y, weight)
+        return torch_kernel.evaluate(self, x, y, weight)
 
     def couple(self, x, y, a, b, c):
         """Apply the sparse Cartesian angular coefficients on CUDA."""
-        from ..ops.channel_product import angular_product
+        from ..ops.common.channel_product import angular_product
 
         return angular_product(x, y, coupling_entries(a, b, c), c.dim)
 
@@ -367,6 +358,14 @@ class FullyConnectedTensorProduct(TensorProduct):
         Input and output representations.
     **kwargs
         TensorProduct weight, normalization, and projection options.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.FullyConnectedTensorProduct("2x1m", "2x1m", "0e + 2m")
+    >>> layer(torch.randn(4, 4), torch.randn(4, 4)).shape
+    torch.Size([4, 5])
     """
 
     def __init__(self, irreps_in1, irreps_in2, irreps_out, **kwargs):
@@ -392,6 +391,14 @@ class ElementwiseTensorProduct(TensorProduct):
         Allowed output irrep types. Defaults to every allowed coupling.
     **kwargs
         TensorProduct normalization and projection options.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co2
+    >>> layer = co2.ElementwiseTensorProduct("2x1m", "2x1m", filter_ir_out=["0e"])
+    >>> layer(torch.randn(4, 4), torch.randn(4, 4)).shape
+    torch.Size([4, 2])
     """
 
     def __init__(self, irreps_in1, irreps_in2, filter_ir_out=None, **kwargs):

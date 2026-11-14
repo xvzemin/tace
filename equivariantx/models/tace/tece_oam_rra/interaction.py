@@ -2,7 +2,7 @@
 
 import torch
 
-from ....ops.tece import interaction
+from ....ops.common.tece import interaction
 from ....utils.metadata import parse_metadata
 from .expressions import build
 
@@ -28,7 +28,7 @@ def stream(
     Other intermediates are recomputed in bounded tiles. CUDA frame arguments
     may contain dense matrices or packed degree blocks shared by both directions.
     """
-    from ....ops.radial import cast_radial
+    from ....ops.common.radial import cast_radial
 
     radial = cast_radial(radial, features.dtype)
     projection = projection.to(features)
@@ -45,7 +45,7 @@ def stream(
         cutoff = features.new_ones((edge_index.shape[1], 1))
     if not features.is_cuda or module._eqx_metadata is None:
         if radial_network is not None:
-            from ....ops.radial import materialize
+            from ....ops.common.radial import materialize
 
             radial = radial_network(materialize(radial, edge_index))
         return module(
@@ -78,7 +78,7 @@ def stream(
     ]
     metadata = module._eqx_metadata
     if radial_network is not None:
-        from ....ops.radial import compose_radial
+        from ....ops.common.radial import compose_radial
 
         nodes, score, value, specs, *settings = build(
             metadata,

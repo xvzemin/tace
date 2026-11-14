@@ -6,6 +6,7 @@ import torch
 from e3nn import o3
 
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co3 import cartesian_harmonics as torch_kernel
 from .basis import path_matrix
 from .irreps import Irrep, Irreps
 
@@ -24,12 +25,35 @@ class CartesianHarmonics(torch.nn.Module):
         Normalization in orthonormal irreducible coordinates.
     irreps_in : Irreps or str, optional
         A single vector or axial-vector representation. Defaults to 1o.
+
+    backend : {"torch", "cuda"}, optional
+        Exact Torch formulas or native low-order CUDA harmonics. Both expose
+        their tensor expressions to joint compilation. CPU inputs use Torch.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from equivariantx import co3
+    >>> layer = co3.CartesianHarmonics("0e + 1o + 2e", normalize=True)
+    >>> layer(torch.randn(4, 3)).shape
+    torch.Size([4, 13])
     """
 
     geometry_precision = True
 
-    def __init__(self, irreps_out, normalize, normalization="integral", irreps_in=None):
+    def __init__(
+        self,
+        irreps_out,
+        normalize,
+        normalization="integral",
+        irreps_in=None,
+        *,
+        backend="torch",
+    ):
         super().__init__()
+        if backend not in ("torch", "cuda"):
+            raise ValueError("backend must be torch or cuda.")
+        self.backend = backend
         if normalization not in ("integral", "component", "norm"):
             raise ValueError("normalization must be 'integral', 'component' or 'norm'.")
         labels = (
@@ -86,26 +110,23 @@ class CartesianHarmonics(torch.nn.Module):
                 scale * matrix.T,
                 persistent=False,
             )
+            if self.lmax <= 6 and 4 <= l <= 6:
+                self.register_buffer(
+                    f"polynomial_{l}",
+                    torch_kernel.polynomial_matrix(l, normalization).clone(),
+                    persistent=False,
+                )
 
     def forward(self, vectors):
         """Return (..., irreps_out.dim) harmonics from (..., 3) vectors."""
         validate_module_precision(self, (vectors,))
         if vectors.shape[-1] != 3:
             raise ValueError("Input vectors must have three Cartesian entries.")
-        if self.normalize:
-            vectors = torch.nn.functional.normalize(vectors, dim=-1)
-        powers = [torch.ones_like(vectors[..., :1])]
-        for _ in range(self.lmax):
-            powers.append(
-                (powers[-1].unsqueeze(-1) * vectors.unsqueeze(-2)).flatten(-2)
-            )
-        values = []
-        for mul, ir in self.irreps_out:
-            x = (powers[ir.l] @ getattr(self, f"basis_{ir.l}").to(vectors)) @ getattr(
-                self, f"scaled_basis_{ir.l}"
-            ).to(vectors)
-            values.extend([x] * mul)
-        return torch.cat(values, dim=-1) if values else vectors[..., :0]
+        if getattr(self, "backend", "torch") == "cuda" and vectors.is_cuda:
+            from ..ops.cuda.co3 import cartesian_harmonics as cuda_kernel
+
+            return cuda_kernel.evaluate(self, vectors)
+        return torch_kernel.evaluate(self, vectors)
 
     def extra_repr(self):
         return f"{self.irreps_out}, normalize={self.normalize}, normalization={self.normalization}"
@@ -123,5 +144,9 @@ class CartesianHarmonics(torch.nn.Module):
                 (f"basis_{l}", matrix),
                 (f"scaled_basis_{l}", scale * matrix.T),
             ):
+                self._buffers[name] = value.to(self._buffers[name]).clone()
+            name = f"polynomial_{l}"
+            if name in self._buffers:
+                value = torch_kernel.polynomial_matrix(l, self.normalization)
                 self._buffers[name] = value.to(self._buffers[name]).clone()
         return self

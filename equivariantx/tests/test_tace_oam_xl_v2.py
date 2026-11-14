@@ -45,7 +45,7 @@ from equivariantx.models.tace.tace_oam_xl_v2.program import (
     fuse_gradient_sums,
 )
 from equivariantx.models.tace.tace_oam_xl_v2.training import GradientWorkspace
-from equivariantx.ops.channel_product import channel_product
+from equivariantx.ops.common.channel_product import channel_product
 
 
 @pytest.mark.parametrize("radial_mode", ["stream", "materialize"])
@@ -306,7 +306,7 @@ def test_delay_radial_mixed_gradient():
     from e3nn import o3
 
     from equivariantx.o3.cgtp.convolution import O3TensorProductConv
-    from equivariantx.ops.o3 import contraction
+    from equivariantx.ops.common.o3 import contraction
 
     product = o3.TensorProduct(
         "8x0e+8x1o",

@@ -5,7 +5,7 @@ import re
 
 HOIST_OWNER = os.environ.get("EQX_XL_HOIST_OWNER", "0") == "1"
 
-from equivariantx.ops.kernels.cuda.codegen import HEADER, contraction_source
+from equivariantx.ops.common.cuda.codegen import HEADER, contraction_source
 
 FOLD_MIXED_INPUTS = os.environ.get("EQX_XL_FOLD_MIXED_INPUTS", "0") == "1"
 
@@ -15,8 +15,17 @@ GEOMETRY_COEFFICIENTS = os.environ.get("EQX_XL_GEOMETRY_COEFFICIENTS", "0") == "
 REUSE_ANGULAR_ADJOINTS = os.environ.get("EQX_XL_REUSE_ANGULAR_ADJOINTS", "0") == "1"
 
 
-def angular_source(path, mapping, dimensions, shared, roles, cache, lines, premultiply=None,
-                   reuse_angular=None):
+def angular_source(
+    path,
+    mapping,
+    dimensions,
+    shared,
+    roles,
+    cache,
+    lines,
+    premultiply=None,
+    reuse_angular=None,
+):
     """Reuse contractions across paths and transposed multilinear terms."""
     start, attr, end, mul1, mul2, dim1, dim2, dim_out, _, _, cg = path
     reuse_angular = REUSE_ANGULAR_ADJOINTS if reuse_angular is None else reuse_angular
@@ -24,25 +33,34 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines, premu
     def load(role, column, channel):
         pointer = mapping[role]
         if premultiply is not None and role == premultiply[0]:
-            key = ("weighted_input",premultiply,column,channel,path[8])
+            key = ("weighted_input", premultiply, column, channel, path[8])
             if key not in cache:
-                pieces=[]
-                for xp,wp in premultiply[1]:
-                    input_row = "source_node" if role == 0 else "0" if shared[xp] else "edge"
-                    xkey=(xp,input_row,column,channel)
+                pieces = []
+                for xp, wp in premultiply[1]:
+                    input_row = (
+                        "source_node" if role == 0 else "0" if shared[xp] else "edge"
+                    )
+                    xkey = (xp, input_row, column, channel)
                     if xkey not in cache:
-                        name=f"v{len(cache)}"
-                        lines.append(f"const T {name}=active?p{xp}[{input_row}*{dimensions[xp]}+{column}+{channel}]:T(0);")
-                        cache[xkey]=name
-                    wkey=("fold_weight",wp,path[8])
+                        name = f"v{len(cache)}"
+                        lines.append(
+                            f"const T {name}=active?p{xp}[{input_row}*{dimensions[xp]}+{column}+{channel}]:T(0);"
+                        )
+                        cache[xkey] = name
+                    wkey = ("fold_weight", wp, path[8])
                     if wkey not in cache:
-                        name=f"v{len(cache)}"; edge="0" if shared[wp] else "edge"
-                        lines.append(f"const T {name}=active?p{wp}[{edge}*{dimensions[wp]}+{path[8]}+u]:T(0);")
-                        cache[wkey]=name
-                    pieces.append((cache[xkey],cache[wkey]))
-                name=f"v{len(cache)}";lines.append(f"T {name}=0;")
-                for a,b in pieces:lines.append(f"{name}=fma({a},{b},{name});")
-                cache[key]=name
+                        name = f"v{len(cache)}"
+                        edge = "0" if shared[wp] else "edge"
+                        lines.append(
+                            f"const T {name}=active?p{wp}[{edge}*{dimensions[wp]}+{path[8]}+u]:T(0);"
+                        )
+                        cache[wkey] = name
+                    pieces.append((cache[xkey], cache[wkey]))
+                name = f"v{len(cache)}"
+                lines.append(f"T {name}=0;")
+                for a, b in pieces:
+                    lines.append(f"{name}=fma({a},{b},{name});")
+                cache[key] = name
             return cache[key]
         row = {0: "source_node", 3: "edge", 4: "target_node"}[role]
         if role == 3 and shared[pointer]:
@@ -65,11 +83,29 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines, premu
         available = []
         if reuse_angular:
             for candidate in candidates:
-                inputs = tuple((i, mapping[i], offset, width) for i, offset, width in (
-                    (0, start, mul1), (3, attr, mul2), (4, end, mul1)) if i != candidate)
-                if all(("angular", inputs, 0 if candidate == 3 else v,
-                        candidate, m, cg, premultiply) in cache
-                       for v in range(mul2) for m in range(widths[candidate])):
+                inputs = tuple(
+                    (i, mapping[i], offset, width)
+                    for i, offset, width in (
+                        (0, start, mul1),
+                        (3, attr, mul2),
+                        (4, end, mul1),
+                    )
+                    if i != candidate
+                )
+                if all(
+                    (
+                        "angular",
+                        inputs,
+                        0 if candidate == 3 else v,
+                        candidate,
+                        m,
+                        cg,
+                        premultiply,
+                    )
+                    in cache
+                    for v in range(mul2)
+                    for m in range(widths[candidate])
+                ):
                     available.append(candidate)
         weight_role = min(available or candidates, key=widths.__getitem__)
         needed.add(weight_role)
@@ -90,7 +126,15 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines, premu
                 if i != role
             )
             for m in range(dim):
-                key = ("angular", inputs, 0 if role == 3 else v, role, m, cg, premultiply)
+                key = (
+                    "angular",
+                    inputs,
+                    0 if role == 3 else v,
+                    role,
+                    m,
+                    cg,
+                    premultiply,
+                )
                 if key not in cache:
                     terms = []
                     for a, b, c, coefficient in cg:
@@ -114,9 +158,13 @@ def angular_source(path, mapping, dimensions, shared, roles, cache, lines, premu
                             coefficient_key = "geometry_coefficient", coefficient, y
                             if coefficient_key not in cache:
                                 name = f"v{len(cache)}"
-                                lines.append(f"const T {name} = T({coefficient:.17g}) * {y};")
+                                lines.append(
+                                    f"const T {name} = T({coefficient:.17g}) * {y};"
+                                )
                                 cache[coefficient_key] = name
-                            terms.append((1.0, (cache[coefficient_key], x if role == 4 else z)))
+                            terms.append(
+                                (1.0, (cache[coefficient_key], x if role == 4 else z))
+                            )
                         else:
                             terms.append(
                                 (
@@ -201,32 +249,47 @@ def convolution_source(
         f"{declaration} void {function or 'run'}(" + ", ".join(args) + ") {",
         "const int lane = threadIdx.x % 32;",
         f"const int u = {'channel' if concurrent else 'int(blockIdx.y)'} * 32 + lane;",
-        ("const bool active = true;" if mul == 128 and os.environ.get('EQX_XL_LAUNCH_CONTRACT', '0') == '1'
-         else f"const bool active = u < {mul};"),
+        (
+            "const bool active = true;"
+            if mul == 128 and os.environ.get("EQX_XL_LAUNCH_CONTRACT", "0") == "1"
+            else f"const bool active = u < {mul};"
+        ),
         f"const int64_t task = {tile} * (blockDim.x / 32) + threadIdx.x / 32;",
         "if (task >= tasks) return;",
     ]
     node_terms, edge_terms, weight_terms = {}, {}, {}
     cache, body = {}, []
-    scheduled=[]
-    groups={}
-    if FOLD_MIXED_INPUTS and normalization is None and all(p[4]==1 and p[8]>=0 for p in paths):
-        for mapping,weighted_only,pairs in program:
-            for role,slot in pairs:
-                if role in (0,4):
-                    common=mapping[3] if role==4 else mapping[4]
-                    groups.setdefault((role,slot,common,weighted_only),[]).append(mapping)
-        merged={key:values for key,values in groups.items() if len(values)>1}
-        for mapping,weighted_only,pairs in program:
-            keep=tuple((role,slot) for role,slot in pairs
-                       if role not in (0,4) or (role,slot,mapping[3] if role==4 else mapping[4],weighted_only) not in merged)
-            if keep:scheduled.append((mapping,weighted_only,keep,None))
-        for (role,slot,_,weighted_only),mappings in merged.items():
-            folded_role=0 if role==4 else 3
-            folded=(folded_role,tuple((m[folded_role],m[1]) for m in mappings))
-            scheduled.append((mappings[0],weighted_only,((role,slot),),folded))
+    scheduled = []
+    groups = {}
+    if (
+        FOLD_MIXED_INPUTS
+        and normalization is None
+        and all(p[4] == 1 and p[8] >= 0 for p in paths)
+    ):
+        for mapping, weighted_only, pairs in program:
+            for role, slot in pairs:
+                if role in (0, 4):
+                    common = mapping[3] if role == 4 else mapping[4]
+                    groups.setdefault((role, slot, common, weighted_only), []).append(
+                        mapping
+                    )
+        merged = {key: values for key, values in groups.items() if len(values) > 1}
+        for mapping, weighted_only, pairs in program:
+            keep = tuple(
+                (role, slot)
+                for role, slot in pairs
+                if role not in (0, 4)
+                or (role, slot, mapping[3] if role == 4 else mapping[4], weighted_only)
+                not in merged
+            )
+            if keep:
+                scheduled.append((mapping, weighted_only, keep, None))
+        for (role, slot, _, weighted_only), mappings in merged.items():
+            folded_role = 0 if role == 4 else 3
+            folded = (folded_role, tuple((m[folded_role], m[1]) for m in mappings))
+            scheduled.append((mappings[0], weighted_only, ((role, slot),), folded))
     else:
-        scheduled=[(*term,None) for term in program]
+        scheduled = [(*term, None) for term in program]
     for mapping, weighted_only, pairs, folded in scheduled:
         needed = {role for role, _ in pairs}
         for path in paths:
@@ -235,7 +298,9 @@ def convolution_source(
                 continue
             angular = angular_source
             if normalization is not None:
-                from equivariantx.ops.kernels.cuda.o3.harmonics import angular_source as angular
+                from equivariantx.ops.common.cuda.o3.harmonics import (
+                    angular_source as angular,
+                )
             values = angular(
                 path,
                 mapping,
@@ -254,8 +319,8 @@ def convolution_source(
                         direction_offset,
                     )
                 ),
-                **({"premultiply":folded} if folded is not None else {}),
-                **({"reuse_angular":reuse_angular} if normalization is None else {}),
+                **({"premultiply": folded} if folded is not None else {}),
+                **({"reuse_angular": reuse_angular} if normalization is None else {}),
             )
             for v in range(mul2):
                 w = f"T({factor:.17g})"
@@ -311,15 +376,22 @@ def convolution_source(
                             (f"T({factor:.17g})", values[v, 1, 0])
                         )
 
-    if (POLYNOMIAL_EDGES and normalization is None
-            and all(p[4] == 1 and p[8] >= 0 for p in paths)
-            and all(role in (0, 1, 3, 4) for _, _, pairs in program for role, _ in pairs)):
+    if (
+        POLYNOMIAL_EDGES
+        and normalization is None
+        and all(p[4] == 1 and p[8] >= 0 for p in paths)
+        and all(role in (0, 1, 3, 4) for _, _, pairs in program for role, _ in pairs)
+    ):
         from .polynomial_edge import edge_polynomials
+
         cache, body, node_terms, edge_terms, weight_terms = edge_polynomials(
-            paths, program, dimensions, shared)
+            paths, program, dimensions, shared
+        )
 
     if "transverse_adjoints" in cache:
-        from equivariantx.ops.kernels.cuda.o2_o3.transverse import coupling_adjoint_source
+        from equivariantx.ops.common.cuda.o2_o3.transverse import (
+            coupling_adjoint_source,
+        )
 
         pending, groups = cache["transverse_adjoints"], {}
         for key, terms in edge_terms.items():
@@ -360,36 +432,52 @@ def convolution_source(
                 key = slot, role, width, offset + column * mul
                 node_terms[key].append(("T(1)", value))
 
-    hoisted=[]
-    if owner>=0 and indexed and (HOIST_OWNER if hoist_owner is None else hoist_owner):
-        invariant="source_node" if owner==0 else "target_node"
-        known=set()
-        remainder=[]
+    hoisted = []
+    if owner >= 0 and indexed and (HOIST_OWNER if hoist_owner is None else hoist_owner):
+        invariant = "source_node" if owner == 0 else "target_node"
+        known = set()
+        remainder = []
         shared_count = 0
         for line in body:
-            match=re.fullmatch(r"const T (v\d+) = (.*);",line)
+            match = re.fullmatch(r"const T (v\d+) = (.*);", line)
             if match:
-                expression=match[2]
-                dependencies=set(re.findall(r"\bv\d+\b",expression))
-                other="target_node" if owner==0 else "source_node"
+                expression = match[2]
+                dependencies = set(re.findall(r"\bv\d+\b", expression))
+                other = "target_node" if owner == 0 else "source_node"
                 if shared_owner:
-                    if (invariant in expression and re.search(r'\bp\d+\[', expression)
-                            and not re.search(r'\bedge\b', expression) and other not in expression):
-                        address = f'owner_values[{shared_count}*blockDim.x+threadIdx.x]'
-                        hoisted.append(f'{address} = {expression.replace(invariant,"node")};')
-                        remainder.append(f'const T {match[1]} = {address};')
+                    if (
+                        invariant in expression
+                        and re.search(r"\bp\d+\[", expression)
+                        and not re.search(r"\bedge\b", expression)
+                        and other not in expression
+                    ):
+                        address = f"owner_values[{shared_count}*blockDim.x+threadIdx.x]"
+                        hoisted.append(
+                            f"{address} = {expression.replace(invariant, 'node')};"
+                        )
+                        remainder.append(f"const T {match[1]} = {address};")
                         shared_count += 1
                         continue
                     remainder.append(line)
                     continue
-                if ((invariant in expression or dependencies) and dependencies<=known
-                        and not re.search(r"\bedge\b",expression) and other not in expression):
-                    hoisted.append(line.replace(invariant,"node"));known.add(match[1]);continue
+                if (
+                    (invariant in expression or dependencies)
+                    and dependencies <= known
+                    and not re.search(r"\bedge\b", expression)
+                    and other not in expression
+                ):
+                    hoisted.append(line.replace(invariant, "node"))
+                    known.add(match[1])
+                    continue
             remainder.append(line)
-        body=remainder
+        body = remainder
         if shared_owner and shared_count:
-            lines.append(f'// EQX_OWNER_VALUES={shared_count}')
-            lines.append('extern __shared__ '+('volatile ' if shared_owner == 2 else '')+'T owner_values[];')
+            lines.append(f"// EQX_OWNER_VALUES={shared_count}")
+            lines.append(
+                "extern __shared__ "
+                + ("volatile " if shared_owner == 2 else "")
+                + "T owner_values[];"
+            )
     if owner >= 0:
         index = "source" if owner == 0 else "target"
         lines += [
@@ -455,12 +543,14 @@ def convolution_source(
                 f"if (active) {address} {'=' if slot in initialize else '+='} value;"
             )
         lines.append("}")
-    mode = os.environ.get('EQX_XL_STREAM_ANGULAR_OUTPUTS', 'off')
-    if mode == 'auto':
+    mode = os.environ.get("EQX_XL_STREAM_ANGULAR_OUTPUTS", "off")
+    if mode == "auto":
         from .angular_schedule import schedule_mode
+
         mode = schedule_mode(mode, program)
-    if mode != 'off' and sinks and normalization is None:
+    if mode != "off" and sinks and normalization is None:
         from .angular_schedule import stream_body
+
         ends = [start for start, _ in sinks[1:]] + [len(lines)]
         chunks = [(lines[start:end], role) for (start, role), end in zip(sinks, ends)]
         lines = lines[:body_start] + stream_body(body, chunks, mode)

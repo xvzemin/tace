@@ -7,7 +7,7 @@ from e3nn import o3
 
 from equivariantx import o3 as eqx_o3
 
-from ...ops.bilinear import contract
+from ...ops.torch.mbe.ace import bilinear as torch_kernel
 from ...ops.precision import validate_module_precision
 from ...utils.metadata import encode_plans
 
@@ -18,7 +18,8 @@ class BilinearContraction(torch.nn.Module):
     Parameters
     ----------
     tensor_product : o3.TensorProduct
-        External-weight ``uuu`` tensor product. All paths are retained.
+        External-weight ``uuu`` tensor product. All paths are retained;
+        :meth:`forward` supplies per-node gates regardless of ``shared_weights``.
     linear : o3.Linear
         Unbiased external coefficient map, defined for one expert. Its input
         irreps may simplify adjacent product outputs.
@@ -78,12 +79,10 @@ class BilinearContraction(torch.nn.Module):
             raise ValueError("Coefficient inputs must match the product output.")
         self.backend = backend
         self.tensor_products = (tensor_product,)
-        self.coefficients = eqx_o3.MoEElementLinear(
-            linear, num_experts, backend=backend
-        )
+        self.coefficients = eqx_o3.MoEElementLinear(linear, num_experts)
         self.input_dim = tensor_product.irreps_in1.dim
         self.base_dim = tensor_product.irreps_in2.dim
-        self.output_dim = linear.irreps_out.dim * num_experts
+        self.output_dim = self.contraction_dim = linear.irreps_out.dim * num_experts
         self.weight_numel = linear.weight_numel * num_experts
         self.gate_dim = tensor_product.weight_numel
         self.shared = (
@@ -258,28 +257,14 @@ class BilinearContraction(torch.nn.Module):
         elif shared_weight is not None:
             raise ValueError("This module has no shared coefficient map.")
         if features.is_cuda and self.backend == "cuda":
-            operands = [
-                features,
-                base,
-                weight.flatten(1),
-                features.new_empty((0, self.output_dim)),
-                gates,
-            ]
-            program = [(0, (0, 1, 2, 3, 4), 3, 0)]
-            if self.shared is not None:
-                operands.append(shared_weight.reshape(1, -1))
-                program.append((1, (0, 1, 5, 3, 4), 3, 0))
-            result = contract(
-                self.kernel_metadata, repr(tuple(program)), node_type, operands
-            )[0]
-            return self.project_output(result)
-        product = self.tensor_products[0](features, base, gates)
-        output = self.coefficients(product, weight, node_type)
-        if self.shared is not None:
-            output = output + self.shared.coefficients(
-                product, shared_weight.reshape(1, 1, -1), torch.zeros_like(node_type)
+            from ...ops.cuda.mbe.ace import bilinear as cuda_kernel
+
+            return cuda_kernel.evaluate(
+                self, features, base, gates, weight, node_type, shared_weight
             )
-        return output
+        return torch_kernel.evaluate(
+            self, features, base, gates, weight, node_type, shared_weight
+        )
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)

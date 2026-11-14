@@ -3,9 +3,58 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx.mbe.ace import (
     SemiCoupledSymmetricContraction,
 )
+
+from .testing import (
+    check_cpu_dynamic_coefficients,
+    check_parent_aoti,
+    check_parent_provider,
+)
+
+
+@pytest.mark.parametrize("space", ["o3", "co3"])
+def test_cpu_dynamic_coefficients(space, monkeypatch):
+    check_cpu_dynamic_coefficients(space, "semi", monkeypatch)
+
+
+def test_cpu_bounded_coefficients(monkeypatch):
+    check_cpu_dynamic_coefficients("co3", "semi", monkeypatch, dynamic=False)
+
+
+@pytest.mark.parametrize("shared_weights", [False, True])
+def test_force_gradient_aoti(shared_weights, tmp_path, double_precision, monkeypatch):
+    check_parent_aoti(
+        "o3", "semi", tmp_path, monkeypatch, shared_weights=shared_weights
+    )
+
+
+@pytest.mark.parametrize("device,nodes", [("cpu", 0), ("cpu", 7), ("cuda", 7)])
+@pytest.mark.parametrize("reference", [False, True])
+def test_shared_descriptors(device, nodes, reference, double_precision, monkeypatch):
+    check_parent_provider(
+        "o3",
+        "semi",
+        device,
+        nodes,
+        "torch",
+        reference,
+        monkeypatch,
+        shared_weights=True,
+    )
+
+
+@pytest.mark.parametrize("device,nodes", [("cpu", 0), ("cpu", 7), ("cuda", 7)])
+@pytest.mark.parametrize("child_backend", ["torch", "cuda"])
+@pytest.mark.parametrize("reference", [False, True])
+def test_parent_provider(
+    device, nodes, child_backend, reference, double_precision, monkeypatch
+):
+    check_parent_provider(
+        "o3", "semi", device, nodes, child_backend, reference, monkeypatch
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Packed CUDA GEMMs")
@@ -14,6 +63,7 @@ from equivariantx.mbe.ace import (
 )
 def test_packed_coefficient_maps(space, project, monkeypatch, double_precision):
     from torch.fx.experimental.proxy_tensor import make_fx
+
     from equivariantx import co3
     from equivariantx.mbe.ace import IctdSemiCoupledSymmetricContraction
     from equivariantx.ops import config
@@ -69,7 +119,7 @@ def test_packed_coefficient_maps(space, project, monkeypatch, double_precision):
 def test_native_cuda_graph_ace(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.graph as cuda_graph
+    import equivariantx.ops.common.cuda.graph as cuda_graph
 
     tp = o3.TensorProduct(
         "2x0e",

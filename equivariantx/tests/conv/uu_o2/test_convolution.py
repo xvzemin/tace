@@ -3,6 +3,7 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
 from equivariantx.tests.conv.testing import assert_native_autograd
@@ -98,8 +99,8 @@ def test_uu_o2_convolution_derivatives(
 def test_uu_o2_chunked_reduction(monkeypatch, double_precision, channels, shared):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.kernels.cuda.o2_o3.convolution as cuda
-    import equivariantx.ops.kernels.cuda.o3.convolution as o3_cuda
+    import equivariantx.ops.common.cuda.o2_o3.convolution as cuda
+    import equivariantx.ops.common.cuda.o3.convolution as o3_cuda
 
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
     monkeypatch.setattr(o3_cuda, "CHUNK_SIZE", 1025)
@@ -243,3 +244,111 @@ def test_uu_o2_compile_and_empty_edges(double_precision):
         ]
         for a, b in zip(*gradients):
             torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-9)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("promoted", [False, True])
+def test_reference_bypasses_wigner_child(
+    device, promoted, monkeypatch, double_precision
+):
+    import copy
+
+    from equivariantx.ops import config
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    dtype = torch.float32 if promoted else torch.float64
+    tolerance = 3e-5 if promoted else 2e-10
+    frame = o2.LocalFrame("2x0e+2x1o+2x2e", mmax=1)
+    linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 2)
+    module = eqx_conv.UuO2TensorProductConv(frame, linear, frame, backend="torch").to(
+        device=device, dtype=dtype
+    )
+    reference = copy.deepcopy(module)
+    module.frame.backend = "cuda"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("The parent reference called its Wigner child.")
+
+    monkeypatch.setattr(module.frame, "forward_packed", forbidden)
+    backends = {
+        name: child.backend
+        for name, child in module.named_modules()
+        if hasattr(child, "backend")
+    }
+    for edges in (5, 0):
+        index = torch.stack(
+            (
+                torch.arange(edges, device=device) % 3,
+                (torch.arange(edges, device=device) + 1) % 3,
+            )
+        )
+        inputs = (
+            torch.randn(
+                3, frame.input_dim, device=device, dtype=dtype
+            ).requires_grad_(),
+            (
+                torch.randn(edges, 3, device=device, dtype=torch.float64) + 1
+            ).requires_grad_(),
+            torch.randn(
+                edges, linear.weight_numel, device=device, dtype=dtype
+            ).requires_grad_(),
+        )
+
+        def run(layer, x, vectors, weights):
+            return layer.forward_wigner(
+                x,
+                weights,
+                weights.new_empty((0, linear.weight_numel)),
+                None,
+                weights.new_ones((edges, 1)),
+                index,
+                3,
+                vectors=vectors,
+            )
+
+        a, b = run(module, *inputs), run(reference, *inputs)
+        torch.testing.assert_close(a, b, atol=tolerance, rtol=tolerance)
+        assert_native_autograd(a)
+        for _ in range(3):
+            gradients = [
+                torch.autograd.grad(
+                    value.sin().sum(), inputs, create_graph=True, allow_unused=True
+                )
+                for value in (a, b)
+            ]
+            gradients = [
+                tuple(
+                    torch.zeros_like(x) if g is None else g
+                    for x, g in zip(inputs, values)
+                )
+                for values in gradients
+            ]
+            torch.testing.assert_close(*gradients, atol=tolerance, rtol=tolerance)
+            a, b = [
+                sum(g.sum() / max(1, g.numel()) for g in values)
+                + sum(x.sum() * 0 for x in inputs)
+                for values in gradients
+            ]
+            assert_native_autograd(a)
+        tangents = tuple(torch.randn_like(x) for x in inputs)
+        with torch.autograd.forward_ad.dual_level():
+            duals = tuple(
+                torch.autograd.forward_ad.make_dual(x, v)
+                for x, v in zip(inputs, tangents)
+            )
+            actual = torch.autograd.forward_ad.unpack_dual(run(module, *duals))
+        expected = torch.autograd.functional.jvp(
+            lambda *args: run(reference, *args), inputs, tangents
+        )
+        assert actual.tangent is not None
+        torch.testing.assert_close(
+            tuple(actual), expected, atol=tolerance, rtol=tolerance
+        )
+        assert backends == {
+            name: child.backend
+            for name, child in module.named_modules()
+            if hasattr(child, "backend")
+        }
+        assert config.TORCH_REFERENCE is True

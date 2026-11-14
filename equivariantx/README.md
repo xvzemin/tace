@@ -12,7 +12,7 @@ git clone https://github.com/xvzemin/tace.git
 pip install ./tace/equivariantx
 ```
 
-Requires PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
+Requires Python >= 3.10, PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
 For fused kernels, install `pip install './tace/equivariantx[cuda]'` and provide a CUDA
 toolkit. Kernels compile on first use and are cached.
 
