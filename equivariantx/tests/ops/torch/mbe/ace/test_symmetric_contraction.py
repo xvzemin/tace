@@ -413,7 +413,7 @@ def test_nonscalar_dynamic_force_loss_aoti(
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
-        assert any(name.endswith(".so") for name in names)
+        assert any(name.endswith((".so", ".dylib", ".dll")) for name in names)
         assert not any(name.endswith((".cubin", ".ptx")) for name in names)
         source = "\n".join(
             archive.read(name).decode() for name in names if name.endswith(".cpp")

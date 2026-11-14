@@ -12,7 +12,12 @@ def linear(module, features, weight, bias, leading_shape):
     """Evaluate the declared Linear paths and output layout."""
     if (
         not config.TORCH_REFERENCE
-        and config.TORCH_CHANNEL_LINEAR
+        and (
+            config.TORCH_CHANNEL_LINEAR
+            or config.TORCH_O2_CHANNEL_LINEAR
+            and features.is_cuda
+        )
+        and torch.is_grad_enabled()
         and hasattr(module, "channel_metadata")
         and channel_linear.supported(features, weight, bias, module.layout)
     ):

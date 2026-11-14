@@ -36,26 +36,63 @@ def primal(metadata, features, weight, bias, *, ordinary=False):
 
 
 def adjoint(metadata, features, weight, gradient, needed, bias_numel):
-    """Differentiate each independent channel map without retaining packed inputs."""
+    """Differentiate grouped channel maps without retaining packed inputs."""
     storage, (input_shapes, output_shapes, paths, biases, groups) = parse_metadata(
         metadata
     )
     inputs = unpack(features, input_shapes, storage)
     outputs = unpack(gradient, output_shapes, storage)
-    zero = features[..., :0].sum() + weight[..., :0].sum() + gradient[..., :0].sum()
+    uniform_scale = bool(paths) and all(path[3] == paths[0][3] for path in paths)
+    scaled_weight = weight * paths[0][3] if needed[0] and uniform_scale else weight
     dx = [None] * len(input_shapes)
-    dw = []
-    for i, j, start, scale in paths:
-        ci, co = input_shapes[i][1], output_shapes[j][1]
+    dw = [None] * len(paths)
+    for entries in groups:
+        indices = entries[0][1]
+        if not indices:
+            continue
+        input_sizes = [input_shapes[paths[k][0]][1] for k in indices]
+        output_sizes = [output_shapes[j][1] for j, _ in entries]
+        right = [outputs[j] for j, _ in entries]
+        right = right[0] if len(right) == 1 else torch.cat(right, -1)
+        flat_right = right.reshape(-1, sum(output_sizes))
         if needed[0]:
-            matrix = weight[start : start + ci * co].reshape(ci, co)
-            matrix = matrix * scale if scale != 1 else matrix
-            value = outputs[j] @ matrix.T
-            dx[i] = value if dx[i] is None else dx[i] + value
+            rows = []
+            for row, ci in enumerate(input_sizes):
+                parts = []
+                for (j, selected), co in zip(entries, output_sizes):
+                    _, _, start, scale = paths[selected[row]]
+                    matrix = scaled_weight[start : start + ci * co].reshape(ci, co)
+                    parts.append(
+                        matrix if uniform_scale or scale == 1 else matrix * scale
+                    )
+                rows.append(parts[0] if len(parts) == 1 else torch.cat(parts, -1))
+            matrix = rows[0] if len(rows) == 1 else torch.cat(rows, -2)
+            values = (
+                (flat_right @ matrix.T)
+                .reshape(*right.shape[:-1], sum(input_sizes))
+                .split(input_sizes, -1)
+            )
+            for k, value in zip(indices, values):
+                i = paths[k][0]
+                dx[i] = value if dx[i] is None else dx[i] + value
         if needed[1]:
-            left = inputs[i].reshape(-1, ci)
-            right = outputs[j].reshape(-1, co)
-            dw.append(((left.T @ right) * scale).flatten())
+            left = [inputs[paths[k][0]] for k in indices]
+            left = left[0] if len(left) == 1 else torch.cat(left, -1)
+            matrix = left.reshape(-1, sum(input_sizes)).T @ flat_right
+            for row, value in enumerate(matrix.split(input_sizes, 0)):
+                for (_, selected), part in zip(entries, value.split(output_sizes, 1)):
+                    k = selected[row]
+                    dw[k] = (part if uniform_scale else part * paths[k][3]).flatten()
+    zero = (
+        features[..., :0].sum() + weight[..., :0].sum() + gradient[..., :0].sum()
+        if needed[0]
+        and any(value is None for value in dx)
+        or needed[1]
+        and not dw
+        or needed[2]
+        and not biases
+        else None
+    )
     if needed[0]:
         dx = pack(
             [
@@ -73,6 +110,8 @@ def adjoint(metadata, features, weight, gradient, needed, bias_numel):
         if needed[1]
         else None
     )
+    if needed[1] and uniform_scale:
+        dw = dw * paths[0][3]
     if needed[2]:
         db = [outputs[j].reshape(-1, size).sum(0) for j, start, size in biases]
         db = torch.cat(db) if db else features.new_zeros((bias_numel,)) + zero

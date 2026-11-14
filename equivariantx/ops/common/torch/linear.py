@@ -454,7 +454,21 @@ def linear(inputs, weight, bias, layout, shape):
             parts = [matrices[selected[row]] for _, selected in entries]
             rows.append(parts[0] if len(parts) == 1 else torch.cat(parts, -1))
         matrix = rows[0] if len(rows) == 1 else torch.cat(rows, -2)
-        if shared:
+        if (
+            shared
+            and value.is_cuda
+            and value.dtype == torch.float32
+            and value.shape[-2] == 2
+            and len(indices) == 1
+            and max(matrix.shape[-2:]) <= config.TORCH_LINEAR_COMPONENT_MAX_CHANNELS
+        ):
+            packed = torch.block_diag(
+                matrix.reshape(matrix.shape[-2:]), matrix.reshape(matrix.shape[-2:])
+            )
+            result = (value.flatten(-2) @ packed).reshape(
+                *value.shape[:-1], matrix.shape[-1]
+            )
+        elif shared:
             result = (
                 value.reshape(math.prod(value.shape[:-1]), value.shape[-1])
                 @ matrix.reshape(matrix.shape[-2:])

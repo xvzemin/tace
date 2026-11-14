@@ -191,7 +191,14 @@ def test_element_linear_compile(
     "channels,rows,dtype", [(64, 256, torch.float64), (128, 257, torch.float32)]
 )
 def test_moe_cpu_force_aoti_updates(
-    tmp_path, monkeypatch, double_precision, dynamic, channels, rows, dtype
+    tmp_path,
+    monkeypatch,
+    double_precision,
+    dynamic,
+    channels,
+    rows,
+    dtype,
+    aoti_threads,
 ):
     import os
     import subprocess
@@ -324,8 +331,10 @@ def test_moe_cpu_force_aoti_updates(
     script = """
 import sys
 import torch
-torch.set_num_threads(4)
+torch.set_num_threads(int(sys.argv[3]))
+print('Loading AOTI package', flush=True)
 runner = torch._inductor.aoti_load_package(sys.argv[1], run_single_threaded=True)
+print('Checking AOTI gradients and updates', flush=True)
 data = torch.load(sys.argv[2], weights_only=True)
 x, w, _, _ = data['inputs']
 parameter = torch.nn.Parameter(w.clone())
@@ -362,13 +371,28 @@ for nodes in (255, 1025) if data['dynamic'] else (data['rows']-1, data['rows']+1
     else:
         raise AssertionError('The checked package accepted a node count outside its contract')
 assert not any(name.startswith(('equivariantx', 'e3nn', 'tace')) for name in sys.modules)
+del runner
+print('AOTI checks complete', flush=True)
 """
     result = subprocess.run(
-        [sys.executable, "-B", "-c", script, str(package), str(data)],
+        [
+            sys.executable,
+            "-B",
+            "-X",
+            "faulthandler",
+            "-u",
+            "-c",
+            script,
+            str(package),
+            str(data),
+            str(aoti_threads),
+        ],
         cwd=tmp_path,
         env={**os.environ, "AOTI_RUNTIME_CHECK_INPUTS": "1"},
         capture_output=True,
         text=True,
         timeout=120,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 0, (
+        f"exit={result.returncode}\n{result.stdout}{result.stderr}"
+    )

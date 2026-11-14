@@ -1,5 +1,7 @@
 """Numerical-test settings for EQX."""
 
+import sys
+
 import pytest
 import torch
 
@@ -29,6 +31,18 @@ def isolated_state():
 def double_precision():
     torch.set_default_dtype(torch.float64)
     torch.manual_seed(12)
+
+
+@pytest.fixture
+def aoti_threads():
+    """Use matching compiler/runtime thread counts in standalone CPU checks."""
+    previous = torch.get_num_threads()
+    threads = 1 if sys.platform == "darwin" else min(previous, 4)
+    torch.set_num_threads(threads)
+    try:
+        yield threads
+    finally:
+        torch.set_num_threads(previous)
 
 
 @pytest.fixture

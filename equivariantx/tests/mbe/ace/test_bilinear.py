@@ -286,7 +286,9 @@ def test_shared_coefficient_noncontiguous_capture(
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
 
 
-def test_shared_coefficient_aoti_storage_clip(tmp_path, double_precision, monkeypatch):
+def test_shared_coefficient_aoti_storage_clip(
+    tmp_path, double_precision, monkeypatch, aoti_threads
+):
     import subprocess
     import sys
 
@@ -358,8 +360,10 @@ def test_shared_coefficient_aoti_storage_clip(tmp_path, double_precision, monkey
     script = """
 import sys
 import torch
-torch.set_num_threads(4)
+torch.set_num_threads(int(sys.argv[3]))
+print('Loading AOTI package', flush=True)
 runner = torch._inductor.aoti_load_package(sys.argv[1])
+print('Checking AOTI gradients and updates', flush=True)
 data = torch.load(sys.argv[2], weights_only=True)
 def overlap(a, b):
     if a.untyped_storage().data_ptr() != b.untyped_storage().data_ptr():
@@ -394,12 +398,27 @@ for case in data['cases']:
             parameter.add_(gradient, alpha=-0.03)
         torch.testing.assert_close(tuple(state[3:]), step['parameters'], atol=2e-10, rtol=2e-9)
 assert not any(name.startswith('equivariantx') for name in sys.modules)
+del runner
+print('AOTI checks complete', flush=True)
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", script, str(package), str(data)],
+        [
+            sys.executable,
+            "-I",
+            "-X",
+            "faulthandler",
+            "-u",
+            "-c",
+            script,
+            str(package),
+            str(data),
+            str(aoti_threads),
+        ],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=180,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 0, (
+        f"exit={result.returncode}\n{result.stdout}{result.stderr}"
+    )

@@ -44,6 +44,10 @@ ATTENTION_NATIVE = False
 
 # Shared channel-map operand-only tape; selected after performance measurement.
 TORCH_CHANNEL_LINEAR = False
+TORCH_O2_CHANNEL_LINEAR = True
+
+# Pack the two components only for narrow FP32 channel maps.
+TORCH_LINEAR_COMPONENT_MAX_CHANNELS = 64
 
 # Avoid batches of tiny GEMMs along short channel-preserving copy axes.
 TORCH_UU_LINEAR = True

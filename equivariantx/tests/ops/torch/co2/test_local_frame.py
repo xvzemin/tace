@@ -147,6 +147,9 @@ def test_other_methods_keep_axis_schedule(method, inverse, monkeypatch):
 
 
 @pytest.mark.parametrize("inverse", [False, True])
+@pytest.mark.skipif(
+    torch.version.cuda is None, reason="Requires a CUDA-enabled PyTorch build"
+)
 def test_cuda_keeps_axis_schedule(inverse, monkeypatch):
     layer = co2.LocalFrame("64x3e").double()
     calls = observe_matrix(monkeypatch, inverse)
@@ -312,7 +315,7 @@ def test_dynamic_cpu_force_loss_aoti(inverse, monkeypatch, tmp_path):
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
-        assert any(name.endswith(".so") for name in names)
+        assert any(name.endswith((".so", ".dylib", ".dll")) for name in names)
         assert not any(name.endswith((".cubin", ".ptx")) for name in names)
         source = "\n".join(
             archive.read(name).decode() for name in names if name.endswith(".cpp")

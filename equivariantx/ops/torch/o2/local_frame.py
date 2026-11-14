@@ -18,11 +18,16 @@ def to_local(module, features, wigner):
         features.split(module._global_sizes, dim=-1),
     ):
         values = values.view(*features.shape[:-1], 2 * degree + 1, mul)
-        values = (
-            torch.bmm(matrix, values)
-            if features.ndim == 2
-            else torch.einsum("bij,b...jk->b...ik", matrix, values)
-        )
+        if degree == 0:
+            values = values * matrix.reshape(
+                matrix.shape[0], *([1] * (values.ndim - 1))
+            )
+        else:
+            values = (
+                torch.bmm(matrix, values)
+                if features.ndim == 2
+                else torch.einsum("bij,b...jk->b...ik", matrix, values)
+            )
         outputs.append(values.flatten(-2))
     if not outputs:
         return features[..., :0]
@@ -48,11 +53,16 @@ def to_global(module, features, wigner_inv):
     ):
         retained = 2 * min(degree, module.mmax) + 1
         values = values.view(*features.shape[:-1], retained, mul)
-        values = (
-            torch.bmm(matrix, values)
-            if features.ndim == 2
-            else torch.einsum("bij,b...jk->b...ik", matrix, values)
-        )
+        if degree == 0:
+            values = values * matrix.reshape(
+                matrix.shape[0], *([1] * (values.ndim - 1))
+            )
+        else:
+            values = (
+                torch.bmm(matrix, values)
+                if features.ndim == 2
+                else torch.einsum("bij,b...jk->b...ik", matrix, values)
+            )
         outputs.append(values.flatten(-2))
     if not outputs:
         return features[..., :0]

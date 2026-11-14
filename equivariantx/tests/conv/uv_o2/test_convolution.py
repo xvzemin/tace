@@ -880,7 +880,9 @@ def test_reference_mixed_children_dynamic_aoti(monkeypatch, tmp_path, double_pre
     package = tmp_path / "reference.pt2"
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
-        assert any(name.endswith(".so") for name in archive.namelist())
+        assert any(
+            name.endswith((".so", ".dylib", ".dll")) for name in archive.namelist()
+        )
         assert not any(name.endswith((".cubin", ".ptx")) for name in archive.namelist())
         source = "\n".join(
             archive.read(name).decode()
