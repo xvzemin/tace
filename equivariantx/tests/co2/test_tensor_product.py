@@ -110,17 +110,22 @@ def test_tensor_product_export(space, backend, double_precision):
 
 
 @pytest.mark.parametrize("space", [o2, co2])
-def test_tensor_product_backend_errors(space):
+@pytest.mark.parametrize("mode", ["uuu", "uvw"])
+def test_tensor_product_cpu_fallback(space, mode):
     module = space.TensorProduct(
-        "2x1m", "2x1m", "2x0e", [(0, 0, 0, "uuu", True)], backend="cuda"
+        "2x1m", "2x1m", "2x0e", [(0, 0, 0, mode, True)], backend="cuda"
     )
-    with pytest.raises(ValueError, match="CUDA inputs"):
-        module(torch.randn(3, 4), torch.randn(3, 4))
-    module = space.TensorProduct(
-        "1m", "1m", "0e", [(0, 0, 0, "uvw", True)], backend="cuda"
+    reference = space.TensorProduct(
+        "2x1m", "2x1m", "2x0e", [(0, 0, 0, mode, True)], backend="torch"
     )
-    with pytest.raises(ValueError, match="CUDA inputs"):
-        module(torch.randn(3, 2), torch.randn(3, 2))
+    reference.load_state_dict(module.state_dict())
+    x, y = (torch.randn(3, 4, requires_grad=True) for _ in range(2))
+    actual, expected = module(x, y), reference(x, y)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.square().sum(), (x, y)),
+        torch.autograd.grad(expected.square().sum(), (x, y)),
+    )
 
 
 def test_native_compile_and_empty(double_precision):

@@ -118,7 +118,6 @@ tace-convert-lora = "tace.scripts.convert_lora:main"
 tace-convert-cgtp = "tace.scripts.convert_cgtp:main"
 tace-average = "tace.scripts.average:main"
 tace-plot-diatom = "tace.scripts.plot_diatom:main"
-tace-uspex-relax = "tace.interface.uspex.relax:main"
 
 [tool.setuptools.packages.find]
 include = [

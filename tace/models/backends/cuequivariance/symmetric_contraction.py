@@ -3,12 +3,12 @@
 import torch
 
 
-class CueSymmetricContraction(torch.nn.Module):
+class CueUuuSymmetricContraction(torch.nn.Module):
     """Evaluate a symmetric polynomial using CuEquivariance.
 
     Parameters
     ----------
-    module : equivariantx.mbe.ace.SymmetricContraction
+    module : equivariantx.mbe.ace.UuuSymmetricContraction
         Contraction supplying angular coefficients and weight ordering.
     """
 

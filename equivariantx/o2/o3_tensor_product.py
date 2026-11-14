@@ -4,6 +4,7 @@ from typing import Optional, Sequence
 import torch
 from e3nn import o3
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o2 import o3_tensor_product as torch_kernel
 from .local_frame import LocalFrame
@@ -61,7 +62,8 @@ class O3TensorProduct(torch.nn.Module):
         Share one weight vector across edges. Defaults to ``True``.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization. Defaults to ``"component"``.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Notes
@@ -97,11 +99,10 @@ class O3TensorProduct(torch.nn.Module):
         shared_weights: Optional[bool] = None,
         *,
         normalization: str = "component",
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)

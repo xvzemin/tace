@@ -6,7 +6,7 @@ import torch
 
 from ...o2.layout import irrep_layout
 from ...o2.wigner import WignerD
-from ...ops import config
+from ...ops import config, resolve_backend
 from ...ops.common.gate import gate_program
 from ...ops.common.linear import linear_program
 from ...ops.common.torch.linear import (
@@ -50,7 +50,8 @@ class UvO2TensorProductConv(torch.nn.Module):
         Attention heads, partitioning each local multiplicity.
     attention_scale, eps : float, optional
         Score normalization and shifted-softmax denominator regularization.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CUDA streams the complete non-attention convolution
         in edge tiles and recomputes intermediates for higher derivatives.
         Attention uses separate projections and a graph softmax. ``"torch"``
@@ -99,12 +100,11 @@ class UvO2TensorProductConv(torch.nn.Module):
         num_heads=1,
         attention_scale=1.0,
         eps=1e-16,
-        backend="torch",
+        backend=None,
         radial_mode="last",
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be cuda or torch.")
         self.backend = backend
         if radial_mode not in ("last", "full"):
             raise ValueError("radial_mode must be last or full.")
@@ -145,7 +145,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         )
         degree = max(f.lmax for f in (frame_in, frame_edge, frame_out) if f is not None)
         self.degree = degree
-        self.wigner = WignerD(degree, degree)
+        self.wigner = WignerD(degree, degree, backend=backend)
         self.transverse_frames = torch.nn.ModuleList(
             TransverseFrame(f, backend) if f is not None and f.basis_change else None
             for f in (frame_in, frame_edge, frame_out)

@@ -8,6 +8,7 @@ import torch
 from ..conv import O2O3TensorProductConv, O3TensorProductConv
 from ..o2.o3_tensor_product import O3TensorProduct
 from ..o2.wigner import WignerD
+from ..ops import resolve_backend
 from ..ops.common.wigner import wigner_D
 
 
@@ -106,7 +107,8 @@ class Convolution(torch.nn.Module):
         Final affine radial layer, or None for precomputed path weights.
     implementation : {"o3", "o2"}
         Direct or aligned tensor product.
-    backend : {"cuda", "torch"}
+    backend : {None, "cuda", "torch"}
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Kernel backend. CPU tensors use PyTorch.
     layout : {"mul_ir", "ir_mul"}
         Input and output feature storage.
@@ -126,13 +128,14 @@ class Convolution(torch.nn.Module):
         projection=None,
         *,
         implementation="o3",
-        backend="torch",
+        backend=None,
         layout="mul_ir",
         normalization="component",
         normalize=True,
         packed_dim=0,
         radial_mode="last",
     ):
+        backend = resolve_backend(backend)
         super().__init__()
         if implementation not in ("o3", "o2"):
             raise ValueError("implementation must be 'o3' or 'o2'.")
@@ -176,7 +179,9 @@ class Convolution(torch.nn.Module):
                 tensor_product, backend=backend, radial_mode=radial_mode
             )
             if not packed_dim:
-                self.wigner = WignerD(tensor_product.lmax, tensor_product.lmax)
+                self.wigner = WignerD(
+                    tensor_product.lmax, tensor_product.lmax, backend=backend
+                )
             self.direction_start = next(
                 (
                     section.start

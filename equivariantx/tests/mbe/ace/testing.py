@@ -5,7 +5,7 @@ import torch
 
 from equivariantx.mbe.ace import (
     IctdBilinearContraction,
-    IctdSemiCoupledSymmetricContraction,
+    IctdUuuFullyConnectedSymmetricContraction,
 )
 
 
@@ -50,9 +50,9 @@ def check_cpu_dynamic_coefficients(space, kind, monkeypatch, experts=1, dynamic=
         weight_shapes = [(3, experts, linear.weight_numel), (shared.weight_numel,)]
     else:
         cls = (
-            ace.SemiCoupledSymmetricContraction
+            ace.UuuFullyConnectedSymmetricContraction
             if space == "o3"
-            else ace.IctdSemiCoupledSymmetricContraction
+            else ace.IctdUuuFullyConnectedSymmetricContraction
         )
         module = cls([product], [linear, linear])
         weight_shapes = [(3, linear.weight_numel), (3, linear.weight_numel)]
@@ -199,7 +199,9 @@ def check_parent_provider(
         irreps, irreps, irreps, instructions, **options
     ).to(device)
     transform = (
-        torch.nn.Identity() if space == "o3" else co3.ChangeOfBasis(irreps).to(device)
+        torch.nn.Identity()
+        if space == "o3"
+        else co3.ChangeOfBasis(irreps, backend="torch").to(device)
     )
     source_dim = irreps.dim if space == "o3" else irreps.spherical().dim
     types = torch.arange(nodes, device=device) % 3
@@ -269,9 +271,9 @@ def check_parent_provider(
             for _ in range(3)
         ]
         cls = (
-            ace.SemiCoupledSymmetricContraction
+            ace.UuuFullyConnectedSymmetricContraction
             if space == "o3"
-            else ace.IctdSemiCoupledSymmetricContraction
+            else ace.IctdUuuFullyConnectedSymmetricContraction
         )
         module = cls([product, product], linears, backend="cuda").to(device)
         inputs = (
@@ -528,7 +530,7 @@ def check_ictd_contraction(kind, monkeypatch):
     else:
         first = co3.Linear(irreps, output, internal_weights=False, shared_weights=False)
         modules = [
-            IctdSemiCoupledSymmetricContraction(
+            IctdUuuFullyConnectedSymmetricContraction(
                 [tp], [first, coefficient], backend=backend
             )
             for backend in ("torch", "cuda")

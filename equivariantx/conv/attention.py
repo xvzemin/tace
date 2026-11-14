@@ -2,13 +2,14 @@
 
 import torch
 
-from ..ops.torch.conv import attention as torch_kernel
-from ..ops.precision import validate_precision
+from ..ops import resolve_backend
 from ..ops.common.recompute import Replay
+from ..ops.precision import validate_precision
+from ..ops.torch.conv import attention as torch_kernel
 
 
 def graph_softmax(
-    scores, target, num_nodes, weight=None, eps=1e-16, *, backend="torch", fused=None
+    scores, target, num_nodes, weight=None, eps=1e-16, *, backend=None, fused=None
 ):
     """Normalize attention scores over incoming edges of each node.
 
@@ -25,8 +26,9 @@ def graph_softmax(
         ``(edges, heads)``. Defaults to one.
     eps : float, optional
         Constant added to the shifted denominator. Defaults to ``1e-16``.
-    backend : {"torch", "cuda"}, optional
-        Execution provider. Defaults to ``"torch"``; CPU inputs use Torch.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        Execution provider. CPU inputs use Torch.
     fused : bool, optional
         Compatibility alias: True selects CUDA and False selects Torch.
 
@@ -50,11 +52,10 @@ def graph_softmax(
             [0.5000],
             [1.0000]])
     """
+    backend = resolve_backend(backend, scores.device)
     validate_precision((scores, weight))
     if fused is not None:
         backend = "cuda" if fused else "torch"
-    if backend not in ("torch", "cuda"):
-        raise ValueError("backend must be torch or cuda.")
     if weight is None:
         weight = scores.new_ones((scores.shape[0], 1))
     if scores.ndim != 2 or weight.ndim != 2:
@@ -107,7 +108,8 @@ class StreamingGraphAttention(Replay):
         Maximum number of edges evaluated together.
     eps : float
         Added to the denominator after shifting by the target-node maximum.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         ``"cuda"`` replays tiles during differentiation. ``"torch"`` retains
         the PyTorch online-softmax graph and uses automatic differentiation.
 
@@ -150,10 +152,9 @@ class StreamingGraphAttention(Replay):
         tile_size,
         eps,
         *,
-        backend="torch",
+        backend=None,
     ):
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
+        backend = resolve_backend(backend)
         self.backend = backend
         self.edge_function = function
         self.edge_axes = edge_axes

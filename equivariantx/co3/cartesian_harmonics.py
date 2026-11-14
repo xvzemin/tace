@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import cartesian_harmonics as torch_kernel
 from .basis import path_matrix
@@ -26,7 +27,8 @@ class CartesianHarmonics(torch.nn.Module):
     irreps_in : Irreps or str, optional
         A single vector or axial-vector representation. Defaults to 1o.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Exact Torch formulas or native low-order CUDA harmonics. Both expose
         their tensor expressions to joint compilation. CPU inputs use Torch.
 
@@ -48,11 +50,10 @@ class CartesianHarmonics(torch.nn.Module):
         normalization="integral",
         irreps_in=None,
         *,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if normalization not in ("integral", "component", "norm"):
             raise ValueError("normalization must be 'integral', 'component' or 'norm'.")

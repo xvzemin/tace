@@ -10,8 +10,8 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.conv.attention import graph_softmax
+from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.models.tace.tece_oam_rra import LocalSplit
 from equivariantx.o2.clebsch_gordan import clebsch_gordan_product
 from equivariantx.ops.common.channel_product import local_product
@@ -113,6 +113,9 @@ class Convolution(torch.nn.Module):
             [(o2.Irrep(0, 1), mul) for _, mul in self.irreps_in],
             self.irreps_in,
             [(i, i, i, "uuu", False) for i in range(len(orders))],
+            backend="cuda"
+            if acceleration_enabled("eqx", kernel="product")
+            else "torch",
         )
         expand = [
             j
@@ -142,6 +145,7 @@ class Convolution(torch.nn.Module):
             [(o2.Irrep(0, 1), self.num_gates * hidden)] if self.num_gates else [],
             [None] if self.num_gates else [],
             gated_irreps,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         widths = [
             mul * (2 if use_asymmetric_contraction else 1)
@@ -149,9 +153,17 @@ class Convolution(torch.nn.Module):
         ]
         widths[0] += self.num_gates * hidden
         self.linear_up = o2.Linear(
-            self.irreps_in, list(zip(orders, widths)), biases=True
+            self.irreps_in,
+            list(zip(orders, widths)),
+            biases=True,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
-        self.linear_down = o2.Linear(self.irreps_hidden, node_irreps, biases=True)
+        self.linear_down = o2.Linear(
+            self.irreps_hidden,
+            node_irreps,
+            biases=True,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        )
 
         first, second = [], []
         offset = 0
@@ -208,11 +220,17 @@ class Convolution(torch.nn.Module):
                 path_normalization="none",
                 internal_weights=False,
                 shared_weights=False,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="product")
+                else "torch",
             )
             self.linear_coefs = o2.Linear(
                 [self.irreps_in[0]],
                 [(o2.Irrep(0, 1), self.ece.weight_numel)],
                 biases=True,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
             )
             rows = []
             for i, index in enumerate(first):
@@ -279,12 +297,29 @@ class Convolution(torch.nn.Module):
             )
 
         if self.use_radial_rotary_attention:
-            self.query_proj = o2.Linear(node_irreps, node_irreps, biases=True)
-            self.key_proj = o2.Linear(node_irreps, node_irreps, biases=True)
+            self.query_proj = o2.Linear(
+                node_irreps,
+                node_irreps,
+                biases=True,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
+            )
+            self.key_proj = o2.Linear(
+                node_irreps,
+                node_irreps,
+                biases=True,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
+            )
             self.radial_proj = o2.Linear(
                 [(o2.Irrep(0, 1), num_radial_basis)],
                 [(o2.Irrep(0, 1), 2 * num_head)],
                 biases=True,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
             )
             torch.nn.init.zeros_(self.radial_proj.weight)
             self.attention_scale = (
@@ -789,8 +824,13 @@ class BilinearMoEACE(Product):
         if self.use_eqx:
             coef = self.coefs[1]
             self.eqx_ace = BilinearContraction(
-                self.aces[0].tp, coef.linear, getattr(coef, "num_experts", 1),
-                shared_linear=self.shared_coefs[1].linear if hasattr(self, "shared_coefs") else None,
+                self.aces[0].tp,
+                coef.linear,
+                getattr(coef, "num_experts", 1),
+                backend="cuda",
+                shared_linear=self.shared_coefs[1].linear
+                if hasattr(self, "shared_coefs")
+                else None,
             )
 
         if self.use_bilinear_gate:

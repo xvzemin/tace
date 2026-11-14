@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import basis as torch_kernel
 from .irreps import Irreps
@@ -118,7 +119,8 @@ class ChangeOfBasis(torch.nn.Module):
     inverse : bool, optional
         False embeds compact O(2) features. True extracts compact features
         and discards components outside the symmetric traceless subspace.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution provider. CUDA uses a fixed-matrix kernel with an exact
         transpose for derivatives.
 
@@ -139,10 +141,9 @@ class ChangeOfBasis(torch.nn.Module):
     >>> torch.testing.assert_close(to_spherical(tensor), x)
     """
 
-    def __init__(self, irreps, inverse=False, *, backend="torch"):
+    def __init__(self, irreps, inverse=False, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         cartesian = Irreps(irreps)
         self.inverse = inverse
@@ -167,7 +168,7 @@ class ChangeOfBasis(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        if getattr(self, "backend", "torch") == "cuda":
+        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
             from ..ops.cuda.co2 import basis as cuda_kernel
 
             return cuda_kernel.change_basis(self, features)
@@ -194,7 +195,8 @@ class Projector(torch.nn.Module):
     method : {"matrix", "factorized"}, optional
         Analytic Cartesian projection or factored path-matrix evaluation.
         Defaults to "matrix".
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CUDA uses the analytic Cartesian projector.
 
     Examples
@@ -207,13 +209,12 @@ class Projector(torch.nn.Module):
     >>> torch.testing.assert_close(result, expected)
     """
 
-    def __init__(self, irreps, *, method="matrix", backend="torch"):
+    def __init__(self, irreps, *, method="matrix", backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
         if method not in ("matrix", "factorized"):
             raise ValueError("method must be 'matrix' or 'factorized'.")
         self.method = method
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         if backend == "cuda" and method != "matrix":
             raise ValueError("The CUDA projector requires method='matrix'.")
         self.backend = backend
@@ -244,7 +245,7 @@ class Projector(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        if self.backend == "cuda":
+        if self.backend == "cuda" and features.is_cuda:
             from ..ops.cuda.co2 import basis as cuda_kernel
 
             return cuda_kernel.project(self, features)

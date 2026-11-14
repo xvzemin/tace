@@ -12,18 +12,27 @@ from equivariantx.o2.rotation_matrix import rotation_matrix_to_y_axis
 from equivariantx.ops.common.radial import materialize
 from tace.models.layout import LayoutTransform
 from tace.models.spherical.tece_oam_rra import Convolution
+from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
 
 class RotationMatrices(torch.nn.Module):
     """Return proper alignment matrices for Cartesian tensor contractions."""
 
+    def __init__(self):
+        super().__init__()
+        self.backend = (
+            "cuda" if acceleration_enabled("eqx", kernel="conv") else "torch"
+        )
+
     def forward(self, vectors):
-        rotation = rotation_matrix_to_y_axis(vectors)
+        backend = self.backend if vectors.is_cuda else "torch"
+        rotation = rotation_matrix_to_y_axis(vectors, backend=backend)
         return rotation, rotation
 
     def forward_packed(self, vectors):
-        return rotation_matrix_to_y_axis(vectors)
+        backend = self.backend if vectors.is_cuda else "torch"
+        return rotation_matrix_to_y_axis(vectors, backend=backend)
 
 
 def linear(module):
@@ -39,6 +48,7 @@ def linear(module):
             for j in range(len(module.irreps_out))
         ],
         path_normalization=module.path_normalization,
+        backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
     )
     result.weight, result.bias = module.weight, module.bias
     return result
@@ -52,6 +62,7 @@ def gate(module):
         module.irreps_gates,
         [None] * len(module.act_gates.acts),
         module.irreps_gated,
+        backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
     )
     result.act_scalars, result.act_gates = module.act_scalars, module.act_gates
     result._paths = module._paths
@@ -121,12 +132,21 @@ class UuConvolution(torch.nn.Module):
             co3.Irreps(reference.irreps_in),
             co3.Irreps(reference.irreps_out),
         )
-        self.local_frame_in = co2.LocalFrame(self.irreps_in, reference.mmax)
-        self.local_frame_out = co2.LocalFrame(self.irreps_out, reference.mmax)
+        self.local_frame_in = co2.LocalFrame(
+            self.irreps_in,
+            reference.mmax,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
+        self.local_frame_out = co2.LocalFrame(
+            self.irreps_out,
+            reference.mmax,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.linear = co2.UuLinear(
             self.local_frame_in.irreps_out,
             self.local_frame_out.irreps_out,
             reference.num_channel,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.weight_numel = reference.weight_numel
         self.eqx_tp = None
@@ -174,8 +194,16 @@ class UvConvolution(torch.nn.Module):
             co3.Irreps(reference.irreps_in),
             co3.Irreps(reference.irreps_out),
         )
-        self.local_frame_in = co2.LocalFrame(self.irreps_in, reference.mmax)
-        self.local_frame_out = co2.LocalFrame(self.irreps_out, reference.mmax)
+        self.local_frame_in = co2.LocalFrame(
+            self.irreps_in,
+            reference.mmax,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
+        self.local_frame_out = co2.LocalFrame(
+            self.irreps_out,
+            reference.mmax,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.node_irreps = self.local_frame_in.irreps_out
         self.linear_up, self.linear_down = (
             linear(reference.linear_up),
@@ -189,7 +217,11 @@ class UvConvolution(torch.nn.Module):
         if hasattr(reference, "magnetic_edge_irreps"):
             self.magnetic_edge_irreps = co3.Irreps(reference.magnetic_edge_irreps)
             self.magnetic_frame = co2.LocalFrame(
-                self.magnetic_edge_irreps, reference.mmax
+                self.magnetic_edge_irreps,
+                reference.mmax,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="conv")
+                else "torch",
             )
         self.attention = (
             RadialAttention(reference.attention)
@@ -287,8 +319,14 @@ class UvTensorProduct(torch.nn.Module):
             co3.Irreps(reference.irreps_in),
             co3.Irreps(reference.irreps_out),
         )
-        self.local_frame_in = co2.LocalFrame(self.irreps_in)
-        self.local_frame_out = co2.LocalFrame(self.irreps_out)
+        self.local_frame_in = co2.LocalFrame(
+            self.irreps_in,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
+        self.local_frame_out = co2.LocalFrame(
+            self.irreps_out,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.linear_up, self.linear_down = (
             linear(reference.linear_up),
             linear(reference.linear_down),
@@ -319,21 +357,44 @@ class RadialRotaryConvolution(Convolution):
 
     def setup_cartesian(self):
         self.local_frame_in = co2.LocalFrame(
-            [(2 * mul, ir) for mul, ir in self.reshape_in.irreps], self.mmax
+            [(2 * mul, ir) for mul, ir in self.reshape_in.irreps],
+            self.mmax,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
         )
-        self.local_frame_out = co2.LocalFrame(self.reshape_out.irreps, self.mmax)
+        self.local_frame_out = co2.LocalFrame(
+            self.reshape_out.irreps,
+            self.mmax,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.to_circular = co2.ChangeOfBasis(
-            self.local_frame_in.irreps_out, inverse=True
+            self.local_frame_in.irreps_out,
+            inverse=True,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
         )
-        self.from_circular = co2.ChangeOfBasis(self.local_frame_out.irreps_out)
+        self.from_circular = co2.ChangeOfBasis(
+            self.local_frame_out.irreps_out,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.register_buffer(
             "inverse_scale", inverse_scale(self.local_frame_out), persistent=False
         )
-        self.to_spherical = co3.ChangeOfBasis(self.reshape_in.irreps, inverse=True)
-        self.from_spherical = co3.ChangeOfBasis(self.reshape_out.irreps)
+        self.to_spherical = co3.ChangeOfBasis(
+            self.reshape_in.irreps,
+            inverse=True,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
+        self.from_spherical = co3.ChangeOfBasis(
+            self.reshape_out.irreps,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.stream_reshape_in = LayoutTransform(self.reshape_in.irreps.spherical())
         self.stream_reshape_out = LayoutTransform(self.reshape_out.irreps.spherical())
-        self.wigner = o2.WignerD(self.lmax, self.lmax, method="recursive")
+        self.wigner = o2.WignerD(
+            self.lmax,
+            self.lmax,
+            method="recursive",
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
 
     def prepare_stream(self, features, rotation, rotation_inv):
         """Convert node tensors and alignment matrices to the compact kernel layout."""

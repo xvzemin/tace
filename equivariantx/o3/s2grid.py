@@ -6,6 +6,7 @@ import torch
 from e3nn import o3
 from scipy.integrate import lebedev_rule
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o3 import s2grid as torch_kernel
 from .rotation import so3_generators
@@ -80,7 +81,8 @@ class S2Grid(torch.nn.Module):
         respectively. ``"integral"`` uses surface-orthonormal harmonics.
     quadrature : {"lebedev", "gauss_legendre", "equiangular"}, optional
         Sphere integration rule. Defaults to ``"lebedev"``.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Buffer dtype. Defaults to the default floating-point dtype.
@@ -125,13 +127,12 @@ class S2Grid(torch.nn.Module):
         *,
         normalization="component",
         quadrature="lebedev",
-        backend="torch",
+        backend=None,
         dtype=None,
         device=None,
     ):
+        backend = resolve_backend(backend, device)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if not isinstance(lmax, int) or lmax < 0:
             raise ValueError("lmax must be a non-negative integer.")

@@ -1,24 +1,27 @@
-"""MACE symmetric-contraction conversion."""
+"""MACE uuu symmetric-contraction conversion."""
 
 import torch
 
-from ...mbe.ace import SymmetricContraction as PolynomialContraction
+from ...mbe.ace import UuuSymmetricContraction as PolynomialContraction
+from ...ops import resolve_backend
 
 
-class SymmetricContraction(torch.nn.Module):
+class UuuSymmetricContraction(torch.nn.Module):
     """Preserve MACE coefficients while replacing their polynomial evaluation.
 
     Parameters
     ----------
     module : torch.nn.Module
         MACE or CuEquivariance symmetric contraction.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend.
     layout : {"mul_ir", "ir_mul"}, optional
         Output layout used by the following MACE Linear.
     """
 
-    def __init__(self, module, backend="torch", layout="mul_ir"):
+    def __init__(self, module, backend=None, layout="mul_ir"):
+        backend = resolve_backend(backend)
         super().__init__()
         self.indexed = not hasattr(module, "contractions")
         self.irreps_in = module.irreps_in

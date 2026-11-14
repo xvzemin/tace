@@ -5,12 +5,12 @@ import math
 import torch
 from e3nn import o3
 
-from ...ops import config
-from ...ops.torch.o3.cgtp import convolution as torch_kernel
+from ...ops import config, resolve_backend
+from ...ops.common.radial import cast_radial, radial_features
 from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...ops.common.torch.tensor_product import instruction_groups
 from ...ops.precision import validate_module_precision
-from ...ops.common.radial import cast_radial, radial_features
+from ...ops.torch.o3.cgtp import convolution as torch_kernel
 
 
 class O3TensorProductConv(torch.nn.Module):
@@ -21,7 +21,8 @@ class O3TensorProductConv(torch.nn.Module):
     tensor_product : e3nn.o3.TensorProduct
         Defines the irreps, instructions and normalization. Only ``uvu``
         instructions are supported. Weights are supplied to :meth:`forward`.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA contractions in float32 or float64, or PyTorch operations.
         CPU tensors use PyTorch. Both backends support higher derivatives.
     normalization : {"component", "integral", "norm"}, optional
@@ -62,15 +63,14 @@ class O3TensorProductConv(torch.nn.Module):
         self,
         tensor_product,
         *,
-        backend="torch",
+        backend=None,
         normalization="component",
         normalize=True,
         batch_paths=False,
         radial_mode="last",
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be torch or cuda.")
         if any(ins.connection_mode != "uvu" for ins in tensor_product.instructions):
             raise NotImplementedError(
                 "O3TensorProductConv supports only 'uvu' instructions."

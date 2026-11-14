@@ -50,6 +50,7 @@ def test_o2_asymmetric_contraction_is_equivariant(algorithm, reflected):
         "2x0e+2x0o+2x1m+2x2m",
         2,
         algorithm=algorithm,
+        backend="torch" if algorithm == "dense" else None,
     ).to(DEVICE, DTYPE)
     inputs = [
         module.irreps_in.randn(4, -1, dtype=DTYPE, device=DEVICE) for _ in range(2)
@@ -94,7 +95,7 @@ def test_o2_contraction_preserves_time_parity(backend, symmetric):
 def test_symmetric_contraction_algorithms(parity, correlation, double_precision):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     irreps = o2.Irreps("2x0e+2x0o+2x1m+2x2m" if parity else "2x0e+2x1m+2x2m")
-    module = o2.SymmetricContraction(irreps, irreps, correlation).to(device)
+    module = o2.SymmetricContraction(irreps, irreps, correlation, backend="torch").to(device)
     x = torch.randn(4, irreps.dim, device=device, requires_grad=True)
     weight = torch.randn(4, module.weight_numel, device=device, requires_grad=True)
     expected = module(x, weight)
@@ -138,7 +139,7 @@ def test_contraction_backends(symmetric, path_mode, dtype, backend):
         pytest.skip("CUDA is unavailable")
     cls = o2.SymmetricContraction if symmetric else o2.AsymmetricContraction
     args = ("2x0e+2x0o+2x1m", "2x0e+2x0o+2x1m+2x2m", 3)
-    reference = cls(*args, algorithm="dense", path_mode=path_mode).to(DEVICE, dtype)
+    reference = cls(*args, algorithm="dense", path_mode=path_mode, backend="torch").to(DEVICE, dtype)
     module = cls(*args, algorithm="recursive", path_mode=path_mode, backend=backend).to(
         DEVICE, dtype
     )
@@ -201,7 +202,7 @@ def test_contraction_high_orders_and_broadcast(backend, empty):
         .float()
         .double()
     )
-    reference = o2.AsymmetricContraction(*args, algorithm="dense").to(
+    reference = o2.AsymmetricContraction(*args, algorithm="dense", backend="torch").to(
         DEVICE, torch.float64
     )
     inputs = [
@@ -247,7 +248,7 @@ def test_staged_sparse_contraction(backend, symmetric, path_mode, monkeypatch):
         .float()
         .double()
     )
-    ordinary = cls(*args, algorithm="dense", path_mode=path_mode).to(device).double()
+    ordinary = cls(*args, algorithm="dense", path_mode=path_mode, backend="torch").to(device).double()
     x = (
         torch.randn(2, 4, 6, dtype=torch.float64, device=device)[..., ::2] * 0.2
     ).requires_grad_()

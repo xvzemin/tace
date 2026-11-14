@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ...ops import resolve_backend
 from ...ops.torch.o3.gtp import tensor_product as torch_kernel
 from ..s2grid import S2Grid
 from ..tensor_product import FactorizedTensorProduct
@@ -33,7 +34,8 @@ class GauntTensorProduct(FactorizedTensorProduct):
     method : {"quadrature", "coefficients"}, optional
         Exact-degree sphere quadrature or direct coefficient contraction.
         Defaults to ``"quadrature"``.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Differentiable Torch or native sparse angular kernels.
 
     Notes
@@ -65,8 +67,9 @@ class GauntTensorProduct(FactorizedTensorProduct):
         internal_weights=None,
         shared_weights=None,
         method="quadrature",
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__(
             irreps_in1,
             irreps_in2,

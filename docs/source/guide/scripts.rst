@@ -241,8 +241,10 @@ current directory:
      -u atomic_energy scale shift
 
 Available update fields are ``atomic_energy``, ``scale``, and ``shift``. The
-result is written to ``new_statistics.pt``. Verify that every statistics file
-uses the same element order and fidelity indexing as the model.
+result is written to ``new_statistics.pt``. Element keys are chemical symbols
+or atomic numbers; their order does not matter. Unspecified elements and
+fidelities are unchanged. Unknown elements and fidelity indices are rejected.
+Update the original model before re-exporting an AOTI package.
 
 ``tace-average``
 ~~~~~~~~~~~~~~~~

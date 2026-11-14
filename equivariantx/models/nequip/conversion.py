@@ -5,6 +5,7 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
+from ...ops import resolve_backend
 from ...utils.module import convert_modules, default_dtype
 from ..convolution import Convolution, RadialFeatures, harmonic_convention
 
@@ -21,7 +22,7 @@ class TensorProductScatter(Convolution):
 
 
 def convert_nequip_to_eqx(
-    model, *, implementation="o3", inplace=False, backend="torch", stream_radial=False
+    model, *, implementation="o3", inplace=False, backend=None, stream_radial=False
 ):
     """Replace NequIP interactions with streamed radial convolutions.
 
@@ -33,8 +34,9 @@ def convert_nequip_to_eqx(
         Direct or aligned tensor product. Defaults to "o3".
     inplace : bool, optional
         Modify the model instead of returning a copy.
-    backend : {"cuda", "torch"}, optional
-        Convolution backend. Defaults to optimized PyTorch on either device.
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        Convolution backend.
     stream_radial : bool, optional
         Fuse the complete radial MLP when True. Defaults to False: evaluate
         hidden layers with PyTorch and fuse only the final projection.
@@ -56,6 +58,7 @@ def convert_nequip_to_eqx(
 
         model = convert_nequip_to_eqx(model, implementation="o3")
     """
+    backend = resolve_backend(backend)
     if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
         raise ValueError(
             "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."

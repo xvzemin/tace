@@ -6,10 +6,11 @@ import torch
 from e3nn import o3
 
 from ...o2.wigner import WignerD
+from ...ops import resolve_backend
 from ...ops.common.wigner import wigner_D
 from ...utils.module import copy_model, default_dtype
 from ..convolution import Convolution, RadialFeatures
-from .product import SymmetricContraction
+from .symmetric_contraction import UuuSymmetricContraction
 
 __all__ = ["convert_mace_to_eqx"]
 
@@ -29,7 +30,7 @@ class FrameAttributes(torch.nn.Module):
         self.normalization = harmonics.normalization
         self.normalize = harmonics.normalize
         self._lmax = harmonics._lmax
-        self.wigner = WignerD(lmax, lmax)
+        self.wigner = WignerD(lmax, lmax, backend=backend)
         self.packed_dim = sum((2 * ell + 1) ** 2 for ell in range(lmax + 1))
         self.register_buffer(
             "degrees",
@@ -53,7 +54,7 @@ def convert_mace_to_eqx(
     implementation="o3",
     enable_cueq=False,
     inplace=False,
-    backend="torch",
+    backend=None,
     stream_radial=False,
 ):
     """Replace MACE convolutions and symmetric contractions with EQX operations.
@@ -74,8 +75,9 @@ def convert_mace_to_eqx(
         Modify the supplied model. Defaults to False, returning an independent
         copy. Enabling cuEquivariance may construct a new model even when
         this is True.
-    backend : {"cuda", "torch"}, optional
-        Operator backend. Defaults to optimized PyTorch on either device.
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        Operator backend.
         Select "cuda" for native CUDA kernels.
     stream_radial : bool, optional
         Fuse the complete radial MLP when True. Defaults to False: evaluate
@@ -115,13 +117,12 @@ def convert_mace_to_eqx(
         model = convert_mace_to_eqx(model.cuda())
         calculator = MACECalculator(models=model, device="cuda")
     """
+    backend = resolve_backend(backend)
     from mace.modules.irreps_tools import tp_out_irreps_with_instructions
     from mace.modules.wrapper_ops import get_layout
 
     if implementation not in ("o3", "o2"):
         raise ValueError("implementation must be 'o3' or 'o2'.")
-    if backend not in ("cuda", "torch"):
-        raise ValueError("backend must be 'cuda' or 'torch'.")
     if not hasattr(model, "spherical_harmonics") or not hasattr(model, "interactions"):
         raise TypeError("Expected a MACE model with spatial interactions.")
     converted = [isinstance(layer.conv_tp, Convolution) for layer in model.interactions]
@@ -136,7 +137,7 @@ def convert_mace_to_eqx(
                 "Convert the original model to select another implementation."
             )
         if any(
-            not isinstance(block.symmetric_contractions, SymmetricContraction)
+            not isinstance(block.symmetric_contractions, UuuSymmetricContraction)
             for block in model.products
         ):
             raise ValueError("The model contains unconverted symmetric contractions.")
@@ -245,7 +246,7 @@ def convert_mace_to_eqx(
             layer.conv_fusion = True
         model.spherical_harmonics = attributes
         for block in model.products:
-            block.symmetric_contractions = SymmetricContraction(
+            block.symmetric_contractions = UuuSymmetricContraction(
                 block.symmetric_contractions,
                 backend,
                 layout=get_layout(getattr(block, "cueq_config", None)),

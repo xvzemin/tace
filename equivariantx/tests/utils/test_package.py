@@ -101,12 +101,15 @@ from equivariantx import o2
 torch.set_default_dtype(torch.float64)
 torch.manual_seed(0)
 device = sys.argv[1]
+if device == "cpu":
+    sys.modules["triton"] = None
 tp = o2.O3TensorProduct(
     "2x1o", "1o", "2x0e+2x1e+2x2e",
     [(0, 0, i, "uvu", True) for i in range(3)],
     internal_weights=False, shared_weights=False,
+    backend="torch",
 ).to(device)
-frame = o2.WignerD(2, 2, method="recursive").to(device)
+frame = o2.WignerD(2, 2, method="recursive", backend="torch").to(device)
 x = torch.randn(3, 6, device=device, requires_grad=True)
 vectors = torch.randn(4, 3, device=device, requires_grad=True)
 weights = torch.randn(4, tp.weight_numel, device=device, requires_grad=True)

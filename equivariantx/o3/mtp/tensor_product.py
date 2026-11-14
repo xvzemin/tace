@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ...ops import resolve_backend
 from ...ops.torch.o3.mtp import tensor_product as torch_kernel
 from ..tensor_product import FactorizedTensorProduct
 
@@ -30,7 +31,8 @@ class MatrixTensorProduct(FactorizedTensorProduct):
     matrix_degree : int, optional
         Auxiliary angular degree. Matrices have size ``2 * matrix_degree + 1``.
         Defaults to half the largest requested degree, rounded up.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Differentiable Torch or native sparse angular kernels.
 
     Notes
@@ -62,8 +64,9 @@ class MatrixTensorProduct(FactorizedTensorProduct):
         internal_weights=None,
         shared_weights=None,
         matrix_degree=None,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__(
             irreps_in1,
             irreps_in2,

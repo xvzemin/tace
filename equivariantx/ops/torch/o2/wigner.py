@@ -45,7 +45,9 @@ def packed(module, vectors, method):
     return torch.cat(
         [
             value.flatten(1)
-            for value in module.from_matrix(rotation_matrix_to_y_axis(vectors))
+            for value in module.from_matrix(
+                rotation_matrix_to_y_axis(vectors, backend="torch")
+            )
         ],
         dim=1,
     )

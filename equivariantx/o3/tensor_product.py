@@ -5,6 +5,7 @@ import math
 import torch
 from e3nn import o3
 
+from ..ops import resolve_backend
 from ..ops.common.sparse_coefficients import bilinear_tables
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o3 import tensor_product as torch_kernel
@@ -46,11 +47,10 @@ class FactorizedTensorProduct(torch.nn.Module):
         irrep_normalization,
         internal_weights,
         shared_weights,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)
@@ -300,7 +300,7 @@ class FactorizedTensorProduct(torch.nn.Module):
             raise ValueError("Weights must end with weight_numel.")
         if self.shared_weights and weight.ndim != 1:
             raise ValueError("Shared weights must be one-dimensional.")
-        if getattr(self, "backend", "torch") == "cuda":
+        if getattr(self, "backend", "torch") == "cuda" and x.is_cuda:
             from ..ops.cuda.o3 import tensor_product as cuda_kernel
 
             return cuda_kernel.evaluate(self, x, y, weight)
@@ -318,11 +318,7 @@ class TensorProductConv(torch.nn.Module):
 
     def __init__(self, tensor_product, *, backend=None, radial_mode="last"):
         super().__init__()
-        backend = (
-            getattr(tensor_product, "backend", "torch") if backend is None else backend
-        )
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
+        backend = resolve_backend(backend)
         if radial_mode not in ("last", "full"):
             raise ValueError("radial_mode must be last or full.")
         self.backend, self.radial_mode = backend, radial_mode
@@ -430,7 +426,7 @@ class TensorProductConv(torch.nn.Module):
         ):
             raise ValueError("Weights must match weight_numel and shared_weights.")
         kernel = torch_kernel
-        if self.backend == "cuda":
+        if self.backend == "cuda" and features.is_cuda:
             from ..ops.cuda.o3 import tensor_product as kernel
 
         return kernel.convolve(

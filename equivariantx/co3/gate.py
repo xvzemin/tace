@@ -3,8 +3,9 @@
 import torch
 from e3nn.nn import Activation as ScalarActivation
 
-from ..ops.torch.co3 import gate as torch_kernel
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co3 import gate as torch_kernel
 from .ictd import ElementwiseTensorProduct
 from .irreps import Irreps
 
@@ -61,7 +62,8 @@ class Gate(torch.nn.Module):
         One normalized activation per gate entry.
     irreps_gated : Irreps or str
         Symmetric traceless tensors multiplied by the activated gates.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Unsupported activations and CPU inputs use PyTorch.
 
     Examples
@@ -80,11 +82,10 @@ class Gate(torch.nn.Module):
         irreps_gates,
         act_gates,
         irreps_gated,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be cuda or torch.")
         self.backend = backend
         self.act_scalars = Activation(irreps_scalars, act_scalars)
         self.act_gates = Activation(irreps_gates, act_gates)

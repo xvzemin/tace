@@ -5,8 +5,9 @@ import math
 import torch
 from e3nn.nn import Gate as E3nnGate
 
-from ..ops.torch.o3 import gate as torch_kernel
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o3 import gate as torch_kernel
 
 
 class Gate(E3nnGate):
@@ -24,7 +25,8 @@ class Gate(E3nnGate):
         Activation for each gate term.
     irreps_gated : o3.Irreps
         Representations multiplied by the gates, one gate per multiplicity.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses supported activations and products. CPU inputs and
         unsupported activations use torch operations.
 
@@ -44,13 +46,12 @@ class Gate(E3nnGate):
         irreps_gates,
         act_gates,
         irreps_gated,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__(
             irreps_scalars, act_scalars, irreps_gates, act_gates, irreps_gated
         )
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be 'cuda' or 'torch'")
         self.backend = backend
         self.input_dim = self.irreps_in.dim
         self.output_dim = self.irreps_out.dim

@@ -91,8 +91,11 @@ def test_change_basis_legacy_and_precision():
     check_method_precision(layer, [("forward", (value,), {})])
     with pytest.raises(ValueError, match="backend"):
         co3.ChangeOfBasis("2e", backend="invalid")
-    with pytest.raises(ValueError, match="CUDA inputs"):
-        co3.ChangeOfBasis("2e", backend="cuda")(torch.randn(3, 5))
+    features = torch.randn(3, 5)
+    torch.testing.assert_close(
+        co3.ChangeOfBasis("2e", backend="cuda")(features),
+        co3.ChangeOfBasis("2e", backend="torch")(features),
+    )
 
 
 @pytest.mark.parametrize("inverse", [False, True])

@@ -7,8 +7,9 @@ from e3nn import o3
 
 from equivariantx import o3 as eqx_o3
 
-from ...ops.torch.mbe.ace import bilinear as torch_kernel
+from ...ops import resolve_backend
 from ...ops.precision import validate_module_precision
+from ...ops.torch.mbe.ace import bilinear as torch_kernel
 from ...utils.metadata import encode_plans
 
 
@@ -25,7 +26,8 @@ class BilinearContraction(torch.nn.Module):
         irreps may simplify adjacent product outputs.
     num_experts : int, optional
         Number of independent channel groups within each linear input irrep.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses the product, gate and coefficient contraction without
         storing product features or per-node coefficient matrices.
     shared_linear : o3.Linear, optional
@@ -60,11 +62,10 @@ class BilinearContraction(torch.nn.Module):
     """
 
     def __init__(
-        self, tensor_product, linear, num_experts=1, backend="torch", shared_linear=None
+        self, tensor_product, linear, num_experts=1, backend=None, shared_linear=None
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be 'cuda' or 'torch'")
         if any(
             ins.connection_mode != "uuu" or not ins.has_weight
             for ins in tensor_product.instructions
@@ -79,7 +80,7 @@ class BilinearContraction(torch.nn.Module):
             raise ValueError("Coefficient inputs must match the product output.")
         self.backend = backend
         self.tensor_products = (tensor_product,)
-        self.coefficients = eqx_o3.MoEElementLinear(linear, num_experts)
+        self.coefficients = eqx_o3.MoEElementLinear(linear, num_experts, backend="torch")
         self.input_dim = tensor_product.irreps_in1.dim
         self.base_dim = tensor_product.irreps_in2.dim
         self.output_dim = self.contraction_dim = linear.irreps_out.dim * num_experts

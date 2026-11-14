@@ -222,7 +222,7 @@ PARAMETER_RULES = {
         "weight1": "packed",
         "weight2": "packed",
     },
-    "equivariantx.models.mace.product.SymmetricContraction": {
+    "equivariantx.models.mace.symmetric_contraction.UuuSymmetricContraction": {
         "weight": "batched_matrix",
         "contractions.*.weights_max": "batched_matrix",
         "contractions.*.weights.*": "batched_matrix",

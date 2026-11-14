@@ -3,9 +3,10 @@
 import torch
 from e3nn import o3
 
+from ...ops import resolve_backend
 from ...ops.common.torch.spherical_product import SphericalProduct
-from ...ops.torch.o3.cgtp import tensor_product as torch_kernel
 from ...ops.precision import validate_module_precision
+from ...ops.torch.o3.cgtp import tensor_product as torch_kernel
 
 __all__ = [
     "TensorProduct",
@@ -25,7 +26,8 @@ class TensorProduct(o3.TensorProduct):
     instructions : sequence of tuple
         ``(input1, input2, output, mode, train[, path_weight])`` paths.
         Supports all e3nn connection modes, including triangular pairs.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Torch retains the generated GEMM schedule for wide channel maps.
         CUDA uses native sparse angular products followed by channel GEMMs.
     **kwargs
@@ -45,11 +47,10 @@ class TensorProduct(o3.TensorProduct):
         irreps_out,
         instructions,
         *args,
-        backend="torch",
+        backend=None,
         **kwargs,
     ):
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
+        backend = resolve_backend(backend)
         super().__init__(
             irreps_in1, irreps_in2, irreps_out, instructions, *args, **kwargs
         )
@@ -76,7 +77,7 @@ class TensorProduct(o3.TensorProduct):
         supplied_weight = weight is not None
         weight = self._get_weights(weight)
         validate_module_precision(self, (weight,))
-        if self.backend == "cuda":
+        if self.backend == "cuda" and x.is_cuda:
             from ...ops.cuda.o3.cgtp import tensor_product as cuda_kernel
 
             return cuda_kernel.evaluate(self, x, y, weight, supplied_weight)

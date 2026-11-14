@@ -1,10 +1,10 @@
-"""Functional derivatives of native semi-coupled contractions."""
+"""Functional derivatives of uuu fully connected symmetric contractions."""
 
 import pytest
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import SemiCoupledSymmetricContraction
+from equivariantx.mbe.ace import UuuFullyConnectedSymmetricContraction
 from equivariantx.tests.ops.testing import assert_functional_derivatives
 
 
@@ -25,7 +25,7 @@ def test_functional_derivatives(compiler, double_precision):
         for _ in range(3)
     ]
     module, reference = [
-        SemiCoupledSymmetricContraction([product, product], linears, backend).cuda()
+        UuuFullyConnectedSymmetricContraction([product, product], linears, backend).cuda()
         for backend in ("cuda", "torch")
     ]
     values = (

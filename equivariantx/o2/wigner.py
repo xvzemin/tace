@@ -3,8 +3,9 @@ import math
 import torch
 from e3nn import o3
 
-from ..ops.torch.o2 import wigner as torch_kernel
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import wigner as torch_kernel
 
 
 class WignerD(torch.nn.Module):
@@ -20,8 +21,9 @@ class WignerD(torch.nn.Module):
         ``"auto"`` uses direct quaternion polynomials on the CUDA backend
         and recursive contractions on Torch. Both explicit methods support
         Torch and CUDA execution.
-    backend : {"torch", "cuda"}, optional
-        Defaults to Torch. CPU inputs always use Torch operations.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        CPU inputs always use Torch operations.
 
     Examples
     --------
@@ -42,8 +44,9 @@ class WignerD(torch.nn.Module):
         lmax: int,
         *,
         method: str = "auto",
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
 
         if not isinstance(lmax, int):
@@ -60,8 +63,6 @@ class WignerD(torch.nn.Module):
         self.mmax = mmax
         self.lmax = lmax
         self.method = method
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
 
         for l in range(2, self.lmax + 1):

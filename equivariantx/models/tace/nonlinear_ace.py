@@ -5,15 +5,15 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
-from ...mbe.ace.ictd_semi_coupled import coupling_entries
 from ...co3 import Projector
+from ...mbe.ace.ictd_symmetric_contraction import coupling_entries
 from ...ops.common.edge import evaluate
 from ...utils.program import Program, activate
 
 
 @lru_cache(maxsize=None)
 def projector_matrix(degree):
-    projector = Projector([(1, (degree, (-1) ** degree))]).double()
+    projector = Projector([(1, (degree, (-1) ** degree))], backend="torch").double()
     return projector(torch.eye(3**degree, dtype=torch.float64, device="cpu"))
 
 

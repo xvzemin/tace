@@ -1,7 +1,8 @@
 import torch
 
-from ..ops.torch.o2 import circular_harmonics as torch_kernel
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision, validate_precision
+from ..ops.torch.o2 import circular_harmonics as torch_kernel
 from .irreps import Irrep, Irreps
 
 
@@ -10,7 +11,7 @@ def circular_harmonics(
     mmax: int,
     *,
     normalize: bool = True,
-    backend: str = "torch",
+    backend: str | None = None,
 ) -> torch.Tensor:
     """Evaluate real circular harmonics through order ``mmax``.
 
@@ -24,7 +25,8 @@ def circular_harmonics(
         Normalize each nonzero vector before constructing the harmonics. If
         ``False``, order ``m`` is homogeneous of degree ``m`` in the input.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Torch recurrence or native CUDA expression. CPU inputs use Torch.
 
     Returns
@@ -34,6 +36,7 @@ def circular_harmonics(
         ``0ee`` through ``mmax``. Every positive-order entry stores its real
         cosine and sine components in that order.
     """
+    backend = resolve_backend(backend, input.device)
     if not isinstance(mmax, int):
         raise TypeError("mmax must be an integer.")
     if mmax < 0:
@@ -45,8 +48,6 @@ def circular_harmonics(
         )
 
     validate_precision((input,))
-    if backend not in ("torch", "cuda"):
-        raise ValueError("backend must be torch or cuda.")
     if backend == "cuda" and input.is_cuda:
         from ..ops.cuda.o2 import circular_harmonics as cuda_kernel
 
@@ -68,7 +69,8 @@ class CircularHarmonics(torch.nn.Module):
         If ``True``, treat the input vector as time odd. Order ``m`` then has
         time parity ``(-1)**m``.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend; joint compilation exposes exact tensor algebra.
 
     Notes
@@ -91,11 +93,10 @@ class CircularHarmonics(torch.nn.Module):
         *,
         normalize: bool = True,
         time_reversal: bool = False,
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if not isinstance(mmax, int):
             raise TypeError("mmax must be an integer.")

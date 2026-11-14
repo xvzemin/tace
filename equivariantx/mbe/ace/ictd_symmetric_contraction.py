@@ -1,10 +1,12 @@
-"""ICTD symmetric contractions with linear channel mixing."""
+"""ICTD uuu symmetric contractions with fully connected coefficient maps."""
 
 import math
 
 from ...co3 import ChangeOfBasis, Linear, Projector
 from ...conv.co3.polynomials import coupling_coefficients
-from .semi_coupled import SemiCoupledSymmetricContraction
+from ...ops import resolve_backend
+from ...ops.torch.mbe.ace import ictd_symmetric_contraction as torch_kernel
+from .symmetric_contraction import UuuFullyConnectedSymmetricContraction
 
 
 def coupling_entries(tensor_product, index):
@@ -39,7 +41,7 @@ def cartesian_coefficient(linear):
     )
 
 
-class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
+class IctdUuuFullyConnectedSymmetricContraction(UuuFullyConnectedSymmetricContraction):
     """Evaluate ICTD products and element-dependent coefficient maps.
 
     Parameters
@@ -50,7 +52,8 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
         External-weight coefficient maps, including the order-one term.
         All maps must use the same ``output_basis``; Cartesian and spherical
         outputs are supported without changing the coefficient weights.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU inputs use PyTorch.
 
     Notes
@@ -68,7 +71,7 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
     >>> linears = [co3.Linear(layout, "2x2e", internal_weights=False,
     ...                       shared_weights=False, output_basis="spherical")
     ...            for layout in (irreps, tp.irreps_out)]
-    >>> layer = ace.IctdSemiCoupledSymmetricContraction(
+    >>> layer = ace.IctdUuuFullyConnectedSymmetricContraction(
     ...     [tp], linears, backend="torch"
     ... )
     >>> weights = [torch.randn(2, linear.weight_numel) for linear in linears]
@@ -79,7 +82,8 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
 
     coupling_entries = staticmethod(coupling_entries)
 
-    def __init__(self, tensor_products, linears, backend="torch"):
+    def __init__(self, tensor_products, linears, backend=None):
+        backend = resolve_backend(backend)
         linears = tuple(linears)
         if len({linear.output_basis for linear in linears}) > 1:
             raise ValueError("Coefficient maps must use the same output basis.")
@@ -88,9 +92,9 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
             [cartesian_coefficient(linear) for linear in linears],
             backend,
         )
-        self.projection = Projector(self.linears[0].irreps_out)
+        self.projection = Projector(self.linears[0].irreps_out, backend=backend)
         self.output_transform = (
-            ChangeOfBasis(self.linears[0].irreps_out, inverse=True)
+            ChangeOfBasis(self.linears[0].irreps_out, inverse=True, backend=backend)
             if linears[0].output_basis == "spherical"
             else None
         )
@@ -99,12 +103,24 @@ class IctdSemiCoupledSymmetricContraction(SemiCoupledSymmetricContraction):
     def forward(self, features, weights, node_type):
         """Return indexed coefficients in the declared output basis."""
         output = super().forward(features, weights, node_type)
-        return (
-            output if self.output_transform is None else self.output_transform(output)
-        )
+        if self.output_transform is None:
+            return output
+        if self.backend == "cuda" and output.is_cuda:
+            from ...ops.cuda.mbe.ace import ictd_symmetric_contraction as cuda_kernel
+
+            return cuda_kernel.change_basis(self.output_transform, output)
+        return torch_kernel.change_basis(self.output_transform, output)
+
+    def project(self, projection, features):
+        """Apply the Cartesian projection using this contraction's backend."""
+        if self.backend == "cuda" and features.is_cuda:
+            from ...ops.cuda.mbe.ace import ictd_symmetric_contraction as cuda_kernel
+
+            return cuda_kernel.project(projection, features)
+        return torch_kernel.project(projection, features)
 
     def project_product(self, features, stage):
-        return self.tensor_products[stage].projection(features)
+        return self.project(self.tensor_products[stage].projection, features)
 
     def project_output(self, features):
-        return self.projection(features)
+        return self.project(self.projection, features)

@@ -3,12 +3,38 @@
 from functools import wraps
 from importlib import import_module
 
+import torch
+
 from . import config
 from .precision import validate_precision, validate_uniform
 
 IMPLEMENTATIONS = {}
 REFERENCES = {}
 RESOLVED = {}
+
+
+def resolve_backend(backend=None, device=None):
+    """Select the execution backend.
+
+    Parameters
+    ----------
+    backend : {None, "torch", "cuda"}, optional
+        Explicit provider, or ``config.DEFAULT_BACKEND``, initialized at import.
+    device : torch.device or str, optional
+        Input device for automatic selection. CPU inputs use Torch.
+
+    Returns
+    -------
+    str
+        Selected execution provider.
+    """
+    if backend is None:
+        backend = config.DEFAULT_BACKEND
+        if device is not None and torch.device(device).type != "cuda":
+            backend = "torch"
+    if backend not in ("torch", "cuda"):
+        raise ValueError("backend must be None, 'torch' or 'cuda'.")
+    return backend
 
 
 def validate_operands(values):

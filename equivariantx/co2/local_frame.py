@@ -4,6 +4,7 @@ import torch
 
 from equivariantx import co3, o2
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision, validate_precision
 from ..ops.torch.co2 import local_frame as torch_kernel
 from .basis import path_matrix
@@ -20,7 +21,7 @@ def execution(module, features):
     return torch_kernel
 
 
-def transform_tensor(tensor, matrix, rank, *, backend="torch"):
+def transform_tensor(tensor, matrix, rank, *, backend=None):
     """Apply a rectangular map to all indices of a Cartesian tensor.
 
     Parameters
@@ -31,12 +32,12 @@ def transform_tensor(tensor, matrix, rank, *, backend="torch"):
         Broadcastable maps of shape (..., output_size, input_size).
     rank : int
         Non-negative Cartesian rank.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
     """
+    backend = resolve_backend(backend, tensor.device)
     validate_precision((tensor, matrix))
-    if backend not in ("torch", "cuda"):
-        raise ValueError("backend must be torch or cuda.")
     if backend == "cuda" and tensor.is_cuda:
         from ..ops.cuda.co2 import local_frame as cuda_kernel
 
@@ -59,7 +60,8 @@ class LocalFrame(torch.nn.Module):
     method : {"direct", "rotation", "projection"}, optional
         Direct rectangular contractions, full Cartesian rotation, or
         three-dimensional transverse projection. Defaults to "direct".
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Notes
@@ -82,13 +84,12 @@ class LocalFrame(torch.nn.Module):
     """
 
     def __init__(
-        self, irreps, mmax=None, basis_change=True, *, method="direct", backend="torch"
+        self, irreps, mmax=None, basis_change=True, *, method="direct", backend=None
     ):
+        backend = resolve_backend(backend)
         super().__init__()
         if method not in ("direct", "rotation", "projection"):
             raise ValueError("method must be 'direct', 'rotation', or 'projection'.")
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.method = method
         self.irreps_in = co3.Irreps(irreps)

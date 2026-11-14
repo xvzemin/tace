@@ -103,6 +103,10 @@ def project(module, features):
             if str(degree) in module.symmetric_bases
             else None
         )
-        return project_dense(value, matrix, square=degree == 2, symmetric_basis=basis)
+        if basis is None:
+            return project_dense(value, matrix, square=degree == 2)
+        value = symmetric_kernel.pack(basis, value)
+        value = (value @ matrix) @ matrix.T
+        return symmetric_kernel.unpack(basis, value)
 
     return map_blocks(features, module.groups, apply)

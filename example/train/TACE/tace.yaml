@@ -117,11 +117,11 @@ callbacks:
   checkpoint_epoch: # at leas one checkpoint is required
     _target_: lightning.pytorch.callbacks.ModelCheckpoint
     dirpath: checkpoints_epoch
-    filename: TACE-{${misc.project_name}-{epoch}-{step}-{${synth_metric.monitor_metric_name}:.4f}
+    filename: TACE-${misc.project_name}-{epoch}-{step}-{${synth_metric.monitor_metric_name}:.4f}
     # monitor: ${synth_metric.monitor_metric_name}
     save_top_k: -1
     save_last: true
-    every_n_epochs: 10
+    every_n_epochs: 1
     # mode: min
     save_weights_only: false # keep false to restore optimizer and EpochSampler state
     auto_insert_metric_name: false
@@ -160,8 +160,8 @@ dataset:
   valid_ratio: 0.1 # split training data when valid_file is null
   valid_from_index: false # split train and val from train.index and valid.index in current directory
   no_valid_set: false # requires a scheduler that does not depend on validation
-  neighborlist_backend: matscipy # [ase, matscipy, vesin, alchemiops] recommend matscipy
-  storage_mode: clmdb # [memory, clmdb, lmdb, on_the_fly]
+  neighborlist_backend: matscipy # [matscipy, alchemiops, vesin, ase] recommend alchemiops
+  storage_mode: memory # [memory, clmdb, lmdb, on_the_fly]
   # Both LMDB modes automatically read either format, including mixed shards.
   # Existing caches are reused, not converted; switching these modes preserves the statistics key.
   # Compression level and LMDB transaction/shard limits are internal, not YAML options.

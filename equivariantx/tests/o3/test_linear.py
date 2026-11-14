@@ -3,6 +3,7 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import o3 as eqx_o3
 
 IRREPS = "0e+0o+1e+1o+2e+2o"
@@ -47,7 +48,7 @@ def test_indexed_linear_derivatives(
     if num_experts != 1:
         kwargs["num_experts"] = num_experts
     module = cls(linear, backend="cuda", **kwargs)
-    reference = cls(linear, **kwargs)
+    reference = cls(linear, backend="torch", **kwargs)
     assert reference.backend == "torch"
     assert not reference.expand_weights
     reference.expand_weights = expand_weights

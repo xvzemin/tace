@@ -49,7 +49,7 @@ class SphericalProduct(TensorProduct):
 
     def angular(self, x, y, *degrees):
         """Contract angular coordinates while broadcasting channel pairs."""
-        if self.backend == "cuda":
+        if self.backend == "cuda" and x.is_cuda:
             from ..channel_product import angular_product
 
             return angular_product(

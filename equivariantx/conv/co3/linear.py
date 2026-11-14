@@ -6,6 +6,7 @@ import torch
 
 from ...co3.basis import path_matrix
 from ...co3.linear import Linear as CartesianLinear
+from ...ops import resolve_backend
 from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.co3 import linear as torch_kernel
 
@@ -19,7 +20,8 @@ class Linear(CartesianLinear):
         Input and output representations, including channel multiplicities.
     input_indices : sequence of int
         Expansion from compact storage to flattened Cartesian ``mul_ir``.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA packs contiguous group matrices in one permutation. CPU inputs
         use ordinary PyTorch operations.
     output_basis : {"spherical", "cartesian"}, optional
@@ -43,13 +45,14 @@ class Linear(CartesianLinear):
         irreps_out,
         input_indices,
         *,
-        backend="torch",
+        backend=None,
         output_basis="spherical",
         **kwargs,
     ):
-        super().__init__(irreps_in, irreps_out, output_basis=output_basis, **kwargs)
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be cuda or torch.")
+        backend = resolve_backend(backend)
+        super().__init__(
+            irreps_in, irreps_out, output_basis=output_basis, backend=backend, **kwargs
+        )
         self.backend = backend
         indices = torch.as_tensor(input_indices, dtype=torch.long, device="cpu")
         if indices.numel() != self.irreps_in.dim or (indices < 0).any():
@@ -187,7 +190,8 @@ class Linear(CartesianLinear):
                 "The compact feature dimension does not match input_indices."
             )
         weight = self.weight if weight is None else weight
-        bias = self.bias if bias is None else bias
+        if bias is None:
+            bias = self.bias if self.bias_numel else features.new_empty(0)
         if weight.shape[-1] != self.weight_numel or bias.shape[-1] != self.bias_numel:
             raise ValueError("Weight or bias size does not match the instructions.")
         if self.shared_weights and (weight.ndim != 1 or bias.ndim != 1):

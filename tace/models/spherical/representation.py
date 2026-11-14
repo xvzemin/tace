@@ -118,14 +118,11 @@ class NodeRepresentation(torch.nn.Module):
             issubclass(node_embedding_cls, SphericalTensorNodeEmbedding)
             and not node_embedding_cls.use_wigner
         ) or any(
-            not issubclass(
-                interaction_cls, (O2CgtpInteraction, O3IctdInteraction)
-            )
+            not issubclass(interaction_cls, (O2CgtpInteraction, O3IctdInteraction))
             for interaction_cls in interaction_classes
         )
         uses_co3_interaction = any(
-            issubclass(cls, O3IctdInteraction)
-            for cls in interaction_classes
+            issubclass(cls, O3IctdInteraction) for cls in interaction_classes
         )
         self.use_so2 = uses_so2_interaction
         self.use_o2 = (
@@ -164,11 +161,9 @@ class NodeRepresentation(torch.nn.Module):
             for name in self.invariant_property + self.equivariant_property
         )
         self.use_time_reversal = (
-            supports_time_reversal() and not uses_so2_interaction
-            and (
-                uses_magnetic_interaction
-                or uses_time_odd_property
-            )
+            supports_time_reversal()
+            and not uses_so2_interaction
+            and (uses_magnetic_interaction or uses_time_odd_property)
         )
         if self.use_time_reversal:
             time_odd_scalars = [
@@ -177,9 +172,7 @@ class NodeRepresentation(torch.nn.Module):
                 if PROPERTIES[name].get("time_reversal", 1) == -1
             ]
             self.invariant_property = [
-                name
-                for name in self.invariant_property
-                if name not in time_odd_scalars
+                name for name in self.invariant_property if name not in time_odd_scalars
             ]
             self.equivariant_property.extend(time_odd_scalars)
         self.use_magnetic_interaction = uses_magnetic_interaction
@@ -197,12 +190,8 @@ class NodeRepresentation(torch.nn.Module):
                 parity=parity,
                 path_irreps=path_irreps,
             )
-            self.magnetic_node_irreps_out = (
-                self.magnetic_basis.magnetic_node_irreps_out
-            )
-            self.magnetic_edge_irreps_out = (
-                self.magnetic_basis.magnetic_edge_irreps_out
-            )
+            self.magnetic_node_irreps_out = self.magnetic_basis.magnetic_node_irreps_out
+            self.magnetic_edge_irreps_out = self.magnetic_basis.magnetic_edge_irreps_out
 
         # === angular basis ===
         if self.use_so2 and Lmax != lmax:
@@ -217,6 +206,9 @@ class NodeRepresentation(torch.nn.Module):
                 if uses_so2_interaction or uses_o2_interaction
                 else 0,
                 max(Lmax, lmax),
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="conv")
+                else "torch",
             )
         else:
             self.o2_angular_basis = None
@@ -230,11 +222,17 @@ class NodeRepresentation(torch.nn.Module):
                 o3.Irreps.spherical_harmonics(lmax, p=-1),
                 normalize=False,
                 normalization="component",
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="conv")
+                else "torch",
             )
-            if uses_co3_interaction else None
+            if uses_co3_interaction
+            else None
         )
         for angular_basis in (
-            self.o2_angular_basis, self.o3_angular_basis, self.co3_angular_basis
+            self.o2_angular_basis,
+            self.o3_angular_basis,
+            self.co3_angular_basis,
         ):
             if angular_basis is not None:
                 angular_basis.geometry_precision = True
@@ -524,9 +522,7 @@ class NodeRepresentation(torch.nn.Module):
             if getattr(self, "use_packed_wigner", False) and (
                 not self.use_so2 or graph.edge_vector.is_cuda
             ):
-                from equivariantx.ops.common.wigner import wigner_D
-
-                edge_wigner = wigner_D(self.o2_angular_basis, graph.edge_vector)
+                edge_wigner = self.o2_angular_basis.forward_packed(graph.edge_vector)
                 edge_wigner_inv = edge_wigner
             else:
                 edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
@@ -561,7 +557,8 @@ class NodeRepresentation(torch.nn.Module):
                 key: value.to(self.model_dtype) for key, value in edge_wigner.items()
             }
             edge_wigner_inv = {
-                key: value.to(self.model_dtype) for key, value in edge_wigner_inv.items()
+                key: value.to(self.model_dtype)
+                for key, value in edge_wigner_inv.items()
             }
         elif edge_wigner is not None:
             edge_wigner = edge_wigner.to(self.model_dtype)
@@ -684,9 +681,7 @@ class NodeRepresentation(torch.nn.Module):
             if graph.lmp and idx == 0:
                 local_node_type = node_type_local
             if self.uee_embeddings is not None:
-                node_feats = self.uee_embeddings[idx](
-                    node_feats, local_node_type, data
-                )
+                node_feats = self.uee_embeddings[idx](node_feats, local_node_type, data)
             if forces_embedding is not None and idx == 0:
                 node_feats = node_feats + forces_embedding
             node_feats = prod(
@@ -842,6 +837,9 @@ class PairRepresentation(torch.nn.Module):
                 method="auto"
                 if acceleration_enabled("eqx", kernel="conv")
                 else "recursive",
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="conv")
+                else "torch",
             )
         for angular_basis in (self.o2_angular_basis, self.o3_angular_basis):
             if angular_basis is not None:

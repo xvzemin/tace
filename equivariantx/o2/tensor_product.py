@@ -3,6 +3,7 @@ from typing import Iterator, Optional, Sequence
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ..ops.common.torch.tensor_product import instruction_groups
 from ..ops.precision import validate_module_precision
@@ -49,7 +50,8 @@ class TensorProduct(torch.nn.Module):
         is inferred from ``shared_weights`` and the weighted instructions.
     shared_weights : bool, optional
         Whether one weight vector is shared over all leading dimensions.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses diagonal paths and uses sparse angular kernels followed
         by channel GEMMs for ``uvw`` paths. Inputs use FP32 or FP64.
 
@@ -89,11 +91,10 @@ class TensorProduct(torch.nn.Module):
         path_normalization: str = "element",
         internal_weights: Optional[bool] = None,
         shared_weights: Optional[bool] = None,
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         self.irreps_in1 = Irreps(irreps_in1)
         self.irreps_in2 = Irreps(irreps_in2)
@@ -331,7 +332,7 @@ class TensorProduct(torch.nn.Module):
                 "TensorProduct input and weight batch dimensions do not broadcast."
             ) from error
 
-        if self.backend == "cuda":
+        if self.backend == "cuda" and input1.is_cuda:
             from ..ops.cuda.o2 import tensor_product as cuda_kernel
 
             return cuda_kernel.evaluate(self, input1, input2, weight)

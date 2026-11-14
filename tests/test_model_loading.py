@@ -883,6 +883,130 @@ def test_export_elements_cli(tmp_path, monkeypatch, double_precision, capsys):
     assert output.read_bytes() == original
 
 
+@pytest.mark.parametrize("field", ["atomic_energy", "scale", "shift"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_update_statistics_roundtrip(tmp_path, double_precision, field, dtype):
+    from tace.scripts.update import update_statistics
+
+    model = load_tace(make_model(), device=DEVICE, dtype=dtype).eval()
+    original = {name: value.clone() for name, value in model.state_dict().items()}
+    before = [evaluate(model, fidelity) for fidelity in range(2)]
+    layer = "atomic_energy_layer" if field == "atomic_energy" else "scale_shift"
+    table = getattr(getattr(model.readout_fn, layer), field)
+    values = {"O": table[1, 2].item() + 0.5, "1": table[1, 0].item() + 0.125}
+    update_statistics(model, {1: {field: values}}, [field])
+    expected = original[f"readout_fn.{layer}.{field}"].clone()
+    expected[1, 2] += 0.5
+    expected[1, 0] += 0.125
+    torch.testing.assert_close(table, expected, atol=0, rtol=0)
+    path = tmp_path / "updated.pt"
+    export_tace(model, str(path))
+    restored = load_tace(path, device=DEVICE).eval()
+    assert restored.get_model_dtype() == dtype
+    assert restored.readout_fn.statistics[1][field] == dict(
+        zip(model.get_atomic_numbers(), expected[1].tolist())
+    )
+    for name, value in restored.state_dict().items():
+        torch.testing.assert_close(
+            value,
+            expected if name == f"readout_fn.{layer}.{field}" else original[name],
+            atol=0,
+            rtol=0,
+        )
+    # Metadata must also construct the updated table before state loading.
+    rebuilt = create_model(
+        restored.readout_fn.model_config,
+        restored.readout_fn.statistics,
+        restored.get_target_property(),
+        restored.get_embedding_property(),
+    )
+    torch.testing.assert_close(
+        getattr(getattr(rebuilt.readout_fn, layer), field),
+        expected.cpu(),
+        atol=0,
+        rtol=0,
+    )
+    for fidelity in range(2):
+        actual, reference = evaluate(restored, fidelity), evaluate(model, fidelity)
+        for key in ("energy", "forces", "stress"):
+            torch.testing.assert_close(actual[key], reference[key], atol=0, rtol=0)
+            if fidelity == 0 or (field == "atomic_energy" and key != "energy"):
+                torch.testing.assert_close(
+                    actual[key], before[fidelity][key], atol=0, rtol=0
+                )
+        if field == "atomic_energy":
+            torch.testing.assert_close(
+                actual["energy"] - before[fidelity]["energy"],
+                torch.full_like(actual["energy"], 0.75 if fidelity else 0.0),
+                atol=1e-12,
+                rtol=0,
+            )
+
+
+def test_update_statistics_validation(double_precision):
+    from tace.scripts.update import update_statistics
+
+    model = make_model()
+    original = {name: value.clone() for name, value in model.state_dict().items()}
+    for updates in (
+        {},
+        {2: {"atomic_energy": {1: 0.0}}},
+        {0: {"atomic_energy": {"Si": 0.0}}},
+        {0: {"atomic_energy": {"H": 0.0, 1: 1.0}}},
+        {0: {"atomic_energy": {1: float("nan")}}},
+        {0: {"atomic_energy": {}}},
+        {0: {"atomic_energy": [1.0]}},
+        {0: []},
+    ):
+        with pytest.raises(ValueError):
+            update_statistics(model, updates)
+    # Invalid later fields must not leave earlier tables partially updated.
+    with pytest.raises(ValueError):
+        update_statistics(
+            model,
+            {0: {"atomic_energy": {1: 42.0}, "shift": {999: 0.0}}},
+            ["atomic_energy", "shift"],
+        )
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, original[name], atol=0, rtol=0)
+
+
+def test_update_statistics_cli(foundation_model, tmp_path, monkeypatch):
+    from tace.scripts.update import main
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "statistics_0.yaml").write_text("atomic_energy:\n  H: -1.23456789\n")
+    monkeypatch.setattr(sys, "argv", ["tace-update", "-m", "TACE-OAM-L"])
+    main()
+    restored = load_tace(tmp_path / "new_statistics.pt", device="cpu")
+    assert restored.readout_fn.atomic_energy_layer.atomic_energy.item() == -1.23456789
+    assert restored.readout_fn.statistics[0]["atomic_energy"] == {1: -1.23456789}
+    foundation_model[1].assert_called_once()
+
+
+def test_average_models_roundtrip(foundation_model, tmp_path, monkeypatch):
+    from tace.scripts.average import average_models, main
+
+    source, _ = foundation_model
+    model = load_tace(source, device="cpu")
+    original = {name: value.clone() for name, value in model.named_parameters()}
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(0.25)
+    second = tmp_path / "second.pt"
+    export_tace(model, str(second))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["tace-average", "-m", str(source), str(second)])
+    main()
+    restored = load_tace(tmp_path / "average_model-state.pt", device="cpu")
+    for name, value in restored.named_parameters():
+        torch.testing.assert_close(value, original[name] + 0.125)
+    other = select_elements(model, [1, 8])
+    export_tace(other, str(second))
+    with pytest.raises(ValueError, match="matching"):
+        average_models([source, second])
+
+
 @pytest.mark.parametrize(
     "parity,node_embedding",
     [(False, "linear"), (True, "linear"), (True, "spherical_tensor")],

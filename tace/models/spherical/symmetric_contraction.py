@@ -262,7 +262,7 @@ BATCH_EXAMPLE = 10
 ALPHABET = ["w", "x", "v", "n", "z", "r", "t", "y", "u", "o", "p", "s"]
 
 
-class SymmetricContraction(CodeGenMixin, torch.nn.Module):
+class UuuSymmetricContraction(CodeGenMixin, torch.nn.Module):
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -517,7 +517,7 @@ class CuEquivarianceConfig:
 cueq_config = CuEquivarianceConfig()
 
 
-class SymmetricContractionWrapper:
+class UuuSymmetricContractionWrapper:
     def __new__(
         cls,
         irreps_in: o3.Irreps,
@@ -545,7 +545,7 @@ class SymmetricContractionWrapper:
                 math_dtype=torch.get_default_dtype(),
             )
 
-        return SymmetricContraction(
+        return UuuSymmetricContraction(
             irreps_in=irreps_in,
             irreps_out=irreps_out,
             correlation=correlation,

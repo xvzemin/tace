@@ -6,7 +6,7 @@ from functools import lru_cache
 
 import torch
 
-from ...ops import config
+from ...ops import config, resolve_backend
 from ...ops.common.irreducible_product import coefficients as sparse_coefficients
 from ...ops.precision import validate_module_precision
 from ...ops.torch.co3.ictp import tensor_product as torch_kernel
@@ -72,14 +72,14 @@ class CartesianProduct(torch.nn.Module):
     ----------
     l1, l2, l3 : int
         Input and output ranks satisfying the triangle inequality.
-    backend : {"torch", "cuda"}, optional
-        Execution provider for the delta/epsilon products. Defaults to torch.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        Execution provider for the delta/epsilon products.
     """
 
-    def __init__(self, l1, l2, l3, backend="torch"):
+    def __init__(self, l1, l2, l3, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         self.l1, self.l2, self.l3 = l1, l2, l3
         k, odd = divmod(l1 + l2 - l3, 2)
@@ -207,7 +207,8 @@ class TensorProduct(IctdTensorProduct):
     internal_weights, shared_weights : bool, optional
         Store trainable weights and share weights over leading dimensions.
         Internal weights require shared weights.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Torch or native sparse angular products with analytic trace removal.
 
     Notes
@@ -240,8 +241,9 @@ class TensorProduct(IctdTensorProduct):
         out_var=None,
         internal_weights=None,
         shared_weights=None,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__(
             irreps_in1,
             irreps_in2,

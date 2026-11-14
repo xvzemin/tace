@@ -5,7 +5,7 @@ import math
 import torch
 from e3nn import o3
 
-from ...ops import config
+from ...ops import config, resolve_backend
 from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.o2_o3 import convolution as torch_kernel
 from ...ops.torch.o2 import wigner as torch_wigner
@@ -20,7 +20,8 @@ class O2O3TensorProductConv(torch.nn.Module):
     ----------
     tensor_product : equivariantx.o2.O3TensorProduct
         Tensor product defining paths, normalization and feature layouts.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. ``"torch"`` evaluates the selected algorithm with
         optimized PyTorch operations and automatic differentiation by default.
         ``"cuda"`` selects native kernels for CUDA tensors.
@@ -68,11 +69,10 @@ class O2O3TensorProductConv(torch.nn.Module):
     """
 
     def __init__(
-        self, tensor_product, *, backend="torch", method="auto", radial_mode="last"
+        self, tensor_product, *, backend=None, method="auto", radial_mode="last"
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.channel_mixing = any(
             ins.connection_mode != "uvu" for ins in tensor_product.instructions
         )
@@ -97,9 +97,9 @@ class O2O3TensorProductConv(torch.nn.Module):
         self.normalization = tensor_product.normalization
         from ...o2.wigner import WignerD
 
-        self.frame = WignerD(tensor_product.lmax, tensor_product.lmax).to(
-            tensor_product.weight
-        )
+        self.frame = WignerD(
+            tensor_product.lmax, tensor_product.lmax, backend=backend
+        ).to(tensor_product.weight)
         self.irreps_in = tensor_product.irreps_in1
         self.irreps_out = tensor_product.irreps_out
         self.output_dim = self.irreps_out.dim

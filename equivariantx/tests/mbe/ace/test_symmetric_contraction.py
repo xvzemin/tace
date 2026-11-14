@@ -1,11 +1,20 @@
-"""Tests for the corresponding EQX source module."""
+"""Uuu symmetric contractions with and without channel mixing."""
 
 import pytest
 import torch
+from e3nn import o3
+
 from equivariantx.mbe.ace import (
-    SymmetricContraction,
+    UuuFullyConnectedSymmetricContraction,
+    UuuSymmetricContraction,
 )
 from equivariantx.ops import config
+
+from .testing import (
+    check_cpu_dynamic_coefficients,
+    check_parent_aoti,
+    check_parent_provider,
+)
 
 
 def test_compiler_visible_derivatives(monkeypatch):
@@ -129,7 +138,7 @@ def contraction(device="cpu"):
         ((2, 0, 1), 2, 0, 0.1),
         ((0, 0, 2, 2), 3, 0, 0.5),
     ]
-    module = SymmetricContraction.from_entries("2x1o", "2x0e", entries, 4).to(
+    module = UuuSymmetricContraction.from_entries("2x1o", "2x0e", entries, 4).to(
         device, torch.float64
     )
     x = torch.randn(3, 2, 3, device=device, dtype=torch.float64, requires_grad=True)
@@ -143,13 +152,13 @@ def contraction(device="cpu"):
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_symmetric_contraction(device, dtype, backend):
+def test_uuu_symmetric_contraction(device, dtype, backend):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     torch.manual_seed(9)
     coupling = torch.randn(3, 4, 4, 4, 2, dtype=torch.float64)
     first = torch.randn(1, 4, 1, dtype=torch.float64)
-    module = SymmetricContraction(
+    module = UuuSymmetricContraction(
         "3x0e+3x1o",
         "3x0e+3x1o",
         [(0, 1, first), (1, 3, coupling)],
@@ -237,7 +246,7 @@ def test_symmetric_shared_polynomials(dtype, nodes, wigner_3j):
                     scale * value,
                 )
             )
-    module = SymmetricContraction.from_entries(
+    module = UuuSymmetricContraction.from_entries(
         "3x0e+3x4e", "3x2e", entries, 4, backend="cuda"
     ).to("cuda", dtype)
     x = (torch.randn(nodes, 3, 20, device="cuda", dtype=dtype) * 0.2)[
@@ -265,3 +274,253 @@ def test_symmetric_shared_polynomials(dtype, nodes, wigner_3j):
             )
             for value in (actual, expected)
         ]
+
+
+@pytest.mark.parametrize("space", ["o3", "co3"])
+def test_cpu_dynamic_coefficients(space, monkeypatch):
+    check_cpu_dynamic_coefficients(space, "uuu_fully_connected", monkeypatch)
+
+
+def test_cpu_bounded_coefficients(monkeypatch):
+    check_cpu_dynamic_coefficients(
+        "co3", "uuu_fully_connected", monkeypatch, dynamic=False
+    )
+
+
+@pytest.mark.parametrize("shared_weights", [False, True])
+def test_force_gradient_aoti(shared_weights, tmp_path, double_precision, monkeypatch):
+    check_parent_aoti(
+        "o3",
+        "uuu_fully_connected",
+        tmp_path,
+        monkeypatch,
+        shared_weights=shared_weights,
+    )
+
+
+@pytest.mark.parametrize("device,nodes", [("cpu", 0), ("cpu", 7), ("cuda", 7)])
+@pytest.mark.parametrize("reference", [False, True])
+def test_shared_descriptors(device, nodes, reference, double_precision, monkeypatch):
+    check_parent_provider(
+        "o3",
+        "uuu_fully_connected",
+        device,
+        nodes,
+        "torch",
+        reference,
+        monkeypatch,
+        shared_weights=True,
+    )
+
+
+@pytest.mark.parametrize("device,nodes", [("cpu", 0), ("cpu", 7), ("cuda", 7)])
+@pytest.mark.parametrize("child_backend", ["torch", "cuda"])
+@pytest.mark.parametrize("reference", [False, True])
+def test_parent_provider(
+    device, nodes, child_backend, reference, double_precision, monkeypatch
+):
+    check_parent_provider(
+        "o3",
+        "uuu_fully_connected",
+        device,
+        nodes,
+        child_backend,
+        reference,
+        monkeypatch,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Packed CUDA GEMMs")
+@pytest.mark.parametrize(
+    "space,project", [("o3", False), ("co3", False), ("co3", True)]
+)
+def test_packed_coefficient_maps(space, project, monkeypatch, double_precision):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx import co3
+    from equivariantx.mbe.ace import IctdUuuFullyConnectedSymmetricContraction
+    from equivariantx.ops import config
+
+    namespace = o3 if space == "o3" else co3
+    contraction = (
+        UuuFullyConnectedSymmetricContraction
+        if space == "o3"
+        else IctdUuuFullyConnectedSymmetricContraction
+    )
+    irreps = namespace.Irreps("128x0e+128x2e")
+    product = namespace.TensorProduct(
+        irreps,
+        irreps,
+        irreps,
+        [(0, 0, 0, "uuu", False), (1, 0, 1, "uuu", False)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    options = {} if space == "o3" else {"project": project}
+    linears = [
+        namespace.Linear(
+            irreps, irreps, internal_weights=False, shared_weights=False, **options
+        )
+        for _ in range(2)
+    ]
+    module = contraction([product], linears).cuda()
+    inputs = (
+        (torch.randn(512, irreps.dim, device="cuda") / 3).requires_grad_(),
+        *(
+            torch.randn(4, linear.weight_numel, device="cuda", requires_grad=True)
+            for linear in linears
+        ),
+    )
+    types = torch.arange(512, device="cuda") % 4
+
+    def joint(x, *weights):
+        energy = module(x, weights, types).square().mean()
+        force = -torch.autograd.grad(energy, x, create_graph=True)[0]
+        loss = energy + force.square().sum()
+        return energy, force, *torch.autograd.grad(loss, weights)
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = joint(*inputs)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+    graph = make_fx(joint)(*inputs)
+    torch.testing.assert_close(graph(*inputs), expected, atol=2e-10, rtol=2e-10)
+    compiled = torch.compile(graph, fullgraph=True)
+    torch.testing.assert_close(compiled(*inputs), expected, atol=2e-10, rtol=2e-10)
+    assert not module.state_dict()
+
+
+def test_native_cuda_graph_ace(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    import equivariantx.ops.common.cuda.graph as cuda_graph
+
+    tp = o3.TensorProduct(
+        "2x0e",
+        "2x0e",
+        "2x0e",
+        [(0, 0, 0, "uuu", False)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    linears = [
+        o3.Linear("2x0e", "3x0e", internal_weights=False, shared_weights=False)
+        for _ in range(3)
+    ]
+    module = (
+        UuuFullyConnectedSymmetricContraction([tp, tp], linears, backend="cuda")
+        .cuda()
+        .double()
+    )
+    cuda_graph._GRAPHS.clear()
+    try:
+        for seed in (2, 3):
+            torch.manual_seed(seed)
+            types = torch.randint(2, (7,), device="cuda")
+            inputs = [
+                torch.randn(
+                    7, 2, device="cuda", dtype=torch.float64, requires_grad=True
+                )
+            ]
+            inputs += [
+                torch.randn(
+                    2, 6, device="cuda", dtype=torch.float64, requires_grad=True
+                )
+                for _ in linears
+            ]
+            results = []
+            for enabled in (False, True):
+                monkeypatch.setenv("EQX_USE_CUDA_GRAPH", str(int(enabled)))
+                value = module(inputs[0], inputs[1:], types)
+                result = [value]
+                for _ in range(3):
+                    grads = torch.autograd.grad(
+                        value.sin().sum(), inputs, create_graph=True
+                    )
+                    result.extend(grads)
+                    value = torch.cat([g.flatten() for g in grads]) / 10
+                results.append(result)
+            for a, b in zip(*results):
+                torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+        assert cuda_graph._GRAPHS
+    finally:
+        cuda_graph._GRAPHS.clear()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("num_nodes", [0, 3, 9])
+@pytest.mark.parametrize("channels_in,channels_out,degree", [(2, 2, 1), (33, 17, 5)])
+def test_uuu_fully_connected_contraction(
+    device, num_nodes, channels_in, channels_out, degree
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    irreps = o3.Irreps([(channels_in, (0, 1)), (channels_in, (degree, (-1) ** degree))])
+    tp = o3.TensorProduct(
+        irreps,
+        irreps,
+        irreps[:1] + irreps[:1] + irreps[1:] + irreps[1:],
+        [
+            (0, 0, 0, "uuu", False),
+            (1, 1, 1, "uuu", False),
+            (0, 1, 2, "uuu", False),
+            (1, 0, 3, "uuu", False),
+        ],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    irreps_out = o3.Irreps([(channels_out, ir) for _, ir in irreps])
+    linears = [
+        o3.Linear(inp, irreps_out, internal_weights=False, shared_weights=False)
+        for inp in (irreps, tp.irreps_out.simplify())
+    ]
+    module = UuuFullyConnectedSymmetricContraction(
+        [tp], linears, backend="cuda" if device == "cuda" else "torch"
+    ).to(device=device, dtype=torch.float64)
+    x = torch.randn(num_nodes, 2 * irreps.dim, device=device, dtype=torch.float64)[
+        :, ::2
+    ].requires_grad_()
+    types = (torch.arange(num_nodes * 2, device=device) % 3)[::2]
+    weights = [
+        torch.randn(
+            3,
+            linear.weight_numel,
+            device=device,
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        for linear in linears
+    ]
+    actual = module(x, weights, types)
+    expected = linears[0](x, weights[0][types]) + linears[1](
+        tp(x, x), weights[1][types]
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    # Requesting only feature gradients must retain their parameter dependence.
+    gradients = [
+        torch.autograd.grad(value.sin().sum(), x, create_graph=True, retain_graph=True)[
+            0
+        ]
+        for value in (actual, expected)
+    ]
+    torch.testing.assert_close(*gradients, atol=1e-10, rtol=1e-10)
+    mixed = [
+        torch.autograd.grad(value.square().sum(), weights, retain_graph=True)
+        for value in gradients
+    ]
+    for a, b in zip(*mixed):
+        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-9)
+    losses = [y.square().sum() for y in (actual, expected)]
+    for _ in range(3):
+        gradients = [
+            torch.autograd.grad(loss, (x, *weights), create_graph=True)
+            for loss in losses
+        ]
+        for a, b in zip(*gradients):
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-10)
+        losses = [sum(g.square().sum() for g in values) / 100 for values in gradients]
+    assert not module.state_dict()
+    if device == "cuda" and num_nodes:
+        compiled = torch.compile(module, backend="aot_eager", fullgraph=True)
+        torch.testing.assert_close(
+            compiled(x, weights, types), expected, atol=1e-12, rtol=1e-12
+        )

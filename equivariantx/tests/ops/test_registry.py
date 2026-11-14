@@ -3,8 +3,50 @@
 import pytest
 import torch
 
-from equivariantx.ops import config, get_kernel, register_kernel
+from equivariantx.ops import config, get_kernel, register_kernel, resolve_backend
 from equivariantx.ops.registry import IMPLEMENTATIONS, REFERENCES
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_backend_selection(monkeypatch, backend):
+    monkeypatch.setattr(config, "DEFAULT_BACKEND", backend)
+
+    def probe():
+        raise AssertionError("Backend selection must not probe CUDA at runtime.")
+
+    monkeypatch.setattr(torch.cuda, "is_available", probe)
+    assert resolve_backend() == backend
+    assert resolve_backend(None, "cpu") == "torch"
+    assert resolve_backend(None, "cuda:0") == backend
+    assert resolve_backend("torch") == "torch"
+    assert resolve_backend("cuda") == "cuda"
+    with pytest.raises(ValueError, match="backend"):
+        resolve_backend("invalid")
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("space", ["o3", "co3", "o2", "co2"])
+def test_default_tensor_product_backend(monkeypatch, backend, space):
+    import equivariantx as eqx
+
+    monkeypatch.setattr(config, "DEFAULT_BACKEND", backend)
+    group = getattr(eqx, space)
+    irrep = "1o" if space.endswith("3") else "1m"
+    args = (f"2x{irrep}", f"2x{irrep}", "2x0e", [(0, 0, 0, "uuu", True)])
+    automatic = group.TensorProduct(*args)
+    explicit = group.TensorProduct(*args, backend="torch")
+    explicit.load_state_dict(automatic.state_dict())
+    assert automatic.backend == backend
+    assert explicit.backend == "torch"
+    # CPU inputs must not require CUDA even on a CUDA-capable host.
+    x = torch.randn(3, automatic.irreps_in1.dim, requires_grad=True)
+    y = torch.randn(3, automatic.irreps_in2.dim, requires_grad=True)
+    actual, expected = automatic(x, y), explicit(x, y)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.square().sum(), (x, y)),
+        torch.autograd.grad(expected.square().sum(), (x, y)),
+    )
 
 
 @pytest.mark.parametrize("reference", [False, True])

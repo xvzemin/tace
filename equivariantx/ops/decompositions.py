@@ -23,11 +23,13 @@ def torch_decompositions():
     from .common.torch.attention import evaluate_adjoint, normalized_exp
     from .common.torch.convolution import contraction
     from .common.torch.frame import frame_rotation, indexed_frame, rotary_product
+    from .common.torch.grid import linear
     from .common.torch.layout import gather_sum, grouped_permute, indexed_sum
     from .common.torch.quaternion import quaternion_polynomial
     from .common.torch.wigner import alignment, packed_wigner, rotation
+    from .torch.co3.basis import rank_two
 
-    return {
+    decompositions = {
         **polynomial_decompositions(),
         torch.ops.eqx.edge_program.default: edge_decomposition,
         torch.ops.eqx.alignment_cuda.default: alignment,
@@ -45,6 +47,10 @@ def torch_decompositions():
         torch.ops.eqx.contraction.default: contraction,
         torch.ops.eqx.o3_contraction.default: o3_decomposition,
     }
+    for name, function in (("grid_linear", linear), ("stf_rank_two", rank_two)):
+        if hasattr(torch.ops.eqx, name):
+            decompositions[getattr(torch.ops.eqx, name).default] = function
+    return decompositions
 
 
 def o3_decomposition(metadata, program, source, target, operands, *, batch_paths=False):

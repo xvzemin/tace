@@ -7,8 +7,9 @@ from e3nn import o3
 
 from ...co2.spherical import SphericalCoupling
 from ...o2.layout import irrep_layout
-from ...ops.torch.conv.uv_o2 import transverse as torch_kernel
+from ...ops import resolve_backend
 from ...ops.precision import validate_module_precision
+from ...ops.torch.conv.uv_o2 import transverse as torch_kernel
 from ...utils.harmonics import harmonic_program
 
 
@@ -19,11 +20,13 @@ class TransverseFrame(torch.nn.Module):
     ----------
     frame : LocalFrame
         Representations, local order cutoff and basis convention.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses the angular contractions and indexed aggregation.
     """
 
-    def __init__(self, frame, backend="torch"):
+    def __init__(self, frame, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
         if not frame.basis_change:
             raise ValueError("Transverse evaluation requires the canonical O(2) basis.")

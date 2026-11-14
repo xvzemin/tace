@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import symmetric as torch_kernel
 
@@ -134,7 +135,8 @@ class SymmetricBasis(torch.nn.Module):
     ----------
     rank : int
         Non-negative Cartesian rank.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Examples
@@ -145,10 +147,9 @@ class SymmetricBasis(torch.nn.Module):
     >>> torch.testing.assert_close(basis.unpack(basis.pack(tensor)), tensor)
     """
 
-    def __init__(self, rank, *, backend="torch"):
+    def __init__(self, rank, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.rank = rank
         self.dim = (rank + 1) * (rank + 2) // 2

@@ -1,5 +1,9 @@
 """Internal execution switches, read before operator dispatch."""
 
+import torch
+
+DEFAULT_BACKEND = "cuda" if torch.cuda.is_available() else "torch"
+
 # Keep the ordinary forward program independent of the optimized adjoints.
 TORCH_REFERENCE = False
 

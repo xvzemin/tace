@@ -6,18 +6,20 @@ from functools import lru_cache
 import torch
 
 from ..co3.symmetric import symmetric_basis
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision, validate_precision
 from ..ops.torch.co2 import projection as torch_kernel
 
 
-def plane_projector(direction, *, backend="torch"):
+def plane_projector(direction, *, backend=None):
     """Return the orthogonal projector perpendicular to a unit direction.
 
     Parameters
     ----------
     direction : torch.Tensor
         Unit vectors of shape (..., 3). Normalization is not performed.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Defaults to Torch.
 
     Returns
@@ -25,11 +27,10 @@ def plane_projector(direction, *, backend="torch"):
     torch.Tensor
         Matrices I - n n.T of shape (..., 3, 3).
     """
+    backend = resolve_backend(backend)
     if direction.shape[-1] != 3:
         raise ValueError("Directions must have trailing size 3.")
     validate_precision((direction,))
-    if backend not in ("torch", "cuda"):
-        raise ValueError("backend must be torch or cuda.")
     if backend == "cuda" and direction.is_cuda:
         from ..ops.cuda.co2 import projection as cuda_kernel
 
@@ -75,7 +76,8 @@ class PlaneProjector(torch.nn.Module):
     rank : int
         Non-negative Cartesian tensor rank. Tensors need not be symmetric.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Examples
@@ -88,10 +90,9 @@ class PlaneProjector(torch.nn.Module):
     [1.0, 0.0, 1.0]
     """
 
-    def __init__(self, rank, *, backend="torch"):
+    def __init__(self, rank, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if not isinstance(rank, int) or rank < 0:
             raise ValueError("rank must be a non-negative integer.")
@@ -125,10 +126,11 @@ class PlanarDetracer(torch.nn.Module):
     rank : int
         Non-negative Cartesian tensor rank.
     dtype : torch.dtype, optional
-        Buffer dtype. Defaults to torch.get_default_dtype().
+        Buffer dtype.get_default_dtype().
     device : torch.device or str, optional
         Buffer device. Defaults to CPU.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Notes
@@ -155,10 +157,9 @@ class PlanarDetracer(torch.nn.Module):
     [0.5, 0.0, -0.5]
     """
 
-    def __init__(self, rank, *, dtype=None, device=None, backend="torch"):
+    def __init__(self, rank, *, dtype=None, device=None, backend=None):
+        backend = resolve_backend(backend, device)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.coefficients = detracing_coefficients(rank)
         if dtype is not None and not dtype.is_floating_point:

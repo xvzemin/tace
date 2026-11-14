@@ -12,7 +12,7 @@ from e3nn import o3
 
 from equivariantx import co3, o2
 from equivariantx import conv as eqx_conv
-from equivariantx.mbe.ace import SymmetricContraction as EqxSymmetricContraction
+from equivariantx.mbe.ace import UuuSymmetricContraction as EqxUuuSymmetricContraction
 from tace.utils.env import acceleration_enabled, select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
@@ -251,10 +251,19 @@ class UvO2TensorProduct(torch.nn.Module):
             irreps_gates,
             [torch.nn.Sigmoid()] if len(irreps_gates) else [],
             irreps_gated,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
-        self.linear_up = o2.Linear(local_irreps_in, gate.irreps_in)
+        self.linear_up = o2.Linear(
+            local_irreps_in,
+            gate.irreps_in,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        )
         self.gate = gate
-        self.linear_down = o2.Linear(gate.irreps_out, local_irreps_out)
+        self.linear_down = o2.Linear(
+            gate.irreps_out,
+            local_irreps_out,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        )
         indices = []
         offset = 0
         for ir, mul in local_irreps_in:
@@ -314,7 +323,10 @@ class O3CartesianTensorProductConv(torch.nn.Module):
             l1l2=l1l2,
             e3nn_mode="uvu",
         )
-        self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1)
+        self.to_cartesian = co3.ChangeOfBasis(
+            self.irreps_in1,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+        )
         self.tp = co3.TensorProduct(
             self.irreps_in1,
             self.irreps_in2,
@@ -323,11 +335,15 @@ class O3CartesianTensorProductConv(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
             project=False,
+            backend="cuda"
+            if acceleration_enabled("eqx", kernel="product")
+            else "torch",
         )
         self.weight_numel = self.tp.weight_numel
 
         self.eqx_tp = eqx_conv.CartesianTensorProductConv(
             self.tp,
+            backend="cuda",
             normalize=False,
             symmetric_inputs=True,
             input_basis="spherical",
@@ -422,7 +438,7 @@ class O3TensorProductConv(torch.nn.Module):
         self.weight_numel = self.tp.weight_numel
 
         self.eqx_tp = eqx_conv.O3TensorProductConv(
-            self.tp, normalize=False, batch_paths=True
+            self.tp, normalize=False, batch_paths=True, backend="cuda"
         )
         self.reshape_in = LayoutTransform(
             self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
@@ -570,6 +586,7 @@ class O2TensorProductConv(torch.nn.Module):
             self.instructions,
             internal_weights=False,
             shared_weights=False,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
         )
         self.eqx_tp = eqx_conv.O2O3TensorProductConv(self.tp, backend="cuda")
         self.weight_numel = self.tp.weight_numel
@@ -674,11 +691,14 @@ class UuO2TensorProductConv(torch.nn.Module):
         self.local_irreps_in = self.local_frame_in.irreps_out
         self.local_irreps_out = self.local_frame_out.irreps_out
         self.linear = o2.UuLinear(
-            self.local_irreps_in, self.local_irreps_out, num_channel
+            self.local_irreps_in,
+            self.local_irreps_out,
+            num_channel,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.weight_numel = self.linear.weight_numel
         self.eqx_tp = eqx_conv.UuO2TensorProductConv(
-            self.local_frame_in, self.linear, self.local_frame_out
+            self.local_frame_in, self.linear, self.local_frame_out, backend="cuda"
         )
 
     def __repr__(self) -> str:
@@ -805,7 +825,7 @@ class Wigner6jTensorProductConv(torch.nn.Module):
         )
 
 
-class SymmetricContraction(EqxSymmetricContraction):
+class UuuSymmetricContraction(EqxUuuSymmetricContraction):
     """Channel-wise symmetric contraction with external element weights.
 
     Parameters
@@ -814,7 +834,7 @@ class SymmetricContraction(EqxSymmetricContraction):
         Input and output representations with equal multiplicities.
     coupling_tensors : sequence of tuple
         ``(output_index, degree, tensor)`` entries accepted by
-        :class:`equivariantx.mbe.ace.SymmetricContraction`.
+        :class:`equivariantx.mbe.ace.UuuSymmetricContraction`.
 
     Notes
     -----
@@ -834,9 +854,9 @@ class SymmetricContraction(EqxSymmetricContraction):
         self.use_eqx = backend == "eqx"
         self.use_cue = backend == "cue"
         if self.use_cue and self.has_terms:
-            from ..backends.cuequivariance import CueSymmetricContraction
+            from ..backends.cuequivariance import CueUuuSymmetricContraction
 
-            self.fused_tp = CueSymmetricContraction(self)
+            self.fused_tp = CueUuuSymmetricContraction(self)
 
     def forward(
         self, features: torch.Tensor, weight: torch.Tensor, node_type: torch.Tensor

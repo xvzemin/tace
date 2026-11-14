@@ -7,6 +7,7 @@ from typing import NamedTuple, Sequence
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from .clebsch_gordan import clebsch_gordan_product, coupling_entries
 from .irreps import Irrep, Irreps, IrrepsLike
@@ -102,7 +103,8 @@ class AsymmetricContraction(torch.nn.Module):
         ``"sum"`` accumulates equivalent paths into each requested output
         type with variance normalization. ``"expand"`` preserves every path
         as a separate output multiplicity.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         PyTorch operations or fused CUDA polynomial evaluation. CUDA requires
         ``algorithm="recursive"`` and float32 or float64 tensors.
 
@@ -131,8 +133,9 @@ class AsymmetricContraction(torch.nn.Module):
         *,
         algorithm: str,
         path_mode: str = "sum",
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
         self.irreps_in = Irreps(irreps_in)
         muls = {mul for _, mul in self.irreps_in}
@@ -155,8 +158,6 @@ class AsymmetricContraction(torch.nn.Module):
         if path_mode not in ("sum", "expand"):
             raise ValueError("path_mode must be 'sum' or 'expand'.")
         self.correlation = correlation
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         self.algorithm = algorithm
         self.path_mode = path_mode
@@ -421,7 +422,7 @@ class AsymmetricContraction(torch.nn.Module):
         leading_shape = torch.broadcast_shapes(
             *(features.shape[:-1] for features in inputs), weight.shape[:-1]
         )
-        if self.backend == "cuda":
+        if self.backend == "cuda" and inputs[0].is_cuda:
             from ..ops.cuda.o2.contraction import evaluate
         else:
             from ..ops.torch.o2.contraction import evaluate
@@ -448,7 +449,8 @@ class SymmetricContraction(AsymmetricContraction):
         Batched analytic coupling paths or precomputed generalized tensors.
     path_mode : {"sum", "expand"}, optional
         Sum paths into each output type or retain their multiplicities.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         PyTorch operations or fused CUDA polynomial evaluation.
 
     Notes
@@ -474,8 +476,9 @@ class SymmetricContraction(AsymmetricContraction):
         *,
         algorithm="recursive",
         path_mode="sum",
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         self.path_normalizations = {}
         super().__init__(
             irreps_in,

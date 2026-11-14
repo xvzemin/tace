@@ -1,6 +1,16 @@
-"""Native recursive products with the final coefficient map fused."""
+"""Native symmetric contractions with recursively differentiated programs."""
 
 from ....common.ace import ace_inputs, contract
+from ....common.symmetric import symmetric_contract, symmetric_inputs, symmetric_result
+
+
+def uuu(module, features, weight, node_type):
+    """Contract directly into the declared angular/channel output layout."""
+    program, operands = symmetric_inputs(
+        features, weight, module.correlation, module.output_dim
+    )
+    output = symmetric_contract(module.metadata, program, node_type, operands)[0]
+    return symmetric_result(output, module.layout, module.output_dims)
 
 
 def linear(module, features, weight, node_type, stage):
@@ -19,7 +29,7 @@ def linear(module, features, weight, node_type, stage):
     )[0]
 
 
-def evaluate(module, features, weights, node_type):
+def uuu_fully_connected(module, features, weights, node_type):
     """Accumulate native contractions without forming the final product tensor."""
     correlation = features
     output = linear(module, features, weights[0], node_type, 0)

@@ -7,11 +7,12 @@ import argparse
 
 import torch
 
-from tace.lightning import load_tace
+from tace.lightning import export_tace, load_tace
 
 
 def average_models(model_paths, ema=False):
-    assert len(model_paths) > 0, "No model paths provided."
+    if not model_paths:
+        raise ValueError("No model paths provided.")
     model_avg = load_tace(
         model_paths[0],
         device="cpu",
@@ -19,9 +20,10 @@ def average_models(model_paths, ema=False):
         use_ema=ema,
     )
     model_avg.eval()
+    averaged = dict(model_avg.named_parameters())
     with torch.no_grad():
         for p in model_avg.parameters():
-            p.data.zero_()
+            p.zero_()
 
     for path in model_paths:
         model = load_tace(
@@ -32,13 +34,25 @@ def average_models(model_paths, ema=False):
             dtype=model_avg.get_model_dtype(),
         )
         model.eval()
+        parameters = dict(model.named_parameters())
+        if (
+            parameters.keys() != averaged.keys()
+            or any(
+                parameters[name].shape != value.shape
+                for name, value in averaged.items()
+            )
+            or model.get_atomic_numbers() != model_avg.get_atomic_numbers()
+        ):
+            raise ValueError(
+                "Models must have matching parameter names, shapes and elements."
+            )
         with torch.no_grad():
-            for p_avg, p in zip(model_avg.parameters(), model.parameters()):
-                p_avg.data.add_(p.data)
+            for name, parameter in averaged.items():
+                parameter.add_(parameters[name])
     num_models = len(model_paths)
     with torch.no_grad():
         for p in model_avg.parameters():
-            p.data.div_(num_models)
+            p.div_(num_models)
     return model_avg
 
 
@@ -63,16 +77,7 @@ def main():
     print(f"A total of {len(args.models)} models will be averaged")
     model_avg = average_models(args.models, args.ema)
     output_path = "average_model-state.pt"
-    torch.save(
-        {
-            "state_dict": model_avg.state_dict(),
-            "cfg": model_avg.readout_fn.model_config,
-            "target_property": model_avg.readout_fn.target_property,
-            "embedding_property": model_avg.readout_fn.embedding_property,
-            "statistics": model_avg.readout_fn.statistics,
-        },
-        output_path,
-    )
+    export_tace(model_avg, output_path)
     print(f"Averaged model saved to {output_path}")
 
 

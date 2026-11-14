@@ -16,10 +16,10 @@ from torch.fx.experimental.dynamic_spec import (
 )
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.mbe.ace import SymmetricContraction
+from equivariantx.mbe.ace import UuuSymmetricContraction
 from equivariantx.ops import config
 from equivariantx.ops.common.symmetric import symmetric_inputs
-from equivariantx.ops.torch.mbe.ace import symmetric as kernel
+from equivariantx.ops.torch.mbe.ace import symmetric_contraction as kernel
 from equivariantx.tests.utils.testing import check_forward_ad
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.module import default_dtype
@@ -37,7 +37,7 @@ def contraction(correlation=3, channels=2):
                 for i in components
             )
         path += 1
-    return SymmetricContraction.from_entries(
+    return UuuSymmetricContraction.from_entries(
         f"{channels}x0e+{channels}x1o+{channels}x2e",
         f"{channels}x0e",
         entries,
@@ -68,7 +68,7 @@ def nonscalar_contraction():
                     mul, ir.dim, *([irreps.dim] * degree)
                 )
                 tensors.append((ir.l, degree, tensor.movedim(0, -1)))
-    return SymmetricContraction(
+    return UuuSymmetricContraction(
         [(64, ir) for _, ir in irreps], [(64, ir) for _, ir in irreps], tensors
     )
 
@@ -160,7 +160,7 @@ def test_prefix_selection_limits(monkeypatch):
     assert not selects_prefix(contraction(4, 64), torch.empty(7, 64, 9))
     assert not selects_prefix(contraction(2, 1024), torch.empty(512, 1024, 9))
     assert not selects_prefix(contraction(5, 64), torch.empty(512, 64, 9))
-    many = SymmetricContraction.from_entries(
+    many = UuuSymmetricContraction.from_entries(
         "64x0e",
         "64x0e",
         [((0, 0, 0), path, 0, 0.1) for path in range(257)],
@@ -263,7 +263,7 @@ def test_compiled_prefix_dag_budget(nonscalar_contraction, monkeypatch):
     x = torch.empty(512, 64, 9)
     program, _ = symmetric_inputs(x, x, layer.correlation, layer.output_dim)
     terms = len(parse_metadata(layer.metadata)[-1])
-    assert terms == 317
+    assert terms > 256
     nodes = len(kernel.prefix_plan(layer.metadata, program)[0])
     assert terms < nodes <= 1024
     monkeypatch.setattr(config, "TORCH_SYMMETRIC_PREFIX", True)

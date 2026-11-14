@@ -4,6 +4,7 @@ import math
 
 import torch
 
+from ..ops import resolve_backend
 from .irreps import Irrep
 
 
@@ -56,6 +57,7 @@ def channel_product(input1, input2, ir1, ir2, ir_out):
         ir2,
         ir_out,
         elementwise=True,
+        backend="torch",
     ).transpose(-1, -2)
 
 
@@ -65,7 +67,7 @@ def quarter_turn(features: torch.Tensor, dim: int = -2) -> torch.Tensor:
 
 
 def clebsch_gordan_product(
-    input1, ir1, input2, ir2, ir_out, *, elementwise=False, backend="torch"
+    input1, ir1, input2, ir2, ir_out, *, elementwise=False, backend=None
 ):
     """Evaluate one component-normalized real O(2) coupling map.
 
@@ -77,7 +79,8 @@ def clebsch_gordan_product(
         Valid input and output representations.
     elementwise : bool, optional
         Retain one broadcast channel axis instead of both input axes.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution provider.
 
     Returns
@@ -86,15 +89,17 @@ def clebsch_gordan_product(
         Features with trailing ``(ir_out.dim, channels)`` or
         ``(ir_out.dim, channels1, channels2)`` axes.
     """
+    backend = resolve_backend(backend, input1.device)
     return clebsch_gordan_products(
         input1, ir1, input2, ir2, (ir_out,), elementwise=elementwise, backend=backend
     )[0]
 
 
 def clebsch_gordan_products(
-    input1, ir1, input2, ir2, irreps_out, *, elementwise, backend="torch"
+    input1, ir1, input2, ir2, irreps_out, *, elementwise, backend=None
 ):
     """Evaluate output irreps while sharing their real products."""
+    backend = resolve_backend(backend, input1.device)
     from ..ops.precision import validate_uniform
 
     validate_uniform((input1, input2))

@@ -39,8 +39,16 @@ class RadialRotaryComplexAttention(torch.nn.Module):
         for _, mul in self.message_irreps:
             if mul % num_head != 0:
                 raise ValueError("num_head must divide every message multiplicity.")
-        self.q_proj = o2.Linear(self.irreps, self.irreps)
-        self.k_proj = o2.Linear(self.irreps, self.irreps)
+        self.q_proj = o2.Linear(
+            self.irreps,
+            self.irreps,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        )
+        self.k_proj = o2.Linear(
+            self.irreps,
+            self.irreps,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        )
         self.radial_proj = torchLinear(num_radial_basis, 2 * num_head)
         torch.nn.init.zeros_(self.radial_proj.weight)
         torch.nn.init.zeros_(self.radial_proj.bias)
@@ -146,6 +154,7 @@ def uv_kernel(module):
             module.nonlinearity,
             module.linear_down,
             module.local_frame_out,
+            backend="cuda",
             frame_edge=getattr(module, "magnetic_frame", None),
             query=attention.q_proj if attention is not None else None,
             key=attention.k_proj if attention is not None else None,
@@ -251,14 +260,17 @@ class UvO2TensorProductConv(torch.nn.Module):
             irreps_gates,
             [tensor_act] if len(irreps_gates) else [],
             irreps_gated,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.linear_up = o2.Linear(
             self.local_irreps_in,
             self.nonlinearity.irreps_in,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.linear_down = o2.Linear(
             self.nonlinearity.irreps_out,
             self.local_irreps_out,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.weight_numel = self.local_irreps_in.num_irreps
 

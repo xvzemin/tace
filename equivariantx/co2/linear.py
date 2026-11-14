@@ -7,6 +7,7 @@ import torch
 from equivariantx import o2
 from equivariantx.ops.common.torch.linear import linear, linear_layout
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import linear as torch_kernel
 from .basis import ChangeOfBasis, Projector
@@ -33,7 +34,8 @@ class Linear(torch.nn.Module):
     output_basis : {"cartesian", "circular"}, optional
         Cartesian mul_ir or compact circular ir_mul output storage.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Native kernels fuse shared channel maps; CPU
         and general broadcasted parameters use Torch.
 
@@ -58,11 +60,10 @@ class Linear(torch.nn.Module):
         path_normalization="element",
         project=False,
         output_basis="cartesian",
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if output_basis not in ("cartesian", "circular"):
             raise ValueError("output_basis must be 'cartesian' or 'circular'.")
@@ -111,9 +112,11 @@ class Linear(torch.nn.Module):
         )
         self.channel_metadata = repr(("mul_ir", self.layout))
         if output_basis == "circular":
-            self.projection = ChangeOfBasis(self.cartesian_out, inverse=True)
+            self.projection = ChangeOfBasis(
+                self.cartesian_out, inverse=True, backend=backend
+            )
         elif project:
-            self.projection = Projector(self.cartesian_out)
+            self.projection = Projector(self.cartesian_out, backend=backend)
         else:
             self.projection = torch.nn.Identity()
         connected = {ins.i_out for ins in self.instructions if ins.path_weight}
@@ -155,7 +158,8 @@ class Linear(torch.nn.Module):
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         weight = self.weight if weight is None else weight
-        bias = self.bias if bias is None else bias
+        if bias is None:
+            bias = self.bias if self.bias_numel else features.new_empty(0)
         if weight.shape[-1] != self.weight_numel or bias.shape[-1] != self.bias_numel:
             raise ValueError("Weight or bias size does not match the instructions.")
         if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
@@ -202,7 +206,8 @@ class UuLinear(torch.nn.Module):
     path_mode : {"sum", "expand"}, optional
         Sum paths or retain each input/output-copy path separately.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Native kernels accept shared or per-node weights.
         CPU tensors and general broadcasts use Torch.
 
@@ -217,11 +222,10 @@ class UuLinear(torch.nn.Module):
     """
 
     def __init__(
-        self, irreps_in, irreps_out, num_channel, *, path_mode="sum", backend="torch"
+        self, irreps_in, irreps_out, num_channel, *, path_mode="sum", backend=None
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.irreps_in = Irreps(irreps_in)
         reference = o2.UuLinear(

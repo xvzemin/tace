@@ -25,9 +25,11 @@ def _get_gate_layer(
 ):
     gate_cls = Gate
     if acceleration_enabled("eqx", kernel="linear"):
+        from functools import partial
+
         from equivariantx.o3 import Gate as EqxGate
 
-        gate_cls = EqxGate
+        gate_cls = partial(EqxGate, backend="cuda")
     if gate_m0:
         if scalar_act is None:
             act_0e_name = "sigmoid"
@@ -79,18 +81,13 @@ def _get_gate_layer(
         act_0o = ACTIVATION[act_0o_name]()
         act_tensor = ACTIVATION[tensor_act]()
 
-        irreps_scalars = o3.Irreps(
-            [(mul, ir) for mul, ir in irreps_in if ir.l == 0]
-        )
-        irreps_gated = o3.Irreps(
-            [(mul, ir) for mul, ir in irreps_in if ir.l > 0]
-        )
+        irreps_scalars = o3.Irreps([(mul, ir) for mul, ir in irreps_in if ir.l == 0])
+        irreps_gated = o3.Irreps([(mul, ir) for mul, ir in irreps_in if ir.l > 0])
         irreps_gates = o3.Irreps([mul, (0, 1)] for mul, _ in irreps_gated)
         nonlinearity = gate_cls(
             irreps_scalars=irreps_scalars,
             act_scalars=[
-                act_0e if irrep.is_scalar() else act_0o
-                for _, irrep in irreps_scalars
+                act_0e if irrep.is_scalar() else act_0o for _, irrep in irreps_scalars
             ],
             irreps_gates=irreps_gates,
             act_gates=[act_tensor] * len(irreps_gates),
@@ -135,6 +132,7 @@ def get_nonlinear_layer(
             tensor_act,
             bias,
         )
+
 
 # class O3Norm(torch.nn.Module):
 #     def __init__(

@@ -20,6 +20,7 @@ from torch_geometric.loader import DataLoader
 
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KEYS, KeySpecification, update_keyspec_from_kwargs
+from tace.dataset.records import record_from_atoms, resolve_property
 from tace.lightning import load_tace
 
 NUM_POINTS = 256
@@ -73,19 +74,23 @@ def read_reference(
     path, atomic_numbers, energy_key, forces_key, include_heteronuclear=False
 ):
     reference = {}
+    key_spec = _key_spec(energy_key, forces_key)
     for index, atoms in enumerate(ase.io.read(path, index=":")):
         numbers = atoms.get_atomic_numbers()
         if len(numbers) != 2 or any(z not in atomic_numbers for z in numbers):
             continue
         if not include_heteronuclear and numbers[0] != numbers[1]:
             continue
-        if energy_key not in atoms.info:
-            raise KeyError(f"Structure {index} has no atoms.info[{energy_key!r}].")
-        if forces_key not in atoms.arrays:
-            raise KeyError(f"Structure {index} has no atoms.arrays[{forces_key!r}].")
+        record = record_from_atoms(atoms)
+        energy = resolve_property(record, "energy", key_spec)
+        forces = resolve_property(record, "forces", key_spec)
+        if energy is None:
+            raise KeyError(f"Structure {index} has no energy label {energy_key!r}.")
+        if forces is None:
+            raise KeyError(f"Structure {index} has no force label {forces_key!r}.")
 
         distance, direction = distance_and_direction(atoms)
-        forces = np.asarray(atoms.arrays[forces_key])
+        forces = np.asarray(forces)
         if forces.shape != (2, 3):
             raise ValueError(
                 f"Structure {index} forces have shape {forces.shape}, expected (2, 3)."
@@ -95,7 +100,7 @@ def read_reference(
             (
                 distance,
                 atoms,
-                float(np.asarray(atoms.info[energy_key]).reshape(-1)[0]),
+                float(np.asarray(energy).reshape(-1)[0]),
                 float(forces[1] @ direction),
                 direction,
             )

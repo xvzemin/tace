@@ -501,7 +501,7 @@ class e3nnElementLinear(torch.nn.Module):
         )
         weight_numel = self.linear.weight_numel
         self.eqx_linear = eqx_o3.ElementLinear(self.linear, backend="cuda")
-        self.torch_linear = eqx_o3.ElementLinear(self.linear)
+        self.torch_linear = eqx_o3.ElementLinear(self.linear, backend="torch")
         self._path_shapes = [tuple(ins.path_shape) for ins in self.linear.instructions]
 
         self._0e_muls = []
@@ -640,7 +640,9 @@ class e3nnMoEElementLinear(torch.nn.Module):
         self.eqx_linear = eqx_o3.MoEElementLinear(
             self.linear, num_experts, backend="cuda"
         )
-        self.torch_linear = eqx_o3.MoEElementLinear(self.linear, num_experts)
+        self.torch_linear = eqx_o3.MoEElementLinear(
+            self.linear, num_experts, backend="torch"
+        )
 
         if self.use_matrix_weight:
             self.weight = torch.nn.ParameterList(

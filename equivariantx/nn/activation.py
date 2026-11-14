@@ -5,6 +5,7 @@ import math
 import torch
 from torch.nn import functional
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.nn import activation as torch_kernel
 
@@ -21,7 +22,8 @@ class PolynomialActivation(torch.nn.Module):
     bound : float, optional
         Positive endpoint of the approximation interval ``[-bound, bound]``.
         Defaults to three. Inputs are not clipped to this interval.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Coefficient dtype. Defaults to the default floating-point dtype.
@@ -57,13 +59,12 @@ class PolynomialActivation(torch.nn.Module):
         degree=8,
         bound=3.0,
         *,
-        backend="torch",
+        backend=None,
         dtype=None,
         device=None,
     ):
+        backend = resolve_backend(backend, device)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         activations = {
             "silu": functional.silu,

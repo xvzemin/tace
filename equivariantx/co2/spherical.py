@@ -7,6 +7,7 @@ import torch
 from e3nn import o3
 
 from ..o3.rotation import so3_generators
+from ..ops import resolve_backend
 from ..ops.common.sparse import bilinear_rows
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import spherical as torch_kernel
@@ -144,7 +145,8 @@ class SphericalCoupling(torch.nn.Module):
     method : {"chebyshev", "recurrence"}, optional
         Evaluate a Chebyshev expansion or a CG recurrence at fixed parity.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Notes
@@ -169,13 +171,12 @@ class SphericalCoupling(torch.nn.Module):
         normalization="component",
         method="chebyshev",
         *,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
         if method not in ("chebyshev", "recurrence"):
             raise ValueError("method must be chebyshev or recurrence.")
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.method = method
         self.l1, self.l2, self.l3 = l1, l2, l3

@@ -8,7 +8,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import SemiCoupledSymmetricContraction
+from equivariantx.mbe.ace import UuuFullyConnectedSymmetricContraction
 from tace.utils.env import acceleration_enabled, select_acceleration
 
 from ..layout import LayoutTransform
@@ -21,7 +21,7 @@ from ..linear import (
 from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
-from .fused import SymmetricContraction, UuuTensorProduct
+from .fused import UuuSymmetricContraction, UuuTensorProduct
 from .paths import SymmetricProductPaths
 
 
@@ -80,9 +80,10 @@ class CgtpACE(Product):
             product_in1 = ace.irreps_out
 
         if self.use_eqx and self.aces:
-            self.eqx_ace = SemiCoupledSymmetricContraction(
+            self.eqx_ace = UuuFullyConnectedSymmetricContraction(
                 [ace.tp for ace in self.aces],
                 [coef.linear for coef in self.coefs],
+                backend="cuda",
             )
 
         self.linear_up = (
@@ -229,7 +230,7 @@ class MaceACE(Product):
                     torch.randn(num_elements, num_paths, self.num_hidden_channel)
                     / num_paths
                 )
-        self.product = SymmetricContraction(
+        self.product = UuuSymmetricContraction(
             self.irreps_hidden,
             self.irreps_coefs_out,
             tensors,

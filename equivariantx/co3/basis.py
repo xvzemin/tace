@@ -7,6 +7,7 @@ from math import factorial, ldexp, prod, sqrt
 import torch
 from e3nn import o3
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import basis as torch_basis
 from .irreps import Irreps
@@ -96,9 +97,10 @@ class ChangeOfBasis(torch.nn.Module):
     inverse : bool, optional
         False maps spherical features to Cartesian tensors. True extracts
         spherical features and discards non-STF components.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Torch matrix operations or compiler-visible native matrix kernels.
-        Defaults to ``"torch"``.
+
 
     Examples
     --------
@@ -112,10 +114,9 @@ class ChangeOfBasis(torch.nn.Module):
     >>> torch.testing.assert_close(to_spherical(tensor), x)
     """
 
-    def __init__(self, irreps, inverse=False, *, backend="torch"):
+    def __init__(self, irreps, inverse=False, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         cartesian = Irreps(irreps)
         spherical = cartesian.spherical()
@@ -155,7 +156,7 @@ class ChangeOfBasis(torch.nn.Module):
         validate_module_precision(self, (features,))
         if features.shape[-1] != self.input_dim:
             raise ValueError("The feature dimension does not match irreps_in.")
-        if getattr(self, "backend", "torch") == "cuda":
+        if getattr(self, "backend", "torch") == "cuda" and features.is_cuda:
             from ..ops.cuda.co3 import basis as cuda_basis
 
             return cuda_basis.change_basis(self, features)
@@ -182,8 +183,9 @@ class Projector(torch.nn.Module):
     instructions : sequence of int, optional
         Entries to project. Other entries are passed through unchanged.
         Defaults to all entries. Scalar and vector projections are identities.
-    backend : {"torch", "cuda"}, optional
-        Execution backend. CPU tensors use Torch. Defaults to ``"torch"``.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        Execution backend. CPU tensors use Torch.
 
     Examples
     --------
@@ -195,10 +197,9 @@ class Projector(torch.nn.Module):
     >>> torch.testing.assert_close(result, expected, atol=1e-6, rtol=1e-6)
     """
 
-    def __init__(self, irreps, instructions=None, *, backend="torch"):
+    def __init__(self, irreps, instructions=None, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         self.irreps_in = self.irreps_out = Irreps(irreps)
         self.slices = self.irreps_in.slices()

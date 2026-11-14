@@ -6,6 +6,7 @@ from e3nn import o3
 
 from equivariantx import co3, o2
 from equivariantx import o3 as eqx_o3
+from equivariantx.ops import config
 from equivariantx.tests.o2.testing import _transform
 from equivariantx.utils.module import copy_model
 
@@ -86,7 +87,7 @@ def test_element_linear(backend, device, mode, dtype, expand_weights):
     assert not module.expand_weights
     module.expand_weights = expand_weights
     assert o2.ElementLinear(linear).element_mode == "pair"
-    assert o2.ElementLinear(linear).backend == "torch"
+    assert o2.ElementLinear(linear).backend == config.DEFAULT_BACKEND
     shape = (3, 4, linear.weight_numel) if mode == "pair" else (3, linear.weight_numel)
     weight = torch.randn(*shape, dtype=dtype, device=device, requires_grad=True)
     for count in (0, 7):

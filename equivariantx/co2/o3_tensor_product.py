@@ -7,6 +7,7 @@ from e3nn import o3
 
 from equivariantx import co3
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import o3_tensor_product as torch_kernel
 from .restriction import (
@@ -51,7 +52,8 @@ class O3TensorProduct(torch.nn.Module):
     project : bool, optional
         Project Cartesian output. Spherical output always includes projection.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend for angular couplings. CPU tensors use Torch.
 
     Notes
@@ -87,11 +89,10 @@ class O3TensorProduct(torch.nn.Module):
         input_basis="cartesian",
         output_basis="cartesian",
         project=True,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if normalization not in ("component", "norm", "integral"):
             raise ValueError("Unknown harmonic normalization.")
@@ -157,10 +158,12 @@ class O3TensorProduct(torch.nn.Module):
         else:
             self.register_buffer("weight", metadata.weight)
         self.embedding = (
-            co3.ChangeOfBasis(a) if input_basis == "spherical" else torch.nn.Identity()
+            co3.ChangeOfBasis(a, backend=backend)
+            if input_basis == "spherical"
+            else torch.nn.Identity()
         )
         self.projection = (
-            co3.ChangeOfBasis(c, inverse=True)
+            co3.ChangeOfBasis(c, inverse=True, backend=backend)
             if output_basis == "spherical"
             else co3.Projector(c, backend=backend)
             if project
@@ -188,12 +191,14 @@ class O3TensorProduct(torch.nn.Module):
         )
 
         self.compact_embedding = (
-            co3.ChangeOfBasis(a, inverse=True)
+            co3.ChangeOfBasis(a, inverse=True, backend=backend)
             if input_basis == "cartesian"
             else torch.nn.Identity()
         )
         self.compact_projection = (
-            co3.ChangeOfBasis(c) if output_basis == "cartesian" else torch.nn.Identity()
+            co3.ChangeOfBasis(c, backend=backend)
+            if output_basis == "cartesian"
+            else torch.nn.Identity()
         )
         self.compact_product = any(max(degrees) > 1 for degrees in self.paths)
         self.couplings = torch.nn.ModuleDict(
@@ -225,7 +230,7 @@ class O3TensorProduct(torch.nn.Module):
         input_basis="cartesian",
         output_basis="cartesian",
         project=True,
-        backend="torch",
+        backend=None,
     ):
         """Copy paths, normalized coefficients, and weights from an O(3) tensor product.
 
@@ -240,6 +245,7 @@ class O3TensorProduct(torch.nn.Module):
         project : bool, optional
             Project Cartesian outputs onto their STF subspaces.
         """
+        backend = resolve_backend(backend)
         result = cls(
             tensor_product.irreps_in1,
             tensor_product.irreps_in2,

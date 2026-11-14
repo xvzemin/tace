@@ -113,7 +113,8 @@ prepare ``statistics_0.yaml`` with the new atomic energies:
      8: -2041.9816003861047
 
 The keys may be atomic numbers, as above, or chemical symbols. The dictionary
-must contain the same elements as the pretrained model. For a multi-fidelity
+may update all or a subset of the pretrained model's elements. Unspecified
+elements are unchanged. For a multi-fidelity
 model, ``statistics_0.yaml``, ``statistics_1.yaml``, and so on update the
 corresponding fidelity. A missing file or a file without an
 ``atomic_energy`` entry leaves that fidelity unchanged.

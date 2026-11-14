@@ -2,6 +2,7 @@
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.common.ictd import dense_basis, initialize, restore
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o2 import ictd as torch_kernel
@@ -80,10 +81,11 @@ class ICTD(torch.nn.Module):
     ----------
     rank : int
         Non-negative Cartesian tensor rank.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
-        Buffer dtype. Defaults to torch.get_default_dtype().
+        Buffer dtype.get_default_dtype().
     device : torch.device or str, optional
         Buffer device. Defaults to CPU.
 
@@ -123,7 +125,8 @@ class ICTD(torch.nn.Module):
 
     dimension = 2
 
-    def __init__(self, rank, *, backend="torch", dtype=None, device=None):
+    def __init__(self, rank, *, backend=None, dtype=None, device=None):
+        backend = resolve_backend(backend, device)
         super().__init__()
         if not isinstance(rank, int) or rank < 0:
             raise ValueError("rank must be a non-negative integer.")
@@ -131,8 +134,6 @@ class ICTD(torch.nn.Module):
             raise TypeError("dtype must be a real floating-point dtype.")
         self.rank = rank
         self.dim = 2**rank
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         initialize(self, rank, Irrep(0, 1), Irrep(1, 0), coupling_matrix, dtype, device)
         self.irreps_out = Irreps([(path[-1], 1) for path in self.paths])

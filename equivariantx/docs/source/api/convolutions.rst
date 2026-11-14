@@ -3,7 +3,8 @@
 Convolutions
 ============
 
-Torch is the default backend; CUDA kernels are optional. Operands support
+``backend=None`` selects CUDA when available and optimized PyTorch otherwise.
+Use ``backend="torch"`` to select PyTorch explicitly. Operands support
 FP32 and FP64, with the caller's TF32 matrix policy. FP16, BF16 and reduced
 precision autocast are unsupported. Geometry may remain FP64 with FP32 features.
 

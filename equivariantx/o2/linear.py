@@ -4,6 +4,7 @@ from typing import Iterator, NamedTuple, Optional, Sequence, Union
 import torch
 
 from ..nn.element_linear import ElementLinear as ElementLinearBase
+from ..ops import resolve_backend
 from ..ops.common.torch.linear import linear_layout
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o2 import linear as torch_kernel
@@ -43,7 +44,8 @@ class Linear(torch.nn.Module):
         ``"element"`` normalizes by the total input multiplicity, while
         ``"path"`` assigns equal variance to each path.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Native kernels fuse shared channel maps; CPU
         and general broadcasted parameters use Torch.
 
@@ -68,11 +70,10 @@ class Linear(torch.nn.Module):
         instructions: Optional[Sequence[tuple[int, int]]] = None,
         biases: Union[bool, Sequence[bool]] = False,
         path_normalization: str = "element",
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
 
         if path_normalization not in ("element", "path"):
@@ -268,7 +269,7 @@ class Linear(torch.nn.Module):
                 raise RuntimeError(
                     "Biases must be provided when internal_weights=False."
                 )
-            bias = self.bias
+            bias = self.bias if self.bias_numel else features.new_empty(0)
         if bias.ndim < 1 or bias.size(-1) != self.bias_numel:
             raise ValueError(
                 f"Linear bias trailing dimension must be {self.bias_numel}."
@@ -356,8 +357,9 @@ class ElementLinear(ElementLinearBase):
     linear : Linear
         Unbiased map defining irreps, paths and normalization. Weights are
         supplied to :meth:`forward`; the map's parameters are not copied.
-    backend : {"torch", "cuda"}, optional
-        Execution backend. Defaults to ``"torch"``. CPU tensors use PyTorch.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        Execution backend. CPU tensors use PyTorch.
     element_mode : {"pair", "single"}, optional
         Independent weights for each ordered element pair, or each element.
         Defaults to ``"pair"``.
@@ -375,7 +377,8 @@ class ElementLinear(ElementLinearBase):
     torch.Size([4, 7])
     """
 
-    def __init__(self, linear, backend="torch", *, element_mode="pair"):
+    def __init__(self, linear, backend=None, *, element_mode="pair"):
+        backend = resolve_backend(backend)
         super().__init__(linear, backend, element_mode, "ir_mul")
 
 
@@ -401,7 +404,8 @@ class UuLinear(torch.nn.Module):
     input irrep copies. Expanded paths have unit normalization. Weights are
     external; biases are not supported.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Native kernels accept shared or per-node weights.
         CPU tensors and general broadcasts use Torch.
 
@@ -422,11 +426,10 @@ class UuLinear(torch.nn.Module):
         num_channel: int,
         *,
         path_mode: str = "sum",
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.irreps_in = Irreps(irreps_in)
         self.irreps_out = Irreps(irreps_out)

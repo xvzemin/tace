@@ -150,6 +150,7 @@ def test_standard_ace_eqx_precedes_eqt(monkeypatch):
     monkeypatch.setenv("TACE_USE_EQT", "1")
     product = make_product("2x0e+2x1o", 3, nonlinear=None)
     assert hasattr(product, "eqx_ace")
+    assert product.eqx_ace.backend == "cuda"
     assert all(not ace.use_eqt for ace in product.aces)
 
 
@@ -232,6 +233,8 @@ def test_element_linear_indexed(moe, matrix_weight, num_nodes):
         use_matrix_weight=matrix_weight,
         **({"num_experts": 2} if moe else {}),
     )
+    assert module.torch_linear.backend == "torch"
+    assert module.eqx_linear.backend == "cuda"
     with torch.no_grad():
         module.bias.normal_()
     x = torch.randn(num_nodes, 16, requires_grad=True)
@@ -772,7 +775,7 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
 @pytest.mark.parametrize("backend", ["eqx", "cue", "both"])
 @pytest.mark.parametrize("hidden", [None, 3])
 def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden):
-    from tace.models.spherical.symmetric_contraction import SymmetricContraction
+    from tace.models.spherical.symmetric_contraction import UuuSymmetricContraction
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if backend == "cue":
@@ -806,7 +809,7 @@ def test_mace_product(monkeypatch, correlation, agnostic, dtype, backend, hidden
     assert module.product.use_eqx == (backend != "cue")
     assert module.product.use_cue == (backend == "cue")
     assert reference.product.backend == "torch"
-    dense = SymmetricContraction(
+    dense = UuuSymmetricContraction(
         module.irreps_hidden,
         module.irreps_coefs_out,
         correlation,

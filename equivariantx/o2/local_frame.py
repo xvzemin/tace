@@ -4,8 +4,9 @@ from typing import NamedTuple, Optional
 import torch
 from e3nn import o3
 
-from ..ops.torch.o2 import local_frame as torch_kernel
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import local_frame as torch_kernel
 from .irreps import Irrep, Irreps
 from .layout import wigner_indices, wigner_orders
 
@@ -429,7 +430,7 @@ class LocalFrame(torch.nn.Module):
         wigner: torch.Tensor,
         index: torch.Tensor,
         *,
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> torch.Tensor:
         """Gather node features and rotate them into edge frames.
 
@@ -441,7 +442,7 @@ class LocalFrame(torch.nn.Module):
             Edge rotation matrices in the layout accepted by :meth:`to_local`.
         index : torch.Tensor
             Node indices of shape ``(num_edges,)``, with dtype ``int64``.
-        backend : {"torch", "cuda"}, optional
+        backend : {None, "torch", "cuda"}, optional
             ``"cuda"`` combines gathering, rotation and the local basis change
             without storing gathered global features. Requires CUDA float32
             or float64 tensors and the CUDA toolkit.
@@ -451,7 +452,8 @@ class LocalFrame(torch.nn.Module):
         torch.Tensor
             Edge features of shape ``(num_edges, irreps_out.dim)``.
         """
-        if backend == "torch":
+        backend = resolve_backend(backend, features.device)
+        if backend == "torch" or not features.is_cuda:
             return torch_kernel.gather(self, features, wigner, index)
         if backend != "cuda":
             raise ValueError("backend must be torch or cuda.")
@@ -466,7 +468,7 @@ class LocalFrame(torch.nn.Module):
         index: torch.Tensor,
         num_nodes: int,
         *,
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> torch.Tensor:
         """Inverse-rotate edge features and sum them at nodes.
 
@@ -482,7 +484,7 @@ class LocalFrame(torch.nn.Module):
             ``int64``. The input edge order need not be sorted.
         num_nodes : int
             Number of output nodes, including nodes with no incident edges.
-        backend : {"torch", "cuda"}, optional
+        backend : {None, "torch", "cuda"}, optional
             ``"cuda"`` accumulates inverse rotations at each node without
             storing global edge messages. Requires CUDA float32 or float64
             tensors and the CUDA toolkit.
@@ -493,7 +495,8 @@ class LocalFrame(torch.nn.Module):
             Node features of shape ``(num_nodes, irreps_in.dim)``. Truncated
             local orders follow the inverse scaling of :meth:`to_global`.
         """
-        if backend == "torch":
+        backend = resolve_backend(backend, features.device)
+        if backend == "torch" or not features.is_cuda:
             return torch_kernel.scatter(self, features, wigner_inv, index, num_nodes)
         if backend != "cuda":
             raise ValueError("backend must be torch or cuda.")

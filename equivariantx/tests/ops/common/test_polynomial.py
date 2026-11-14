@@ -11,8 +11,8 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.mbe.ace import (
     BilinearContraction,
-    SemiCoupledSymmetricContraction,
-    SymmetricContraction,
+    UuuFullyConnectedSymmetricContraction,
+    UuuSymmetricContraction,
 )
 from equivariantx.o3 import MoEElementLinear
 
@@ -27,7 +27,7 @@ def test_gradient_jvp_aoti(kind, native, tmp_path, double_precision, monkeypatch
     monkeypatch.setattr(config, "LINEAR_NATIVE", native)
     if kind == "symmetric":
         modules = [
-            SymmetricContraction.from_entries(
+            UuuSymmetricContraction.from_entries(
                 "2x0e",
                 "2x0e",
                 [((0,), 0, 0, 0.4), ((0, 0, 0), 1, 0, -0.1)],
@@ -126,7 +126,7 @@ def test_default_force_gradient_aoti_updates(
     monkeypatch.setattr(config, "LINEAR_NATIVE", native)
     types = torch.tensor([0, 1, 0], device="cuda")
     if kind == "symmetric":
-        module = SymmetricContraction.from_entries(
+        module = UuuSymmetricContraction.from_entries(
             "2x0e",
             "2x0e",
             [((0,), 0, 0, 0.4), ((0, 0, 0), 1, 0, -0.1)],
@@ -171,7 +171,7 @@ def test_default_force_gradient_aoti_updates(
                 return module(x, base, gates, weight, types)
 
         else:
-            module = SemiCoupledSymmetricContraction(
+            module = UuuFullyConnectedSymmetricContraction(
                 [product], [linear, linear], backend="cuda"
             ).cuda()
             shapes = ((3, 2), (2, linear.weight_numel), (2, linear.weight_numel))

@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.common.torch.linear import linear_layout
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import linear as torch_kernel
@@ -42,7 +43,8 @@ class Linear(torch.nn.Module):
         Output storage. Spherical output applies the transposed path matrix
         after channel mixing, including projection of raw Cartesian inputs.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. Native kernels fuse shared channel maps; CPU
         and general broadcasted parameters use Torch.
 
@@ -67,11 +69,10 @@ class Linear(torch.nn.Module):
         path_normalization="element",
         project=False,
         output_basis="cartesian",
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         if path_normalization not in ("element", "path"):
             raise ValueError("path_normalization must be 'element' or 'path'.")
@@ -177,9 +178,11 @@ class Linear(torch.nn.Module):
         )
         self.channel_metadata = repr(("mul_ir", self.channel_layout))
         if output_basis == "spherical":
-            self.projection = ChangeOfBasis(cartesian_out, inverse=True)
+            self.projection = ChangeOfBasis(
+                cartesian_out, inverse=True, backend=backend
+            )
         elif project:
-            self.projection = Projector(cartesian_out)
+            self.projection = Projector(cartesian_out, backend=backend)
         else:
             self.projection = torch.nn.Identity()
         connected = {ins.i_out for ins in self.instructions if all(ins.path_shape)}
@@ -218,7 +221,8 @@ class Linear(torch.nn.Module):
         if features.shape[-1] != self.irreps_in.dim:
             raise ValueError("The feature dimension does not match irreps_in.")
         weight = self.weight if weight is None else weight
-        bias = self.bias if bias is None else bias
+        if bias is None:
+            bias = self.bias if self.bias_numel else features.new_empty(0)
         if weight.shape[-1] != self.weight_numel or bias.shape[-1] != self.bias_numel:
             raise ValueError("Weight or bias size does not match the instructions.")
         if self.shared_weights and (weight.ndim != 1 or bias.ndim != 1):

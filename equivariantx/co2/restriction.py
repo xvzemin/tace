@@ -8,6 +8,7 @@ from e3nn import o3
 
 from ..co3.basis import path_matrix as spherical_path_matrix
 from ..co3.symmetric import SymmetricBasis
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision, validate_precision
 from ..ops.torch.co2 import restriction as torch_kernel
 from .basis import path_matrix
@@ -101,7 +102,8 @@ class TransverseProjector(torch.nn.Module):
     ----------
     m : int
         Non-negative Cartesian rank. Storage has size 3**m.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Examples
@@ -113,12 +115,11 @@ class TransverseProjector(torch.nn.Module):
     [1.0, 0.0, 3.0]
     """
 
-    def __init__(self, m, *, backend="torch"):
+    def __init__(self, m, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
         if not isinstance(m, int) or m < 0:
             raise ValueError("The order must be a non-negative integer.")
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.m = m
         self.bases = torch.nn.ModuleList(
@@ -149,7 +150,8 @@ class Restriction(torch.nn.Module):
     ----------
     l : int
         Three-dimensional angular degree. Inputs have Cartesian size 3**l.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Notes
@@ -167,12 +169,11 @@ class Restriction(torch.nn.Module):
     (1, 3)
     """
 
-    def __init__(self, l, *, backend="torch"):
+    def __init__(self, l, *, backend=None):
+        backend = resolve_backend(backend)
         super().__init__()
         if not isinstance(l, int) or l < 0:
             raise ValueError("The degree must be a non-negative integer.")
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.l = l
         self.bases = torch.nn.ModuleList(
@@ -213,11 +214,10 @@ class Restriction(torch.nn.Module):
         return self
 
 
-def transverse_quarter_turn(tensor, direction, *, backend="torch"):
+def transverse_quarter_turn(tensor, direction, *, backend=None):
     """Apply the normalized rotation generator to a transverse STF tensor."""
+    backend = resolve_backend(backend, tensor.device)
     validate_precision((tensor, direction))
-    if backend not in ("torch", "cuda"):
-        raise ValueError("backend must be torch or cuda.")
     if backend == "cuda" and tensor.is_cuda:
         from ..ops.cuda.co2 import restriction as cuda_kernel
 

@@ -24,8 +24,11 @@ def test_change_basis_legacy_backend():
     torch.testing.assert_close(layer(x), expected)
     with pytest.raises(ValueError, match="backend"):
         co2.ChangeOfBasis("1m", backend="unsupported")
-    with pytest.raises(ValueError, match="CUDA inputs"):
-        co2.ChangeOfBasis("1m", backend="cuda")(torch.randn(3, 2))
+    features = torch.randn(3, 2)
+    torch.testing.assert_close(
+        co2.ChangeOfBasis("1m", backend="cuda")(features),
+        co2.ChangeOfBasis("1m", backend="torch")(features),
+    )
 
 
 @pytest.mark.parametrize("rank", [0, 1, 2, 3, 4, 6, 8])

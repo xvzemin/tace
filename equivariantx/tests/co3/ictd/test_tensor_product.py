@@ -118,10 +118,16 @@ def test_unweighted_channel_program(project, nodes, double_precision):
         torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
 
 
-def test_native_requires_cuda():
+def test_cuda_backend_cpu_inputs():
     module = co3.ElementwiseTensorProduct("1o", "1o", backend="cuda")
-    with pytest.raises(ValueError, match="CUDA"):
-        module(torch.ones(2, 3), torch.ones(2, 3))
+    reference = co3.ElementwiseTensorProduct("1o", "1o", backend="torch")
+    x, y = [torch.randn(2, 3, requires_grad=True) for _ in range(2)]
+    actual, expected = module(x, y), reference(x, y)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.square().sum(), (x, y)),
+        torch.autograd.grad(expected.square().sum(), (x, y)),
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Captured CUDA-device Torch")

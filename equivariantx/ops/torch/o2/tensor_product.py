@@ -65,6 +65,7 @@ def forward_paths(module, input1, input2, weight, *, reference=False, native=Fal
                 module.irreps_in2[j].ir,
                 irreps,
                 elementwise=elementwise,
+                backend="torch",
             )
         for index, angular in paths:
             ins = module.instructions[index]

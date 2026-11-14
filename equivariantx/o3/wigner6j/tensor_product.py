@@ -6,6 +6,7 @@ from functools import lru_cache
 import torch
 from e3nn import o3
 
+from ...ops import resolve_backend
 from ...ops.precision import validate_module_precision
 from ...ops.torch.o3.wigner6j import tensor_product as torch_kernel
 
@@ -52,9 +53,9 @@ class Wigner6jTensorProduct(torch.nn.Module):
     internal_weights, shared_weights : bool, optional
         Store trainable weights and share them over leading dimensions.
         Both default to true. Internal weights require shared weights.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA contractions or PyTorch operations with automatic differentiation.
-        Defaults to "torch"; CUDA kernels are selected explicitly.
 
     Notes
     -----
@@ -89,11 +90,10 @@ class Wigner6jTensorProduct(torch.nn.Module):
         path_normalization="element",
         internal_weights=None,
         shared_weights=None,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be cuda or torch.")
         self.backend = backend
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)

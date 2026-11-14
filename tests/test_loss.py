@@ -1117,7 +1117,7 @@ def test_optimizer_eqx_parameter_roles(caplog):
 
     from equivariantx import co2, co3, o2
     from equivariantx import o3 as eqx_o3
-    from equivariantx.models.mace.product import SymmetricContraction
+    from equivariantx.models.mace.symmetric_contraction import UuuSymmetricContraction
     from tace.lightning.optimizer import get_optimizer_param_groups
 
     class Contraction(torch.nn.Module):
@@ -1136,7 +1136,7 @@ def test_optimizer_eqx_parameter_roles(caplog):
     original.irreps_in = original.irreps_out = o3.Irreps("4x0e")
     original.contractions = torch.nn.ModuleList([Contraction()])
     model = torch.nn.Module()
-    model.product = SymmetricContraction(original, backend="torch")
+    model.product = UuuSymmetricContraction(original, backend="torch")
     model.norm = torch.nn.LayerNorm((4, 6))
     model.o3_linear = o3.Linear("4x0e+4x1o", "6x0e+6x1o", biases=True)
     model.o3_product = eqx_o3.TensorProduct(

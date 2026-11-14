@@ -3,9 +3,10 @@ from typing import Callable, NamedTuple, Optional, Sequence
 import torch
 from e3nn.math import normalize2mom
 
-from ..ops.torch.o2 import gate as torch_kernel
-from ..ops.precision import validate_module_precision
+from ..ops import resolve_backend
 from ..ops.common.torch.gate import GateExpand, expand_gates
+from ..ops.precision import validate_module_precision
+from ..ops.torch.o2 import gate as torch_kernel
 from .irreps import Irrep, Irreps, IrrepsLike
 
 
@@ -155,8 +156,9 @@ class Gate(torch.nn.Module):
         ``None`` leaves the entry unchanged.
     irreps_gated : Irreps, str, or sequence
         Entries multiplied channel-wise by the activated gates.
-    backend : {"torch", "cuda"}, optional
-        Defaults to ``"torch"``. ``"cuda"`` fuses scalar activations, basis
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        ``"cuda"`` fuses scalar activations, basis
         permutations and gate multiplication for CUDA float32 and float64
         inputs. Supported activations are SiLU, sigmoid, tanh and identity,
         including their second-moment normalization. Requires the CUDA toolkit.
@@ -178,11 +180,10 @@ class Gate(torch.nn.Module):
         act_gates: Sequence[Optional[Callable]],
         irreps_gated: IrrepsLike,
         *,
-        backend: str = "torch",
+        backend: str | None = None,
     ) -> None:
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         irreps_scalars = Irreps(irreps_scalars)
         irreps_gates = Irreps(irreps_gates)
@@ -396,7 +397,7 @@ class Gate(torch.nn.Module):
             )
         if not self.irreps_in:
             return features
-        if self.backend == "cuda":
+        if self.backend == "cuda" and features.is_cuda:
             from ..ops.cuda.o2.gate import evaluate
 
             return evaluate(self, features)

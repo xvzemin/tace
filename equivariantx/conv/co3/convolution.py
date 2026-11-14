@@ -10,8 +10,9 @@ from equivariantx import co3
 from ...co3.basis import path_normalization
 from ...co3.ictd.tensor_product import coupling_phase
 from ...o3.cgtp.convolution import O3TensorProductConv
-from ...ops.torch.conv.co3 import convolution as torch_kernel
+from ...ops import resolve_backend
 from ...ops.precision import validate_module_precision
+from ...ops.torch.conv.co3 import convolution as torch_kernel
 from .polynomials import (
     ANGULAR_TILE_SIZE,
     coupling_coefficients,
@@ -30,7 +31,8 @@ class CartesianTensorProductConv(O3TensorProductConv):
     ----------
     tensor_product : equivariantx.co3.TensorProduct
         Defines the irreps, ``uvu`` instructions and normalization.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses delta/epsilon contractions and graph reduction. ``"torch"``
         uses PyTorch Cartesian operations and automatic differentiation.
     normalization : {"component", "integral", "norm"}, optional
@@ -79,7 +81,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self,
         tensor_product,
         *,
-        backend="torch",
+        backend=None,
         normalization="component",
         normalize=True,
         symmetric_inputs=False,
@@ -87,9 +89,8 @@ class CartesianTensorProductConv(O3TensorProductConv):
         compact_output=False,
         radial_mode="last",
     ):
+        backend = resolve_backend(backend)
         torch.nn.Module.__init__(self)
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be torch or cuda.")
         if normalization not in ("component", "integral", "norm"):
             raise ValueError("normalization must be integral, component or norm.")
         if any(ins.connection_mode != "uvu" for ins in tensor_product.instructions):
@@ -125,7 +126,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self.weight_numel = tensor_product.weight_numel
         self.tp = tensor_product
         if input_basis == "spherical":
-            self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1)
+            self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1, backend=backend)
             for _, ir in self.irreps_in1:
                 self.register_buffer(
                     f"input_basis_{ir.l}",
@@ -134,7 +135,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 )
         self.projector = (
             co3.Projector(
-                self.irreps_out, instructions=tensor_product.projection_indices
+                self.irreps_out,
+                instructions=tensor_product.projection_indices,
+                backend=backend,
             )
             if tensor_product.project
             else torch.nn.Identity()
@@ -142,7 +145,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self.harmonics = torch.nn.ModuleDict(
             {
                 str(ir.l): co3.CartesianHarmonics(
-                    ir.l, normalize=False, normalization=normalization
+                    ir.l, normalize=False, normalization=normalization, backend=backend
                 )
                 for _, ir in self.irreps_in2
             }

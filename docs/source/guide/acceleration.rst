@@ -180,7 +180,7 @@ EQX in TACE
    * - TECE-OAM-RRA ``so2``
      - ``equivariantx.models.tace.tece_oam_rra``
    * - Standard / gated bilinear ACE
-     - ``equivariantx.mbe.ace.SemiCoupledSymmetricContraction`` / ``equivariantx.mbe.ace.BilinearContraction``
+     - ``equivariantx.mbe.ace.UuuFullyConnectedSymmetricContraction`` / ``equivariantx.mbe.ace.BilinearContraction``
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx.models.tace.nonlinear_ace``
 

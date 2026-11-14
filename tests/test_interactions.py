@@ -278,6 +278,7 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
         types.SimpleNamespace(CueTensorProductConv=cue),
     )
     module = O3TensorProductConv("2x0e", "0e", "2x0e")
+    assert module.eqx_tp.backend == "cuda"
     assert module.use_eqx == (expected == "eqx")
     assert module.use_luna == (expected == "luna")
     assert module.use_oeq == (expected == "oeq")
@@ -572,7 +573,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
     from equivariantx.models.tace.tece_oam_rra.interaction import stream
     from tace.models.spherical.tece_oam_rra import Convolution
 
-    if edges == 1025:
+    if edges == 1025 and device == "cuda":
         from functools import partial
 
         import equivariantx.ops.common.cuda.execution as convolution_execution

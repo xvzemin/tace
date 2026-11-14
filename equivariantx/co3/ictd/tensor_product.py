@@ -8,12 +8,12 @@ from typing import NamedTuple
 import torch
 from e3nn import o3
 
-from ...ops import config, get_kernel
+from ...ops import config, get_kernel, resolve_backend
 from ...ops.common.torch.cartesian import cartesian_product, normalized_coefficients
 from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...ops.common.torch.tensor_product import instruction_groups
-from ...ops.torch.co3.ictd import tensor_product as torch_kernel
 from ...ops.precision import validate_module_precision
+from ...ops.torch.co3.ictd import tensor_product as torch_kernel
 from ..basis import Projector, path_matrix
 from ..basis import path_normalization as coupling_scale
 from ..irreps import Irreps
@@ -74,9 +74,10 @@ class TensorProduct(torch.nn.Module):
     project : bool, optional
         Project outputs to symmetric traceless tensors. Set False to defer
         projection until after aggregation and channel mixing.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Torch groups compatible paths. CUDA uses sparse angular kernels;
-        channel-wise paths share a native product program. Defaults to torch.
+        channel-wise paths share a native product program.
 
     Notes
     -----
@@ -112,11 +113,10 @@ class TensorProduct(torch.nn.Module):
         internal_weights=None,
         shared_weights=None,
         project=True,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         if irrep_normalization not in (
             "component",
@@ -293,7 +293,9 @@ class TensorProduct(torch.nn.Module):
             )
         )
         self.projection = Projector(
-            self.irreps_out, instructions=self.projection_indices if project else ()
+            self.irreps_out,
+            instructions=self.projection_indices if project else (),
+            backend=backend,
         )
         reference_paths = [
             ins._replace(path_weight=scale)
@@ -376,7 +378,7 @@ class TensorProduct(torch.nn.Module):
         if self.shared_weights and weight.ndim != 1:
             raise ValueError("Shared weights must be one-dimensional.")
         torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        if self.backend == "cuda":
+        if self.backend == "cuda" and x.is_cuda:
             from ...ops.cuda.co3.ictd import tensor_product as cuda_kernel
 
             return cuda_kernel.evaluate(self, x, y, weight)
@@ -384,7 +386,8 @@ class TensorProduct(torch.nn.Module):
 
     def couple(self, x, y, l1, l2, l3):
         """Contract one angular path before output projection."""
-        return get_kernel("cartesian_product", self.backend)(x, y, l1, l2, l3)
+        backend = self.backend if x.is_cuda else "torch"
+        return get_kernel("cartesian_product", backend)(x, y, l1, l2, l3)
 
     def channel_metadata(self, couplings):
         """Combine channel-wise paths without expanding intermediate products."""

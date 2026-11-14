@@ -421,16 +421,19 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
             irreps_gates,
             gate_acts,
             irreps_gated,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.linear_up = o2.Linear(
             self.local_irreps_in,
             self.nonlinearity.irreps_in,
             biases=True,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.linear_down = o2.Linear(
             self.nonlinearity.irreps_out,
             self.local_irreps_out,
             biases=True,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.weight_numel = self.local_irreps_in.num_irreps
         self.attention = None

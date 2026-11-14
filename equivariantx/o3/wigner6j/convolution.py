@@ -20,8 +20,9 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
         Normalizations of the standard tensor products.
     internal_weights, shared_weights : bool, optional
         Store internal weights and share weights between edges.
-    backend : {"cuda", "torch"}, optional
-        CUDA or PyTorch evaluation. Defaults to "torch".
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        CUDA or PyTorch evaluation.
 
     Examples
     --------
@@ -65,7 +66,7 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
             Standard tensor-product weights, shared or one vector per edge.
         num_nodes : int, optional
             Destination-node count. Defaults to the first input's node count.
-        backend : {"cuda", "torch"}, optional
+        backend : {None, "torch", "cuda"}, optional
             Override the construction-time backend for this call.
 
         Returns

@@ -4,8 +4,9 @@ import torch
 
 from equivariantx import o2
 
-from ..ops.torch.co2 import gate as torch_kernel
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
+from ..ops.torch.co2 import gate as torch_kernel
 from .irreps import Irreps
 
 
@@ -55,7 +56,8 @@ class Gate(torch.nn.Module):
         Normalized activations for each scalar and gate entry.
     irreps_gated : Irreps or str
         STF representations multiplied by the activated gates.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         PyTorch operations or fused CUDA evaluation, including derivatives.
 
     Examples
@@ -75,11 +77,10 @@ class Gate(torch.nn.Module):
         act_gates,
         irreps_gated,
         *,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         reference = o2.Gate(
             Irreps(irreps_scalars).circular(),
@@ -87,6 +88,7 @@ class Gate(torch.nn.Module):
             Irreps(irreps_gates).circular(),
             act_gates,
             Irreps(irreps_gated).circular(),
+            backend="torch",
         )
         self.irreps_in, self.irreps_out = map(
             Irreps, (reference.irreps_in, reference.irreps_out)

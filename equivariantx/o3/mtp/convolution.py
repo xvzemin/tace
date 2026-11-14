@@ -11,8 +11,9 @@ class MatrixTensorProductConv(TensorProductConv):
     ----------
     tensor_product : equivariantx.o3.MatrixTensorProduct
         Defines the irreps, factors, matrix degree and normalization.
-    backend : {"torch", "cuda"}, optional
-        Defaults to the tensor product backend.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        CUDA or optimized PyTorch execution.
     radial_mode : {"last", "full"}, optional
         Fuse the last radial projection, or recompute all radial layers in
         the convolution adjoints. Defaults to ``"last"``.

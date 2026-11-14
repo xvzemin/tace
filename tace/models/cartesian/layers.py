@@ -8,12 +8,12 @@ from e3nn import o3
 from e3nn.nn import Gate
 
 from equivariantx import co3
-from equivariantx.mbe.ace import (
-    IctdBilinearContraction,
-    IctdSemiCoupledSymmetricContraction,
-)
 from equivariantx.co3 import ElementLinear, MoEElementLinear
 from equivariantx.conv.co3 import CartesianTensorProductConv, Linear
+from equivariantx.mbe.ace import (
+    IctdBilinearContraction,
+    IctdUuuFullyConnectedSymmetricContraction,
+)
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -90,6 +90,7 @@ def cartesian_tensor_product(module, *, project=True):
         internal_weights=False,
         shared_weights=module.shared_weights,
         project=project,
+        backend="cuda" if acceleration_enabled("eqx", kernel="product") else "torch",
     )
 
 
@@ -210,10 +211,11 @@ def linear_layout(module):
         instructions=[(p.i_in, p.i_out) for p in old.instructions],
         internal_weights=False,
         shared_weights=old.shared_weights,
+        backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
     )
     if isinstance(module, e3nnElementLinear):
         module.eqx_linear = ElementLinear(module.linear, backend="cuda")
-        module.torch_linear = ElementLinear(module.linear)
+        module.torch_linear = ElementLinear(module.linear, backend="torch")
     indices = torch.zeros(module.irreps_out.dim, dtype=torch.long)
     mask = torch.zeros(module.irreps_out.dim, dtype=torch.float64)
     offset = 0
@@ -258,11 +260,14 @@ def cartesian_modules(module):
             module.expert_irreps_out,
             internal_weights=False,
             shared_weights=False,
+            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         module.eqx_linear = MoEElementLinear(
             module.linear, module.num_experts, backend="cuda"
         )
-        module.torch_linear = MoEElementLinear(module.linear, module.num_experts)
+        module.torch_linear = MoEElementLinear(
+            module.linear, module.num_experts, backend="torch"
+        )
         for side, irreps in (
             ("input", module.irreps_in),
             ("output", module.irreps_out),
@@ -318,7 +323,12 @@ def cartesian_modules(module):
         gate.act_scalars = module.act_scalars
         gate.act_gates = module.act_gates
         gate.mul = co3.ElementwiseTensorProduct(
-            gate.irreps_gated, module.act_gates.irreps_out, project=False
+            gate.irreps_gated,
+            module.act_gates.irreps_out,
+            project=False,
+            backend="cuda"
+            if acceleration_enabled("eqx", kernel="product")
+            else "torch",
         )
         gate.irreps_out = (
             co3.Irreps(module.act_scalars.irreps_out) + gate.mul.irreps_out
@@ -339,7 +349,10 @@ def cartesian_modules(module):
         return module
     if isinstance(module, (o3.SphericalHarmonics, SphericalHarmonics)):
         return co3.CartesianHarmonics(
-            module.irreps_out, module.normalize, module.normalization
+            module.irreps_out,
+            module.normalize,
+            module.normalization,
+            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
         )
     if isinstance(module, LayoutTransform):
         module.irreps = co3.Irreps(module.irreps)
@@ -360,7 +373,7 @@ def cartesian_modules(module):
         module.__class__ = RadialRotaryConvolution
         module.setup_cartesian()
     if isinstance(module, CgtpACE) and module.aces:
-        module.eqx_ace = IctdSemiCoupledSymmetricContraction(
+        module.eqx_ace = IctdUuuFullyConnectedSymmetricContraction(
             [ace.tp for ace in module.aces],
             [coef.linear for coef in module.coefs],
             backend="cuda" if module.use_eqx else "torch",

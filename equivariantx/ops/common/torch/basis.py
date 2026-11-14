@@ -3,6 +3,18 @@
 import torch
 
 
+def project_features(module, features, kernel):
+    """Apply a block projector to flattened Cartesian features."""
+    if isinstance(module, torch.nn.Identity) or not module.groups:
+        return features
+    values = [
+        features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
+        for (mul, ir), section in zip(module.irreps_in, module.slices)
+    ]
+    values = [value.flatten(-2) for value in kernel(module, values)]
+    return values[0] if len(values) == 1 else torch.cat(values, dim=-1)
+
+
 def map_blocks(features, groups, function):
     """Batch equal-rank entries before applying a linear projection."""
     values = list(features)

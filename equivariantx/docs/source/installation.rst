@@ -35,6 +35,8 @@ are limited by that version's CG table. Global time-odd irreps require:
 
 See :ref:`equivariantx-api` for parameters and usage examples.
 
+``backend=None`` uses ``equivariantx.ops.config.DEFAULT_BACKEND``, set once at
+import to CUDA when available and optimized PyTorch otherwise.
 ``backend="torch"`` uses PyTorch on the input device, including GPUs. CUDA
 implementations are loaded on demand. ``import equivariantx as eqx`` registers the operators
-needed by compiled models without initializing CUDA or compiling kernels.
+needed by compiled models without loading CUDA implementations or compiling kernels.

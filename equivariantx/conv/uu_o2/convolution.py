@@ -8,9 +8,9 @@ from e3nn import o3
 from ...co2.spherical import SphericalCoupling
 from ...o2.irreps import Irrep
 from ...o2.wigner import WignerD
-from ...ops import config
-from ...ops.torch.conv.uu_o2 import convolution as torch_kernel
+from ...ops import config, resolve_backend
 from ...ops.precision import validate_module_precision
+from ...ops.torch.conv.uu_o2 import convolution as torch_kernel
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
@@ -27,7 +27,8 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     linear : UuLinear
         Channelwise map between the frames' local representations. Its
         instruction order, weight layout and path normalization are preserved.
-    backend : {"cuda", "torch"}, optional
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CUDA fuses directional couplings and aggregation
         without storing edge messages. ``"torch"`` uses PyTorch operations
         and automatic differentiation for both aligned and transverse forms.
@@ -53,11 +54,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     """
 
     def __init__(
-        self, frame_in, linear, frame_out, *, backend="torch", radial_mode="last"
+        self, frame_in, linear, frame_out, *, backend=None, radial_mode="last"
     ):
+        backend = resolve_backend(backend)
         torch.nn.Module.__init__(self)
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         if (
             frame_in.irreps_out != linear.irreps_in
             or frame_out.irreps_out != linear.irreps_out
@@ -84,7 +84,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         if any(mul != channels for mul, _ in self.irreps_in + self.irreps_out):
             raise ValueError("Every global multiplicity must equal num_channel.")
         lmax = max(frame_in.lmax, frame_out.lmax)
-        self.frame = WignerD(lmax, lmax, method="recursive")
+        self.frame = WignerD(lmax, lmax, method="recursive", backend=backend)
         self.degree_offsets = tuple(
             sum((2 * k + 1) ** 2 for k in range(l)) for l in range(lmax + 1)
         )

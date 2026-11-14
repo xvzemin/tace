@@ -24,7 +24,7 @@ def test_cartesian_planar_projector(double_precision, m, backend):
     irreps = co2.Irreps(f"2x{irrep}+1x{irrep}")
     value = torch.randn(3, irreps.dim, device=DEVICE, requires_grad=True)
     actual = co2.Projector(irreps, backend=backend).to(DEVICE)(value)
-    expected = co2.Projector(irreps, method="factorized").to(DEVICE)(value)
+    expected = co2.Projector(irreps, method="factorized", backend="torch").to(DEVICE)(value)
     for _ in range(3):
         torch.testing.assert_close(actual, expected, atol=3e-13, rtol=3e-13)
         actual, expected = [

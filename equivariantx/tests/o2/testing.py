@@ -49,7 +49,7 @@ def _asymmetric_contractions(correlation=3, path_mode="sum"):
         irreps_out,
         correlation,
         algorithm="dense",
-        path_mode=path_mode,
+        path_mode=path_mode, backend="torch",
     ).to(DEVICE, DTYPE)
     return recursive, dense
 
@@ -106,7 +106,7 @@ def operator_training_problem(kind, backend, device):
             .double()
         )
         reference = (
-            o2.SymmetricContraction("2x0e+2x1m", "2x0e+2x1m", 3, algorithm="dense")
+            o2.SymmetricContraction("2x0e+2x1m", "2x0e+2x1m", 3, algorithm="dense", backend="torch")
             .to(device)
             .double()
         )

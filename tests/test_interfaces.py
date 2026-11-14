@@ -23,6 +23,29 @@ from tace.interface.ase import MagneticFIRE, TACEAseCalc
 from tace.models.adapter import TensorModel
 
 
+@pytest.mark.parametrize("custom_keys", [False, True])
+def test_diatomic_reference_labels(tmp_path, custom_keys):
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    from tace.scripts.plot_diatom import read_reference
+
+    atoms = Atoms("H2", positions=[[0, 0, 0], [1.2, 0, 0]])
+    forces = np.array([[0.25, 0.0, 0.0], [-0.25, 0.0, 0.0]])
+    atoms.calc = SinglePointCalculator(atoms, energy=-1.5, forces=forces)
+    energy_key, forces_key = "energy", "forces"
+    if custom_keys:
+        energy_key, forces_key = "ref_energy", "ref_forces"
+        atoms.info[energy_key] = -2.0
+        atoms.arrays[forces_key] = forces * 2
+    path = tmp_path / "diatomic.xyz"
+    write(path, atoms)
+    rows = read_reference(path, [1], energy_key, forces_key)[1, 1]
+    distance, _, energy, radial_force, _ = rows[0]
+    assert distance == pytest.approx(1.2)
+    assert energy == (-2.0 if custom_keys else -1.5)
+    assert radial_force == (-0.5 if custom_keys else -0.25)
+
+
 @pytest.mark.parametrize("graph_input", [False, True])
 @pytest.mark.parametrize("test_mode", [0, 1])
 def test_eval_u_shift_only_changes_reference_labels(

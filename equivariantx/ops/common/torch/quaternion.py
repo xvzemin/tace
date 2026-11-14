@@ -67,11 +67,11 @@ def quaternion_wigner(vectors, lmax):
         return torch.cat(
             (
                 vectors.new_ones((vectors.shape[0], 1)),
-                rotation_matrix_to_y_axis(vectors).flatten(1),
+                rotation_matrix_to_y_axis(vectors, backend="torch").flatten(1),
             ),
             dim=-1,
         )
-    return polynomial(alignment_quaternion(vectors), lmax)
+    return polynomial(alignment_quaternion(vectors, backend="torch"), lmax)
 
 
 def quaternion_polynomial(lmax, transpose, values):

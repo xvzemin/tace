@@ -4,6 +4,7 @@ import math
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ..ops.common.torch.tensor_product import instruction_groups
 from ..ops.precision import validate_module_precision
@@ -108,7 +109,8 @@ class TensorProduct(torch.nn.Module):
         Store weights and share them over leading feature dimensions.
     project : bool, optional
         Apply STF projection. False defers it until after linear operations.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses diagonal paths and STF projection, and uses sparse angular
         kernels followed by channel GEMMs for ``uvw``. Inputs use FP32 or FP64.
 
@@ -143,11 +145,10 @@ class TensorProduct(torch.nn.Module):
         shared_weights=None,
         *,
         project=True,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be 'torch' or 'cuda'.")
         self.backend = backend
         self.irreps_in1, self.irreps_in2, self.irreps_out = map(
             Irreps, (irreps_in1, irreps_in2, irreps_out)
@@ -302,7 +303,7 @@ class TensorProduct(torch.nn.Module):
         if x.is_complex() or y.is_complex() or weight.is_complex():
             raise TypeError("Cartesian O(2) products require real inputs and weights.")
         torch.broadcast_shapes(x.shape[:-1], y.shape[:-1], weight.shape[:-1])
-        if self.backend == "cuda":
+        if self.backend == "cuda" and x.is_cuda:
             from ..ops.cuda.co2 import tensor_product as cuda_kernel
 
             return cuda_kernel.evaluate(self, x, y, weight)
@@ -310,6 +311,8 @@ class TensorProduct(torch.nn.Module):
 
     def couple(self, x, y, a, b, c):
         """Apply the sparse Cartesian angular coefficients on CUDA."""
+        if not x.is_cuda:
+            return cartesian_product(x, y, a, b, c)
         from ..ops.common.channel_product import angular_product
 
         return angular_product(x, y, coupling_entries(a, b, c), c.dim)

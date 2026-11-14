@@ -5,6 +5,7 @@ from collections import Counter
 
 import torch
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o2 import o2grid as torch_kernel
 from .irreps import Irrep, Irreps
@@ -40,7 +41,8 @@ class O2Grid(torch.nn.Module):
         order. ``"integral"`` uses harmonics orthonormal under ``d alpha``.
         Two sets are combined by an orthogonal sum-and-difference transform.
         For ``"integral"``, the measure is ``d alpha`` summed over the grids.
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
         Buffer dtype. Defaults to the default floating-point dtype.
@@ -99,13 +101,12 @@ class O2Grid(torch.nn.Module):
         resolution=None,
         *,
         normalization="component",
-        backend="torch",
+        backend=None,
         dtype=None,
         device=None,
     ):
+        backend = resolve_backend(backend, device)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         self.irreps = Irreps(irreps)
         self.time_parities = (

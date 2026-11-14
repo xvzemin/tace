@@ -1142,7 +1142,7 @@ def test_convolution_backends_and_modes():
     tp = o2.O3TensorProduct("2x0e", "0e", "3x0e", [(0, 0, 0, "uvw", True)])
     assert tp.convolution.instructions[0].connection_mode == "uvw"
     assert eqx_conv.O2O3TensorProductConv(tp, backend="cuda").channel_mixing
-    with pytest.raises(ValueError, match="backend must be torch or cuda"):
+    with pytest.raises(ValueError, match="backend must be"):
         eqx_conv.O2O3TensorProductConv(tp, backend="triton")
     with pytest.raises(ValueError, match="backend must be torch or cuda"):
         wigner_D(o2.WignerD(0, 0), torch.randn(2, 3), backend="triton")

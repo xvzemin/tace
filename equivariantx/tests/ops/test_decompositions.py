@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.mbe.ace import SymmetricContraction
+from equivariantx.mbe.ace import UuuSymmetricContraction
 from equivariantx.ops.decompositions import symmetric_forward
 
 
@@ -77,7 +77,7 @@ def test_cuda_primal_aoti_without_eqx(inline, tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "POLYNOMIAL_INLINE", inline)
     module = (
-        SymmetricContraction.from_entries(
+        UuuSymmetricContraction.from_entries(
             "2x0e",
             "2x0e",
             [((0, 0), 0, 0, 1.0), ((0, 0, 0), 1, 0, -0.5)],
@@ -143,7 +143,7 @@ assert 'equivariantx' not in sys.modules
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA compiled adjoints")
 def test_cuda_adjoint_joint_compilation():
     module = (
-        SymmetricContraction.from_entries(
+        UuuSymmetricContraction.from_entries(
             "3x0e",
             "3x0e",
             [((0, 0), 0, 0, 0.4), ((0, 0, 0), 1, 0, -0.7)],

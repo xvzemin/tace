@@ -4,6 +4,7 @@ import torch
 
 from equivariantx import o2
 
+from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import cartesian_harmonics as torch_kernel
 from .basis import ChangeOfBasis
@@ -24,7 +25,8 @@ class CartesianHarmonics(torch.nn.Module):
     time_reversal : bool, optional
         Assign odd time parity to the input vector.
 
-    backend : {"torch", "cuda"}, optional
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
 
     Examples
@@ -43,11 +45,10 @@ class CartesianHarmonics(torch.nn.Module):
         normalization="component",
         time_reversal=False,
         *,
-        backend="torch",
+        backend=None,
     ):
+        backend = resolve_backend(backend)
         super().__init__()
-        if backend not in ("torch", "cuda"):
-            raise ValueError("backend must be torch or cuda.")
         self.backend = backend
         orders = [m] if isinstance(m, int) else list(m)
         if any(not isinstance(order, int) or order < 0 for order in orders):
@@ -68,7 +69,7 @@ class CartesianHarmonics(torch.nn.Module):
                 for order in orders
             ]
         )
-        self.to_cartesian = ChangeOfBasis(self.irreps_out)
+        self.to_cartesian = ChangeOfBasis(self.irreps_out, backend=backend)
         self.harmonics = o2.CircularHarmonics(
             max(orders, default=0), normalize=normalize, time_reversal=time_reversal
         )

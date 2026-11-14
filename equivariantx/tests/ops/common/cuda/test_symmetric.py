@@ -13,7 +13,7 @@ from torch.fx.experimental.dynamic_spec import (
 )
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.mbe.ace import SymmetricContraction
+from equivariantx.mbe.ace import UuuSymmetricContraction
 from equivariantx.ops import config
 from equivariantx.ops.common.polynomial import polynomial_prefix
 from equivariantx.ops.common.symmetric import symmetric_inputs
@@ -36,7 +36,7 @@ def contraction(degree=4, channels=2, backend="cuda"):
                 for i in components
             )
         path += 1
-    return SymmetricContraction.from_entries(
+    return UuuSymmetricContraction.from_entries(
         f"{channels}x0e+{channels}x1o+{channels}x2e",
         f"{channels}x0e",
         entries,

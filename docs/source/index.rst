@@ -20,4 +20,3 @@ Documentation Structure
    guide/guide
    equivariantx
    model/model
-   changelog/changelog
