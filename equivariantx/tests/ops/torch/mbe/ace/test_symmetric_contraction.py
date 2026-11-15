@@ -353,7 +353,7 @@ def test_nonscalar_prefix_derivatives(nodes, nonscalar_contraction, monkeypatch)
 
 
 def test_nonscalar_dynamic_force_loss_aoti(
-    nonscalar_contraction, monkeypatch, tmp_path
+    nonscalar_contraction, monkeypatch, tmp_path, aoti_threads
 ):
     monkeypatch.setattr(config, "TORCH_SYMMETRIC_PREFIX", True)
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
@@ -413,7 +413,7 @@ def test_nonscalar_dynamic_force_loss_aoti(
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
-        assert any(name.endswith((".so", ".dylib", ".dll")) for name in names)
+        assert any(name.endswith((".so", ".dylib", ".dll", ".pyd")) for name in names)
         assert not any(name.endswith((".cubin", ".ptx")) for name in names)
         source = "\n".join(
             archive.read(name).decode() for name in names if name.endswith(".cpp")
@@ -436,7 +436,7 @@ def test_nonscalar_dynamic_force_loss_aoti(
             "-c",
             """
 import sys, torch
-torch.set_num_threads(2)
+torch.set_num_threads(int(sys.argv[4]))
 run = torch._inductor.aoti_load_package(sys.argv[1])
 oracle = torch.load(sys.argv[2], weights_only=False)
 weight, cases = torch.load(sys.argv[3], weights_only=True)
@@ -455,6 +455,7 @@ assert 'equivariantx' not in sys.modules and 'e3nn' not in sys.modules
             str(package),
             str(tmp_path / "oracle.pt"),
             str(tmp_path / "inputs.pt"),
+            str(aoti_threads),
         ],
         cwd=tmp_path,
         capture_output=True,

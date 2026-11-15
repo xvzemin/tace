@@ -3,7 +3,8 @@
 import math
 
 import torch
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
+
+from .compilation import edge_work, should_inline
 
 
 def torch_evaluate(features, metadata, output_dim):
@@ -23,10 +24,10 @@ def evaluate(features, metadata, output_dim, *, inline=True):
 
     if not features.is_cuda or features.dtype not in (torch.float32, torch.float64):
         raise TypeError("Pointwise kernels require CUDA float32 or float64 features.")
-    if inline and (torch.compiler.is_compiling() or get_proxy_mode() is not None):
+    if should_inline(inline, edge_work, metadata):
         return torch_evaluate(features, metadata, output_dim)
     batch = math.prod(features.shape[:-1])
     index = torch.zeros(batch, dtype=torch.int64, device=features.device)
     inputs = [features.reshape(batch, features.shape[-1])]
-    output = edge_program(metadata, inputs, index, index, batch)[0]
+    output = edge_program(metadata, inputs, index, index, batch, inline=False)[0]
     return output.reshape(*features.shape[:-1], output_dim)

@@ -59,8 +59,19 @@ def module_context(module):
         for name, value in (*module.named_parameters(), *module.named_buffers())
     }
     modules = {id(item): name for name, item in module.named_modules()}
+    active = set()
 
     def encode(value):
+        identity = id(value)
+        if identity in active:
+            raise ValueError("Cyclic compiled module configuration")
+        active.add(identity)
+        try:
+            return encode_value(value)
+        finally:
+            active.remove(identity)
+
+    def encode_value(value):
         if value is None or type(value) in (bool, int, float, str):
             return value
         if isinstance(value, torch.nn.Module):
@@ -125,6 +136,22 @@ def module_context(module):
             }
         if type(value).__module__.startswith("numpy"):
             return {"numpy": type_name(value), "value": encode(value.tolist())}
+        # Structural metadata, including slotted irreps, needs no type registry.
+        # Read stored attributes, not user-defined serialization hooks.
+        attributes = getattr(value, "__dict__", None)
+        slots = {}
+        for base in type(value).__mro__:
+            for name, descriptor in vars(base).items():
+                if isinstance(descriptor, types.MemberDescriptorType):
+                    try:
+                        slots[base.__qualname__, name] = descriptor.__get__(value)
+                    except AttributeError:
+                        pass
+        if attributes is not None or slots:
+            return {
+                "type": type_name(value),
+                "attributes": encode((attributes, slots)),
+            }
         raise TypeError(f"Unsupported compiled module attribute: {type_name(value)}")
 
     def type_name(value):

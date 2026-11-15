@@ -30,6 +30,7 @@ def parse_metadata(metadata: str):
 
 
 @lru_cache(maxsize=256)
+@torch.compiler.assume_constant_result
 def compact_metadata(metadata: str):
     """Compact a literal operator specification.
 

@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from equivariantx.o3.wigner6j import Wigner6jTensorProductConv
 from equivariantx.ops import config
 from equivariantx.tests.o3.wigner6j.testing import (
     check_derivatives,
@@ -14,6 +15,51 @@ from equivariantx.tests.o3.wigner6j.testing import (
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native Wigner-6j requires CUDA"
 )
+
+
+def test_fused_node_reduction(monkeypatch):
+    monkeypatch.setattr(config, "WIGNER6J_RECOUPLE", True)
+    monkeypatch.setattr(config, "WIGNER6J_INLINE", False)
+    layer, values, index, _ = problem("convolution", "cuda", "cuda")
+
+    def materialized(*args, **kwargs):
+        raise AssertionError(
+            "The fused convolution must not materialize edge messages."
+        )
+
+    monkeypatch.setattr(layer.schedule, "evaluate", materialized)
+    x1, x2, x3, w1, w2 = values
+    actual = layer(x1, x2, x3, index, w1, w2)
+    expected = layer.forward_reference(x1, x2, x3, index, w1, w2)
+    torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+
+
+def test_compensated_node_reduction():
+    from equivariantx.utils.module import default_dtype
+
+    dtype = torch.float32
+    with default_dtype(dtype):
+        layer = Wigner6jTensorProductConv(
+            "0e",
+            "0e",
+            "0e",
+            "0e",
+            "0e",
+            [(0, 0, 0, "uvu", False)],
+            [(0, 0, 0, "uvu", False)],
+            backend="cuda",
+            recouple=True,
+        ).cuda()
+    large = 4 / torch.finfo(dtype).eps
+    attrs = torch.tensor([large, 1, 1, 1, 1, 1, 1, -large], device="cuda", dtype=dtype)
+    attrs = attrs.repeat(128).reshape(-1, 1).requires_grad_()
+    nodes = torch.ones(1, 1, device="cuda", dtype=dtype, requires_grad=True)
+    edges = torch.zeros(2, attrs.shape[0], device="cuda", dtype=torch.long)
+    result = layer(nodes, attrs, nodes, edges)
+    torch.testing.assert_close(result, torch.full_like(result, 768), atol=0, rtol=0)
+    torch.testing.assert_close(
+        torch.autograd.grad(result.sum(), attrs)[0], torch.ones_like(attrs)
+    )
 
 
 @pytest.mark.parametrize("recouple", [False, True])

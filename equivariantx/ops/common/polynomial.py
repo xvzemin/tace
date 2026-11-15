@@ -4,13 +4,13 @@ from collections import Counter, defaultdict
 from functools import lru_cache
 
 import torch
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...utils.autograd import nested_forward_ad, torch_gradient_mask
-from ...utils.metadata import parse_metadata
+from ...utils.metadata import compact_metadata, parse_metadata
 from ...utils.scalar import ScalarProgram
 from .. import config
 from ..precision import validate_uniform
+from .compilation import polynomial_work, should_inline
 
 
 @lru_cache(maxsize=128)
@@ -185,6 +185,13 @@ class NativePolynomial(torch.autograd.Function):
 
     @staticmethod
     def forward(kind, metadata, program, node_type, *operands):
+        if not operands[0].is_cuda:
+            return tuple(
+                value.view_as(value)
+                for value in evaluate_polynomial(
+                    kind, metadata, program, node_type, operands
+                )
+            )
         if kind == "symmetric_matrix" or (
             kind == "symmetric" and config.SYMMETRIC_NATIVE
         ):
@@ -200,8 +207,8 @@ class NativePolynomial(torch.autograd.Function):
                     torch.ops.eqx.element_linear, metadata, program, node_type, operands
                 )
             )
-        if config.POLYNOMIAL_INLINE and (
-            torch.compiler.is_compiling() or get_proxy_mode() is not None
+        if should_inline(
+            config.POLYNOMIAL_INLINE, polynomial_work, kind, metadata, program
         ):
             return tuple(
                 value.view_as(value)
@@ -286,6 +293,8 @@ class NativePolynomial(torch.autograd.Function):
 def native_polynomial(kind, metadata, program, node_type, *operands):
     """Retain native derivatives and expose nested forward AD to ordinary ops."""
     validate_uniform(operands)
+    metadata = metadata if kind == "bilinear" else compact_metadata(metadata)
+    program = compact_metadata(program)
     if nested_forward_ad():
         return tuple(evaluate_polynomial(kind, metadata, program, node_type, operands))
     return NativePolynomial.apply(kind, metadata, program, node_type, *operands)

@@ -8,6 +8,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx.conv import O3TensorProductConv
 from equivariantx.ops import config
 from equivariantx.ops.common.convolution import convolve
+from equivariantx.tests.utils.testing import package_script
 
 
 def convolution_case(width=4, edges=7, shared=False, device="cpu"):
@@ -271,7 +272,6 @@ def test_force_gradient_aoti(
 
     inputs = (x, attrs, radial, projection, index, *parameters)
     graph = make_fx(joint)(*inputs)
-    assert all(not str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     detached = tuple(value.detach() for value in inputs)
     exported = torch.export.export(graph, detached, strict=True)
     package = tmp_path / "convolution.pt2"
@@ -287,6 +287,7 @@ def test_force_gradient_aoti(
         )
         with monkeypatch.context() as reference:
             reference.setattr(config, "TORCH_REFERENCE", True)
+            reference.setattr(model.conv, "backend", "torch")
             expected = tuple(value.detach().cpu() for value in joint(*values))
         cases.append(
             {
@@ -305,10 +306,10 @@ for case in torch.load(sys.argv[2], weights_only=True):
         actual = runner(*(value.cuda() for value in case['inputs']))
     for value, expected in zip(actual, case['expected']):
         torch.testing.assert_close(value.cpu(), expected, atol=1e-8, rtol=1e-8)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-B", "-c", script, str(package), str(data)],
+        [sys.executable, "-B", "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         env=dict(os.environ),
         capture_output=True,
@@ -382,7 +383,6 @@ def test_dynamic_cuda_force_gradient_aoti(tmp_path, double_precision, monkeypatc
         _allow_non_fake_inputs=True,
         dynamic_shapes=ShapesSpec(ParamsSpec({"*args": specs})),
     )(*inputs)
-    assert all(not str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     (tmp_path / "graph.py").write_text(graph.code)
     count = torch.export.Dim("edges", min=2, max=1024)
     detached = tuple(value.detach() for value in inputs)
@@ -428,10 +428,10 @@ for case in torch.load(sys.argv[2], weights_only=True):
     actual = runner(*(value.cuda() for value in case['inputs']))
     for value, expected in zip(actual, case['expected']):
         torch.testing.assert_close(value.cpu(), expected, atol=1e-8, rtol=1e-8)
-assert 'equivariantx' not in sys.modules
+assert 'equivariantx' in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", script, str(package), str(data)],
+        [sys.executable, "-I", "-c", package_script(script), str(package), str(data)],
         cwd=tmp_path,
         capture_output=True,
         text=True,

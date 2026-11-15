@@ -1,14 +1,14 @@
 """Differentiable CUDA execution of static edge expressions."""
 
 import torch
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...utils.autograd import gradient_mask, nested_forward_ad, torch_gradient_mask
-from ...utils.metadata import parse_metadata
+from ...utils.metadata import compact_metadata, parse_metadata
 from ...utils.outputs import edge_outputs
 from ...utils.program import next_adjoint, next_tangent
 from .. import config
 from ..precision import validate_uniform
+from .compilation import edge_work, should_inline
 
 
 @torch.library.custom_op("eqx::edge_program", mutates_args=(), device_types="cuda")
@@ -61,6 +61,11 @@ class EdgeProgram(torch.autograd.Function):
 
     @staticmethod
     def forward(backend, inline, metadata, num_nodes, source, target, *inputs):
+        # Keep the requested backend in the context so each adjoint is budgeted.
+        if backend == "cuda" and should_inline(
+            inline and config.EDGE_PROGRAM_INLINE, edge_work, metadata
+        ):
+            backend = "torch"
         if backend == "cuda":
             return tuple(
                 torch.ops.eqx.edge_program(
@@ -188,13 +193,7 @@ def evaluate(metadata, inputs, source, target, num_nodes, *, inline=True):
 def edge_program(backend, metadata, num_nodes, source, target, *inputs, inline=True):
     """Expose compiled programs and nested JVPs while retaining eager CUDA."""
     validate_uniform(inputs)
-    if (
-        backend == "cuda"
-        and inline
-        and config.EDGE_PROGRAM_INLINE
-        and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
-    ):
-        backend = "torch"
+    metadata = compact_metadata(metadata)
     if nested_forward_ad():
         from .torch.edge import evaluate_torch
 

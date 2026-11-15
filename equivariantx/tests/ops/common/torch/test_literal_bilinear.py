@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from equivariantx.ops.common.torch.literal_bilinear import evaluate
+from equivariantx.ops.common.torch.reduction import add_pairwise, sum_pairwise
 
 
 @pytest.mark.parametrize("role", [0, 1, 2])
@@ -69,3 +70,24 @@ def test_empty_map():
         gradients = torch.autograd.grad(value.square().sum(), (x, y), create_graph=True)
         for gradient, original in zip(gradients, (x, y)):
             torch.testing.assert_close(gradient, torch.zeros_like(original))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_balanced_reduction(dtype):
+    small = torch.finfo(dtype).eps / 2
+    values = torch.tensor([1.0, 0.0] + [small] * 6, dtype=dtype, requires_grad=True)
+    expected = 1.0 + 6 * small
+    terms = values.unbind()
+    partials = []
+    for value in terms:
+        add_pairwise(partials, value)
+    for result in (
+        sum_pairwise(terms),
+        sum_pairwise(value for value in partials if value is not None),
+    ):
+        torch.testing.assert_close(
+            result, torch.as_tensor(expected, dtype=dtype), atol=0, rtol=0
+        )
+        torch.testing.assert_close(
+            torch.autograd.grad(result, values)[0], torch.ones_like(values)
+        )

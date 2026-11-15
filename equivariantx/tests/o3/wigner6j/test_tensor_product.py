@@ -9,6 +9,59 @@ from equivariantx import o3 as eqx_o3
 IRREPS = "0e+0o+1e+1o+2e+2o"
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("convolution", [False, True])
+def test_repeated_irreps(backend, convolution, double_precision):
+    from equivariantx.conv import Wigner6jTensorProductConv
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    mid = o3.Irreps("2x0e+2x1e+2x2e+2x0e+2x1e+2x2e")
+    cls = Wigner6jTensorProductConv if convolution else eqx_o3.Wigner6jTensorProduct
+    module = cls(
+        "2x1o+2x1o",
+        "1o",
+        "2x1e",
+        mid,
+        mid,
+        [(i, 0, 3 * i + j, "uvu", True) for i in range(2) for j in range(3)],
+        [
+            (i, 0, j, "uvu", True)
+            for i, (_, ir) in enumerate(mid)
+            for j, (_, out) in enumerate(mid)
+            if out in ir * o3.Irrep("1e")
+        ],
+        internal_weights=False,
+        shared_weights=False,
+        backend=backend,
+        recouple=True,
+    ).to(device)
+    assert max(map(len, module.schedule.node_groups)) > 1
+    values = tuple(
+        (0.2 * torch.randn(rows, dim, device=device)).requires_grad_()
+        for rows, dim in (
+            (3, 12),
+            (5 if convolution else 3, 3),
+            (3, 6),
+            (5 if convolution else 3, module.weight_numel1),
+            (5 if convolution else 3, module.weight_numel2),
+        )
+    )
+    index = torch.tensor([[0, 1, 1, 2, 2], [1, 0, 2, 1, 0]], device=device)
+    arguments = (*values[:3], index, *values[3:]) if convolution else values
+    actual, expected = module(*arguments), module.forward_reference(*arguments)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        gradients = [
+            torch.autograd.grad(result.sin().sum(), values, create_graph=True)
+            for result in (actual, expected)
+        ]
+        actual, expected = [
+            torch.cat([g.flatten() for g in grad]) for grad in gradients
+        ]
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_public_method_precision(device, double_precision):
     from equivariantx.tests.utils.testing import check_method_precision
@@ -62,6 +115,7 @@ def test_wigner6j_tensor_product(
         internal_weights=False,
         shared_weights=False,
         backend=backend,
+        recouple=True,
     ).to(device)
     inputs = [
         torch.randn(4, width, device=device, requires_grad=True)

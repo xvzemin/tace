@@ -17,6 +17,74 @@ from equivariantx.models.sevennet import convert_sevennet_to_eqx
 from equivariantx.utils import copy_model
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("residual", [False, True])
+def test_magnetic_mace_recoupling(backend, residual, double_precision, tmp_path):
+    pytest.importorskip("mace")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from mace.modules import blocks
+
+    from equivariantx.models.mace.magnetic import Wigner6jInteraction
+
+    name = (
+        "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock"
+        if residual
+        else "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock"
+    )
+    reference = getattr(blocks, name)(
+        node_attrs_irreps=o3.Irreps("2x0e"),
+        node_feats_irreps=o3.Irreps("2x0e+2x1o"),
+        edge_attrs_irreps=o3.Irreps("0e+1o+2e"),
+        edge_feats_irreps=o3.Irreps("3x0e"),
+        target_irreps=o3.Irreps("2x0e+2x1o+2x2e"),
+        hidden_irreps=o3.Irreps("2x0e+2x1o"),
+        avg_num_neighbors=3.0,
+        radial_MLP=[4],
+        magmom_node_inv_feats_irreps=o3.Irreps("2x0e"),
+        magmom_node_attrs_irreps=o3.Irreps("0e+1o+2e"),
+    ).cuda()
+    converted = Wigner6jInteraction(copy_model(reference), backend)
+    original_parameters = dict(reference.named_parameters())
+    assert original_parameters.keys() == dict(converted.named_parameters()).keys()
+    for name, value in converted.named_parameters():
+        torch.testing.assert_close(value, original_parameters[name])
+    data = dict(
+        node_attrs=torch.eye(2, device="cuda")[[0, 1, 0]],
+        node_feats=torch.randn(3, 8, device="cuda", requires_grad=True),
+        edge_attrs=torch.randn(6, 9, device="cuda", requires_grad=True),
+        edge_feats=torch.randn(6, 3, device="cuda", requires_grad=True),
+        edge_index=torch.tensor(
+            [[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]], device="cuda"
+        ),
+        magmom_node_inv_feats=torch.randn(3, 2, device="cuda", requires_grad=True),
+        magmom_node_attrs=torch.randn(3, 9, device="cuda", requires_grad=True),
+    )
+    results = []
+    for module in (reference, converted):
+        output = tuple(value for value in module(**data) if value is not None)
+        variables = tuple(value for value in data.values() if value.requires_grad)
+        gradients = torch.autograd.grad(
+            sum(value.square().sum() for value in output), variables, create_graph=True
+        )
+        parameter_gradients = torch.autograd.grad(
+            sum(value.square().sum() for value in gradients),
+            tuple(
+                dict(module.named_parameters())[name] for name in original_parameters
+            ),
+        )
+        results.append((*output, *gradients, *parameter_gradients))
+    for actual, expected in zip(results[1], results[0]):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-8)
+    path = tmp_path / "magnetic.model"
+    torch.save(converted.cpu(), path)
+    loaded = torch.load(path, weights_only=False).cuda()
+    assert loaded.conv_tp.recouple is True
+    for actual, expected in zip(loaded(**data), reference(**data)):
+        if expected is not None:
+            torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+
+
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
 @pytest.mark.parametrize("device", ["cuda", "cpu"])
 @pytest.mark.parametrize("time_reversal", [False, True])

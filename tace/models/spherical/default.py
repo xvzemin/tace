@@ -238,21 +238,8 @@ def check_model_config(cfg: dict[str, Any]):
         }
 
     magnetic_lmax = cfg["angular_basis"]["magnetic_Lmax"]
-    atomic_basis_type = cfg["atomic_basis"]["type"]
-    if isinstance(atomic_basis_type, str):
-        atomic_basis_type = [atomic_basis_type]
-    uses_magnetic_interaction = any(
-        name in ("uv_o2_mag", "w6j_mag") for name in atomic_basis_type
-    )
-    if (
-        not isinstance(magnetic_lmax, int)
-        or magnetic_lmax < 1
-        or (uses_magnetic_interaction and magnetic_lmax > cfg["Lmax"])
-    ):
-        raise ValueError(
-            "angular_basis.magnetic_Lmax must be positive and must not "
-            "exceed model.config.Lmax when a magnetic interaction is used."
-        )
+    if not isinstance(magnetic_lmax, int) or magnetic_lmax < 1:
+        raise ValueError("angular_basis.magnetic_Lmax must be a positive integer.")
     num_mag_radial_basis = cfg["radial_basis"]["num_mag_radial_basis"]
     if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:
         raise ValueError("radial_basis.num_mag_radial_basis must be positive.")

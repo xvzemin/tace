@@ -7,20 +7,35 @@ import torch
 from e3nn import o3
 
 from ...ops import resolve_backend
+from ...ops.common.sparse_coefficients import SparseMap
 from ...ops.precision import validate_module_precision
 from ...ops.torch.o3.wigner6j import tensor_product as torch_kernel
+from ...utils.module import default_dtype
 
 
 @lru_cache(maxsize=None)
 def recoupling_coefficient(l1, l2, l3, l12, l13, l_out):
-    """Return the coefficient between two products of unit-norm Wigner-3j tensors."""
+    """Return a Racah coefficient in the installed e3nn CG convention."""
     from sympy.physics.wigner import wigner_6j
 
-    return (
-        (-1) ** (l2 + l3 + l12 + l13)
-        * (2 * l13 + 1)
-        * float(wigner_6j(l2, l1, l12, l3, l_out, l13))
+    value = (2 * l13 + 1) * float(wigner_6j(l2, l1, l12, l3, l_out, l13))
+    if value == 0:
+        return 0.0
+    # CG tables may choose different signs for each angular triple. The
+    # overlap fixes this convention once, without changing the exact 6j magnitude.
+    overlap = torch.einsum(
+        "abk,kcd,acj,jbd->",
+        *(
+            o3.wigner_3j(*degrees, dtype=torch.float64, device="cpu")
+            for degrees in (
+                (l1, l2, l12),
+                (l12, l3, l_out),
+                (l1, l3, l13),
+                (l13, l2, l_out),
+            )
+        ),
     )
+    return math.copysign(abs(value), float(overlap))
 
 
 def layout_indices(irreps):
@@ -56,6 +71,9 @@ class Wigner6jTensorProduct(torch.nn.Module):
     backend : {None, "cuda", "torch"}, optional
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA contractions or PyTorch operations with automatic differentiation.
+    recouple : bool, optional
+        Select the recoupled or standard tree. ``None`` selects by angular
+        work and node reuse. Internal execution switches take precedence.
 
     Notes
     -----
@@ -91,10 +109,14 @@ class Wigner6jTensorProduct(torch.nn.Module):
         internal_weights=None,
         shared_weights=None,
         backend=None,
+        recouple=None,
     ):
         backend = resolve_backend(backend)
         super().__init__()
         self.backend = backend
+        if recouple is not None and not isinstance(recouple, bool):
+            raise TypeError("recouple must be a bool or None.")
+        self.recouple = recouple
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)
         self.irreps_in3 = o3.Irreps(irreps_in3)
@@ -261,6 +283,23 @@ class Wigner6jTensorProduct(torch.nn.Module):
         self.register_buffer(
             "weight_index2", torch.tensor(indices2, dtype=torch.long), persistent=False
         )
+        self.unit_weights = (
+            self.weight_numel1 in indices1,
+            self.weight_numel2 in indices2,
+        )
+        self.weight_product = SparseMap(
+            (
+                self.weight_numel1 + self.unit_weights[0],
+                self.weight_numel2 + self.unit_weights[1],
+                len(coefficients),
+            ),
+            tuple(
+                (a, b, i, coefficient)
+                for i, (a, b, coefficient) in enumerate(
+                    zip(indices1, indices2, coefficients)
+                )
+            ),
+        )
         for name, irreps in (
             ("input1_index", self.irreps_in1),
             ("input2_index", self.irreps_in2),
@@ -273,8 +312,17 @@ class Wigner6jTensorProduct(torch.nn.Module):
             self.register_buffer(name, index, persistent=False)
         from ..cgtp.convolution import O3TensorProductConv
 
-        self.conv13 = O3TensorProductConv(self.tp13, backend="cuda", batch_paths=True)
-        self.conv132 = O3TensorProductConv(self.tp132, backend="cuda", batch_paths=True)
+        dtype = torch.get_default_dtype()
+        # The CUDA schedules retain Python coefficient values across dtype casts.
+        with default_dtype(torch.float64):
+            self.conv13 = O3TensorProductConv(
+                self.tp13, backend="cuda", batch_paths=True
+            )
+            self.conv132 = O3TensorProductConv(
+                self.tp132, backend="cuda", batch_paths=True
+            )
+        self.conv13.to(dtype=dtype)
+        self.conv132.to(dtype=dtype)
         self.schedule = torch_kernel.Schedule(self)
 
     def _apply(self, fn, recurse=True):
@@ -312,10 +360,20 @@ class Wigner6jTensorProduct(torch.nn.Module):
             weights.append(weight)
         return tuple(weights)
 
-    def combine_weights(self, weight1, weight2):
+    def combine_weights(self, weight1, weight2, *, backend="torch"):
         """Apply fixed recoupling coefficients to products of standard weights."""
-        weight1 = torch.cat((weight1, weight1.new_ones(weight1.shape[:-1] + (1,))), -1)
-        weight2 = torch.cat((weight2, weight2.new_ones(weight2.shape[:-1] + (1,))), -1)
+        if self.unit_weights[0]:
+            weight1 = torch.cat(
+                (weight1, weight1.new_ones(weight1.shape[:-1] + (1,))), -1
+            )
+        if self.unit_weights[1]:
+            weight2 = torch.cat(
+                (weight2, weight2.new_ones(weight2.shape[:-1] + (1,))), -1
+            )
+        if backend == "cuda":
+            return self.weight_product(
+                weight1.unsqueeze(-1), weight2.unsqueeze(-1), backend
+            ).squeeze(-1)
         return (
             weight1.index_select(-1, self.weight_index1)
             * weight2.index_select(-1, self.weight_index2)

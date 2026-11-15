@@ -3,6 +3,7 @@
 import torch
 
 from ....utils.autograd import torch_gradient_mask
+from .reduction import sum_pairwise
 
 
 def primal(x, y, dimensions, entries, role=2, dim=-1):
@@ -16,7 +17,7 @@ def primal(x, y, dimensions, entries, role=2, dim=-1):
             products[a, b] = inputs[0][a] * inputs[1][b]
         parts[indices[role]].append(products[a, b] * coefficient)
     if parts and all(parts):
-        return torch.stack([sum(terms[1:], terms[0]) for terms in parts], dim=dim)
+        return torch.stack([sum_pairwise(terms) for terms in parts], dim=dim)
     shapes = [list(value.shape) for value in (x, y)]
     for shape in shapes:
         shape.pop(dim)
@@ -25,7 +26,7 @@ def primal(x, y, dimensions, entries, role=2, dim=-1):
     if parts:
         return torch.stack(
             [
-                sum(terms[1:], terms[0]) if terms else x.new_zeros(shape) + zero
+                sum_pairwise(terms) if terms else x.new_zeros(shape) + zero
                 for terms in parts
             ],
             dim=dim,

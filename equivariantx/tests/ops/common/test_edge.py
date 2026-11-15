@@ -14,6 +14,58 @@ from equivariantx.tests.ops.common.torch.test_edge import program_case
 from equivariantx.utils.program import Program
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA compilation")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("primal_inline", [False, True])
+def test_large_program_keeps_native_derivatives(dtype, primal_inline, monkeypatch):
+    from equivariantx.ops import config
+    from equivariantx.ops.common.compilation import edge_work
+
+    program = Program()
+    x = program.input(0, "source", 2)
+    output = x
+    for index in range(6 if primal_inline else 300):
+        term = program.unary("sin", output) if primal_inline else x
+        output = program.binary("add", output, program.scale(term, 1 / (index + 2)))
+    metadata = repr((tuple(program.nodes), ((output, 0, "target"),)))
+    if primal_inline:
+        monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", edge_work(metadata))
+    else:
+        assert edge_work(metadata) > config.COMPILE_MAX_INLINE_WORK
+    source = torch.tensor([0, 1, 2, 0], device="cuda")
+    target = torch.tensor([1, 2, 0, 2], device="cuda")
+    values = torch.randn(3, 2, device="cuda", dtype=dtype, requires_grad=True) * 0.1
+    if primal_inline:
+        primal = make_fx(
+            lambda features: edge_program("cuda", metadata, 3, source, target, features)
+        )(values)
+        assert "eqx.edge_program" not in primal.code
+
+    def joint(features, backend="cuda"):
+        output = edge_program(backend, metadata, 3, source, target, features)[0]
+        force = torch.autograd.grad(output.sin().sum(), features, create_graph=True)[0]
+        gradient = torch.autograd.grad(force.square().sum(), features)[0]
+        return output, force, gradient
+
+    graph = make_fx(lambda features: joint(features))(values)
+    assert "eqx.edge_program" in graph.code
+    assert len(list(graph.graph.nodes)) < 200
+    if len(metadata) >= 4096:
+        calls = [
+            n for n in graph.graph.nodes if str(n.target) == "eqx.edge_program.default"
+        ]
+        assert calls and all(n.args[0].startswith("z:") for n in calls)
+    compiled = torch.compile(graph, fullgraph=True)
+    tolerance = 3e-4 if dtype == torch.float32 else 2e-10
+    for scale in (1.0, 0.8):
+        inputs = (values.detach() * scale).requires_grad_()
+        with torch.no_grad():
+            actual = compiled(inputs)
+        torch.testing.assert_close(
+            actual, joint(inputs, "torch"), atol=tolerance, rtol=tolerance
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA frame fusion")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("channels", [2, 32])

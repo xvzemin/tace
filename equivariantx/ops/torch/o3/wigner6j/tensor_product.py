@@ -7,6 +7,7 @@ from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from .... import config
 from ....common.sparse_coefficients import AngularMap
+from ....common.torch.reduction import add_pairwise, sum_pairwise
 
 
 def channel_projection(x, weight):
@@ -42,6 +43,7 @@ class Schedule(torch.nn.Module):
 
     def __init__(self, module):
         super().__init__()
+        self.recouple = module.recouple
         from .....o3.wigner6j.tensor_product import recoupling_coefficient
 
         self.angular = torch.nn.ModuleDict()
@@ -113,7 +115,7 @@ class Schedule(torch.nn.Module):
                             channel,
                             angular((ir13.l, ir2.l, ir_out.l)),
                         )
-                        routes[key] = routes.get(key, 0.0) + coefficient
+                        routes.setdefault(key, []).append(coefficient)
         first_paths, second_paths = [], []
         for i, first in enumerate(module.tp1.instructions):
             mul1, ir1 = module.irreps_in1[first.i_in1]
@@ -151,9 +153,17 @@ class Schedule(torch.nn.Module):
             )
         self.first_paths, self.second_paths = tuple(first_paths), tuple(second_paths)
         self.nodes = tuple(nodes)
+        node_groups = {}
+        for i, (first, _, _, key) in enumerate(self.nodes):
+            node_groups.setdefault((key, self.input_sections[0][first][1]), []).append(
+                i
+            )
+        self.node_groups = tuple(tuple(indices) for indices in node_groups.values())
         self.projections = tuple(projections)
         self.routes = tuple(
-            (*key, coefficient) for key, coefficient in routes.items() if coefficient
+            (*key, coefficient)
+            for key, terms in routes.items()
+            if (coefficient := math.fsum(terms))
         )
         scalar = self.projections[0][0] if self.projections else None
         self.scalar_edge = (
@@ -194,15 +204,29 @@ class Schedule(torch.nn.Module):
         )
 
     def node_values(self, x1, x3, backend):
-        values = []
-        for first, third, channel, key in self.nodes:
-            start, mul, dim = self.input_sections[0][first]
-            x = x1[..., start : start + mul * dim].unflatten(-1, (mul, dim))
-            start, _, dim = self.input_sections[2][third]
-            y = x3[..., start + channel * dim : start + (channel + 1) * dim].unsqueeze(
-                -2
-            )
-            values.append(self.angular[key](x, y, backend))
+        values = [None] * len(self.nodes)
+        for indices in self.node_groups:
+            left, right = [], []
+            for i in indices:
+                first, third, channel, key = self.nodes[i]
+                start, mul, dim = self.input_sections[0][first]
+                left.append(
+                    x1[..., start : start + mul * dim].unflatten(-1, (mul, dim))
+                )
+                start, _, dim = self.input_sections[2][third]
+                right.append(
+                    x3[
+                        ..., start + channel * dim : start + (channel + 1) * dim
+                    ].unsqueeze(-2)
+                )
+            if len(indices) == 1:
+                values[indices[0]] = self.angular[key](left[0], right[0], backend)
+            else:
+                result = self.angular[key](
+                    torch.stack(left, dim=-3), torch.stack(right, dim=-3), backend
+                )
+                for i, value in zip(indices, result.unbind(-3)):
+                    values[i] = value
         return values
 
     def project_inputs(self, x2, weight):
@@ -297,9 +321,11 @@ class Schedule(torch.nn.Module):
                 value = value * weights[spec]
             if scale != 1:
                 value = value * scale
-            outputs[target] = (
-                value if target not in outputs else outputs[target] + value
-            )
+            add_pairwise(outputs.setdefault(target, []), value)
+        outputs = {
+            target: sum_pairwise(value for value in partials if value is not None)
+            for target, partials in outputs.items()
+        }
         return self.assemble(values, outputs, source)
 
     def scalar_nodes(self, values, backend, source):
@@ -332,9 +358,11 @@ class Schedule(torch.nn.Module):
                     )[..., channel : channel + 1]
                 )
             value = value * (scale * self.angular[key].scalar_factor)
-            outputs[target] = (
-                value if target not in outputs else outputs[target] + value
-            )
+            add_pairwise(outputs.setdefault(target, []), value)
+        outputs = {
+            target: sum_pairwise(value for value in partials if value is not None)
+            for target, partials in outputs.items()
+        }
         features = self.assemble(values, outputs, None, leading=(x1.shape[0],))
         start = self.input_sections[1][self.scalar_edge][0]
         return features[source] * x2[:, start : start + 1]
@@ -408,6 +436,8 @@ class Schedule(torch.nn.Module):
     def use_recoupling(self, values, source=None):
         """Compare sparse arithmetic before and after node reuse."""
         recouple = config.WIGNER6J_RECOUPLE
+        if recouple is None:
+            recouple = self.recouple
         if recouple is None:
             saving = self.standard_cost - self.recoupled_cost
             recouple = saving > 0 and statically_known_true(

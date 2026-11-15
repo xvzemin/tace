@@ -748,7 +748,9 @@ def test_reference_bypasses_geometry_children(
         assert config.TORCH_REFERENCE is True
 
 
-def test_reference_mixed_children_dynamic_aoti(monkeypatch, tmp_path, double_precision):
+def test_reference_mixed_children_dynamic_aoti(
+    monkeypatch, tmp_path, double_precision, aoti_threads
+):
     import os
     import subprocess
     import sys
@@ -881,7 +883,8 @@ def test_reference_mixed_children_dynamic_aoti(monkeypatch, tmp_path, double_pre
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         assert any(
-            name.endswith((".so", ".dylib", ".dll")) for name in archive.namelist()
+            name.endswith((".so", ".dylib", ".dll", ".pyd"))
+            for name in archive.namelist()
         )
         assert not any(name.endswith((".cubin", ".ptx")) for name in archive.namelist())
         source = "\n".join(
@@ -906,7 +909,7 @@ def test_reference_mixed_children_dynamic_aoti(monkeypatch, tmp_path, double_pre
             "-c",
             """
 import sys, torch
-torch.set_num_threads(2)
+torch.set_num_threads(int(sys.argv[4]))
 run = torch._inductor.aoti_load_package(sys.argv[1])
 oracle = torch.export.load(sys.argv[2]).module()
 weights, cases, invalid = torch.load(sys.argv[3], weights_only=True)
@@ -940,6 +943,7 @@ print(f'{len(cases) * 2} steps checked, {updates} nonzero force/parameter update
             str(package),
             str(tmp_path / "oracle.pt2"),
             str(tmp_path / "inputs.pt"),
+            str(aoti_threads),
         ],
         cwd=tmp_path,
         env={

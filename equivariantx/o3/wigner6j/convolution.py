@@ -23,6 +23,9 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
     backend : {None, "torch", "cuda"}, optional
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA or PyTorch evaluation.
+    recouple : bool, optional
+        Force recoupled or standard evaluation. ``None`` selects by angular
+        work and node reuse. Internal execution switches take precedence.
 
     Examples
     --------

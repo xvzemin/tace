@@ -678,8 +678,6 @@ class O2MagneticInteraction(UvO2Interaction):
     def _prepare_setup(self) -> None:
         if self.magnetic_edge_irreps is None:
             raise ValueError("uv_o2_mag requires magnetic_edge_irreps.")
-        if not 0 <= self.magnetic_edge_irreps.lmax <= self.Lmax:
-            raise ValueError("magnetic edge irreps must satisfy 0 <= lmax <= Lmax.")
         self.magnetic_edge_irreps_out = o3.Irreps(
             [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
         ).sort().irreps.simplify()

@@ -197,5 +197,8 @@ WIGNER6J_RECOUPLE = None
 EDGE_PROGRAM_INLINE = True
 POLYNOMIAL_INLINE = True
 
+# Retain CUDA calls for large programs and their expanded derivative schedules.
+COMPILE_MAX_INLINE_WORK = 256
+
 # Keep compiler-visible indexed maps optional until wider workloads are measured.
 LINEAR_NATIVE = False

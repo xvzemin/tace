@@ -199,13 +199,16 @@ class NodeRepresentation(torch.nn.Module):
         if uses_o2_cgtp_interaction and self.use_so2 and mmax != lmax:
             raise ValueError("Mixing o2_cgtp with legacy so2 requires mmax == lmax.")
         if self.use_local_frame:
+            wigner_lmax = max(Lmax, lmax)
+            if uses_o2_magnetic_interaction:
+                wigner_lmax = max(wigner_lmax, self.magnetic_edge_irreps_out.lmax)
             self.o2_angular_basis = o2.WignerD(
-                max(Lmax, lmax)
+                wigner_lmax
                 if uses_o2_cgtp_interaction
                 else mmax
                 if uses_so2_interaction or uses_o2_interaction
                 else 0,
-                max(Lmax, lmax),
+                wigner_lmax,
                 backend="cuda"
                 if acceleration_enabled("eqx", kernel="conv")
                 else "torch",

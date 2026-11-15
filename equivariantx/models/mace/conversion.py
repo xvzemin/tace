@@ -62,10 +62,12 @@ def convert_mace_to_eqx(
     Parameters
     ----------
     model : torch.nn.Module
-        MACE model with supported RealAgnostic interactions. Set its device
+        MACE model with supported spatial or magnetic interactions. Set its device
         and floating-point precision before conversion.
-    implementation : {"o3", "o2"}, optional
-        Direct or aligned convolution. Defaults to "o3".
+    implementation : {"o3", "o2", "wigner6j"}, optional
+        Direct or aligned convolution, or magnetic Wigner-6j recoupling.
+        Defaults to "o3". Magnetic conversion replaces only interactions;
+        radial networks, products and readouts are unchanged.
     enable_cueq : bool, optional
         Also convert the remaining operators using MACE's CuEquivariance
         converter. Defaults to False. Existing CuEquivariance operators
@@ -87,7 +89,8 @@ def convert_mace_to_eqx(
     -------
     torch.nn.Module
         Model with the original forward interface, supporting energy, force
-        and stress training and ``MACECalculator(models=...)``. Learned
+        and stress training and ``MACECalculator(models=...)`` or
+        ``MagneticMACECalculator(models=...)``. Learned
         parameters and all tensor-product paths are retained.
 
     Notes
@@ -96,8 +99,10 @@ def convert_mace_to_eqx(
     RealAgnosticDensityInteractionBlock, RealAgnosticDensityResidualInteractionBlock,
     RealAgnosticAttResidualInteractionBlock and
     RealAgnosticResidualNonLinearInteractionBlock. Edge harmonics must have
-    natural spatial parity for the aligned implementation. Magnetic interactions
-    are not supported.
+    natural spatial parity for the aligned implementation. ``"wigner6j"``
+    supports the magnetic density and residual density interactions of MACE
+    v0.3.17, with their original external edge weights. It does not support
+    ``enable_cueq`` or ``stream_radial``.
     Chemical node attributes must be one-hot element indicators.
 
     Load weights before conversion, and construct the optimizer afterwards.
@@ -116,13 +121,30 @@ def convert_mace_to_eqx(
 
         model = convert_mace_to_eqx(model.cuda())
         calculator = MACECalculator(models=model, device="cuda")
+
+    For an e3nn magnetic MACE model:
+
+    .. code-block:: python
+
+        from mace.calculators import MagneticMACECalculator
+
+        model = convert_mace_to_eqx(model.cuda(), implementation="wigner6j")
+        calculator = MagneticMACECalculator(models=model, device="cuda")
     """
     backend = resolve_backend(backend)
+    if implementation == "wigner6j":
+        if enable_cueq or stream_radial:
+            raise ValueError(
+                "Wigner-6j conversion retains the original radial networks and operators."
+            )
+        from .magnetic import convert_magnetic_mace
+
+        return convert_magnetic_mace(model, backend=backend, inplace=inplace)
     from mace.modules.irreps_tools import tp_out_irreps_with_instructions
     from mace.modules.wrapper_ops import get_layout
 
     if implementation not in ("o3", "o2"):
-        raise ValueError("implementation must be 'o3' or 'o2'.")
+        raise ValueError("implementation must be 'o3', 'o2', or 'wigner6j'.")
     if not hasattr(model, "spherical_harmonics") or not hasattr(model, "interactions"):
         raise TypeError("Expected a MACE model with spatial interactions.")
     converted = [isinstance(layer.conv_tp, Convolution) for layer in model.interactions]

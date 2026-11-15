@@ -3,10 +3,10 @@
 import torch
 
 from ...utils.autograd import gradient_mask
-from ...utils.metadata import parse_metadata
+from ...utils.metadata import compact_metadata, parse_metadata
 from ...utils.outputs import o3_outputs
-from .contraction import adjoint_program, project_radial
 from ..precision import validate_uniform
+from .contraction import adjoint_program, project_radial
 
 
 @torch.library.custom_op("eqx::o3_contraction", mutates_args=(), device_types="cuda")
@@ -187,5 +187,10 @@ def contraction(metadata, program, source, target, operands, *, batch_paths=Fals
         )
     program, operands = project_radial(program, operands, 4)
     return torch.ops.eqx.o3_contraction(
-        metadata, program, source, target, operands, batch_paths=batch_paths
+        compact_metadata(metadata),
+        compact_metadata(program),
+        source,
+        target,
+        operands,
+        batch_paths=batch_paths,
     )

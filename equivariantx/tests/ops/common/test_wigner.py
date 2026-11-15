@@ -11,6 +11,38 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import o2
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA joint compilation")
+@pytest.mark.parametrize("method", ["quaternion", "recursive"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_native_joint_derivatives(method, dtype, monkeypatch):
+    from equivariantx.ops import config
+
+    monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", 0)
+    frame = o2.WignerD(3, 3, backend="cuda", method=method).to("cuda", dtype)
+    reference = o2.WignerD(3, 3, backend="torch", method=method).to("cuda", dtype)
+    vectors = (
+        torch.randn(3, 3, device="cuda", dtype=dtype) * 0.1 + 0.5
+    ).requires_grad_()
+    weight = (torch.randn(84, device="cuda", dtype=dtype) * 0.1).requires_grad_()
+
+    def joint(module, vectors, weight):
+        energy = (module.forward_packed(vectors) @ weight).sin().mean()
+        force = -torch.autograd.grad(energy, vectors, create_graph=True)[0]
+        loss = energy.square() + force.square().mean()
+        return loss, force, *torch.autograd.grad(loss, (vectors, weight))
+
+    graph = make_fx(lambda *values: joint(frame, *values))(vectors, weight)
+    assert "eqx.alignment_cuda" in graph.code
+    assert len(list(graph.graph.nodes)) < 180
+    compiled = torch.compile(graph, fullgraph=True)
+    tolerance = 2e-4 if dtype == torch.float32 else 2e-10
+    for offset in (0.0, 0.1):
+        inputs = ((vectors.detach() + offset).requires_grad_(), weight)
+        torch.testing.assert_close(
+            compiled(*inputs), joint(reference, *inputs), rtol=tolerance, atol=tolerance
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Wigner transforms")
 @pytest.mark.parametrize("method", ["quaternion", "recursive"])
 @pytest.mark.parametrize("degree", [1, 3])

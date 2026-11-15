@@ -73,7 +73,11 @@ def test_raw_forward_ad(inverse):
 
 
 @pytest.mark.parametrize("inverse", [False, True])
-def test_default_force_loss_package(inverse, tmp_path):
+@pytest.mark.parametrize("inline_limit", [0, 256])
+def test_default_force_loss_package(inverse, inline_limit, tmp_path, monkeypatch):
+    from equivariantx.ops import config
+
+    monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", inline_limit)
     values, _, training = problem(inverse)
     expected = training(*values, backend="torch")
     assert expected[1].abs().max() > 1e-7
@@ -81,9 +85,8 @@ def test_default_force_loss_package(inverse, tmp_path):
     graph = make_fx(lambda *v: training(*v))(*values)
     graph.graph.eliminate_dead_code()
     graph.recompile()
-    assert not any(
-        "eqx.indexed_frame" in str(node.target) for node in graph.graph.nodes
-    )
+    native = any("eqx.indexed_frame" in str(node.target) for node in graph.graph.nodes)
+    assert native == (inline_limit == 0)
     exported = torch.export.export(
         graph, tuple(value.detach() for value in values), strict=True
     )

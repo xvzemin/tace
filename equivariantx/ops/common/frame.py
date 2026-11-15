@@ -1,11 +1,11 @@
 """Indexed frame rotations and their multilinear adjoints."""
 
 import torch
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...utils.autograd import forward_ad_active
 from ...utils.outputs import EDGE, MATRIX, NODE, indexed_frame_output
 from ..precision import validate_module_precision, validate_uniform
+from .compilation import frame_work, should_inline
 
 
 def transform(frame, features, wigner, index, num_nodes, inverse):
@@ -27,11 +27,7 @@ def transform(frame, features, wigner, index, num_nodes, inverse):
         raise ValueError("Each edge requires one Wigner matrix.")
     if num_nodes < 0 or (inverse and features.size(0) != index.numel()):
         raise ValueError("Invalid node count or edge feature count.")
-    if (
-        forward_ad_active()
-        or torch.compiler.is_compiling()
-        or get_proxy_mode() is not None
-    ):
+    if forward_ad_active() or should_inline(True, frame_work, frame.rotation_layout):
         from ..torch.o2 import local_frame
 
         if inverse:
@@ -113,11 +109,7 @@ contract_cuda.register_autograd(backward, setup_context=setup_context)
 def contract(nodes, matrix, edges, index, num_nodes, layout, role):
     """Expose frame algebra during joint capture and forward differentiation."""
     validate_uniform((nodes, matrix, edges))
-    if (
-        forward_ad_active()
-        or torch.compiler.is_compiling()
-        or get_proxy_mode() is not None
-    ):
+    if forward_ad_active() or should_inline(True, frame_work, layout):
         from .torch.frame import indexed_frame
 
         return indexed_frame(nodes, matrix, edges, index, num_nodes, layout, role)

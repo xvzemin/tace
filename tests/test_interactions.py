@@ -1265,6 +1265,75 @@ def test_o2_representation_uses_common_angular_coverage(Lmax, lmax, interaction)
     assert incompatible.unexpected_keys == []
 
 
+@pytest.mark.parametrize("interaction", ["uv_o2_mag_non_soc", "uv_o2_mag", "w6j_mag"])
+@pytest.mark.parametrize("fused", [False, True])
+def test_magnetic_degree_independent_of_node_degree(
+    interaction, fused, monkeypatch, double_precision
+):
+    if fused and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tace.models import SphericalTACE, TensorModel
+
+    monkeypatch.setenv("TACE_USE_EQX", "1" if fused else "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        num_layers=1,
+        num_channel=2,
+        Lmax=0,
+        lmax=1,
+        mmax=1,
+        parity=True,
+        cutoff=4.0,
+        max_neighbors=None,
+        statistics=[
+            dict(atomic_numbers=[26], avg_num_neighbors=2.0, atomic_energy={26: 0.0})
+        ],
+        target_property=["energy", "forces", "stress", "noncollinear_magnetic_forces"],
+    )
+    config["fidelity"]["magnetic_scale"] = 2.0
+    config["atomic_basis"]["type"] = (
+        "uv_o2_mag" if interaction == "uv_o2_mag_non_soc" else interaction
+    )
+    config["angular_basis"].update(
+        magnetic_Lmax=3,
+        use_spin_orbit_coupling=interaction != "uv_o2_mag_non_soc",
+    )
+    config["radial_basis"].update(hidden=[4], apply_cutoff=False)
+    config["scale_shift"]["enable"] = False
+    config["readout_emlp"]["use_one_body_magmoms"] = False
+    model = TensorModel(SphericalTACE(**config)).to(DEVICE).train()
+    representation = model.readout_fn.representation
+    assert representation.magnetic_node_irreps_out.lmax == 3
+    assert representation.irreps_outs[-1].lmax == 0
+    if interaction != "w6j_mag":
+        expected = 3 if interaction == "uv_o2_mag" else 1
+        assert representation.o2_angular_basis.lmax == expected
+
+    data = dict(
+        positions=torch.randn(3, 3, device=DEVICE),
+        node_type=torch.zeros(3, dtype=torch.long, device=DEVICE),
+        edge_index=torch.tensor(
+            [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device=DEVICE
+        ),
+        edge_shifts=torch.zeros(6, 3, device=DEVICE),
+        lattice=torch.eye(3, device=DEVICE)[None] * 8,
+        batch=torch.zeros(3, dtype=torch.long, device=DEVICE),
+        ptr=torch.tensor([0, 3], device=DEVICE),
+        fidelity_idx=torch.zeros(1, dtype=torch.long, device=DEVICE),
+        initial_noncollinear_magmoms=torch.randn(3, 3, device=DEVICE) * 0.2,
+    )
+    output = model(data)
+    for name in config["target_property"]:
+        assert torch.isfinite(output[name]).all()
+    sum(output[name].square().sum() for name in config["target_property"]).backward()
+    gradients = [
+        parameter.grad
+        for parameter in model.parameters()
+        if parameter.grad is not None
+    ]
+    assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
 @pytest.mark.parametrize(
     "magnetic_info_type",
     [None, "node"],

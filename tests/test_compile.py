@@ -250,6 +250,48 @@ def test_joint_loss_aliases_and_scaling(device):
     torch.testing.assert_close(shared, torch.ones_like(shared))
 
 
+def test_joint_artifact_metadata():
+    from types import SimpleNamespace
+
+    from e3nn import o3
+
+    from equivariantx import co2, co3, o2
+    from tace.models.compile.artifact import module_context
+
+    class Settings:
+        __slots__ = ("representations", "options")
+
+        def __getstate__(self):
+            raise AssertionError("Compilation must not invoke serialization hooks")
+
+    module = torch.nn.Linear(2, 2)
+    settings = Settings()
+    settings.representations = (
+        o2.Irreps("2x0ee+3x1mo"),
+        co2.Irreps("2x0ee+3x1mo"),
+        o3.Irreps("2x0e+3x1o"),
+        co3.Irreps("2x0e+3x1o"),
+    )
+    settings.options = SimpleNamespace(layout="ir_mul", weight=module.weight)
+    module.settings = settings
+    expected = module_context(module)
+    settings.representations = tuple(type(v)(v) for v in settings.representations)
+    assert module_context(module) == expected
+    with torch.no_grad():
+        module.weight.add_(1)
+    assert module_context(module) == expected
+    for irreps in ("2x0oe+3x1mo", "2x0ee+3x1me", "3x1mo+2x0ee"):
+        settings.representations = (o2.Irreps(irreps), *settings.representations[1:])
+        assert module_context(module) != expected
+    settings.options.weight = torch.ones(2, requires_grad=True)
+    with pytest.raises(ValueError, match="Unregistered trainable"):
+        module_context(module)
+    settings.options.weight = module.weight
+    settings.options.parent = settings
+    with pytest.raises(ValueError, match="Cyclic"):
+        module_context(module)
+
+
 def test_joint_artifact_contract(tmp_path, monkeypatch):
     from torch._inductor.output_code import CompiledFxGraph
 

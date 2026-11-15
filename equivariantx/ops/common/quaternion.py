@@ -53,11 +53,16 @@ quaternion_polynomial_cuda.register_autograd(
 )
 
 
+def polynomial_work(lmax, order):
+    """Count power construction and vectorized derivative gathers."""
+    return 2 * lmax + order + 16
+
+
 @torch.compiler.allow_in_graph
 def quaternion_polynomial(lmax, transpose, values):
     """Expose directional polynomial expressions to functional transformations."""
     validate_uniform(values)
-    if inline():
+    if inline(polynomial_work, lmax, len(values)):
         from .torch.quaternion import quaternion_polynomial as evaluate
 
         return evaluate(lmax, transpose, values)

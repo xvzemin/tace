@@ -266,7 +266,7 @@ def test_empty_irreps_and_legacy_object(tmp_path):
 
 
 @pytest.mark.parametrize("inverse", [False, True])
-def test_dynamic_cpu_force_loss_aoti(inverse, monkeypatch, tmp_path):
+def test_dynamic_cpu_force_loss_aoti(inverse, monkeypatch, tmp_path, aoti_threads):
     layer = co2.LocalFrame("64x2o+64x3e+64x4e", mmax=2).double()
     width = layer.output_dim if inverse else layer.input_dim
 
@@ -315,7 +315,7 @@ def test_dynamic_cpu_force_loss_aoti(inverse, monkeypatch, tmp_path):
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
-        assert any(name.endswith((".so", ".dylib", ".dll")) for name in names)
+        assert any(name.endswith((".so", ".dylib", ".dll", ".pyd")) for name in names)
         assert not any(name.endswith((".cubin", ".ptx")) for name in names)
         source = "\n".join(
             archive.read(name).decode() for name in names if name.endswith(".cpp")
@@ -346,7 +346,7 @@ def test_dynamic_cpu_force_loss_aoti(inverse, monkeypatch, tmp_path):
             "-c",
             """
 import sys, torch
-torch.set_num_threads(2)
+torch.set_num_threads(int(sys.argv[4]))
 run = torch._inductor.aoti_load_package(sys.argv[1], run_single_threaded=True)
 oracle = torch.load(sys.argv[2], weights_only=False)
 weight, cases, invalid = torch.load(sys.argv[3], weights_only=True)
@@ -375,6 +375,7 @@ assert 'equivariantx' not in sys.modules and 'e3nn' not in sys.modules
             str(package),
             str(tmp_path / "oracle.pt"),
             str(tmp_path / "inputs.pt"),
+            str(aoti_threads),
         ],
         cwd=tmp_path,
         env={

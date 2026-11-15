@@ -8,6 +8,8 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
+from equivariantx.tests.utils.testing import package_script
+
 
 def wide_tensor_product_problem(space, shared):
     from equivariantx import co2, o2
@@ -140,7 +142,7 @@ def test_wide_dynamic_tensor_product(space, shared, monkeypatch, tmp_path):
         [
             sys.executable,
             "-c",
-            """
+            package_script("""
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
@@ -148,8 +150,8 @@ for row in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = run(*(value.cuda() for value in row['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), row['outputs'], atol=3e-10, rtol=3e-10)
-assert 'equivariantx' not in sys.modules
-""",
+assert 'equivariantx' in sys.modules
+"""),
             str(package),
             str(data),
         ],
@@ -456,6 +458,7 @@ def check_diagonal_boundaries(space, monkeypatch):
     from equivariantx.ops.common.torch import channel_product
 
     cls = o2 if space == "o2" else co2
+    monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", 0)
     monkeypatch.setattr(config, "CHANNEL_SLICES_MIN_WIDTH", 3)
     for output, instructions in (
         ("3x0e+3x2m", [(0, 0, 0, "uuu", False)]),

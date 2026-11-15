@@ -1,7 +1,6 @@
 """Packed Wigner matrices with quaternion and recursive CUDA kernels."""
 
 import torch
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...utils.autograd import forward_ad_active
 from ...utils.metadata import parse_metadata
@@ -12,14 +11,17 @@ from ...utils.outputs import (
 )
 from .. import config
 from ..precision import validate_module_precision, validate_uniform
+from .compilation import alignment_work, should_inline
 
 
-def inline():
-    """Expose geometry to compilation and functional differentiation."""
-    return forward_ad_active() or (
-        config.WIGNER_INLINE
-        and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
-    )
+def inline(estimate, *args):
+    """Expose bounded geometry while preserving functional differentiation."""
+    return forward_ad_active() or should_inline(config.WIGNER_INLINE, estimate, *args)
+
+
+def rotation_work(degree):
+    """Count recursive degree contractions, whose angular axes are vectorized."""
+    return 16 * (degree + 1)
 
 
 @torch.library.custom_op("eqx::alignment_cuda", mutates_args=(), device_types="cuda")
@@ -66,7 +68,7 @@ alignment_native.register_autograd(
 def alignment_cuda(key, values):
     """Retain native geometry while exposing functional transforms to Torch."""
     validate_uniform(values)
-    if inline():
+    if inline(alignment_work, key):
         from .torch.wigner import alignment
 
         return alignment(key, values)
@@ -116,7 +118,7 @@ rotation_native.register_autograd(
 def rotation(cg, output, values):
     """Expose recursive degree contractions inside functional transformations."""
     validate_uniform((cg, values))
-    if inline():
+    if inline(rotation_work, 1):
         from .torch.wigner import rotation as evaluate
 
         return evaluate(cg, output, values)
@@ -140,7 +142,7 @@ packed_wigner_native.register_fake(packed_wigner_output)
 def packed_wigner(vectors, degree, coefficients):
     """Keep inference-only packing from suppressing a forward-mode tangent."""
     validate_uniform((vectors, coefficients))
-    if inline():
+    if inline(rotation_work, degree):
         from .torch.wigner import packed_wigner as evaluate
 
         return evaluate(vectors, degree, coefficients)

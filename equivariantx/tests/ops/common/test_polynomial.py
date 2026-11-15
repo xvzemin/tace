@@ -18,6 +18,33 @@ from equivariantx.o3 import MoEElementLinear
 from equivariantx.tests.utils.testing import package_script
 
 
+def test_inline_work_counts_vectorized_batches():
+    from equivariantx.ops.common.compilation import polynomial_work
+
+    rows = tuple(((0, 1), i, 0, 1.0) for i in range(400))
+    metadata = repr((2, 1, 400, 2, rows))
+    program = repr((((0, 0, 1, 2), 3, 0, 0),))
+    assert polynomial_work("symmetric", metadata, program) == 4
+    metadata = repr((1, (400, 400, 400), tuple(((i, i, i), 1.0) for i in range(400))))
+    program = repr((((0, 1, 2), 2, 0, 0),))
+    assert polynomial_work("channel", metadata, program) == 3
+
+
+def test_inline_budget(monkeypatch):
+    from equivariantx.ops import config
+    from equivariantx.ops.common.compilation import should_inline
+
+    def unexpected(*args):
+        pytest.fail("Eager or disabled programs must not estimate graph work")
+
+    assert not should_inline(True, unexpected)
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    assert not should_inline(False, unexpected)
+    monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", 4)
+    assert should_inline(True, int, 4)
+    assert not should_inline(True, int, 5)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AOTInductor")
 @pytest.mark.parametrize(
     "kind,native", [("symmetric", False), ("linear", False), ("linear", True)]
@@ -109,6 +136,7 @@ assert 'equivariantx' in sys.modules
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AOTInductor")
+@pytest.mark.parametrize("inline_limit", [0, 256])
 @pytest.mark.parametrize(
     "kind,native",
     [
@@ -120,11 +148,12 @@ assert 'equivariantx' in sys.modules
     ],
 )
 def test_default_force_gradient_aoti_updates(
-    kind, native, tmp_path, double_precision, monkeypatch
+    kind, native, inline_limit, tmp_path, double_precision, monkeypatch
 ):
     from equivariantx.ops import config
 
     monkeypatch.setattr(config, "LINEAR_NATIVE", native)
+    monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", inline_limit)
     types = torch.tensor([0, 1, 0], device="cuda")
     if kind == "symmetric":
         module = UuuSymmetricContraction.from_entries(
@@ -199,7 +228,15 @@ def test_default_force_gradient_aoti_updates(
         for node in graph.graph.nodes
         if str(node.target).startswith("eqx.")
     }
-    assert operators == ({"eqx.element_linear.default"} if native else set())
+    operator = {
+        "symmetric": "symmetric_contract",
+        "linear": "element_linear",
+        "bilinear": "bilinear_ace",
+        "ace": "ace_contract",
+    }[kind]
+    assert operators == (
+        {f"eqx.{operator}.default"} if native or not inline_limit else set()
+    )
     exported = torch.export.export(graph, tuple(value.detach() for value in values))
     package = tmp_path / "polynomial_force.pt2"
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
@@ -240,3 +277,41 @@ assert 'equivariantx' in sys.modules
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA compilation")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_large_contraction_keeps_native_derivatives(dtype, double_precision):
+    product = o3.TensorProduct("2x4e", "2x4e", "2x4e", [(0, 0, 0, "uuu", False)])
+    linear = o3.Linear("2x4e", "2x4e", internal_weights=False, shared_weights=False)
+    module = UuuFullyConnectedSymmetricContraction(
+        [product, product], [linear] * 3, backend="cuda"
+    ).to(device="cuda", dtype=dtype)
+    types = torch.tensor([0, 1, 0], device="cuda")
+    values = tuple(
+        (torch.randn(shape, device="cuda", dtype=dtype) * 0.2).requires_grad_()
+        for shape in ((3, 18), (2, 4), (2, 4), (2, 4))
+    )
+
+    def joint(x, *weights):
+        energy = module(x, weights, types).sin().sum()
+        force = torch.autograd.grad(energy, x, create_graph=True)[0]
+        gradients = torch.autograd.grad(energy + force.square().sum(), (x, *weights))
+        return energy, force, *gradients
+
+    graph = make_fx(joint)(*values)
+    assert "eqx.ace_contract" in graph.code
+    depths = {}
+    for node in graph.graph.nodes:
+        depths[node] = 1 + max((depths[x] for x in node.all_input_nodes), default=0)
+    assert max(depths.values()) < 300
+    compiled = torch.compile(graph, fullgraph=True)
+    tolerance = 2e-5 if dtype == torch.float32 else 2e-10
+    for scale in (1.0, 0.7):
+        inputs = tuple((value.detach() * scale).requires_grad_() for value in values)
+        with torch.no_grad():
+            actual = compiled(*inputs)
+        module.backend = "torch"
+        expected = joint(*inputs)
+        module.backend = "cuda"
+        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)

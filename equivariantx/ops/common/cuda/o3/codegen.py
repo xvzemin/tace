@@ -2,6 +2,15 @@
 
 from ..codegen import HEADER, contraction_source
 
+ACCUMULATION = r"""
+__device__ __forceinline__ void accumulate(T value, T& sum, T& correction) {
+    const T next = sum + value;
+    correction += fabs(sum) >= fabs(value)
+        ? (sum - next) + value : (value - next) + sum;
+    sum = next;
+}
+"""
+
 
 def angular_source(path, mapping, dimensions, shared, roles, cache, lines):
     """Reuse contractions across paths and transposed multilinear terms."""
@@ -124,6 +133,7 @@ def convolution_source(
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
+    compensated = dtype == "float"
     concurrent = function is not None
     args = [f"const T* p{i}" for i in range(len(dimensions))]
     args += [f"T* g{i}" for i in range(outputs)]
@@ -142,7 +152,7 @@ def convolution_source(
     )
     tile = "tile" if concurrent else "int64_t(blockIdx.x)"
     lines = [
-        "" if concurrent else HEADER.replace("SCALAR", dtype),
+        "" if concurrent else HEADER.replace("SCALAR", dtype) + ACCUMULATION,
         f"{declaration} void {function or 'run'}(" + ", ".join(args) + ") {",
         "const int lane = threadIdx.x % 32;",
         f"const int u = {'channel' if concurrent else 'int(blockIdx.y)'} * 32 + lane;",
@@ -288,7 +298,7 @@ def convolution_source(
             f"const bool exclusive = (begin == 0 || {index}[order[begin - 1]] != node) && (end == edges || {index}[order[end]] != node);",
         ]
         lines += [
-            f"T sum{i} = 0;"
+            f"T sum{i} = 0" + (f", correction{i} = 0;" if compensated else ";")
             for i, (_, role, _, _) in enumerate(node_terms)
             if role == (0 if owner == 0 else 4)
         ]
@@ -309,8 +319,14 @@ def convolution_source(
         reduced = owner >= 0 and role == (0 if owner == 0 else 4)
         if not reduced:
             lines.append(f"T {name} = 0;")
-        for a, b in terms:
-            lines.append(f"{name} = fma({a}, {b}, {name});")
+        if reduced and compensated:
+            lines.append("{ T value = 0;")
+            for a, b in terms:
+                lines.append(f"value = fma({a}, {b}, value);")
+            lines.append(f"accumulate(value, {name}, correction{i}); }}")
+        else:
+            for a, b in terms:
+                lines.append(f"{name} = fma({a}, {b}, {name});")
         if not reduced:
             row = "source_node" if role == 0 else "target_node"
             lines.append(
@@ -341,6 +357,8 @@ def convolution_source(
         for i, ((slot, role, dim, offset), _) in enumerate(node_terms.items()):
             if role != (0 if owner == 0 else 4):
                 continue
+            if compensated:
+                lines.append(f"sum{i} += correction{i};")
             address = f"g{slot}[node * {dim} + {offset} + u]"
             if concurrent or any(
                 other_slot == slot and other_role != role
@@ -370,7 +388,7 @@ def fused_source(
     indexed=True,
 ):
     """Execute independent path tiles in one grid with shared launch operands."""
-    header = HEADER.replace("SCALAR", dtype)
+    header = HEADER.replace("SCALAR", dtype) + ACCUMULATION
     args = [f"const T* p{i}" for i in range(len(dimensions))]
     args += [f"T* g{i}" for i in range(outputs)]
     names = [f"p{i}" for i in range(len(dimensions))] + [

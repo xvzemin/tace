@@ -270,23 +270,6 @@ class JointTraining:
                     *[data[key].detach().contiguous().clone() for key in self.keys],
                     *state,
                 )
-            from equivariantx.utils.metadata import compact_metadata
-
-            metadata_arguments = {
-                "eqx.edge_program.default": (0,),
-                "eqx.o3_contraction.default": (0, 1),
-                "eqx.local_channel_product.default": (0, 1),
-            }
-            for node in graph.graph.nodes:
-                positions = metadata_arguments.get(str(node.target), ())
-                if positions:
-                    arguments = list(node.args)
-                    for position in positions:
-                        if position < len(arguments) and isinstance(
-                            arguments[position], str
-                        ):
-                            arguments[position] = compact_metadata(arguments[position])
-                    node.args = tuple(arguments)
             strip_saved_tensor_detach(graph)
             graph = rebuild_graph_module(graph)
             replace_sym_numel(graph)
