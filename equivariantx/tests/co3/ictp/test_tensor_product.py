@@ -9,6 +9,127 @@ from equivariantx import co3
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def test_analytic_path_types():
+    from equivariantx.co3.ictp.tensor_product import path_type
+
+    for a in range(11):
+        for b in range(11):
+            for c in range(abs(a - b), a + b + 1):
+                k, odd = divmod(a + b - c, 2)
+                traces = min(a - k - odd, b - k - odd)
+                expected = (
+                    "detrace" if traces else "symmetrize" if odd and c > 1 else "direct"
+                )
+                assert path_type(a, b, c) == expected
+    for ranks in ((1, 1, 3), (2, 0, 1), (-1, 0, 1)):
+        with pytest.raises(ValueError):
+            path_type(*ranks)
+
+
+@pytest.mark.parametrize(
+    "ranks",
+    [
+        (4, 4, 0),
+        (4, 4, 1),
+        (5, 2, 3),
+        (0, 3, 3),
+        (1, 2, 2),
+        (2, 1, 2),
+        (3, 2, 2),
+        (4, 5, 2),
+        (3, 1, 3),
+        (5, 1, 5),
+        (2, 6, 5),
+    ],
+)
+def test_saturated_ictp(ranks, double_precision):
+    from itertools import permutations
+    from math import factorial, sqrt
+    from string import ascii_lowercase
+
+    from equivariantx.co3.ictp.tensor_product import CartesianProduct
+    from equivariantx.tests.utils.testing import check_forward_ad
+
+    a, b, c = ranks
+    k, odd = divmod(a + b - c, 2)
+    symbols = iter(ascii_lowercase)
+
+    def axes(n):
+        return "".join(next(symbols) for _ in range(n))
+
+    summed, left, right = axes(k), axes(a - k - odd), axes(b - k - odd)
+    eps = torch.zeros(3, 3, 3, device=DEVICE)
+    for h in range(3):
+        eps[h, (h + 1) % 3, (h + 2) % 3] = 1
+        eps[h, (h + 2) % 3, (h + 1) % 3] = -1
+    p, q, h = (axes(1), axes(1), axes(1)) if odd else ("", "", "")
+    equation = (
+        f"...{left}{p}{summed},...{summed}{q}{right}"
+        + (f",{h}{p}{q}" if odd else "")
+        + f"->...{left}{h}{right}"
+    )
+
+    def oracle(x, y):
+        shapes = (
+            x.reshape(*x.shape[:-1], *([3] * a)),
+            y.reshape(*y.shape[:-1], *([3] * b)),
+        )
+        raw = torch.einsum(equation, *shapes, *((eps,) if odd else ())) / sqrt(
+            (1 + odd) * 3**k
+        )
+        if odd and c > 1:
+            batch = list(range(raw.ndim - c))
+            raw = sum(
+                raw.permute(*batch, *order)
+                for order in permutations(range(len(batch), raw.ndim))
+            ) / factorial(c)
+        return raw.flatten(-c) if c else raw.unsqueeze(-1)
+
+    x, y = [
+        (torch.randn(*s, 2 * 3**r, device=DEVICE) * 0.1)[..., ::2].requires_grad_()
+        for r, s in zip((a, b), ((2, 1), (1, 3)))
+    ]
+    expected = oracle(x, y)
+    for backend in ("torch", "cuda") if x.is_cuda else ("torch",):
+        module = CartesianProduct(*ranks, backend=backend).to(DEVICE)
+        assert not hasattr(module, "expansion_0") and not hasattr(module, "projection")
+        actual, reference = module(x, y), expected
+        for _ in range(3):
+            torch.testing.assert_close(actual, reference, atol=1e-11, rtol=1e-11)
+            seed = torch.randn_like(reference)
+            actual, reference = [
+                torch.cat(
+                    [
+                        v.flatten()
+                        for v in torch.autograd.grad(
+                            z.sin(), (x, y), seed, create_graph=True, retain_graph=True
+                        )
+                    ]
+                )
+                for z in (actual, reference)
+            ]
+        torch.testing.assert_close(actual, reference, atol=1e-10, rtol=1e-10)
+        if ranks in ((4, 4, 1), (3, 2, 2), (2, 6, 5)):
+            check_forward_ad(module, oracle, (x, y))
+        assert module(x[:0], y).shape == (0, 3, 3**c)
+        if c >= 2:
+            # Tracelessness of saturated paths is guaranteed for STF, not arbitrary dense inputs.
+            stf = [
+                co3.ChangeOfBasis(f"{v}e", backend="torch").to(DEVICE)(
+                    torch.randn(2, 2 * v + 1, device=DEVICE)
+                )
+                for v in (a, b)
+            ]
+            tensor = module(*stf).reshape(2, *([3] * c))
+            torch.testing.assert_close(
+                tensor, tensor.transpose(-2, -1), atol=1e-11, rtol=1e-11
+            )
+            trace = tensor.diagonal(dim1=-2, dim2=-1).sum(-1)
+            torch.testing.assert_close(
+                trace, torch.zeros_like(trace), atol=1e-11, rtol=0
+            )
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision):
     from unittest.mock import patch

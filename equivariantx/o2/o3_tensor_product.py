@@ -156,11 +156,15 @@ class O3TensorProduct(torch.nn.Module):
             self.register_buffer("weight", metadata.weight)
         self.register_buffer("output_mask", metadata.output_mask)
 
-        self.local_frame_in = LocalFrame(self.irreps_in1, basis_change=False)
-        output_frame = LocalFrame(self.irreps_out, reverse=True, basis_change=False)
+        self.local_frame_in = LocalFrame(
+            self.irreps_in1, basis_change=False, backend=backend
+        )
+        output_frame = LocalFrame(
+            self.irreps_out, reverse=True, basis_change=False, backend=backend
+        )
         simplified_irreps_out = self.irreps_out.simplify()
         self.local_frame_out = LocalFrame(
-            simplified_irreps_out, reverse=True, basis_change=False
+            simplified_irreps_out, reverse=True, basis_change=False, backend=backend
         )
         self.lmax = max(self.local_frame_in.lmax, self.local_frame_out.lmax)
         # Adjacent equal irreps share a single rotation over their channels.

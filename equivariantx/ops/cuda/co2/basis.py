@@ -16,8 +16,6 @@ def change_basis(module, features):
 
     if not features.is_cuda:
         raise ValueError("backend='cuda' requires CUDA inputs.")
-    if config.TORCH_REFERENCE:
-        return torch_kernel.change_basis(module, features)
     values = []
     for mul, rank, dim, circular_dim, section in module.paths:
         matrix = getattr(module, f"basis_{rank}")
@@ -83,14 +81,16 @@ def project(module, features):
 
     if not features.is_cuda:
         raise ValueError("backend='cuda' requires CUDA inputs.")
-    if config.TORCH_REFERENCE:
-        return torch_kernel.project_reference(module, features)
     if (
         config.PLANAR_PROJECTION_INLINE
         and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
         and all(4 <= rank <= 8 for rank, _ in module.groups)
     ):
-        return torch_kernel.project(module, features)
+        return torch_kernel.project_blocks(
+            module,
+            features,
+            lambda rank, value: torch_kernel.planar_project(value, rank),
+        )
     if config.PLANAR_PROJECTION_NATIVE and all(
         2 <= rank <= 8 for rank, _ in module.groups
     ):

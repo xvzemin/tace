@@ -8,6 +8,18 @@ from .edge import evaluate_torch
 
 
 def indexed_frame(nodes, matrix, edges, index, num_nodes, layout, role):
+    return frame_program(
+        nodes, matrix, edges, index, num_nodes, layout, role, optimized=True
+    )
+
+
+def indexed_frame_reference(nodes, matrix, edges, index, num_nodes, layout, role):
+    return frame_program(
+        nodes, matrix, edges, index, num_nodes, layout, role, optimized=False
+    )
+
+
+def frame_program(nodes, matrix, edges, index, num_nodes, layout, role, *, optimized):
     """Evaluate a local-frame pairing with the declared node reduction."""
     ni, no, nw, _ = parse_metadata(layout)
     dimensions = ni, nw, no
@@ -26,7 +38,7 @@ def indexed_frame(nodes, matrix, edges, index, num_nodes, layout, role):
         )
     )
     return evaluate_torch(
-        metadata, (nodes, matrix, edges), index, index, num_nodes, optimized=True
+        metadata, (nodes, matrix, edges), index, index, num_nodes, optimized=optimized
     )[0]
 
 
@@ -43,6 +55,17 @@ def frame_rotation(features, matrix, edge, metadata, role):
     else:
         result = torch.bmm(matrix * mask, features)
     return result + (features, matrix, edge)[role][..., :0].sum()
+
+
+def frame_reference(features, matrix, edge, metadata, role):
+    degrees_in, degrees_out = parse_metadata(metadata)
+    mask = matrix.new_tensor([[a == b for a in degrees_in] for b in degrees_out])
+    terms = [features, matrix, edge]
+    labels = ["eic", "eoi", "eoc"]
+    output = labels.pop(role)
+    dummy = terms.pop(role)
+    result = torch.einsum(",".join((*labels, "oi")) + "->" + output, *terms, mask)
+    return result + dummy[..., :0].sum()
 
 
 def rotary_product(query, key, phase, score, lmax, mmax, heads, role):
@@ -99,3 +122,34 @@ def rotary_product(query, key, phase, score, lmax, mmax, heads, role):
     else:
         result = sum(parts[1:], parts[0])
     return result + (query, key, phase, score)[role][..., :0].sum()
+
+
+def rotary_reference(query, key, phase, score, lmax, mmax, heads, role):
+    """Differentiate the scalar pairing to select any multilinear output leg."""
+
+    def primal(q, k, p):
+        q, k = (v.unflatten(-1, (heads, -1)) for v in (q, k))
+        p = p.reshape(q.shape[0], mmax + 1, heads, 2)
+        offset, parts = 0, []
+        for m in range(mmax + 1):
+            width = lmax + 1 - m
+            qr, kr = (v[:, offset : offset + width] for v in (q, k))
+            alpha = p[:, m, :, 0][:, None, :, None]
+            block = qr * kr * alpha
+            if m:
+                qi, ki = (v[:, offset + width : offset + 2 * width] for v in (q, k))
+                beta = p[:, m, :, 1][:, None, :, None]
+                block = block + qi * ki * alpha + (qi * kr - qr * ki) * beta
+            parts.append(block.sum((1, 3)))
+            offset += width * (1 + (m != 0))
+        return sum(parts[1:], parts[0])
+
+    values = query, key, phase, score
+    result = (
+        primal(query, key, phase)
+        if role == 3
+        else torch.func.grad(
+            lambda q, k, p, s: (primal(q, k, p) * s).sum(), argnums=role
+        )(*values)
+    )
+    return result + values[role][..., :0].sum()

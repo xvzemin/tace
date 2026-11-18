@@ -3,8 +3,89 @@
 import torch
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-from ... import config
 from ....utils.autograd import nested_forward_ad
+from ... import config
+
+
+def scalar_blocks(sizes, activations):
+    """Coalesce adjacent scalar entries with the same stateless activation."""
+    from e3nn.math import normalize2mom
+
+    kinds = {
+        torch.nn.SiLU: 1,
+        torch.nn.Sigmoid: 2,
+        torch.nn.Tanh: 3,
+        torch.nn.Identity: 0,
+    }
+    functions = {torch.nn.functional.silu: 1, torch.sigmoid: 2, torch.tanh: 3}
+    groups = []
+    for size, act in zip(sizes, activations):
+        if not size:
+            continue
+        scale = 1.0
+        if type(act) is normalize2mom:
+            scale = 1.0 if act._is_id else act.cst
+            act = act.f
+        kind = 0 if act is None else kinds.get(type(act))
+        if kind is None:
+            kind = next((k for fn, k in functions.items() if act is fn), None)
+        if kind is None or getattr(act, "inplace", False):
+            return None
+        if groups and groups[-1][1:] == (kind, scale):
+            size += groups.pop()[0]
+        groups.append((size, kind, scale))
+    return tuple(groups)
+
+
+def scalar_values(features, groups, gradient=None, order=0):
+    """Evaluate contiguous scalar blocks and their first two derivatives."""
+    from ...common.pointwise import activation_vjp
+
+    values = []
+    start = 0
+    for size, kind, scale in groups:
+        x = features if len(groups) == 1 else features[..., start : start + size]
+        if order:
+            g = gradient if len(groups) == 1 else gradient[..., start : start + size]
+            if kind:
+                value = activation_vjp(
+                    x, g, ("", "silu", "sigmoid", "tanh")[kind], order
+                )
+            else:
+                value = g if order == 1 else g * 0.0
+        elif kind == 1:
+            value = torch.nn.functional.silu(x)
+        elif kind == 2:
+            value = x.sigmoid()
+        elif kind == 3:
+            value = x.tanh()
+        else:
+            value = x
+        values.append(value if scale == 1.0 else value * scale)
+        start += size
+    if not values:
+        return features[..., :0]
+    return values[0] if len(values) == 1 else torch.cat(values, -1)
+
+
+def scalars(module, features, reference):
+    """Dispatch normalized activations without crossing provider boundaries."""
+    groups = module.scalar_blocks
+    if groups is None or (config.TORCH_REFERENCE and module.backend == "torch"):
+        return reference(module, features)
+    if features.shape[-1] != module.irreps_in.dim:
+        raise ValueError("The feature dimension does not match irreps_in.")
+    if not groups or (len(groups) == 1 and groups[0][1:] == (0, 1.0)):
+        return features
+    if module.backend == "cuda" and features.is_cuda:
+        from ....utils.autograd import forward_ad_active
+
+        if not forward_ad_active():
+            from ...cuda.nn.activation import block_activation
+
+            sizes, kinds, scales = zip(*groups)
+            return block_activation(features, None, sizes, kinds, scales)
+    return scalar_values(features, groups)
 
 
 def reference(features, coefficients):

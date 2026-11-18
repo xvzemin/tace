@@ -8,14 +8,61 @@ import torch
 
 from ...ops import config, resolve_backend
 from ...ops.common.irreducible_product import coefficients as sparse_coefficients
+from ...ops.common.sparse_coefficients import bilinear_tables
+from ...ops.common.torch.cartesian import (
+    coupling_size,
+    literal_coupling,
+    normalized_coefficients,
+)
 from ...ops.precision import validate_module_precision
 from ...ops.torch.co3.ictp import tensor_product as torch_kernel
-from ..ictd.tensor_product import TensorProduct as IctdTensorProduct
-from ..symmetric import SymmetricBasis, symmetric_basis, symmetric_powers
+from ..symmetric import (
+    SymmetricBasis,
+    SymmetricProduct,
+    permutation_classes,
+    symmetric_basis,
+    symmetric_powers,
+)
+from ..tensor_product_base import TensorProductBase
 
 SYMMETRIC_MATRIX_SIZE = 8192
 SPARSE_PRODUCT_SIZE = 262144
 LITERAL_PRODUCT_SIZE = 256
+ANALYTIC_TRACE_TERMS = 24576
+
+
+def path_type(l1, l2, l3):
+    """Classify the work on the free indices of two STF inputs."""
+    if min(l1, l2, l3) < 0 or not abs(l1 - l2) <= l3 <= l1 + l2:
+        raise ValueError(
+            "Degrees must be nonnegative and satisfy the triangle inequality."
+        )
+    if l3 <= 1 or l3 == abs(l1 - l2):
+        return "direct"
+    if l3 == abs(l1 - l2) + 1:
+        return "symmetrize"
+    return "detrace"
+
+
+def symmetric_entries(degrees, budget, compact):
+    """Return bounded epsilon coefficients averaged only over free-index permutations."""
+    l1, l2, l3 = degrees
+    terms = 2 * 3 ** ((l1 + l2 - l3) // 2)
+    if 3**l3 * terms > budget:
+        return None
+    indices, _, _, counts = permutation_classes(l3)
+    counts = counts.tolist()
+    if not compact and terms * sum(n * n for n in counts) > budget:
+        return None
+    indices = indices.tolist()
+    rows = [[] for _ in counts]
+    for a, b, c, scale in normalized_coefficients(*degrees):
+        j = indices[c]
+        rows[j].append((a, b, scale / counts[j]))
+    order = range(len(rows)) if compact else indices
+    return tuple(
+        (a, b, c, scale) for c, j in enumerate(order) for a, b, scale in rows[j]
+    )
 
 
 def execution(module, features):
@@ -65,6 +112,26 @@ def symmetric_expansion(rank, traces):
     return (matrix @ identity_expansion(rank, traces)) / symmetric_basis(rank)["norm"]
 
 
+@lru_cache(maxsize=32)
+def trace_tables(l1, l2, l3, scales):
+    """Collect analytic trace terms by Cartesian exponent triple."""
+    entries = []
+    out_norm = symmetric_basis(l3)["norm"]
+    for t, scale in enumerate(scales):
+        lower = l3 - 2 * t
+        basis = symmetric_basis(lower)
+        matrix = identity_expansion(l3, t) * scale
+        matrix = matrix / basis["norm"][:, None] / out_norm
+        rows = [
+            [(j, value) for j, value in enumerate(row) if value]
+            for row in matrix.tolist()
+        ]
+        index = basis["indices"].tolist()
+        for a, b, c, weight in normalized_coefficients(l1, l2, lower):
+            entries.extend((a, b, j, weight * v) for j, v in rows[index[c]])
+    return bilinear_tables((3**l1, 3**l2, len(out_norm)), tuple(entries))
+
+
 class CartesianProduct(torch.nn.Module):
     """Couple one pair of STF tensors by symmetric delta and epsilon products.
 
@@ -82,10 +149,23 @@ class CartesianProduct(torch.nn.Module):
         super().__init__()
         self.backend = backend
         self.l1, self.l2, self.l3 = l1, l2, l3
+        self.path_type = path_type(l1, l2, l3)
         k, odd = divmod(l1 + l2 - l3, 2)
         a, b = l1 - k - odd, l2 - k - odd
-        self.symmetric = l3 >= 2 and l3 != abs(l1 - l2)
-        if not self.symmetric:
+        self.contractions = k
+        if self.path_type == "direct":
+            return
+        if self.path_type == "symmetrize":
+            indices, permutation, offsets, counts = permutation_classes(l3)
+            self.register_buffer("indices", indices.clone(), persistent=False)
+            self.register_buffer(
+                "counts", counts.to(torch.get_default_dtype()), persistent=False
+            )
+            if backend == "cuda" and l3 > 3:
+                self.register_buffer(
+                    "permutation", permutation.clone(), persistent=False
+                )
+                self.register_buffer("offsets", offsets.clone(), persistent=False)
             return
         self.packed = 3**l3 * (l3 + 1) * (l3 + 2) // 2 <= SYMMETRIC_MATRIX_SIZE
         if self.packed:
@@ -94,11 +174,21 @@ class CartesianProduct(torch.nn.Module):
             )
         else:
             self.bases = torch.nn.ModuleList(
-                SymmetricBasis(l3 - 2 * t) for t in range(min(a, b) + 1)
+                SymmetricBasis(l3 - 2 * t, backend=backend)
+                for t in range(min(a, b) + 1)
             )
+            if backend == "torch":
+                self.symmetric_products = torch.nn.ModuleDict(
+                    {
+                        str(l3 - 2 * t): SymmetricProduct(l1, l2, l3 - 2 * t)
+                        for t in range(min(a, b) + 1)
+                        if l3 - 2 * t >= 4
+                    }
+                )
         coefficient = Fraction(1)
         self.coefficients = [1.0]
         for t in range(1, min(a, b) + 1):
+            # Ratio of consecutive trace terms with averaged free-index permutations.
             coefficient *= Fraction(
                 -(a - t + 1) * (b - t + 1), t * (2 * l3 - 2 * t + 1)
             )
@@ -121,7 +211,20 @@ class CartesianProduct(torch.nn.Module):
             self.packed
             and 3 ** (l1 + l2) * (l3 + 1) * (l3 + 2) // 2 <= SPARSE_PRODUCT_SIZE
         )
-        if self.sparse_product:
+        self.fused_traces = (
+            backend == "cuda"
+            and not self.packed
+            and sum(
+                coupling_size(l1, l2, l3 - 2 * t) * math.comb(t + 2, 2)
+                for t in range(len(self.coefficients))
+            )
+            <= ANALYTIC_TRACE_TERMS
+        )
+        if self.fused_traces:
+            self.sparse_coefficients = trace_tables(
+                l1, l2, l3, tuple(self.coefficients)
+            )
+        elif self.sparse_product:
             self.sparse_coefficients = sparse_coefficients(
                 l1,
                 l2,
@@ -146,6 +249,7 @@ class CartesianProduct(torch.nn.Module):
                     break
             self.literal_entries = tuple(entries)
             self.literal_dimensions = (3**l1, 3**l2, 3**l3)
+        if self.sparse_product or self.fused_traces:
             for k, value in enumerate(self.sparse_coefficients):
                 self.register_buffer(
                     f"sparse_{k}",
@@ -162,7 +266,9 @@ class CartesianProduct(torch.nn.Module):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
-        if not self.symmetric:
+        if self.path_type == "symmetrize":
+            self.counts = permutation_classes(self.l3)[3].to(self.counts)
+        if self.path_type != "detrace":
             return self
         for t, scale in enumerate(self.coefficients):
             if not t and not self.packed:
@@ -178,7 +284,7 @@ class CartesianProduct(torch.nn.Module):
                 name,
                 (matrix * scale).to(getattr(self, name)),
             )
-        if getattr(self, "sparse_product", False):
+        if self.sparse_product or self.fused_traces:
             for k, value in enumerate(self.sparse_coefficients):
                 setattr(
                     self,
@@ -188,7 +294,7 @@ class CartesianProduct(torch.nn.Module):
         return self
 
 
-class TensorProduct(IctdTensorProduct):
+class TensorProduct(TensorProductBase):
     """Couple Cartesian irreps with analytic symmetrization and trace removal.
 
     Parameters
@@ -213,9 +319,12 @@ class TensorProduct(IctdTensorProduct):
 
     Notes
     -----
-    Inputs and outputs are symmetric traceless tensors. Angular paths and
-    weights use the same normalization as :class:`equivariantx.co3.TensorProduct`.
-    Delta and Levi-Civita contractions support both spatial parities.
+    Each path returns a symmetric traceless tensor before summation.
+    Even paths use Kronecker deltas. Odd paths also use a Levi-Civita tensor.
+    Scalar, vector, and lowest-rank outputs need no free-index correction.
+    One rank above the minimum, outputs of rank two or higher need only
+    symmetrization. All remaining paths subtract traces on the individual product.
+    Path scalars follow the normalization of :class:`equivariantx.co3.TensorProduct`.
 
     Examples
     --------
@@ -226,6 +335,13 @@ class TensorProduct(IctdTensorProduct):
     >>> tp(torch.randn(5, 6), torch.randn(5, 6)).shape
     torch.Size([5, 18])
     """
+
+    @staticmethod
+    def coupling_factor(l1, l2, l3):
+        """Convert the oriented delta/epsilon product to unit-CG normalization."""
+        from ..basis import path_normalization
+
+        return 1.0 / path_normalization(l1, l2, l3)
 
     def __init__(
         self,
@@ -256,12 +372,12 @@ class TensorProduct(IctdTensorProduct):
             out_var=out_var,
             internal_weights=internal_weights,
             shared_weights=shared_weights,
-            project=False,
             backend=backend,
         )
         self.project = True
-        self.kernel_metadata = None
         self.products = torch.nn.ModuleDict()
+        couplings = []
+        compact = set(range(len(self.irreps_out)))
         for ins in self.instructions:
             degrees = (
                 self.irreps_in1[ins.i_in1].ir.l,
@@ -271,6 +387,57 @@ class TensorProduct(IctdTensorProduct):
             key = "_".join(map(str, degrees))
             if key not in self.products:
                 self.products[key] = CartesianProduct(*degrees, backend=backend)
+            couplings.append(degrees)
+            if self.products[key].path_type == "direct":
+                compact.discard(ins.i_out)
+        # Only analytic (already symmetrized) paths may share coordinates.
+        # Unreachable outputs need no expansion either.
+        compact.intersection_update(ins.i_out for ins in self.instructions)
+        self.packed_metadata = (
+            self.channel_metadata(couplings, compact) if backend == "cuda" else None
+        )
+        width, permutation = 0, []
+        if self.packed_metadata is not None:
+            for i, (mul, ir) in enumerate(self.irreps_out):
+                if i in compact:
+                    ids = permutation_classes(ir.l)[0].tolist()
+                    size = math.comb(ir.l + 2, 2)
+                else:
+                    ids, size = range(ir.dim), ir.dim
+                if compact:
+                    permutation.extend(
+                        width + ch * size + j for ch in range(mul) for j in ids
+                    )
+                width += mul * size
+        self.packed_dim = width
+        self.register_buffer(
+            "expansion_index",
+            torch.tensor(permutation, dtype=torch.long) if permutation else None,
+            persistent=False,
+        )
+
+    def channel_entries(self, degrees, budget, compact):
+        product = self.products["_".join(map(str, degrees))]
+        if product.path_type == "direct":
+            return (
+                normalized_coefficients(*degrees)
+                if literal_coupling(degrees, budget)
+                else None
+            )
+        if product.path_type == "symmetrize":
+            return symmetric_entries(degrees, budget, compact)
+        if not getattr(product, "sparse_product", False):
+            return None
+        left, right, values = (v.tolist() for v in product.sparse_coefficients[-3:])
+        rows = range(len(left)) if compact else product.indices.tolist()
+        entries = []
+        for c, row in enumerate(rows):
+            entries.extend(
+                (a, b, c, v) for a, b, v in zip(left[row], right[row], values[row]) if v
+            )
+            if len(entries) > budget:
+                return None
+        return entries
 
     def forward(self, x, y, weight=None):
         """Couple STF inputs with optional shared or batched channel weights."""

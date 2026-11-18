@@ -14,12 +14,12 @@ def angular(module, x, y, name):
 
 
 def evaluate(module, x, y, weight):
-    if config.TORCH_REFERENCE or not x.is_cuda:
+    if not x.is_cuda:
         return torch_kernel.evaluate(module, x, y, weight)
     if config.FACTORIZED_INLINE and (
         torch.compiler.is_compiling() or get_proxy_mode() is not None
     ):
-        return torch_kernel.evaluate(module, x, y, weight)
+        return torch_kernel.compact(module, x, y, weight, torch_kernel.angular)
     return torch_kernel.compact(module, x, y, weight, angular, native=True)
 
 

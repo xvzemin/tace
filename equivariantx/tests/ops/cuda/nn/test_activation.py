@@ -13,6 +13,34 @@ from equivariantx.tests.utils.testing import package_script
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
 
 
+@pytest.mark.parametrize("space", ["o2", "co2", "co3"])
+def test_normalized_scalar_blocks(space, monkeypatch):
+    import equivariantx
+    from equivariantx.ops import config
+
+    cls = getattr(equivariantx, space).Activation
+    acts = [torch.tanh, torch.tanh, torch.sigmoid, torch.nn.functional.silu, None]
+    spec = "3x0o+2x0o+4x0e+2x0e+3x0e"
+    reference = cls(spec, acts, backend="torch").double().cuda()
+    native = cls(spec, acts, backend="cuda").double().cuda()
+    assert len(native.scalar_blocks) == 4
+    x = torch.randn(14, 4, device="cuda", dtype=torch.float64).T.requires_grad_()
+    seed = torch.randn_like(x)
+    for ordinary in (False, True):
+        monkeypatch.setattr(config, "TORCH_REFERENCE", ordinary)
+        a, b = native(x), reference(x)
+        for _ in range(4):
+            torch.testing.assert_close(a, b, atol=2e-12, rtol=2e-11)
+            a, b = [
+                torch.autograd.grad(z, x, seed, create_graph=True)[0] for z in (a, b)
+            ]
+        torch.testing.assert_close(
+            torch.func.jvp(native, (x,), (seed,)),
+            torch.func.jvp(reference, (x,), (seed,)),
+        )
+    assert "eqx.block_activation" in str(make_fx(native)(x).graph)
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_native_values_and_derivatives(dtype):
     from equivariantx.ops.cuda.nn.activation import chebyshev
@@ -33,7 +61,7 @@ def test_native_values_and_derivatives(dtype):
 
 
 def test_joint_aoti(tmp_path):
-    from equivariantx.ops.cuda.nn.activation import chebyshev
+    from equivariantx.ops.cuda.nn.activation import block_activation, chebyshev
     from equivariantx.ops.torch.nn.activation import reference
 
     x = (torch.randn(5, device="cuda", dtype=torch.float64) * 0.1).requires_grad_()
@@ -41,6 +69,9 @@ def test_joint_aoti(tmp_path):
 
     def operation(x, weight, ordinary=False):
         value = (reference if ordinary else chebyshev)(x, weight)
+        value = (
+            value.tanh() if ordinary else block_activation(value, None, [5], [3], [1.0])
+        )
         energy = value.sin().sum()
         force = -torch.autograd.grad(energy, x, create_graph=True)[0]
         loss = (force - 0.2).square().mean() + energy.square() * 0.01

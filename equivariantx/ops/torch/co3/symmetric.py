@@ -9,6 +9,34 @@ from ... import config
 from ...common.torch import sparse_axis, tensor_axis
 
 
+def symmetric_product(module, x, y, norm):
+    """Contract symmetric free-index classes, retaining the contracted indices exactly."""
+    p = 3 if module.odd else 1
+    x = x.unflatten(-1, (3**module.a, p, module.inner))
+    y = y.unflatten(-1, (module.inner, p, 3**module.b))
+    if module.a >= 2:
+        x = x.new_zeros((*x.shape[:-3], module.na, p, module.inner)).index_add(
+            -3, module.left, x
+        )
+    if module.b >= 2:
+        y = y.new_zeros((*y.shape[:-1], module.nb)).index_add(-1, module.right, y)
+
+    def term(i, j):
+        left, right = x[..., :, i, :], y[..., :, j, :]
+        return left * right if module.inner == 1 else left @ right
+
+    if module.odd:
+        values = torch.stack(
+            [term(i, j) - term(j, i) for i, j in ((1, 2), (2, 0), (0, 1))], -2
+        ).flatten(-3)
+    else:
+        values = term(0, 0).flatten(-2)
+    result = values.new_zeros((*values.shape[:-1], norm.numel())).index_add(
+        -1, module.output_index, values
+    )
+    return result * (module.scale / norm)
+
+
 def pack_factorized(module, tensor):
     """Map successive Cartesian index groups in normalized storage."""
     if module.rank < 2:

@@ -17,6 +17,91 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("degrees", [(3, 3, 6), (4, 3, 6), (4, 4, 6)])
+def test_symmetric_free_indices(degrees):
+    from equivariantx.co3.ictp.tensor_product import CartesianProduct
+    from equivariantx.ops.torch.co3.ictp.tensor_product import reference
+
+    modules = [
+        CartesianProduct(*degrees, backend=b).cuda().double() for b in ("torch", "cuda")
+    ]
+    x, y = [
+        (torch.randn(*shape, 3**degree * 2, device="cuda", dtype=torch.float64) * 0.1)[
+            ..., ::2
+        ].requires_grad_()
+        for shape, degree in zip(((2, 1), (1, 3)), degrees)
+    ]
+    expected = reference(modules[0], x, y)
+    for module in modules:
+        actual, oracle = module(x, y), expected
+        for _ in range(3):
+            torch.testing.assert_close(actual, oracle, rtol=2e-10, atol=2e-11)
+            seed = torch.randn_like(oracle)
+            actual, oracle = [
+                torch.cat(
+                    [
+                        a.flatten()
+                        for a in torch.autograd.grad(
+                            v.sin(), (x, y), seed, create_graph=True
+                        )
+                    ]
+                )
+                for v in (actual, oracle)
+            ]
+        torch.testing.assert_close(actual, oracle, rtol=2e-10, atol=2e-11)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("route", ["ictd", "ictp"])
+@pytest.mark.parametrize("mode", ["uvu", "uvv", "uuu"])
+def test_independent_weighted_paths(backend, route, mode, monkeypatch):
+    from equivariantx import co3
+
+    c = 4
+    paths = [(0, 0, 0, mode, True, 0.5), (1, 0, 0, mode, True, 1.5)]
+    cls = getattr(co3, route).TensorProduct
+
+    def layer(b):
+        return (
+            cls(
+                f"{c}x1o+{c}x1o",
+                f"{c}x1o",
+                f"{c}x2e",
+                paths,
+                internal_weights=False,
+                shared_weights=False,
+                backend=b,
+            )
+            .cuda()
+            .double()
+        )
+
+    op, ref = layer(backend), layer("torch")
+    values = [
+        torch.randn(*s, device="cuda", dtype=torch.float64).requires_grad_()
+        for s in ((2, 1, 6 * c), (1, 3, 3 * c), (2, 1, op.weight_numel))
+    ]
+    actual = op(*values)
+    with monkeypatch.context() as change:
+        change.setattr(config, "TORCH_REFERENCE", True)
+        expected = ref(*values)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-11)
+        seed = torch.randn_like(actual)
+        actual, expected = [
+            torch.cat(
+                [
+                    a.flatten()
+                    for a in torch.autograd.grad(
+                        z.sin(), values, seed, create_graph=True
+                    )
+                ]
+            )
+            for z in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-10)
+
+
 @pytest.mark.parametrize("degrees", [(4, 3, 6), (4, 4, 6), (7, 7, 0)])
 def test_indexed_cartesian_product(degrees):
     from equivariantx.ops import get_kernel
@@ -53,7 +138,13 @@ def test_indexed_cartesian_product(degrees):
 
 @pytest.mark.parametrize(
     "degrees,inline",
-    [((2, 2, 2), False), ((4, 3, 6), False), ((4, 3, 6), True)],
+    [
+        ((2, 2, 2), False),
+        ((4, 3, 6), False),
+        ((4, 3, 6), True),
+        ((5, 6, 2), False),
+        ((6, 2, 5), False),
+    ],
 )
 def test_joint_aoti(degrees, inline, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
@@ -63,7 +154,7 @@ def test_joint_aoti(degrees, inline, monkeypatch, tmp_path):
     operation, values = training_problem("cuda", "cuda", degrees)
     reference, _ = training_problem("cuda", "torch", degrees)
     shapes = None
-    if degrees == (4, 3, 6):
+    if degrees != (2, 2, 2):
         from torch.fx.experimental.dynamic_spec import (
             ParamsSpec,
             ShapesSpec,
@@ -87,6 +178,10 @@ def test_joint_aoti(degrees, inline, monkeypatch, tmp_path):
     graph.recompile()
     if degrees == (4, 3, 6):
         assert ("eqx.cartesian_contract" in graph.code) != inline
+    if degrees == (5, 6, 2):
+        assert "eqx.ictp_symmetric_epsilon" in graph.code
+    if degrees == (6, 2, 5):
+        assert "eqx.ictp_orbit_product" in graph.code
     exported = torch.export.export(
         graph, tuple(v.detach() for v in values), strict=True, dynamic_shapes=shapes
     )

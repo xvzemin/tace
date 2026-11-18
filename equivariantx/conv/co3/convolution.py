@@ -1,4 +1,4 @@
-"""Cartesian graph convolutions with deferred node-level projection."""
+"""Cartesian graph convolutions with edge-local ICTP or a deferred ICTD projection."""
 
 import math
 from collections import defaultdict
@@ -29,8 +29,9 @@ class CartesianTensorProductConv(O3TensorProductConv):
 
     Parameters
     ----------
-    tensor_product : equivariantx.co3.TensorProduct
-        Defines the irreps, ``uvu`` instructions and normalization.
+    tensor_product : equivariantx.co3.ictd.TensorProduct or equivariantx.co3.ictp.TensorProduct
+        Defines the irreps, ``uvu`` paths and normalization. ICTD projects
+        the aggregated tensor. ICTP takes the analytic product on each edge.
     backend : {None, "cuda", "torch"}, optional
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CUDA fuses delta/epsilon contractions and graph reduction. ``"torch"``
@@ -43,7 +44,8 @@ class CartesianTensorProductConv(O3TensorProductConv):
         Average input index permutations before coupling. Enables shared
         symmetric storage across paths when vectors are supplied.
     input_basis : {"cartesian", "spherical"}, optional
-        Spherical inputs are converted directly to unique Cartesian entries.
+        Convert spherical input coordinates before Cartesian coupling.
+        Requires ``symmetric_inputs=True`` for spherical inputs.
     compact_output : bool, optional
         Return partially symmetric raw tensors in ``ir_mul`` order. Requires
         symmetric inputs and ``tensor_product.project=False``. The expansion
@@ -56,7 +58,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
     -----
     Cartesian inputs must be symmetric traceless and use flattened ``mul_ir``
     storage. Every output path is retained. ``tensor_product.project`` selects
-    STF or raw outputs; CUDA projects after aggregation. Both backends support
+    STF or raw outputs for ICTD. ICTP edge products are already STF. Both backends support
     higher derivatives.
 
     Examples
@@ -125,8 +127,10 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self.instructions = tuple(tensor_product.instructions)
         self.weight_numel = tensor_product.weight_numel
         self.tp = tensor_product
+        self.analytic = isinstance(tensor_product, co3.ictp.TensorProduct)
         if input_basis == "spherical":
             self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1, backend=backend)
+        if input_basis == "spherical" and not self.analytic:
             for _, ir in self.irreps_in1:
                 self.register_buffer(
                     f"input_basis_{ir.l}",
@@ -139,12 +143,16 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 instructions=tensor_product.projection_indices,
                 backend=backend,
             )
-            if tensor_product.project
+            if tensor_product.project and not self.analytic
             else torch.nn.Identity()
         )
+        from ...co3.ictp.harmonics import Harmonics
+
         self.harmonics = torch.nn.ModuleDict(
             {
-                str(ir.l): co3.CartesianHarmonics(
+                str(ir.l): Harmonics(ir.l, normalization, backend)
+                if self.analytic
+                else co3.CartesianHarmonics(
                     ir.l, normalize=False, normalization=normalization, backend=backend
                 )
                 for _, ir in self.irreps_in2
@@ -194,6 +202,11 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 torch.tensor(counts, dtype=torch.long),
                 persistent=False,
             )
+        if self.analytic:
+            from ...co3.ictp.convolution import build
+
+            build(self)
+            return
         paths, offset = [], 0
         for ins in self.instructions:
             mul1, ir1 = self.irreps_in1[ins.i_in1]
@@ -341,6 +354,23 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 radial_network,
             ),
         )
+        if self.analytic:
+            from ...co3.ictp.convolution import evaluate
+
+            if self.input_basis == "spherical":
+                features = self.to_cartesian(features)
+            return evaluate(
+                self,
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
+            )
         if self.backend == "cuda" and features.is_cuda:
             from ...ops.cuda.conv.co3 import convolution as cuda_kernel
 
@@ -371,7 +401,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
-        if self.input_basis == "spherical":
+        if self.input_basis == "spherical" and not self.analytic:
             for _, ir in self.irreps_in1:
                 name = f"input_basis_{ir.l}"
                 self._buffers[name] = (
@@ -383,6 +413,33 @@ class CartesianTensorProductConv(O3TensorProductConv):
         self, features, edge_attrs, radial, projection, edge_index, num_nodes
     ):
         """Evaluate the same instructions using PyTorch Cartesian operations."""
+        if self.analytic:
+            from ...co3.ictp.convolution import edge_messages
+
+            x = (
+                features.index_select(-1, self.input_inverse)
+                if not self.input_identity
+                else features
+            )
+            y = (
+                edge_attrs.index_select(-1, self.attrs_inverse)
+                if not self.attrs_identity
+                else edge_attrs
+            )
+            if edge_index is not None:
+                x = x.index_select(0, edge_index[0])
+            w = radial @ projection if projection.numel() else radial
+            msg = edge_messages(self, x, y, w, ordinary=True)
+            out = (
+                msg
+                if edge_index is None
+                else msg.new_zeros(num_nodes, self.output_dim).index_add(
+                    0, edge_index[1], msg
+                )
+            )
+            return (
+                out if self.output_identity else out.index_select(-1, self.output_index)
+            )
         return torch_kernel.reference(
             self, features, edge_attrs, radial, projection, edge_index, num_nodes
         )

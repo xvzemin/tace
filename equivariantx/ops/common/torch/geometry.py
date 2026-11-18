@@ -7,10 +7,24 @@ import torch
 from ....utils.metadata import kernel_plan, parse_metadata
 from ....utils.outputs import direction_outputs
 
+COEFFICIENT_CACHE_BYTES = 8 << 20
+
 
 def direction_contraction(
     metadata, program, vectors, source, target, operands, use_cuda
 ):
+    return evaluate(
+        metadata, program, source, target, operands, cache_coefficients=True
+    )
+
+
+def direction_reference(metadata, program, vectors, source, target, operands, use_cuda):
+    return evaluate(
+        metadata, program, source, target, operands, cache_coefficients=False
+    )
+
+
+def evaluate(metadata, program, source, target, operands, *, cache_coefficients):
     results = direction_outputs(program, operands)
     plan = kernel_plan(metadata)
     terms = parse_metadata(program)
@@ -28,13 +42,41 @@ def direction_contraction(
         )
         for rank, mapping, weighted, pairs in terms
     ]
+    tables = {}
+    remaining = [COEFFICIENT_CACHE_BYTES]
+    uses = {}
+    for rank, outputs, *_ in calls:
+        uses[rank] = uses.get(rank, 0) + len(outputs)
     for rank, outputs, values, destinations, weighted in calls:
         for output, result in zip(outputs, destinations):
-            reference(metadata, rank, output, source, target, values, result, weighted)
+            reference(
+                metadata,
+                rank,
+                output,
+                source,
+                target,
+                values,
+                result,
+                weighted,
+                cache=tables if cache_coefficients and uses[rank] > 1 else None,
+                remaining=remaining,
+            )
     return results
 
 
-def reference(metadata, rank, output, source, target, operands, result, weighted_only):
+def reference(
+    metadata,
+    rank,
+    output,
+    source,
+    target,
+    operands,
+    result,
+    weighted_only,
+    *,
+    cache=None,
+    remaining=None,
+):
     """Reference contraction for directions and arbitrary derivative order."""
     from ....utils.geometry import angular_coefficients
 
@@ -53,7 +95,14 @@ def reference(metadata, rank, output, source, target, operands, result, weighted
             continue
         if rank and index in plan.scalar_paths:
             continue
-        cg = angular_coefficients(metadata, rank)[index].to(x)
+        key = (rank, index, x.device, x.dtype)
+        cg = None if cache is None else cache.get(key)
+        if cg is None:
+            cg = angular_coefficients(metadata, rank)[index].to(x)
+            size = cg.numel() * cg.element_size()
+            if cache is not None and size <= remaining[0]:
+                cache[key] = cg
+                remaining[0] -= size
         if index in plan.scalar_paths:
             di = torch.eye(dim, dtype=x.dtype, device=x.device).expand(edges, -1, -1)
             do = di

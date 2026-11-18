@@ -5,11 +5,19 @@ import torch
 from ....utils.layout import permute
 
 
-def to_local(module, features, wigner):
+def multiply(matrix, values):
+    return (
+        torch.bmm(matrix, values)
+        if values.ndim == 3
+        else torch.einsum("bij,b...jk->b...ik", matrix, values)
+    )
+
+
+def to_local(module, features, wigner, *, product=multiply, permutation=permute):
     """Rotate validated blocks using grouped batched matrix products."""
     matrices = module._rotation_matrices(wigner.to(features))
     if not module._global_identity:
-        features = permute(features, module._global_index, module._global_inverse)
+        features = permutation(features, module._global_index, module._global_inverse)
     outputs = []
     for degree, mul, matrix, values in zip(
         module._degrees,
@@ -23,27 +31,23 @@ def to_local(module, features, wigner):
                 matrix.shape[0], *([1] * (values.ndim - 1))
             )
         else:
-            values = (
-                torch.bmm(matrix, values)
-                if features.ndim == 2
-                else torch.einsum("bij,b...jk->b...ik", matrix, values)
-            )
+            values = product(matrix, values)
         outputs.append(values.flatten(-2))
     if not outputs:
         return features[..., :0]
     features = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
     if not module._local_identity:
-        features = permute(features, module._local_index, module._local_inverse)
+        features = permutation(features, module._local_index, module._local_inverse)
     return features * module._local_sign.to(features) if module._has_signs else features
 
 
-def to_global(module, features, wigner_inv):
+def to_global(module, features, wigner_inv, *, product=multiply, permutation=permute):
     """Rotate validated blocks using grouped batched matrix products."""
     matrices = module._rotation_matrices(wigner_inv.to(features), inverse=True)
     if module._has_signs:
         features = features * module._local_sign.to(features)
     if not module._local_identity:
-        features = permute(features, module._local_inverse, module._local_index)
+        features = permutation(features, module._local_inverse, module._local_index)
     outputs = []
     for degree, mul, matrix, values in zip(
         module._degrees,
@@ -58,11 +62,7 @@ def to_global(module, features, wigner_inv):
                 matrix.shape[0], *([1] * (values.ndim - 1))
             )
         else:
-            values = (
-                torch.bmm(matrix, values)
-                if features.ndim == 2
-                else torch.einsum("bij,b...jk->b...ik", matrix, values)
-            )
+            values = product(matrix, values)
         outputs.append(values.flatten(-2))
     if not outputs:
         return features[..., :0]
@@ -70,18 +70,18 @@ def to_global(module, features, wigner_inv):
     return (
         features
         if module._global_identity
-        else permute(features, module._global_inverse, module._global_index)
+        else permutation(features, module._global_inverse, module._global_index)
     )
 
 
 def gather(module, features, wigner, index):
     """Gather or reduce the ordinary frame transform."""
-    return module.to_local(features.index_select(0, index), wigner)
+    return to_local(module, features.index_select(0, index), wigner)
 
 
 def scatter(module, features, wigner_inv, index, num_nodes):
     """Gather or reduce the ordinary frame transform."""
-    messages = module.to_global(features, wigner_inv)
+    messages = to_global(module, features, wigner_inv)
     return messages.new_zeros((num_nodes, module.input_dim)).index_add(
         0, index, messages
     )

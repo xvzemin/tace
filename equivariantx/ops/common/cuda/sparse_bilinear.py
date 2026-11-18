@@ -4,8 +4,10 @@ import torch
 
 from ...precision import validate_uniform
 from ..torch import sparse_bilinear as torch_kernel
-from .pointwise import broadcast_offset
+from .pointwise import broadcast_offset, launch, scalar_type
 from .pointwise import evaluate as pointwise
+
+WARP_REDUCTION_TERMS = 32
 
 
 @torch.library.custom_op("eqx::sparse_bilinear", mutates_args=(), device_types="cuda")
@@ -37,6 +39,37 @@ def contract(
         return result
     if not x.shape[-1] or not y.shape[-1]:
         return result.zero_()
+    if terms >= WARP_REDUCTION_TERMS:
+        source = f"""
+        using T = {scalar_type(x.dtype)}; using I = long long;
+        extern "C" __global__ void run(const T* x, const T* y,
+             const {scalar_type(left.dtype)}* left, const {scalar_type(right.dtype)}* right,
+             const T* weights, T* out, I n) {{
+          unsigned lane=threadIdx.x%32;
+          for(I i=(I(blockIdx.x)*blockDim.x+threadIdx.x)/32; i<n;
+              i+=I(gridDim.x)*blockDim.x/32) {{
+            I row=i/{width}, c=i%{width};
+            I xo={broadcast_offset(x, shape, 1)}, yo={broadcast_offset(y, shape, 1)};
+            T sum=0;
+            for(int k=lane;k<{terms};k+=32) {{
+              I j=c*{terms}+k;
+              T w=weights[j];
+              if(w!=T(0)) sum+=x[xo+left[j]*{x.stride(-1)}]*
+                                  y[yo+right[j]*{y.stride(-1)}]*w;
+            }}
+            #pragma unroll
+            for(int d=16;d;d>>=1) sum+=__shfl_down_sync(0xffffffff,sum,d);
+            if(!lane) out[i]=sum;
+          }}
+        }}
+        """
+        launch(
+            source,
+            (x, y, left, right, coefficient, result),
+            (result.numel(),),
+            32 * result.numel(),
+        )
+        return result
     body = f"""
         I row=i/{width},c=i%{width};
         I xo={broadcast_offset(x, shape, 1)},yo={broadcast_offset(y, shape, 1)};

@@ -51,14 +51,13 @@ def test_joint_inductor(monkeypatch):
         w = (w - 0.01 * expected[-1]).detach().requires_grad_()
 
 
-def test_literal_angular_joint(monkeypatch):
+def test_angular_joint(monkeypatch):
     from equivariantx.co3.ictp.tensor_product import CartesianProduct
     from equivariantx.ops.torch.co3.ictp.tensor_product import reference
 
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
-    for degrees in ((1, 1, 2), (2, 1, 2), (3, 1, 3)):
-        layer = CartesianProduct(*degrees).double()
-        assert layer.literal_entries
+    for degrees in ((1, 1, 2), (2, 1, 2), (3, 1, 3), (3, 2, 2)):
+        layer = CartesianProduct(*degrees, backend="torch").double()
         x = (
             torch.randn(2, 2, 3 ** degrees[0], dtype=torch.float64) * 0.1
         ).requires_grad_()

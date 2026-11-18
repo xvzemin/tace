@@ -214,7 +214,7 @@ def convolve(
     captured = torch.compiler.is_compiling() or get_proxy_mode() is not None
     eager_torch = backend == "torch" and not captured
     if (
-        config.TORCH_REFERENCE
+        (backend == "torch" and config.TORCH_REFERENCE)
         or getattr(module, "program_metadata", None) is None
         or eager_torch
         and module.radial_mode == "last"

@@ -74,6 +74,27 @@ def quaternion_wigner(vectors, lmax):
     return polynomial(alignment_quaternion(vectors, backend="torch"), lmax)
 
 
+def polynomial_reference(lmax, transpose, values):
+    """Apply the requested directional derivatives to the ordinary monomial map."""
+    q, *directions = values
+    cotangent = directions.pop() if transpose else None
+
+    def fn(x):
+        return polynomial(x, lmax)
+
+    for direction in directions:
+
+        def derivative(x, previous=fn, tangent=direction):
+            return torch.func.jvp(previous, (x,), (tangent,))[1]
+
+        fn = derivative
+    if transpose:
+        result = torch.func.vjp(fn, q)[1](cotangent)[0]
+    else:
+        result = fn(q)
+    return result + sum(x[..., :0].sum() for x in values)
+
+
 def quaternion_polynomial(lmax, transpose, values):
     """Evaluate directional polynomial derivatives and their vector cotangent."""
     q, *directions = values

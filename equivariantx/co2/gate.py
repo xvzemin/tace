@@ -7,6 +7,7 @@ from equivariantx import o2
 from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import gate as torch_kernel
+from ..ops.torch.nn.activation import scalar_blocks, scalars
 from .irreps import Irreps
 
 
@@ -19,6 +20,8 @@ class Activation(torch.nn.Module):
         Input representations. Non-scalars require a None activation.
     acts : sequence of callable or None
         One activation per entry, respecting reflection and time parity.
+    backend : {None, "torch", "cuda"}, optional
+        Execution provider for stateless scalar activations.
 
     Examples
     --------
@@ -29,17 +32,21 @@ class Activation(torch.nn.Module):
     torch.Size([4, 4])
     """
 
-    def __init__(self, irreps_in, acts):
+    def __init__(self, irreps_in, acts, *, backend=None):
         super().__init__()
+        self.backend = resolve_backend(backend)
         self.irreps_in = Irreps(irreps_in)
-        self.activation = o2.Activation(self.irreps_in.circular(), acts)
+        self.activation = o2.Activation(
+            self.irreps_in.circular(), acts, backend="torch"
+        )
         self.irreps_out = Irreps(self.activation.irreps_out)
         self.sizes = tuple(entry.dim for entry in self.irreps_in)
+        self.scalar_blocks = scalar_blocks(self.sizes, self.activation.acts)
 
     def forward(self, features):
         """Activate STF features with trailing size irreps_in.dim."""
         validate_module_precision(self, (features,))
-        return torch_kernel.activate(self, features)
+        return scalars(self, features, torch_kernel.activate)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"

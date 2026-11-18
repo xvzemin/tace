@@ -80,3 +80,16 @@ def evaluate_adjoint(values, grad, weight, target, num_nodes):
         (-values * selected).sum_to_size(weight.shape),
         total,
     )
+
+
+def adjoint_reference(values, grad, weight, target, num_nodes):
+    indices = target[:, None].expand_as(values)
+    total = values.new_zeros((num_nodes, values.shape[1])).scatter_add(
+        0, indices, values * grad
+    )
+    correction = values * total.gather(0, indices)
+    return (
+        values * grad - weight * correction,
+        -correction.sum_to_size(weight.shape),
+        total,
+    )

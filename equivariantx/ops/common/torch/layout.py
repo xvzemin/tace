@@ -5,7 +5,7 @@ import torch
 from ....utils.metadata import parse_metadata
 
 
-def gather_sum(features, indices):
+def gather_sum_reference(features, indices):
     """Sum optionally indexed feature matrices without changing their row order."""
     if not features or len(features) != len(indices):
         raise ValueError("Each feature matrix requires an index tensor or None.")
@@ -18,7 +18,23 @@ def gather_sum(features, indices):
     return sum(values[1:], values[0])
 
 
-def grouped_permute(features, indices, inverse, widths, transpose=False):
+def gather_sum(features, indices):
+    """Consume one indexed feature matrix at a time."""
+    if not features or len(features) != len(indices):
+        raise ValueError("Each feature matrix requires an index tensor or None.")
+    result = None
+    for value, index in zip(features, indices):
+        block = value if index is None else value.index_select(0, index)
+        if result is None:
+            result = block
+        else:
+            if result.shape != block.shape:
+                raise ValueError("Gathered feature matrices must have the same shape.")
+            result = result + block
+    return result
+
+
+def grouped_permute_reference(features, indices, inverse, widths, transpose=False):
     """Pack contiguous batch matrices by group, or undo the same permutation."""
     widths = parse_metadata(widths)
     if sum(widths) != features.shape[1]:
@@ -42,7 +58,16 @@ def grouped_permute(features, indices, inverse, widths, transpose=False):
     return torch.cat(parts).reshape(features.shape)
 
 
-def indexed_sum(
+def grouped_permute(features, indices, inverse, widths, transpose=False):
+    if (
+        len(parse_metadata(widths)) == 1
+        and parse_metadata(widths)[0] == features.shape[1]
+    ):
+        return features.index_select(1, indices)
+    return grouped_permute_reference(features, indices, inverse, widths, transpose)
+
+
+def indexed_sum_reference(
     features, indices, ptr, transpose_indices, transpose_ptr, count, transpose=False
 ):
     """Apply a binary CSR column map and its declared normalization."""
@@ -59,3 +84,18 @@ def indexed_sum(
         1, columns, values
     )
     return result / count if count.numel() and not transpose else result
+
+
+def indexed_sum(
+    features, indices, ptr, transpose_indices, transpose_ptr, count, transpose=False
+):
+    """Reduce a single CSR row directly and use the general map otherwise."""
+    if ptr.numel() == 2:
+        values = features.index_select(1, indices)
+        if count.numel() and transpose:
+            values = values / count[indices]
+        result = values.sum(1, keepdim=True)
+        return result / count if count.numel() and not transpose else result
+    return indexed_sum_reference(
+        features, indices, ptr, transpose_indices, transpose_ptr, count, transpose
+    )

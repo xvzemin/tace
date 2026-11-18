@@ -2,7 +2,9 @@
 
 import torch
 
+from ....ops import get_kernel, resolve_backend
 from ....ops.common.tece import interaction
+from ....utils.autograd import forward_ad_active
 from ....utils.metadata import parse_metadata
 from .expressions import build
 
@@ -20,6 +22,7 @@ def stream(
     radial_basis,
     *,
     radial_network=None,
+    backend=None,
 ):
     """Fuse the complete edge update without graph replay or Python callbacks.
 
@@ -43,7 +46,7 @@ def stream(
         bias = projection.new_zeros(projection.shape[1])
     if cutoff is None:
         cutoff = features.new_ones((edge_index.shape[1], 1))
-    if not features.is_cuda or module._eqx_metadata is None:
+    if module._eqx_metadata is None:
         if radial_network is not None:
             from ....ops.common.radial import materialize
 
@@ -101,7 +104,18 @@ def stream(
                 specs[data[0]] = (width, data[1])
         base = (nodes, outputs[0][0], outputs[1][0], tuple(specs), *settings)
         metadata = repr((metadata, base))
-    result = interaction(
+    backend = resolve_backend(backend, features.device)
+    if backend == "cuda" and not features.is_cuda:
+        raise ValueError("backend='cuda' requires CUDA inputs.")
+    if backend == "cuda" and forward_ad_active():
+        from ....ops.common.torch.tece import interaction as execute
+    else:
+        execute = (
+            interaction
+            if backend == "cuda"
+            else get_kernel("tece_interaction", "torch")
+        )
+    result = execute(
         metadata,
         edge_index[0],
         edge_index[1],

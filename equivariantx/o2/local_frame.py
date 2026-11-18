@@ -38,6 +38,8 @@ class LocalFrame(torch.nn.Module):
         entries. Defaults to ``True``. If ``False``, retain the spherical
         harmonic basis; subsequent operators must account for the different
         reflection matrices of natural- and unnatural-parity inputs.
+    backend : {None, "torch", "cuda"}, optional
+        Execution provider for rotations and indexed frame transforms.
 
     Notes
     -----
@@ -101,8 +103,11 @@ class LocalFrame(torch.nn.Module):
         mmax: Optional[int] = None,
         reverse: bool = False,
         basis_change: bool = True,
+        *,
+        backend: str | None = None,
     ) -> None:
         super().__init__()
+        self.backend = resolve_backend(backend)
         self.irreps_in = o3.Irreps(irreps)
         self.lmax = self.irreps_in.lmax if self.irreps_in else 0
         if mmax is None:
@@ -379,6 +384,10 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner.ndim not in (2, 3) or features.size(0) != wigner.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
+        if self.backend == "cuda" and features.is_cuda:
+            from ..ops.cuda.o2 import local_frame as cuda_kernel
+
+            return cuda_kernel.to_local(self, features, wigner)
         return torch_kernel.to_local(self, features, wigner)
 
     def forward(
@@ -422,6 +431,10 @@ class LocalFrame(torch.nn.Module):
             )
         if wigner_inv.ndim not in (2, 3) or features.size(0) != wigner_inv.size(0):
             raise ValueError("Feature and Wigner batch dimensions must match.")
+        if self.backend == "cuda" and features.is_cuda:
+            from ..ops.cuda.o2 import local_frame as cuda_kernel
+
+            return cuda_kernel.to_global(self, features, wigner_inv)
         return torch_kernel.to_global(self, features, wigner_inv)
 
     def gather(
@@ -452,7 +465,18 @@ class LocalFrame(torch.nn.Module):
         torch.Tensor
             Edge features of shape ``(num_edges, irreps_out.dim)``.
         """
-        backend = resolve_backend(backend, features.device)
+        validate_module_precision(self, (features, wigner))
+        if (
+            features.ndim != 2
+            or features.shape[-1] != self.input_dim
+            or wigner.ndim not in (2, 3)
+            or index.ndim != 1
+            or wigner.size(0) != index.size(0)
+        ):
+            raise ValueError(
+                "Node features, edge indices and rotation matrices do not match."
+            )
+        backend = self.backend if backend is None else resolve_backend(backend)
         if backend == "torch" or not features.is_cuda:
             return torch_kernel.gather(self, features, wigner, index)
         if backend != "cuda":
@@ -495,7 +519,19 @@ class LocalFrame(torch.nn.Module):
             Node features of shape ``(num_nodes, irreps_in.dim)``. Truncated
             local orders follow the inverse scaling of :meth:`to_global`.
         """
-        backend = resolve_backend(backend, features.device)
+        validate_module_precision(self, (features, wigner_inv))
+        if (
+            features.ndim != 2
+            or features.shape[-1] != self.output_dim
+            or wigner_inv.ndim not in (2, 3)
+            or index.ndim != 1
+            or wigner_inv.size(0) != index.size(0)
+            or features.size(0) != index.size(0)
+        ):
+            raise ValueError(
+                "Edge features, edge indices and rotation matrices do not match."
+            )
+        backend = self.backend if backend is None else resolve_backend(backend)
         if backend == "torch" or not features.is_cuda:
             return torch_kernel.scatter(self, features, wigner_inv, index, num_nodes)
         if backend != "cuda":

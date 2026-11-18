@@ -6,6 +6,7 @@ from e3nn.math import normalize2mom
 from ..ops import resolve_backend
 from ..ops.common.torch.gate import GateExpand, expand_gates
 from ..ops.precision import validate_module_precision
+from ..ops.torch.nn.activation import scalar_blocks, scalars
 from ..ops.torch.o2 import gate as torch_kernel
 from .irreps import Irrep, Irreps, IrrepsLike
 
@@ -22,6 +23,8 @@ class Activation(torch.nn.Module):
         One activation per input entry. ``None`` leaves that entry unchanged.
         Each activation is rescaled to unit second moment for standard-normal
         inputs. Its parity determines the output reflection and time parity.
+    backend : {None, "torch", "cuda"}, optional
+        Execution provider for stateless scalar activations.
 
     Examples
     --------
@@ -36,8 +39,11 @@ class Activation(torch.nn.Module):
         self,
         irreps_in: IrrepsLike,
         acts: Sequence[Optional[Callable]],
+        *,
+        backend=None,
     ) -> None:
         super().__init__()
+        self.backend = resolve_backend(backend)
         self.irreps_in = Irreps(irreps_in)
         if len(self.irreps_in) != len(acts):
             raise ValueError(
@@ -99,6 +105,7 @@ class Activation(torch.nn.Module):
         self.acts = torch.nn.ModuleList(normalized_acts)
         self._slices = self.irreps_in.slices()
         self._sizes = tuple(ir_mul.dim for ir_mul in self.irreps_in)
+        self.scalar_blocks = scalar_blocks(self._sizes, self.acts)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Apply the configured activations.
@@ -119,7 +126,7 @@ class Activation(torch.nn.Module):
                 "Activation feature trailing dimension must be "
                 f"{self.irreps_in.dim}, got {tuple(features.shape)}."
             )
-        return torch_kernel.activate(self, features)
+        return scalars(self, features, torch_kernel.activate)
 
     def __repr__(self) -> str:
         acts = "".join("x" if act is not None else " " for act in self.acts)
@@ -198,8 +205,8 @@ class Gate(torch.nn.Module):
                 f"{irreps_gates.num_irreps} gate scalars."
             )
 
-        self.act_scalars = Activation(irreps_scalars, act_scalars)
-        self.act_gates = Activation(irreps_gates, act_gates)
+        self.act_scalars = Activation(irreps_scalars, act_scalars, backend="torch")
+        self.act_gates = Activation(irreps_gates, act_gates, backend="torch")
         self.irreps_scalars = irreps_scalars
         self.irreps_gates = irreps_gates
         self.irreps_gated = irreps_gated

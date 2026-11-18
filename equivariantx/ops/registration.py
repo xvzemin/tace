@@ -39,6 +39,7 @@ for module in (
     "equivariantx.ops.cuda.co2.projection",
     "equivariantx.ops.cuda.co3.basis",
     "equivariantx.ops.cuda.co3.cartesian_harmonics",
+    "equivariantx.ops.cuda.co3.ictp.permutation",
     "equivariantx.ops.cuda.co3.symmetric",
     "equivariantx.ops.cuda.nn.activation",
 ):

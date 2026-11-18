@@ -123,7 +123,8 @@ class TransverseProjector(torch.nn.Module):
         self.backend = backend
         self.m = m
         self.bases = torch.nn.ModuleList(
-            SymmetricBasis(rank) for rank in (range(m, -1, -2) if m > 2 else ())
+            SymmetricBasis(rank, backend=backend)
+            for rank in (range(m, -1, -2) if m > 2 else ())
         )
         self.coefficients = detracing_coefficients(m)
         self.register_buffer("identity", torch.eye(3), persistent=False)
@@ -177,7 +178,7 @@ class Restriction(torch.nn.Module):
         self.backend = backend
         self.l = l
         self.bases = torch.nn.ModuleList(
-            SymmetricBasis(m) for m in (range(l + 1) if l > 2 else ())
+            SymmetricBasis(m, backend=backend) for m in (range(l + 1) if l > 2 else ())
         )
         self.coefficients = tuple(
             tuple(abs(value) for value in detracing_coefficients(m))

@@ -217,7 +217,11 @@ class Projector(torch.nn.Module):
             (l, tuple(entries)) for l, entries in sorted(groups.items())
         )
         self.symmetric_bases = torch.nn.ModuleDict(
-            {str(l): SymmetricBasis(l) for l, _ in self.groups if l >= 6}
+            {
+                str(l): SymmetricBasis(l, backend=backend)
+                for l, _ in self.groups
+                if l >= 6
+            }
         )
         for l, _ in self.groups:
             self.register_buffer(
@@ -225,6 +229,35 @@ class Projector(torch.nn.Module):
                 self.projection_matrix(l).to(torch.get_default_dtype()).clone(),
                 persistent=False,
             )
+            if str(l) in self.symmetric_bases and (l + 1) * (l + 2) // 2 <= 128:
+                indices, weights = self.parity_blocks(l)
+                self.register_buffer(f"columns_{l}", indices.clone(), persistent=False)
+                self.register_buffer(
+                    f"projector_{l}",
+                    weights.to(torch.get_default_dtype()).clone(),
+                    persistent=False,
+                )
+
+    @classmethod
+    @lru_cache(maxsize=32)
+    def parity_blocks(cls, l):
+        """Return the STF map within coordinate-reflection parity sectors."""
+        from .symmetric import symmetric_powers
+
+        basis = cls.projection_matrix(l)
+        matrix = basis @ basis.T
+        parity = [tuple(k % 2 for k in p) for p in symmetric_powers(l)]
+        rows = [[j for j, q in enumerate(parity) if q == p] for p in parity]
+        width = max(map(len, rows))
+        columns = torch.tensor(
+            [row + [0] * (width - len(row)) for row in rows],
+            dtype=torch.long,
+            device="cpu",
+        )
+        weights = matrix.gather(1, columns)
+        for i, row in enumerate(rows):
+            weights[i, len(row) :] = 0.0
+        return columns, weights
 
     @staticmethod
     @lru_cache(maxsize=None)
@@ -234,7 +267,7 @@ class Projector(torch.nn.Module):
         if l == 2:
             return matrix @ matrix.T
         if l >= 6:
-            return SymmetricBasis(l).double().pack(matrix.T).T
+            return SymmetricBasis(l, backend="torch").double().pack(matrix.T).T
         return matrix
 
     def forward(self, features):
@@ -254,15 +287,15 @@ class Projector(torch.nn.Module):
             return features[..., :0]
         return values[0] if len(values) == 1 else torch.cat(values, dim=-1)
 
-    def forward_blocks(self, features):
+    def forward_blocks(self, features, *, packed_degrees=()):
         """Project blocks of shape (..., mul, 3**l), batching equal ranks."""
         values = list(features)
         validate_module_precision(self, (values,))
         if self.backend == "cuda" and values and values[0].is_cuda:
             from ..ops.cuda.co3 import basis as cuda_basis
 
-            return cuda_basis.project(self, values)
-        return torch_basis.project(self, values)
+            return cuda_basis.project(self, values, packed_degrees=packed_degrees)
+        return torch_basis.project(self, values, packed_degrees=packed_degrees)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
@@ -271,6 +304,13 @@ class Projector(torch.nn.Module):
             setattr(
                 self, name, self.projection_matrix(l).to(getattr(self, name)).clone()
             )
+            if hasattr(self, f"projector_{l}"):
+                _, matrix = self.parity_blocks(l)
+                setattr(
+                    self,
+                    f"projector_{l}",
+                    matrix.to(getattr(self, f"projector_{l}")).clone(),
+                )
         return self
 
     def extra_repr(self):

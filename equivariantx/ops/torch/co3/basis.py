@@ -64,6 +64,29 @@ class RankTwo(torch.autograd.Function):
         return RankTwo.apply(tangent)
 
 
+class ParityProjection(torch.autograd.Function):
+    """Self-adjoint projection of normalized symmetric coordinates."""
+
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(value, columns, weights):
+        return (value[..., columns] * weights).sum(-1)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        ctx.save_for_backward(*inputs[1:])
+        ctx.save_for_forward(*inputs[1:])
+
+    @staticmethod
+    def backward(ctx, gradient):
+        return ParityProjection.apply(gradient, *ctx.saved_tensors), None, None
+
+    @staticmethod
+    def jvp(ctx, tangent, dc, dw):
+        return ParityProjection.apply(tangent, *ctx.saved_tensors)
+
+
 def project_reference(module, features):
     """Project with ordinary dense/factored basis matrices and standard AD."""
 
@@ -83,14 +106,18 @@ def project_reference(module, features):
     return map_blocks(features, module.groups, apply)
 
 
-def project(module, features):
+def project(module, features, *, packed_degrees=()):
     """Use analytic low-rank projection when the compiler can fuse its algebra."""
-    if config.TORCH_REFERENCE or not config.TORCH_STF_PROJECTION:
+    if not packed_degrees and (
+        config.TORCH_REFERENCE or not config.TORCH_STF_PROJECTION
+    ):
         return project_reference(module, features)
 
     def apply(degree, value):
         if degree == 2 and (
-            torch.compiler.is_compiling() or get_proxy_mode() is not None
+            value.is_cuda
+            or torch.compiler.is_compiling()
+            or get_proxy_mode() is not None
         ):
             return (
                 rank_two(value)
@@ -105,8 +132,23 @@ def project(module, features):
         )
         if basis is None:
             return project_dense(value, matrix, square=degree == 2)
-        value = symmetric_kernel.pack(basis, value)
-        value = (value @ matrix) @ matrix.T
+        if degree not in packed_degrees:
+            value = symmetric_kernel.pack(basis, value)
+        if (
+            value.is_cuda
+            and hasattr(module, f"projector_{degree}")
+            and not torch.compiler.is_compiling()
+            and get_proxy_mode() is None
+            and value.numel()
+            * value.element_size()
+            * getattr(module, f"columns_{degree}").shape[1]
+            <= 8 << 20
+        ):
+            columns = getattr(module, f"columns_{degree}")
+            weights = getattr(module, f"projector_{degree}")
+            value = ParityProjection.apply(value, columns, weights)
+        else:
+            value = (value @ matrix) @ matrix.T
         return symmetric_kernel.unpack(basis, value)
 
     return map_blocks(features, module.groups, apply)

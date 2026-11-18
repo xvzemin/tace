@@ -26,18 +26,31 @@ def symmetric_powers(rank):
 
 
 @lru_cache(maxsize=None)
-def symmetric_basis(rank):
-    """Return CPU float64 coefficients and integer contraction indices."""
-    powers = symmetric_powers(rank)
-    lookup = {p: i for i, p in enumerate(powers)}
+def permutation_classes(rank):
+    """Group flattened Cartesian entries by index permutations."""
     integers = torch.arange(3**rank, device="cpu")
     y, z = torch.zeros_like(integers), torch.zeros_like(integers)
     for _ in range(rank):
         y = y + (integers % 3 == 1)
         z = z + (integers % 3 == 2)
         integers = integers // 3
+    indices = (y + z) * (y + z + 1) // 2 + z
+    permutation = torch.argsort(indices, stable=True)
+    counts = torch.bincount(indices, minlength=math.comb(rank + 2, 2))
+    offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+    return indices, permutation, offsets, counts
+
+
+@lru_cache(maxsize=None)
+def symmetric_basis(rank):
+    """Return CPU float64 coefficients and integer contraction indices."""
+    powers = symmetric_powers(rank)
+    lookup = {p: i for i, p in enumerate(powers)}
+    indices, permutation, offsets, _ = permutation_classes(rank)
     data = {
-        "indices": (y + z) * (y + z + 1) // 2 + z,
+        "indices": indices,
+        "permutation": permutation,
+        "offsets": offsets,
         "norm": torch.tensor(
             [
                 math.sqrt(math.comb(rank, p[1]) * math.comb(rank - p[1], p[2]))
@@ -47,10 +60,6 @@ def symmetric_basis(rank):
             device="cpu",
         ),
     }
-
-    data["permutation"] = torch.argsort(data["indices"], stable=True)
-    counts = torch.bincount(data["indices"], minlength=len(powers))
-    data["offsets"] = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
 
     def add(name, indices, weights):
         data[f"{name}_indices"] = torch.tensor(indices, dtype=torch.long, device="cpu")
@@ -126,6 +135,43 @@ def symmetric_basis(rank):
             torch.tensor(weights, dtype=torch.float64, device="cpu"),
         )
     return data
+
+
+class SymmetricProduct(torch.nn.Module):
+    """Contract free Cartesian indices by their exponent triples.
+
+    Parameters
+    ----------
+    l1, l2, rank : int
+        Input ranks and rank before trace removal.
+    """
+
+    def __init__(self, l1, l2, rank):
+        super().__init__()
+        k, odd = divmod(l1 + l2 - rank, 2)
+        a, b = l1 - k - odd, l2 - k - odd
+        self.a, self.b, self.inner, self.odd = a, b, 3**k, odd
+        self.na, self.nb = math.comb(a + 2, 2), math.comb(b + 2, 2)
+        self.scale = ((1 + odd) * self.inner) ** -0.5
+        for name, degree in (("left", a), ("right", b)):
+            self.register_buffer(
+                name, symmetric_basis(degree)["indices"].clone(), persistent=False
+            )
+        lookup = {p: i for i, p in enumerate(symmetric_powers(rank))}
+        indices = [
+            lookup[tuple(p[d] + q[d] + int(odd and d == c) for d in range(3))]
+            for p in symmetric_powers(a)
+            for c in range(3 if odd else 1)
+            for q in symmetric_powers(b)
+        ]
+        self.register_buffer(
+            "output_index",
+            torch.tensor(indices, device="cpu", dtype=torch.long),
+            persistent=False,
+        )
+
+    def forward(self, x, y, norm):
+        return torch_kernel.symmetric_product(self, x, y, norm)
 
 
 class SymmetricBasis(torch.nn.Module):

@@ -6,6 +6,7 @@ from e3nn.nn import Activation as ScalarActivation
 from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import gate as torch_kernel
+from ..ops.torch.nn.activation import scalar_blocks, scalars
 from .ictd import ElementwiseTensorProduct
 from .irreps import Irreps
 
@@ -20,6 +21,8 @@ class Activation(torch.nn.Module):
     acts : sequence of callable or None
         One activation per entry. Activations on odd scalars must have
         definite parity. None leaves an entry unchanged.
+    backend : {None, "torch", "cuda"}, optional
+        Execution provider for stateless scalar activations.
 
     Examples
     --------
@@ -30,18 +33,22 @@ class Activation(torch.nn.Module):
     torch.Size([4, 3])
     """
 
-    def __init__(self, irreps_in, acts):
+    def __init__(self, irreps_in, acts, *, backend=None):
         super().__init__()
+        self.backend = resolve_backend(backend)
         self.irreps_in = Irreps(irreps_in)
         if any(ir.l for _, ir in self.irreps_in):
             raise ValueError("Activation accepts only scalar representations.")
         self.activation = ScalarActivation(self.irreps_in.spherical(), acts)
         self.irreps_out = Irreps(self.activation.irreps_out)
+        self.scalar_blocks = scalar_blocks(
+            (mul for mul, _ in self.irreps_in), self.activation.acts
+        )
 
     def forward(self, features):
         """Activate scalar features of shape (..., irreps_in.dim)."""
         validate_module_precision(self, (features,))
-        return torch_kernel.activate(self, features)
+        return scalars(self, features, torch_kernel.activate)
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out}"
@@ -87,13 +94,13 @@ class Gate(torch.nn.Module):
         backend = resolve_backend(backend)
         super().__init__()
         self.backend = backend
-        self.act_scalars = Activation(irreps_scalars, act_scalars)
-        self.act_gates = Activation(irreps_gates, act_gates)
+        self.act_scalars = Activation(irreps_scalars, act_scalars, backend="torch")
+        self.act_gates = Activation(irreps_gates, act_gates, backend="torch")
         self.irreps_scalars = Irreps(irreps_scalars).simplify()
         self.irreps_gates = Irreps(irreps_gates).simplify()
         self.irreps_gated = Irreps(irreps_gated).simplify()
         self.mul = ElementwiseTensorProduct(
-            self.irreps_gated, self.act_gates.irreps_out, project=False
+            self.irreps_gated, self.act_gates.irreps_out, project=False, backend="torch"
         )
         unsorted = self.irreps_scalars + self.irreps_gates + self.irreps_gated
         sorted_irreps, permutation, _ = unsorted.sort()

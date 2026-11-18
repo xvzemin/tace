@@ -268,9 +268,20 @@ class O3TensorProductConv(torch.nn.Module):
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         if radial_network is not None and (
-            self.radial_mode == "last" or config.TORCH_REFERENCE
+            self.radial_mode == "last"
+            or (
+                config.TORCH_REFERENCE
+                and (self.backend == "torch" or not features.is_cuda)
+            )
         ):
-            radial = radial_features(radial_network, radial, edge_index, projection)
+            radial = radial_features(
+                radial_network,
+                radial,
+                edge_index,
+                projection,
+                reference=config.TORCH_REFERENCE
+                and (self.backend == "torch" or not features.is_cuda),
+            )
             radial_network = None
         if vectors is not None:
             if vectors.ndim != 2 or vectors.shape != (edge_index.size(1), 3):

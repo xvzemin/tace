@@ -34,7 +34,10 @@ register_kernel(
     "alignment_cuda", "cuda", "equivariantx.ops.common.cuda.wigner:alignment_cuda"
 )
 register_kernel(
-    "alignment_cuda", "torch", "equivariantx.ops.common.torch.wigner:alignment"
+    "alignment_cuda",
+    "torch",
+    "equivariantx.ops.common.torch.wigner:alignment",
+    reference="equivariantx.ops.common.torch.wigner:alignment_reference",
 )
 register_kernel(
     "bilinear_ace", "cuda", "equivariantx.ops.common.cuda.bilinear:contract"
@@ -63,6 +66,7 @@ register_kernel(
     "direction_contraction",
     "torch",
     "equivariantx.ops.common.torch.geometry:direction_contraction",
+    reference="equivariantx.ops.common.torch.geometry:direction_reference",
 )
 register_kernel("edge_program", "cuda", "equivariantx.ops.common.cuda.edge:evaluate")
 register_kernel(
@@ -78,11 +82,17 @@ register_kernel(
     "frame_rotation", "cuda", "equivariantx.ops.common.cuda.rotation:contract"
 )
 register_kernel(
-    "frame_rotation", "torch", "equivariantx.ops.common.torch.frame:frame_rotation"
+    "frame_rotation",
+    "torch",
+    "equivariantx.ops.common.torch.frame:frame_rotation",
+    reference="equivariantx.ops.common.torch.frame:frame_reference",
 )
 register_kernel("gather_sum", "cuda", "equivariantx.ops.common.cuda.layout:gather_sum")
 register_kernel(
-    "gather_sum", "torch", "equivariantx.ops.common.torch.layout:gather_sum"
+    "gather_sum",
+    "torch",
+    "equivariantx.ops.common.torch.layout:gather_sum",
+    reference="equivariantx.ops.common.torch.layout:gather_sum_reference",
 )
 register_kernel(
     "graph_normalized_exp",
@@ -104,22 +114,32 @@ register_kernel(
     "graph_normalized_exp_adjoint",
     "torch",
     "equivariantx.ops.common.torch.attention:evaluate_adjoint",
+    reference="equivariantx.ops.common.torch.attention:adjoint_reference",
 )
 register_kernel(
     "grouped_permute", "cuda", "equivariantx.ops.common.cuda.layout:grouped_permute"
 )
 register_kernel(
-    "grouped_permute", "torch", "equivariantx.ops.common.torch.layout:grouped_permute"
+    "grouped_permute",
+    "torch",
+    "equivariantx.ops.common.torch.layout:grouped_permute",
+    reference="equivariantx.ops.common.torch.layout:grouped_permute_reference",
 )
 register_kernel("indexed_frame", "cuda", "equivariantx.ops.common.cuda.frame:contract")
 register_kernel(
-    "indexed_frame", "torch", "equivariantx.ops.common.torch.frame:indexed_frame"
+    "indexed_frame",
+    "torch",
+    "equivariantx.ops.common.torch.frame:indexed_frame",
+    reference="equivariantx.ops.common.torch.frame:indexed_frame_reference",
 )
 register_kernel(
     "indexed_sum", "cuda", "equivariantx.ops.common.cuda.layout:indexed_sum"
 )
 register_kernel(
-    "indexed_sum", "torch", "equivariantx.ops.common.torch.layout:indexed_sum"
+    "indexed_sum",
+    "torch",
+    "equivariantx.ops.common.torch.layout:indexed_sum",
+    reference="equivariantx.ops.common.torch.layout:indexed_sum_reference",
 )
 register_kernel(
     "local_channel_product",
@@ -145,7 +165,10 @@ register_kernel(
     "packed_wigner", "cuda", "equivariantx.ops.common.cuda.wigner:packed_wigner"
 )
 register_kernel(
-    "packed_wigner", "torch", "equivariantx.ops.common.torch.wigner:packed_wigner"
+    "packed_wigner",
+    "torch",
+    "equivariantx.ops.common.torch.wigner:packed_wigner",
+    reference="equivariantx.ops.common.torch.wigner:packed_reference",
 )
 register_kernel(
     "quaternion_polynomial",
@@ -156,15 +179,24 @@ register_kernel(
     "quaternion_polynomial",
     "torch",
     "equivariantx.ops.common.torch.quaternion:quaternion_polynomial",
+    reference="equivariantx.ops.common.torch.quaternion:polynomial_reference",
 )
 register_kernel(
     "rotary_product", "cuda", "equivariantx.ops.common.cuda.rotary:contract"
 )
 register_kernel(
-    "rotary_product", "torch", "equivariantx.ops.common.torch.frame:rotary_product"
+    "rotary_product",
+    "torch",
+    "equivariantx.ops.common.torch.frame:rotary_product",
+    reference="equivariantx.ops.common.torch.frame:rotary_reference",
 )
 register_kernel("rotation", "cuda", "equivariantx.ops.common.cuda.wigner:rotation")
-register_kernel("rotation", "torch", "equivariantx.ops.common.torch.wigner:rotation")
+register_kernel(
+    "rotation",
+    "torch",
+    "equivariantx.ops.common.torch.wigner:rotation",
+    reference="equivariantx.ops.common.torch.wigner:rotation_reference",
+)
 register_kernel(
     "tece_contraction",
     "cuda",
@@ -174,6 +206,18 @@ register_kernel(
     "tece_interaction",
     "cuda",
     "equivariantx.ops.common.cuda.models.tace.interaction:interaction",
+)
+register_kernel(
+    "tece_contraction",
+    "torch",
+    "equivariantx.ops.common.torch.tece:contraction",
+    reference="equivariantx.ops.common.torch.tece:contraction_reference",
+)
+register_kernel(
+    "tece_interaction",
+    "torch",
+    "equivariantx.ops.common.torch.tece:interaction",
+    reference="equivariantx.ops.common.torch.tece:interaction_reference",
 )
 register_kernel(
     "edge_program",

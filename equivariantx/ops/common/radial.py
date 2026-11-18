@@ -88,9 +88,11 @@ def radial_program(network, inputs, program, value):
     return value
 
 
-def radial_features(network, radial, edge_index, projection=None):
+def radial_features(network, radial, edge_index, projection=None, *, reference=None):
     """Evaluate hidden layers with higher-order normalization derivatives."""
-    if config.TORCH_REFERENCE:
+    if reference is None:
+        reference = config.TORCH_REFERENCE
+    if reference:
         value = radial_reference(network, materialize(radial, edge_index))
     else:
         from .convolution import radial_input

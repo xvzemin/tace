@@ -7,6 +7,101 @@ from equivariantx.ops import config, get_kernel, register_kernel, resolve_backen
 from equivariantx.ops.registry import IMPLEMENTATIONS, REFERENCES
 
 
+def test_registered_providers_are_paired():
+    names = {name for name, _ in IMPLEMENTATIONS}
+    assert all(
+        (name, backend) in IMPLEMENTATIONS
+        for name in names
+        for backend in ("torch", "cuda")
+    )
+    assert names == set(REFERENCES)
+
+
+def test_geometry_providers_have_independent_references(monkeypatch, double_precision):
+    from e3nn import o3
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def rand(*shape):
+        return torch.randn(*shape, device=device, dtype=torch.float64)
+
+    e = 4
+    q, k = rand(e, 4, 6), rand(e, 4, 6)
+    phase, score = rand(e, 2, 2, 2), rand(e, 2)
+    cg = o3.wigner_3j(1, 1, 2, dtype=torch.float64, device=device)
+    x = rand(e, 3)
+    quat = rand(e, 4) / 3
+    cases = [
+        (
+            "alignment_cuda",
+            (repr(key), [x] if key != "direction_gradient" else [x, rand(e, 3)]),
+        )
+        for key in (None, "quaternion", "normalize", "direction_gradient")
+    ]
+    cases += [
+        ("rotation", (cg, i, [rand(e, 9), rand(e, 9), rand(e, 25)])) for i in range(3)
+    ]
+    cases += [("packed_wigner", (x, 2, [cg]))]
+    cases += [
+        (
+            "quaternion_polynomial",
+            (2, trans, [quat, rand(e, 4)] + ([rand(e, 35)] if trans else [])),
+        )
+        for trans in (False, True)
+    ]
+    cases += [
+        (
+            "rotary_product",
+            (q, k, phase, score if role != 3 else score[:0], 1, 1, 2, role),
+        )
+        for role in range(4)
+    ]
+    cases += [
+        (
+            "frame_rotation",
+            (q, rand(e, 3, 4), rand(e, 3, 6), repr(((1, 1, 2, 2), (1, 2, 1))), role),
+        )
+        for role in range(3)
+    ]
+    for name, args in cases:
+        results = []
+        for ref in (False, True):
+            monkeypatch.setattr(config, "TORCH_REFERENCE", ref)
+            results.append(get_kernel(name, "torch")(*args))
+        torch.testing.assert_close(*results, rtol=1e-10, atol=1e-11)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("product", ["GauntTensorProduct", "MatrixTensorProduct"])
+def test_factorized_cuda_reference_isolation(product, monkeypatch):
+    from unittest.mock import patch
+
+    from equivariantx import o3
+    from equivariantx.ops.cuda.o3 import tensor_product as kernel
+
+    layer = (
+        getattr(o3, product)(
+            "2x1o",
+            "2x1o",
+            "2x0e+2x1e+2x2e",
+            backend="cuda",
+            internal_weights=True,
+            shared_weights=True,
+        )
+        .cuda()
+        .double()
+    )
+    x, y = torch.randn(2, 3, 6, device="cuda", dtype=torch.float64)
+    with patch.object(kernel, "angular", wraps=kernel.angular) as angular:
+        values = []
+        for reference in (False, True):
+            monkeypatch.setattr(config, "TORCH_REFERENCE", reference)
+            angular.reset_mock()
+            values.append(layer(x, y))
+            assert angular.called
+    torch.testing.assert_close(*values)
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 def test_backend_selection(monkeypatch, backend):
     monkeypatch.setattr(config, "DEFAULT_BACKEND", backend)
