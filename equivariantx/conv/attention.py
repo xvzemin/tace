@@ -1,4 +1,4 @@
-"""Segmented attention normalization with optional nonnegative edge weights."""
+"""Streaming graph attention."""
 
 import torch
 
@@ -6,80 +6,6 @@ from ..ops import resolve_backend
 from ..ops.common.recompute import Replay
 from ..ops.precision import validate_precision
 from ..ops.torch.conv import attention as torch_kernel
-
-
-def graph_softmax(
-    scores, target, num_nodes, weight=None, eps=1e-16, *, backend=None, fused=None
-):
-    """Normalize attention scores over incoming edges of each node.
-
-    Parameters
-    ----------
-    scores : torch.Tensor
-        Attention logits with shape ``(edges, heads)``.
-    target : torch.Tensor
-        Destination node indices with shape ``(edges,)``.
-    num_nodes : int
-        Number of destination nodes, including isolated nodes.
-    weight : torch.Tensor, optional
-        Nonnegative edge weights with shape ``(edges, 1)`` or
-        ``(edges, heads)``. Defaults to one.
-    eps : float, optional
-        Constant added to the shifted denominator. Defaults to ``1e-16``.
-    backend : {None, "torch", "cuda"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Execution provider. CPU inputs use Torch.
-    fused : bool, optional
-        Compatibility alias: True selects CUDA and False selects Torch.
-
-    Returns
-    -------
-    torch.Tensor
-        Weighted softmax values with shape ``(edges, heads)``.
-
-    Notes
-    -----
-    Maxima are detached. Derivatives through scores and weights support
-    higher orders, including weights equal to zero.
-
-    Examples
-    --------
-    >>> from equivariantx.conv import graph_softmax
-    >>> scores = torch.zeros(3, 1)
-    >>> target = torch.tensor([0, 0, 1])
-    >>> graph_softmax(scores, target, num_nodes=3)
-    tensor([[0.5000],
-            [0.5000],
-            [1.0000]])
-    """
-    backend = resolve_backend(backend, scores.device)
-    validate_precision((scores, weight))
-    if fused is not None:
-        backend = "cuda" if fused else "torch"
-    if weight is None:
-        weight = scores.new_ones((scores.shape[0], 1))
-    if scores.ndim != 2 or weight.ndim != 2:
-        raise ValueError("Scores and weights must have shape (edges, heads).")
-    if weight.shape[0] != scores.shape[0] or weight.shape[1] not in (
-        1,
-        scores.shape[1],
-    ):
-        raise ValueError("Edge weights must broadcast over score heads.")
-    if weight.device != scores.device or weight.dtype != scores.dtype:
-        raise ValueError("Scores and edge weights must have the same device and dtype.")
-    if (
-        target.ndim != 1
-        or target.shape[0] != scores.shape[0]
-        or target.device != scores.device
-        or target.dtype not in (torch.int32, torch.int64)
-    ):
-        raise ValueError("Target indices must match the edges and device of scores.")
-    target = target.long()
-    if backend == "cuda" and scores.is_cuda:
-        from ..ops.cuda.conv import attention as cuda_kernel
-
-        return cuda_kernel.graph_softmax(scores, target, num_nodes, weight, eps)
-    return torch_kernel.graph_softmax(scores, target, num_nodes, weight, eps)
 
 
 class StreamingGraphAttention(Replay):

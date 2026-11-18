@@ -2,16 +2,7 @@
 
 import torch
 
-from ...common.attention import normalized_exp
 from ...common.recompute import Replay
-
-
-def graph_softmax(scores, target, num_nodes, weight, eps):
-    """Normalize with native segmented reductions."""
-    return (
-        normalized_exp(scores.contiguous(), weight.contiguous(), target, num_nodes, eps)
-        * weight
-    )
 
 
 def transpose(module, active, outputs, num_inputs):

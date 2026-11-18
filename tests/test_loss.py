@@ -708,6 +708,7 @@ def test_balanced_element_weights_have_weighted_mean_one():
 def test_optimizer_weight_decay(optimizer_name, matrix_weight, weight_decay):
     from e3nn.nn import BatchNorm
 
+    from equivariantx.nn import MergeLayerNorm
     from tace.lightning.lit_model import LightningWrapperModel
     from tace.models.blocks import ScaleShift
     from tace.models.linear import e3nnLinear, enable_lora
@@ -717,7 +718,6 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight, weight_decay):
         j0SphericalBesselBasis,
         jnSphericalBesselBasis,
     )
-    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
     from tace.models.spherical.scatter_norm import DensityScatterNorm
 
     class TrainingModel(torch.nn.Module):
@@ -746,7 +746,7 @@ def test_optimizer_weight_decay(optimizer_name, matrix_weight, weight_decay):
             self.mlp = torch.nn.Sequential(
                 torch.nn.Linear(3, 3), torch.nn.SiLU(), torch.nn.Linear(3, 2)
             )
-            self.norm = EquivariantMergeLayerNorm([0, 1], 2)
+            self.norm = MergeLayerNorm("2x0e + 2x1o")
             self.batch_norm = BatchNorm("2x0e+2x1o")
             self.density = DensityScatterNorm(2.0, 4, radial_bias=True)
             enable_lora(self.density.edge_density.mlp[0], r=2, freeze_base=False)
@@ -936,6 +936,7 @@ def test_optimizer_semantic_muon_groups(matrix_weight, muon_mode):
     from e3nn import o3
     from e3nn.nn import FullyConnectedNet
 
+    from equivariantx.nn import MergeRmsNorm
     from tace.lightning.optimizer import get_optimizer_param_groups
     from tace.models.cartesian.prod import NonlinearIctdACE
     from tace.models.linear import (
@@ -947,7 +948,6 @@ def test_optimizer_semantic_muon_groups(matrix_weight, muon_mode):
         switch_e3nn_weight_layout,
         torchLinear,
     )
-    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
     from tace.models.spherical.node import (
         Element2NodeUpdate,
         ElementNodeUpdate,
@@ -994,7 +994,7 @@ def test_optimizer_semantic_muon_groups(matrix_weight, muon_mode):
         ]
     )
     model.lookup = torch.nn.Embedding(3, 4)
-    model.norm = EquivariantMergeLayerNorm([0, 1], 4)
+    model.norm = MergeRmsNorm("4x0e + 4x1o")
     model.router = torch.nn.Linear(4, 4)
     model.density = DensityScatterNorm(2.0, 4, radial_bias=True)
     model.adapter = enable_lora(mlpLinear(4, 6), r=2, freeze_base=False)

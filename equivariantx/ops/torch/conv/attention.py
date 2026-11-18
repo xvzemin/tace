@@ -2,18 +2,6 @@
 
 import torch
 
-from ... import get_kernel
-
-
-def graph_softmax(scores, target, num_nodes, weight, eps):
-    """Evaluate the shared Torch normalization and its analytic adjoint."""
-    return (
-        get_kernel("graph_normalized_exp", "torch")(
-            scores, weight, target, num_nodes, eps
-        )
-        * weight
-    )
-
 
 def stream(module, inputs, create_graph):
     """Accumulate an online softmax over bounded edge tiles."""

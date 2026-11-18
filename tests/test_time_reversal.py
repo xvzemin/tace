@@ -12,7 +12,7 @@ from tace.dataset.augmentation import AugmentedDataset, validate_augmentations
 from tace.dataset.quantity import PROPERTIES, TIME_ODD_PROPERTIES
 from tace.models.adapter import TensorModel
 from tace.models.angular import SolidHarmonics
-from tace.models.layout import LayoutTransform
+from tace.models.layer_norm import get_normalization_layer
 from tace.models.linear import e3nnLinear
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG, check_model_config
 from tace.models.spherical.edge import EDGE_UPDATE
@@ -21,7 +21,6 @@ from tace.models.spherical.fused import (
     UuuTensorProduct,
     UvuTensorProduct,
 )
-from tace.models.spherical.layer_norm import get_normalization_layer
 from tace.models.spherical.mtace import MagneticBasis
 from tace.models.spherical.node import ElementNodeUpdate
 from tace.models.spherical.nonlinear import get_nonlinear_layer
@@ -635,21 +634,18 @@ def test_linear_is_time_reversal_equivariant():
     reason="the installed e3nn does not represent time-reversal parity",
 )
 def test_merge_layer_norm_is_time_reversal_equivariant():
-    irreps = o3.Irreps("2x0oo + 2x0ee + 2x1eo")
-    layout = LayoutTransform(irreps)
-    norm = get_normalization_layer(
-        "merge_layer_norm",
-        ls=irreps.ls,
-        num_channels=2,
-        irreps=irreps,
-    ).to(dtype=torch.get_default_dtype())
+    irreps = o3.Irreps("2x0oo + 3x0ee + 2x0eo + 2x1eo + 2x0ee")
+    norm = get_normalization_layer("merge_layer_norm", irreps).to(
+        dtype=torch.get_default_dtype()
+    )
     with torch.no_grad():
-        norm.affine_bias.fill_(0.25)
+        assert norm.bias.shape == (5,)
+        norm.bias.normal_()
 
     features = torch.randn(5, irreps.dim)
     matrix = _time_reversal_matrix(irreps)
-    expected = layout.inverse(norm(layout(features))) @ matrix.T
-    observed = layout.inverse(norm(layout(features @ matrix.T)))
+    expected = norm(features) @ matrix.T
+    observed = norm(features @ matrix.T)
     torch.testing.assert_close(observed, expected)
 
 

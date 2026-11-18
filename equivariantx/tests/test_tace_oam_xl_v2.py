@@ -48,14 +48,19 @@ from equivariantx.models.tace.tace_oam_xl_v2.training import GradientWorkspace
 from equivariantx.ops.common.channel_product import channel_product
 
 
-@pytest.mark.parametrize("radial_mode", ["stream", "materialize"])
-def test_conversion_checkpoint_and_mixed_derivatives(monkeypatch, radial_mode):
+@pytest.mark.parametrize(
+    ("radial_mode", "associate_norm"), [("stream", False), ("materialize", True)]
+)
+def test_conversion_checkpoint_and_mixed_derivatives(
+    monkeypatch, radial_mode, associate_norm
+):
     pytest.importorskip("tace")
     from tace.lightning.torch_model import create_model
     from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
     for name, value in {"EQX": "1", "MATRIX_WEIGHT": "1", "COMPILE": "0"}.items():
         monkeypatch.setenv(f"TACE_USE_{name}", value)
+    monkeypatch.setenv("EQX_XL_ASSOCIATE_NORM", str(int(associate_norm)))
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:

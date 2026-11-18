@@ -370,15 +370,12 @@ class GaussianBasis(torch.nn.Module):
 
 class CosineCutoff(torch.nn.Module):
     """
-    The fourth derivative and above are discontinuous
+    f(1) = f'(1) = 0
     """
 
     def __init__(self, cutoff: float) -> None:
         super().__init__()
-        self.register_buffer(
-            "cutoff",
-            torch.tensor(cutoff, dtype=torch.float64),
-        )
+        self.register_buffer("cutoff", torch.tensor(cutoff, dtype=torch.float64))
 
     def forward(
         self, x: torch.Tensor, cutoff: Union[torch.Tensor, None] = None
@@ -389,9 +386,9 @@ class CosineCutoff(torch.nn.Module):
 
     @staticmethod
     def calculate_envelope(r_ij: torch.Tensor, cutoff: torch.Tensor) -> torch.Tensor:
-        x = r_ij / cutoff
-        envelope = (0.5 * torch.cos(torch.pi * x) + 0.5).unsqueeze(-1)
-        return envelope * (r_ij < cutoff)
+        inside = r_ij < cutoff
+        gap = torch.where(inside, (cutoff - r_ij) / cutoff, 0.0)
+        return torch.sin((math.pi / 2) * gap).square() * inside
 
     def __repr__(self):
         return f"{self.__class__.__name__}(cutoff={self.cutoff})"
@@ -399,32 +396,31 @@ class CosineCutoff(torch.nn.Module):
 
 class MollifierCutoff(torch.nn.Module):
     """
-    Derivatives of any order are continuous
+    f(1) = f'(1) = ... = f^n(1) = 0
     """
 
-    def __init__(self, cutoff: float, eps: float = 1e-9):
+    def __init__(self, cutoff: float) -> None:
         super().__init__()
-        self.register_buffer(
-            "cutoff", torch.tensor(cutoff, dtype=torch.float64)
-        )
-        self.eps = eps
+        self.register_buffer("cutoff", torch.tensor(cutoff, dtype=torch.float64))
 
     def forward(
         self, x: torch.Tensor, cutoff: Union[torch.Tensor, None] = None
     ) -> torch.Tensor:
         if cutoff is None:
             cutoff = self.cutoff
-        return self.calculate_envelope(x, cutoff, self.eps)
+        return self.calculate_envelope(x, cutoff)
 
     @staticmethod
-    def calculate_envelope(
-        r_ij: torch.Tensor,
-        cutoff: torch.Tensor,
-        eps: float = 1e-9,
-    ) -> torch.Tensor:
-        x = r_ij / cutoff
-        envelope = torch.exp(1 - 1 / (1 - x**2 + eps))
-        return envelope * (r_ij < cutoff)
+    def calculate_envelope(r_ij: torch.Tensor, cutoff: torch.Tensor) -> torch.Tensor:
+        inside = r_ij < cutoff
+        x = torch.where(inside, r_ij / cutoff, 0.0)
+        gap = torch.where(inside, (cutoff - r_ij) / cutoff, 1.0)
+        denominator = gap * (1 + x)
+        # Once exp underflows, differentiating large reciprocal powers can
+        # otherwise form 0*inf even though the envelope and its limit are zero.
+        active = inside & (torch.exp(1 - denominator.reciprocal()) > 0)
+        denominator = torch.where(active, denominator, 1.0)
+        return torch.exp(1 - denominator.reciprocal()) * active
 
     def __repr__(self):
         return f"{self.__class__.__name__}(cutoff={self.cutoff})"
@@ -440,6 +436,7 @@ class C2PolynomialCutoff(torch.nn.Module):
     def __init__(self, cutoff: float, p: int = 5):
         super().__init__()
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
+        self.polynomial_power = int(p)
         self.register_buffer(
             "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
@@ -449,10 +446,29 @@ class C2PolynomialCutoff(torch.nn.Module):
     ) -> torch.Tensor:
         if cutoff is None:
             cutoff = self.cutoff
-        return self.calculate_envelope(x, cutoff, self.p.to(torch.int))
+        return self.calculate_envelope(x, cutoff, self.polynomial_power)
 
     @staticmethod
     def calculate_envelope(
+        r_ij: torch.Tensor, cutoff: torch.Tensor, p: int
+    ) -> torch.Tensor:
+        inside = r_ij < cutoff
+        x = torch.where(inside, r_ij / cutoff, 0.0)
+        gap = torch.where(inside, (cutoff - r_ij) / cutoff, 0.0)
+        polynomial = torch.zeros_like(x)
+        for k in range(p - 1, -1, -1):
+            polynomial = polynomial * x + (k + 1) * (k + 2) / 2
+        return gap.pow(3) * polynomial
+
+    def legacy_forward(
+        self, x: torch.Tensor, cutoff: Union[torch.Tensor, None] = None
+    ) -> torch.Tensor:
+        if cutoff is None:
+            cutoff = self.cutoff
+        return self.legacy_calculate_envelope(x, cutoff, self.p.to(torch.int))
+
+    @staticmethod
+    def legacy_calculate_envelope(
         r_ij: torch.Tensor, cutoff: torch.Tensor, p: torch.Tensor
     ) -> torch.Tensor:
         x = r_ij / cutoff  # [edge, 1]
@@ -477,6 +493,7 @@ class C3PolynomialCutoff(torch.nn.Module):
     def __init__(self, cutoff: float, p: int = 6):
         super().__init__()
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
+        self.polynomial_power = int(p)
         self.register_buffer(
             "cutoff", torch.tensor(cutoff, dtype=torch.float64)
         )
@@ -486,12 +503,33 @@ class C3PolynomialCutoff(torch.nn.Module):
     ) -> torch.Tensor:
         if cutoff is None:
             cutoff = self.cutoff
-        return self.calculate_envelope(x, cutoff, self.p.to(torch.int))
+        return self.calculate_envelope(x, cutoff, self.polynomial_power)
 
     @staticmethod
     def calculate_envelope(
+        r_ij: torch.Tensor, cutoff: torch.Tensor, p: int
+    ) -> torch.Tensor:
+        inside = r_ij < cutoff
+        x = torch.where(inside, r_ij / cutoff, 0.0)
+        gap = torch.where(inside, (cutoff - r_ij) / cutoff, 0.0)
+        polynomial = torch.zeros_like(x)
+        for k in range(p - 1, -1, -1):
+            polynomial = polynomial * x + (k + 1) * (k + 2) * (k + 3) / 6
+        return gap.pow(4) * polynomial
+
+    def legacy_forward(
+        self, x: torch.Tensor, cutoff: Union[torch.Tensor, None] = None
+    ) -> torch.Tensor:
+        """Evaluate the original expanded polynomial for comparison."""
+        if cutoff is None:
+            cutoff = self.cutoff
+        return self.legacy_calculate_envelope(x, cutoff, self.p.to(torch.int))
+
+    @staticmethod
+    def legacy_calculate_envelope(
         r_ij: torch.Tensor, cutoff: torch.Tensor, p: torch.Tensor
     ) -> torch.Tensor:
+        """Original expanded C3 polynomial; unused by the execution path."""
         x = r_ij / cutoff
 
         # coefficients
@@ -535,6 +573,7 @@ class SmoothDynamicCutoff(torch.nn.Module):
         self.alpha = alpha
         self.eps = eps
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
+        self.polynomial_power = int(p)
         self.coef = 1.0 / (self.sigma * math.sqrt(2 * math.pi))
 
     def __repr__(self):
@@ -593,7 +632,7 @@ class SmoothDynamicCutoff(torch.nn.Module):
     def _compute_node_cutoff(self, node_length, mask):
         p = (
             self.cutoff_fn.calculate_envelope(
-                node_length, cutoff=self.cutoff_fn.cutoff, p=self.p
+                node_length, cutoff=self.cutoff_fn.cutoff, p=self.polynomial_power
             )
             * mask
         )
@@ -734,7 +773,6 @@ class ZBLBasis(torch.nn.Module):
     """
     Metal units
     From LAMMPS pair_zbl_const.h
-    Code from MACE
     """
 
     p: torch.Tensor
@@ -750,6 +788,7 @@ class ZBLBasis(torch.nn.Module):
             ),
         )
         self.register_buffer("p", torch.tensor(p, dtype=torch.int))
+        self.polynomial_power = int(p)
         self.register_buffer(
             "covalent_radii",
             torch.tensor(
@@ -807,7 +846,7 @@ class ZBLBasis(torch.nn.Module):
         )
         v_edges = (14.3996 * Z_u * Z_v) / x * phi
         if self.is_polynomial_cutoff:
-            envelope = self.cutoff_fn(x, r_max, self.p)
+            envelope = self.cutoff_fn(x, r_max, self.polynomial_power)
         else:
             envelope = self.cutoff_fn(x, r_max)
         v_edges = 0.5 * v_edges * envelope

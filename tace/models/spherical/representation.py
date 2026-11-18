@@ -13,7 +13,7 @@ from equivariantx import co3, o2
 
 from ...dataset.quantity import PROPERTIES
 from ...utils.env import acceleration_enabled, get_tace_use_dens
-from ..layout import LayoutTransform
+from ..layer_norm import get_normalization_layer
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
@@ -26,7 +26,6 @@ from .inter import (
     UuO2Interaction,
     UvO2Interaction,
 )
-from .layer_norm import get_normalization_layer
 from .mtace import MagneticBasis, O2MagneticInteraction, O3MagneticWigner6jInteraction
 from .node import (
     NODE_EMBEDDING,
@@ -455,13 +454,7 @@ class NodeRepresentation(torch.nn.Module):
 
         if layer_norm["final_norm_type"] is not None:
             self.final_norm = get_normalization_layer(
-                layer_norm["final_norm_type"],
-                ls=target_irreps.ls,
-                num_channels=num_channel,
-                irreps=target_irreps,
-            )
-            self.final_reshape = LayoutTransform(
-                [(num_channel, ir) for _, ir in target_irreps]
+                layer_norm["final_norm_type"], self.irreps_out
             )
 
         if self.use_dens:
@@ -694,9 +687,7 @@ class NodeRepresentation(torch.nn.Module):
                 data["batch"],
             )
             if idx == self.num_layers - 1 and hasattr(self, "final_norm"):
-                node_feats = self.final_reshape.inverse(
-                    self.final_norm(self.final_reshape(node_feats))
-                )
+                node_feats = self.final_norm(node_feats)
             prev_feats.append(node_feats)
 
         return {

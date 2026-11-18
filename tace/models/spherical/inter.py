@@ -11,7 +11,7 @@ from e3nn import o3
 from tace.utils.env import acceleration_enabled
 
 from ..lammps import Graph
-from ..layout import LayoutTransform
+from ..layer_norm import get_normalization_layer
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
 from ..mlp import ACTIVATION, MLP, convolution_radial
 from .base import Interaction
@@ -21,7 +21,6 @@ from .fused import (
     O3TensorProductConv,
     UuO2TensorProductConv,
 )
-from .layer_norm import get_normalization_layer
 from .nonlinear import get_nonlinear_layer
 from .o2 import UvO2TensorProductConv
 from .residual import get_resnet_layer
@@ -162,21 +161,11 @@ class O3CgtpInteraction(Interaction):
             self.use_first_pre_norm or self.layer > 0
         ) and self.pre_norm_type is not None:
             if self.resnet_type in ["BB", "BAB"]:
-                self.norm1 = get_normalization_layer(
-                    self.pre_norm_type,
-                    ls=self.irreps_in.ls,
-                    num_channels=self.num_channel,
-                    irreps=self.irreps_in,
-                )
-                self.reshape1 = LayoutTransform(self.irreps_in)
+                self.norm1 = get_normalization_layer(self.pre_norm_type, self.irreps_in)
             if self.resnet_type in ["AB", "BAB"]:
                 self.norm2 = get_normalization_layer(
-                    self.pre_norm_type,
-                    ls=self.irreps_out.ls,
-                    num_channels=self.num_channel,
-                    irreps=self.irreps_out,
+                    self.pre_norm_type, self.irreps_out
                 )
-                self.reshape2 = LayoutTransform(self.irreps_out)
 
     def _compute_messages(
         self,
@@ -268,7 +257,7 @@ class O3CgtpInteraction(Interaction):
                 resBA = self.resnetBA(node_feats)
 
         if hasattr(self, "norm1"):
-            node_feats = self.reshape1.inverse(self.norm1(self.reshape1(node_feats)))
+            node_feats = self.norm1(node_feats)
 
         node_feats = self.linear_up(node_feats)
         node_feats = self.handle_lammps(node_feats, lmp_data, lmp_natoms, self.layer)
@@ -320,7 +309,7 @@ class O3CgtpInteraction(Interaction):
                 resAB = self.resnetAB(m_i)
 
         if hasattr(self, "norm2"):
-            m_i = self.reshape2.inverse(self.norm2(self.reshape2(m_i)))
+            m_i = self.norm2(m_i)
 
         if resBB is not None:
             sc = resBB

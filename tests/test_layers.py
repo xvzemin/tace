@@ -9,6 +9,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
+from equivariantx.nn import MergeLayerNorm, MergeRmsNorm
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models.layout import LayoutTransform
 from tace.models.linear import (
@@ -1213,48 +1214,6 @@ def test_universal_embedding_is_filtered_by_default_config():
     assert filtered == DEFAULT_MODEL_CONFIG["universal_embedding"]
 
 
-@pytest.mark.parametrize(
-    ("shape", "dim", "use_ptr"),
-    [
-        ((5, 3), 0, False),
-        ((3, 5), 1, False),
-        ((3, 5), -1, False),
-        ((5, 3), 0, True),
-        ((0, 3), 0, False),
-        ((0, 3), 0, True),
-    ],
-)
-def test_graph_softmax_matches_groupwise_sums_and_gradients(shape, dim, use_ptr):
-    from tace.models.softmax import GraphSoftmax
-
-    module = GraphSoftmax()
-    src = torch.randn(shape, dtype=DTYPE, device=DEVICE, requires_grad=True)
-    scale = torch.rand_like(src, requires_grad=True)
-    counts = [2, 0, 3, 0] if src.size(dim) else [0, 0, 0, 0]
-    count = torch.tensor(counts, device=DEVICE)
-    index = torch.arange(len(counts), device=DEVICE).repeat_interleave(count)
-    ptr = torch.cat((count.new_zeros(1), count.cumsum(0)))
-    actual = module(
-        src,
-        dim=dim,
-        exp_rescale=scale,
-        **({"ptr": ptr} if use_ptr else {"index": index, "num_nodes": len(counts)}),
-    )
-    expected = []
-    for value, weight in zip(src.split(counts, dim), scale.split(counts, dim)):
-        if value.size(dim):
-            value = (value - value.detach().amax(dim, keepdim=True)).exp()
-        value = value * weight
-        expected.append(value / (value.sum(dim, keepdim=True) + module.eps))
-    expected = torch.cat(expected, dim=dim)
-    torch.testing.assert_close(actual, expected)
-    for actual_grad, expected_grad in zip(
-        torch.autograd.grad(actual.square().sum(), (src, scale)),
-        torch.autograd.grad(expected.square().sum(), (src, scale)),
-    ):
-        torch.testing.assert_close(actual_grad, expected_grad)
-
-
 @pytest.mark.parametrize("magnetic_type", ["identity", "element", "element2"])
 def test_node_update_returns_source_and_target_info(magnetic_type):
     update = NODE_UPDATE[magnetic_type](
@@ -1343,6 +1302,41 @@ def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> 
         layout_out="flatten_ir_mul",
     ).to(DEVICE)
     torch.testing.assert_close(transform.inverse(transform(features)), features)
+
+
+@pytest.mark.parametrize("cls", [MergeRmsNorm, MergeLayerNorm])
+def test_merge_norm_loads_legacy_state(cls):
+    from tace.models.layer_norm import get_normalization_layer
+
+    name = "merge_layer_norm" if cls is MergeLayerNorm else "merge_rms_norm"
+    norm = get_normalization_layer(name, "3x0e + 3x1o + 3x2e").to(DEVICE)
+    x = torch.randn(7, 9, 3, device=DEVICE)
+    index = torch.tensor([0, 1, 1, 1, 2, 2, 2, 2, 2], device=DEVICE)
+    weights = torch.randn(3, 3, device=DEVICE)
+    # Serialized coefficients were rounded at FP32 even for later FP64 evaluation.
+    balance = torch.tensor([1 / 3, 1 / 9, 1 / 15], dtype=torch.float32, device=DEVICE)[
+        index
+    ][None, :]
+    state = dict(
+        expand_index=index, balance_degree_weight=balance, affine_weight=weights
+    )
+    centered = x
+    if cls is MergeLayerNorm:
+        state["affine_bias"] = torch.randn(3, device=DEVICE)
+        centered = torch.cat([x[:, :1] - x[:, :1].mean(-1, keepdim=True), x[:, 1:]], 1)
+    norm.load_state_dict(state, strict=True)
+    var = centered.square().mean(-1) @ balance.to(x).T
+    expected = centered * (var + norm.eps).rsqrt().unsqueeze(-1) * weights[index]
+    if cls is MergeLayerNorm:
+        expected[:, 0] += state["affine_bias"]
+    torch.testing.assert_close(norm(x), expected, atol=1e-12, rtol=1e-12)
+    restored = get_normalization_layer(name, norm.irreps).to(DEVICE)
+    restored.load_state_dict(norm.state_dict(), strict=True)
+    torch.testing.assert_close(restored(x), norm(x), atol=0, rtol=0)
+    assert not list(restored.buffers())
+    assert not {"expand_index", "balance_degree_weight"}.intersection(
+        restored.state_dict()
+    )
 
 
 @pytest.mark.parametrize("matrix", ["0", "1"])
@@ -1478,94 +1472,3 @@ def test_tace_indexed_linear(
             atol=tol,
             rtol=tol,
         )
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("edges", [0, 13])
-def test_graph_attention_derivatives(device, edges):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA unavailable")
-    from equivariantx.conv.attention import graph_softmax
-    from tace.models.softmax import GraphSoftmax
-
-    target = torch.arange(edges, device=device) % 4
-    scores = torch.randn(
-        edges, 3, dtype=torch.float64, device=device, requires_grad=True
-    )
-    weight = torch.rand(edges, 1, dtype=torch.float64, device=device)
-    weight[::3] = 0
-    weight.requires_grad_()
-    actual = graph_softmax(scores, target, 5, weight, eps=1e-3)
-    expected = GraphSoftmax(eps=1e-3)(scores, target, num_nodes=5, exp_rescale=weight)
-    torch.testing.assert_close(actual, expected)
-    losses = [x.square().sum() for x in (actual, expected)]
-    for _ in range(3):
-        grads = [
-            torch.autograd.grad(loss, (scores, weight), create_graph=True)
-            for loss in losses
-        ]
-        for a, b in zip(*grads):
-            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-8)
-        losses = [sum(g.square().sum() for g in values) for values in grads]
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("nodes", [0, 5])
-def test_streaming_graph_attention_weights(device, nodes):
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("CUDA unavailable")
-    from equivariantx.conv.attention import StreamingGraphAttention
-    from tace.models.softmax import GraphSoftmax
-
-    edges, heads = (9 if nodes else 0), 2
-    target = torch.arange(edges, device=device) % 3
-    inputs = [
-        torch.zeros(nodes, 1, device=device, dtype=torch.float64),
-        torch.randn(edges, heads, device=device, dtype=torch.float64).requires_grad_(),
-        torch.randn(edges, 3, 4, device=device, dtype=torch.float64).requires_grad_(),
-        torch.rand(edges, 1, device=device, dtype=torch.float64).requires_grad_(),
-        torch.rand(edges, heads, device=device, dtype=torch.float64).requires_grad_(),
-        target,
-        torch.ones(edges, device=device, dtype=torch.bool),
-    ]
-    with torch.no_grad():
-        inputs[3][::3] = 0
-
-    def fake(v):
-        return (
-            v[0].new_empty(nodes, 3, 4),
-            v[0].new_empty(nodes, heads),
-            v[0].new_empty(nodes, heads),
-        )
-
-    attention = StreamingGraphAttention(
-        lambda v: (v[1], v[2]),
-        fake,
-        {i: 0 for i in range(1, 7)},
-        target_slot=5,
-        normalizer_slot=3,
-        value_weight_slot=4,
-        valid_slot=6,
-        tile_size=4,
-        eps=1e-3,
-    )
-    actual = attention(*inputs)[0]
-    weight = (
-        GraphSoftmax(eps=1e-3)(
-            inputs[1], target, num_nodes=nodes, exp_rescale=inputs[3]
-        )
-        * inputs[4]
-    )
-    value = (inputs[2].view(edges, 3, heads, 2) * weight[:, None, :, None]).reshape(
-        edges, 3, 4
-    )
-    expected = value.new_zeros(nodes, 3, 4).index_add(0, target, value)
-    torch.testing.assert_close(actual, expected)
-    losses = [x.square().sum() for x in (actual, expected)]
-    for _ in range(3):
-        grads = [
-            torch.autograd.grad(loss, inputs[1:5], create_graph=True) for loss in losses
-        ]
-        for a, b in zip(*grads):
-            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-8)
-        losses = [sum(g.square().sum() for g in values) for values in grads]

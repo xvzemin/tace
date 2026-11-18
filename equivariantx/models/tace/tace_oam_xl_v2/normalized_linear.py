@@ -8,40 +8,35 @@ all derivatives remain live; nothing is cached across updates.
 import torch
 
 
-def normalized_linear(linear, normalization, reshape, inputs):
-    """Evaluate a non-centering equivariant RMSNorm followed by a linear map."""
-    if normalization.centering or normalization.affine_bias is not None:
-        raise ValueError("Associated RMS linear requires no centering or affine bias")
-    if not isinstance(linear.weight, torch.nn.ParameterList):
-        raise ValueError(
-            "Associated RMS linear requires independent parameter matrices"
+def normalized_linear(linear, normalization, inputs):
+    """Apply merged RMS normalization and a linear map to flat mul_ir features."""
+    if normalization.center_scalars or normalization.layout != "mul_ir":
+        raise ValueError("Associated RMS linear requires mul_ir RMS normalization")
+    matrices = linear.weight
+    if not isinstance(matrices, torch.nn.ParameterList):
+        matrices = matrices.split([a * b for a, b in linear._path_shapes])
+    inverse = normalization.inverse_rms(inputs).unsqueeze(-1)
+    blocks = [
+        part.unflatten(1, (c, d)).transpose(1, 2)
+        for part, c, d in zip(
+            inputs.split(normalization.widths, dim=1),
+            normalization.channels,
+            normalization.components,
         )
-    shaped = reshape(inputs)
-    norm = shaped.pow(2).mean(dim=2, keepdim=True)
-    if normalization.normalization == "norm":
-        norm = norm.sum(dim=1, keepdim=True)
-    elif normalization.std_balance_degrees:
-        norm = torch.einsum("ai,nic->nac", normalization.balance_degree_weight, norm)
-    else:
-        norm = norm.mean(dim=1, keepdim=True)
-    inverse = (norm + normalization.eps).pow(-0.5)
-    offsets, offset = [], 0
-    for ci, ir in linear.irreps_in:
-        if ci != normalization.num_channels:
-            raise ValueError("Input irreps must match normalization channels")
-        offsets.append(offset)
-        offset += ir.dim
+    ]
+    gains = (
+        normalization.weight.split(normalization.channels)
+        if normalization.weight is not None
+        else None
+    )
     pieces = [[] for _ in linear.irreps_out]
-    for matrix, instruction in zip(linear.weight, linear.linear.instructions):
+    for matrix, instruction in zip(matrices, linear.linear.instructions):
         ci, ir = linear.irreps_in[instruction.i_in]
         co, _ = linear.irreps_out[instruction.i_out]
         weight = matrix.reshape(ci, co)
-        if normalization.affine_weight is not None:
-            weight = weight * normalization.affine_weight[instruction.i_in, :, None]
-        value = (
-            shaped[:, offsets[instruction.i_in] : offsets[instruction.i_in] + ir.dim]
-            @ weight
-        )
+        if gains is not None:
+            weight = weight * gains[instruction.i_in][:, None]
+        value = blocks[instruction.i_in] @ weight
         value = value * instruction.path_weight * inverse
         pieces[instruction.i_out].append(
             value.transpose(1, 2).reshape(inputs.shape[0], co * ir.dim)

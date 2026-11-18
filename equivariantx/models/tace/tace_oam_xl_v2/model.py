@@ -539,15 +539,17 @@ class Representation(torch.nn.Module):
             res_bb = inter.resnetBB(nodes) if hasattr(inter, "resnetBB") else None
             res_ba = inter.resnetBA(nodes) if hasattr(inter, "resnetBA") else None
             associate_norm = os.environ.get("EQX_XL_ASSOCIATE_NORM", "0") == "1"
-            if associate_norm and hasattr(inter, "norm1"):
+            if (
+                associate_norm
+                and hasattr(inter, "norm1")
+                and not inter.norm1.center_scalars
+            ):
                 from .normalized_linear import normalized_linear
 
-                nodes = normalized_linear(
-                    inter.linear_up, inter.norm1, inter.reshape1, nodes
-                )
+                nodes = normalized_linear(inter.linear_up, inter.norm1, nodes)
             else:
                 if hasattr(inter, "norm1"):
-                    nodes = inter.reshape1.inverse(inter.norm1(inter.reshape1(nodes)))
+                    nodes = inter.norm1(nodes)
                 nodes = inter.linear_up(nodes)
             last = inter.edge_info.mlp[-1]
             if projected is not None:
@@ -630,7 +632,11 @@ class Representation(torch.nn.Module):
                 message = message + res_ba
             res_ab = inter.resnetAB(message) if hasattr(inter, "resnetAB") else None
             preprojected = None
-            if associate_norm and hasattr(inter, "norm2"):
+            if (
+                associate_norm
+                and hasattr(inter, "norm2")
+                and not inter.norm2.center_scalars
+            ):
                 if product.compose_gate:
                     raise ValueError(
                         "Associated normalization and composed scalar gate are separate experiments"
@@ -638,18 +644,16 @@ class Representation(torch.nn.Module):
                 from .normalized_linear import normalized_linear
 
                 preprojected = normalized_linear(
-                    product.linear_up, inter.norm2, inter.reshape2, message
+                    product.linear_up, inter.norm2, message
                 )
             elif hasattr(inter, "norm2"):
-                message = inter.reshape2.inverse(inter.norm2(inter.reshape2(message)))
+                message = inter.norm2(message)
             sc = res_bb if res_bb is not None else res_ab
             nodes = product(
                 message, node_type, sc, data["batch"], preprojected=preprojected
             )
             if index == self.num_layers - 1 and hasattr(self, "final_norm"):
-                nodes = self.final_reshape.inverse(
-                    self.final_norm(self.final_reshape(nodes))
-                )
+                nodes = self.final_norm(nodes)
             descriptors.append(nodes)
         return {
             "descriptors": descriptors,

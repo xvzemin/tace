@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from equivariantx.conv.attention import graph_softmax
+from equivariantx.nn import graph_softmax
 from equivariantx.ops import get_kernel
 from equivariantx.ops.common.attention import evaluate_adjoint
 from equivariantx.ops.common.torch.attention import normalized_exp_reference

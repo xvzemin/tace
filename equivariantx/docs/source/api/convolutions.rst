@@ -55,7 +55,5 @@ Cartesian output maps
 Graph attention
 ---------------
 
-.. autofunction:: equivariantx.conv.graph_softmax
-
 .. autoclass:: equivariantx.conv.StreamingGraphAttention
    :members: forward

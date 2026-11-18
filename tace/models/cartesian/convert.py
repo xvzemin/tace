@@ -29,7 +29,6 @@ def convert_basis(model, basis="cartesian"):
     from tace.models.adapter import TensorModel
     from tace.models.layout import LayoutTransform
     from tace.models.linear import switch_e3nn_weight_layout
-    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
     from tace.utils.precision import configure_model_precision, torch_default_dtype
 
     if not isinstance(model, TensorModel):
@@ -89,39 +88,16 @@ def convert_basis(model, basis="cartesian"):
                     "tace.models.cartesian.layers",
                     "tace.models.cartesian.prod",
                 )
-            ) or isinstance(module, (LayoutTransform, EquivariantMergeLayerNorm)):
+            ) or isinstance(module, LayoutTransform):
                 constants.update(
                     f"{name}.{key}" for key, _ in module.named_buffers(recurse=False)
                 )
     state, previous = result.state_dict(), model.state_dict()
-    for name in state.keys() & previous.keys():
-        if name not in constants and state[name].shape == previous[name].shape:
-            state[name] = previous[name]
-    for name, module in result.named_modules():
-        if not isinstance(module, EquivariantMergeLayerNorm):
-            continue
-        original = source_modules[name]
-        if (
-            module.balance_degree_weight is None
-            or original.balance_degree_weight is None
+    for name, value in previous.items():
+        if name.endswith(".block_weights") or (
+            name in state and name not in constants and state[name].shape == value.shape
         ):
-            continue
-        source_widths = [
-            3**l if original.dim == sum(3**k for k in original.ls) else 2 * l + 1
-            for l in original.ls
-        ]
-        target_widths = [
-            3**l if module.dim == sum(3**k for k in module.ls) else 2 * l + 1
-            for l in module.ls
-        ]
-        values = original.balance_degree_weight.split(source_widths, dim=-1)
-        state[name + ".balance_degree_weight"] = torch.cat(
-            [
-                value[..., :1].expand(*value.shape[:-1], width)
-                for value, width in zip(values, target_widths)
-            ],
-            -1,
-        )
+            state[name] = value
     result.load_state_dict(state, strict=True)
     for name, parameter in target.items():
         parameter.requires_grad_(source[name].requires_grad)

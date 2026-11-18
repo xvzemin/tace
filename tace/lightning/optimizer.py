@@ -10,6 +10,7 @@ from fnmatch import fnmatchcase
 import torch
 from e3nn.nn import BatchNorm
 
+from equivariantx.nn import MergeRmsNorm
 from tace.models.blocks import ScaleShift
 from tace.models.linear import (
     ElementEmbedding,
@@ -28,7 +29,6 @@ from tace.models.radial import (
     jnSphericalBesselBasis,
 )
 from tace.models.spherical.base import ReadOut
-from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
 from tace.models.spherical.mtace import MagneticBasis
 from tace.models.spherical.prod import MaceACE
 from tace.models.spherical.readout import DirectHessianReadout, EdgeReadOut
@@ -51,7 +51,7 @@ NO_WEIGHT_DECAY_MODULES = (
     torch.nn.EmbeddingBag,
     torch.nn.PReLU,
     BatchNorm,
-    EquivariantMergeLayerNorm,
+    MergeRmsNorm,
     ScatterNorm,
     ScaleShift,
     AgnesiTransform,
@@ -130,7 +130,7 @@ NO_MUON_MODULES = (
     ElementEmbedding,
     torch.nn.PReLU,
     BatchNorm,
-    EquivariantMergeLayerNorm,
+    MergeRmsNorm,
     ScaleShift,
     AgnesiTransform,
     SoftTransform,

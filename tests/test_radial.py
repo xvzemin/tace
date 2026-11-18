@@ -1,6 +1,7 @@
 """Spherical Bessel values, derivatives and radial normalization."""
 
 import math
+from decimal import Decimal, localcontext
 
 import numpy as np
 import pytest
@@ -8,7 +9,12 @@ import torch
 from scipy.special import spherical_jn
 
 from tace.models.radial import (
+    C2PolynomialCutoff,
+    C3PolynomialCutoff,
+    CosineCutoff,
+    MollifierCutoff,
     RadialBasis,
+    ZBLBasis,
     compute_jn_zeros,
     j0SphericalBesselBasis,
     jnSphericalBesselBasis,
@@ -17,6 +23,165 @@ from tace.models.radial import (
 )
 
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize(
+    "cutoff_cls",
+    [CosineCutoff, MollifierCutoff, C2PolynomialCutoff, C3PolynomialCutoff],
+)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("column", [False, True])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_cutoff_boundary_and_shape(cutoff_cls, dtype, column, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    module = cutoff_cls(6.0).to(device=device, dtype=dtype)
+    cutoff = module.cutoff
+    below = torch.nextafter(cutoff, torch.zeros_like(cutoff))
+    above = torch.nextafter(cutoff, 2 * cutoff)
+    r = torch.stack([cutoff * 0, cutoff / 2, below, cutoff, above, cutoff * 2])
+    if column:
+        r = r[:, None]
+    r.requires_grad_()
+    value = module(r)
+    assert value.shape == r.shape and value.dtype == dtype
+    torch.testing.assert_close(value.flatten()[0], value.new_tensor(1.0))
+    assert torch.isfinite(value).all()
+    assert bool((value >= 0).all())
+    for order in range(7):
+        assert torch.isfinite(value).all(), order
+        assert torch.equal(value[r >= cutoff], torch.zeros_like(value[r >= cutoff]))
+        if order < 6:
+            value = torch.autograd.grad(value.sum(), r, create_graph=True)[0]
+    empty = torch.empty((0, 1) if column else (0,), device=device, dtype=dtype)
+    assert module(empty).shape == empty.shape
+
+
+@pytest.mark.parametrize(
+    "cutoff_cls",
+    [CosineCutoff, MollifierCutoff, C2PolynomialCutoff, C3PolynomialCutoff],
+)
+def test_cutoff_broadcast_and_derivatives(cutoff_cls):
+    module = cutoff_cls(6.0)
+    cutoff = torch.tensor([[2.0], [3.0], [6.0]], requires_grad=True)
+    r = torch.tensor([[0.3], [2.0], [5.7]], requires_grad=True)
+    actual = module(r, cutoff)
+    assert actual.shape == r.shape
+    expected = torch.stack([module(r[i], cutoff[i]) for i in range(3)])
+    torch.testing.assert_close(actual, expected)
+    assert torch.autograd.gradcheck(module, (r, cutoff))
+    assert torch.autograd.gradgradcheck(module, (r, cutoff))
+    _, tangent = torch.func.jvp(
+        module, (r, cutoff), (torch.ones_like(r), torch.zeros_like(cutoff))
+    )
+    expected_tangent = torch.autograd.grad(actual.sum(), r)[0]
+    torch.testing.assert_close(tangent, expected_tangent)
+
+
+@pytest.mark.parametrize("cutoff_cls", [C2PolynomialCutoff, C3PolynomialCutoff])
+@pytest.mark.parametrize("p", [1, 2, 5, 6, 50])
+def test_polynomial_cutoff_legacy_agreement(cutoff_cls, p):
+    module = cutoff_cls(6.0, p)
+    r = torch.linspace(0.01, 5.7, 19, requires_grad=True)
+    actual = module(r)
+    expected = module.legacy_forward(r)
+    torch.testing.assert_close(actual, module.calculate_envelope(r, module.cutoff, p))
+    for order in range(4):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
+        if order < 3:
+            actual = torch.autograd.grad(actual.sum(), r, create_graph=True)[0]
+            expected = torch.autograd.grad(expected.sum(), r, create_graph=True)[0]
+
+
+@pytest.mark.parametrize(
+    "cutoff_cls,order", [(C2PolynomialCutoff, 3), (C3PolynomialCutoff, 4)]
+)
+@pytest.mark.parametrize("p", [5, 6, 50])
+def test_polynomial_cutoff_near_boundary(cutoff_cls, order, p):
+    module = cutoff_cls(6.0, p)
+    r = torch.tensor([6.0 - 1e-3, 6.0 - 1e-6, 6.0 - 1e-8])
+    with localcontext() as context:
+        context.prec = 80
+        expected = []
+        for distance in r.tolist():
+            x = Decimal.from_float(distance) / 6
+            polynomial = sum(
+                Decimal(math.comb(k + order - 1, order - 1)) * x**k for k in range(p)
+            )
+            expected.append(float((1 - x) ** order * polynomial))
+    actual = module(r)
+    torch.testing.assert_close(actual, torch.tensor(expected), rtol=2e-13, atol=0)
+    assert bool((actual > 0).all())
+
+
+@pytest.mark.parametrize("cutoff_name", ["cosine", "mollifier", "c2poly", "c3poly"])
+def test_zbl_cutoff_boundary(cutoff_name):
+    module = ZBLBasis(cutoff_name)
+    cutoff = 2 * module.covalent_radii[1]
+    # Edges can be outside the element-dependent ZBL cutoff while still being
+    # inside the model's graph cutoff.
+    r = (cutoff + torch.tensor([0.0, 1e-8, 0.01])).requires_grad_()
+    edges = torch.arange(6).reshape(3, 2)
+    edge_index = torch.stack((edges.flatten(), edges.flip(1).flatten()))
+    energy = module(
+        r.repeat_interleave(2)[:, None],
+        torch.zeros(6, dtype=torch.long),
+        edge_index,
+        torch.tensor([1]),
+    ).sum()
+    assert float(energy.detach()) == 0.0
+    for order in range(6):
+        energy = torch.autograd.grad(energy.sum(), r, create_graph=True)[0]
+        assert torch.equal(energy, torch.zeros_like(energy)), order
+
+
+@pytest.mark.parametrize(
+    "cutoff_cls",
+    [CosineCutoff, MollifierCutoff, C2PolynomialCutoff, C3PolynomialCutoff],
+)
+def test_cutoff_compilation(cutoff_cls):
+    module = cutoff_cls(6.0)
+    compiled = torch.compile(module, backend="aot_eager", fullgraph=True, dynamic=True)
+    for count in (4, 7, 0):
+        r = torch.linspace(0.0, 6.01, count).unsqueeze(-1).requires_grad_()
+        actual = compiled(r)
+        expected = module(r)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual.sum(), r)[0],
+            torch.autograd.grad(expected.sum(), r)[0],
+        )
+
+
+@pytest.mark.parametrize("cutoff_cls", [C2PolynomialCutoff, C3PolynomialCutoff])
+@pytest.mark.parametrize("p", [2, 5, 50])
+def test_polynomial_cutoff_functional_capture(cutoff_cls, p):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    module = cutoff_cls(6.0, p)
+
+    def evaluate(r, cutoff):
+        return torch.func.functional_call(module, {"cutoff": cutoff}, (r,))
+
+    r = torch.linspace(0.1, 6.01, 8)
+    captured = make_fx(evaluate, tracing_mode="symbolic")(r, module.cutoff)
+    for cutoff in (module.cutoff, module.cutoff + 1):
+        torch.testing.assert_close(captured(r, cutoff), module(r, cutoff))
+
+
+@pytest.mark.parametrize("cutoff_cls", [C2PolynomialCutoff, C3PolynomialCutoff])
+def test_polynomial_cutoff_cuda_graph(cutoff_cls):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    module = cutoff_cls(6.0).cuda()
+    r = torch.tensor([0.0, 2.0, 5.99999999, 6.0, 6.1], device="cuda")
+    expected = module(r)
+    capture = torch.cuda.CUDAGraph()
+    torch.cuda.synchronize()
+    with torch.cuda.graph(capture):
+        actual = module(r)
+    capture.replay()
+    torch.testing.assert_close(actual, expected)
 
 
 def reference_derivative(n, x, derivative):

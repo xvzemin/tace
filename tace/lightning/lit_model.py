@@ -723,9 +723,11 @@ def convert_cgtp(model: TensorModel, implementation: str = "auto") -> TensorMode
     # Reuse matching state and retain freshly constructed implementation-specific buffers.
     source_state = model.state_dict()
     converted_state = converted.state_dict()
-    for name in converted_state.keys() & source_state.keys():
-        if converted_state[name].shape == source_state[name].shape:
-            converted_state[name] = source_state[name]
+    for name, value in source_state.items():
+        if name.endswith(".block_weights") or (
+            name in converted_state and converted_state[name].shape == value.shape
+        ):
+            converted_state[name] = value
     converted.load_state_dict(converted_state, strict=True)
     for name, parameter in converted_parameters.items():
         parameter.requires_grad_(parameters[name].requires_grad)

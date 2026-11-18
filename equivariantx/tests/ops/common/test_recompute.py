@@ -75,7 +75,8 @@ def test_streaming_attention_aoti(tmp_path):
     import subprocess
     import sys
 
-    from equivariantx.conv.attention import StreamingGraphAttention, graph_softmax
+    from equivariantx.conv import StreamingGraphAttention
+    from equivariantx.nn import graph_softmax
 
     def shapes(inputs):
         return tuple(

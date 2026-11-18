@@ -14,6 +14,7 @@ from equivariantx.mbe.ace import (
     IctdBilinearContraction,
     IctdUuuFullyConnectedSymmetricContraction,
 )
+from equivariantx.nn import MergeRmsNorm
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -34,7 +35,6 @@ from ..spherical.fused import (
     UvuTensorProduct,
     Wigner6jTensorProductConv,
 )
-from ..spherical.layer_norm import EquivariantMergeLayerNorm
 from ..spherical.les import TACELES
 from ..spherical.mtace import MagneticUvO2TensorProductConv
 from ..spherical.node import SphericalTensorNodeEmbedding
@@ -277,38 +277,8 @@ def cartesian_modules(module):
         return module
     if isinstance(module, _SymmetricRankTwoBasisChange):
         return RankTwoReadout()
-    if isinstance(module, EquivariantMergeLayerNorm):
-        old_dim = module.dim
-        if module.scalar_index is not None:
-            old_offset = offset = 0
-            for l in module.ls:
-                if old_offset == module.scalar_index:
-                    module.scalar_index = offset
-                    break
-                old_offset += 2 * l + 1
-                offset += 3**l
-        module.dim = sum(3**l for l in module.ls)
-        if module.affine:
-            module.expand_index = torch.cat(
-                [
-                    torch.full((3**l,), i, dtype=torch.long)
-                    for i, l in enumerate(module.ls)
-                ]
-            )
-        if module.normalization == "component":
-            module.balance_degree_weight = torch.cat(
-                [
-                    torch.full(
-                        (3**l,),
-                        1 / ((2 * l + 1) * len(module.ls))
-                        if module.std_balance_degrees
-                        else 1 / old_dim,
-                        dtype=torch.float64,
-                    )
-                    for l in module.ls
-                ]
-            ).unsqueeze(0)
-            module.std_balance_degrees = True
+    if isinstance(module, MergeRmsNorm):
+        module.set_storage(co3.Irreps(module.irreps))
         return module
     if isinstance(module, Gate):
         gate = co3.Gate(

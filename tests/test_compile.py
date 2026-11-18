@@ -697,6 +697,7 @@ for key, expected in case["expected"].items():
 def test_constant_construction_precision():
     from e3nn import o3
 
+    from equivariantx.nn import MergeLayerNorm
     from tace.models.angular import CartesianHarmonics
     from tace.models.blocks import AtomicEnergy, ScaleShift
     from tace.models.linear import e3nnLinear
@@ -713,7 +714,6 @@ def test_constant_construction_precision():
         jnSphericalBesselBasis,
     )
     from tace.models.spherical.basis_change import DirectVirials
-    from tace.models.spherical.layer_norm import EquivariantMergeLayerNorm
     from tace.models.spherical.mtace import MagneticBasis
     from tace.models.spherical.symmetric_contraction import Contraction
 
@@ -737,7 +737,7 @@ def test_constant_construction_precision():
                 MagneticBasis([3.123456789], 4, 1, [1]),
                 CartesianHarmonics(3),
                 DirectVirials(),
-                EquivariantMergeLayerNorm([0, 1, 2], 2),
+                MergeLayerNorm("2x0e + 2x1o + 2x2e"),
                 e3nnLinear("2x0e + 2x1o", "2x0e + 2x1o"),
                 Contraction(
                     o3.Irreps("2x0e + 2x1o"), o3.Irreps("0e"), 2, num_elements=1

@@ -2,35 +2,8 @@
 
 import pytest
 import torch
+
 from equivariantx.tests.conv.testing import assert_native_autograd
-
-
-@pytest.mark.parametrize("backend", ["torch", "cuda"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.complex64])
-def test_graph_softmax_precision(backend, dtype):
-    from equivariantx.conv.attention import graph_softmax
-
-    with pytest.raises(TypeError, match="float32 or float64"):
-        graph_softmax(
-            torch.ones(3, 1, dtype=dtype), torch.tensor([0, 0, 1]), 2, backend=backend
-        )
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        with pytest.raises(TypeError, match="autocast"):
-            graph_softmax(torch.ones(3, 1), torch.tensor([0, 0, 1]), 2, backend=backend)
-
-
-def test_graph_softmax_backend():
-    from equivariantx.conv.attention import graph_softmax
-
-    inputs = torch.randn(3, 1), torch.tensor([0, 0, 1], dtype=torch.int32), 2
-    torch.testing.assert_close(
-        graph_softmax(*inputs), graph_softmax(*inputs, fused=False)
-    )
-    torch.testing.assert_close(
-        graph_softmax(*inputs, backend="cuda"), graph_softmax(*inputs, fused=True)
-    )
-    with pytest.raises(ValueError, match="backend"):
-        graph_softmax(*inputs, backend="unknown")
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -81,7 +54,8 @@ def test_online_attention_merge(dtype):
 def test_streaming_attention_torch(tile_size, edges, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.conv.attention import StreamingGraphAttention, graph_softmax
+    from equivariantx.conv import StreamingGraphAttention
+    from equivariantx.nn import graph_softmax
 
     def shapes(inputs):
         return tuple(
@@ -140,104 +114,63 @@ def test_streaming_attention_torch(tile_size, edges, double_precision):
             ]
 
 
-@pytest.mark.parametrize("heads,weight_heads", [(1, 1), (3, 1), (3, 3), (8, 8)])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_graph_softmax_derivatives(heads, weight_heads, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.common.cuda.attention import normalized_exp_forward
-    from equivariantx.conv.attention import graph_softmax
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("nodes", [0, 5])
+def test_streaming_graph_attention_weights(device, nodes):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from equivariantx.conv import StreamingGraphAttention
+    from equivariantx.nn import GraphSoftmax
 
-    target = torch.randint(4, (146,), device="cuda")[::2]
-    scores = torch.randn(73, heads, device="cuda", dtype=dtype, requires_grad=True)
-    weight = torch.rand(73, weight_heads, device="cuda", dtype=dtype)
-    weight[::7] = 0
-    weight.requires_grad_()
-    actual = graph_softmax(scores, target, 6, weight, eps=1e-8, backend="cuda")
-    expected = graph_softmax(scores, target, 6, weight, eps=1e-8, fused=False)
-    tolerance = 3e-5 if dtype == torch.float32 else 2e-10
-    for _ in range(3):
-        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-        seed = torch.randn_like(actual)
-        a = torch.autograd.grad(
-            (actual.sin() * seed).sum(), (scores, weight), create_graph=True
-        )
-        b = torch.autograd.grad(
-            (expected.sin() * seed).sum(), (scores, weight), create_graph=True
-        )
-        actual, expected = (
-            torch.cat([x.flatten() for x in values]) for values in (a, b)
-        )
-    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    denominator = scores.new_empty(6, heads)
-    maximum = torch.empty_like(denominator)
-    with torch.no_grad():
-        normalized_exp_forward(
-            scores[:0], weight[:0], target[:0], 6, 1e-8, denominator, maximum
-        )
-    torch.testing.assert_close(denominator, torch.full_like(denominator, 1e-8))
-    torch.testing.assert_close(maximum, torch.zeros_like(maximum))
-
-
-@pytest.mark.parametrize("heads,weight_heads", [(3, 1), (8, 8), (32, 1)])
-@pytest.mark.parametrize("output", [0, 1, 2])
-def test_graph_softmax_adjoint(heads, weight_heads, output, double_precision):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.common.attention import evaluate_adjoint
-
-    target = torch.randint(4, (73,), device="cuda")
+    edges, heads = (9 if nodes else 0), 2
+    target = torch.arange(edges, device=device) % 3
     inputs = [
-        (0.1 * torch.randn(73, width, device="cuda")).requires_grad_()
-        for width in (heads, heads, weight_heads)
+        torch.zeros(nodes, 1, device=device, dtype=torch.float64),
+        torch.randn(edges, heads, device=device, dtype=torch.float64).requires_grad_(),
+        torch.randn(edges, 3, 4, device=device, dtype=torch.float64).requires_grad_(),
+        torch.rand(edges, 1, device=device, dtype=torch.float64).requires_grad_(),
+        torch.rand(edges, heads, device=device, dtype=torch.float64).requires_grad_(),
+        target,
+        torch.ones(edges, device=device, dtype=torch.bool),
     ]
-    values, grad, weight = inputs
-    total = values.new_zeros(6, heads).index_add(0, target, values * grad)
-    expected = (
-        values * (grad - weight * total[target]),
-        (-values * total[target]).sum_to_size(weight.shape),
-        total,
-    )[output]
-    actual = evaluate_adjoint(*inputs, target, 6)[output]
-    for _ in range(3):
-        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
-        seed = torch.randn_like(actual)
-        results = [
-            torch.autograd.grad(
-                (x.sin() * seed).sum(), inputs, create_graph=True, allow_unused=True
-            )
-            for x in (actual, expected)
-        ]
-        actual, expected = (
-            torch.cat(
-                [
-                    (torch.zeros_like(x) if value is None else value).flatten()
-                    for x, value in zip(inputs, result)
-                ]
-            )
-            for result in results
+    with torch.no_grad():
+        inputs[3][::3] = 0
+
+    def fake(v):
+        return (
+            v[0].new_empty(nodes, 3, 4),
+            v[0].new_empty(nodes, heads),
+            v[0].new_empty(nodes, heads),
         )
-    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
 
-
-@pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_graph_softmax_compile(backend, double_precision):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
-    from equivariantx.conv.attention import graph_softmax
-
-    function = torch.compile(
-        graph_softmax, backend="aot_eager", fullgraph=True, dynamic=True
+    attention = StreamingGraphAttention(
+        lambda v: (v[1], v[2]),
+        fake,
+        {i: 0 for i in range(1, 7)},
+        target_slot=5,
+        normalizer_slot=3,
+        value_weight_slot=4,
+        valid_slot=6,
+        tile_size=4,
+        eps=1e-3,
     )
-    for edges in (7, 13, 0):
-        scores = torch.randn(edges, 3, device="cuda", requires_grad=True)
-        weights = torch.rand(edges, 1, device="cuda", requires_grad=True)
-        target = torch.randint(4, (edges,), device="cuda")
-        actual = function(scores, target, 6, weights, backend=backend)
-        expected = graph_softmax(scores, target, 6, weights, fused=False)
-        torch.testing.assert_close(actual, expected)
-        for a, b in zip(
-            torch.autograd.grad(actual.square().sum(), (scores, weights)),
-            torch.autograd.grad(expected.square().sum(), (scores, weights)),
-        ):
-            torch.testing.assert_close(a, b)
+    actual = attention(*inputs)[0]
+    weight = (
+        GraphSoftmax(eps=1e-3, backend="torch")(
+            inputs[1], target, num_nodes=nodes, exp_rescale=inputs[3]
+        )
+        * inputs[4]
+    )
+    value = (inputs[2].view(edges, 3, heads, 2) * weight[:, None, :, None]).reshape(
+        edges, 3, 4
+    )
+    expected = value.new_zeros(nodes, 3, 4).index_add(0, target, value)
+    torch.testing.assert_close(actual, expected)
+    losses = [x.square().sum() for x in (actual, expected)]
+    for _ in range(3):
+        grads = [
+            torch.autograd.grad(loss, inputs[1:5], create_graph=True) for loss in losses
+        ]
+        for a, b in zip(*grads):
+            torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-8)
+        losses = [sum(g.square().sum() for g in values) for values in grads]
