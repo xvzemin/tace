@@ -86,7 +86,10 @@ def program_inputs(
         if wigner is None:
             raise ValueError("Supply Wigner matrices or vectors.")
         local_dim, global_dim, packed = rotation_layout(wigner)
-        geometry, inverse = (wigner, wigner if packed else wigner_inv)
+        geometry, inverse = (
+            wigner,
+            features.new_empty((1, 0)) if packed else wigner_inv,
+        )
     metadata = module.convolution_program(
         local_dim,
         global_dim,

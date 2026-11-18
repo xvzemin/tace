@@ -27,7 +27,7 @@ logging.getLogger("filelock").addFilter(
 )
 
 
-_KERNELS = OrderedDict()
+_KERNELS = {}
 _LAUNCH_CONFIGS = OrderedDict()
 _RUNTIME_LOCK = threading.Lock()
 _POOL = ThreadPoolExecutor(
@@ -117,6 +117,14 @@ def compile_binary(source, options, compiler):
 
 def kernels(sources, device):
     """Compile independent phases concurrently and load on the active device."""
+    sources = tuple(sources)
+    device = torch.device(device)
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    try:
+        return {source: _KERNELS[device, source] for source in sources}
+    except KeyError:
+        pass
     result, pending = {}, {}
     with torch.cuda.device(device):
         capability = torch.cuda.get_device_capability(device)
@@ -144,7 +152,6 @@ def kernels(sources, device):
             key = (device, source)
             if key not in _KERNELS:
                 _KERNELS[key] = runtime().Kernel(pending[source].result(), "run")
-            _KERNELS.move_to_end(key)
             result[source] = _KERNELS[key]
         # Captured CUDA Graphs can outlive the host execution-plan cache. Keep
         # their CUDA modules resident so replay never references unloaded code.

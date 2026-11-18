@@ -11,6 +11,9 @@ from ...o2.wigner import WignerD
 from ...ops import config, resolve_backend
 from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.uu_o2 import convolution as torch_kernel
+from ...ops.torch.o3.cgtp.convolution import angular_groups, directional_table
+from ...utils.autograd import forward_ad_active
+from ...utils.metadata import parse_metadata
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
@@ -259,12 +262,64 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                 tuple(weight_paths),
             )
         )
+        n_in, n_out = self.weight_numel // channels, offset // channels
+        use_matrix = (
+            backend == "cuda"
+            and channels >= 16
+            and 0 < min(n_in, n_out)
+            and max(n_in, n_out) <= config.UU_O2_DENSE_WEIGHT_ORDERS
+        )
+        self.register_buffer(
+            "projection_basis",
+            self.weight_basis().to(torch.get_default_dtype()) if use_matrix else None,
+            persistent=False,
+        )
         self.transverse_metadata = repr(
             (self.transverse_paths, offset, False, ("transverse", "norm"))
         )
+        dimensions = sorted({path[6] for path in transverse_paths})
+        self.angular_degrees = tuple(dim // 2 for dim in dimensions)
+        self.shared_harmonics = (
+            backend == "torch"
+            and len(dimensions) > 1
+            and self.angular_degrees[-1] <= config.UU_O2_SHARED_HARMONICS_DEGREE
+            and channels >= 16
+        )
+        angular_paths = ()
+        if self.shared_harmonics:
+            starts = {dim: sum(dimensions[:i]) for i, dim in enumerate(dimensions)}
+            angular_paths = tuple(
+                (path[0], starts[path[6]], *path[2:]) for path in transverse_paths
+            )
+        self.angular_metadata = (
+            repr((angular_paths, offset, False)) if angular_paths else ""
+        )
+        self.angular_basis = (
+            o3.SphericalHarmonics(list(self.angular_degrees), False, "norm")
+            if self.shared_harmonics
+            else None
+        )
+        self.angular_groups = (
+            angular_groups(self, angular_paths)
+            if self.angular_basis is not None
+            else ()
+        )
+
+    def weight_basis(self):
+        """Return the fixed map from local path weights to directional weights."""
+        _, (inputs, outputs), entries = parse_metadata(self.weight_metadata)
+        basis = torch.zeros(outputs, inputs, dtype=torch.float64, device="cpu")
+        for (i, j), coefficient in entries:
+            basis[j, i] += coefficient
+        return basis
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
+        if (
+            self.projection_basis is not None
+            and self.projection_basis.dtype == torch.float64
+        ):
+            self.projection_basis.copy_(self.weight_basis())
         for index, (_, values) in enumerate(self.weight_transforms):
             buffer = getattr(self, f"weight_transform_{index}")
             buffer.copy_(torch.tensor(values, dtype=buffer.dtype, device=buffer.device))
@@ -274,6 +329,11 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             for a, b, coefficient in entries:
                 value[a, b] = coefficient
             buffer.copy_(value.to(buffer))
+        for name, _, _, _, dx, dy, _, paths in self.angular_groups:
+            buffer = getattr(self, name)
+            if buffer.dtype == torch.float64:
+                sizes = tuple(dict.fromkeys(dz for _, _, dz in paths))
+                buffer.copy_(directional_table(dx, dy, sizes))
         return self
 
     def transform_weights(self, weights):
@@ -361,10 +421,37 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                 "as projection."
             )
         if projection.numel():
-            projection = self.transform_weights(projection)
+            if (
+                self.projection_basis is not None
+                and projection.is_cuda
+                and self.backend == "cuda"
+            ):
+                from ...ops.cuda.conv.uu_o2 import convolution as cuda_kernel
+
+                projection = cuda_kernel.transform_projection(self, projection)
+            else:
+                projection = self.transform_weights(projection)
         else:
             radial = self.transform_weights(radial)
             projection = projection.new_empty((0, self.transverse_weight_numel))
+        if (
+            self.shared_harmonics
+            and self.backend == "torch"
+            and features.is_cuda
+            and not config.TORCH_REFERENCE
+            and not forward_ad_active()
+        ):
+            return torch_kernel.transverse(
+                self,
+                features,
+                radial,
+                projection,
+                cutoff,
+                edge_index,
+                num_nodes,
+                vectors,
+                radial_network,
+            )
         return super().forward_transverse(
             features,
             radial,

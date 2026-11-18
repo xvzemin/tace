@@ -84,6 +84,8 @@ TORCH_BILINEAR_PRODUCT = True
 
 # Expose low-degree transverse convolutions before differentiation and compilation.
 TRANSVERSE_POLYNOMIAL_DEGREE = 2
+UU_O2_SHARED_HARMONICS_DEGREE = 6
+UU_O2_DENSE_WEIGHT_ORDERS = 32
 
 # Expose low-degree Cartesian channel products to the joint Torch compiler.
 CARTESIAN_POLYNOMIAL_DEGREE = 2

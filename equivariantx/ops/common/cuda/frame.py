@@ -110,7 +110,7 @@ def source(dtype, layout, role, rowwise=False, accumulate=False):
                 terms
                 if rowwise
                 else f"""
-                for (int64_t j = bounds[0]; j < bounds[1]; ++j) {{
+                for (int64_t j = ptr[n]; j < ptr[n+1]; ++j) {{
                     const int64_t e = order[j];
                     {terms}
                 }}"""
@@ -123,27 +123,9 @@ def source(dtype, layout, role, rowwise=False, accumulate=False):
                 output[n * {ni} + col] {"+=" if accumulate else "="} value;
                 return;
             }}""")
-        bounds = (
-            "const int64_t e = n;"
-            if rowwise
-            else """
-        __shared__ int64_t bounds[2];
-        if (threadIdx.x < 2) {
-            int64_t lo = 0, hi = num_edges;
-            const int64_t node = n + threadIdx.x;
-            while (lo < hi) {
-                const int64_t mid = lo + (hi - lo) / 2;
-                if (index[order[mid]] < node) lo = mid + 1;
-                else hi = mid;
-            }
-            bounds[threadIdx.x] = lo;
-        }
-        __syncthreads();
-        """
-        )
         body = f"""
         const int64_t n = blockIdx.x;
-        {bounds}
+        {"const int64_t e = n;" if rowwise else ""}
         const int col = blockIdx.y * blockDim.x + threadIdx.x;
         if (col >= {ni}) return;
         {"".join(branches)}
@@ -182,7 +164,7 @@ def source(dtype, layout, role, rowwise=False, accumulate=False):
     using int64_t = long long;
     extern "C" __global__ void run(const scalar* nodes, const scalar* matrix,
         const scalar* edges, const int64_t* index, const int64_t* order,
-        scalar* output, int64_t num_edges) {{ {body} }}
+        const int64_t* ptr, scalar* output) {{ {body} }}
     """
 
 
@@ -220,11 +202,11 @@ def contract(
         return output
     if not index.numel():
         return output if accumulate else output.zero_()
-    order = index
+    order = ptr = index
     if role == NODE and not rowwise:
         from .reduction import prepare_graph
 
-        order = prepare_graph(index, index, 0)
+        order, ptr = prepare_graph(index, index, 0, num_nodes)
     code = source(nodes.dtype, layout, role, rowwise, accumulate)
     kernel = kernels([code], nodes.device)[code]
     width = (ni, nw, no)[role]
@@ -233,8 +215,10 @@ def contract(
         [
             (
                 kernel,
-                [x.data_ptr() for x in (nodes, matrix, edges, index, order, output)]
-                + [index.numel()],
+                [
+                    x.data_ptr()
+                    for x in (nodes, matrix, edges, index, order, ptr, output)
+                ],
                 num_nodes if role == NODE else index.numel(),
                 (width + columns - 1) // columns,
                 128,

@@ -1,6 +1,18 @@
 """Native channelwise direction contractions."""
 
+import torch
+
 from ....torch.conv.uu_o2 import convolution as torch_kernel
+
+
+def transform_projection(module, projection):
+    """Transform all channels of a shared radial projection in one batched GEMM."""
+    basis = module.projection_basis
+    if basis.dtype != projection.dtype or basis.device != projection.device:
+        return transform_weights(module, projection)
+    return torch.matmul(
+        basis, projection.reshape(-1, basis.shape[1], module.num_channel)
+    ).flatten(1)
 
 
 def transform_weights(module, weights):

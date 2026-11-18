@@ -9,7 +9,7 @@ from ...o2.layout import irrep_layout
 from ...o2.wigner import WignerD
 from ...ops import config, resolve_backend
 from ...ops.common.gate import gate_program
-from ...ops.common.linear import linear_program, path_scales
+from ...ops.common.linear import linear_program, path_scale_rows, path_scales
 from ...ops.common.torch.linear import linear_layout
 from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.uv_o2 import convolution as torch_kernel
@@ -156,6 +156,17 @@ class UvO2TensorProductConv(torch.nn.Module):
         self.path_scales = tuple(
             path_scales(description) for description in self.linears
         )
+        self.scale_rows = tuple(
+            path_scale_rows(blocks) if backend == "cuda" else ()
+            for blocks in self.path_scales
+        )
+        for layer, rows in enumerate(self.scale_rows):
+            if rows:
+                self.register_buffer(
+                    f"scale_rows_{layer}",
+                    torch.tensor(rows, dtype=torch.get_default_dtype()),
+                    persistent=False,
+                )
         self.transverse_linears = tuple(
             linear_description(layer, True) for layer in linears
         )
@@ -164,6 +175,15 @@ class UvO2TensorProductConv(torch.nn.Module):
             gate_program(gate, True, blocks=True) for gate in gates
         )
         self.weight_numel = self.irreps_in.num_irreps
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        for layer, rows in enumerate(self.scale_rows):
+            if rows:
+                factors = getattr(self, f"scale_rows_{layer}")
+                if factors.dtype == torch.float64:
+                    factors.copy_(factors.new_tensor(rows))
+        return self
 
     @cached_program
     def prepare_program(
@@ -264,16 +284,18 @@ class UvO2TensorProductConv(torch.nn.Module):
         widths = widths if blocks else (sum(widths),)
         wigner = program.input(len(widths), "edge", local_dim * global_dim)
         scale = program.input(len(widths) + 1, "edge", 1)
-        message = program.concatenate(
-            [
-                program.binary(
-                    "mul",
-                    program.input(i, "edge", width),
-                    program.gather(scale, (0,) * width),
-                )
-                for i, width in enumerate(widths)
+        values = [program.input(i, "edge", width) for i, width in enumerate(widths)]
+        if packed and 0 < program.size(wigner) < sum(widths):
+            # A scalar envelope commutes with inverse rotation.
+            wigner = program.binary(
+                "mul", wigner, program.gather(scale, (0,) * program.size(wigner))
+            )
+        else:
+            values = [
+                program.binary("mul", value, program.gather(scale, (0,) * width))
+                for value, width in zip(values, widths)
             ]
-        )
+        message = program.concatenate(values)
         if transverse:
             return repr((tuple(program.nodes), ((message, 0, "edge"),)))
         output = rotate(
@@ -321,22 +343,21 @@ class UvO2TensorProductConv(torch.nn.Module):
                 radial,
             ]
             linears = self.transverse_linears
-            local = program.compose(
-                self.prepare_program(local_dim, global_dim, packed, True),
+            values = program.compose(
+                self.prepare_program(local_dim, global_dim, packed, True, True),
                 local_inputs,
-            )[0]
+            )
         else:
             nodes, outputs = parse_metadata(
-                self.prepare_program(local_dim, global_dim, packed, False)
+                self.prepare_program(local_dim, global_dim, packed, False, True)
             )
-            program, local = Program(nodes), outputs[0][0]
+            program, values = Program(nodes), [root for root, _, _ in outputs]
             linears = self.linears
-        inverse = program.input(4, "edge", 0 if transverse else local_dim * global_dim)
+        # Packed forward and inverse rotations are transposes of one input.
+        inverse = program.input(
+            3 if packed else 4, "edge", 0 if transverse else local_dim * global_dim
+        )
         cutoff = program.input(5, "edge", 1)
-        values, offset = [], 0
-        for dim, mul in linears[0][0]:
-            values.append(program.slice(local, offset, dim * mul))
-            offset += dim * mul
         gates = self.transverse_gates if transverse else self.gates
         for layer, description in enumerate(linears):
             ins, outs, paths, biases, _ = description

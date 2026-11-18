@@ -164,7 +164,7 @@ def staged(
         local_inputs = [features, edge_features, conv_weights, wigner]
         linears = module.linears
     separate = not config.TORCH_REFERENCE and not transverse
-    input_blocks = separate and module.radial_mode == "full" and bool(linears[0][0])
+    input_blocks = separate and bool(linears[0][0])
     output_blocks = separate and bool(linears[-1][1])
     metadata = module.prepare_program(
         local_dim, global_dim, packed, transverse, input_blocks

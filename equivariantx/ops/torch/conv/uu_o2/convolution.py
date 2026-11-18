@@ -6,6 +6,42 @@ from .... import config
 from ...o2 import wigner as torch_wigner
 
 
+def transverse(
+    module,
+    features,
+    radial,
+    projection,
+    cutoff,
+    edge_index,
+    num_nodes,
+    vectors,
+    radial_network,
+):
+    """Share harmonic rows across all channelwise paths of the same degree."""
+    from ....common.convolution import convolve
+
+    direction = vectors / vectors.norm(dim=-1, keepdim=True)
+    angular = module.angular_basis(direction) * cutoff
+    return convolve(
+        module.angular_metadata,
+        features,
+        angular,
+        radial,
+        projection,
+        edge_index,
+        num_nodes,
+        module.output_dim,
+        network=radial_network,
+        recompute=module.radial_mode == "full",
+        angular_groups=tuple(
+            (getattr(module, name).to(features), *group)
+            for name, *group in module.angular_groups
+        )
+        if features.is_cuda and config.TORCH_CG_ANGULAR_MATRICES
+        else (),
+    )
+
+
 def transform_weights(module, weights):
     """Transform channelwise weights into transverse coupling paths."""
     values = weights.reshape(

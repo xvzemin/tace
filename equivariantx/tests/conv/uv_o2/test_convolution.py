@@ -204,9 +204,12 @@ def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precis
         return loss, force, *torch.autograd.grad(loss, parameters)
 
     graph = make_fx(joint)(*inputs)
-    assert torch.ops.eqx.path_scale.default in {
-        node.target for node in graph.graph.nodes
-    }
+    targets = {node.target for node in graph.graph.nodes}
+    needs_path_kernel = any(
+        len(blocks) > 1 and not rows
+        for blocks, rows in zip(module.conv.path_scales, module.conv.scale_rows)
+    )
+    assert (torch.ops.eqx.path_scale.default in targets) == needs_path_kernel
     assert (
         sum(
             node.target == torch.ops.eqx.edge_program.default

@@ -1,5 +1,7 @@
 """Indexed bilinear contractions and their transposes."""
 
+from math import gcd
+
 import torch
 
 from ...utils.outputs import linear_output
@@ -64,6 +66,16 @@ def path_scales(description):
                 size += blocks.pop()[0]
             blocks.append((size, scale))
     return tuple(blocks)
+
+
+def path_scale_rows(blocks):
+    """Describe uniform runs by one factor per shared weight row."""
+    if len(blocks) < 2:
+        return ()
+    width = gcd(*(n for n, _ in blocks))
+    if width < 16 or sum(n for n, _ in blocks) > 128 * width:
+        return ()
+    return tuple(s for n, s in blocks for _ in range(n // width))
 
 
 def linear_program(program, inputs, weight, bias, description, normalized=False):

@@ -30,7 +30,19 @@ def evaluate(
     )
     parameters = list(parameters)
     for i, blocks in enumerate(module.path_scales):
-        parameters[2 * i] = scale_parameters(parameters[2 * i], blocks)
+        weight = parameters[2 * i]
+        factors = getattr(module, f"scale_rows_{i}", None)
+        if (
+            factors is not None
+            and factors.device == weight.device
+            and factors.dtype == weight.dtype
+        ):
+            factors = factors.view(-1, 1)
+            parameters[2 * i] = (
+                weight.reshape(factors.shape[0], -1) * factors
+            ).reshape_as(weight)
+        else:
+            parameters[2 * i] = scale_parameters(weight, blocks)
     metadata, inputs = program_inputs(
         module,
         features,

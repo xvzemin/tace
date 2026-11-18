@@ -74,6 +74,7 @@ def rotate(
             else wigner_indices(ell, retained, lmax)
         )
         offset = ell * (4 * ell**2 - 1) // 3
+        square = packed and retained == ell
         if inverse:
             values = []
             for m, (index, begin) in enumerate(zip(indices, starts)):
@@ -87,31 +88,41 @@ def rotate(
                     values.append(
                         program.scale(value, -1 if swapped and real == 1 else 1)
                     )
+            if square:
+                values = [v for _, v in sorted(zip(rows, values))]
             value = program.concatenate(values)
             value = program.scale(
                 value, math.sqrt((2 * min(ell, wigner_mmax) + 1) / len(rows))
             )
-            matrix = program.gather(
-                wigner,
-                (offset + b * dim + a for a in range(dim) for b in rows)
-                if packed
-                else (
-                    a * local_dim + b
-                    for a in range(ell * ell, (ell + 1) ** 2)
-                    for b in rows
-                ),
+            matrix = (
+                program.transpose(program.slice(wigner, offset, dim * dim), dim, dim)
+                if square
+                else program.gather(
+                    wigner,
+                    (offset + b * dim + a for a in range(dim) for b in rows)
+                    if packed
+                    else (
+                        a * local_dim + b
+                        for a in range(ell * ell, (ell + 1) ** 2)
+                        for b in rows
+                    ),
+                )
             )
             outputs.append(program.matmul(matrix, value, dim, len(rows), mul))
         else:
-            matrix = program.gather(
-                wigner,
-                (offset + a * dim + b for a in rows for b in range(dim))
-                if packed
-                else (
-                    a * global_dim + b
-                    for a in rows
-                    for b in range(ell * ell, (ell + 1) ** 2)
-                ),
+            matrix = (
+                program.slice(wigner, offset, dim * dim)
+                if square
+                else program.gather(
+                    wigner,
+                    (offset + a * dim + b for a in rows for b in range(dim))
+                    if packed
+                    else (
+                        a * global_dim + b
+                        for a in rows
+                        for b in range(ell * ell, (ell + 1) ** 2)
+                    ),
+                )
             )
             value = program.matmul(
                 matrix, program.slice(features, start, dim * mul), len(rows), dim, mul
@@ -122,6 +133,8 @@ def rotate(
                     swapped = basis_change and odd and m > 0
                     position = (1 - real) if swapped else real
                     a = 0 if m == 0 else 2 * m - 1 + position
+                    if square:
+                        a = rows[a]
                     values.append(
                         program.scale(
                             program.slice(value, a * mul, mul),
@@ -170,7 +183,10 @@ def indexed_rotation(
             else wigner_indices(ell, retained, lmax)
         )
         packed_offset = ell * (4 * ell**2 - 1) // 3
-        if packed:
+        square = packed and retained == ell
+        if square:
+            indices = range(packed_offset, packed_offset + dim * dim)
+        elif packed:
             indices = (packed_offset + a * dim + b for a in rows for b in range(dim))
         elif inverse:
             indices = (
@@ -194,6 +210,8 @@ def indexed_rotation(
                 for real in range(1 if m == 0 else 2):
                     swapped = basis_change and odd and m > 0
                     row = 0 if m == 0 else 2 * m - 1 + (1 - real if swapped else real)
+                    if square:
+                        row = rows[row]
                     local_rows.append(
                         (
                             local_offsets[index] + real * irreps[index][1] + begin,

@@ -1,6 +1,7 @@
 """Spherical CG convolution in angular-first storage."""
 
 from collections import defaultdict
+from functools import lru_cache
 
 import torch
 from e3nn import o3
@@ -8,12 +9,26 @@ from e3nn import o3
 from .... import config
 
 
-def angular_groups(module):
+@lru_cache(maxsize=128)
+def directional_table(dx, dy, sizes):
+    """Return the fixed angular map before channel mixing."""
+    return torch.cat(
+        [
+            o3.wigner_3j(
+                dx // 2, dy // 2, dz // 2, dtype=torch.float64, device="cpu"
+            ).permute(1, 2, 0)
+            for dz in sizes
+        ],
+        dim=1,
+    ).reshape(dy, -1)
+
+
+def angular_groups(module, paths=None):
     """Pack single-copy angular maps sharing both inputs into one matrix."""
+    directional = paths is not None
+    paths = module.paths if paths is None else paths
     groups = defaultdict(list)
-    for i, (start, attr, _, channels, copies, dx, dy, dz, *_) in enumerate(
-        module.paths
-    ):
+    for i, (start, attr, _, channels, copies, dx, dy, dz, *_) in enumerate(paths):
         if copies == 1 and channels >= 16:
             groups[start, attr, channels, dx, dy].append((i, dz))
     result = []
@@ -26,18 +41,24 @@ def angular_groups(module):
         ):
             continue
         tables, rows, sections = [], 0, {}
-        paths = []
+        indices = []
         for i, dz in entries:
             if dz not in sections:
                 sections[dz] = rows
                 rows += dz
-                tables.append(getattr(module, f"cg_{i}").permute(1, 2, 0))
-            paths.append((i, sections[dz], dz))
+                if not directional:
+                    tables.append(getattr(module, f"cg_{i}").permute(1, 2, 0))
+            indices.append((i, sections[dz], dz))
         name = f"angular_cg_{len(result)}"
-        module.register_buffer(
-            name, torch.cat(tables, dim=1).reshape(dy, rows * dx), persistent=False
+        table = (
+            directional_table(dx, dy, tuple(sections)).to(
+                dtype=torch.get_default_dtype(), copy=True
+            )
+            if directional
+            else torch.cat(tables, dim=1).reshape(dy, rows * dx)
         )
-        result.append((name, *key, rows, tuple(paths)))
+        module.register_buffer(name, table, persistent=False)
+        result.append((name, *key, rows, tuple(indices)))
     return tuple(result)
 
 

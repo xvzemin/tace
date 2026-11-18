@@ -149,6 +149,59 @@ def test_uu_o2_chunked_reduction(monkeypatch, double_precision, channels, shared
         ]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize(
+    "backend,mode", [("torch", "last"), ("torch", "full"), ("cuda", "last")]
+)
+@pytest.mark.parametrize("shared_direction", [False, True])
+def test_shared_angular_orders(backend, mode, shared_direction, double_precision):
+    # Duplicate degrees need independent weights; include both reflection sectors.
+    irreps = (
+        "16x0ee+16x1oe+16x1ee+16x1oe+16x2eo"
+        if hasattr(o3.Irrep("0e"), "t")
+        else "16x0e+16x1o+16x1e+16x1o+16x2e"
+    )
+    frame = o2.LocalFrame(irreps, mmax=1)
+    linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 16, backend="torch")
+    layer = eqx_conv.UuO2TensorProductConv(
+        frame, linear, frame, backend=backend, radial_mode=mode
+    )
+    layer.float().cuda().double()
+    frame, linear = frame.cuda(), linear.cuda()
+    rotation = o2.WignerD(2, 2, backend="torch").cuda()
+    index = torch.tensor([[0, 1, 0, 2, 1], [1, 1, 2, 0, 0]], device="cuda")
+    count = index.shape[1]
+
+    def rand(*shape):
+        return torch.randn(*shape, device="cuda", requires_grad=True)
+
+    x, r, w = rand(4, frame.input_dim), rand(count, 7), rand(7, linear.weight_numel)
+    n = rand(1 if shared_direction else count, 3)
+    cut = rand(count if shared_direction else 1, 1)
+    actual = layer(x, r, w, None, cut, index, 4, vectors=n)
+    d, inverse = rotation(n.expand(count, 3))
+    local = linear(frame.to_local(x[index[0]], d), r @ w)
+    expected = torch.zeros_like(x).index_add(
+        0, index[1], frame.to_global(local, inverse) * cut
+    )
+    operands = (x, r, w, n, cut)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=1e-9)
+        probe = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = (
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        value, operands, probe, create_graph=True
+                    )
+                ]
+            )
+            for value in (actual, expected)
+        )
+    torch.testing.assert_close(actual, expected, atol=2e-9, rtol=1e-9)
+
+
 def test_uu_o2_time_parity_and_duplicate_entries(double_precision):
     if not hasattr(o3.Irrep("0e"), "t"):
         pytest.skip("Time-reversal representations are unavailable")

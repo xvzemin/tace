@@ -180,12 +180,15 @@ class Program:
         op, _, args, offset = self.nodes[x]
         if op == "slice":
             return self.slice(args[0], offset + start, size)
-        if op == "concat" and size:
-            begin = 0
+        if op == "concat" and size > 0 and 0 <= start <= self.size(x) - size:
+            begin, pieces = 0, []
             for arg in args:
                 end = begin + self.size(arg)
-                if begin <= start and start + size <= end:
-                    return self.slice(arg, start - begin, size)
+                left, right = max(start, begin), min(start + size, end)
+                if left < right:
+                    pieces.append(self.slice(arg, left - begin, right - left))
+                if end >= start + size:
+                    return self.concatenate(pieces)
                 begin = end
         return self.add("slice", size, (x,), start)
 
@@ -250,11 +253,16 @@ class Program:
         nodes, outputs = parse_metadata(metadata)
         translated = []
         for op, size, args, data in nodes:
-            translated.append(
-                inputs[data[0]]
-                if op == "input"
-                else self.add(op, size, tuple(translated[j] for j in args), data)
-            )
+            args = tuple(translated[j] for j in args)
+            if op == "input":
+                value = inputs[data[0]]
+            elif op == "slice":
+                value = self.slice(args[0], data, size)
+            elif op == "concat":
+                value = self.concatenate(args)
+            else:
+                value = self.add(op, size, args, data)
+            translated.append(value)
         return tuple(translated[root] for root, _, _ in outputs)
 
     def adjoint(self, outputs, seeds, active):
