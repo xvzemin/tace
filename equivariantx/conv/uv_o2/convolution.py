@@ -1,6 +1,7 @@
 """Fused local frame, radial, gate and aggregation operations for UV convolutions."""
 
-from functools import lru_cache
+from functools import wraps
+from weakref import WeakKeyDictionary
 
 import torch
 
@@ -8,7 +9,7 @@ from ...o2.layout import irrep_layout
 from ...o2.wigner import WignerD
 from ...ops import config, resolve_backend
 from ...ops.common.gate import gate_program
-from ...ops.common.linear import linear_program
+from ...ops.common.linear import linear_program, path_scales
 from ...ops.common.torch.linear import linear_layout
 from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.uv_o2 import convolution as torch_kernel
@@ -17,6 +18,27 @@ from ...utils.frame_program import frame_description, rotate
 from ...utils.metadata import parse_metadata
 from ...utils.program import Program
 from .transverse import TransverseFrame
+
+
+def cached_program(method):
+    """Cache static descriptions without owning the module or its tensors."""
+    owners = WeakKeyDictionary()
+
+    @torch.compiler.assume_constant_result
+    @wraps(method)
+    def lookup(module, *args, **kwargs):
+        entries = owners.get(module)
+        if entries is None:
+            entries = {}
+            owners[module] = entries
+        key = module.backend, args, tuple(kwargs.items())
+        if key not in entries:
+            if len(entries) >= 64:
+                entries.clear()
+            entries[key] = method(module, *args, **kwargs)
+        return entries[key]
+
+    return lookup
 
 
 def linear_description(linear, transverse=False):
@@ -131,6 +153,9 @@ class UvO2TensorProductConv(torch.nn.Module):
         self.edge_irreps = frame_edge.irreps_out if frame_edge is not None else ()
         self.irreps_out = frame_out.irreps_out
         self.linears = tuple(linear_description(layer) for layer in linears)
+        self.path_scales = tuple(
+            path_scales(description) for description in self.linears
+        )
         self.transverse_linears = tuple(
             linear_description(layer, True) for layer in linears
         )
@@ -140,9 +165,10 @@ class UvO2TensorProductConv(torch.nn.Module):
         )
         self.weight_numel = self.irreps_in.num_irreps
 
-    @lru_cache(maxsize=64)
-    @torch.compiler.assume_constant_result
-    def prepare_program(self, local_dim, global_dim, packed=False, transverse=False):
+    @cached_program
+    def prepare_program(
+        self, local_dim, global_dim, packed=False, transverse=False, blocks=False
+    ):
         program = Program()
         if transverse:
             width = sum(
@@ -219,20 +245,35 @@ class UvO2TensorProductConv(torch.nn.Module):
             scale = program.gather(weight, tuple(range(offset, offset + mul)) * dim)
             outputs.append(program.binary("mul", value, scale))
             offset += mul
-        result = program.concatenate(outputs)
-        return repr((tuple(program.nodes), ((result, 0, "edge"),)))
+        roots = outputs if blocks else (program.concatenate(outputs),)
+        return repr(
+            (
+                tuple(program.nodes),
+                tuple((root, i, "edge") for i, root in enumerate(roots)),
+            )
+        )
 
-    @lru_cache(maxsize=64)
-    @torch.compiler.assume_constant_result
-    def output_program(self, local_dim, global_dim, packed=False, transverse=False):
+    @cached_program
+    def output_program(
+        self, local_dim, global_dim, packed=False, transverse=False, blocks=False
+    ):
         program = Program()
-        width = sum(
+        widths = tuple(
             dim * mul for dim, mul, _ in irrep_layout(self.irreps_out, transverse)
         )
-        message = program.input(0, "edge", width)
-        wigner = program.input(1, "edge", local_dim * global_dim)
-        scale = program.input(2, "edge", 1)
-        message = program.binary("mul", message, program.gather(scale, (0,) * width))
+        widths = widths if blocks else (sum(widths),)
+        wigner = program.input(len(widths), "edge", local_dim * global_dim)
+        scale = program.input(len(widths) + 1, "edge", 1)
+        message = program.concatenate(
+            [
+                program.binary(
+                    "mul",
+                    program.input(i, "edge", width),
+                    program.gather(scale, (0,) * width),
+                )
+                for i, width in enumerate(widths)
+            ]
+        )
         if transverse:
             return repr((tuple(program.nodes), ((message, 0, "edge"),)))
         output = rotate(
@@ -246,12 +287,21 @@ class UvO2TensorProductConv(torch.nn.Module):
             packed=packed,
             native=self.backend == "cuda",
         )
-        return repr((tuple(program.nodes), ((output, 0, "target"),)))
+        roots = (
+            program.nodes[output][2]
+            if blocks and program.nodes[output][0] == "concat"
+            else (output,)
+        )
+        return repr(
+            (
+                tuple(program.nodes),
+                tuple((root, i, "target") for i, root in enumerate(roots)),
+            )
+        )
 
-    @lru_cache(maxsize=64)
-    @torch.compiler.assume_constant_result
+    @cached_program
     def convolution_program(
-        self, local_dim, global_dim, packed, transverse, native=True
+        self, local_dim, global_dim, packed, transverse, native=True, normalized=False
     ):
         """Encode radial weighting, the local MLP and node aggregation."""
         if transverse:
@@ -296,7 +346,9 @@ class UvO2TensorProductConv(torch.nn.Module):
                 sum(ins[i][1] * outs[j][1] for i, j, _, _ in paths),
             )
             bias = program.input(7 + layer * 2, "shared", sum(n for _, _, n in biases))
-            values = linear_program(program, values, weight, bias, description)
+            values = linear_program(
+                program, values, weight, bias, description, normalized
+            )
             if layer < len(gates):
                 values = program.compose(
                     gates[layer],

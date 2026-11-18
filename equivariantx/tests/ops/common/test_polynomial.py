@@ -31,8 +31,9 @@ def test_inline_work_counts_vectorized_batches():
 
 
 def test_inline_budget(monkeypatch):
+    from equivariantx.mbe.ace.symmetric_contraction import make_metadata
     from equivariantx.ops import config
-    from equivariantx.ops.common.compilation import should_inline
+    from equivariantx.ops.common.compilation import should_inline, wide_ace
 
     def unexpected(*args):
         pytest.fail("Eager or disabled programs must not estimate graph work")
@@ -43,6 +44,13 @@ def test_inline_budget(monkeypatch):
     monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", 4)
     assert should_inline(True, int, 4)
     assert not should_inline(True, int, 5)
+    metadata = make_metadata(
+        [((0, 0, 0, 0, 64, 64, 1, 1, 1), 1.0)], (64, 64, 4096, 64), True
+    )
+    assert not wide_ace(metadata, 8)
+    assert wide_ace(metadata, 512)
+    monkeypatch.setattr(config, "ACE_INLINE_MAX_ELEMENTS", 0)
+    assert not wide_ace(metadata, 512)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AOTInductor")

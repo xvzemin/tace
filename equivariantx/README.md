@@ -20,13 +20,19 @@ The default `backend=None` uses `equivariantx.ops.config.DEFAULT_BACKEND`,
 set once at import to CUDA when available and optimized PyTorch otherwise.
 Select `backend="torch"` to use PyTorch explicitly, including on GPUs.
 
+For numerical comparisons, set `equivariantx.ops.config.TORCH_REFERENCE = True`
+with `backend="torch"` before building the module. To load an AOTInductor package
+that retains EQX CUDA operators, import `equivariantx` before loading the `.pt2`.
+
 Operators support FP32 and FP64 storage and follow PyTorch's TF32 matrix
 multiplication setting. FP16 and BF16 are not supported.
 
 Eligible CUDA row-product programs automatically replay CUDA Graphs, including
 their registered derivatives. Shape buckets and shared temporary storage limit
-capture overhead for changing batch sizes. Set `EQX_USE_CUDA_GRAPH=0` to compare
-against ordinary CUDA execution; CPU execution is unchanged.
+capture overhead for changing batch sizes. `EQX_USE_CUDA_GRAPH=1` also replays
+convolutions at repeated sizes, or nearby graph sizes for eligible local O(2)
+programs, trading reserved memory for speed. Set it
+to `0` to disable replay. CPU execution is unchanged.
 
 Import the package as:
 

@@ -7,13 +7,11 @@ from equivariantx import co3
 from equivariantx.ops import config
 
 
-def training_problem(device="cpu", backend="torch"):
+def training_problem(device="cpu", backend="torch", degrees=(2, 2, 2)):
     torch.manual_seed(97)
     layer = (
         co3.ictp.TensorProduct(
-            "2x2e",
-            "2x2e",
-            "2x2e",
+            *(f"2x{l}e" for l in degrees),
             [(0, 0, 0, "uuu", True)],
             backend=backend,
             internal_weights=False,
@@ -21,8 +19,12 @@ def training_problem(device="cpu", backend="torch"):
         .double()
         .to(device)
     )
-    x = (torch.randn(3, 18, device=device, dtype=torch.float64) * 0.1).requires_grad_()
-    y = (torch.randn(3, 18, device=device, dtype=torch.float64) * 0.1).requires_grad_()
+    x, y = [
+        (
+            torch.randn(3, 2 * 3**l, device=device, dtype=torch.float64) * 0.1
+        ).requires_grad_()
+        for l in degrees[:2]
+    ]
     w = (torch.randn(2, device=device, dtype=torch.float64) * 0.1).requires_grad_()
 
     def operation(x, y, w):

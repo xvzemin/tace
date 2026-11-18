@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.ops.common.cuda.channel_linear import evaluate
+from equivariantx.ops.common.cuda.channel_linear import evaluate, scale_parameters
 from equivariantx.ops.common.torch.channel_linear import primal
 from equivariantx.tests.ops.common.torch.test_channel_linear import linear_case
 from equivariantx.tests.utils.testing import package_script
@@ -16,6 +16,26 @@ from equivariantx.tests.utils.testing import package_script
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Native channel maps require CUDA"
 )
+
+
+def test_path_normalization_derivatives():
+    blocks = ((4, 1.0), (9, 0.375), (15, 3**-0.5))
+    x = torch.randn(4, 7, device="cuda", dtype=torch.float64).T.requires_grad_()
+    scale = x.new_tensor([s for n, s in blocks for _ in range(n)]).reshape_as(x)
+
+    def actual(x):
+        return scale_parameters(x, blocks)
+
+    for fn in (lambda x: x * scale, actual):
+        v, jvp = torch.func.jvp(fn, (x,), (torch.ones_like(x),))
+        torch.testing.assert_close(v, x * scale)
+        torch.testing.assert_close(jvp, scale)
+    y, ref = actual(x).sin(), (x * scale).sin()
+    for _ in range(5):
+        y, ref = (
+            torch.autograd.grad(v.sum(), x, create_graph=True)[0] for v in (y, ref)
+        )
+        torch.testing.assert_close(y, ref)
 
 
 @pytest.mark.parametrize("space", ["o2", "co2", "co3"])

@@ -1,6 +1,6 @@
 """Specialized sparse ACE kernels and transposed contractions."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from functools import lru_cache
 
 import torch
@@ -27,8 +27,22 @@ def schedule_batches(groups, max_entries=1024):
     return tuple(batches)
 
 
+def single_writer(blocks, size, *, complete=True):
+    """Check that writes are disjoint, optionally covering the whole destination."""
+    if not size or size > 1 << 18:
+        return False
+    written = bytearray(size)
+    for start, channels, stride, span in blocks:
+        for channel in range(channels):
+            lo = start + channel * stride
+            if lo < 0 or lo + span > size or any(written[lo : lo + span]):
+                return False
+            written[lo : lo + span] = b"\1" * span
+    return not complete or all(written)
+
+
 @lru_cache(maxsize=128)
-def weighted_source(dtype, dims, schedules, roles):
+def weighted_source(dtype, dims, schedules, roles, unique):
     """Share angular products and coefficient adjoints across channels."""
     paths = defaultdict(list)
     for _, entries in schedules[3]:
@@ -40,6 +54,31 @@ def weighted_source(dtype, dims, schedules, roles):
     itemsize = 8 if dtype == torch.float64 else 4
     cases, storage = [], 1
     rows = 4 if roles in ((3,), (2,)) else 1
+    direct = []
+    for role in unique:
+        if role == 2:
+            continue
+        blocks = []
+        for (_, ci, co, dx, dy, dz), entries in paths.items():
+            offsets = [r[role] for r, _ in entries]
+            blocks.append(
+                (
+                    min(offsets),
+                    co if role == 3 else ci,
+                    {0: dx, 1: dy, 3: dz}[role],
+                    max(offsets) - min(offsets) + 1,
+                )
+            )
+        if single_writer(blocks, dims[role]):
+            direct.append(role)
+
+    def store(role, index, value):
+        return (
+            f"o{role}[{index}]={value};"
+            if role in direct
+            else f"atomicAdd(o{role}+{index},{value});"
+        )
+
     for index, ((sw, ci, co, dx, dy, dz), entries) in enumerate(paths.items()):
         sx = min(r[0] for r, _ in entries)
         sy = min(r[1] for r, _ in entries)
@@ -76,7 +115,7 @@ def weighted_source(dtype, dims, schedules, roles):
                 f"p2[types[n0+row]*{dims[2]}+{sw}+u*{co}+v];",
                 "}",
                 f"#pragma unroll\nfor(int row=0;row<{rows};++row) if(n0+row<nodes) "
-                f"atomicAdd(o3+(n0+row)*{dims[3]}+{so}+v*{dz}+m,sum[row]);",
+                + store(3, f"(n0+row)*{dims[3]}+{so}+v*{dz}+m", "sum[row]"),
                 "}",
             ]
         elif roles == (2,):
@@ -122,7 +161,12 @@ def weighted_source(dtype, dims, schedules, roles):
             for role, size, offset, stride in ((0, nx, sx, dx), (1, ny, sy, dy)):
                 if role in roles:
                     parts.append(
-                        f"for(int m=0;m<{size};++m) atomicAdd(o{role}+n0*{dims[role]}+{offset}+u*{stride}+m,g{role}[m]);"
+                        f"for(int m=0;m<{size};++m) "
+                        + store(
+                            role,
+                            f"n0*{dims[role]}+{offset}+u*{stride}+m",
+                            f"g{role}[m]",
+                        )
                     )
             parts.append("}")
         cases.append("\n".join([*parts, "return; }"]))
@@ -140,11 +184,12 @@ def weighted_source(dtype, dims, schedules, roles):
     }}""",
         len(paths),
         rows,
+        tuple(direct),
     )
 
 
 @lru_cache(maxsize=128)
-def source(dtype, dims, weighted, role, groups):
+def source(dtype, dims, weighted, role, groups, write):
     scalar = "double" if dtype == torch.float64 else "float"
     cases = []
     for group, ((offset, channels, stride), entries) in enumerate(groups):
@@ -206,7 +251,9 @@ def source(dtype, dims, weighted, role, groups):
         parts.append(
             f"atomicAdd(out+z*{dims[role]}+{offset}+c,total);"
             if weighted and role == 2
-            else f"out[n*{dims[role]}+{offset}+c*{stride}] += total;"
+            else f"atomicAdd(out+n*{dims[role]}+{offset}+c*{stride},total);"
+            if write == "atomic"
+            else f"out[n*{dims[role]}+{offset}+c*{stride}] {'=' if write == 'assign' else '+='} total;"
         )
         parts += ["return;", "}"]
         cases.append("\n".join(parts))
@@ -221,26 +268,30 @@ def source(dtype, dims, weighted, role, groups):
     """
 
 
-def launch(metadata, program, node_type, operands, outputs):
-    dims, weighted, schedules = metadata
-    if operands[0].dtype not in (torch.float32, torch.float64):
-        raise TypeError("ACE CUDA kernels support float32 and float64.")
-    operands = [value.contiguous() for value in operands]
-    node_type = node_type.contiguous()
-    for output in outputs:
-        output.zero_()
-    if not node_type.numel():
-        return
-    device = operands[0].device
+@lru_cache(maxsize=256)
+def launch_plan(metadata, program, dtype):
+    """Schedule immutable path and adjoint instructions independently of node count."""
+    dims, weighted, schedules = parse_metadata(metadata)
     grouped = defaultdict(list)
-    for mapping, role, slot in program:
+    read = {0}
+    terms = parse_metadata(program)
+    writers = Counter(slot for _, _, slot in terms)
+    initialized = set()
+    for mapping, role, slot in terms:
         grouped[mapping, 0 if role in (0, 1) else role].append((role, slot))
+        read.update(1 + index for i, index in enumerate(mapping) if i != role)
     jobs = []
     for (mapping, _), terms in grouped.items():
         roles = tuple(sorted(role for role, _ in terms))
         # Mixed higher derivatives can contribute more than once to a role.
         tiled = (
-            weighted_source(operands[0].dtype, dims, schedules, roles)
+            weighted_source(
+                dtype,
+                dims,
+                schedules,
+                roles,
+                tuple(r for r, slot in terms if writers[slot] == 1),
+            )
             if weighted
             and sum(len(entries) for _, entries in schedules[3]) <= 2048
             and len(set(roles)) == len(roles)
@@ -248,29 +299,77 @@ def launch(metadata, program, node_type, operands, outputs):
             else None
         )
         if tiled is not None:
-            code, count, rows = tiled
+            code, count, rows, direct = tiled
             destinations = dict(terms)
-            args = [operands[i].data_ptr() for i in mapping]
-            args += [node_type.data_ptr()]
-            args += [outputs[destinations[role]].data_ptr() for role in roles]
-            args += [node_type.numel()]
-            jobs.append((code, args, (node_type.numel() + rows - 1) // rows, count))
+            initialized.update(destinations[r] for r in direct)
+            jobs.append(
+                (code, mapping, tuple(destinations[r] for r in roles), 1, rows, count)
+            )
             continue
         for role, slot in terms:
             groups = schedules[role]
             if not groups:
                 continue
-            args = [operands[i].data_ptr() for i in mapping]
-            args += [0] * (4 - len(args))
-            args += [node_type.data_ptr(), outputs[slot].data_ptr(), node_type.numel()]
-            for batch in schedule_batches(groups):
-                code = source(operands[0].dtype, dims, weighted, role, batch)
+            batches = schedule_batches(groups)
+            direct = (
+                writers[slot] == 1
+                and not (weighted and role == 2)
+                and single_writer(
+                    ((*key, 1) for batch in batches for key, _ in batch), dims[role]
+                )
+            )
+            if direct:
+                initialized.add(slot)
+            for batch in batches:
+                # Reblocked input multiplicities can partially overlap even
+                # when the schedule keys are different. Separate launches are ordered.
+                write = "atomic"
+                if direct:
+                    write = "assign"
+                elif not (weighted and role == 2) and single_writer(
+                    ((*key, 1) for key, _ in batch), dims[role], complete=False
+                ):
+                    write = "add"
+                code = source(dtype, dims, weighted, role, batch, write)
                 width = max(key[1] for key, _ in batch)
                 jobs.append(
-                    (code, args, (node_type.numel() * width + 127) // 128, len(batch))
+                    (
+                        code,
+                        mapping + (-1,) * (4 - len(mapping)),
+                        (slot,),
+                        width,
+                        128,
+                        len(batch),
+                    )
                 )
+    return tuple(jobs), frozenset(read), frozenset(initialized)
+
+
+def launch(jobs, read, initialized, node_type, operands, outputs):
+    """Bind tensors to the cached schedule on the current CUDA stream."""
+    nodes = node_type.numel()
+    for slot, output in enumerate(outputs):
+        if not nodes or slot not in initialized:
+            output.zero_()
+    if not nodes:
+        return
+    device = node_type.device
+    operands = [
+        value.contiguous() if i + 1 in read else value
+        for i, value in enumerate(operands)
+    ]
+    node_type = node_type.contiguous()
+    pointers = [value.data_ptr() for value in operands] + [0]
+    destinations = [value.data_ptr() for value in outputs]
     compiled = kernels([job[0] for job in jobs], device)
-    launches = [(compiled[code], args, nx, ny, 128, 0) for code, args, nx, ny in jobs]
+    launches = []
+    for code, mapping, slots, width, rows, ny in jobs:
+        args = [pointers[i] for i in mapping] + [node_type.data_ptr()]
+        args.extend(destinations[slot] for slot in slots)
+        args.append(nodes)
+        launches.append(
+            (compiled[code], args, (nodes * width + rows - 1) // rows, ny, 128, 0)
+        )
     runtime().launch(launches, torch.cuda.current_stream(device).cuda_stream)
 
 
@@ -281,17 +380,15 @@ def contract(
     operands: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Evaluate a multilinear contraction without expanded CG products."""
-    from .ace import launch
     from .graph import execute
 
+    if operands[0].dtype not in (torch.float32, torch.float64):
+        raise TypeError("ACE CUDA kernels support float32 and float64.")
     outputs = ace_outputs(metadata, program, node_type, operands)
-    terms = parse_metadata(program)
+    jobs, read, initialized = launch_plan(metadata, program, operands[0].dtype)
 
     def run(inputs, outputs):
-        launch(parse_metadata(metadata), terms, inputs[0], inputs[1:], outputs)
+        launch(jobs, read, initialized, inputs[0], inputs[1:], outputs)
 
-    read = {0}
-    for mapping, output, _ in terms:
-        read.update(1 + index for role, index in enumerate(mapping) if role != output)
     execute("ace", (metadata, program), run, (node_type, *operands), outputs, read=read)
     return outputs

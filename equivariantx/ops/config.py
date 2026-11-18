@@ -34,6 +34,9 @@ GATE_INLINE = True
 # Recompute expression intermediates when activation memory is the priority.
 TORCH_RECOMPUTE = False
 
+# Limit eager scratch per wide edge operand, independently of graph size.
+TORCH_EDGE_TILE_BYTES = 128 << 20
+
 # Save normalized values for eager attention; compiled graphs retain ordinary AD.
 TORCH_ATTENTION_ADJOINT = True
 TORCH_ATTENTION_MIN_CPU_ELEMENTS = 1 << 21
@@ -67,6 +70,8 @@ SHARED_COEFFICIENTS_MAX_BYTES = 192 << 20
 
 # Keep wide CG channel contractions in e3nn's measured GEMM schedule.
 TORCH_GROUPED_CG = True
+TORCH_CG_ANGULAR_MATRICES = True
+TORCH_CG_ANGULAR_WIDTH_RATIO = 24
 TORCH_CHANNEL_SLICES = True
 CHANNEL_SLICES_MIN_WIDTH = 64
 
@@ -82,6 +87,12 @@ TRANSVERSE_POLYNOMIAL_DEGREE = 2
 
 # Expose low-degree Cartesian channel products to the joint Torch compiler.
 CARTESIAN_POLYNOMIAL_DEGREE = 2
+# Bound literal delta/epsilon programs independently of the number of channels.
+CARTESIAN_LITERAL_TERMS = 1024
+# Expose short contracted axes and scalar dot products to compiler fusion.
+CARTESIAN_REDUCTION_INLINE = True
+# Bound the eager Torch temporary for full scalar contractions.
+TORCH_CARTESIAN_DOT_BYTES = 16 << 20
 
 # Expose measured small-order rotary primals to joint compilation.
 ROTARY_INLINE = True
@@ -98,8 +109,9 @@ RADIAL_AFFINE_MIN_WIDTH = 1024
 TORCH_TENSOR_AXIS = True
 TORCH_TENSOR_AXIS_ADJOINT = False
 
-# Share Cartesian frame maps across wide channels during CPU compilation.
+# Share Cartesian frame maps across wide channels.
 TORCH_CARTESIAN_FRAME_MATRIX = True
+CUDA_CARTESIAN_FRAME_MATRIX = True
 CARTESIAN_FRAME_MATRIX_MIN_CHANNELS = 64
 TORCH_PLANAR_DETRACING = True
 TENSOR_AXIS_INLINE = True
@@ -126,7 +138,20 @@ SYMMETRIC_PREFIX_MIN_WORK = 1 << 19
 SYMMETRIC_PREFIX_MAX_TERMS = 256
 SYMMETRIC_PREFIX_MAX_NODES = 1024
 
-# Preserve native ACE calls in compiled graphs.
+# Group wide CUDA-device Torch ACE polynomials. Keep their native CUDA counterpart during capture.
+TORCH_SYMMETRIC_MONOMIAL_GEMM = True
+TORCH_ACE_CHANNEL_POLYNOMIAL = True
+ACE_POLYNOMIAL_WORKSPACE = 12 << 20
+ACE_ELEMENT_BLOCK = 16
+# Pack independent coefficient tables together during Torch graph capture.
+TORCH_ACE_PACK_TABLES = True
+# Limit node-by-channel-table expansion during native joint graph capture.
+ACE_INLINE_MAX_ELEMENTS = 1 << 18
+SYMMETRIC_WIDE_CHANNELS = 16
+SYMMETRIC_WIDE_TERMS = 32
+SYMMETRIC_SORT_MIN_NODES = 256
+
+# Also preserve small ACE calls during joint tracing.
 SYMMETRIC_NATIVE = False
 
 # Optional shared representation matrices for measured CUDA channel widths.

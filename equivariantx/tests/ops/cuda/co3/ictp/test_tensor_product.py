@@ -10,31 +10,98 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import config
 from equivariantx.tests.ops.torch.co3.ictp.test_tensor_product import training_problem
-from equivariantx.tests.utils.testing import package_script
+from equivariantx.tests.utils.testing import check_forward_ad, package_script
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is unavailable"
 )
 
 
-def test_joint_aoti(monkeypatch, tmp_path):
+@pytest.mark.parametrize("degrees", [(4, 3, 6), (4, 4, 6), (7, 7, 0)])
+def test_indexed_cartesian_product(degrees):
+    from equivariantx.ops import get_kernel
+
+    def operation(backend, x, y):
+        return get_kernel("cartesian_product", backend)(x, y, *degrees)
+
+    x, y = [
+        (torch.randn(*shape, 2 * 3**l, device="cuda", dtype=torch.float64) * 0.1)[
+            ..., ::2
+        ].requires_grad_()
+        for l, shape in zip(degrees[:2], ((2, 1), (1, 3)))
+    ]
+    actual, expected = [operation(backend, x, y) for backend in ("cuda", "torch")]
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    for _ in range(4):
+        seed = torch.randn_like(expected)
+        derivative = [
+            torch.autograd.grad(value.sin(), (x, y), seed, create_graph=True)
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(*derivative, atol=2e-10, rtol=2e-10)
+        actual, expected = [
+            torch.cat([v.flatten() for v in pair]) for pair in derivative
+        ]
+    check_forward_ad(
+        lambda a, b: operation("cuda", a, b),
+        lambda a, b: operation("torch", a, b),
+        (x, y),
+    )
+    empty = operation("cuda", x[:0], y)
+    assert empty.shape == (0, 3, 3 ** degrees[2])
+
+
+@pytest.mark.parametrize(
+    "degrees,inline",
+    [((2, 2, 2), False), ((4, 3, 6), False), ((4, 3, 6), True)],
+)
+def test_joint_aoti(degrees, inline, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
     monkeypatch.setattr(config, "ICTP_INLINE", False)
+    monkeypatch.setattr(config, "CARTESIAN_REDUCTION_INLINE", inline)
     monkeypatch.setattr(config, "SPHERICAL_INLINE", False)
-    operation, values = training_problem("cuda", "cuda")
-    graph = make_fx(operation)(*values)
+    operation, values = training_problem("cuda", "cuda", degrees)
+    reference, _ = training_problem("cuda", "torch", degrees)
+    shapes = None
+    if degrees == (4, 3, 6):
+        from torch.fx.experimental.dynamic_spec import (
+            ParamsSpec,
+            ShapesSpec,
+            ShapeVar,
+            TensorSpec,
+        )
+
+        rows = ShapeVar("rows", min=2, optimization_hint=3)
+        specs = {"x": TensorSpec((rows, None)), "y": TensorSpec((rows, None))}
+        graph = make_fx(
+            operation,
+            tracing_mode="fake",
+            _allow_non_fake_inputs=True,
+            dynamic_shapes=ShapesSpec(ParamsSpec(specs)),
+        )(*values)
+        rows = torch.export.Dim("rows", min=2, max=32)
+        shapes = ({0: rows}, {0: rows}, None)
+    else:
+        graph = make_fx(operation)(*values)
     graph.graph.eliminate_dead_code()
     graph.recompile()
+    if degrees == (4, 3, 6):
+        assert ("eqx.cartesian_contract" in graph.code) != inline
     exported = torch.export.export(
-        graph, tuple(v.detach() for v in values), strict=True
+        graph, tuple(v.detach() for v in values), strict=True, dynamic_shapes=shapes
     )
     package = tmp_path / "module.pt2"
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
     records = []
     x, y, w = values
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
-    for _ in range(3):
-        expected = operation(x, y, w)
+    for rows in (3, 7, 9) if shapes else (3, 3, 3):
+        if shapes:
+            x, y = [
+                (v.new_empty(rows, v.shape[-1]).normal_() * 0.1).requires_grad_()
+                for v in (x, y)
+            ]
+        expected = reference(x, y, w)
         records.append(
             {
                 "inputs": tuple(v.detach().cpu() for v in (x, y, w)),

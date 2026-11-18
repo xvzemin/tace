@@ -6,23 +6,28 @@ from functools import lru_cache
 import torch
 
 from ....utils.metadata import parse_metadata
-from ....utils.program import Program
+from ....utils.program import Program, scalar_product
+from ..pointwise import activation_vjp
 from .edge_codegen import source as expression_source
+from .graph import CAPTURE_CONSTANTS
 from .runtime import kernels, runtime
 
 TILE_BYTES = 64 << 20
 FRAME_TILE_BYTES = 256 << 20
 PRODUCT_TILE_BYTES = 512 << 20
+CONVOLUTION_TILE_BYTES = 384 << 20
+CONVOLUTION_TILE_MIN_EDGES = 16384
 TILE_SIZE = 131072
 
 
-def node_projection(nodes, i):
+def node_projection(nodes, i, dependent):
     op, _, args, data = nodes[i]
     return (
         op == "matmul"
         and data[0] == 1
         and nodes[args[0]][0] == "input"
         and nodes[args[0]][3][1] in ("source", "target")
+        and not dependent[args[1]]
     )
 
 
@@ -42,9 +47,13 @@ def can_inline_frame(nodes, i):
     return nodes[i][0] == "frame" and nodes[i][3][1] in (0, 2)
 
 
-def matrix_input(nodes, i):
+def matrix_input(nodes, i, shape):
     """Keep matrix transposes as BLAS views rather than flattened copies."""
-    return nodes[i][2][0] if nodes[i][0] == "transpose" else i
+    return (
+        nodes[i][2][0]
+        if nodes[i][0] == "transpose" and nodes[i][3] == shape[::-1]
+        else i
+    )
 
 
 @lru_cache(maxsize=128)
@@ -75,28 +84,42 @@ def execution_plan(metadata):
         elif op == "add" and all(j in frame_terms and consumers[j] == 1 for j in args):
             frame_terms[i] = tuple(k for j in args for k in frame_terms[j])
     frame_sums = {i: terms for i, terms in frame_terms.items() if len(terms) > 1}
+    affine = {}
+    for i in live:
+        op, _, args, _ = nodes[i]
+        if op != "add" or consumers[i] <= 1:
+            continue
+        for matrix, bias in (args, args[::-1]):
+            operation, _, operands, shape = nodes[matrix]
+            if (
+                operation == "matmul"
+                and shape[0] == 1
+                and consumers[matrix] == 1
+                and result[operands[0]]
+                and not result[operands[1]]
+                and not result[bias]
+                and not node_projection(nodes, matrix, result)
+            ):
+                affine[i] = matrix, bias
+                break
+    # Reading two or three consumers' cheap pointwise expressions on demand
+    # is cheaper than storing another edge tensor between the local GEMMs.
+    local_frames = any(nodes[i][0] == "frame" for i in live)
+    pointwise = {"add", "mul", "silu", "sigmoid", "tanh", "exp", "activation_vjp"}
     boundaries = (
         frozenset(
             i
             for i in live
             if result[i]
-            and consumers[i] > 1
+            and consumers[i] > (3 if local_frames and nodes[i][0] in pointwise else 1)
             and (
-                nodes[i][0]
-                in (
-                    "product",
-                    "scatter",
-                    "add",
-                    "mul",
-                    "silu",
-                    "sigmoid",
-                    "tanh",
-                    "exp",
-                )
+                nodes[i][0] in pointwise
+                or nodes[i][0] in ("product", "scatter")
                 or can_inline_matmul(nodes, i, result)
             )
         )
         | frame_sums.keys()
+        | affine.keys()
     )
     expressions, dependencies, uses = {}, {}, Counter()
 
@@ -105,12 +128,26 @@ def execution_plan(metadata):
         uses[key] += 1
         if key in dependencies:
             return
-        op, _, args, _ = nodes[i]
+        op, _, args, data = nodes[i]
         if kind == "value":
             if op in ("input", "constant"):
                 children = ()
-            elif node_projection(nodes, i):
-                children = (("value", args[1]),)
+            elif (
+                not result[i]
+                and op == "mul"
+                and (factor := scalar_product(nodes, args)) is not None
+            ):
+                children = (("value", factor[0]),)
+            elif node_projection(nodes, i, result):
+                children = (("value", matrix_input(nodes, args[1], data[1:])),)
+            elif i in affine:
+                matrix, bias = affine[i]
+                _, _, (left, right), shape = nodes[matrix]
+                children = (
+                    ("value", matrix_input(nodes, left, shape[:2])),
+                    ("value", matrix_input(nodes, right, shape[1:])),
+                    ("value", bias),
+                )
             elif i in frame_sums:
                 children = tuple(
                     ("value", j)
@@ -151,7 +188,10 @@ def execution_plan(metadata):
                     )
                 )
             elif op == "matmul" and not can_inline_matmul(nodes, i, result):
-                children = tuple(("value", matrix_input(nodes, j)) for j in args)
+                children = tuple(
+                    ("value", matrix_input(nodes, j, dims))
+                    for j, dims in zip(args, (data[:2], data[1:]))
+                )
             elif (
                 not result[i]
                 or op == "slice"
@@ -166,7 +206,10 @@ def execution_plan(metadata):
         elif op in ("convolution", "frame"):
             children = (("value", i),)
         elif op == "matmul" and all(result[j] for j in args):
-            children = tuple(("value", matrix_input(nodes, j)) for j in args)
+            children = tuple(
+                ("value", matrix_input(nodes, j, dims))
+                for j, dims in zip(args, (data[:2], data[1:]))
+            )
         elif op in (
             "add",
             "slice",
@@ -177,6 +220,8 @@ def execution_plan(metadata):
             "scatter",
         ):
             children = tuple(("reduce", j) for j in args)
+        elif op == "mul" and (factor := scalar_product(nodes, args)) is not None:
+            children = (("reduce", factor[0]),)
         elif op in ("mul", "matmul") and any(not result[j] for j in args):
             children = tuple(("reduce" if result[j] else "value", j) for j in args)
         else:
@@ -198,7 +243,16 @@ def execution_plan(metadata):
             accumulate(root)
         else:
             require("value", root)
-    return nodes, outputs, tuple(result), expressions, dependencies, frame_sums, uses
+    return (
+        nodes,
+        outputs,
+        tuple(result),
+        expressions,
+        dependencies,
+        affine,
+        frame_sums,
+        uses,
+    )
 
 
 @lru_cache(maxsize=128)
@@ -226,7 +280,9 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
     def visit(i):
         if i not in translated:
             op, size, args, data = nodes[i]
-            if (
+            if op == "constant" and i != root:
+                translated[i] = program.constant(size, data)
+            elif (
                 op in ("input", "convolution", "product")
                 or op == "frame"
                 and not can_inline_frame(nodes, i)
@@ -244,7 +300,7 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
                     else "shared"
                     if not dependent[i]
                     else nodes[args[0]][3][1]
-                    if node_projection(nodes, i)
+                    if node_projection(nodes, i, dependent)
                     else "edge"
                 )
                 translated[i] = program.input(slot, kind, size)
@@ -265,7 +321,12 @@ def expression_kernel(metadata, dtype, device):
         "row"
         if any(op in ("normalize", "inv_norm", "mean") for op, _, _, _ in nodes)
         else "edge"
-        if any(op in ("product", "scatter", "matmul") for op, _, _, _ in nodes)
+        if any(
+            op in ("product", "matmul")
+            or op == "scatter"
+            and max(Counter(data).values(), default=0) > 8
+            for op, _, _, data in nodes
+        )
         else "pointwise"
     )
     code, storage, slots = expression_source(dtype, metadata, mode, 0, 4, 0.0, 0, 1)
@@ -290,6 +351,17 @@ def indices(values, device):
     return torch.tensor(values, dtype=torch.int64, device=device)
 
 
+def column_indices(values, device):
+    """Keep captured index tables alive independently of the eager cache."""
+    retained = CAPTURE_CONSTANTS.get()
+    if retained is None:
+        return indices(values, device)
+    key = values, device
+    if key not in retained:
+        retained[key] = indices(values, device)
+    return retained[key]
+
+
 def transform(op, size, values, data):
     """Evaluate shared expressions and linear maps of reduced adjoints."""
     x = values[0] if values else None
@@ -306,9 +378,11 @@ def transform(op, size, values, data):
     if op == "transpose":
         return x.reshape(x.shape[0], *data).transpose(1, 2).reshape(x.shape[0], size)
     if op == "gather":
-        return x.index_select(1, indices(data, x.device))
+        return x.index_select(1, column_indices(data, x.device))
     if op == "scatter":
-        return x.new_zeros((x.shape[0], size)).index_add_(1, indices(data, x.device), x)
+        return x.new_zeros((x.shape[0], size)).index_add_(
+            1, column_indices(data, x.device), x
+        )
     if op == "matmul":
         rows, inner, columns = data
         a = x.reshape(x.shape[0], rows, inner)
@@ -320,6 +394,8 @@ def transform(op, size, values, data):
         return torch.matmul(a, b).flatten(1)
     if op == "silu":
         return torch.nn.functional.silu(x)
+    if op == "activation_vjp":
+        return activation_vjp(*values, *data)
     if op == "mean":
         return x.mean(-1, keepdim=True).expand_as(x)
     if op in ("sigmoid", "tanh", "sin", "cos", "exp", "reciprocal", "rsqrt"):
@@ -337,6 +413,7 @@ class TiledProgram:
             self.dependent,
             self.expressions,
             self.dependencies,
+            self.affine,
             self.frame_sums,
             uses,
         ) = plan
@@ -361,11 +438,11 @@ class TiledProgram:
         _, _, args, data = self.nodes[i]
         if ("node", i) not in self.shared:
             slot, _ = self.nodes[args[0]][3]
-            weight = self.value(args[1]).reshape(data[1], data[2])
+            weight = self.matrix(args[1], data[1], data[2])[0]
             self.shared["node", i] = self.inputs[slot].flatten(1) @ weight
         return self.shared["node", i]
 
-    def value(self, i):
+    def value(self, i, destination=None):
         cache = self.values if self.dependent[i] else self.shared
         if i not in cache:
             op, size, args, data = self.nodes[i]
@@ -384,13 +461,35 @@ class TiledProgram:
                     )
             elif op == "constant":
                 x = self.inputs[0].new_full((1, size), data)
-            elif node_projection(self.nodes, i):
+            elif (
+                not self.dependent[i]
+                and op == "mul"
+                and (factor := scalar_product(self.nodes, args)) is not None
+            ):
+                x = self.value(factor[0]) * factor[1]
+            elif node_projection(self.nodes, i, self.dependent):
                 _, kind = self.nodes[args[0]][3]
                 x = self.project_node(i).index_select(
                     0, self.source if kind == "source" else self.target
                 )
+            elif i in self.affine:
+                matrix, bias = self.affine[i]
+                _, _, (left, right), (_, inner, columns) = self.nodes[matrix]
+                a = self.matrix(left, 1, inner).reshape(-1, inner)
+                b = self.matrix(right, inner, columns)[0]
+                x = torch.addmm(self.value(bias).reshape(-1), a, b, out=destination)
             elif op == "convolution":
-                x = self.convolution(i)
+                # Edge-local adjoints can accumulate directly into their sole
+                # output. Node and shared adjoints have different reductions.
+                role = data[2]
+                if destination is not None and role not in (
+                    0,
+                    2,
+                    4 if data[0] == "o3" else 6,
+                ):
+                    x = self.convolution(i, destination.zero_())
+                else:
+                    x = self.convolution(i)
             elif i in self.frame_sums:
                 x = self.frame_sum(i)
             elif op == "frame" and not can_inline_frame(self.nodes, i):
@@ -432,18 +531,31 @@ class TiledProgram:
                 rows, inner, columns = data
                 a = self.matrix(args[0], rows, inner)
                 b = self.matrix(args[1], inner, columns)
-                x = (
-                    (a.reshape(a.shape[0] * rows, inner) @ b[0]).reshape(
+                if destination is not None and self.dependent[i]:
+                    x = destination
+                    if b.shape[0] == 1:
+                        torch.mm(
+                            a.reshape(a.shape[0] * rows, inner),
+                            b[0],
+                            out=x.view(x.shape[0] * rows, columns),
+                        )
+                    else:
+                        torch.matmul(a, b, out=x.view(x.shape[0], rows, columns))
+                elif b.shape[0] == 1:
+                    x = (a.reshape(a.shape[0] * rows, inner) @ b[0]).reshape(
                         a.shape[0], size
                     )
-                    if b.shape[0] == 1
-                    else torch.matmul(a, b).flatten(1)
-                )
+                else:
+                    x = torch.matmul(a, b).flatten(1)
             elif not self.dependent[i] or op == "slice" and i not in self.expressions:
                 x = transform(op, size, [self.value(j) for j in args], data)
             else:
                 metadata, values = self.expression_inputs(i)
-                x = self.inputs[0].new_empty((self.end - self.begin, size))
+                x = (
+                    destination
+                    if destination is not None
+                    else self.inputs[0].new_empty((self.end - self.begin, size))
+                )
                 kernel, storage, slots, nbytes, processors, mode = expression_kernel(
                     metadata, x.dtype, x.device
                 )
@@ -486,7 +598,7 @@ class TiledProgram:
     def matrix(self, i, rows, columns):
         """Return a batched matrix, retaining a transposed input's strides."""
         op, _, args, data = self.nodes[i]
-        if op == "transpose":
+        if op == "transpose" and data == (columns, rows):
             value = self.value(args[0])
             return value.reshape(value.shape[0], *data).transpose(1, 2)
         value = self.value(i)
@@ -503,7 +615,7 @@ class TiledProgram:
                 if self.nodes[j][0] == "input"
                 and self.nodes[j][3][1] in ("source", "target")
                 else self.project_node(j)
-                if node_projection(self.nodes, j)
+                if node_projection(self.nodes, j, self.dependent)
                 else self.value(j)
             ).contiguous()
             for j in leaves
@@ -656,7 +768,11 @@ class TiledProgram:
         for k, j in enumerate(args):
             if k == role:
                 if k == 2:
-                    value = self.inputs[0].new_empty(shape)
+                    value = (
+                        self.inputs[0].new_zeros(shape)
+                        if destination is None
+                        else destination.reshape(shape)
+                    )
                 elif destination is not None:
                     value = destination
                     op, _, _, storage = self.nodes[j]
@@ -667,7 +783,7 @@ class TiledProgram:
                         elif k == output_role:
                             target = index
                 else:
-                    value = self.inputs[0].new_empty((rows, size))
+                    value = self.inputs[0].new_zeros((rows, size))
                     if k in (0, output_role):
                         if self.local is None:
                             self.local = torch.arange(rows, device=source.device)
@@ -707,10 +823,9 @@ class TiledProgram:
                     cache[key] = value.reshape(shape)
                 value = cache[key]
             values.append(value.contiguous())
-        result = values[role]
-        if destination is None:
-            result = torch.zeros_like(result)
-        return source, target, values, result
+        # A contraction never reads its own output role. Its zero-initialized
+        # accumulator supplies the shape without a second full-size operand.
+        return source, target, values, values[role]
 
     def reduce(self, i):
         """Sum parameter adjoints before allocating per-edge outer products."""
@@ -741,6 +856,10 @@ class TiledProgram:
                 "scatter",
             ):
                 x = transform(op, size, [self.reduce(j) for j in args], data)
+            elif (
+                op == "mul" and (factor := scalar_product(self.nodes, args)) is not None
+            ):
+                x = self.reduce(factor[0]) * factor[1]
             elif op in ("mul", "matmul") and any(not self.dependent[j] for j in args):
                 x = transform(
                     op,
@@ -767,14 +886,44 @@ class TiledProgram:
         elif op == "unslice":
             self.accumulate(args[0], output[:, data : data + self.nodes[args[0]][1]])
         else:
-            output.add_(self.reduce(i))
+            matrix = args[0] if op == "transpose" else i
+            name, _, operands, shape = self.nodes[matrix]
+            if (
+                name == "matmul"
+                and (op != "transpose" or data == (shape[0], shape[2]))
+                and all(self.dependent[j] for j in operands)
+                and self.uses["reduce", i] == 1
+                and i not in self.reductions
+                and self.uses["reduce", matrix] == 1
+                and matrix not in self.reductions
+            ):
+                # Direct GEMM accumulation into the parameter gradient, also
+                # when nn.Linear stores its weight in the transposed layout.
+                rows, inner, columns = shape
+                left = self.matrix(operands[0], rows, inner)
+                right = self.matrix(operands[1], inner, columns)
+                destination = (
+                    output.view(columns, rows).T
+                    if op == "transpose"
+                    else output.view(rows, columns)
+                )
+                destination.addmm_(
+                    left.transpose(1, 2).reshape(-1, rows).T,
+                    right.reshape(-1, columns),
+                )
+                for child in self.dependencies["reduce", matrix]:
+                    self.release(*child)
+                if matrix != i:
+                    self.release("reduce", matrix)
+            else:
+                output.add_(self.reduce(i))
             self.release("reduce", i)
 
 
 @lru_cache(maxsize=128)
 def tile_width(metadata):
     """Estimate peak per-row storage using the tile's evaluation/release order."""
-    nodes, outputs, dependent, expressions, dependencies, _, counts = execution_plan(
+    nodes, outputs, dependent, expressions, dependencies, _, _, counts = execution_plan(
         metadata
     )
     uses, values, references = counts.copy(), {}, Counter()
@@ -805,7 +954,7 @@ def tile_width(metadata):
                 and (
                     nodes[j][0] == "input"
                     and nodes[j][3][1] in ("source", "target")
-                    or node_projection(nodes, j)
+                    or node_projection(nodes, j, dependent)
                 )
             ):
                 # Fused expressions gather these directly, without a tile copy.
@@ -862,6 +1011,7 @@ def tile_width(metadata):
             and op == "matmul"
             and data[0] == 1
             and not dependent[args[1]]
+            and not node_projection(nodes, root, dependent)
             and counts[key] == 1
         ):
             # This map runs after node reduction, outside the tile workspace.
@@ -875,46 +1025,61 @@ def tile_width(metadata):
     return max(128, peak)
 
 
+@lru_cache(maxsize=256)
+def launch_layout(metadata):
+    plan = execution_plan(metadata)
+    writes = Counter(slot for _, slot, _ in plan[1])
+    shared = frozenset(slot for _, slot, kind in plan[1] if kind == "shared")
+    return tuple(sorted(writes)), shared, writes
+
+
+@lru_cache(maxsize=256)
+def tile_rows(metadata, element_size, workspace):
+    """Select a GEMM batch size using fixed program widths."""
+    plan = execution_plan(metadata)
+    node_product = any(op == "product" for op, _, _, _ in plan[0]) and not any(
+        op == "convolution" or op == "input" and data[1] in ("source", "target")
+        for op, _, _, data in plan[0]
+    )
+    width = (
+        tile_width(metadata)
+        if node_product
+        else max(
+            (max(data[1:]) for op, _, _, data in plan[0] if op == "matmul"),
+            default=128,
+        )
+    )
+    channel_frame = any(op == "frame" for op, _, _, _ in plan[0]) and any(
+        op == "matmul" and data[0] > 1 and not plan[2][args[1]]
+        for op, _, args, data in plan[0]
+    )
+    budget = (
+        PRODUCT_TILE_BYTES
+        if node_product
+        else FRAME_TILE_BYTES
+        if channel_frame
+        else TILE_BYTES
+    )
+    rows = min(TILE_SIZE, budget // (max(1, width) * element_size))
+    if (
+        workspace
+        and not node_product
+        and any(op in ("frame", "convolution") for op, *_ in plan[0])
+    ):
+        rows = min(rows, workspace // (tile_width(metadata) * element_size))
+    return max(256, rows // 128 * 128)
+
+
 def launch(metadata, inputs, source, target, outputs, tile_size=None):
     """Evaluate a program with bounded intermediate edge storage."""
     plan = execution_plan(metadata)
     if tile_size is None:
-        node_product = any(op == "product" for op, _, _, _ in plan[0]) and not any(
-            op == "convolution" or op == "input" and data[1] in ("source", "target")
-            for op, _, _, data in plan[0]
+        workspace = (
+            CONVOLUTION_TILE_BYTES if source.numel() > CONVOLUTION_TILE_MIN_EDGES else 0
         )
-        # Reusing node products amortizes the dense maps over larger tiles.
-        # Keep convolution scheduling unchanged; product storage is bounded by
-        # the live vectors, excluding already-reduced parameter outer products.
-        width = (
-            tile_width(metadata)
-            if node_product
-            else max(
-                (max(data[1:]) for op, _, _, data in plan[0] if op == "matmul"),
-                default=128,
-            )
-        )
-        channel_frame = any(op == "frame" for op, _, _, _ in plan[0]) and any(
-            op == "matmul" and data[0] > 1 and not plan[2][args[1]]
-            for op, _, args, data in plan[0]
-        )
-        # Dense O(2) channel maps need larger GEMM batches than radial-only
-        # projections. Their complete forward and adjoint still share a tile.
-        budget = (
-            PRODUCT_TILE_BYTES
-            if node_product
-            else FRAME_TILE_BYTES
-            if channel_frame
-            else TILE_BYTES
-        )
-        tile_size = max(
-            256,
-            min(TILE_SIZE, budget // (max(1, width) * inputs[0].element_size())),
-        )
+        tile_size = tile_rows(metadata, inputs[0].element_size(), workspace)
     descriptions = plan[1]
-    writes = Counter(slot for _, slot, _ in descriptions)
-    slots = sorted({slot for _, slot, _ in descriptions})
-    shared_slots = {slot for _, slot, kind in descriptions if kind == "shared"}
+    slots, shared_slots, writes = launch_layout(metadata)
     destinations = {
         slot: output.reshape(1, -1) if slot in shared_slots else output.flatten(1)
         for slot, output in zip(slots, outputs)
@@ -934,7 +1099,11 @@ def launch(metadata, inputs, source, target, outputs, tile_size=None):
                 tile.accumulate(root, output)
             elif kind == "edge":
                 if writes[slot] == 1:
-                    output[begin:end].copy_(tile.value(root))
+                    destination = output[begin:end]
+                    value = tile.value(root, destination)
+                    if value is not destination:
+                        destination.copy_(value)
+                    del value
                 else:
                     output[begin:end].add_(tile.value(root))
                 tile.release("value", root)
@@ -944,6 +1113,7 @@ def launch(metadata, inputs, source, target, outputs, tile_size=None):
                     op == "matmul"
                     and data[0] == 1
                     and not tile.dependent[args[1]]
+                    and not node_projection(tile.nodes, root, tile.dependent)
                     and plan[-1]["value", root] == 1
                 ):
                     # Sum the narrow adjoint at nodes before the shared linear

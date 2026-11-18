@@ -174,6 +174,8 @@ class Convolution(torch.nn.Module):
                 internal_weights=False,
                 shared_weights=False,
                 normalization=normalization,
+                # SO(3)-only models can label all edge harmonics as even.
+                vector_parity=next((ir.p for _, ir in self.irreps_in2 if ir.l % 2), -1),
             )
             self.eqx_tp = O2O3TensorProductConv(
                 tensor_product, backend=backend, radial_mode=radial_mode

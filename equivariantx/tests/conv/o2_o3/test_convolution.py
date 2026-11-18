@@ -573,18 +573,23 @@ def test_channel_mixing_joint_export(
         return loss, force, *gradients
 
     graph = make_fx(lambda *values: joint(module, *values))(*values)
-    assert any(
+    native = any(
         str(node.target).startswith("eqx.edge_program") for node in graph.graph.nodes
-    ) == (
-        backend == "cuda" and radial_mode == "full" and not config.EDGE_PROGRAM_INLINE
+    )
+    assert native == (
+        backend == "cuda"
+        and radial_mode == "full"
+        and (method != "wigner" or not config.EDGE_PROGRAM_INLINE)
     )
     detached = tuple(value.detach() for value in values)
     if compiler == "inductor":
         runner = torch.compile(graph, fullgraph=True)
     else:
-        assert not any(
-            str(node.target).startswith("eqx.") for node in graph.graph.nodes
-        )
+        assert {
+            node.target
+            for node in graph.graph.nodes
+            if str(node.target).startswith("eqx.")
+        } == ({torch.ops.eqx.edge_program.default} if native else set())
         exported = torch.export.export(graph, detached)
         package = tmp_path / "channel_mixing.pt2"
         torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
@@ -622,8 +627,13 @@ for case in torch.load(sys.argv[2], weights_only=True):
     with torch.no_grad():
         actual = runner(*(value.cuda() for value in case['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual), case['expected'], atol=2e-10, rtol=2e-9)
-assert 'equivariantx' not in sys.modules
 """
+        if native:
+            from equivariantx.tests.utils.testing import package_script
+
+            script = package_script(script)
+        else:
+            script += "assert 'equivariantx' not in sys.modules"
         result = subprocess.run(
             [sys.executable, "-B", "-c", script, str(package), str(data)],
             cwd=tmp_path,

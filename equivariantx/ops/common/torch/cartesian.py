@@ -5,6 +5,69 @@ from functools import lru_cache
 from itertools import product
 
 import torch
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
+
+from ... import config
+
+
+def coupling_size(l1, l2, l3):
+    """Number of nonzero delta/epsilon terms before STF projection."""
+    if not abs(l1 - l2) <= l3 <= l1 + l2:
+        raise ValueError("Degrees must satisfy the triangle inequality.")
+    k, odd = divmod(l1 + l2 - l3, 2)
+    return (1 + odd) * 3 ** (l3 + k)
+
+
+def literal_coupling(degrees, budget):
+    """Bound both source size and the longest reduction over any leg."""
+    return coupling_size(*degrees) <= min(budget, 64 * 3 ** min(degrees))
+
+
+def inline_reduction(x, degrees):
+    l1, l2, l3 = degrees
+    return (
+        config.CARTESIAN_REDUCTION_INLINE
+        and x.is_cuda
+        and ((l1 + l2 - l3) // 2 <= 2 or l3 == 0)
+        and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
+    )
+
+
+def reduced_product(x, y, l1, l2, l3):
+    """Expose a delta or epsilon product and its contracted axis to fusion."""
+    k, odd = divmod(l1 + l2 - l3, 2)
+    a, d, b = 3 ** (l1 - k - odd), 3**k, 3 ** (l2 - k - odd)
+    p = 3 if odd else 1
+    x = x.unflatten(-1, (a, p, d)).unsqueeze(-1)
+    y = y.unflatten(-1, (d, p, b)).transpose(-3, -2).unsqueeze(-4)
+    if odd:
+        x, y = torch.broadcast_tensors(x, y)
+        value = torch.linalg.cross(x, y, dim=-3)
+    else:
+        value = x * y
+    return value.sum(-2).flatten(-3) * ((1 + odd) * d) ** -0.5
+
+
+def evaluate(x, y, l1, l2, l3):
+    """Contract with a bounded scalar reduction or a compiler-visible product."""
+    degrees = (l1, l2, l3)
+    if inline_reduction(x, degrees) and not literal_coupling(
+        degrees, config.CARTESIAN_LITERAL_TERMS
+    ):
+        return reduced_product(x, y, *degrees)
+    if (
+        x.is_cuda
+        and l3 == 0
+        and l1 == l2 >= 4
+        and not torch.compiler.is_compiling()
+        and get_proxy_mode() is None
+        and x.shape == y.shape
+        and x.is_contiguous()
+        and y.is_contiguous()
+        and x.numel() * x.element_size() <= config.TORCH_CARTESIAN_DOT_BYTES
+    ):
+        return (x * y).sum(-1, keepdim=True) * (3**l1) ** -0.5
+    return cartesian_product(x, y, *degrees)
 
 
 def cartesian_product(x, y, l1, l2, l3):

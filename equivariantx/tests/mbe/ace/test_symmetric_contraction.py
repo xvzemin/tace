@@ -17,6 +17,172 @@ from .testing import (
 )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU GEMM schedule")
+@pytest.mark.parametrize("layout", ["ir_mul", "mul_ir"])
+def test_shared_monomials_preserve_independent_coefficients(layout, monkeypatch):
+    entries = [
+        (
+            (j, (p + j + 1) % 4, (p + 2 * j) % 4)[: 1 + (p + j) % 3],
+            p,
+            out,
+            (p + out + 1) / 11,
+        )
+        for p in range(8)
+        for j in range(4)
+        for out in (j, (j + 1) % 4)
+    ]
+    layer = (
+        UuuSymmetricContraction.from_entries(
+            "16x0e+16x1o", "16x0e+16x1e", entries, 8, backend="torch", layout=layout
+        )
+        .double()
+        .cuda()
+    )
+    assert layer.monomial_count > 0
+    types = torch.tensor([2, 0, 2, 1], device="cuda")
+    x = torch.randn(4, 16, 4, device="cuda", dtype=torch.float64, requires_grad=True)
+    w = torch.randn(4, 8, 16, device="cuda", dtype=torch.float64, requires_grad=True)
+    actual = layer(x, w, types)
+    compiled = torch.compile(layer, fullgraph=True, backend="aot_eager", dynamic=True)
+    for n in (4, 2, 0):
+        torch.testing.assert_close(compiled(x[:n], w, types[:n]), actual[:n])
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = layer(x, w, types)
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+        v = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (y.sin() * v).sum(), (x, w), create_graph=True
+                    )
+                ]
+            )
+            for y in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA Torch polynomial schedule"
+)
+@pytest.mark.parametrize("space", ["o3", "co3"])
+@pytest.mark.parametrize("elements", [3, 9])
+def test_channel_polynomial_derivatives(space, elements, monkeypatch, double_precision):
+    from equivariantx import co3
+    from equivariantx.mbe import ace
+
+    namespace = o3 if space == "o3" else co3
+    cls = (
+        ace.UuuFullyConnectedSymmetricContraction
+        if space == "o3"
+        else ace.IctdUuuFullyConnectedSymmetricContraction
+    )
+    ir = namespace.Irreps("32x0e + 32x1o + 32x2e")
+    options = dict(internal_weights=False, shared_weights=False)
+    descriptor = {} if space == "o3" else {"backend": "torch"}
+    tp = namespace.TensorProduct(
+        ir,
+        ir,
+        ir,
+        [
+            (0, 0, 0, "uuu", False),
+            (1, 1, 0, "uuu", False),
+            (1, 0, 1, "uuu", False),
+            (1, 1, 2, "uuu", False),
+            (0, 2, 2, "uuu", False),
+        ],
+        **options,
+        **descriptor,
+    )
+    linears = [
+        namespace.Linear(ir, "3x0e + 5x2e", **options, **descriptor) for _ in range(3)
+    ]
+    module = cls([tp, tp], linears, backend="torch").cuda().float().double()
+    assert module.channel_polynomial is not None and not module.state_dict()
+    monkeypatch.setattr(config, "ACE_POLYNOMIAL_WORKSPACE", 128)
+    weights = tuple(
+        (torch.randn(elements, 2 * lin.weight_numel, device="cuda") * 0.05)[
+            :, ::2
+        ].requires_grad_()
+        for lin in linears
+    )
+    raw = torch.randn(5, 2 * ir.dim, device="cuda") * 0.2
+    x = raw[:, ::2].requires_grad_()
+    types = torch.tensor([elements - 1, 0, 1, elements - 1, 2], device="cuda")
+
+    def call(x, *tables):
+        return module(x, tables, types)
+
+    actual = call(x, *weights)
+    with monkeypatch.context() as ordinary:
+        ordinary.setattr(config, "TORCH_REFERENCE", True)
+        expected = call(x, *weights)
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+        vector = torch.randn_like(expected) / expected.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    d.flatten()
+                    for d in torch.autograd.grad(
+                        (v.sin() * vector).sum(), (x, *weights), create_graph=True
+                    )
+                ]
+            )
+            for v in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+    tangents = tuple(torch.randn_like(v) * 0.1 for v in (x, *weights))
+    tangent = torch.func.jvp(call, (x, *weights), tangents)
+    with monkeypatch.context() as ordinary:
+        ordinary.setattr(config, "TORCH_REFERENCE", True)
+        reference = torch.func.jvp(call, (x, *weights), tangents)
+    torch.testing.assert_close(tangent, reference, rtol=2e-10, atol=2e-10)
+    assert module(x[:0], weights, types[:0]).shape == (0, module.output_dim)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Compare native and Torch providers"
+)
+def test_coefficient_map_splits_a_product_multiplicity(double_precision):
+    irreps = o3.Irreps("32x0e+32x1o")
+    options = {"internal_weights": False, "shared_weights": False}
+    product = o3.TensorProduct(
+        irreps,
+        irreps,
+        "32x0e",
+        [(0, 0, 0, "uuu", False), (1, 1, 0, "uuu", False)],
+        **options,
+    ).cuda()
+    linears = [
+        o3.Linear(irreps, "5x0e", **options).cuda(),
+        o3.Linear("7x0e+25x0e", "5x0e", instructions=[(1, 0)], **options).cuda(),
+    ]
+    x = torch.randn(9, irreps.dim, device="cuda", requires_grad=True)
+    types = torch.arange(9, device="cuda") % 3
+    tables = tuple(
+        torch.randn(3, lin.weight_numel, device="cuda", requires_grad=True)
+        for lin in linears
+    )
+    expected = linears[0](x, tables[0][types]) + linears[1](
+        product(x, x), tables[1][types]
+    )
+    expected_grad = torch.autograd.grad(expected.square().sum(), (x, *tables))
+    for backend in ("cuda", "torch"):
+        layer = UuuFullyConnectedSymmetricContraction(
+            [product], linears, backend=backend
+        ).cuda()
+        assert layer.channel_polynomial is None
+        out = layer(x, tables, types)
+        torch.testing.assert_close(out, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(out.square().sum(), (x, *tables)), expected_grad
+        )
+
+
 def test_compiler_visible_derivatives(monkeypatch):
     from torch.fx.experimental.proxy_tensor import make_fx
 

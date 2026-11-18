@@ -1,9 +1,60 @@
 """Spherical CG convolution in angular-first storage."""
 
-import torch
+from collections import defaultdict
 
+import torch
 from e3nn import o3
+
 from .... import config
+
+
+def angular_groups(module):
+    """Pack single-copy angular maps sharing both inputs into one matrix."""
+    groups = defaultdict(list)
+    for i, (start, attr, _, channels, copies, dx, dy, dz, *_) in enumerate(
+        module.paths
+    ):
+        if copies == 1 and channels >= 16:
+            groups[start, attr, channels, dx, dy].append((i, dz))
+    result = []
+    for key, entries in groups.items():
+        _, _, channels, dx, dy = key
+        sizes = {dz for _, dz in entries}
+        if (
+            max(dx, dy, *sizes) > 7
+            and dx * sum(sizes) > config.TORCH_CG_ANGULAR_WIDTH_RATIO * channels
+        ):
+            continue
+        tables, rows, sections = [], 0, {}
+        paths = []
+        for i, dz in entries:
+            if dz not in sections:
+                sections[dz] = rows
+                rows += dz
+                tables.append(getattr(module, f"cg_{i}").permute(1, 2, 0))
+            paths.append((i, sections[dz], dz))
+        name = f"angular_cg_{len(result)}"
+        module.register_buffer(
+            name, torch.cat(tables, dim=1).reshape(dy, rows * dx), persistent=False
+        )
+        result.append((name, *key, rows, tuple(paths)))
+    return tuple(result)
+
+
+def angular_paths(program, features, attrs, groups):
+    """Return unweighted path values for the shared angular matrices."""
+    parts = {}
+    for slot, start, attr, channels, dx, dy, rows, paths in groups:
+        table = program.input(slot, "shared", dy * rows * dx)
+        angular = program.matmul(
+            program.slice(attrs, attr, dy), table, 1, dy, rows * dx
+        )
+        coupled = program.matmul(
+            angular, program.slice(features, start, dx * channels), rows, dx, channels
+        )
+        for i, row, dz in paths:
+            parts[i] = program.slice(coupled, row * channels, dz * channels)
+    return parts
 
 
 def evaluate(
@@ -51,6 +102,12 @@ def evaluate(
             module.output_dim,
             network=radial_network,
             recompute=module.radial_mode == "full",
+            angular_groups=tuple(
+                (getattr(module, name).to(features), *group)
+                for name, *group in module.angular_groups
+            )
+            if features.is_cuda and config.TORCH_CG_ANGULAR_MATRICES
+            else (),
         )
     return result if vectors is None else result + vectors.sum() * 0
 

@@ -5,6 +5,14 @@ from functools import lru_cache
 from .metadata import parse_metadata
 
 
+def scalar_product(nodes, args):
+    """Return the other operand and the scalar of a uniform product."""
+    for side, index in enumerate(args):
+        if nodes[index][0] == "constant":
+            return args[1 - side], nodes[index][3]
+    return None
+
+
 def activate(program, value, module):
     """Encode a supported scalar activation and its normalization."""
     if module is None:
@@ -93,9 +101,58 @@ class Program:
             else self.binary("mul", x, self.constant(self.size(x), value))
         )
 
+    def activation_vjp(self, name, order, x, grad):
+        """Apply a pointwise activation derivative to a cotangent."""
+        size = self.size(x)
+        if order in (1, 2):
+            return self.add("activation_vjp", size, (x, grad), (name, order))
+        # Higher orders remain ordinary differentiable expressions. Factoring
+        # out the first derivative also retains the saturated activation tails.
+        if order != 3:
+            raise ValueError(
+                "Differentiate the expanded third derivative for higher orders."
+            )
+        one = self.constant(size, 1)
+        if name == "tanh":
+            t = self.unary("tanh", x)
+            d = self.activation_vjp("tanh", 1, x, grad)
+            return self.binary(
+                "mul",
+                d,
+                self.binary(
+                    "add", self.scale(self.binary("mul", t, t), 6), self.scale(one, -2)
+                ),
+            )
+        d = self.activation_vjp("sigmoid", 1, x, one)
+        third = self.binary("mul", d, self.binary("add", one, self.scale(d, -6)))
+        if name == "silu":
+            second = self.activation_vjp("sigmoid", 2, x, one)
+            third = self.binary(
+                "add", self.scale(second, 3), self.binary("mul", x, third)
+            )
+        return self.binary("mul", grad, third)
+
     def sum(self, values, size):
         if not values:
             return self.constant(size, 0)
+        if len(values) > 1 and all(self.nodes[x][0] == "unslice" for x in values):
+            # Slice adjoints occupy contiguous column intervals. Combine equal
+            # intervals before joining disjoint ones, without full-width pads.
+            sections = {}
+            for i in values:
+                _, _, (x,), start = self.nodes[i]
+                sections.setdefault((start, self.size(x)), []).append(x)
+            intervals = sorted(sections)
+            if all(a + w <= b for (a, w), (b, _) in zip(intervals, intervals[1:])):
+                blocks, end = [], 0
+                for start, width in intervals:
+                    if end < start:
+                        blocks.append(self.constant(start - end, 0))
+                    blocks.append(self.sum(sections[start, width], width))
+                    end = start + width
+                if end < size:
+                    blocks.append(self.constant(size - end, 0))
+                return self.concatenate(blocks)
         result = values[0]
         for x in values[1:]:
             result = self.binary("add", result, x)
@@ -103,7 +160,14 @@ class Program:
 
     def gather(self, x, indices):
         indices = tuple(indices)
-        if indices == tuple(range(self.size(x))):
+        if (
+            indices
+            and 0 <= indices[0]
+            and indices[-1] < self.size(x)
+            and indices == tuple(range(indices[0], indices[0] + len(indices)))
+        ):
+            return self.slice(x, indices[0], len(indices))
+        if not indices and not self.size(x):
             return x
         return self.add("gather", len(indices), (x,), indices)
 
@@ -113,11 +177,32 @@ class Program:
     def slice(self, x, start, size):
         if start == 0 and size == self.size(x):
             return x
+        op, _, args, offset = self.nodes[x]
+        if op == "slice":
+            return self.slice(args[0], offset + start, size)
+        if op == "concat" and size:
+            begin = 0
+            for arg in args:
+                end = begin + self.size(arg)
+                if begin <= start and start + size <= end:
+                    return self.slice(arg, start - begin, size)
+                begin = end
         return self.add("slice", size, (x,), start)
 
     def concatenate(self, values):
         if len(values) == 1:
             return values[0]
+        # A split followed by a join is a view, not another edge allocation.
+        if values and all(self.nodes[i][0] == "slice" for i in values):
+            _, _, (parent,), start = self.nodes[values[0]]
+            end = start
+            for i in values:
+                _, width, (source,), offset = self.nodes[i]
+                if source != parent or offset != end:
+                    break
+                end += width
+            else:
+                return self.slice(parent, start, end - start)
         return self.add("concat", sum(self.size(x) for x in values), values)
 
     def transpose(self, x, rows, columns):
@@ -267,27 +352,28 @@ class Program:
             elif op == "reciprocal":
                 factor = self.scale(self.binary("mul", i, i), -1)
                 accumulate(args[0], self.binary("mul", grad, factor))
-            elif op in ("exp", "sin", "cos", "tanh", "sigmoid", "silu"):
+            elif op == "activation_vjp":
+                x, cotangent = args
+                name, order = data
+                if needed[x]:
+                    accumulate(
+                        x,
+                        self.activation_vjp(
+                            name, order + 1, x, self.binary("mul", grad, cotangent)
+                        ),
+                    )
+                if needed[cotangent]:
+                    accumulate(cotangent, self.activation_vjp(name, order, x, grad))
+            elif op in ("tanh", "sigmoid", "silu"):
+                accumulate(args[0], self.activation_vjp(op, 1, args[0], grad))
+            elif op in ("exp", "sin", "cos"):
                 x = args[0]
-                one = self.constant(size, 1)
                 if op == "exp":
                     factor = i
                 elif op == "sin":
                     factor = self.unary("cos", x)
-                elif op == "cos":
-                    factor = self.scale(self.unary("sin", x), -1)
-                elif op == "tanh":
-                    factor = self.binary(
-                        "add", one, self.scale(self.binary("mul", i, i), -1)
-                    )
                 else:
-                    sigmoid = i if op == "sigmoid" else self.unary("sigmoid", x)
-                    complement = self.binary("add", one, self.scale(sigmoid, -1))
-                    factor = self.binary("mul", sigmoid, complement)
-                    if op == "silu":
-                        factor = self.binary(
-                            "add", sigmoid, self.binary("mul", x, factor)
-                        )
+                    factor = self.scale(self.unary("sin", x), -1)
                 accumulate(x, self.binary("mul", grad, factor))
             elif op == "slice":
                 accumulate(

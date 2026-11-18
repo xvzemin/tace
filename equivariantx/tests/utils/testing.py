@@ -312,7 +312,7 @@ def check_ictd_lazy_compile(d, device, monkeypatch):
     """Compile the first dense reference call without preloading its basis."""
     from equivariantx.ops import config
 
-    module = SPACES[d].ICTD(3, dtype=torch.float64, device=device)
+    module = SPACES[d].ICTD(3, backend="torch", dtype=torch.float64, device=device)
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     assert module._buffers["change_of_basis"] is None
     compiled = torch.compile(module, backend="eager", fullgraph=True, dynamic=True)
@@ -322,7 +322,7 @@ def check_ictd_lazy_compile(d, device, monkeypatch):
     assert module._buffers["change_of_basis"] is not None
     from torch.fx.experimental.proxy_tensor import make_fx
 
-    fresh = SPACES[d].ICTD(3, dtype=torch.float64, device=device)
+    fresh = SPACES[d].ICTD(3, backend="torch", dtype=torch.float64, device=device)
     x = torch.randn(2, d**3, dtype=torch.float64, device=device)
     traced = make_fx(fresh)(x)
     # Basis construction must be lifted as a constant on the very first call.

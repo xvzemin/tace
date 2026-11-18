@@ -37,25 +37,41 @@ def input_specifications(metadata):
 
 
 @lru_cache(maxsize=256)
-def product_graph_layout(metadata):
-    """Prove that padding a row-local product leaves its reductions unchanged."""
+def padding_layout(metadata, indexed=False):
+    """Prove that padded rows cannot contribute to any shared output."""
     nodes, outputs = parse_metadata(metadata)
-    if not any(op == "product" for op, _, _, _ in nodes):
+    operations = {op for op, *_ in nodes}
+    required = {"frame", "matmul"} if indexed else {"product"}
+    if not required <= operations:
         return None
     kinds, zeros = {}, []
+
+    def merge(mapping, slot, kind):
+        previous = mapping.get(slot)
+        if previous is None or previous == kind:
+            mapping[slot] = kind
+            return True
+        if indexed and {previous, kind} <= {"source", "target", "both"}:
+            mapping[slot] = "both"
+            return True
+        return False
+
     for op, _, args, data in nodes:
         if op == "input":
             slot, kind = data
-            if kind not in ("edge", "shared"):
+            if not indexed and kind not in ("edge", "shared"):
                 return None
-            kinds[slot] = kind
-            zero = kind == "edge"
+            if not merge(kinds, slot, kind):
+                return None
+            zero = kind != "shared"
         elif op == "constant":
             zero = data == 0
         elif op in ("add", "concat"):
             zero = all(zeros[i] for i in args)
         elif op in ("mul", "matmul"):
             zero = any(zeros[i] for i in args)
+        elif op == "frame":
+            zero = any(zeros[j] for role, j in enumerate(args) if role != data[1])
         elif op == "product":
             (_, _, paths), output, _ = data
             zero = all(
@@ -79,16 +95,20 @@ def product_graph_layout(metadata):
             zero = zeros[args[0]]
         elif op in ("sigmoid", "cos"):
             zero = False
+        elif op == "activation_vjp":
+            zero = zeros[args[1]]
         else:
             # In particular, zero padding must not introduce singular norms.
             return None
         zeros.append(zero)
-    if any(
-        kind not in ("edge", "shared") or (kind == "shared" and not zeros[root])
-        for root, _, kind in outputs
-    ):
-        return None
-    output_kinds = {slot: kind for _, slot, kind in outputs}
+    output_kinds = {}
+    for root, slot, kind in outputs:
+        if (
+            (not indexed and kind not in ("edge", "shared"))
+            or (kind == "shared" and not zeros[root])
+            or not merge(output_kinds, slot, kind)
+        ):
+            return None
     return kinds, tuple(kind for _, kind in sorted(output_kinds.items()))
 
 
@@ -102,7 +122,7 @@ def evaluate(
     from .edge_codegen import launch
     from .execution import launch as launch_tiled
     from .execution import uses_matrix_products
-    from .graph import product
+    from .graph import edge_program
 
     if inputs[0].dtype not in (torch.float32, torch.float64):
         raise TypeError("Fused edge expressions require float32 or float64.")
@@ -152,13 +172,14 @@ def evaluate(
                     mode=execution_mode(metadata),
                 )
 
-    product(
+    edge_program(
         metadata,
         run,
         inputs,
         source,
         target,
         outputs,
-        product_graph_layout(metadata) if matrix_products else None,
+        padding_layout(metadata) if matrix_products else None,
+        counts,
     )
     return outputs

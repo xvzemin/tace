@@ -9,7 +9,12 @@ import torch
 from e3nn import o3
 
 from ...ops import config, get_kernel, resolve_backend
-from ...ops.common.torch.cartesian import cartesian_product, normalized_coefficients
+from ...ops.common.torch.cartesian import (
+    cartesian_product,
+    coupling_size,
+    literal_coupling,
+    normalized_coefficients,
+)
 from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...ops.common.torch.tensor_product import instruction_groups
 from ...ops.precision import validate_module_precision
@@ -393,6 +398,12 @@ class TensorProduct(torch.nn.Module):
         """Combine channel-wise paths without expanding intermediate products."""
         if any(ins.connection_mode != "uuu" for ins in self.instructions):
             return None
+        if self.backend == "cuda":
+            remaining = config.CARTESIAN_LITERAL_TERMS
+            for degrees in couplings:
+                if not literal_coupling(degrees, remaining):
+                    return None
+                remaining -= coupling_size(*degrees)
         rows, offset = [], 0
         sections = [
             irreps.slices()

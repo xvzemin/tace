@@ -14,6 +14,185 @@ from equivariantx.tests.ops.common.torch.test_edge import program_case
 from equivariantx.utils.program import Program
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph index lifetime")
+def test_replay_pins_column_indices(monkeypatch):
+    import weakref
+    from collections import OrderedDict
+
+    from equivariantx.ops.common.cuda import execution, graph
+
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    monkeypatch.setattr(graph, "CONVOLUTION_GRAPH_MIN_CALLS", 1)
+    monkeypatch.setattr(graph, "_GRAPHS", OrderedDict())
+    x = torch.randn(9, 5, device="cuda")
+    columns = (4, 1, 2)
+    output = x.new_empty((9, 3))
+
+    def run(inputs, outputs):
+        outputs[0].copy_(execution.transform("gather", 3, inputs, columns))
+
+    graph.execute("edge_program", "column_lifetime", run, (x,), (output,))
+    pointer = weakref.ref(execution.indices(columns, x.device))
+    execution.indices.cache_clear()
+    assert pointer() is not None
+    x.normal_()
+    graph.execute("edge_program", "column_lifetime", run, (x,), (output,))
+    torch.testing.assert_close(output, x[:, columns])
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_gate_higher_derivatives(backend):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    device = "cuda" if backend == "cuda" else "cpu"
+    x = torch.tensor(
+        [[-20.0, -0.4, 0.0, 0.6, 20.0]],
+        device=device,
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    index = torch.zeros(1, dtype=torch.long, device=device)
+    program = Program()
+    operand = program.input(0, "edge", x.shape[1])
+    roots = tuple(
+        (program.unary(name, operand), i, "edge")
+        for i, name in enumerate(("silu", "sigmoid", "tanh"))
+    )
+    actual = edge_program(
+        backend, repr((tuple(program.nodes), roots)), 1, index, index, x, inline=False
+    )
+    expected = (torch.nn.functional.silu(x), x.sigmoid(), x.tanh())
+    for value, reference in zip(actual, expected, strict=True):
+        for _ in range(5):
+            (value,) = torch.autograd.grad(value.sum(), (x,), create_graph=True)
+            (reference,) = torch.autograd.grad(reference.sum(), (x,), create_graph=True)
+            torch.testing.assert_close(value, reference, atol=2e-13, rtol=2e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Graph replay")
+@pytest.mark.parametrize("shared_nodes", [False, True])
+def test_frame_replay_changes_graph_size(shared_nodes, monkeypatch):
+    from collections import OrderedDict
+
+    from equivariantx.ops.common.cuda import graph
+    from equivariantx.ops.common.cuda.edge import padding_layout
+
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    monkeypatch.setattr(graph, "_GRAPHS", OrderedDict())
+    monkeypatch.setattr(graph, "_CANDIDATES", OrderedDict())
+    monkeypatch.setattr(graph, "CONVOLUTION_GRAPH_MIN_CALLS", 1)
+    monkeypatch.setattr(graph, "MIN_EDGES", 4)
+    monkeypatch.setattr(graph, "ROW_BUCKET", 8)
+    p = Program()
+    src = p.input(0, "source", 2)
+    dst = p.input(0 if shared_nodes else 4, "target", 2)
+    rot, w, b = p.input(1, "edge", 4), p.input(2, "shared", 4), p.input(3, "shared", 2)
+    layout = repr((2, 2, 4, ((0, 1, 2, 0, ((0, 0, 1), (1, 1, 1))),)))
+    local = p.add(
+        "frame", 2, (p.binary("add", src, dst), rot, p.constant(2, 0)), (layout, 2)
+    )
+    y = p.unary("silu", p.binary("add", p.matmul(local, w, 1, 2, 2), b))
+    meta = repr((tuple(p.nodes), ((y, 0, "target"),)))
+    assert padding_layout(meta, indexed=True) is not None
+    # A padded edge still has a nonzero bias. Discarding its private node is
+    # safe, summing its output into a shared tensor would not be.
+    assert (
+        padding_layout(repr((tuple(p.nodes), ((y, 0, "shared"),))), indexed=True)
+        is None
+    )
+    previous = None
+    for nodes, edges in ((5, 12), (6, 10), (7, 13)):
+        targets = nodes if shared_nodes else nodes - 2
+        source = torch.randint(nodes, (edges,), device="cuda")
+        target = torch.randint(targets, (edges,), device="cuda")
+        shapes = [(nodes, 2), (edges, 4), (1, 4), (1, 2)]
+        if not shared_nodes:
+            shapes.append((targets, 2))
+        values = [
+            torch.randn(shape, device="cuda", dtype=torch.float64, requires_grad=True)
+            for shape in shapes
+        ]
+        actual = edge_program(
+            "cuda", meta, targets, source, target, *values, inline=False
+        )[0]
+        reference = evaluate_torch(meta, values, source, target, targets)[0]
+
+        def outputs(x):
+            energy = x.square().sum()
+            (forces,) = torch.autograd.grad(energy, values[1], create_graph=True)
+            return (
+                x,
+                forces,
+                *torch.autograd.grad(energy + forces.square().sum(), values),
+            )
+
+        for a, b in zip(outputs(actual), outputs(reference), strict=True):
+            torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-10)
+        keys = set(graph._GRAPHS)
+        assert keys
+        if previous is not None:
+            assert keys == previous
+        previous = keys
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA reductions")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_edge_dependent_projection_and_receiver_reduction(dtype):
+    from equivariantx.ops.common.cuda.edge_codegen import launch
+
+    N, E, width = 5, 103, 35
+    index = torch.randint(N - 1, (2, E), device="cuda")
+    x = torch.randn(N, 3, device="cuda", dtype=dtype)
+    matrices = torch.randn(E, 3 * width, device="cuda", dtype=dtype)
+    program = Program()
+    node, matrix = program.input(0, "source", 3), program.input(1, "edge", 3 * width)
+    root = program.matmul(node, matrix, 1, 3, width)
+    metadata = repr((tuple(program.nodes), ((root, 0, "target"),)))
+    actual = edge_program("cuda", metadata, N, *index, x, matrices, inline=False)[0]
+    messages = torch.bmm(x[index[0], None, :], matrices.view(E, 3, width))[:, 0]
+    expected = x.new_zeros(N, width).index_add_(0, index[1], messages)
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+    program = Program()
+    root = program.input(0, "edge", width)
+    for owner, ids in (("source", index[0]), ("target", index[1])):
+        metadata = repr((tuple(program.nodes), ((root, 0, owner),)))
+        output = x.new_ones(N, width)
+        launch(metadata, [messages.contiguous()], *index, [output], mode="node")
+        expected = x.new_ones(N, width).index_add_(0, ids, messages)
+        torch.testing.assert_close(output, expected, rtol=2e-5, atol=2e-5)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_transpose_before_reinterpreted_matmul(backend, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Requires CUDA.")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    program = Program()
+    x, w = program.input(0, "source", 3), program.input(1, "shared", 12)
+    transposed = program.transpose(w, 2, 6)
+    root = program.matmul(x, transposed, 1, 3, 4)
+    metadata = repr((tuple(program.nodes), ((root, 0, "target"),)))
+    index = torch.tensor([[0, 1, 2, 0], [1, 2, 0, 2]], device=device)
+    x = torch.randn(3, 3, device=device, requires_grad=True)
+    w = torch.randn(1, 12, device=device, requires_grad=True)
+    actual = edge_program(backend, metadata, 3, *index, x, w, inline=False)[0]
+    expected = evaluate_torch(metadata, (x, w), *index, 3)[0]
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        y.sin().sum(), (x, w), create_graph=True
+                    )
+                ]
+            )
+            for y in (actual, expected)
+        ]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA compilation")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("primal_inline", [False, True])

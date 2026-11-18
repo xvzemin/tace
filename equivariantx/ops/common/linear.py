@@ -53,11 +53,26 @@ def contract(metadata, role, node_type, features, weight, output):
     )[0]
 
 
-def linear_program(program, inputs, weight, bias, description):
+def path_scales(description):
+    """Group consecutive parameter slices with equal normalization."""
+    inputs, outputs, paths, _, _ = description
+    blocks = []
+    for i, j, _, scale in paths:
+        size = inputs[i][1] * outputs[j][1]
+        if size:
+            if blocks and blocks[-1][1] == scale:
+                size += blocks.pop()[0]
+            blocks.append((size, scale))
+    return tuple(blocks)
+
+
+def linear_program(program, inputs, weight, bias, description, normalized=False):
     """Encode grouped channel GEMMs without materializing edge intermediates."""
     input_shapes, output_shapes, paths, biases, groups = description
-    uniform = bool(paths) and all(path[3] == paths[0][3] for path in paths)
-    if uniform:
+    uniform = (
+        normalized or bool(paths) and all(path[3] == paths[0][3] for path in paths)
+    )
+    if uniform and not normalized:
         weight = program.scale(weight, paths[0][3])
     matrices = [
         program.scale(

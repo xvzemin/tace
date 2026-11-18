@@ -17,8 +17,47 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_dynamic_inductor():
+@pytest.mark.parametrize(
+    "feature_shape,matrix_shape",
+    [
+        ((2, 1, 4, 18), (1, 3, 1, 2, 3)),
+        ((257, 17, 18), (2, 3)),
+        ((0, 18), (2, 3)),
+    ],
+)
+def test_broadcast_matrix_gradient(feature_shape, matrix_shape):
+    x, matrix = (
+        torch.randn(*shape, 2, device="cuda", dtype=torch.float64)[
+            ..., 0
+        ].requires_grad_()
+        for shape in (feature_shape, matrix_shape)
+    )
+    values = (x, matrix)
+    losses = [fn(x, matrix, 3, 2).sin().sum() for fn in (evaluate, reference)]
+    for _ in range(4):
+        gradients = [
+            torch.autograd.grad(loss, values, create_graph=True) for loss in losses
+        ]
+        torch.testing.assert_close(*gradients, atol=3e-9, rtol=3e-10)
+        tangent = tuple(torch.randn_like(v) * 0.1 for v in values)
+        losses = [
+            sum((g * v).sum() for g, v in zip(grads, tangent)) for grads in gradients
+        ]
+
+
+def test_dynamic_inductor(monkeypatch):
+    from equivariantx.ops.common.cuda import pointwise
+
+    sources = []
+    resolve = pointwise.kernels
+
+    def traced(programs, device):
+        sources.extend(programs)
+        return resolve(programs, device)
+
+    monkeypatch.setattr(pointwise, "kernels", traced)
     run = torch.compile(evaluate, fullgraph=True, dynamic=True)
+    previous = None
     for rows in (2, 5):
         x = (torch.randn(rows, 3, 54, device="cuda", dtype=torch.float64) * 0.2)[
             ..., ::2
@@ -37,6 +76,11 @@ def test_dynamic_inductor():
             atol=3e-10,
             rtol=3e-10,
         )
+        assert sources
+        if previous is not None:
+            assert set(sources) == previous
+        previous = set(sources)
+        sources.clear()
 
 
 def test_joint_aoti(tmp_path):

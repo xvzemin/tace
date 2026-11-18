@@ -39,6 +39,7 @@ def test_import(tmp_path, allow_slice):
         {
             name
             for path in ROOT.rglob("*.py")
+            if not {"tests", "build"}.intersection(path.relative_to(ROOT).parts)
             for name in re.findall(
                 r'@torch\.library\.custom_op\(\s*"(eqx::[^"]+)"',
                 path.read_text(encoding="utf-8"),
@@ -176,7 +177,7 @@ else:
     [
         path
         for path in sorted(ROOT.rglob("*.py"))
-        if "tests" not in path.relative_to(ROOT).parts
+        if not {"tests", "build"}.intersection(path.relative_to(ROOT).parts)
         and has_documentation_examples(path)
     ],
     ids=lambda path: path.relative_to(ROOT).as_posix(),

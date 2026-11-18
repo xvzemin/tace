@@ -55,16 +55,19 @@ def embedded_case(kind, edges, shared, device):
 def test_embedded_convolution(
     kind, edges, shared, recompute, double_precision, monkeypatch
 ):
-    from equivariantx.ops.common import edge
     from equivariantx.ops import get_kernel
+    from equivariantx.ops.common import edge
     from equivariantx.ops.common.torch.edge import evaluate_recomputed, evaluate_torch
 
     metadata, program, kernel, role, values, index, network = embedded_case(
         kind, edges, shared, "cpu"
     )
-    monkeypatch.setattr(
-        edge, "evaluate", evaluate_recomputed if recompute else evaluate_torch
-    )
+
+    def evaluate(*args, inline):
+        assert not inline
+        return (evaluate_recomputed if recompute else evaluate_torch)(*args)
+
+    monkeypatch.setattr(edge, "evaluate", evaluate)
     actual = convolve(kind, metadata, values, index, network)
     operands = [values[0], network(values[1]), *values[2:]]
     expected = get_kernel(kernel, "torch")(metadata, program, *index, operands)[0]
@@ -493,8 +496,8 @@ def test_radial_network_compiled(kind, edges, monkeypatch, double_precision):
 def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    import equivariantx.ops.common.edge as edge
     import equivariantx.ops.common.cuda.execution as execution
+    import equivariantx.ops.common.edge as edge
     from equivariantx.ops.common.torch.edge import evaluate_torch
     from equivariantx.utils.metadata import parse_metadata
     from equivariantx.utils.program import Program
@@ -531,9 +534,9 @@ def test_edge_radial_projection(monkeypatch, width, edges, double_precision):
     adjoints = []
     evaluate = edge.edge_program
 
-    def record(backend, metadata, *args):
+    def record(backend, metadata, *args, inline=True):
         adjoints.append({slot for _, slot, _ in parse_metadata(metadata)[1]})
-        return evaluate(backend, metadata, *args)
+        return evaluate(backend, metadata, *args, inline=inline)
 
     monkeypatch.setattr(edge, "edge_program", record)
     # A position-dependent radial input needs no parameter adjoints on the

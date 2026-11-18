@@ -51,9 +51,71 @@ def global_matrix(module, rotation, rank):
     )
 
 
-def to_local(module, features, rotation, contract=None):
+def shared_contract(features, default_contract, matrix_contract):
+    """Use batched matrix products for the default GPU Torch schedule."""
+    if matrix_contract is not None:
+        return matrix_contract
+    if (
+        features.is_cuda
+        and default_contract
+        and config.TORCH_CARTESIAN_FRAME_MATRIX
+        and config.TORCH_TENSOR_AXIS
+        and not config.TORCH_TENSOR_AXIS_ADJOINT
+        and not config.TORCH_REFERENCE
+    ):
+        return paired_rows
+    return None
+
+
+def share_rows(module, contract, rank, channels):
+    """Bound per-frame storage relative to the Cartesian features."""
+    return (
+        contract is not None
+        and module.method == "direct"
+        and 2 <= rank <= 4
+        and channels >= config.CARTESIAN_FRAME_MATRIX_MIN_CHANNELS
+    )
+
+
+def paired_rows(rows, rotation, rank):
+    """Rotate Cartesian matrix rows by grouping adjacent tensor indices."""
+    if rank == 2:
+        return tensor_axis.transform(
+            rows.to(rotation), rotation.transpose(-1, -2).unsqueeze(-3), rank
+        )
+    pair = (
+        (rotation[..., :, None, :, None] * rotation[..., None, :, None, :])
+        .flatten(-4, -3)
+        .flatten(-2)
+    )
+    left = pair if rank == 4 else rotation
+    rows = rows.to(rotation)
+    count, inner, outer = rows.shape[-2], left.shape[-1], pair.shape[-1]
+    basis = rows.reshape(count, inner, outer).transpose(0, 1).reshape(inner, -1)
+    value = (left.transpose(-1, -2) @ basis).unflatten(-1, (count, outer))
+    value = value.transpose(-3, -2).flatten(-3, -2) @ pair
+    return value.unflatten(-2, (count, inner)).flatten(-2)
+
+
+def cartesian_rows(module, key, features, count, transpose, row_contract):
+    """Apply the repeated Cartesian rows or their exact transpose."""
+    if row_contract is not None:
+        return row_contract(features, list(module.frame_codes[key]), transpose)
+    index = getattr(module, f"{key}_index")
+    signs = getattr(module, f"{key}_signs").to(features)
+    if transpose:
+        return features.new_zeros((*features.shape[:-1], count)).index_add(
+            -1, index, features * signs
+        )
+    return features.index_select(-1, index) * signs
+
+
+def to_local(
+    module, features, rotation, contract=None, matrix_contract=None, row_contract=None
+):
     """Contract Cartesian indices without global edge-frame expansion."""
     default_contract = contract is None
+    matrix_contract = shared_contract(features, default_contract, matrix_contract)
     contract = tensor_axis.select() if contract is None else contract
     rotation = rotation.to(features)
     direction = rotation[..., 1, :].unsqueeze(-2)
@@ -67,13 +129,30 @@ def to_local(module, features, rotation, contract=None):
             .reshape(*features.shape[:-1], mul, 3**l)
             .expand(*shape, mul, 3**l)
         )
-        matrix = default_contract and matrix_enabled(module, features, contract, l, mul)
+        shared = share_rows(module, matrix_contract, l, mul)
+        matrix = shared or (
+            default_contract and matrix_enabled(module, features, contract, l, mul)
+        )
         if matrix:
+            key = f"analysis_{l}"
+            grouped = shared and key in module.frame_codes
             if l not in matrices:
-                matrices[l] = local_matrix(module, rotation, l, len(paths))
-            values = (tensor @ matrices[l].transpose(-1, -2)).split(
-                tuple(2**m for m in range(len(paths))), -1
-            )
+                matrices[l] = (
+                    matrix_contract(
+                        getattr(module, f"{key}_rows" if grouped else key),
+                        rotation,
+                        l,
+                    )
+                    if shared
+                    else local_matrix(module, rotation, l, len(paths))
+                )
+            rows = matrices[l]
+            local = tensor @ rows.transpose(-1, -2)
+            if grouped:
+                local = cartesian_rows(
+                    module, key, local, rows.shape[-2], False, row_contract
+                )
+            values = local.split(tuple(2**m for m in range(len(paths))), -1)
         elif module.method == "projection":
             restriction = module.restrictions[str(l)]
             values = (
@@ -109,9 +188,12 @@ def to_local(module, features, rotation, contract=None):
     )
 
 
-def to_global(module, features, rotation, contract=None):
+def to_global(
+    module, features, rotation, contract=None, matrix_contract=None, row_contract=None
+):
     """Contract Cartesian indices without global edge-frame expansion."""
     default_contract = contract is None
+    matrix_contract = shared_contract(features, default_contract, matrix_contract)
     contract = tensor_axis.select() if contract is None else contract
     rotation = rotation.to(features)
     direction = rotation[..., 1, :].unsqueeze(-2)
@@ -142,10 +224,31 @@ def to_global(module, features, rotation, contract=None):
                 value = value @ getattr(module, f"basis_{l}_{m}").to(features)
                 value = tensor_axis.transform(value, axes, m, contract)
             values.append(value)
-        if default_contract and matrix_enabled(module, features, contract, l, mul):
+        shared = share_rows(module, matrix_contract, l, mul)
+        if shared or (
+            default_contract and matrix_enabled(module, features, contract, l, mul)
+        ):
+            key = f"synthesis_{l}"
+            grouped = shared and key in module.frame_codes
             if l not in matrices:
-                matrices[l] = global_matrix(module, rotation, l)
-            value = (torch.cat(values, -1) @ matrices[l]).expand(*shape, mul, 3**l)
+                matrices[l] = (
+                    matrix_contract(
+                        getattr(module, f"{key}_rows")
+                        if grouped
+                        else getattr(module, key).T,
+                        rotation,
+                        l,
+                    )
+                    if shared
+                    else global_matrix(module, rotation, l)
+                )
+            rows = matrices[l]
+            value = torch.cat(values, -1)
+            if grouped:
+                value = cartesian_rows(
+                    module, key, value, rows.shape[-2], True, row_contract
+                )
+            value = (value @ rows).expand(*shape, mul, 3**l)
         elif module.method == "projection":
             restriction = module.restrictions[str(l)]
             value = (

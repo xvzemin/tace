@@ -7,7 +7,6 @@ import zipfile
 
 import pytest
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.dynamic_spec import (
     ParamsSpec,
     ShapesSpec,
@@ -147,18 +146,36 @@ def test_other_methods_keep_axis_schedule(method, inverse, monkeypatch):
 
 
 @pytest.mark.parametrize("inverse", [False, True])
-@pytest.mark.skipif(
-    torch.version.cuda is None, reason="Requires a CUDA-enabled PyTorch build"
-)
-def test_cuda_keeps_axis_schedule(inverse, monkeypatch):
-    layer = co2.LocalFrame("64x3e").double()
-    calls = observe_matrix(monkeypatch, inverse)
-    width = layer.output_dim if inverse else layer.input_dim
-    with FakeTensorMode(allow_non_fake_inputs=True):
-        x = torch.empty(3, width, device="cuda", dtype=torch.float64)
-        r = torch.empty(3, 3, 3, device="cuda", dtype=torch.float64)
-        capture(layer, inverse, (x, r))
-    assert calls == []
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_gpu_shared_cartesian_rows(inverse, monkeypatch):
+    layer = co2.LocalFrame("64x2o+64x2e+64x4e", mmax=2, backend="torch").double().cuda()
+    values = tuple(
+        v.cuda().detach().requires_grad_()
+        for v in inputs(layer, inverse, (1, 2), (3, 1))
+    )
+    calls = []
+    original = kernel.paired_rows
+
+    def rotated(rows, rotation, rank):
+        calls.append(rank)
+        return original(rows, rotation, rank)
+
+    monkeypatch.setattr(kernel, "paired_rows", rotated)
+    actual = operation(layer, inverse)(*values)
+    assert calls == [2, 4]
+    with monkeypatch.context() as flags:
+        flags.setattr(config, "TORCH_REFERENCE", True)
+        expected = operation(layer, inverse)(*values)
+    assert calls == [2, 4]
+    torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-11)
+    losses = [y.sin().sum() for y in (actual, expected)]
+    for _ in range(3):
+        grads = [
+            torch.autograd.grad(loss, values, create_graph=True) for loss in losses
+        ]
+        torch.testing.assert_close(*grads, atol=3e-9, rtol=3e-10)
+        tangents = tuple(torch.randn_like(v) * 0.1 for v in values)
+        losses = [sum((g * v).sum() for g, v in zip(gs, tangents)) for gs in grads]
 
 
 @pytest.mark.parametrize("inverse", [False, True])

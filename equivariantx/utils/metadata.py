@@ -11,6 +11,24 @@ import torch
 __all__ = ["KernelPlan", "compact_metadata", "kernel_plan", "parse_metadata"]
 
 
+@lru_cache(maxsize=256)
+@torch.compiler.assume_constant_result
+def column_schedule(indices, size):
+    """Identify contiguous channel broadcasts and their reduction adjoints."""
+    if not indices:
+        return None
+    start, stop = min(indices), max(indices) + 1
+    width = stop - start
+    if start < 0 or stop > size or len(indices) % width:
+        return None
+    repeats = len(indices) // width
+    if indices == tuple(range(start, stop)) * repeats:
+        return start, width, repeats, False
+    if indices == tuple(i for i in range(start, stop) for _ in range(repeats)):
+        return start, width, repeats, True
+    return None
+
+
 def static_dimensions(tensor, dimensions=None):
     """Specialize model widths while leaving unselected batch dimensions dynamic."""
     dimensions = tuple(range(tensor.ndim)) if dimensions is None else dimensions

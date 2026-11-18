@@ -72,11 +72,9 @@ class EdgeProgram(torch.autograd.Function):
                     metadata, list(inputs), source, target, num_nodes
                 )
             )
-        from .torch.edge import evaluate_torch
+        from .torch.edge import evaluate_tiled
 
-        outputs = evaluate_torch(
-            metadata, inputs, source, target, num_nodes, optimized=True
-        )
+        outputs = evaluate_tiled(metadata, inputs, source, target, num_nodes)
         return tuple(value.view_as(value) for value in outputs)
 
     @staticmethod

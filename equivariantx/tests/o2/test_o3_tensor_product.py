@@ -171,12 +171,16 @@ def test_o3_tensor_product_normalization_and_second_derivatives(
         torch.testing.assert_close(actual_grad, expected_grad, atol=2e-6, rtol=2e-8)
 
 
-def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(double_precision):
+@pytest.mark.parametrize("vector", ["1o", "1e"])
+def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(
+    double_precision, vector
+):
     module = o2.O3TensorProduct(
-        "2x1o",
-        "1x1o",
+        f"2x{vector}",
+        vector,
         "2x0e+2x1e+2x2e",
         [(0, 0, i, "uvu", True) for i in range(3)],
+        vector_parity=o3.Irrep(vector).p,
     )
     reference = o3.TensorProduct(
         module.irreps_in1,
@@ -193,9 +197,8 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(double_pre
         module.irreps_out,
         inverse=True,
     )
-    expected = reference(
-        x, o3.spherical_harmonics([1], r, True, "component")[:, None], module.weight
-    )
+    harmonics = o3.SphericalHarmonics(vector, True, "component", irreps_in=vector)
+    expected = reference(x, harmonics(r)[:, None], module.weight)
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
     d, di = o2.WignerD(1, 2)(r)
     with pytest.raises(ValueError, match="orders"):

@@ -21,7 +21,7 @@ def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision
         pytest.skip("CUDA is unavailable")
     module, reference = (
         CartesianProduct(1, 1, 2, backend="cuda").to(device),
-        CartesianProduct(1, 1, 2).to(device),
+        CartesianProduct(1, 1, 2, backend="torch").to(device),
     )
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     for count in (3, 0):
@@ -49,9 +49,11 @@ def test_reference_bypasses_children(device, grouped, monkeypatch, double_precis
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     module = (
-        co3.ictp.TensorProduct("2x1o", "2x1o", "2x2e", [(0, 0, 0, "uvu", True)])
+        co3.ictp.TensorProduct(
+            "2x1o", "2x1o", "2x2e", [(0, 0, 0, "uvu", True)], backend="torch"
+        )
         if grouped
-        else CartesianProduct(3, 3, 6)
+        else CartesianProduct(3, 3, 6, backend="torch")
     ).to(device)
     reference = copy.deepcopy(module)
 

@@ -469,6 +469,64 @@ def test_equflash_reject_efficient():
 
 
 @pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_equflash_pretrained(implementation):
+    path = os.environ.get("EQX_EQUFLASH_CHECKPOINT")
+    if not path or not torch.cuda.is_available():
+        pytest.skip("Requires CUDA and EQX_EQUFLASH_CHECKPOINT")
+    pytest.importorskip("GGNN")
+    from ase.build import bulk
+    from ase.neighborlist import neighbor_list
+    from GGNN.model.EquFlashV2 import EquFlashV2
+
+    torch.set_default_dtype(torch.float32)
+    checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
+    config = checkpoint["config"]["model"]
+    assert config["interaction_kwargs"]["conv_type"] == "full"
+    model = EquFlashV2(deepcopy(config))
+    model.load_state_dict(
+        {
+            k.removeprefix("module.model."): v
+            for k, v in checkpoint["state_dict"].items()
+            if k.startswith("module.model.") and not k.endswith("z_to_onehot_tensor")
+        }
+    )
+    del checkpoint
+    model.cuda().eval()
+    atoms = bulk("Fe", "bcc", a=2.87, cubic=True)
+    atoms.positions[1] += [0.05, -0.03, 0.02]
+    i, j, vectors = neighbor_list("ijD", atoms, config["cutoff"])
+    data = {
+        "atomic_numbers": torch.as_tensor(atoms.numbers, device="cuda"),
+        "edge_index": torch.stack(
+            [torch.as_tensor(k, device="cuda", dtype=torch.int32) for k in (i, j)]
+        ),
+        "edge_vec": torch.as_tensor(vectors, device="cuda", dtype=torch.float32),
+        "cell": torch.as_tensor(atoms.cell.array, device="cuda", dtype=torch.float32)[
+            None
+        ],
+        "batch": torch.zeros(len(atoms), dtype=torch.long, device="cuda"),
+        "natoms": torch.tensor([len(atoms)], device="cuda"),
+    }
+
+    def predict(layer):
+        out = layer({k: v.clone() for k, v in data.items()})
+        return tuple(out[k].detach() for k in ("energy", "forces", "stress"))
+
+    expected = predict(model)
+    converted = convert_equflash_to_eqx(
+        model,
+        implementation=implementation,
+        inplace=True,
+        backend="cuda",
+        stream_radial=True,
+    )
+    actual = predict(converted)
+    errors = [(a - b).abs().max().item() for a, b in zip(actual, expected)]
+    print(f"EquFlashV2 {implementation}: max |delta E,F,S| = {errors}")
+    torch.testing.assert_close(actual, expected, atol=5e-5, rtol=2e-5)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
 def test_nequip_package(implementation, atoms):
     path = os.environ.get("EQX_NEQUIP_CHECKPOINT")
     if not path:
@@ -816,7 +874,7 @@ def test_sevennet_pretrained(implementation):
     converted = convert_sevennet_to_eqx(original, implementation=implementation)
     atoms = bulk("Fe", "bcc", a=2.87, cubic=True)
     atoms.positions[1] += [0.05, -0.03, 0.02]
-    for modal in ("omat24", "matpes_r2scan"):
+    for modal in original.modal_map or (None,):
         results = []
         for model in (original, converted):
             atoms.calc = SevenNetCalculator(
@@ -830,4 +888,7 @@ def test_sevennet_pretrained(implementation):
             a, b = torch.as_tensor(a), torch.as_tensor(b)
             errors.append((a - b).abs().max().item())
             torch.testing.assert_close(a, b, atol=5e-5, rtol=2e-5)
-        print(f"SevenNet {implementation} {modal}: max |delta E,F,S| = {errors}")
+        print(
+            f"SevenNet {implementation} {modal or 'single head'}: "
+            f"max |delta E,F,S| = {errors}"
+        )

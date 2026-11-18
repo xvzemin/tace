@@ -1,5 +1,6 @@
 """Tiled radial weighting, local channel maps, gates and graph reduction."""
 
+from ....common.cuda.channel_linear import scale_parameters
 from ....common.edge import evaluate as edge_program
 from ....common.uv_o2 import prepare, program_inputs
 
@@ -27,6 +28,9 @@ def evaluate(
         vectors,
         radial_network,
     )
+    parameters = list(parameters)
+    for i, blocks in enumerate(module.path_scales):
+        parameters[2 * i] = scale_parameters(parameters[2 * i], blocks)
     metadata, inputs = program_inputs(
         module,
         features,
@@ -40,6 +44,7 @@ def evaluate(
         vectors,
         radial_network,
         False,
+        normalized=True,
     )
     return edge_program(
         metadata,

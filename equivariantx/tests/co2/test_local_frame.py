@@ -47,8 +47,8 @@ def test_projection_reference_bypasses_children(device, monkeypatch, double_prec
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    module = co2.LocalFrame("2x2e", method="projection").to(device)
-    reference = co2.LocalFrame("2x2e", method="projection").to(device)
+    module = co2.LocalFrame("2x2e", method="projection", backend="torch").to(device)
+    reference = co2.LocalFrame("2x2e", method="projection", backend="torch").to(device)
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
 
     def forbidden(*args, **kwargs):

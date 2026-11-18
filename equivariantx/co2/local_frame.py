@@ -73,6 +73,7 @@ class LocalFrame(torch.nn.Module):
     Keeping every order makes the map invertible on the STF subspace.
     ``projection`` first constructs ``3**m`` transverse tensors. ``rotation``
     first rotates the full ``3**l`` tensor. ``direct`` avoids both intermediates.
+    Wide direct maps can share the rotated Cartesian rows across channels.
 
     Examples
     --------
@@ -135,15 +136,15 @@ class LocalFrame(torch.nn.Module):
                         )
             entries.append((section, mul, ir.l, ir.p != (-1) ** ir.l, tuple(paths)))
         self.entries = tuple(entries)
+        self.frame_codes = {}
         if method != "projection":
             for l in sorted({ir.l for _, ir in self.irreps_in}):
-                self.register_buffer(
-                    f"synthesis_{l}",
-                    self.synthesis_matrix(l, min(l, self.mmax)).to(
-                        torch.get_default_dtype()
-                    ),
-                    persistent=False,
-                )
+                matrices, codes = self.frame_matrices(l)
+                self.frame_codes.update(codes)
+                for name, value in matrices.items():
+                    if value.is_floating_point():
+                        value = value.to(torch.get_default_dtype())
+                    self.register_buffer(name, value, persistent=False)
 
     @staticmethod
     def basis_matrix(l, m):
@@ -163,6 +164,17 @@ class LocalFrame(torch.nn.Module):
         return planar * 3 ** (l - m) + (3 ** (l - m) - 1) // 2
 
     @classmethod
+    def analysis_matrix(cls, l, mmax):
+        """Return the Cartesian restriction rows at the reference axis."""
+        rows = []
+        for m in range(mmax + 1):
+            basis = cls.basis_matrix(l, m) * restriction_scale(l, m)
+            block = basis.new_zeros(2**m, 3**l)
+            block[:, cls.planar_indices(l, m)] = basis
+            rows.append(block)
+        return torch.cat(rows)
+
+    @classmethod
     def synthesis_matrix(cls, l, mmax):
         """Return the fixed Cartesian reconstruction matrix at the y axis."""
         basis = co3.path_matrix(l)
@@ -173,6 +185,33 @@ class LocalFrame(torch.nn.Module):
             for m in range(mmax + 1)
         ]
         return basis @ torch.cat(blocks, dim=0).T
+
+    def frame_matrices(self, l):
+        """Return reference-axis matrices and exact signed Cartesian row repetitions."""
+        mmax = min(l, self.mmax)
+        synthesis = self.synthesis_matrix(l, mmax)
+        matrices, codes = {f"synthesis_{l}": synthesis}, {}
+        if self.method != "direct" or not 2 <= l <= 4:
+            return matrices, codes
+        analysis = self.analysis_matrix(l, mmax)
+        matrices[f"analysis_{l}"] = analysis
+        if l < 3 or mmax < 2:
+            return matrices, codes
+        for name, rows in (("analysis", analysis), ("synthesis", synthesis.T)):
+            # Equal (possibly opposite) rows stay equal under every rotation.
+            pivot = rows.gather(1, rows.abs().argmax(1, keepdim=True)).flatten()
+            signs = torch.where(
+                pivot < 0, -torch.ones_like(pivot), torch.ones_like(pivot)
+            )
+            unique, index = torch.unique(
+                rows * signs[:, None], dim=0, return_inverse=True
+            )
+            key = f"{name}_{l}"
+            matrices[f"{key}_rows"] = unique
+            matrices[f"{key}_index"] = index
+            matrices[f"{key}_signs"] = signs
+            codes[key] = tuple(((index + 1) * signs.long()).tolist())
+        return matrices, codes
 
     def rotate(self, features, rotation):
         """Rotate every Cartesian index, retaining the full input layout."""
@@ -220,8 +259,8 @@ class LocalFrame(torch.nn.Module):
                 self._buffers[name] = matrix.to(getattr(self, name))
         if self.method != "projection":
             for l in {ir.l for _, ir in self.irreps_in}:
-                name = f"synthesis_{l}"
-                self._buffers[name] = self.synthesis_matrix(l, min(l, self.mmax)).to(
-                    getattr(self, name)
-                )
+                matrices, _ = self.frame_matrices(l)
+                for name, matrix in matrices.items():
+                    if matrix.is_floating_point():
+                        self._buffers[name] = matrix.to(getattr(self, name))
         return self

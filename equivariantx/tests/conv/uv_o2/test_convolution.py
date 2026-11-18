@@ -54,6 +54,20 @@ class RadialConvolution(torch.nn.Module):
         )
 
 
+def test_program_cache_releases_module():
+    import gc
+    import weakref
+
+    layer = RadialConvolution("torch", "full").conv
+    owner = weakref.ref(layer)
+    layer.prepare_program(0, 0, False, True)
+    layer.output_program(0, 0, False, True)
+    layer.convolution_program(0, 0, False, True)
+    del layer
+    gc.collect()
+    assert owner() is None
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("radial_mode", ["last", "full"])
 def test_transverse_functional(backend, radial_mode, monkeypatch, double_precision):
@@ -190,6 +204,9 @@ def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precis
         return loss, force, *torch.autograd.grad(loss, parameters)
 
     graph = make_fx(joint)(*inputs)
+    assert torch.ops.eqx.path_scale.default in {
+        node.target for node in graph.graph.nodes
+    }
     assert (
         sum(
             node.target == torch.ops.eqx.edge_program.default
@@ -504,6 +521,55 @@ def test_uv_o2_transverse_compile(backend, geometry, double_precision):
             ]
             for a, b in zip(*gradients):
                 torch.testing.assert_close(a, b, atol=2e-8, rtol=2e-8)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Tiled torch execution on CUDA"
+)
+def test_packed_radial_tiled_joint(monkeypatch, double_precision):
+    from equivariantx.ops import config
+
+    model = RadialConvolution("torch", "full").cuda()
+    index = torch.tensor([[0, 1, 0, 2, 2, 0, 1], [2, 2, 0, 1, 1, 0, 0]], device="cuda")
+    x = torch.randn(5, model.conv.input_dim, device="cuda", requires_grad=True)
+    vectors = torch.randn(7, 3, device="cuda", requires_grad=True)
+    basis = torch.randn(7, 3, device="cuda", requires_grad=True)
+    variables = x, vectors, basis, *model.parameters()
+    cutoff = vectors.square().sum(-1, keepdim=True).sigmoid()
+    rotation = model.conv.wigner.forward_packed(vectors)
+    parameters = model.up.weight, model.up.bias, model.down.weight, model.down.bias
+    outputs = []
+    monkeypatch.setattr(config, "TORCH_EDGE_TILE_BYTES", 144)
+    for ordinary in (False, True):
+        monkeypatch.setattr(config, "TORCH_REFERENCE", ordinary)
+        outputs.append(
+            model.conv(
+                x,
+                None,
+                basis,
+                index,
+                rotation,
+                None,
+                cutoff,
+                parameters,
+                radial_network=model.radial,
+            )
+        )
+    for _ in range(3):
+        torch.testing.assert_close(*outputs, rtol=2e-9, atol=2e-9)
+        seed = torch.randn_like(outputs[0]) * 0.1
+        outputs = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (y.sin() * seed).sum(), variables, create_graph=True
+                    )
+                ]
+            )
+            for y in outputs
+        ]
+    torch.testing.assert_close(*outputs, rtol=2e-9, atol=2e-9)
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])

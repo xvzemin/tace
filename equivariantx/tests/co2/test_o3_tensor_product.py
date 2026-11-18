@@ -352,6 +352,7 @@ def test_reference_bypasses_children(device, spherical, monkeypatch, double_prec
         output_basis=basis,
         internal_weights=False,
         shared_weights=False,
+        backend="torch",
     ).to(device)
     reference = copy.deepcopy(module)
 

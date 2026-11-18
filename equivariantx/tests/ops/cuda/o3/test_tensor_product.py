@@ -15,6 +15,7 @@ from torch.fx.experimental.dynamic_spec import (
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import config
+from equivariantx.ops.common.compilation import edge_work
 from equivariantx.tests.ops.torch.o3.test_tensor_product import (
     convolution_training_problem,
     training_problem,
@@ -31,6 +32,7 @@ def test_native_joint_package(kind, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
     monkeypatch.setattr(config, "FACTORIZED_INLINE", False)
     operation, values = training_problem(kind, "cuda", "cuda")
+    reference, _ = training_problem(kind, "torch", "cuda")
     operation(*values)
     graph = make_fx(operation)(*values)
     graph.graph.eliminate_dead_code()
@@ -43,7 +45,7 @@ def test_native_joint_package(kind, monkeypatch, tmp_path):
     records = []
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     for _ in range(3):
-        expected = operation(*values)
+        expected = reference(*values)
         records.append(
             {
                 "inputs": tuple(v.detach().cpu() for v in values),
@@ -88,9 +90,9 @@ def test_radial_joint_package(mode, width, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "EDGE_PROGRAM_INLINE", True)
     dynamic = mode == "full"
     operation, values = convolution_training_problem(mode, width, dynamic=dynamic)
-    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
-    operation(*values)
-    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+    reference, _ = convolution_training_problem(
+        mode, width, backend="torch", dynamic=dynamic
+    )
     export_shapes = None
     if dynamic:
 
@@ -119,7 +121,10 @@ def test_radial_joint_package(mode, width, monkeypatch, tmp_path):
         graph = make_fx(operation)(*values)
     graph.graph.eliminate_dead_code()
     graph.recompile()
-    assert "eqx.edge_program" not in graph.code
+    preserved = [
+        n for n in graph.graph.nodes if n.target == torch.ops.eqx.edge_program.default
+    ]
+    assert all(edge_work(n.args[0]) > config.COMPILE_MAX_INLINE_WORK for n in preserved)
     exported = torch.export.export(
         graph,
         tuple(v.detach() for v in values),
@@ -145,7 +150,7 @@ def test_radial_joint_package(mode, width, monkeypatch, tmp_path):
                 *values[start:],
             )
         for _ in range(3):
-            expected = operation(*values)
+            expected = reference(*values)
             records.append(
                 {
                     "inputs": tuple(v.detach().cpu() for v in values),

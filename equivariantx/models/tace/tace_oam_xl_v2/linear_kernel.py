@@ -1,5 +1,7 @@
 """Native matrix products for grouped irrep channel maps."""
 
+import torch
+
 
 def run_program(metadata, program, operands):
     """Evaluate channel maps and their adjoints using strided matrix products."""
@@ -11,6 +13,7 @@ def run_program(metadata, program, operands):
     results = linear_outputs(metadata, program, operands)
     for result in results:
         result.zero_()
+    tf32 = operands[0].dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32
 
     def view(value, start, channels, dim, layout):
         block = value[:, start : start + channels * dim]
@@ -26,11 +29,16 @@ def run_program(metadata, program, operands):
                 if role == 2:
                     value = view(operands[x], ix, ci, dim, layout_x) @ operands[w]
                     view(results[slot], iy, co, dim, layout_y).add_(value, alpha=scale)
-                elif role == 0:
-                    value = view(operands[y], iy, co, dim, layout_y) @ operands[w].T
-                    view(results[slot], ix, ci, dim, layout_x).add_(value, alpha=scale)
+                    continue
+                b = view(operands[y], iy, co, dim, layout_y)
+                # Match the primal's post-GEMM scale before TF32 rounds dY.
+                alpha = scale
+                if tf32 and scale != 1:
+                    b, alpha = b * scale, 1
+                if role == 0:
+                    value = b @ operands[w].T
+                    view(results[slot], ix, ci, dim, layout_x).add_(value, alpha=alpha)
                 else:
                     a = view(operands[x], ix, ci, dim, layout_x).reshape(-1, ci)
-                    b = view(operands[y], iy, co, dim, layout_y).reshape(-1, co)
-                    results[slot].addmm_(a.T, b, alpha=scale)
+                    results[slot].addmm_(a.T, b.reshape(-1, co), alpha=alpha)
     return results

@@ -60,6 +60,8 @@ class IctdUuuFullyConnectedSymmetricContraction(UuuFullyConnectedSymmetricContra
     -----
     Features use flattened ``mul_ir`` storage with STF Cartesian inputs.
     The caller supplies the element-dependent weights for every order.
+    For small angular bases, the PyTorch polynomial coefficients include
+    the intermediate Cartesian projections.
 
     Examples
     --------

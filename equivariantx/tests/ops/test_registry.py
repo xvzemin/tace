@@ -16,6 +16,8 @@ def test_backend_selection(monkeypatch, backend):
 
     monkeypatch.setattr(torch.cuda, "is_available", probe)
     assert resolve_backend() == backend
+    monkeypatch.setitem(IMPLEMENTATIONS, ("selection_test", backend), torch.sin)
+    assert get_kernel("selection_test") is get_kernel("selection_test", backend)
     assert resolve_backend(None, "cpu") == "torch"
     assert resolve_backend(None, "cuda:0") == backend
     assert resolve_backend("torch") == "torch"
@@ -54,7 +56,7 @@ def test_dispatch_rejects_reduced_storage(monkeypatch, reference):
     monkeypatch.setitem(IMPLEMENTATIONS, ("storage_test", "torch"), torch.sin)
     monkeypatch.setattr(config, "TORCH_REFERENCE", reference)
     with pytest.raises(TypeError, match="float32 or float64"):
-        get_kernel("storage_test")(torch.ones(3, dtype=torch.bfloat16))
+        get_kernel("storage_test", "torch")(torch.ones(3, dtype=torch.bfloat16))
 
 
 def test_compiled_reference_switch(monkeypatch):
@@ -62,7 +64,7 @@ def test_compiled_reference_switch(monkeypatch):
     monkeypatch.setitem(REFERENCES, "compiled_switch_test", torch.cos)
 
     def function(value):
-        return get_kernel("compiled_switch_test")(value)
+        return get_kernel("compiled_switch_test", "torch")(value)
 
     compiled = torch.compile(function, backend="eager", fullgraph=True)
     value = torch.randn(3)
@@ -91,7 +93,7 @@ def test_reference_switch_changes_cached_dispatch(monkeypatch):
     for enabled in (False, True, False):
         monkeypatch.setattr(config, "TORCH_REFERENCE", enabled)
         expected = torch.cos(value) if enabled else torch.sin(value)
-        torch.testing.assert_close(get_kernel("switch_test")(value), expected)
+        torch.testing.assert_close(get_kernel("switch_test", "torch")(value), expected)
 
 
 def test_execution_provider(monkeypatch):

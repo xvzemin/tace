@@ -7,6 +7,7 @@ import torch
 
 from ....utils.metadata import parse_metadata
 from ....utils.outputs import symmetric_outputs
+from ... import config
 from ..polynomial import polynomial_groups
 from .runtime import kernels, runtime
 
@@ -186,6 +187,7 @@ def source(
     dimensions,
     reduce,
     rows=16,
+    ordered=True,
 ):
     """Generate a single evaluation for each output or derivative entry."""
     cases = []
@@ -214,7 +216,9 @@ def source(
             code = [
                 f"scalar acc[{len(batch)}]={{}}; long long previous=-1;",
                 f"for(int row=0;row<{rows} && start+row<nodes;++row) {{",
-                "long long n=order[start+row],z=types[n];",
+                "long long n="
+                + ("order[start+row]" if ordered else "start+row")
+                + ",z=types[n];",
                 f"if(previous>=0 && z!=previous) {{ {''.join(stores)} }} previous=z;",
                 *code,
                 "}",
@@ -270,6 +274,7 @@ def contract(metadata, program, node_type, operands):
     if not nodes:
         return outputs
     programs = []
+    needs_order = False
     for reduce in (False, True):
         batches = polynomial_batches(metadata, program, reduce)
         if not batches:
@@ -279,6 +284,12 @@ def contract(metadata, program, node_type, operands):
             if reduce
             else 16
         )
+        ordered = (
+            reduce
+            and nodes >= config.SYMMETRIC_SORT_MIN_NODES
+            and any(outputs[batch[0][0][0]].shape[0] > 1 for batch in batches)
+        )
+        needs_order |= ordered
         code, count = source(
             metadata,
             program,
@@ -289,13 +300,10 @@ def contract(metadata, program, node_type, operands):
             tuple(output.shape[1] for output in outputs),
             reduce,
             rows,
+            ordered,
         )
         programs.append((code, count, reduce, rows))
-    order = (
-        node_type.argsort()
-        if any(reduce for _, _, reduce, _ in programs)
-        else node_type
-    )
+    order = node_type.argsort() if needs_order else node_type
     args = [x.data_ptr() for x in operands]
     args += [
         node_type.data_ptr(),

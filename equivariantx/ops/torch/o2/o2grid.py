@@ -50,32 +50,31 @@ def from_grid_reference(module, features, split=False):
     return combine(module, (value @ module.analysis.T).flatten(-3, -2), split)
 
 
-def operands(module):
+def operands(module, split=False):
     return (
-        module.input_index,
-        module.output_index,
+        module.split_input_index if split else module.input_index,
+        module.split_output_index if split else module.output_index,
         module.input_sign,
-        module.output_sign,
+        module.split_output_sign if split else module.output_sign,
         module.num_sheets,
         2 * module.mmax + 1,
     )
 
 
 def to_grid_program(module, features, features2, transform):
-    if features2 is None:
-        value = transform(features, *operands(module)).unflatten(
-            -1, module._coefficient_shape
-        )
-    else:
-        value = grid.mix(coefficients(module, features, features2))
+    split = features2 is not None
+    if split:
+        features = torch.cat((features, features2), -1)
+    value = transform(features, *operands(module, split)).unflatten(
+        -1, module._coefficient_shape
+    )
     return value @ module.synthesis.T
 
 
 def from_grid_program(module, features, split, transform):
     value = features @ module.analysis.T
-    if split:
-        return combine(module, grid.mix(value), True)
-    return transform(value.flatten(-3), *operands(module), True)
+    value = transform(value.flatten(-3), *operands(module, split), True)
+    return value.chunk(2, dim=-1) if split else value
 
 
 def compiling():

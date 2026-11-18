@@ -6,7 +6,7 @@ import torch
 from e3nn import o3
 
 from ...o3.linear import ElementLinear
-from ...ops import resolve_backend
+from ...ops import config, resolve_backend
 from ...ops.precision import validate_module_precision, validate_precision
 from ...ops.torch.mbe.ace import symmetric_contraction as torch_kernel
 
@@ -158,6 +158,14 @@ class UuuSymmetricContraction(torch.nn.Module):
         self.metadata = repr(
             (self.input_dim, num_paths, self.output_dim, self.correlation, rows)
         )
+        self.monomial_count = 0
+        if (
+            backend == "torch"
+            and self.num_channels >= config.SYMMETRIC_WIDE_CHANNELS
+            and len(rows) >= config.SYMMETRIC_WIDE_TERMS
+            and self.correlation <= 3
+        ):
+            torch_kernel.register_monomials(self, rows)
         for degree in range(1, self.correlation + 1):
             terms = [row for row in rows if len(row[0]) == degree]
             self.register_buffer(
@@ -246,6 +254,8 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
     Inputs use flattened ``mul_ir`` storage. The module owns no learned weights.
     Linear maps mix channels of equivalent irreps at each correlation order.
     Tensor products remain channel-wise and retain the supplied coupling paths.
+    For small angular bases, PyTorch combines compatible orders in one
+    coefficient contraction per output irrep.
     Both backends support higher derivatives. CUDA weight gradients use
     atomic reductions and are not bitwise deterministic.
 
@@ -350,20 +360,23 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
                     if weighted:
                         for input_ir, out_ir, sw, scale in linear_paths:
                             linear_slice = linear.irreps_in.slices()[input_ir]
-                            if linear_slice.start <= sz < linear_slice.stop:
+                            start = max(sz, linear_slice.start)
+                            stop = min(sz + mul * ir3.dim, linear_slice.stop)
+                            if start < stop:
+                                first = (start - sz) // ir3.dim
                                 cout = linear.irreps_out[out_ir].mul
                                 sout = linear.irreps_out.slices()[out_ir].start
                                 weight_offset = (
-                                    sw + (sz - linear_slice.start) // ir3.dim * cout
+                                    sw + (start - linear_slice.start) // ir3.dim * cout
                                 )
                                 rows.append(
                                     (
                                         (
-                                            sx + a,
-                                            sy + b,
+                                            sx + first * ir1.dim + a,
+                                            sy + first * ir2.dim + b,
                                             weight_offset,
                                             sout + c,
-                                            mul,
+                                            (stop - start) // ir3.dim,
                                             cout,
                                             ir1.dim,
                                             ir2.dim,
@@ -395,6 +408,9 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
             if getattr(linear, "output_basis", "cartesian") == "cartesian"
             else None
             for linear in linears
+        )
+        self.channel_polynomial = (
+            torch_kernel.build_channel_polynomial(self) if backend == "torch" else None
         )
 
     @staticmethod

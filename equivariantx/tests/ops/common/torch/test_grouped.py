@@ -5,9 +5,11 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.torch.grouped import (
+    channel_groups,
     element_expert_path,
     element_grouping,
     element_path,
+    indexed_channel_product,
 )
 from equivariantx.ops.common.torch.linear import (
     element_linear_blocks,
@@ -28,6 +30,53 @@ def exact_matmul():
     torch.backends.cuda.matmul.allow_tf32 = False
     yield
     torch.backends.cuda.matmul.allow_tf32 = previous
+
+
+def test_channel_table_derivatives(device, double_precision):
+    elements = 32
+    types = torch.tensor([0] * 29 + [1] * 4 + [-1] * 3, device=device).roll(3)
+    x = torch.randn(6, 2, types.numel(), device=device).transpose(0, 2)
+    weights = [
+        torch.randn(elements, 3, s, device=device).transpose(1, 2) for s in (2, 4)
+    ]
+    args = tuple(v.requires_grad_() for v in (x, *weights))
+
+    def optimized(x, w1, w2, types):
+        return indexed_channel_product(x, (w1, w2), channel_groups(types, elements))
+
+    def reference(x, w1, w2, types):
+        return torch.bmm(x, torch.cat((w1, w2), 1)[types])
+
+    graph = make_fx(optimized)(*args, types)
+    if device == "cuda":
+        assert any(
+            node.target == torch.ops.aten.index_select.default
+            and getattr(node.args[0], "target", None) == torch.ops.aten.cat.default
+            for node in graph.graph.nodes
+        )
+    actual, expected = (fn(*args, types) for fn in (graph, reference))
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected)
+        seed = torch.randn_like(actual) / actual.numel()
+        actual, expected = (
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (out.sin() * seed).sum(), args, create_graph=True
+                    )
+                ]
+            )
+            for out in (actual, expected)
+        )
+    torch.testing.assert_close(actual, expected)
+    tangents = tuple(torch.randn_like(v) for v in args)
+    torch.testing.assert_close(
+        torch.func.jvp(lambda *v: graph(*v, types), args, tangents),
+        torch.func.jvp(lambda *v: reference(*v, types), args, tangents),
+    )
+    empty = make_fx(optimized)(x[:0], *weights, types[:0])
+    assert empty(x[:0], *weights, types[:0]).shape == (0, 2, 3)
 
 
 def grouped_case(nodes, experts, layout, device, dtype=torch.float64):
@@ -265,7 +314,7 @@ def test_element_force_aoti(tmp_path, monkeypatch):
     linear = o3.Linear(
         "128x0e+128x1o", "128x0e+128x1o", internal_weights=False, shared_weights=False
     )
-    module = eqx_o3.ElementLinear(linear)
+    module = eqx_o3.ElementLinear(linear, backend="torch")
     x = torch.randn(
         512, module.input_dim, device="cuda", dtype=torch.float64, requires_grad=True
     )

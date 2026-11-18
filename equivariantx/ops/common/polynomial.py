@@ -10,7 +10,7 @@ from ...utils.metadata import compact_metadata, parse_metadata
 from ...utils.scalar import ScalarProgram
 from .. import config
 from ..precision import validate_uniform
-from .compilation import polynomial_work, should_inline
+from .compilation import polynomial_work, should_inline, wide_ace, wide_symmetric
 
 
 @lru_cache(maxsize=128)
@@ -209,6 +209,9 @@ class NativePolynomial(torch.autograd.Function):
             )
         if should_inline(
             config.POLYNOMIAL_INLINE, polynomial_work, kind, metadata, program
+        ) and not (
+            (kind == "symmetric" and wide_symmetric(metadata, operands[0].shape[-1]))
+            or (kind == "ace" and wide_ace(metadata, node_type.shape[0]))
         ):
             return tuple(
                 value.view_as(value)

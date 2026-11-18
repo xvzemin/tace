@@ -45,7 +45,7 @@ def test_projector_reference_bypasses_children(
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    module = co3.Projector("1x6e").to(device)
+    module = co3.Projector("1x6e", backend="torch").to(device)
     reference = copy.deepcopy(module)
     for child in module.symmetric_bases.values():
         child.backend = "cuda"

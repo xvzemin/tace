@@ -71,7 +71,7 @@ def register_kernel(name, backend, implementation, *, reference=None):
             RESOLVED[reference, backend] = resolve_kernel(reference, backend)
 
 
-def get_kernel(name, backend="torch"):
+def get_kernel(name, backend=None):
     """Resolve a registered execution provider.
 
     Parameters
@@ -79,13 +79,15 @@ def get_kernel(name, backend="torch"):
     name : str
         Operator name without its namespace.
     backend : str, optional
-        Execution provider name. Defaults to ``"torch"``.
+        Execution provider name. Defaults to ``config.DEFAULT_BACKEND``.
 
     Returns
     -------
     callable
         Implementation with the operator's argument and return conventions.
     """
+    if backend is None:
+        backend = config.DEFAULT_BACKEND
     try:
         implementation = IMPLEMENTATIONS[name, backend]
     except KeyError:

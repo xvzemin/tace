@@ -1,11 +1,72 @@
 """CUDA shared channel maps with fused path scaling, layout and bias."""
 
+from functools import lru_cache
+
 import torch
 
+from ....utils.autograd import forward_ad_active
 from ....utils.metadata import parse_metadata
 from ...precision import validate_uniform
 from ..torch.channel_linear import ChannelLinear
 from .pointwise import evaluate as pointwise
+
+
+@lru_cache(maxsize=128)
+def scale_expression(blocks):
+    """Generate one piecewise-constant normalization for a parameter vector."""
+    start, terms = 0, []
+    for width, scale in blocks:
+        start += width
+        terms.append((start, f"T({scale:.17g})"))
+    expression = " : ".join(f"i < {end} ? {value}" for end, value in terms[:-1])
+    return (
+        "out[i] = p0[i] * ("
+        + (expression + " : " if expression else "")
+        + terms[-1][1]
+        + ");"
+    )
+
+
+@torch.library.custom_op("eqx::path_scale", mutates_args=(), device_types="cuda")
+def scale_cuda(metadata: str, weight: torch.Tensor) -> torch.Tensor:
+    """Scale contiguous parameter blocks without storing a coefficient array."""
+    validate_uniform((weight,))
+    blocks = parse_metadata(metadata)
+    if not blocks or weight.numel() != sum(n for n, _ in blocks):
+        raise ValueError("Parameter blocks must cover the weight vector.")
+    return pointwise(
+        weight.new_empty(weight.shape), (weight.contiguous(),), scale_expression(blocks)
+    )
+
+
+@scale_cuda.register_fake
+def scale_fake(metadata, weight):
+    return weight.new_empty(weight.shape)
+
+
+def setup_scale(ctx, inputs, output):
+    ctx.metadata_key = inputs[0]
+
+
+def scale_backward(ctx, gradient):
+    return None, scale_cuda(ctx.metadata_key, gradient)
+
+
+scale_cuda.register_autograd(scale_backward, setup_context=setup_scale)
+
+
+def scale_parameters(weight, blocks):
+    """Normalize shared path weights once before the edge program."""
+    if not blocks or len(blocks) == 1 and blocks[0][1] == 1:
+        return weight
+    if len(blocks) == 1:
+        return weight * blocks[0][1]
+    if forward_ad_active():
+        parts = weight.reshape(-1).split([n for n, _ in blocks])
+        return torch.cat(
+            [part * scale for part, (_, scale) in zip(parts, blocks)]
+        ).reshape_as(weight)
+    return scale_cuda(repr(blocks), weight)
 
 
 @torch.library.custom_op("eqx::channel_linear", mutates_args=(), device_types="cuda")

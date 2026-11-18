@@ -5,7 +5,8 @@ from ..registry import get_kernel, register_kernel
 register_kernel(
     "cartesian_product",
     "torch",
-    "equivariantx.ops.common.torch.cartesian:cartesian_product",
+    "equivariantx.ops.common.torch.cartesian:evaluate",
+    reference="equivariantx.ops.common.torch.cartesian:cartesian_product",
 )
 register_kernel(
     "cartesian_product",

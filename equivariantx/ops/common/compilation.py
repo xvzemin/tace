@@ -4,9 +4,39 @@ from functools import lru_cache
 
 import torch
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ...utils.metadata import decode_plans, parse_metadata
 from .. import config
+
+
+def wide_symmetric(metadata, channels):
+    """Keep element-weighted CUDA contractions with wide term axes intact."""
+    if not statically_known_true(channels >= config.SYMMETRIC_WIDE_CHANNELS):
+        return False
+    _, paths, _, _, rows = parse_metadata(metadata)
+    return bool(paths) and len(rows) >= config.SYMMETRIC_WIDE_TERMS
+
+
+@lru_cache(maxsize=256)
+@torch.compiler.assume_constant_result
+def ace_expansion_width(metadata):
+    """Return the largest per-node channel table or intermediate product width."""
+    dims, weighted, schedules = parse_metadata(metadata)
+    if not weighted:
+        return dims[-1]
+    return max(
+        (r[4] * r[5] for _, entries in schedules[3] for r, _ in entries), default=0
+    )
+
+
+def wide_ace(metadata, nodes):
+    """Keep wide ACE contractions native when inlining can expand node-sized tables."""
+    budget = config.ACE_INLINE_MAX_ELEMENTS
+    if not budget:
+        return False
+    width = ace_expansion_width(metadata)
+    return width > 256 and not statically_known_true(nodes * width <= budget)
 
 
 def should_inline(enabled, estimate, *args):

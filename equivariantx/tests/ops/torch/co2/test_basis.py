@@ -61,7 +61,7 @@ def test_high_order_and_transforms(rank):
 
 
 def test_reference_and_rank_policy(monkeypatch):
-    layer = co2.Projector("2x4m+1x0e+1x4m").double()
+    layer = co2.Projector("2x4m+1x0e+1x4m", backend="torch").double()
     x = torch.randn(7, layer.input_dim, dtype=torch.float64)
     monkeypatch.setattr(config, "TORCH_PLANAR_PROJECTION", True)
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
@@ -73,11 +73,11 @@ def test_reference_and_rank_policy(monkeypatch):
     torch.testing.assert_close(optimized(x), reference(x), atol=2e-12, rtol=2e-12)
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
     for rank, method in ((2, "matrix"), (3, "matrix"), (4, "factorized")):
-        layer = co2.Projector(f"2x{rank}m", method=method).double()
+        layer = co2.Projector(f"2x{rank}m", method=method, backend="torch").double()
         graph = make_fx(layer)(torch.randn(7, layer.input_dim, dtype=torch.float64))
         assert any(n.target == torch.ops.aten.mm.default for n in graph.graph.nodes)
     monkeypatch.setattr(config, "TORCH_PLANAR_PROJECTION", False)
-    layer = co2.Projector("2x4m").double()
+    layer = co2.Projector("2x4m", backend="torch").double()
     graph = make_fx(layer)(torch.randn(7, layer.input_dim, dtype=torch.float64))
     assert any(n.target == torch.ops.aten.mm.default for n in graph.graph.nodes)
 

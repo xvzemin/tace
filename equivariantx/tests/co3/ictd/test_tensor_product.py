@@ -144,6 +144,7 @@ def test_compiled_torch_channel_program(project, shared, monkeypatch, double_pre
         internal_weights=False,
         shared_weights=shared,
         project=project,
+        backend="torch",
     ).cuda()
     x, y = [torch.randn(5, 9, device="cuda", requires_grad=True) for _ in range(2)]
     weight = torch.randn(

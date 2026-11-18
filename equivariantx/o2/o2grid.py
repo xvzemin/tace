@@ -178,7 +178,7 @@ class O2Grid(torch.nn.Module):
                 name, value.to(dtype=dtype, device=device, copy=True), persistent=False
             )
 
-        locations, signs = [], []
+        locations, split_locations, signs = [], [], []
         offsets = Counter()
         for ir, mul in self.irreps:
             for component in range(ir.dim):
@@ -193,6 +193,12 @@ class O2Grid(torch.nn.Module):
                             # J^{-1}(h_+, h_-) = (h_-, -h_+).
                             order = 2 * ir.m - component
                             sign = -1 if component == 0 else 1
+                    split_order = 2 * ir.m - 1 + component if ir.m else 0
+                    split_sheet = sheet * len(self.time_parities) + int(ir.t == -1)
+                    split_locations.append(
+                        (split_sheet * dim + split_order) * self.num_channels
+                        + channel % self.num_channels
+                    )
                     sheet += 2 * int(ir.t == -1)
                     position = (
                         (channel % self.num_channels) * self.num_sheets + sheet
@@ -205,6 +211,9 @@ class O2Grid(torch.nn.Module):
         output_sign = torch.tensor(signs, dtype=torch.int8, device="cpu")
         input_index = output_index.argsort()
         input_sign = output_sign[input_index]
+        split_order = torch.tensor(split_locations, dtype=torch.long, device="cpu")
+        split_input_index = split_order[input_index]
+        split_output_index = split_input_index.argsort()
         second_index = torch.arange(dim, device="cpu")
         second_index[1:] = (
             second_index[1:].unflatten(0, (self.mmax, 2)).flip(-1).flatten()
@@ -216,6 +225,9 @@ class O2Grid(torch.nn.Module):
             ("input_sign", input_sign),
             ("output_index", output_index),
             ("output_sign", output_sign),
+            ("split_input_index", split_input_index),
+            ("split_output_index", split_output_index),
+            ("split_output_sign", input_sign[split_output_index]),
             ("second_index", second_index),
             ("second_sign", second_sign),
         ):

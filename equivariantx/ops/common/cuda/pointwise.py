@@ -63,6 +63,21 @@ def evaluate(result, inputs, body, *, declarations=""):
     return result
 
 
+def coordinate_offset(shape, strides, row):
+    """Map a valid flattened row without specializing its outer extent."""
+    axes = [(n, s) for n, s in zip(shape, strides) if n != 1]
+    terms, divisor = [], 1
+    for axis in range(len(axes) - 1, -1, -1):
+        size, stride = axes[axis]
+        if stride:
+            coordinate = f"({row}/{divisor})" if divisor != 1 else row
+            if axis:
+                coordinate = f"({coordinate}%{size})"
+            terms.append(f"({coordinate}*{stride})")
+        divisor *= size
+    return " + ".join(terms) or "0"
+
+
 def broadcast_offset(tensor, shape, trailing, *, row="row"):
     """Generate an offset for a broadcast row without expanding its storage."""
     leading = tensor.shape[:-trailing]
@@ -70,9 +85,4 @@ def broadcast_offset(tensor, shape, trailing, *, row="row"):
         0 if size == 1 else stride
         for size, stride in zip(leading, tensor.stride()[:-trailing])
     )
-    terms, divisor = [], 1
-    for size, stride in reversed(tuple(zip(shape, strides))):
-        if stride:
-            terms.append(f"(({row} / {divisor}) % {size}) * {stride}")
-        divisor *= size
-    return " + ".join(terms) or "0"
+    return coordinate_offset(shape, strides, row)

@@ -11,13 +11,14 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import co2
 from equivariantx.ops import config
 from equivariantx.ops.torch.co2.spherical import reference
+from equivariantx.tests.utils.testing import package_script
 
 
 @pytest.mark.parametrize("method", ["chebyshev", "recurrence"])
 def test_joint_inductor(method, monkeypatch, device):
     monkeypatch.setattr(config, "TORCH_SPHERICAL_COUPLING", True)
     monkeypatch.setattr(config, "TORCH_SPHERICAL_ADJOINT", True)
-    layer = co2.SphericalCoupling(2, 3, 2, method=method).to(
+    layer = co2.SphericalCoupling(2, 3, 2, method=method, backend="torch").to(
         device=device, dtype=torch.float64
     )
     x = (
@@ -110,6 +111,7 @@ def test_unbacked_joint_package(
     )(*values)
     graph.graph.eliminate_dead_code()
     graph.recompile()
+    assert ("eqx.sparse_axis" in graph.code) == (backend == "cuda")
     rows = torch.export.Dim("rows", min=2, max=64)
     exported = torch.export.export(
         graph,
@@ -139,12 +141,7 @@ def test_unbacked_joint_package(
                 weight.add_(expected[-1], alpha=-0.01)
     data = tmp_path / "records.pt"
     torch.save((initial, records), data)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            """
+    script = """
 import sys
 import torch
 run = torch._inductor.aoti_load_package(sys.argv[1])
@@ -179,11 +176,20 @@ for count in (0, 1, 65):
         assert ('too small' if count < 2 else 'too large') in str(error)
     else:
         raise AssertionError('The exported row bounds were not enforced')
-assert 'equivariantx' not in sys.modules and 'e3nn' not in sys.modules
-""",
+assert ('equivariantx' in sys.modules) == (sys.argv[4] == 'cuda')
+if sys.argv[4] == 'torch':
+    assert 'e3nn' not in sys.modules
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            package_script(script) if backend == "cuda" else script,
             str(package),
             str(data),
             device,
+            backend,
         ],
         cwd=tmp_path,
         env={

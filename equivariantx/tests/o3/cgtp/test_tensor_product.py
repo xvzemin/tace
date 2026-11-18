@@ -188,7 +188,7 @@ def test_grouped_reference_switch(monkeypatch, device, double_precision):
     from equivariantx.ops import config
 
     module = eqx_o3.FullyConnectedTensorProduct(
-        "2x0e+2x1o", "2x0e+2x1o", "2x0e+2x1o", internal_weights=False
+        "2x0e+2x1o", "2x0e+2x1o", "2x0e+2x1o", internal_weights=False, backend="torch"
     ).cuda()
     x = torch.randn(512, module.irreps_in1.dim, device="cuda")
     y = torch.randn_like(x)

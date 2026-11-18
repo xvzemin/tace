@@ -126,9 +126,13 @@ def polynomial_decompositions():
 
 def symmetric_forward(metadata, program, node_type, operands):
     """Inline small primal polynomials; retain native large or adjoint kernels."""
-    from .common.compilation import polynomial_work
+    from .common.compilation import polynomial_work, wide_symmetric
 
-    if polynomial_work("symmetric", metadata, program) > config.COMPILE_MAX_INLINE_WORK:
+    if (
+        wide_symmetric(metadata, operands[0].shape[-1])
+        or polynomial_work("symmetric", metadata, program)
+        > config.COMPILE_MAX_INLINE_WORK
+    ):
         return NotImplemented
     degree = parse_metadata(metadata)[3]
     terms = parse_metadata(program)

@@ -7,6 +7,22 @@ import torch
 from .compilation import edge_work, should_inline
 
 
+def activation_vjp(x, grad, name, order):
+    """Apply the first or second derivative of a scalar activation."""
+    if name == "tanh":
+        t = x.tanh()
+        first = grad * (1 - t.square())
+        return first if order == 1 else -2 * t * first
+    s = x.sigmoid()
+    d = s * (1 - s)
+    if name == "silu" and order == 1:
+        return grad * torch.addcmul(s, x, d)
+    first = grad * d
+    if name == "sigmoid":
+        return first if order == 1 else first * (1 - 2 * s)
+    return first * (2 + x * (1 - 2 * s))
+
+
 def torch_evaluate(features, metadata, output_dim):
     """Expose row-local algebra and reduction adjoints to the Torch compiler."""
     from .torch.edge import evaluate_torch

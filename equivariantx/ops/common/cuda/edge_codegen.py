@@ -5,7 +5,9 @@ from functools import lru_cache
 
 import torch
 
-from ....utils.metadata import parse_metadata
+from ....utils.metadata import column_schedule, parse_metadata
+
+CSR_WARPS_MIN_DEGREE = 16
 
 
 @lru_cache(maxsize=128)
@@ -63,7 +65,7 @@ def source(
         # them into each edge's workspace dominates wide derivative programs.
         and (dependent[i] or nodes[i][1] <= 256)
     }
-    if mode in ("pointwise", "row", "node"):
+    if mode in ("pointwise", "row", "node", "node_warps"):
         stored = set()
     order = sorted(stored)
     position = {i: k for k, i in enumerate(order)}
@@ -165,6 +167,18 @@ def source(
             # Match the framework's pointwise functions, including their finite
             # precision saturation, rather than clamping the activation input.
             return f"scalar x={a}; return {'x' if op == 'silu' else 'scalar(1)'}/(scalar(1)+exp(-x));"
+        if op == "activation_vjp":
+            name, order = data
+            grad = get(args[1], "i")
+            if name == "tanh":
+                factor = "d" if order == 1 else "(-2*t)*d"
+                return f"scalar t=tanh({a}), d=(1-t*t); return {grad}*({factor});"
+            factor = (
+                ("d" if order == 1 else "d*(1-2*s)")
+                if name == "sigmoid"
+                else ("s+x*d" if order == 1 else "d*(2+x*(1-2*s))")
+            )
+            return f"scalar x={a}, s=scalar(1)/(scalar(1)+exp(-x)), d=s*(1-s); return {grad}*({factor});"
         if op == "slice":
             return f"return {get(args[0], f'i+{data}')};"
         if op == "unslice":
@@ -181,8 +195,27 @@ def source(
             rows, columns = data
             return f"return {get(args[0], f'(i%{rows})*{columns}+i/{rows}')};"
         if op == "gather":
+            schedule = column_schedule(data, nodes[args[0]][1])
+            if schedule:
+                start, width, repeats, interleaved = schedule
+                column = f"i/{repeats}" if interleaved else f"i%{width}"
+                return f"return {get(args[0], f'{start}+{column}')};"
             return f"return {get(args[0], f'{table(data)}[i]')};"
         if op == "scatter":
+            schedule = column_schedule(data, size)
+            if schedule:
+                start, width, repeats, interleaved = schedule
+                column = (
+                    f"(i-{start})*{repeats}+k"
+                    if interleaved
+                    else f"k*{width}+i-{start}"
+                )
+                guard = (
+                    ""
+                    if width == size
+                    else f"if(i<{start} || i>={start + width}) return scalar(0);"
+                )
+                return f"{guard} scalar sum=0; for(int k=0;k<{repeats};++k) sum+={get(args[0], column)}; return sum;"
             groups = defaultdict(list)
             for j, k in enumerate(data):
                 groups[k].append(j)
@@ -422,14 +455,37 @@ def source(
           {"".join(writes)}
         }}"""
         count_outputs = len(destinations)
-    elif mode == "node":
+    elif mode in ("node", "node_warps"):
         root, _, kind = outputs[0]
         if len(outputs) != 1 or kind not in ("source", "target"):
             raise ValueError("Node reductions require one source or target output.")
         width = nodes[root][1]
         columns = 1 << (max(1, width) - 1).bit_length()
-        body = (
-            f"""
+        if mode == "node_warps":
+            # Four warps share one receiver's neighbors for the same 32 columns.
+            body = f"""
+            const long long node=blockIdx.x;
+            const int warp=threadIdx.x/32, lane=threadIdx.x%32;
+            const int i=32*blockIdx.y+lane;
+            __shared__ scalar partial[4][32];
+            scalar value=0;
+            if(i<{width}) {{
+              const long long end=ptr[node+1];
+              for(long long j=ptr[node]+warp;j<end;j+=4) {{
+                const long long edge=order[j];
+                State state{{{initializer}, nullptr, edge, source[edge], target[edge]}};
+                value+=state.v{root}(i);
+              }}
+            }}
+            partial[warp][lane]=value;
+            __syncthreads();
+            if(warp==0 && i<{width})
+              out0[node*{width}+i]+=(partial[0][lane]+partial[1][lane])
+                                    +(partial[2][lane]+partial[3][lane]);
+            """
+        else:
+            body = (
+                f"""
         const long long node=blockIdx.x;
         const int i=blockIdx.y*blockDim.x+threadIdx.x;
         if(i>={width}) return;
@@ -441,8 +497,8 @@ def source(
         }}
         out0[node*{width}+i]+=value;
         """
-            if width > 32
-            else f"""
+                if width > 32
+                else f"""
         const long long node=(long long)blockIdx.x*4+threadIdx.x/32;
         const int lane=threadIdx.x%32;
         if(node>=count) return;
@@ -459,7 +515,7 @@ def source(
           value+=__shfl_down_sync(0xffffffffu,value,stride);
         if(lane<{width}) out0[node*{width}+i]+=value;
         """
-        )
+            )
         count_outputs = 1
     else:
         destinations = sorted(set(slot for _, slot, _ in outputs))
@@ -553,6 +609,11 @@ def launch(
         inputs[0].device
     ).multi_processor_count
     splits = 1
+    if node_reduction:
+        nodes, descriptions = parse_metadata(metadata)
+        width = nodes[descriptions[0][0]][1]
+        if width > 32 and source_index.numel() >= CSR_WARPS_MIN_DEGREE * count:
+            mode = "node_warps"
     if online:
         splits = min(
             8,
@@ -605,7 +666,9 @@ def launch(
                 compiled[code],
                 arguments,
                 blocks,
-                (width + threads - 1) // threads
+                (width + 31) // 32
+                if mode == "node_warps"
+                else (width + threads - 1) // threads
                 if node_reduction and width > 32
                 else 1,
                 threads,

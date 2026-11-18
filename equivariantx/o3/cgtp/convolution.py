@@ -58,6 +58,7 @@ class O3TensorProductConv(torch.nn.Module):
     """
 
     batch_paths = False
+    angular_groups = ()
 
     def __init__(
         self,
@@ -132,6 +133,9 @@ class O3TensorProductConv(torch.nn.Module):
                 )
             )
         self.paths = tuple(paths)
+        self.angular_groups = (
+            torch_kernel.angular_groups(self) if backend == "torch" else ()
+        )
         couplings = [
             (
                 self.irreps_in1[p.i_in1].ir.l,

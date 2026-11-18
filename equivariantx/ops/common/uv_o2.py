@@ -3,7 +3,14 @@
 import torch
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
+from ...utils.metadata import static_dimensions
 from .. import config
+
+
+def rotation_layout(wigner):
+    """Specialize rotation block widths without specializing the edge count."""
+    dims = static_dimensions(wigner, range(1, wigner.ndim))
+    return (dims[0], 1, True) if len(dims) == 1 else (*dims, False)
 
 
 def prepare(
@@ -54,6 +61,7 @@ def program_inputs(
     vectors,
     radial_network,
     expanded,
+    normalized=False,
 ):
     """Construct the local convolution program and its tensor operands."""
     transverse = vectors is not None
@@ -77,11 +85,15 @@ def program_inputs(
     else:
         if wigner is None:
             raise ValueError("Supply Wigner matrices or vectors.")
-        packed = wigner.ndim == 2
-        local_dim, global_dim = (wigner.shape[1], 1) if packed else wigner.shape[1:]
+        local_dim, global_dim, packed = rotation_layout(wigner)
         geometry, inverse = (wigner, wigner if packed else wigner_inv)
     metadata = module.convolution_program(
-        local_dim, global_dim, packed, transverse, native=not expanded
+        local_dim,
+        global_dim,
+        packed,
+        transverse,
+        native=not expanded,
+        normalized=normalized,
     )
     inputs = [features, edge_features, conv_weights, geometry, inverse, cutoff]
     inputs.extend((value.reshape(1, -1) for value in parameters))

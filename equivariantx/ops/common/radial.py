@@ -1,6 +1,7 @@
 """Radial networks evaluated inside tiled convolution programs."""
 
 import math
+from functools import lru_cache
 
 import torch
 
@@ -67,9 +68,15 @@ def radial_program(network, inputs, program, value):
                 weight = weight / math.sqrt(scale)
             if weight.ndim != 2 or weight.shape[0] != program.size(value):
                 raise ValueError("Radial linear weight has an incompatible shape.")
-            value = program.matmul(
-                value, parameter(weight), 1, *static_dimensions(weight)
+            rows, columns = static_dimensions(weight)
+            # nn.Linear stores (out, in). Keep its storage as an operand;
+            # matrix products can transpose the view directly at execution.
+            matrix = (
+                program.transpose(parameter(weight.T), columns, rows)
+                if isinstance(layer, torch.nn.Linear)
+                else parameter(weight)
             )
+            value = program.matmul(value, matrix, 1, rows, columns)
             if getattr(layer, "bias", None) is not None:
                 value = program.binary("add", value, parameter(layer.bias))
             if hasattr(layer, "h_in") and layer.act is not None:
@@ -150,7 +157,6 @@ def align_projection(radial, projection):
 
 def compose_radial(metadata, inputs, slot, network):
     """Replace an edge input by a tiled radial network evaluation."""
-    nodes, outputs = parse_metadata(metadata)
     inputs = list(inputs)
     program = Program()
     radial = inputs[slot]
@@ -166,6 +172,20 @@ def compose_radial(metadata, inputs, slot, network):
         )
     value = program.concatenate(parts)
     value = radial_program(network, inputs, program, value)
+    lower = (
+        radial_expression.__wrapped__
+        if torch.compiler.is_compiling()
+        else radial_expression
+    )
+    return lower(metadata, tuple(program.nodes), slot, value), inputs
+
+
+@lru_cache(maxsize=128)
+@torch.compiler.assume_constant_result
+def radial_expression(metadata, prefix, slot, value):
+    """Substitute a static radial expression without retaining network parameters."""
+    nodes, outputs = parse_metadata(metadata)
+    program = Program(prefix)
     translated = {}
     for i, (op, size, args, data) in enumerate(nodes):
         if op == "input" and data[0] == slot:
@@ -179,7 +199,7 @@ def compose_radial(metadata, inputs, slot, network):
                 op, size, tuple(translated[j] for j in args), data
             )
     outputs = tuple((translated[root], output, kind) for root, output, kind in outputs)
-    return repr((tuple(program.nodes), outputs)), inputs
+    return repr((tuple(program.nodes), outputs))
 
 
 def convolve(kind, metadata, operands, edge_index, network):
@@ -247,6 +267,7 @@ def convolve(kind, metadata, operands, edge_index, network):
         edge_index[0],
         edge_index[1],
         output.shape[0],
+        inline=False,
     )[0]
 
 

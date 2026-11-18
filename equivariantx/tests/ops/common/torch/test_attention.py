@@ -78,7 +78,8 @@ def test_reference_switch_and_active_inputs(active, monkeypatch):
         reference.setattr(config, "TORCH_REFERENCE", True)
         expected = graph_softmax(scores, target, 5, weight, eps=0.1)
         assert (
-            get_kernel("graph_normalized_exp").__wrapped__ is normalized_exp_reference
+            get_kernel("graph_normalized_exp", "torch").__wrapped__
+            is normalized_exp_reference
         )
     for _ in range(4):
         torch.testing.assert_close(actual, expected, atol=1e-9, rtol=1e-9)

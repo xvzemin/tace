@@ -4,12 +4,12 @@ import torch
 
 from ....utils.autograd import nested_forward_ad, torch_gradient_mask
 from ....utils.metadata import parse_metadata
-from .linear import linear, linear_reference
+from .linear import linear, linear_reference, split_channels
 
 
 def unpack(features, shapes, storage):
     """View flattened features as component-major channel blocks."""
-    values = features.split([dim * mul for dim, mul in shapes], -1)
+    values = split_channels(features, [dim * mul for dim, mul in shapes], -1)
     return [
         value.reshape(*features.shape[:-1], dim, mul)
         if storage == "ir_mul"
@@ -67,10 +67,10 @@ def adjoint(metadata, features, weight, gradient, needed, bias_numel):
                     )
                 rows.append(parts[0] if len(parts) == 1 else torch.cat(parts, -1))
             matrix = rows[0] if len(rows) == 1 else torch.cat(rows, -2)
-            values = (
-                (flat_right @ matrix.T)
-                .reshape(*right.shape[:-1], sum(input_sizes))
-                .split(input_sizes, -1)
+            values = split_channels(
+                (flat_right @ matrix.T).reshape(*right.shape[:-1], sum(input_sizes)),
+                input_sizes,
+                -1,
             )
             for k, value in zip(indices, values):
                 i = paths[k][0]
@@ -79,8 +79,10 @@ def adjoint(metadata, features, weight, gradient, needed, bias_numel):
             left = [inputs[paths[k][0]] for k in indices]
             left = left[0] if len(left) == 1 else torch.cat(left, -1)
             matrix = left.reshape(-1, sum(input_sizes)).T @ flat_right
-            for row, value in enumerate(matrix.split(input_sizes, 0)):
-                for (_, selected), part in zip(entries, value.split(output_sizes, 1)):
+            for row, value in enumerate(split_channels(matrix, input_sizes, 0)):
+                for (_, selected), part in zip(
+                    entries, split_channels(value, output_sizes, 1)
+                ):
                     k = selected[row]
                     dw[k] = (part if uniform_scale else part * paths[k][3]).flatten()
     zero = (

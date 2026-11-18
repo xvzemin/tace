@@ -109,7 +109,7 @@ packages = [
 package-dir = { equivariantx = "." }
 
 [tool.setuptools.package-data]
-equivariantx = ["README.md", "ops/common/cuda/csrc/*.cpp", "models/tace/tace_oam_xl_v2/README.rst"]
+equivariantx = ["README.md", "ops/common/cuda/csrc/*.cpp", "ops/cuda/co2/*.cu", "models/tace/tace_oam_xl_v2/README.rst"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,7 @@
 """Tensor-product expressions shared by radial execution policies."""
 
 from collections import defaultdict
+from functools import lru_cache
 from math import prod
 
 import torch
@@ -9,8 +10,8 @@ from ...utils.harmonics import harmonic_program
 from ...utils.metadata import parse_metadata, static_dimensions
 from ...utils.program import Program
 from .. import config
-from .torch.edge import evaluate_recomputed, evaluate_torch
 from ..precision import validate_precision
+from .torch.edge import evaluate_recomputed, evaluate_torch
 
 
 def radial_input(program, inputs, radial, network=None):
@@ -28,12 +29,12 @@ def radial_input(program, inputs, radial, network=None):
 
 
 def tensor_product_program(
-    program, metadata, features, attributes, weights, output_dim
+    program, metadata, features, attributes, weights, output_dim, angular=()
 ):
     """Lower sparse ``uvu`` paths to matrix products and multilinear terms."""
     paths = parse_metadata(metadata)[0]
     blocks = defaultdict(list)
-    for (
+    for i, (
         start,
         attr,
         end,
@@ -45,7 +46,18 @@ def tensor_product_program(
         offset,
         scale,
         cg,
-    ) in paths:
+    ) in enumerate(paths):
+        if i in angular:
+            value = angular[i]
+            if offset >= 0:
+                w = program.scale(program.slice(weights, offset, channels), scale)
+                value = program.binary(
+                    "mul", value, program.gather(w, tuple(range(channels)) * dz)
+                )
+            else:
+                value = program.scale(value, scale)
+            blocks[end, dz * channels].append(value)
+            continue
         x = program.slice(features, start, dx * channels)
         y = program.slice(attributes, attr, dy * multiplicity)
         if offset >= 0:
@@ -74,6 +86,30 @@ def tensor_product_program(
     if position < output_dim:
         values.append(program.constant(output_dim - position, 0))
     return program.concatenate(values)
+
+
+@lru_cache(maxsize=64)
+@torch.compiler.assume_constant_result
+def cgtp_expression(prefix, metadata, features, attrs, radial, width, groups, indexed):
+    """Lower a static path schedule once without retaining operand tensors."""
+    program = Program(prefix)
+    angular = ()
+    if groups:
+        from ..torch.o3.cgtp.convolution import angular_paths
+
+        angular = angular_paths(program, features, attrs, groups)
+    result = tensor_product_program(
+        program, metadata, features, attrs, radial, width, angular
+    )
+    roots = (
+        program.nodes[result][2]
+        if groups and indexed and program.nodes[result][0] == "concat"
+        else (result,)
+    )
+    outputs = tuple(
+        (root, i, "target" if indexed else "edge") for i, root in enumerate(roots)
+    )
+    return repr((tuple(program.nodes), outputs))
 
 
 def aligned_product_program(
@@ -208,6 +244,7 @@ def convolve(
     amplitudes=None,
     transverse=None,
     backend="torch",
+    angular_groups=(),
 ):
     """Evaluate tensor-product expressions with Torch or tiled CUDA adjoints.
 
@@ -257,7 +294,25 @@ def convolve(
     elif program.size(radial) != projection.shape[1]:
         raise ValueError("Radial network output does not match path weights.")
     if amplitudes is None:
-        result = tensor_product_program(program, metadata, x, attrs, radial, output_dim)
+        groups = []
+        for table, *group in angular_groups:
+            groups.append((len(inputs), *group))
+            inputs.append(table.reshape(1, -1))
+        lower = (
+            cgtp_expression.__wrapped__
+            if torch.compiler.is_compiling()
+            else cgtp_expression
+        )
+        expressions = lower(
+            tuple(program.nodes),
+            metadata,
+            x,
+            attrs,
+            radial,
+            output_dim,
+            tuple(groups),
+            indexed,
+        )
     else:
         amplitude = program.input(
             len(inputs),
@@ -282,16 +337,18 @@ def convolve(
                 native=backend == "cuda",
             )
         )
+        expressions = repr(
+            (tuple(program.nodes), ((result, 0, "target" if indexed else "edge"),))
+        )
     validate_precision(inputs)
-    expressions = repr(
-        (tuple(program.nodes), ((result, 0, "target" if indexed else "edge"),))
-    )
     if backend == "cuda":
         from .edge import evaluate
 
         return evaluate(expressions, inputs, source, target, num_nodes)[0]
     if recompute or config.TORCH_RECOMPUTE:
-        return evaluate_recomputed(expressions, inputs, source, target, num_nodes)[0]
-    return evaluate_torch(
-        expressions, inputs, source, target, num_nodes, optimized=True
-    )[0]
+        values = evaluate_recomputed(expressions, inputs, source, target, num_nodes)
+    else:
+        values = evaluate_torch(
+            expressions, inputs, source, target, num_nodes, optimized=True
+        )
+    return values[0] if len(values) == 1 else torch.cat(values, dim=-1)

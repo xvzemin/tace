@@ -3,16 +3,108 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
 from equivariantx.ops import config
 from equivariantx.tests.conv.o2_o3.test_convolution import (
     test_streaming_projected_tiles as check_streaming_projected_tiles,
 )
-from equivariantx.tests.conv.testing import layout
-from equivariantx.tests.conv.testing import reference
-from equivariantx.tests.conv.testing import assert_native_autograd
-from equivariantx.tests.conv.testing import tensor_product
+from equivariantx.tests.conv.testing import (
+    assert_native_autograd,
+    layout,
+    reference,
+    tensor_product,
+)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Torch GPU contraction")
+@pytest.mark.parametrize("mode", ["last", "full"])
+def test_shared_angular_matrices_preserve_paths(mode, double_precision):
+    tp = o3.TensorProduct(
+        "16x1o+16x1o+2x1o",
+        "1o+2x1o",
+        "16x0e+16x1e+16x2e+16x0e+2x0e",
+        [
+            (0, 0, 0, "uvu", True),
+            (0, 0, 1, "uvu", False),
+            (0, 0, 2, "uvu", True),
+            (1, 0, 0, "uvu", True),
+            (0, 0, 3, "uvu", True),
+            (0, 1, 0, "uvu", True),
+            (2, 0, 4, "uvu", True),
+        ],
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    conv = eqx_conv.O3TensorProductConv(tp, backend="torch", radial_mode=mode).cuda()
+    assert len(conv.angular_groups) == 2
+    index = torch.tensor([[0, 2, 1, 0], [1, 1, 0, 2]], device="cuda")
+    arguments = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in [
+            (5, tp.irreps_in1.dim),
+            (4, tp.irreps_in2.dim),
+            (4, 4),
+            (4, tp.weight_numel),
+        ]
+    )
+    actual = conv(*arguments, index)
+    expected = reference(tp, *arguments, index)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    for _ in range(3):
+        direction = torch.randn_like(actual) / actual.numel() ** 0.5
+        grads = [
+            torch.autograd.grad(
+                (value.sin() * direction).sum(), arguments, create_graph=True
+            )
+            for value in (actual, expected)
+        ]
+        torch.testing.assert_close(*grads, atol=1e-10, rtol=1e-10)
+        actual, expected = [
+            torch.cat([g.flatten() for g in values]) for values in grads
+        ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU angular matrices")
+def test_high_degree_angular_matrix(double_precision, monkeypatch):
+    monkeypatch.setattr(config, "TORCH_CG_ANGULAR_WIDTH_RATIO", 24)
+    tp = o3.TensorProduct(
+        "16x6e",
+        "6e",
+        "16x0e+16x2e+16x4e+16x6e",
+        [(0, 0, i, "uvu", True) for i in range(4)],
+        internal_weights=False,
+        shared_weights=False,
+    ).cuda()
+    layer = eqx_conv.O3TensorProductConv(tp, backend="torch").cuda()
+    assert len(layer.angular_groups) == 1
+    edges = torch.tensor([[0, 2, 1], [1, 1, 0]], device="cuda")
+    args = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (3, tp.irreps_in1.dim),
+            (3, tp.irreps_in2.dim),
+            (3, 5),
+            (5, tp.weight_numel),
+        )
+    )
+    actual, expected = layer(*args, edges), reference(tp, *args, edges)
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)
+        v = torch.randn_like(actual) / actual.numel() ** 0.5
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (y.sin() * v).sum(), args, create_graph=True
+                    )
+                ]
+            )
+            for y in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
 
 
 @pytest.mark.parametrize("rows", [0, 1, 9])
@@ -591,6 +683,56 @@ def test_empty_and_unsupported(double_precision):
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph replay")
+def test_full_radial_replay_reads_new_graph_and_weights(monkeypatch, double_precision):
+    from collections import OrderedDict
+
+    from equivariantx.ops.common.cuda import graph
+
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    monkeypatch.setattr(graph, "MIN_EDGES", 1)
+    monkeypatch.setattr(graph, "_GRAPHS", OrderedDict())
+    monkeypatch.setattr(graph, "_CANDIDATES", OrderedDict())
+    tp = tensor_product().cuda()
+    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda", radial_mode="full").cuda()
+    network = torch.nn.Sequential(torch.nn.Linear(3, 8), torch.nn.SiLU()).cuda()
+    x, attrs, basis, weight = (
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (5, tp.irreps_in1.dim),
+            (23, tp.irreps_in2.dim),
+            (23, 3),
+            (8, tp.weight_numel),
+        )
+    )
+    index = torch.empty(2, 23, dtype=torch.long, device="cuda")
+    variables = (x, attrs, basis, weight, *network.parameters())
+
+    def derivatives(y):
+        energy = y.square().mean()
+        forces = torch.autograd.grad(energy, (attrs, basis), create_graph=True)
+        grads = torch.autograd.grad(
+            energy + sum(f.square().mean() for f in forces), variables
+        )
+        return y, *forces, *grads
+
+    for i in range(5):
+        with torch.no_grad():
+            index.random_(5)
+            for value in variables:
+                value.uniform_(-1, 1)
+        actual = derivatives(
+            conv(x, attrs, basis, weight, index, radial_network=network)
+        )
+        expected = derivatives(reference(tp, x, attrs, network(basis), weight, index))
+        torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+        if i == 3:
+            held = actual[0].detach()
+            snapshot = held.clone()
+    assert any(key[0] == "edge_program" for key in graph._GRAPHS)
+    torch.testing.assert_close(held, snapshot, rtol=0, atol=0)
+
+
 def test_compile_and_cuda_graph(double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
@@ -773,9 +915,9 @@ def test_row_product_cuda_graph(
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx.ops.common.cuda import graph
-    from equivariantx.ops.common.cuda.edge import product_graph_layout
-    from equivariantx.ops.common.torch.edge import evaluate_torch
+    from equivariantx.ops.common.cuda.edge import padding_layout
     from equivariantx.ops.common.edge import evaluate
+    from equivariantx.ops.common.torch.edge import evaluate_torch
     from equivariantx.utils.program import Program
 
     worker = None
@@ -818,8 +960,8 @@ def test_row_product_cuda_graph(
     metadata = repr((tuple(program.nodes), ((value, 0, "edge"),)))
     # A sum of biased primals is not safe to pad; adjoints with zero seeds are.
     unsafe = repr((tuple(program.nodes), ((value, 0, "shared"),)))
-    assert product_graph_layout(unsafe) is None
-    assert product_graph_layout(metadata) is not None
+    assert padding_layout(unsafe) is None
+    assert padding_layout(metadata) is not None
     from equivariantx.ops.common.cuda.execution import uses_matrix_products
 
     assert uses_matrix_products(metadata)

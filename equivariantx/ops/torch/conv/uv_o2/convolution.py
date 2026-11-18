@@ -1,10 +1,12 @@
 """Local Torch channel contractions and compiler-visible angular expressions."""
 
 import torch
+from torch._subclasses.fake_tensor import is_fake
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from .... import config, get_kernel
 from ....common.torch.linear import linear as linear_blocks
-from ....common.uv_o2 import prepare, program_inputs
+from ....common.uv_o2 import prepare, program_inputs, rotation_layout
 from . import transverse as transverse_kernel
 
 
@@ -56,6 +58,34 @@ def evaluate(
         from equivariantx.ops.common.torch.edge import evaluate_recomputed
 
         execute = evaluate_recomputed
+        if (
+            vectors is None
+            and features.is_cuda
+            and config.TORCH_EDGE_TILE_BYTES
+            and not torch.compiler.is_compiling()
+            and not is_fake(features)
+            and get_proxy_mode() is None
+            and not torch._C._are_functorch_transforms_active()
+            and edge_index.shape[1]
+            * max(features.shape[1], module.weight_numel)
+            * features.element_size()
+            > config.TORCH_EDGE_TILE_BYTES
+        ):
+            metadata, inputs = program_inputs(
+                module,
+                features,
+                edge_features,
+                conv_weights,
+                wigner,
+                wigner_inv,
+                cutoff,
+                parameters,
+                *edge_index,
+                vectors,
+                radial_network,
+                True,
+            )
+            return execute(metadata, inputs, *edge_index, features.shape[0])[0]
     return staged(
         module,
         features,
@@ -128,13 +158,17 @@ def staged(
     else:
         if wigner is None:
             raise ValueError("Supply Wigner matrices or vectors.")
-        packed = wigner.ndim == 2
-        local_dim, global_dim = (wigner.shape[1], 1) if packed else wigner.shape[1:]
+        local_dim, global_dim, packed = rotation_layout(wigner)
         if packed:
             wigner_inv = wigner
         local_inputs = [features, edge_features, conv_weights, wigner]
         linears = module.linears
-    metadata = module.prepare_program(local_dim, global_dim, packed, transverse)
+    separate = not config.TORCH_REFERENCE and not transverse
+    input_blocks = separate and module.radial_mode == "full" and bool(linears[0][0])
+    output_blocks = separate and bool(linears[-1][1])
+    metadata = module.prepare_program(
+        local_dim, global_dim, packed, transverse, input_blocks
+    )
     if radial_network is not None:
         from equivariantx.ops.common.radial import compose_radial
 
@@ -142,12 +176,16 @@ def staged(
             metadata, local_inputs, 3 if transverse else 2, radial_network
         )
     local = execute(metadata, local_inputs, source, target, features.shape[0])
+    pieces = (
+        local
+        if input_blocks
+        else local[0].split([dim * mul for dim, mul in linears[0][0]], -1)
+    )
     values = [
         value.reshape(source.shape[0], dim, mul)
-        for value, (dim, mul) in zip(
-            local[0].split([dim * mul for dim, mul in linears[0][0]], -1), linears[0][0]
-        )
+        for value, (dim, mul) in zip(pieces, linears[0][0])
     ]
+    del local, pieces, local_inputs
     gates = module.transverse_gates if transverse else module.gates
     for layer, description in enumerate(linears):
         values = linear_blocks(
@@ -169,19 +207,22 @@ def staged(
                 value.reshape(source.shape[0], dim, mul)
                 for value, (dim, mul) in zip(values, linears[layer + 1][0])
             ]
-    message = torch.cat([value.flatten(-2) for value in values], -1)
-    del values, local, local_inputs
-    output = execute(
-        module.output_program(local_dim, global_dim, packed, transverse),
+    messages = [value.flatten(-2) for value in values]
+    if not output_blocks:
+        messages = [torch.cat(messages, -1)]
+    del values
+    outputs = execute(
+        module.output_program(local_dim, global_dim, packed, transverse, output_blocks),
         [
-            message,
-            message.new_empty((source.numel(), 0)) if transverse else wigner_inv,
+            *messages,
+            features.new_empty((source.numel(), 0)) if transverse else wigner_inv,
             cutoff,
         ],
         source,
         target,
         features.shape[0],
-    )[0]
+    )
+    output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, -1)
     if transverse:
         output = project(
             module.transverse_frames[2],

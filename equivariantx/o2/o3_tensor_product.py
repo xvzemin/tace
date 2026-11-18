@@ -43,7 +43,8 @@ class O3TensorProduct(torch.nn.Module):
         Feature representation, stored in flattened ``ir_mul`` order.
     irreps_in2 : o3.Irreps or str
         Edge spherical-harmonic representation. Each entry must have one
-        channel, natural spatial parity, and even time parity.
+        channel, spatial parity :math:`p^\ell` for the specified vector parity,
+        and even time parity.
     irreps_out : o3.Irreps or str
         Output representation, stored in flattened ``ir_mul`` order.
     instructions : sequence of tuple
@@ -62,6 +63,9 @@ class O3TensorProduct(torch.nn.Module):
         Share one weight vector across edges. Defaults to ``True``.
     normalization : {"component", "integral", "norm"}, optional
         Spherical-harmonic normalization. Defaults to ``"component"``.
+    vector_parity : {-1, 1}, optional
+        Spatial parity of the vector used to evaluate the harmonics.
+        Defaults to ``-1`` (polar vector).
     backend : {None, "torch", "cuda"}, optional
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
@@ -99,6 +103,7 @@ class O3TensorProduct(torch.nn.Module):
         shared_weights: Optional[bool] = None,
         *,
         normalization: str = "component",
+        vector_parity: int = -1,
         backend: str | None = None,
     ) -> None:
         backend = resolve_backend(backend)
@@ -107,9 +112,11 @@ class O3TensorProduct(torch.nn.Module):
         self.irreps_in1 = o3.Irreps(irreps_in1)
         self.irreps_in2 = o3.Irreps(irreps_in2)
         self.irreps_out = o3.Irreps(irreps_out)
+        if vector_parity not in (-1, 1):
+            raise ValueError("vector_parity must be -1 or 1.")
         if any(
             entry.mul != 1
-            or entry.ir.p != (-1) ** entry.ir.l
+            or entry.ir.p != vector_parity**entry.ir.l
             or getattr(entry.ir, "t", 1) != 1
             for entry in self.irreps_in2
         ):

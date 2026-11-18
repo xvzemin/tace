@@ -8,6 +8,7 @@ from torch.fx.experimental.proxy_tensor import get_proxy_mode
 from .... import config
 from ....common.irreducible_product import operands
 from ....common.torch.cartesian import cartesian_product
+from ....common.torch.cartesian import evaluate as optimized_product
 from ....common.torch.literal_bilinear import evaluate as literal_product
 from ....common.torch.sparse_bilinear import evaluate as sparse_product
 from .. import symmetric as symmetric_kernel
@@ -112,7 +113,7 @@ def angular(module, x, y):
     if config.TORCH_REFERENCE:
         return reference(module, x, y)
     if not config.TORCH_ICTP_PRODUCT or not getattr(module, "sparse_product", False):
-        return structured(module, x, y, cartesian_product)
+        return structured(module, x, y, optimized_product)
     if not x.is_cuda:
         if getattr(module, "literal_entries", ()) and (
             torch.compiler.is_compiling() or get_proxy_mode() is not None

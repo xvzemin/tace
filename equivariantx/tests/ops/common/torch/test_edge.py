@@ -43,8 +43,13 @@ def test_forward_and_two_derivatives(edges):
     assert torch.autograd.gradgradcheck(function, values, fast_mode=True)
 
 
-def test_four_derivative_orders():
-    metadata, source, target, values = program_case()
+@pytest.mark.parametrize("tiled", [False, True])
+def test_four_derivative_orders(tiled, monkeypatch):
+    if tiled and not torch.cuda.is_available():
+        pytest.skip("Requires a CUDA tensor for eager Torch tiling.")
+    if tiled:
+        monkeypatch.setattr(config, "TORCH_EDGE_TILE_BYTES", 72)
+    metadata, source, target, values = program_case("cuda" if tiled else "cpu")
     optimized = evaluate(metadata, values, source, target, 3)
     reference = evaluate_torch(metadata, values, source, target, 3)
     actual = sum(value.square().sum() for value in optimized)
@@ -196,7 +201,9 @@ def test_reference_switch(monkeypatch):
     results = []
     for reference in (False, True, False):
         monkeypatch.setattr(config, "TORCH_REFERENCE", reference)
-        result = get_kernel("edge_program")(metadata, values, source, target, 3)
+        result = get_kernel("edge_program", "torch")(
+            metadata, values, source, target, 3
+        )
         results.append(result)
         assert (
             type(result[0].grad_fn).__name__ == "EdgeProgramBackward"
@@ -210,7 +217,9 @@ def test_recompute_switch(monkeypatch):
     results = []
     for recompute in (False, True, False):
         monkeypatch.setattr(config, "TORCH_RECOMPUTE", recompute)
-        result = get_kernel("edge_program")(metadata, values, source, target, 3)
+        result = get_kernel("edge_program", "torch")(
+            metadata, values, source, target, 3
+        )
         results.append(result)
         assert (type(result[0].grad_fn).__name__ == "EdgeProgramBackward") is recompute
     torch.testing.assert_close(results[0], results[1])

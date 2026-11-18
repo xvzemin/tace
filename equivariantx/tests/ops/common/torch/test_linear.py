@@ -211,7 +211,7 @@ def test_provider_dispatch(channels, reference, double_precision, monkeypatch):
     monkeypatch.setattr(linear, "contract_grouped", record)
     monkeypatch.setattr(config, "TORCH_REFERENCE", reference)
     for role in range(3):
-        actual = get_kernel("element_linear")(metadata, role, types, *values)
+        actual = get_kernel("element_linear", "torch")(metadata, role, types, *values)
         expected = linear.contract_reference(metadata, role, types, *values)
         torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
     assert calls == ([0, 1, 2] if channels == 128 and not reference else [])

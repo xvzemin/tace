@@ -32,3 +32,19 @@ def test_sparse_coefficients(degrees, device, double_precision):
             for result in (actual, expected)
         ]
         torch.testing.assert_close(ga, gb, atol=2e-11, rtol=2e-11)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_scalar_contraction_tape(double_precision):
+    from equivariantx.ops.common.torch.cartesian import cartesian_product, evaluate
+
+    x, y = [torch.randn(5, 3**4, device="cuda", requires_grad=True) for _ in range(2)]
+    actual, expected = [fn(x, y, 4, 4, 0) for fn in (evaluate, cartesian_product)]
+    for _ in range(4):
+        torch.testing.assert_close(actual, expected)
+        seed = torch.randn_like(expected)
+        actual, expected = [
+            torch.cat(torch.autograd.grad(v.sin(), (x, y), seed, create_graph=True), -1)
+            for v in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected)

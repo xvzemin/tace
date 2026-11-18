@@ -370,6 +370,11 @@ def element_linear(
     return torch.empty_like(result).index_copy(0, order, result)
 
 
+def split_channels(value, sizes, dim):
+    """Return channel blocks without a split or its concatenating adjoint for a single block."""
+    return (value,) if len(sizes) == 1 else value.split(sizes, dim)
+
+
 def linear_layout(inputs, outputs, instructions):
     """Describe channel matrices grouped by their input entries."""
     paths, biases = [], []
@@ -432,7 +437,7 @@ def linear(inputs, weight, bias, layout, shape):
         weight = weight * paths[0][3]
     matrices = [
         value.reshape(*weight.shape[:-1], input_shapes[i][1], output_shapes[j][1])
-        for value, (i, j, _, _) in zip(weight.split(sizes, -1), paths)
+        for value, (i, j, _, _) in zip(split_channels(weight, sizes, -1), paths)
     ]
     if not uniform_scale:
         matrices = [value * path[3] for value, path in zip(matrices, paths)]
@@ -475,11 +480,7 @@ def linear(inputs, weight, bias, layout, shape):
             ).reshape(*value.shape[:-1], matrix.shape[-1])
         else:
             result = value @ matrix
-        parts = (
-            (result,)
-            if len(entries) == 1
-            else result.split([output_shapes[j][1] for j, _ in entries], -1)
-        )
+        parts = split_channels(result, [output_shapes[j][1] for j, _ in entries], -1)
         for (j, _), part in zip(entries, parts):
             outputs[j] = part
     for j, start, size in biases:

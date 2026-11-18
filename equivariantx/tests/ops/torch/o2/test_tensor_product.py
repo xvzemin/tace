@@ -49,6 +49,7 @@ def test_small_shared_u1u(monkeypatch):
         "1x1m",
         "1024x2m",
         [(0, 0, 0, "u1u", True)],
+        backend="torch",
         internal_weights=False,
         shared_weights=True,
     ).double()
