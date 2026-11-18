@@ -874,9 +874,36 @@ def test_density_accepts_indexed_features(double_precision, key):
     )
 
 
+def cutoff_reference(cutoff, target):
+    others = (target[:, None] == target[None, :]) & ~torch.eye(
+        len(target), device=target.device, dtype=torch.bool
+    )
+    return cutoff / (1 + others.to(cutoff) @ cutoff.square()).sqrt()
+
+
+def test_cutoff_scatter_norm():
+    norm = get_scatter_norm_layer("cutoff", 9.0, 4)
+    target = torch.tensor([2, 0, 2, 3, 2, 0], device=DEVICE)
+    c = torch.tensor([[0.8], [1.0], [0.0], [0.02], [0.6], [1.0]], device=DEVICE)
+    c.requires_grad_()
+    weights = norm.edge_weights(c, target, 5)
+    torch.testing.assert_close(weights, cutoff_reference(c, target))
+    torch.testing.assert_close(weights[3], c[3], rtol=0, atol=0)
+    assert weights[2].item() == 0
+    assert norm.edge_weights(c[:0], target[:0], 0).shape == (0, 1)
+
+    def fn(cutoff):
+        return norm.edge_weights(cutoff, target, 5)
+
+    assert torch.autograd.gradcheck(fn, (c,))
+    assert torch.autograd.gradgradcheck(fn, (c,))
+    with pytest.raises(ValueError, match="requires radial_basis.apply_cutoff=false"):
+        check_model_config({"atomic_basis": {"scatter_norm": "cutoff"}})
+
+
 @pytest.fixture
 def small_model():
-    def build(key):
+    def build(key, interaction="cgtp"):
         config = deepcopy(DEFAULT_MODEL_CONFIG)
         config.update(
             num_layers=2,
@@ -888,7 +915,7 @@ def small_model():
             max_neighbors=None,
         )
         config["atomic_basis"].update(
-            type="cgtp",
+            type=interaction,
             scatter_norm=key,
             num_head=1,
         )
@@ -902,6 +929,50 @@ def small_model():
         return create_model(config, statistics, ["energy", "forces"], []).to(DEVICE)
 
     return build
+
+
+@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2"])
+def test_cutoff_scatter_norm_force_training(small_model, monkeypatch, interaction):
+    def weight_messages(_, args):
+        cutoff = cutoff_reference(args[7], args[6][1])
+        return (*args[:7], cutoff, *args[8:])
+
+    positions = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.1, 0.1, 0.0], [0.0, 3.5, 0.2], [8.0, 0.0, 0.0]],
+        device=DEVICE,
+    )
+    data = dict(
+        positions=positions,
+        node_type=torch.zeros(4, dtype=torch.long, device=DEVICE),
+        edge_index=torch.tensor(
+            [[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]], device=DEVICE
+        ),
+        edge_shifts=torch.zeros(6, 3, device=DEVICE),
+        lattice=torch.eye(3, device=DEVICE).unsqueeze(0) * 12,
+        batch=torch.zeros(4, dtype=torch.long, device=DEVICE),
+        ptr=torch.tensor([0, 4], device=DEVICE),
+        fidelity_idx=torch.zeros(1, dtype=torch.long, device=DEVICE),
+    )
+    results = []
+    for key in ("identity", "cutoff"):
+        monkeypatch.setenv(
+            "TACE_USE_EQX", str(int(key == "cutoff" and DEVICE.type == "cuda"))
+        )
+        model = small_model(key, interaction).train()
+        layers = model.readout_fn.representation.interactions
+        if key == "identity":
+            state = model.state_dict()
+            for layer in layers:
+                layer.register_forward_pre_hook(weight_messages)
+        else:
+            model.load_state_dict(state)
+        out = model({k: v.clone() for k, v in data.items()})
+        gradient = torch.autograd.grad(
+            out["forces"].square().sum(), next(layers[0].edge_info.parameters())
+        )[0]
+        results.append((out["energy"], out["forces"], gradient))
+    for actual, expected in zip(results[1], results[0]):
+        torch.testing.assert_close(actual, expected, rtol=2e-8, atol=2e-10)
 
 
 @pytest.mark.parametrize(

@@ -406,11 +406,19 @@ class Representation(torch.nn.Module):
         radial_basis = radial_basis.to(self.model_dtype)
         direction = graph.edge_vector / graph.edge_length.clamp_min(1e-12)
         attrs = self.o3_angular_basis(direction).to(self.model_dtype)
+        message_cutoff = None
+        if self.use_cutoff_scatter_norm:
+            norm = self.interactions[0].scatter_norm
+            message_cutoff = norm.edge_weights(
+                cutoff, edge_index[1], node_type.size(0)
+            ).to(self.model_dtype)
         cutoff = cutoff.to(self.model_dtype) if cutoff is not None else None
         nodes = self.node_embedding(
             node_type, radial_basis, edge_index, attrs, cutoff, None, None
         )
         radial = self.edge_embedding(nodes, node_type, radial_basis, edge_index, cutoff)
+        if message_cutoff is None:
+            message_cutoff = cutoff
         frame = None
         if self.angular_mode == "aligned":
             frame = packed_frame(self.frame_source.frame, direction).to(
@@ -425,8 +433,8 @@ class Representation(torch.nn.Module):
             conv = self.interactions[0].rejector.eqx_tp
             amplitude = (
                 nodes.new_ones((1, conv.amplitude_dim))
-                if cutoff is None
-                else cutoff.expand(-1, conv.amplitude_dim)
+                if message_cutoff is None
+                else message_cutoff.expand(-1, conv.amplitude_dim)
             )
             sections, offset = [], 0
             for mul, degree in conv.harmonic_entries:
@@ -448,7 +456,6 @@ class Representation(torch.nn.Module):
             and self.edge_mode == "scheduled"
             and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1"
         )
-        radial_cutoff = cutoff
         if radial_map is not None:
             if self.radial_mode != "materialize":
                 raise ValueError(
@@ -461,7 +468,6 @@ class Representation(torch.nn.Module):
                 source_types[representatives],
                 target_types[representatives],
             )
-            radial_cutoff = cutoff[representatives] if cutoff is not None else None
         radial_jet = os.environ.get("EQX_XL_RADIAL_JET", "0") == "1"
         if radial_jet:
             if (
@@ -502,34 +508,39 @@ class Representation(torch.nn.Module):
                 target_types,
                 self.radial_projection,
             )
-        densities = grouped_networks(
-            [layer.scatter_norm.edge_density for layer in self.interactions],
-            self.edge_updates,
-            radial,
-            source_types,
-            target_types,
-            hidden=False,
-            embedding=self.edge_embedding
-            if self.radial_projection == "composed"
-            else None,
-            basis=radial_basis,
-        )
-        edge_density = torch.cat(
-            [torch.tanh(value.square()) for value in densities], dim=-1
-        )
-        if radial_cutoff is not None:
-            edge_density = edge_density * radial_cutoff
-        if radial_map is not None:
-            edge_density = edge_density[radial_map]
-        density = nodes.new_zeros((nodes.shape[0], self.num_layers)).index_add(
-            0, edge_index[1], edge_density
-        )
-        density = density * torch.stack(
-            [layer.scatter_norm.beta for layer in self.interactions]
-        )
-        density = density + torch.stack(
-            [layer.scatter_norm.alpha for layer in self.interactions]
-        )
+        density = None
+        if not self.use_cutoff_scatter_norm:
+            densities = grouped_networks(
+                [layer.scatter_norm.edge_density for layer in self.interactions],
+                self.edge_updates,
+                radial,
+                source_types,
+                target_types,
+                hidden=False,
+                embedding=self.edge_embedding
+                if self.radial_projection == "composed"
+                else None,
+                basis=radial_basis,
+            )
+            edge_density = torch.cat(
+                [torch.tanh(value.square()) for value in densities], dim=-1
+            )
+            if cutoff is not None:
+                radial_cutoff = (
+                    cutoff if radial_map is None else cutoff[representatives]
+                )
+                edge_density = edge_density * radial_cutoff
+            if radial_map is not None:
+                edge_density = edge_density[radial_map]
+            density = nodes.new_zeros((nodes.shape[0], self.num_layers)).index_add(
+                0, edge_index[1], edge_density
+            )
+            density = density * torch.stack(
+                [layer.scatter_norm.beta for layer in self.interactions]
+            )
+            density = density + torch.stack(
+                [layer.scatter_norm.alpha for layer in self.interactions]
+            )
         descriptors = []
         flash_indices = (
             edge_index.to(torch.int32) if self.edge_mode == "flashtp" else None
@@ -600,7 +611,9 @@ class Representation(torch.nn.Module):
             elif self.angular_mode == "aligned":
                 aligned = self.aligned[index]
                 amplitude = (
-                    torch.ones_like(direction[:, :1]) if cutoff is None else cutoff
+                    torch.ones_like(direction[:, :1])
+                    if message_cutoff is None
+                    else message_cutoff
                 )
                 message = aligned(
                     inter.rejector.reshape_in(nodes),
@@ -619,14 +632,16 @@ class Representation(torch.nn.Module):
                     features,
                     projection,
                     edge_index,
-                    cutoff,
+                    message_cutoff,
                     edge_vector=direction,
                 )
             message = (
                 packed_linear(inter.linear_down, message)
                 if packed_message
                 else inter.linear_down(message)
-            ) / density[:, index : index + 1]
+            )
+            if density is not None:
+                message = message / density[:, index : index + 1]
             message = inter.linear_nonlinearity(inter.nonlinearity(message))
             if res_ba is not None:
                 message = message + res_ba
@@ -713,8 +728,11 @@ def validate(source):
             raise ValueError("Expected element2 geometry-only edge conditioning")
         if type(inter.edge_info).__name__ != "MLPV2":
             raise ValueError("Expected MLPV2 radial networks")
-        if type(inter.scatter_norm).__name__ != "DensityScatterNorm":
-            raise ValueError("Expected learned density normalization")
+        if type(inter.scatter_norm).__name__ not in (
+            "DensityScatterNorm",
+            "CutoffScatterNorm",
+        ):
+            raise ValueError("Expected density or cutoff scatter normalization")
     return Architecture(
         representation.num_layers,
         representation.num_channel,

@@ -49,12 +49,19 @@ from equivariantx.ops.common.channel_product import channel_product
 
 
 @pytest.mark.parametrize(
-    ("radial_mode", "associate_norm"), [("stream", False), ("materialize", True)]
+    ("radial_mode", "associate_norm", "scatter_norm", "edge_mode", "device"),
+    [
+        ("stream", False, "density", "original", "cpu"),
+        ("materialize", True, "density", "original", "cpu"),
+        ("materialize", True, "cutoff", "scheduled", "cuda"),
+    ],
 )
 def test_conversion_checkpoint_and_mixed_derivatives(
-    monkeypatch, radial_mode, associate_norm
+    monkeypatch, radial_mode, associate_norm, scatter_norm, edge_mode, device
 ):
     pytest.importorskip("tace")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA execution")
     from tace.lightning.torch_model import create_model
     from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
@@ -78,7 +85,7 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         config["edge_update"]["type"] = "element2"
         config["edge_embedding"]["type"] = "linear"
         config["radial_basis"].update(hidden=[4, 4], bias=True, apply_cutoff=False)
-        config["atomic_basis"].update(type="cgtp", scatter_norm="density")
+        config["atomic_basis"].update(type="cgtp", scatter_norm=scatter_norm)
         config["resnet"].update(type="BAB", linear_type="identity")
         config["layer_norm"].update(
             pre_norm_type="merge_rms_norm", final_norm_type="merge_rms_norm"
@@ -93,8 +100,10 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         stats = [
             dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)
         ]
-        source = create_model(config, stats, targets, []).double().train()
-        candidate = TACEOAMXLV2.from_tace(source, radial_mode=radial_mode)
+        source = create_model(config, stats, targets, []).double().to(device).train()
+        candidate = TACEOAMXLV2.from_tace(
+            source, radial_mode=radial_mode, edge_mode=edge_mode
+        )
         original = dict(source.named_parameters())
         converted = dict(candidate.named_parameters())
         assert original.keys() == converted.keys()
@@ -114,19 +123,20 @@ def test_conversion_checkpoint_and_mixed_derivatives(
                 [
                     [0.0, 0.0, 0.0],
                     [2.0, 0.31, -0.18],
+                    [0.3, 2.7, -0.12],
                     [0.0, 0.0, 0.0],
-                    [2.0, -0.22, 0.41],
                 ]
             ),
             "node_type": torch.zeros(4, dtype=torch.int64),
-            "edge_index": torch.tensor([[0, 1, 2, 3], [1, 0, 3, 2]]),
-            "edge_shifts": torch.zeros(4, 3, dtype=torch.int64),
+            "edge_index": torch.tensor([[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]]),
+            "edge_shifts": torch.zeros(6, 3, dtype=torch.int64),
             "lattice": torch.eye(3).repeat(2, 1, 1) * 16.0,
             "pbc": torch.ones(2, 3, dtype=torch.bool),
-            "batch": torch.tensor([0, 0, 1, 1]),
-            "ptr": torch.tensor([0, 2, 4]),
+            "batch": torch.tensor([0, 0, 0, 1]),
+            "ptr": torch.tensor([0, 3, 4]),
             "fidelity_idx": torch.zeros(2, dtype=torch.int64),
         }
+        data = {name: value.to(device) for name, value in data.items()}
         results = []
         for model in (source, candidate):
             batch = model.prepare_property_data(

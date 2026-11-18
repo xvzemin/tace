@@ -24,7 +24,7 @@ from .fused import (
 from .nonlinear import get_nonlinear_layer
 from .o2 import UvO2TensorProductConv
 from .residual import get_resnet_layer
-from .scatter_norm import get_scatter_norm_layer
+from .scatter_norm import CutoffScatterNorm, get_scatter_norm_layer
 
 
 class O3CgtpInteraction(Interaction):
@@ -219,6 +219,7 @@ class O3CgtpInteraction(Interaction):
         graph: Graph,
         magnetic_node_attrs: torch.Tensor | None = None,
         magnetic_edge_feats: torch.Tensor | IndexedFeatures | None = None,
+        message_cutoff: torch.Tensor | None = None,
     ):
 
         lmp_data = graph.lmp_data
@@ -270,6 +271,13 @@ class O3CgtpInteraction(Interaction):
             if magnetic_node_attrs is not None
             else {}
         )
+        if isinstance(self.scatter_norm, CutoffScatterNorm):
+            if message_cutoff is None:
+                message_cutoff = self.scatter_norm.edge_weights(
+                    edge_cutoff, edge_index[1], node_types.size(0)
+                )
+        else:
+            message_cutoff = edge_cutoff
         m_i = self.linear_down(
             self.truncate_ghosts(
                 self._compute_messages(
@@ -279,7 +287,7 @@ class O3CgtpInteraction(Interaction):
                     edge_feats,
                     edge_attrs,
                     edge_index,
-                    edge_cutoff,
+                    message_cutoff,
                     edge_wigner,
                     edge_wigner_inv,
                     magnetic_node_info,

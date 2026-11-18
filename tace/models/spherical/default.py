@@ -227,6 +227,11 @@ def check_model_config(cfg: dict[str, Any]):
             "edge_update.type='element2_v2' requires radial_basis.apply_cutoff=false "
             "to apply the cutoff after the radial MLP."
         )
+    if cfg["atomic_basis"]["scatter_norm"] == "cutoff" and radial["apply_cutoff"]:
+        raise ValueError(
+            "scatter_norm='cutoff' requires radial_basis.apply_cutoff=false "
+            "to apply the normalized cutoff to messages."
+        )
 
     universal_embedding = cfg.get("universal_embedding")
     if isinstance(universal_embedding, Mapping):

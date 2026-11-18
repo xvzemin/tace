@@ -72,6 +72,24 @@ class IdentityScatterNorm(ScatterNorm):
         return node_feats
 
 
+class CutoffScatterNorm(IdentityScatterNorm):
+
+    @staticmethod
+    def edge_weights(
+        edge_cutoff: torch.Tensor | None, target: torch.Tensor, num_nodes: int
+    ) -> torch.Tensor:
+        """Map cutoff values of shape ``(num_edges, 1)`` to message amplitudes."""
+        if edge_cutoff is None:
+            raise ValueError(
+                "scatter_norm='cutoff' requires radial_basis.apply_cutoff=false."
+            )
+        squared = edge_cutoff.square()
+        total = squared.new_zeros((num_nodes, *squared.shape[1:])).index_add(
+            0, target, squared
+        )
+        return edge_cutoff * ((total[target] - squared) + 1).rsqrt()
+
+
 class AvgNumNeighborsScatterNorm(ScatterNorm):
     """Divide aggregated features by the mean neighbor count."""
 
@@ -173,7 +191,8 @@ def get_scatter_norm_layer(
     ----------
     norm_type : str or None
         ``None``, ``"identity"``, ``"avg_num_neighbors"``,
-        ``"sqrt_avg_num_neighbors"``, ``"density"`` or ``"no_cutoff_density"``.
+        ``"sqrt_avg_num_neighbors"``, ``"cutoff"``, ``"density"`` or
+        ``"no_cutoff_density"``.
     avg_num_neighbors : float
         Mean neighbor count in the training data.
     edge_feats_channel : int
@@ -187,6 +206,8 @@ def get_scatter_norm_layer(
     """
     if norm_type is None or norm_type == "identity":
         norm_class = IdentityScatterNorm
+    elif norm_type == "cutoff":
+        norm_class = CutoffScatterNorm
     elif norm_type == "avg_num_neighbors":
         norm_class = AvgNumNeighborsScatterNorm
     elif norm_type == "sqrt_avg_num_neighbors":

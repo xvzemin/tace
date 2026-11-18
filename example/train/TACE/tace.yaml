@@ -423,7 +423,7 @@ model:
       # Magnetic UV-O2 uses uv_o2_mag. Interaction choices can change the model architecture.
       type: cgtp # str or per-layer list: cgtp, o2_cgtp, so2, uv_o2, uu_o2, uv_o2_mag
       l1l2: null # [null, <=], restriction for each layer
-      scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density]
+      scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density, cutoff]
       nonlinear: gate # [null, gate]
       edge_nonlinear: gate # [gate]
       scalar_act: null # (str or list[str]), name for 0e, or [0e, 0o]

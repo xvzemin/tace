@@ -34,6 +34,7 @@ from .node import (
     WignerTensorNodeEmbedding,
 )
 from .prod import PRODUCT, CgtpACE
+from .scatter_norm import CutoffScatterNorm
 from .tece_oam_rra import BilinearMoEACE, UvSO2Interaction
 from .ue import UniversalEquivariantEmbedding, UniversalInvariantEmbedding
 
@@ -452,6 +453,10 @@ class NodeRepresentation(torch.nn.Module):
             )
             self.irreps_out = self.products[-1].irreps_out
 
+        self.use_cutoff_scatter_norm = any(
+            isinstance(inter.scatter_norm, CutoffScatterNorm)
+            for inter in self.interactions
+        )
         if layer_norm["final_norm_type"] is not None:
             self.final_norm = get_normalization_layer(
                 layer_norm["final_norm_type"], self.irreps_out
@@ -502,6 +507,11 @@ class NodeRepresentation(torch.nn.Module):
             data["edge_index"],
             self.atomic_numbers,
         )
+        message_cutoff = None
+        if self.use_cutoff_scatter_norm:
+            message_cutoff = CutoffScatterNorm.edge_weights(
+                edge_cutoff, data["edge_index"][1], node_type.size(0)
+            ).to(self.model_dtype)
 
         # === angular basis ===
         edge_wigner = None
@@ -672,6 +682,7 @@ class NodeRepresentation(torch.nn.Module):
                 magnetic_edge_attrs,
                 data["batch"],
                 graph,
+                message_cutoff=message_cutoff,
                 **magnetic_inputs,
             )
             if graph.lmp and idx == 0:

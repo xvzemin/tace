@@ -39,6 +39,24 @@ O(3) Cgtp
    :no-members:
    :show-inheritance:
 
+Cutoff scatter normalization
+----------------------------
+
+.. code-block:: yaml
+
+   atomic_basis:
+     scatter_norm: cutoff
+   radial_basis:
+     apply_cutoff: false
+
+For each incoming edge :math:`e`, replace its cutoff :math:`c_e` by
+:math:`c_e / \sqrt{1 + \sum_{b\ne e,\,b\to i} c_b^2}`, where :math:`i`
+is its target. A lone neighbor keeps its original cutoff. The weights are
+computed once per graph and shared across interaction layers. CGTP applies
+them to the radial MLP output; gated O(2) applies them to the completed edge
+messages before summation. The SO(2) attention interaction retains its own
+normalization.
+
 O(2) CGTP
 ---------
 
