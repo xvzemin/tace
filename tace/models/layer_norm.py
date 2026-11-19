@@ -3,6 +3,7 @@
 import torch
 
 from equivariantx.nn import MergeLayerNorm, MergeRmsNorm
+from tace.utils.env import acceleration_enabled
 
 
 def load_norm_state(module, state, prefix, *args):
@@ -42,6 +43,7 @@ def save_norm_state(module, state, prefix, metadata):
 
 def get_normalization_layer(norm_type: str, irreps, **kwargs) -> MergeRmsNorm:
     """Build an EQX normalization layer for a TACE model."""
+    kwargs.setdefault("backend", None if acceleration_enabled("eqx") else "torch")
     if norm_type == "merge_layer_norm":
         module = MergeLayerNorm(irreps, **kwargs)
     elif norm_type == "merge_rms_norm":

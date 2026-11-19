@@ -110,6 +110,19 @@ def angular(module, x, y, name):
 def evaluate(module, x, y, weight):
     if config.TORCH_REFERENCE or not config.TORCH_FACTORIZED_PRODUCT:
         return reference(module, x, y, weight)
+    if (
+        x.is_cuda
+        and not torch.compiler.is_compiling()
+        and get_proxy_mode() is None
+        and x.ndim == y.ndim == 2
+        and x.shape[0] == y.shape[0]
+        and (
+            weight.ndim == 1 or weight.ndim == 2 and weight.shape[0] in (1, x.shape[0])
+        )
+        and module.routes
+        and len(module.edge_matrices) == len(module.routes)
+    ):
+        return edge_matrix_product(module, x, y, weight, x.shape[0])
     if getattr(module, "method", None) == "quadrature" and not (
         torch.compiler.is_compiling() or get_proxy_mode() is not None
     ):
@@ -194,6 +207,49 @@ def convolution_reference(
     )
 
 
+def edge_matrix_product(
+    module, features, attributes, weight, num_nodes, edge_index=None
+):
+    """Build one angular map per edge and share it across all source channels."""
+    source, target = edge_index if edge_index is not None else (None, None)
+    shared = weight.ndim == 1 or weight.shape[0] == 1
+    groups = []
+    for side, (value, entries) in enumerate(zip((features, attributes), module.inputs)):
+        blocks = []
+        for name, mul, dim in entries:
+            x = value.index_select(-1, getattr(module, f"{name}_index"))
+            w = weight.index_select(-1, getattr(module, f"{name}_weight_index"))
+            if side == 0 and source is not None:
+                x = (
+                    (x * w).index_select(0, source)
+                    if shared
+                    else x.index_select(0, source) * w
+                )
+            else:
+                x = x * w
+            blocks.append(x.reshape(-1, mul, dim))
+        groups.append(blocks)
+    result = features.new_zeros((num_nodes, module.output_dim))
+    for i, j, name, dim in module.routes:
+        basis = getattr(module, f"{name}_edge_basis")
+        matrix = groups[1][j].squeeze(1) @ basis
+        matrix = matrix.reshape(-1, *module.edge_matrices[name])
+        block = torch.bmm(groups[0][i], matrix).flatten(1)
+        w = weight.index_select(-1, getattr(module, f"{name}_weight_index"))
+        if target is None:
+            result = result.index_add(1, getattr(module, f"{name}_index"), block * w)
+            continue
+        if not shared:
+            block = block * w
+        nodes = block.new_zeros((num_nodes, block.shape[-1])).index_add(
+            0, target, block
+        )
+        result = result.index_add(
+            1, getattr(module, f"{name}_index"), nodes * w if shared else nodes
+        )
+    return result
+
+
 def convolve(
     module,
     features,
@@ -213,6 +269,28 @@ def convolve(
 
     captured = torch.compiler.is_compiling() or get_proxy_mode() is not None
     eager_torch = backend == "torch" and not captured
+    if (
+        eager_torch
+        and features.is_cuda
+        and not config.TORCH_REFERENCE
+        and config.TORCH_FACTORIZED_PRODUCT
+        and module.radial_mode == "last"
+        and module.tensor_product.routes
+        and len(module.tensor_product.edge_matrices)
+        == len(module.tensor_product.routes)
+    ):
+        if network is not None:
+            from ...common.radial import materialize, radial_reference
+
+            weight = radial_reference(network, materialize(radial, edge_index))
+        return edge_matrix_product(
+            module.tensor_product,
+            features,
+            attributes,
+            module.tensor_product.weight if weight is None else weight,
+            num_nodes,
+            edge_index,
+        )
     if (
         (backend == "torch" and config.TORCH_REFERENCE)
         or getattr(module, "program_metadata", None) is None

@@ -2,9 +2,54 @@
 
 import pytest
 import torch
+
 from equivariantx import co2, o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("project", [False, True])
+@pytest.mark.parametrize("pair", [False, True])
+def test_cartesian_element_linear(double_precision, backend, project, pair):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    linear = co2.Linear(
+        "2x0o+2x2m+1x2m",
+        "3x2m+2x0o",
+        project=project,
+        backend="torch",
+        internal_weights=False,
+        shared_weights=False,
+    ).to(DEVICE)
+    args = {} if pair else {"element_mode": "single"}
+    module = co2.ElementLinear(linear, backend=backend, **args).to(DEVICE)
+    source = torch.tensor([1, 0, 1, 0, 1], device=DEVICE)
+    target = torch.tensor([0, 2, 2, 1, 1], device=DEVICE) if pair else None
+    weight = torch.randn(
+        *((2, 3) if pair else (2,)),
+        linear.weight_numel,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    x = torch.randn(5, linear.input_dim, device=DEVICE, requires_grad=True)
+    actual = module(x, weight, source, target)
+    expected = linear(x, weight[source, target] if pair else weight[source])
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected)
+        probe = torch.randn_like(actual)
+        actual, expected = (
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (y * probe).sin().sum(), (x, weight), create_graph=True
+                    )
+                ]
+            )
+            for y in (actual, expected)
+        )
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("kind", ["linear", "uu"])

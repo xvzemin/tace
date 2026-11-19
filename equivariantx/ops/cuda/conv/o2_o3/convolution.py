@@ -92,11 +92,19 @@ def transverse(
             or forward_ad_active()
         )
     )
-    direction = (
-        vectors / vectors.square().sum(dim=-1, keepdim=True).sqrt()
-        if expanded
-        else alignment_cuda(repr("normalize"), [vectors])[0]
-    )
+    if expanded:
+        direction = vectors / vectors.square().sum(dim=-1, keepdim=True).sqrt()
+    elif (
+        not module.channel_mixing
+        and radial_network is not None
+        and not torch.compiler.is_compiling()
+        and get_proxy_mode() is None
+    ):
+        # The streamed CUDA contraction takes unit directions. In eager mode
+        # ATen's norm avoids replaying a scalar frame program for every adjoint.
+        direction = vectors / torch.linalg.vector_norm(vectors, dim=-1, keepdim=True)
+    else:
+        direction = alignment_cuda(repr("normalize"), [vectors])[0]
     if module.channel_mixing:
         from equivariantx.ops.common.convolution import convolve
 

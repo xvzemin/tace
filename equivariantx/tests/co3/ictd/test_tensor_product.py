@@ -130,6 +130,55 @@ def test_cuda_backend_cpu_inputs():
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA channel scheduling")
+@pytest.mark.parametrize("a,b,shared", [(1, 2, False), (2, 1, True)])
+def test_channel_first_uvw(a, b, shared, monkeypatch, double_precision):
+    from equivariantx.ops.torch.co3.ictd import tensor_product as kernel
+
+    monkeypatch.setattr(kernel, "CHANNEL_PRODUCT_MIN_BYTES", 0)
+    monkeypatch.setattr(config, "CARTESIAN_REORDER_MIN_WORK", 0)
+    layer = co3.ictd.TensorProduct(
+        f"4x{a}e",
+        f"4x{b}e",
+        "4x3e",
+        [(0, 0, 0, "uvw", True), (0, 0, 0, "uvw", True, 0.7)],
+        shared_weights=shared,
+        internal_weights=False,
+        backend="torch",
+    ).cuda()
+    assert all(
+        kernel.channel_order(group, row_bytes=1, shared=shared)
+        == ("left" if a < b else "right")
+        for group in layer.groups
+    )
+    inputs = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (2, 1, 4 * 3**a),
+            (1, 3, 4 * 3**b),
+            (layer.weight_numel,) if shared else (2, 3, layer.weight_numel),
+        )
+    )
+    actual = layer(*inputs)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    expected = layer(*inputs)
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
+        seed = torch.randn_like(expected)
+        actual, expected = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        v.sin(), inputs, seed, create_graph=True
+                    )
+                ]
+            )
+            for v in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Captured CUDA-device Torch")
 @pytest.mark.parametrize("project", [False, True])
 @pytest.mark.parametrize("shared", [False, True])

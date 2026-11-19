@@ -40,6 +40,46 @@ def test_element_linear_high_degree(backend, double_precision):
         torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-11)
 
 
+@pytest.mark.parametrize("experts", [1, 2])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_element_linear_projection(backend, experts, double_precision):
+    linear = co3.Linear(
+        "2x2e",
+        "1x2e",
+        internal_weights=False,
+        shared_weights=False,
+        project=True,
+        backend="torch",
+    ).to(DEVICE)
+    module = (
+        co3.ElementLinear(linear, backend)
+        if experts == 1
+        else co3.MoEElementLinear(linear, experts, backend)
+    ).to(DEVICE)
+    x = torch.randn(5, experts * 18, device=DEVICE, requires_grad=True)
+    w = torch.randn(3, experts, 2, device=DEVICE, requires_grad=True)
+    ids = torch.tensor([2, 0, 1, 2, 2], device=DEVICE)
+    actual = module(x, w, ids)
+    expected = torch.cat(
+        [linear(x[:, i * 18 : (i + 1) * 18], w[ids, i]) for i in range(experts)], -1
+    )
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected)
+        probe = torch.randn_like(actual)
+        actual, expected = (
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (y * probe).sin().sum(), (x, w), create_graph=True
+                    )
+                ]
+            )
+            for y in (actual, expected)
+        )
+    torch.testing.assert_close(actual, expected)
+
+
 @pytest.mark.parametrize("normalization", ["element", "path"])
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize(

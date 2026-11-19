@@ -85,6 +85,7 @@ class Readout(torch.nn.Module):
         self.output_dim = output_dim
         self.scale_values = tuple(scales)
         self.input_is_identity = indices[0] == list(range(input_dim))
+        self.output_is_identity = indices[2] == list(range(output_dim))
         for name, value in zip(("input", "weight", "output"), indices):
             self.register_buffer(
                 name, torch.tensor(value, dtype=torch.long), persistent=False
@@ -112,10 +113,12 @@ class Readout(torch.nn.Module):
             features
         ).unsqueeze(-1)
         values = values * weights
+        if self.output_is_identity:
+            return values
         output = values.new_zeros(
             (*values.shape[:-2], self.output_dim, values.shape[-1])
         )
-        return output.index_add(-2, self.output, values)
+        return output.index_add_(-2, self.output, values)
 
 
 class Contraction(torch.nn.Module):
@@ -218,9 +221,8 @@ def prepare(module, inputs, weight, leading_shape):
         )
         for features in inputs
     )
-    weight = weight.expand(*leading_shape, module.weight_numel)
     order_weights = tuple(
-        weight[..., section].reshape(*leading_shape, count, module.num_channels)
+        weight[..., section].reshape(*weight.shape[:-1], count, module.num_channels)
         for section, count in zip(module._order_weight_slices, module.order_num_paths)
     )
     return inputs, order_weights

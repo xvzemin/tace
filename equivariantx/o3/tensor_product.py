@@ -14,6 +14,8 @@ __all__ = ["FactorizedTensorProduct"]
 
 SPARSE_PRODUCT_SIZE = 32768
 LITERAL_PRODUCT_SIZE = 64
+EDGE_MATRIX_SIZE = 4096
+EDGE_MATRIX_MIN_CHANNELS = 16
 
 
 def irrep_layout(irreps):
@@ -171,6 +173,7 @@ class FactorizedTensorProduct(torch.nn.Module):
 
         self.routes = []
         self.compact_routes = {}
+        self.edge_matrices = {}
         self.program_entries = {}
         mask = torch.zeros(self.irreps_out.dim, dtype=torch.float64, device="cpu")
         for i, j, irreps in routes:
@@ -227,6 +230,21 @@ class FactorizedTensorProduct(torch.nn.Module):
                     entries if len(entries) <= LITERAL_PRODUCT_SIZE else (),
                 )
                 self.program_entries[name] = entries
+                if (
+                    self.inputs[1][j][3] == 1
+                    and mul >= EDGE_MATRIX_MIN_CHANNELS
+                    and math.prod(dimensions) <= EDGE_MATRIX_SIZE
+                    and dimensions[2] <= mul
+                ):
+                    a, b, c = dimensions
+                    matrix = torch.zeros((b, a, c), dtype=torch.float64, device="cpu")
+                    if entries:
+                        u, v, w, coefficients = zip(*entries)
+                        matrix[list(v), list(u), list(w)] = matrix.new_tensor(
+                            coefficients
+                        )
+                    self.add_constant(f"{name}_edge_basis", matrix.reshape(b, a * c))
+                    self.edge_matrices[name] = (a, c)
             self.routes.append((i, j, name, index.shape[-1]))
         self.add_constant("output_mask", mask)
         self.inputs = tuple(

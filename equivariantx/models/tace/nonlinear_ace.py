@@ -232,14 +232,17 @@ def build(module):
             linear(program.binary("mul", corr, gate), f"coefs.{degree}")
         )
     output = linear(program.sum(contributions, module.irreps_coefs_out.dim), "linear")
-    return repr((tuple(program.nodes), ((output, 0, "edge"),))), tuple(bindings)
+    paths = tuple((*path.split("."), name) for path, name in bindings)
+    return repr((tuple(program.nodes), ((output, 0, "edge"),))), paths
 
 
 def run(module, features, embedding):
     """Execute the cached expression without registering duplicate parameters."""
     inputs = [features, embedding]
-    for path, name in module.eqx_bindings:
-        value = getattr(module.get_submodule(path), name)
+    for path in module.eqx_bindings:
+        value = module
+        for name in path:
+            value = getattr(value, name)
         if isinstance(value, torch.nn.ParameterList):
             value = torch.cat([part.reshape(-1) for part in value])
         inputs.append(value.reshape(1, -1))

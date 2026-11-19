@@ -2,7 +2,7 @@
 
 import torch
 
-from ...common.cuda.pointwise import broadcast_offset
+from ...common.cuda.pointwise import broadcast_offset, launch, scalar_type
 from ...common.cuda.pointwise import evaluate as pointwise
 from ...common.cuda.tensor_axis import evaluate as tensor_axis
 from ...common.cuda.tensor_axis import inline
@@ -54,6 +54,38 @@ def native_detrace(tensor, plane, rank, coefficient):
     result = tensor.new_empty((*shape, 3**rank))
     if not result.numel():
         return result
+    if rank == 3:
+        # A warp owns one cubic tensor. Its first 27 lanes share the three
+        # traces across all outputs, including for nonsymmetric input.
+        row_x = broadcast_offset(tensor, shape, 1)
+        row_p = broadcast_offset(plane, shape, 2)
+        sx, pa, pb = tensor.stride(-1), *plane.stride()[-2:]
+        source = f"""
+        using T={scalar_type(tensor.dtype)}; using I=long long;
+        extern "C" __global__ void run(const T* x,const T* p,T* out,I rows) {{
+            int t=threadIdx.x%32, a=(t/9)%3, b=(t/3)%3, c=t%3;
+            for(I row=(I(blockIdx.x)*blockDim.x+threadIdx.x)/32;
+                row<rows;row+=I(gridDim.x)*blockDim.x/32) {{
+                const T* plane=p+({row_p});
+                T v=t<27?x[({row_x})+t*{sx}]:T(0);
+                T q=(plane[b*{pa}+c*{pb}]+plane[c*{pa}+b*{pb}])*T(0.5);
+                T s=(v+__shfl_sync(0xffffffff,v,9*b+3*a+c)
+                      +__shfl_sync(0xffffffff,v,9*b+3*c+a))*q;
+                #pragma unroll
+                for(int d=1;d<=8;d*=2) {{
+                    T other=__shfl_down_sync(0xffffffff,s,d);
+                    if(t%9+d<9) s+=other;
+                }}
+                T u=__shfl_sync(0xffffffff,s,9*a);
+                T w=__shfl_sync(0xffffffff,s,9*b);
+                T z=__shfl_sync(0xffffffff,s,9*c);
+                T ab=__shfl_sync(0xffffffff,q,3*a+b),ac=__shfl_sync(0xffffffff,q,3*a+c);
+                if(t<27) out[row*27+t]=v+T({coefficient:.17g}/9.0)*(q*u+ac*w+ab*z);
+            }}
+        }}"""
+        rows = result.numel() // 27
+        launch(source, (tensor, plane, result), (rows,), rows * 32)
+        return result
     prepare = f"""
         I row=i/{3**rank},xo={broadcast_offset(tensor, shape, 1)},po={broadcast_offset(plane, shape, 2)};
         T p[9];
@@ -61,26 +93,11 @@ def native_detrace(tensor, plane, rank, coefficient):
             p[a*3+b]=(p1[po+a*{plane.stride(-2)}+b*{plane.stride(-1)}]
                        +p1[po+b*{plane.stride(-2)}+a*{plane.stride(-1)}])*T(0.5);
     """
-    if rank == 2:
-        body = f"""
-            T trace=0;
-            for(int k=0;k<9;++k) trace+=p0[xo+k*{tensor.stride(-1)}]*p[k];
-            out[i]=p0[xo+(i%9)*{tensor.stride(-1)}]+T({coefficient:.17g})*trace*p[i%9];
-        """
-    else:
-        body = f"""
-            T traces[3]={{0,0,0}};
-            for(int k=0;k<3;++k) {{
-                for(int a=0;a<3;++a) for(int b=0;b<3;++b)
-                    traces[k]+=(p0[xo+(9*a+3*b+k)*{tensor.stride(-1)}]
-                               +p0[xo+(9*a+3*k+b)*{tensor.stride(-1)}]
-                               +p0[xo+(9*k+3*a+b)*{tensor.stride(-1)}])*p[a*3+b];
-                traces[k]/=T(3);
-            }}
-            int a=(i%27)/9,b=(i%9)/3,c=i%3;
-            T correction=(p[a*3+b]*traces[c]+p[a*3+c]*traces[b]+p[b*3+c]*traces[a])/T(3);
-            out[i]=p0[xo+(i%27)*{tensor.stride(-1)}]+T({coefficient:.17g})*correction;
-        """
+    body = f"""
+        T trace=0;
+        for(int k=0;k<9;++k) trace+=p0[xo+k*{tensor.stride(-1)}]*p[k];
+        out[i]=p0[xo+(i%9)*{tensor.stride(-1)}]+T({coefficient:.17g})*trace*p[i%9];
+    """
     return pointwise(result, (tensor, plane), prepare + body)
 
 

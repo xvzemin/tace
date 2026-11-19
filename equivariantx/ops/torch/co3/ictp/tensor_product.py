@@ -83,6 +83,10 @@ def axial_product(module, x, y):
     elif (
         torch.compiler.is_compiling()
         or get_proxy_mode() is not None
+        # One contracted Cartesian index: the cross products and the 3-by-3
+        # Gram matrix both occupy nine scalars per free-index tuple. A GEMM
+        # would additionally retain its workspace and the three skew slices.
+        or (x.is_cuda and k == 3)
         or math.prod(torch.broadcast_shapes(x.shape[:-1], y.shape[:-1]))
         * 3
         * free

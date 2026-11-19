@@ -67,15 +67,45 @@ def angular_paths(program, features, attrs, groups):
     parts = {}
     for slot, start, attr, channels, dx, dy, rows, paths in groups:
         table = program.input(slot, "shared", dy * rows * dx)
-        angular = program.matmul(
-            program.slice(attrs, attr, dy), table, 1, dy, rows * dx
-        )
-        coupled = program.matmul(
-            angular, program.slice(features, start, dx * channels), rows, dx, channels
-        )
+        angles = program.slice(attrs, attr, dy)
+        source = program.slice(features, start, dx * channels)
+        if dy == 1 and dx == rows:
+            # CG(l, 0, l) is a scaled identity, also for signed conventions.
+            scalar = program.binary("mul", angles, program.slice(table, 0, 1))
+            coupled = program.matmul(scalar, source, 1, 1, dx * channels)
+        elif dx == 1 and dy == rows:
+            angular = program.matmul(program.slice(table, 0, 1), angles, 1, 1, dy)
+            coupled = program.matmul(angular, source, rows, 1, channels)
+        else:
+            angular = program.matmul(angles, table, 1, dy, rows * dx)
+            coupled = program.matmul(angular, source, rows, dx, channels)
         for i, row, dz in paths:
             parts[i] = program.slice(coupled, row * channels, dz * channels)
     return parts
+
+
+def harmonic_attributes(module, vectors, amplitudes):
+    """Evaluate all spherical degrees in one recurrence and apply their amplitudes."""
+    if module.harmonics is None or config.TORCH_REFERENCE:
+        parts = [
+            o3.spherical_harmonics(l, vectors, False, module.normalization)
+            for _, l in module.harmonic_entries
+        ]
+    else:
+        values = module.harmonics(vectors)
+        if amplitudes is None and module.unit_harmonic_copies:
+            return values
+        parts = values.split([2 * l + 1 for _, l in module.harmonic_entries], dim=-1)
+    sections, offset = [], 0
+    for (mul, _), harmonic in zip(module.harmonic_entries, parts):
+        value = harmonic.unsqueeze(-1)
+        if amplitudes is None:
+            value = value.expand(-1, -1, mul)
+        else:
+            value = value * amplitudes[:, None, offset : offset + mul]
+        sections.append(value.flatten(1))
+        offset += mul
+    return torch.cat(sections, dim=-1)
 
 
 def evaluate(
@@ -86,24 +116,9 @@ def evaluate(
     projection,
     edge_index,
     num_nodes,
-    vectors,
-    amplitudes,
     radial_network,
 ):
     """Evaluate validated convolution operands."""
-    if vectors is not None:
-        sections, offset = ([], 0)
-        for mul, degree in module.harmonic_entries:
-            harmonic = o3.spherical_harmonics(
-                degree, vectors, normalize=False, normalization=module.normalization
-            )
-            sections.append(
-                (
-                    harmonic.unsqueeze(-1) * amplitudes[:, None, offset : offset + mul]
-                ).flatten(1)
-            )
-            offset += mul
-        edge_attrs = torch.cat(sections, dim=-1)
     edge_attrs = edge_attrs.to(features)
     if config.TORCH_REFERENCE:
         result = module.reference(
@@ -130,7 +145,7 @@ def evaluate(
             if features.is_cuda and config.TORCH_CG_ANGULAR_MATRICES
             else (),
         )
-    return result if vectors is None else result + vectors.sum() * 0
+    return result
 
 
 def reference(module, features, edge_attrs, radial, projection, edge_index, num_nodes):

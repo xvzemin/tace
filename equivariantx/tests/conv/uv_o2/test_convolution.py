@@ -377,14 +377,18 @@ def test_uv_o2_transverse(
             cutoff,
             *((extra,) if magnetic else ()),
         ) + tuple(p for p in parameters if p.requires_grad)
-        for transverse in (False, True):
+        frames = [(wigner, inverse), (None, None)]
+        if backend == "torch" and device == "cuda" and not reference:
+            frames.append((rotation.forward_packed(vectors), None))
+        for rotation_in, rotation_out in frames:
+            transverse = rotation_in is None
             actual = conv(
                 x,
                 extra,
                 weights,
                 index,
-                None if transverse else wigner,
-                None if transverse else inverse,
+                rotation_in,
+                rotation_out,
                 cutoff,
                 parameters,
                 vectors=vectors if transverse else None,

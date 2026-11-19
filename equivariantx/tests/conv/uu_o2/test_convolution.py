@@ -151,7 +151,8 @@ def test_uu_o2_chunked_reduction(monkeypatch, double_precision, channels, shared
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize(
-    "backend,mode", [("torch", "last"), ("torch", "full"), ("cuda", "last")]
+    "backend,mode",
+    [("torch", "last"), ("torch", "full"), ("cuda", "last"), ("cuda", "full")],
 )
 @pytest.mark.parametrize("shared_direction", [False, True])
 def test_shared_angular_orders(backend, mode, shared_direction, double_precision):
@@ -178,13 +179,18 @@ def test_shared_angular_orders(backend, mode, shared_direction, double_precision
     x, r, w = rand(4, frame.input_dim), rand(count, 7), rand(7, linear.weight_numel)
     n = rand(1 if shared_direction else count, 3)
     cut = rand(count if shared_direction else 1, 1)
-    actual = layer(x, r, w, None, cut, index, 4, vectors=n)
+    network = (
+        torch.nn.Sequential(torch.nn.Linear(7, 7), torch.nn.SiLU()).cuda()
+        if mode == "full"
+        else None
+    )
+    actual = layer(x, r, w, None, cut, index, 4, vectors=n, radial_network=network)
     d, inverse = rotation(n.expand(count, 3))
-    local = linear(frame.to_local(x[index[0]], d), r @ w)
+    local = linear(frame.to_local(x[index[0]], d), (network(r) if network else r) @ w)
     expected = torch.zeros_like(x).index_add(
         0, index[1], frame.to_global(local, inverse) * cut
     )
-    operands = (x, r, w, n, cut)
+    operands = (x, r, w, n, cut, *(network.parameters() if network else ()))
     for _ in range(3):
         torch.testing.assert_close(actual, expected, atol=2e-9, rtol=1e-9)
         probe = torch.randn_like(actual) / actual.numel() ** 0.5

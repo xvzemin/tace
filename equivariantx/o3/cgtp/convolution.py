@@ -102,6 +102,17 @@ class O3TensorProductConv(torch.nn.Module):
             (section.start, section.stop - section.start) for section in slices[2]
         )
         self.harmonic_entries = tuple((mul, ir.l) for mul, ir in self.irreps_in2)
+        self.unit_harmonic_copies = all(mul == 1 for mul, _ in self.harmonic_entries)
+        degrees = [degree for _, degree in self.harmonic_entries]
+        self.harmonics = None
+        if degrees:
+            try:
+                self.harmonics = o3.SphericalHarmonics(
+                    degrees, normalize=False, normalization=normalization
+                )
+            except NotImplementedError:
+                # Precomputed attributes also support degrees not implemented by e3nn.
+                pass
         paths, offset = [], 0
         for ins in self.instructions:
             mul1, ir1 = self.irreps_in1[ins.i_in1]
@@ -288,30 +299,22 @@ class O3TensorProductConv(torch.nn.Module):
                 raise ValueError("vectors must have shape (edges, 3).")
             if self.normalize:
                 vectors = torch.nn.functional.normalize(vectors, dim=-1)
-            amplitudes = (
-                features.new_ones((1, self.amplitude_dim))
-                if amplitudes is None
-                else amplitudes.expand(amplitudes.size(0), self.amplitude_dim)
-            )
-            edge_attrs = amplitudes
-            if vectors.dtype != features.dtype:
-                sections, offset = [], 0
-                for mul, degree in self.harmonic_entries:
-                    harmonic = o3.spherical_harmonics(
-                        degree,
-                        vectors,
-                        normalize=False,
-                        normalization=self.normalization,
-                    )
-                    sections.append(
-                        (
-                            harmonic.unsqueeze(-1)
-                            * amplitudes[:, None, offset : offset + mul]
-                        ).flatten(1)
-                    )
-                    offset += mul
-                edge_attrs = torch.cat(sections, dim=-1)
+            if amplitudes is not None:
+                amplitudes = amplitudes.expand(amplitudes.size(0), self.amplitude_dim)
+            if (
+                vectors.dtype != features.dtype
+                or self.backend == "torch"
+                or not features.is_cuda
+            ):
+                edge_attrs = torch_kernel.harmonic_attributes(self, vectors, amplitudes)
+                # The constant harmonic has a zero (not absent) vector gradient.
+                if self.edge_dim == self.amplitude_dim:
+                    edge_attrs = edge_attrs + vectors[..., :0].sum()
                 vectors = None
+            else:
+                if amplitudes is None:
+                    amplitudes = features.new_ones((1, self.amplitude_dim))
+                edge_attrs = amplitudes
         edge_attrs = edge_attrs.to(features)
         radial_values = radial[0][0] if isinstance(radial, tuple) else radial
         if any(
@@ -376,8 +379,6 @@ class O3TensorProductConv(torch.nn.Module):
             projection,
             edge_index,
             num_nodes,
-            vectors,
-            amplitudes,
             radial_network,
         )
 

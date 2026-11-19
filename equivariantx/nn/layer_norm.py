@@ -5,7 +5,9 @@ from math import isfinite
 import torch
 from e3nn import o3
 
+from ..ops import config, resolve_backend
 from ..ops.precision import validate_module_precision
+from ..utils.autograd import forward_ad_active
 
 
 class MergeRmsNorm(torch.nn.Module):
@@ -26,6 +28,8 @@ class MergeRmsNorm(torch.nn.Module):
     layout : {'mul_ir', 'ir_mul'}, optional
         Order within each block. Defaults to ``ir_mul`` for spherical O(2)
         and ``mul_ir`` otherwise.
+    backend : {None, 'torch', 'cuda'}, optional
+        Execution backend. CPU inputs use PyTorch.
 
     Examples
     --------
@@ -37,7 +41,15 @@ class MergeRmsNorm(torch.nn.Module):
 
     center_scalars = False
 
-    def __init__(self, irreps, eps: float = 1e-5, affine: bool = True, *, layout=None):
+    def __init__(
+        self,
+        irreps,
+        eps: float = 1e-5,
+        affine: bool = True,
+        *,
+        layout=None,
+        backend=None,
+    ):
         super().__init__()
         from ..o2.irreps import Irrep as O2Irrep
         from ..o2.irreps import Irreps as O2Irreps
@@ -56,6 +68,7 @@ class MergeRmsNorm(torch.nn.Module):
         if not isfinite(eps) or eps <= 0:
             raise ValueError("eps must be finite and positive.")
         self.layout = layout
+        self.backend = resolve_backend(backend)
         self.eps = eps
         self.channels = tuple(block.mul for block in irreps)
         labels = tuple(block.ir for block in irreps)
@@ -131,13 +144,43 @@ class MergeRmsNorm(torch.nn.Module):
             raise ValueError(
                 "Expected flat irrep features or uniform (..., components, channels)."
             )
-        if self.scalar_blocks:
+        # A single scalar block has the ordinary channel-wise normalization.
+        if (
+            not (self.backend == "torch" and config.TORCH_REFERENCE)
+            and x.is_cuda
+            and (x.dtype == torch.float32 or torch.is_grad_enabled())
+            and self.components == (1,)
+            and self.block_weights == (1.0,)
+            and not forward_ad_active()
+        ):
+            if self.scalar_blocks:
+                out = torch.nn.functional.layer_norm(
+                    x, (self.dim,), self.weight, self.bias, self.eps
+                )
+            else:
+                out = torch.nn.functional.rms_norm(
+                    x, (self.dim,), self.weight, self.eps
+                )
+            return out.reshape_as(features)
+        native = (
+            self.backend == "cuda"
+            and x.is_cuda
+            and not forward_ad_active()
+            and 1 < len(self.widths) <= 16
+        )
+        if native:
+            from ..ops.cuda.nn.layer_norm import normalize
+
+            factors = tuple(w / c for w, c in zip(self.block_weights, self.channels))
+            key = repr((self.widths, factors, self.scalar_blocks))
+            x = normalize(key, x.reshape(-1, self.dim), self.eps)[0].reshape_as(x)
+        elif self.scalar_blocks:
             blocks = list(x.split(self.widths, dim=-1))
             for i in self.scalar_blocks:
                 blocks[i] = blocks[i] - blocks[i].mean(-1, keepdim=True)
             x = torch.cat(blocks, dim=-1) if len(blocks) > 1 else blocks[0]
 
-        scale = self.inverse_rms(x)
+        scale = None if native else self.inverse_rms(x)
         if self.weight is not None:
             gains = [
                 (w.expand(d, c) if channel_last else w[:, None].expand(c, d)).reshape(
@@ -147,8 +190,9 @@ class MergeRmsNorm(torch.nn.Module):
                     self.weight.split(self.channels), self.channels, self.components
                 )
             ]
-            scale = scale * (torch.cat(gains) if len(gains) > 1 else gains[0])
-        out = x * scale
+            gain = torch.cat(gains) if len(gains) > 1 else gains[0]
+            scale = gain if native else scale * gain
+        out = x if scale is None else x * scale
         if self.bias is not None:
             blocks = list(out.split(self.widths, dim=-1))
             for i, bias in zip(
@@ -175,6 +219,8 @@ class MergeLayerNorm(MergeRmsNorm):
         Learn one scale per irrep copy and one bias per invariant scalar channel.
     layout : {'mul_ir', 'ir_mul'}, optional
         Order within each block. Defaults to the representation's native layout.
+    backend : {None, 'torch', 'cuda'}, optional
+        Execution backend. CPU inputs use PyTorch.
 
     Examples
     --------

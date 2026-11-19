@@ -18,7 +18,7 @@ def normalized_exp(scores, weight, target, num_nodes, eps):
         or get_proxy_mode() is not None
         or forward_ad_active()
         or not torch.is_grad_enabled()
-        or not (scores.requires_grad or weight.requires_grad)
+        or not (scores.requires_grad or (weight is not None and weight.requires_grad))
         or (
             not scores.is_cuda
             and scores.numel() < config.TORCH_ATTENTION_MIN_CPU_ELEMENTS
@@ -44,9 +44,11 @@ class NormalizedExp(torch.autograd.Function):
         total = values.new_zeros((ctx.num_nodes, values.shape[1])).index_add(
             0, target, values * grad
         )[target]
-        scores_grad = (
-            values * (grad - weight * total) if ctx.needs_input_grad[0] else None
-        )
+        scores_grad = None
+        if ctx.needs_input_grad[0]:
+            scores_grad = values * (
+                grad - (total if weight is None else weight * total)
+            )
         weight_grad = (
             (-values * total).sum_to_size(weight.shape)
             if ctx.needs_input_grad[1]
@@ -64,7 +66,7 @@ def normalized_exp_reference(scores, weight, target, num_nodes, eps):
     maxima = torch.where(torch.isneginf(maxima), 0, maxima)
     exponential = (scores - maxima[target]).exp()
     denominator = scores.new_zeros((num_nodes, scores.shape[1])).index_add(
-        0, target, exponential * weight
+        0, target, exponential if weight is None else exponential * weight
     )
     return exponential / (denominator[target] + eps)
 

@@ -30,11 +30,9 @@ Linear maps
 
 .. autoclass:: equivariantx.co3.ElementLinear
    :members: forward
-   :no-index:
 
 .. autoclass:: equivariantx.co3.MoEElementLinear
    :members: forward
-   :no-index:
 
 Activations
 -----------

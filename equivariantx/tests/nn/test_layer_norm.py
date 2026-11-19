@@ -131,3 +131,31 @@ def test_uniform_storage(cls, device, double_precision):
         else torch.nn.functional.rms_norm
     )
     torch.testing.assert_close(norm(scalar), ref(scalar, (3,), eps=norm.eps))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_normalization_derivatives(cls, dtype, double_precision):
+    irreps = co2.Irreps("40x0e+20x0o+18x2m+12x0e")
+    layer = cls(irreps, backend="cuda").cuda().to(dtype)
+    reference = cls(irreps, backend="torch").cuda().to(dtype)
+    x = torch.randn(3, irreps.dim, device="cuda", dtype=dtype)
+    x[0] = 0
+    x[1] *= 1e-4
+    x.requires_grad_()
+    actual, expected = layer(x), reference(x)
+    torch.testing.assert_close(actual, expected)
+    for _ in range(4):
+        probe = torch.randn_like(x) / x.shape[-1]
+        actual, expected = (
+            torch.autograd.grad((v * probe).sum(), x, create_graph=True)[0]
+            for v in (actual, expected)
+        )
+        if dtype == torch.float32:
+            scale = expected.abs().amax(-1, keepdim=True).clamp_min(1)
+            torch.testing.assert_close(
+                actual / scale, expected / scale, rtol=2e-5, atol=2e-5
+            )
+        else:
+            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-9)

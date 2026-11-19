@@ -13,7 +13,7 @@ from equivariantx.ops.common.gate import gate_program
 from equivariantx.ops.common.radial import materialize
 from tace.models.layout import LayoutTransform
 from tace.models.spherical.tece_oam_rra import Convolution
-from tace.utils.env import acceleration_enabled
+from tace.utils.env import acceleration_enabled, memory_first
 from tace.utils.torch_scatter import scatter_sum
 
 
@@ -85,6 +85,16 @@ def inverse_scale(frame):
     )
 
 
+def use_streamed_convolution(plan, features, edge_index):
+    """Select the streamed schedule for large FP32 CUDA graphs."""
+    return (
+        plan is not None
+        and features.is_cuda
+        and features.dtype == torch.float32
+        and edge_index.shape[1] >= 8192
+    )
+
+
 class UuConvolution(torch.nn.Module):
     """Apply a channel-wise local map to Cartesian source features."""
 
@@ -112,6 +122,18 @@ class UuConvolution(torch.nn.Module):
         )
         self.weight_numel = reference.weight_numel
         self.eqx_tp = None
+        if (
+            acceleration_enabled("eqx", kernel="conv")
+            and reference.num_channel == 64
+            and max(self.local_frame_in.lmax, self.local_frame_out.lmax) <= 2
+        ):
+            self.eqx_tp = co2.UuTensorProductConv(
+                self.local_frame_in,
+                self.linear,
+                self.local_frame_out,
+                backend="cuda",
+                radial_mode="full" if memory_first() else "last",
+            ).plan
         self.register_buffer(
             "scale", inverse_scale(self.local_frame_out), persistent=False
         )
@@ -137,6 +159,19 @@ class UuConvolution(torch.nn.Module):
         radial_network=None,
     ):
         """Evaluate radial coefficients without changing Cartesian storage."""
+        if use_streamed_convolution(self.eqx_tp, features, edge_index):
+            return (
+                self.eqx_tp(
+                    features,
+                    radial,
+                    edge_index,
+                    rotation,
+                    cutoff,
+                    projection=projection,
+                    radial_network=radial_network,
+                )
+                * self.scale
+            )
         radial = materialize(radial, edge_index)
         if radial_network is not None:
             radial = radial_network(radial)
@@ -176,6 +211,25 @@ class UvConvolution(torch.nn.Module):
         self.eqx_tp = None
         self.local_irreps_in = self.linear_up.irreps_in
         self.magnetic_frame = None
+        if (
+            not hasattr(reference, "magnetic_edge_irreps")
+            and acceleration_enabled("eqx", kernel="conv")
+            and reference.num_channel == 64
+            and max(self.local_frame_in.lmax, self.local_frame_out.lmax) <= 2
+        ):
+            try:
+                self.eqx_tp = co2.UvTensorProductConv(
+                    self.local_frame_in,
+                    self.linear_up,
+                    self.nonlinearity,
+                    self.linear_down,
+                    self.local_frame_out,
+                    backend="cuda",
+                    radial_mode="full" if memory_first() else "last",
+                ).plan
+            except NotImplementedError:
+                # User-supplied scalar activations can lack an edge expression.
+                pass
         if hasattr(reference, "magnetic_edge_irreps"):
             self.magnetic_edge_irreps = co3.Irreps(reference.magnetic_edge_irreps)
             self.magnetic_frame = co2.LocalFrame(
@@ -223,6 +277,28 @@ class UvConvolution(torch.nn.Module):
         radial_network=None,
         magnetic=None,
     ):
+        if (
+            use_streamed_convolution(self.eqx_tp, features, edge_index)
+            and rotation_inv is rotation
+            and magnetic is None
+        ):
+            return (
+                self.eqx_tp(
+                    features,
+                    weights,
+                    edge_index,
+                    rotation,
+                    edge_cutoff,
+                    (
+                        self.linear_up.weight,
+                        self.linear_up.bias,
+                        self.linear_down.weight,
+                        self.linear_down.bias,
+                    ),
+                    radial_network=radial_network,
+                )
+                * self.scale
+            )
         if radial_network is not None:
             weights = radial_network(materialize(weights, edge_index))
         source = self.local_frame_in(features[edge_index[0]], rotation)

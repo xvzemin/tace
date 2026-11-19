@@ -47,15 +47,15 @@ def graph_softmax(
         backend = "cuda" if fused else "torch"
     if scores.ndim != 2:
         raise ValueError("Scores must have shape (items, heads).")
-    if weight is None:
-        weight = scores.new_ones((scores.shape[0], 1))
-    if (
+    if weight is not None and (
         weight.ndim != 2
         or weight.shape[0] != scores.shape[0]
         or weight.shape[1] not in (1, scores.shape[1])
     ):
         raise ValueError("Weights must have shape (items, 1) or (items, heads).")
-    if weight.device != scores.device or weight.dtype != scores.dtype:
+    if weight is not None and (
+        weight.device != scores.device or weight.dtype != scores.dtype
+    ):
         raise ValueError("Scores and weights must have the same device and dtype.")
     if (
         target.shape != scores.shape[:1]
@@ -67,14 +67,17 @@ def graph_softmax(
     if backend == "cuda" and scores.is_cuda:
         from ..ops.common.attention import normalized_exp
 
-        values = normalized_exp(
-            scores.contiguous(), weight.contiguous(), target, num_nodes, eps
+        normalizer = (
+            scores.new_ones((scores.shape[0], 1))
+            if weight is None
+            else weight.contiguous()
         )
+        values = normalized_exp(scores.contiguous(), normalizer, target, num_nodes, eps)
     else:
         values = get_kernel("graph_normalized_exp", "torch")(
             scores, weight, target, num_nodes, eps
         )
-    return values * weight
+    return values if weight is None else values * weight
 
 
 class GraphSoftmax(torch.nn.Module):

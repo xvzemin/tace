@@ -2,8 +2,8 @@
 
 import torch
 
-from ..ops.torch.nn import element_linear as torch_kernel
 from ..ops.precision import validate_module_precision
+from ..ops.torch.nn import element_linear as torch_kernel
 
 
 class ElementLinear(torch.nn.Module):
@@ -17,6 +17,7 @@ class ElementLinear(torch.nn.Module):
         if element_mode not in ("single", "pair"):
             raise ValueError("element_mode must be 'single' or 'pair'.")
         self.backend = backend
+        self.projection = None
         self.element_mode = element_mode
         self.layout = layout
         self.num_experts = 1
@@ -118,8 +119,11 @@ class ElementLinear(torch.nn.Module):
         if fused:
             from ..ops.cuda.nn import element_linear as cuda_kernel
 
-            return cuda_kernel.evaluate(self, features, weight, node_type, target_type)
-        return torch_kernel.evaluate(self, features, weight, node_type, target_type)
+            kernel = cuda_kernel
+        else:
+            kernel = torch_kernel
+        result = kernel.evaluate(self, features, weight, node_type, target_type)
+        return result if self.projection is None else self.projection(result)
 
     def extra_repr(self):
         return (

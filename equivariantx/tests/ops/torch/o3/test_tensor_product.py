@@ -22,6 +22,44 @@ def tensor_product(kind, backend="torch", device="cpu", degree=2):
     ).to(device=device, dtype=torch.float64)
 
 
+@pytest.mark.parametrize("cls", [o3.GauntTensorProduct, o3.MatrixTensorProduct])
+@pytest.mark.parametrize("edges_count,shared", [(0, False), (7, False), (7, True)])
+def test_edge_matrix_convolution(cls, edges_count, shared, device, double_precision):
+    from equivariantx.ops.torch.o3.tensor_product import (
+        convolution_reference,
+        edge_matrix_product,
+    )
+
+    irreps = "8x1o+16x2e+16x0e+8x1o"
+    tp = cls(irreps, "0e+1o", irreps, shared_weights=shared, backend="torch").to(device)
+    assert len(tp.edge_matrices) == len(tp.routes)
+    layer = getattr(conv, cls.__name__ + "Conv")(tp, backend="torch")
+    edges = torch.randint(3, (2, edges_count), device=device)
+    x = torch.randn(3, tp.input_dim1, device=device, requires_grad=True)
+    y = torch.randn(edges_count, tp.input_dim2, device=device, requires_grad=True)
+    shape = (tp.weight_numel,) if shared else (edges_count, tp.weight_numel)
+    w = torch.randn(shape, device=device, requires_grad=True)
+    outputs = (
+        edge_matrix_product(tp, x, y, w, 4, edges),
+        convolution_reference(layer, x, y, edges, w, 4, None, None),
+    )
+    torch.testing.assert_close(*outputs)
+    for _ in range(3):
+        probe = torch.randn_like(outputs[0])
+        outputs = [
+            torch.cat(
+                [
+                    g.flatten()
+                    for g in torch.autograd.grad(
+                        (out.sin() * probe).sum(), (x, y, w), create_graph=True
+                    )
+                ]
+            )
+            for out in outputs
+        ]
+        torch.testing.assert_close(*outputs)
+
+
 @pytest.mark.parametrize("kind", ["gaunt", "matrix"])
 def test_independent_reference_and_high_orders(kind, monkeypatch):
     module = tensor_product(kind, degree=1 if kind == "gaunt" else 2)

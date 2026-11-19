@@ -3,8 +3,6 @@
 import torch
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-from ... import config
-
 
 def mix_channels(weight, features):
     """Contract narrow Cartesian blocks without a batched GEMM workspace."""
@@ -37,14 +35,6 @@ def grouped(
             (y, module.irreps_in2, module.slices_in2),
         )
     ]
-    active = (
-        order_for is not None
-        and module.backend == "torch"
-        and not x.is_cuda
-        and not config.TORCH_REFERENCE
-        and config.TORCH_CARTESIAN_REORDER
-        and (torch.compiler.is_compiling() or get_proxy_mode() is not None)
-    )
     for group in module.groups:
         couple = (
             module.symmetric_product
@@ -76,7 +66,7 @@ def grouped(
                     ],
                     dim=-len(group.path_shape) - 1,
                 )
-        order = order_for(group) if active else None
+        order = order_for(group) if order_for is not None else None
         if mode == "uvu" and right.shape[-2] > 1:
             # Each output u shares its left operand across v.
             right = (

@@ -20,7 +20,6 @@ def plane_projector(direction, *, backend=None):
         Unit vectors of shape (..., 3). Normalization is not performed.
     backend : {None, "torch", "cuda"}, optional
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Execution backend. Defaults to Torch.
 
     Returns
     -------

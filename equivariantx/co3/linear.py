@@ -5,12 +5,73 @@ from typing import NamedTuple
 
 import torch
 
+from ..nn.element_linear import ElementLinear as ElementLinearBase
+from ..o3.linear import MoEElementLinear as MoEElementLinearBase
 from ..ops import resolve_backend
 from ..ops.common.torch.linear import linear_layout
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import linear as torch_kernel
 from .basis import ChangeOfBasis, Projector
 from .irreps import Irreps
+
+
+def configure_element_projection(layer, linear):
+    if not isinstance(linear, Linear) or linear.output_basis != "cartesian":
+        raise ValueError("Expected a co3.Linear with Cartesian output.")
+    if isinstance(linear.projection, Projector):
+        layer.projection = Projector(layer.irreps_out, backend=layer.backend)
+
+
+class ElementLinear(ElementLinearBase):
+    """Mix Cartesian channels with element-dependent weights.
+
+    Parameters
+    ----------
+    linear : Linear
+        Unbiased Cartesian-output map defining paths and optional STF projection.
+    backend : {None, "torch", "cuda"}, optional
+        Execution backend.
+    element_mode : {"single", "pair"}, optional
+        Index weights by one element (default) or by an ordered element pair.
+
+    Examples
+    --------
+    >>> from equivariantx import co3
+    >>> layer = co3.ElementLinear(co3.Linear("2x2e", "1x2e", project=True))
+    >>> layer(torch.randn(3, 18), torch.randn(2, 2), torch.tensor([0, 1, 0])).shape
+    torch.Size([3, 9])
+    """
+
+    def __init__(self, linear, backend=None, *, element_mode="single"):
+        super().__init__(linear, resolve_backend(backend), element_mode, "mul_ir")
+        configure_element_projection(self, linear)
+
+
+class MoEElementLinear(MoEElementLinearBase):
+    """Apply element-indexed maps to independent Cartesian channel groups.
+
+    Parameters
+    ----------
+    linear : Linear
+        Unbiased Cartesian-output map for one expert.
+    num_experts : int
+        Number of independently weighted channel groups in each irrep.
+    backend : {None, "torch", "cuda"}, optional
+        Execution backend.
+    element_mode : {"single", "pair"}, optional
+        Index weights by one element (default) or by an ordered element pair.
+
+    Examples
+    --------
+    >>> from equivariantx import co3
+    >>> layer = co3.MoEElementLinear(co3.Linear("2x2e", "1x2e"), 2)
+    >>> layer(torch.randn(3, 36), torch.randn(2, 2, 2), torch.tensor([1, 1, 0])).shape
+    torch.Size([3, 18])
+    """
+
+    def __init__(self, linear, num_experts, backend=None, *, element_mode="single"):
+        super().__init__(linear, num_experts, backend, element_mode=element_mode)
+        configure_element_projection(self, linear)
 
 
 class Instruction(NamedTuple):

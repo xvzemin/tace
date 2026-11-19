@@ -42,5 +42,6 @@ for module in (
     "equivariantx.ops.cuda.co3.ictp.permutation",
     "equivariantx.ops.cuda.co3.symmetric",
     "equivariantx.ops.cuda.nn.activation",
+    "equivariantx.ops.cuda.nn.layer_norm",
 ):
     import_module(module)

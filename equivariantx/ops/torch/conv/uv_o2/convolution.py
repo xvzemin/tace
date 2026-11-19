@@ -4,10 +4,67 @@ import torch
 from torch._subclasses.fake_tensor import is_fake
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
+from .....utils.autograd import forward_ad_active
 from .... import config, get_kernel
+from ....common.edge import EdgeProgram
 from ....common.torch.linear import linear as linear_blocks
 from ....common.uv_o2 import prepare, program_inputs, rotation_layout
+from ...nn.activation import scalar_blocks, scalar_values
 from . import transverse as transverse_kernel
+
+
+def gate_layout(module):
+    """Describe the scalar maps and the circular blocks each of them gates."""
+    groups = []
+    for locations, acts in (
+        (module._scalar_locations, module.act_scalars),
+        (module._gate_locations, module.act_gates),
+    ):
+        blocks = [
+            scalar_blocks((size,), (act,)) for size, act in zip(acts._sizes, acts.acts)
+        ]
+        if any(not block for block in blocks):
+            return None
+        groups.append(tuple(zip(locations, blocks)))
+    paths = tuple(
+        (
+            module._gated_locations[path.i_gated],
+            path.gated_start,
+            path.i_gate,
+            path.gate_start,
+            path.mul,
+            path.ir_gate.is_odd_scalar() and path.ir_gated.m > 0,
+        )
+        for path in module._paths
+    )
+    return (*groups, paths) if groups[0] or paths else None
+
+
+def gate_blocks(values, layout):
+    """Apply scalar gates to blocked circular features with native broadcasts."""
+    scalar_maps, gate_maps, paths = layout
+    outputs = [scalar_values(values[i], block) for i, block in scalar_maps]
+    gates = [scalar_values(values[i], block) for i, block in gate_maps]
+    for i, start, g, offset, mul, odd in paths:
+        value = values[i].narrow(-1, start, mul)
+        if odd:
+            value = torch.stack((-value[..., 1, :], value[..., 0, :]), -2)
+        outputs.append(value * gates[g].narrow(-1, offset, mul))
+    return outputs
+
+
+class CircularGate(EdgeProgram):
+    """Broadcast the primal; replay the bounded expression for its derivatives."""
+
+    @staticmethod
+    def forward(plan, inline, metadata, nodes, source, target, *inputs):
+        layout, shapes = plan
+        values = [x.reshape(x.shape[0], d, c) for x, (d, c) in zip(inputs, shapes)]
+        return tuple(value.flatten(-2) for value in gate_blocks(values, layout))
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        EdgeProgram.setup_context(ctx, ("torch", *inputs[1:]), output)
 
 
 def evaluate(
@@ -195,14 +252,38 @@ def staged(
             (source.shape[0],),
         )
         if layer < len(gates):
-            values = execute(
-                gates[layer],
-                [value.flatten(-2) for value in values]
-                + ([direction] if transverse else []),
-                source,
-                target,
-                features.shape[0],
-            )
+            layout = module.gate_layouts[layer]
+            if (
+                separate
+                and packed
+                and features.is_cuda
+                and module.radial_mode == "full"
+                and layout is not None
+                and not torch.compiler.is_compiling()
+                and get_proxy_mode() is None
+                and not forward_ad_active()
+            ):
+                if not torch.is_grad_enabled():
+                    values = gate_blocks(values, layout)
+                    continue
+                values = CircularGate.apply(
+                    (layout, linears[layer][1]),
+                    True,
+                    gates[layer],
+                    features.shape[0],
+                    source,
+                    target,
+                    *(value.flatten(-2) for value in values),
+                )
+            else:
+                values = execute(
+                    gates[layer],
+                    [value.flatten(-2) for value in values]
+                    + ([direction] if transverse else []),
+                    source,
+                    target,
+                    features.shape[0],
+                )
             values = [
                 value.reshape(source.shape[0], dim, mul)
                 for value, (dim, mul) in zip(values, linears[layer + 1][0])

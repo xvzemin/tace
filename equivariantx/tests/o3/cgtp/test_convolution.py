@@ -22,9 +22,9 @@ from equivariantx.tests.conv.testing import (
 @pytest.mark.parametrize("mode", ["last", "full"])
 def test_shared_angular_matrices_preserve_paths(mode, double_precision):
     tp = o3.TensorProduct(
-        "16x1o+16x1o+2x1o",
-        "1o+2x1o",
-        "16x0e+16x1e+16x2e+16x0e+2x0e",
+        "16x1o+16x1o+2x1o+16x0e",
+        "1o+2x1o+0e",
+        "16x0e+16x1e+16x2e+16x0e+2x0e+16x1o",
         [
             (0, 0, 0, "uvu", True),
             (0, 0, 1, "uvu", False),
@@ -33,12 +33,14 @@ def test_shared_angular_matrices_preserve_paths(mode, double_precision):
             (0, 0, 3, "uvu", True),
             (0, 1, 0, "uvu", True),
             (2, 0, 4, "uvu", True),
+            (0, 2, 5, "uvu", True),
+            (3, 0, 5, "uvu", True),
         ],
         internal_weights=False,
         shared_weights=False,
     ).cuda()
     conv = eqx_conv.O3TensorProductConv(tp, backend="torch", radial_mode=mode).cuda()
-    assert len(conv.angular_groups) == 2
+    assert len(conv.angular_groups) == 4
     index = torch.tensor([[0, 2, 1, 0], [1, 1, 0, 2]], device="cuda")
     arguments = tuple(
         torch.randn(shape, device="cuda", requires_grad=True)

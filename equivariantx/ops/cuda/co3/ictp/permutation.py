@@ -153,7 +153,10 @@ def orbit_source(degrees, dtype, stride_x, stride_y, row_x, row_y):
     right = 3 ** max(0, l2 - l1)
     width = 3**rank
     groups = math.comb(rank + 2, 2)
-    lanes = 32 if width * k >= 6 * groups else 1
+    # Keep short permutation classes in the same warp. Assign roughly two
+    # products per lane and cap long reductions at a full warp.
+    work = max(1, width * k // (2 * groups))
+    lanes = min(32, 1 << (work.bit_length() - 1))
     return (
         f"""
     using I=long long; using T={scalar_type(dtype)};
@@ -170,10 +173,11 @@ def orbit_source(degrees, dtype, stride_x, stride_y, row_x, row_y):
                 sum+=px[((u*3+p)*K+k)*{stride_x}]*py[((k*3+m)*B+v)*{stride_y}]
                     -px[((u*3+m)*K+k)*{stride_x}]*py[((k*3+p)*B+v)*{stride_y}];
             }}
-            if constexpr(lanes==32){{
+            if constexpr(lanes>1){{
+                unsigned mask=(0xffffffffu>>(32-lanes))<<((threadIdx.x%32)/lanes*lanes);
                 #pragma unroll
-                for(int d=16;d;d/=2)sum+=__shfl_down_sync(0xffffffff,sum,d);
-                sum=__shfl_sync(0xffffffff,sum,0);
+                for(int d=lanes/2;d;d/=2)sum+=__shfl_down_sync(mask,sum,d,lanes);
+                sum=__shfl_sync(mask,sum,0,lanes);
             }}
             T value=sum*(T({(2 * k) ** -0.5:.17g})/T(end-begin));
             for(I t=begin+lane;t<end;t+=lanes)out[row*W+order[t]]=value;

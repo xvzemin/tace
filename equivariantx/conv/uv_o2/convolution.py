@@ -171,6 +171,12 @@ class UvO2TensorProductConv(torch.nn.Module):
             linear_description(layer, True) for layer in linears
         )
         self.gates = tuple(gate_program(gate, blocks=True) for gate in gates)
+        self.gate_layouts = tuple(
+            torch_kernel.gate_layout(gate)
+            if backend == "torch" and radial_mode == "full"
+            else None
+            for gate in gates
+        )
         self.transverse_gates = tuple(
             gate_program(gate, True, blocks=True) for gate in gates
         )

@@ -7,6 +7,7 @@ import torch
 from equivariantx import o2
 from equivariantx.ops.common.torch.linear import linear, linear_layout
 
+from ..nn.element_linear import ElementLinear as ElementLinearBase
 from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import linear as torch_kernel
@@ -192,6 +193,40 @@ class Linear(torch.nn.Module):
 
     def extra_repr(self):
         return f"{self.irreps_in} -> {self.irreps_out} | {self.weight_numel} weights"
+
+
+class ElementLinear(ElementLinearBase):
+    """Apply element-dependent channel maps to planar Cartesian tensors.
+
+    Parameters
+    ----------
+    linear : Linear
+        Unbiased Cartesian-output map defining the paths, normalization and
+        optional STF projection. Weights are supplied to :meth:`forward`.
+    backend : {None, "torch", "cuda"}, optional
+        Execution backend. CPU inputs use PyTorch.
+    element_mode : {"pair", "single"}, optional
+        Use an independent matrix for each ordered element pair (default) or
+        for each element.
+
+    Examples
+    --------
+    >>> from equivariantx import co2
+    >>> linear = co2.Linear("2x0e + 2x2m", "3x0e + 1x2m")
+    >>> layer = co2.ElementLinear(linear)
+    >>> x = torch.randn(4, 10)
+    >>> weight = torch.randn(2, 3, layer.weight_numel)
+    >>> layer(x, weight, torch.tensor([0, 0, 1, 1]), torch.tensor([0, 1, 2, 1])).shape
+    torch.Size([4, 7])
+    """
+
+    def __init__(self, linear, backend=None, *, element_mode="pair"):
+        if not isinstance(linear, Linear) or linear.output_basis != "cartesian":
+            raise ValueError("Expected a co2.Linear with Cartesian output.")
+        backend = resolve_backend(backend)
+        super().__init__(linear, backend, element_mode, "mul_ir")
+        if isinstance(linear.projection, Projector):
+            self.projection = Projector(self.irreps_out, backend=backend)
 
 
 class UuLinear(torch.nn.Module):

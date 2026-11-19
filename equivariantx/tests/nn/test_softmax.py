@@ -32,6 +32,27 @@ def test_graph_softmax_backend():
         graph_softmax(*inputs, backend="unknown")
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_graph_softmax_unit_weights(backend):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    scores = torch.randn(13, 4, device=device, dtype=torch.float64, requires_grad=True)
+    index = torch.arange(13, device=device) % 3
+    actual = graph_softmax(scores, index, 5, eps=1e-3, backend=backend)
+    expected = graph_softmax(
+        scores, index, 5, scores.new_ones(13, 1), eps=1e-3, backend="torch"
+    )
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected)
+        seed = torch.randn_like(scores)
+        actual, expected = (
+            torch.autograd.grad(y, scores, seed, create_graph=True)[0]
+            for y in (actual, expected)
+        )
+    torch.testing.assert_close(actual, expected)
+
+
 @pytest.mark.parametrize("heads,weight_heads", [(1, 1), (3, 1), (3, 3), (8, 8)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_graph_softmax_derivatives(heads, weight_heads, dtype):

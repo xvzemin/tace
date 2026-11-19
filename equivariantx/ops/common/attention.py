@@ -177,7 +177,11 @@ def backward(ctx, grad):
     )
     reduction = reduction[target]
     grad_scores = exp * (grad - weight * reduction)
-    grad_weight = (-exp * reduction).sum_to_size(weight.shape)
+    grad_weight = (
+        (-exp * reduction).sum_to_size(weight.shape)
+        if ctx.needs_input_grad[1]
+        else None
+    )
     return grad_scores, grad_weight, None, None, None
 
 

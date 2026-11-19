@@ -69,6 +69,9 @@ Linear maps
 .. autoclass:: equivariantx.co2.Linear
    :members: forward, weight_view_for_instruction, weight_views
 
+.. autoclass:: equivariantx.co2.ElementLinear
+   :members: forward
+
 .. autoclass:: equivariantx.co2.UuLinear
    :members: forward
 
@@ -90,6 +93,15 @@ Tensor products
 .. autoclass:: equivariantx.co2.FullyConnectedTensorProduct
 
 .. autoclass:: equivariantx.co2.ElementwiseTensorProduct
+
+Convolutions
+------------
+
+.. autoclass:: equivariantx.co2.UuTensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.co2.UvTensorProductConv
+   :members: forward
 
 Projection
 ----------

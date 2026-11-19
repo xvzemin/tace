@@ -212,6 +212,9 @@ class AsymmetricContraction(torch.nn.Module):
                 paths_by_order.append(tuple(paths))
 
         self._base_irreps_out = base_irreps_out
+        self.output_is_contiguous = all(
+            ir.dim == 1 or mul == 1 for ir, mul in base_irreps_out
+        )
         self.irreps_out = Irreps(
             [(ir, mul * self.num_channels) for ir, mul in base_irreps_out]
         )
@@ -360,6 +363,8 @@ class AsymmetricContraction(torch.nn.Module):
             )
 
     def _flatten_output(self, features: torch.Tensor) -> torch.Tensor:
+        if self.output_is_contiguous:
+            return features.flatten(-2)
         outputs = []
         offset = 0
         for ir, mul in self._base_irreps_out:

@@ -2,9 +2,10 @@
 
 from .basis import ChangeOfBasis, Projector, path_matrix, projector_matrix
 from .cartesian_harmonics import CartesianHarmonics
+from .convolution import UuTensorProductConv, UvTensorProductConv
 from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
-from .linear import Linear, UuLinear
+from .linear import ElementLinear, Linear, UuLinear
 from .local_frame import LocalFrame
 from .o3_tensor_product import O3TensorProduct
 from .projection import PlanarDetracer, PlaneProjector, plane_projector
@@ -31,7 +32,10 @@ __all__ = [
     "projector_matrix",
     "CartesianHarmonics",
     "Linear",
+    "ElementLinear",
     "UuLinear",
+    "UuTensorProductConv",
+    "UvTensorProductConv",
     "LocalFrame",
     "Activation",
     "Gate",
