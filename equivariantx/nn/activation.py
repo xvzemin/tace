@@ -49,7 +49,7 @@ class PolynomialActivation(torch.nn.Module):
     >>> act = nn.PolynomialActivation("silu", degree=4)
     >>> grid = o2.O2Grid("0e + 0o + 2x1m", resolution=6)
     >>> x = grid.irreps.randn(5, -1)
-    >>> grid.from_grid(act(grid.to_grid(x))).shape
+    >>> grid.activate(x, act).shape
     torch.Size([5, 6])
     """
 

@@ -13,7 +13,7 @@ from equivariantx.ops.torch.o2 import o2grid as kernels
 def test_joint_inductor(time_odd, monkeypatch, device):
     monkeypatch.setattr(config, "TORCH_O2_GRID", True)
     irreps = "0ee+0oe+2x1me" + ("+0eo+0oo+2x1mo" if time_odd else "")
-    layer = O2Grid(irreps, dtype=torch.float64, device=device)
+    layer = O2Grid(irreps, backend="torch", dtype=torch.float64, device=device)
     x = (
         torch.randn(2, layer.dim, dtype=torch.float64, device=device) * 0.1
     ).requires_grad_()
@@ -22,9 +22,14 @@ def test_joint_inductor(time_odd, monkeypatch, device):
     ).requires_grad_()
 
     def run(x, w, ordinary=False):
-        to_grid = kernels.to_grid_reference if ordinary else kernels.to_grid
-        from_grid = kernels.from_grid_reference if ordinary else kernels.from_grid
-        y = from_grid(layer, to_grid(layer, x * w).sin())
+        z = x * w
+        if ordinary:
+            v = kernels.to_grid_reference(layer, z)
+            y = kernels.from_grid_reference(
+                layer, v.sin() + v * kernels.to_grid_reference(layer, x)
+            )
+        else:
+            y = layer.activate(z, torch.sin) + layer.product(z, x)
         energy = 1 + y.sin().sum()
         force = -torch.autograd.grad(energy, x, create_graph=True)[0]
         loss = force.square().sum() + energy.square()

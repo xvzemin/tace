@@ -33,6 +33,7 @@ for module in (
     "equivariantx.ops.common.cuda.grid",
     "equivariantx.ops.common.cuda.attention",
     "equivariantx.ops.cuda.o2.circular_harmonics",
+    "equivariantx.ops.cuda.o2.grid_projection",
     "equivariantx.ops.cuda.co2.basis",
     "equivariantx.ops.cuda.co2.cartesian_harmonics",
     "equivariantx.ops.cuda.co2.local_frame",

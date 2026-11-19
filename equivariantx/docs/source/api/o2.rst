@@ -69,4 +69,4 @@ Grid transforms
 ---------------
 
 .. autoclass:: equivariantx.o2.O2Grid
-   :members: forward, to_grid, from_grid
+   :members: forward, to_grid, from_grid, activate, product

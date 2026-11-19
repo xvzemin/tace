@@ -189,6 +189,11 @@ CARTESIAN_REORDER_MIN_WORK = 1 << 18
 
 # Move sheet mixing to compact Fourier coefficients; test S2 parity separately.
 TORCH_O2_GRID = True
+O2_GRID_FUSED = True
+O2_GRID_MATRIX_ELEMENTS = 1 << 15
+O2_GRID_MAX_SAMPLES = 96
+O2_GRID_MAX_BANDS = 48
+O2_GRID_TILE_BYTES = 64 << 20
 O2_GRID_INLINE = False
 TORCH_S2_GRID = False
 S2_GRID_INLINE = False

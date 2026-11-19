@@ -230,6 +230,52 @@ def test_o2_grid_dtype_and_derivatives(irreps, double_precision, device):
     torch.testing.assert_close(actual, expected)
 
 
+def test_tiled_product_and_callable(monkeypatch, double_precision, device):
+    from equivariantx.ops import config
+    from equivariantx.ops.torch.o2 import o2grid as ref
+
+    monkeypatch.setattr(config, "TORCH_RECOMPUTE", True)
+    monkeypatch.setattr(config, "O2_GRID_TILE_BYTES", 64)
+    grid = O2Grid("2x0e+2x0o+4x1m+4x2m", backend="torch", device=device)
+    x, y = (
+        grid.irreps.randn(7, -1, device=device, requires_grad=True) for _ in range(2)
+    )
+    a = grid.product(x, y) + grid.product(x, x)
+    u, v = ref.to_grid_reference(grid, x), ref.to_grid_reference(grid, y)
+    b = ref.from_grid_reference(grid, u * v + u.square())
+    for _ in range(4):
+        torch.testing.assert_close(a, b, atol=3e-10, rtol=3e-9)
+        a, b = [
+            torch.cat(
+                torch.autograd.grad(z.sin().mean(), (x, y), create_graph=True), dim=-1
+            )
+            for z in (a, b)
+        ]
+    torch.testing.assert_close(a, b, atol=3e-10, rtol=3e-9)
+
+    if device != "cuda":
+        return
+    grid = O2Grid("2x0e+2x0o+4x1m+4x2m", backend="cuda", device=device)
+    w = torch.tensor(1.2, requires_grad=True, device=device)
+    act = torch.nn.SiLU()
+    seen = []
+
+    def hook(module, args, output):
+        seen.append(output.shape)
+        return output * w
+
+    with act.register_forward_hook(hook):
+        a = grid.activate(x, act)
+    b = ref.from_grid_reference(
+        grid, torch.nn.functional.silu(ref.to_grid_reference(grid, x)) * w
+    )
+    assert seen == [(7, *grid.grid_shape)]
+    torch.testing.assert_close(a, b)
+    torch.testing.assert_close(
+        torch.autograd.grad(a.sum(), (x, w)), torch.autograd.grad(b.sum(), (x, w))
+    )
+
+
 @pytest.mark.parametrize("irreps", ["0e+0o", "0e+0o+2x1m", "1m+0o+2m+1m+0e+2m"])
 def test_o2_grid_compile(irreps, double_precision, device):
     grid = O2Grid(irreps, device=device)
@@ -436,7 +482,11 @@ def test_o2_grid_polynomial_projection(power, reflection, double_precision, devi
     grid = O2Grid("0e+0o+2x1m+2x2m+2x3m+2x4m+2x5m", (power + 1) * 5 + 1).to(device)
     rotation = grid.irreps.D_from_angle(0.731, reflected=reflection, device=device)
     x = torch.randn(3, 4, grid.dim, device=device)
-    actual = grid.from_grid(grid(x @ rotation.T).pow(power))
+    actual = (
+        grid.product(x @ rotation.T, x @ rotation.T)
+        if power == 2
+        else grid.activate(x @ rotation.T, lambda z: z.pow(3))
+    )
     expected = grid.from_grid(grid(x).pow(power)) @ rotation.T
     torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
 
@@ -508,10 +558,9 @@ def test_fp32_backend(backend, monkeypatch, device):
             torch.randn(2, layer.dim, device=device, dtype=torch.float32) * 0.1
         ).requires_grad_()
         precise = x.detach().double().requires_grad_()
-        actual = layer.from_grid(layer(x).sin())
-        expected = kernels.from_grid_reference(
-            oracle, kernels.to_grid_reference(oracle, precise).sin()
-        )
+        actual = layer.activate(x, torch.sin) + layer.product(x, 0.5 * x)
+        z = kernels.to_grid_reference(oracle, precise)
+        expected = kernels.from_grid_reference(oracle, z.sin() + 0.5 * z.square())
         for _ in range(3):
             torch.testing.assert_close(actual.double(), expected, atol=3e-7, rtol=1e-5)
             actual, expected = [
@@ -520,3 +569,78 @@ def test_fp32_backend(backend, monkeypatch, device):
             ]
     finally:
         torch.set_float32_matmul_precision(precision)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "product",
+        "square",
+        "silu",
+        "sigmoid",
+        "tanh",
+        "sin",
+        "polynomial",
+        "gelu",
+        "relu",
+        "softplus",
+    ],
+)
+def test_projected_function(backend, kind, device, double_precision):
+    from equivariantx.ops.torch.o2 import o2grid as ref
+
+    # Split the positive-order copies across uneven entries and use four sheets.
+    grid = O2Grid(
+        "0oe+2x0ee+1me+3x1me+0oe+2x0eo+4x1mo+2x0oo",
+        resolution=9,
+        backend=backend,
+        device=device,
+        dtype=torch.float32,
+    ).double()
+    act = {
+        "polynomial": PolynomialActivation(
+            degree=5, bound=1.7, backend="torch", device=device
+        ),
+        "square": torch.square,
+        "silu": torch.nn.functional.silu,
+        "gelu": torch.nn.GELU(),
+        "relu": torch.nn.functional.relu,
+        "softplus": torch.nn.Softplus(),
+        "tanh": torch.tanh,
+        "sigmoid": torch.sigmoid,
+        "sin": torch.sin,
+    }.get(kind)
+
+    def run(x, y, ordinary):
+        if ordinary:
+            u = ref.to_grid_reference(grid, x)
+            v = u * ref.to_grid_reference(grid, y) if kind == "product" else act(u)
+            return ref.from_grid_reference(grid, v)
+        return grid.product(x, y) if kind == "product" else grid.activate(x, act)
+
+    x, y = [
+        (0.3 * torch.randn(grid.dim, 4, device=device)).T.requires_grad_()
+        for _ in range(2)
+    ]
+    a, b = run(x, y, False), run(x, y, True)
+    inputs = (x, y) if kind == "product" else (x,)
+    for _ in range(4):
+        torch.testing.assert_close(a, b, atol=3e-10, rtol=3e-9)
+        a, b = [
+            torch.cat(
+                torch.autograd.grad(v.sin().mean(), inputs, create_graph=True), dim=-1
+            )
+            for v in (a, b)
+        ]
+    torch.testing.assert_close(a, b, atol=3e-10, rtol=3e-9)
+    tx, ty = torch.randn_like(x), torch.randn_like(y)
+    torch.testing.assert_close(
+        torch.func.jvp(lambda a, b: run(a, b, False), (x, y), (tx, ty)),
+        torch.func.jvp(lambda a, b: run(a, b, True), (x, y), (tx, ty)),
+    )
+    assert run(x[:0], y[:0], False).shape == (0, grid.dim)
+    if kind == "product":
+        torch.testing.assert_close(grid.product(x, x), run(x, x, True))
+        torch.testing.assert_close(grid.product(x, y[:1]), run(x, y[:1], True))
+    assert not grid.state_dict()

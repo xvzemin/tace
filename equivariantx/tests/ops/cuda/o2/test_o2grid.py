@@ -29,16 +29,13 @@ def test_joint_aoti(time_odd, monkeypatch, tmp_path):
     )
 
     def run(x, w, ordinary=False):
-        y = (
-            kernels.to_grid_reference(layer, x * w)
-            if ordinary
-            else layer.to_grid(x * w)
-        )
-        y = (
-            kernels.from_grid_reference(layer, y.sin())
-            if ordinary
-            else layer.from_grid(y.sin())
-        )
+        z = x * w
+        if ordinary:
+            grid = kernels.to_grid_reference(layer, z)
+            other = kernels.to_grid_reference(layer, x)
+            y = kernels.from_grid_reference(layer, grid.sin() + grid * other)
+        else:
+            y = layer.activate(z, torch.sin) + layer.product(z, x)
         energy = 1 + y.sin().sum()
         force = -torch.autograd.grad(energy, x, create_graph=True)[0]
         loss = force.square().sum() + energy.square()
@@ -53,6 +50,9 @@ def test_joint_aoti(time_odd, monkeypatch, tmp_path):
     graph = make_fx(lambda *args: run(*args))(x, w)
     graph.graph.eliminate_dead_code()
     graph.recompile()
+    assert any(
+        n.target == torch.ops.eqx.o2_grid_project.default for n in graph.graph.nodes
+    )
     exported = torch.export.export(graph, (x.detach(), w.detach()), strict=True)
     package = tmp_path / "grid.pt2"
     torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
@@ -102,15 +102,20 @@ def test_native_dynamic_inductor(time_odd, monkeypatch):
         device="cuda",
     )
 
+    act = torch.nn.SiLU()
+
     def run(x):
-        return layer.from_grid(layer(x).sin())
+        return (
+            layer.from_grid(layer(x).sin())
+            + layer.activate(x, act)
+            + layer.product(x, x)
+        )
 
     compiled = torch.compile(run, fullgraph=True, dynamic=True)
     for count in (3, 7, 0):
         x = torch.randn(count, 2, layer.dim, device="cuda", dtype=torch.float64) * 0.1
-        expected = kernels.from_grid_reference(
-            layer, kernels.to_grid_reference(layer, x).sin()
-        )
+        z = kernels.to_grid_reference(layer, x)
+        expected = kernels.from_grid_reference(layer, z.sin() + act(z) + z.square())
         torch.testing.assert_close(compiled(x), expected, atol=3e-10, rtol=3e-10)
 
 

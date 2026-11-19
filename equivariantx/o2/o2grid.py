@@ -5,7 +5,7 @@ from collections import Counter
 
 import torch
 
-from ..ops import resolve_backend
+from ..ops import config, resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o2 import o2grid as torch_kernel
 from .irreps import Irrep, Irreps
@@ -235,6 +235,54 @@ class O2Grid(torch.nn.Module):
                 name, value.to(device=self.grid.device), persistent=False
             )
 
+        # Use one summation order for combined, repeated and split irrep blocks.
+        bands = self.num_sheets * dim
+        self.dense_grid = (
+            bands * self.num_sheets * resolution <= config.O2_GRID_MATRIX_ELEMENTS
+        )
+        self.band_layout = all(mul % self.num_channels == 0 for _, mul in self.irreps)
+        if self.dense_grid:
+            order = []
+            for t in range(len(self.time_parities)):
+                for m in range(self.mmax + 1):
+                    for k in range(2 if m else 1):
+                        for s in range(2):
+                            j = 0 if not m else 2 * m - 1 + (k ^ s)
+                            order.append((2 * t + s) * dim + j)
+            order = torch.tensor(order, dtype=torch.long, device="cpu")
+            sheet = torch.tensor(
+                [[1.0, 1.0], [1.0, -1.0]], dtype=torch.float64, device="cpu"
+            )
+            if self.num_sheets == 4:
+                sheet = torch.kron(sheet, sheet)
+            sheet = sheet / math.sqrt(self.num_sheets)
+            for key, basis in (
+                ("synthesis", self._constants["synthesis"]),
+                ("analysis", self._constants["analysis"].T),
+            ):
+                matrix = torch.kron(sheet, basis.contiguous()) * input_sign[:bands]
+                value = matrix.index_select(1, order).contiguous()
+                self._constants[key + "_bands"] = value
+                self.register_buffer(
+                    key + "_bands",
+                    value.to(dtype=dtype, device=device, copy=True),
+                    persistent=False,
+                )
+            for prefix, index in (("", input_index), ("split_", split_input_index)):
+                index = index.view(self.num_channels, bands).T.index_select(0, order)
+                index = (
+                    index[:, 0] // self.num_channels
+                    if prefix or self.band_layout
+                    else index.flatten()
+                )
+                identity = torch.equal(index, torch.arange(index.numel(), device="cpu"))
+                for key, idx in (("in_bands", index), ("out_bands", index.argsort())):
+                    self.register_buffer(
+                        prefix + key,
+                        None if identity else idx.to(device),
+                        persistent=False,
+                    )
+
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
         for name, value in self._constants.items():
@@ -313,6 +361,62 @@ class O2Grid(torch.nn.Module):
         if features.ndim < 3 or features.shape[-3:] != self.grid_shape:
             raise ValueError(f"Expected trailing grid dimensions {self.grid_shape}.")
         return execution(self, features).from_grid(self, features, split)
+
+    def activate(self, features, act):
+        """Apply a pointwise activation on the grid and project to the input irreps.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Combined coefficients of shape ``(..., irreps.dim)``.
+        act : callable
+            Shape-preserving scalar activation, shared by all grid sheets. For
+            a polynomial of degree ``d``, use ``resolution > (d + 1) * mmax``
+            for an alias-free projection.
+
+        Returns
+        -------
+        torch.Tensor
+            Coefficients of shape ``(..., irreps.dim)``.
+
+        Examples
+        --------
+        >>> grid = O2Grid("0e + 0o + 2x1m")
+        >>> x = grid.irreps.randn(4, -1)
+        >>> grid.activate(x, torch.tanh).shape
+        torch.Size([4, 6])
+        """
+        validate_module_precision(self, (features,))
+        if features.ndim < 1 or features.shape[-1] != self.dim:
+            raise ValueError(f"Expected {self.dim} features on the last axis.")
+        return execution(self, features).activate(self, features, act)
+
+    def product(self, features1, features2):
+        """Multiply two signals pointwise on the grid and project to the input irreps.
+
+        Parameters
+        ----------
+        features1, features2 : torch.Tensor
+            Combined coefficients with broadcastable leading dimensions and
+            trailing dimension ``irreps.dim``. The product projected back to
+            ``mmax`` is alias-free when ``resolution > 3 * mmax``.
+
+        Returns
+        -------
+        torch.Tensor
+            Projected coefficients, with the broadcast leading dimensions.
+
+        Examples
+        --------
+        >>> grid = O2Grid("0e + 0o + 2x1m")
+        >>> x = grid.irreps.randn(4, -1)
+        >>> grid.product(x, x).shape
+        torch.Size([4, 6])
+        """
+        validate_module_precision(self, (features1, features2))
+        if any(x.ndim < 1 or x.shape[-1] != self.dim for x in (features1, features2)):
+            raise ValueError(f"Expected {self.dim} features on the last axis.")
+        return execution(self, features1).product(self, features1, features2)
 
     def extra_repr(self):
         return (
