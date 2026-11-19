@@ -157,9 +157,9 @@ class O3CgtpInteraction(Interaction):
                 resnet_type=self.resnet_linear_type,
             )
 
-        if (
+        if self.pre_norm_type not in (None, "const_norm") and (
             self.use_first_pre_norm or self.layer > 0
-        ) and self.pre_norm_type is not None:
+        ):
             if self.resnet_type in ["BB", "BAB"]:
                 self.norm1 = get_normalization_layer(self.pre_norm_type, self.irreps_in)
             if self.resnet_type in ["AB", "BAB"]:
@@ -308,7 +308,7 @@ class O3CgtpInteraction(Interaction):
         if resBA is not None:
             if hasattr(self, "stochastic_depth"):
                 m_i = self.stochastic_depth(m_i, batch)
-            m_i = m_i + resBA
+            m_i = torch.add(resBA, m_i, alpha=self.residual_scale)
 
         if hasattr(self, "resnetAB"):
             if self.resnet_linear_type == "aware":
@@ -319,13 +319,7 @@ class O3CgtpInteraction(Interaction):
         if hasattr(self, "norm2"):
             m_i = self.norm2(m_i)
 
-        if resBB is not None:
-            sc = resBB
-        elif resAB is not None:
-            sc = resAB
-        else:
-            sc = None
-
+        sc = resBB if resBB is not None else resAB
         return m_i, self.truncate_ghosts(sc, nlocal)
 
 

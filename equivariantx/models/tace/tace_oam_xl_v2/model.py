@@ -389,7 +389,9 @@ class NodeProduct(torch.nn.Module):
             )
         if not self.compose_products:
             output = self.linear(output)
-        return output if sc is None else output + sc
+        if sc is not None:
+            output = torch.add(sc, output, alpha=getattr(self, "residual_scale", 1.0))
+        return output
 
 
 class Representation(torch.nn.Module):
@@ -644,7 +646,9 @@ class Representation(torch.nn.Module):
                 message = message / density[:, index : index + 1]
             message = inter.linear_nonlinearity(inter.nonlinearity(message))
             if res_ba is not None:
-                message = message + res_ba
+                message = torch.add(
+                    res_ba, message, alpha=getattr(inter, "residual_scale", 1.0)
+                )
             res_ab = inter.resnetAB(message) if hasattr(inter, "resnetAB") else None
             preprojected = None
             if (

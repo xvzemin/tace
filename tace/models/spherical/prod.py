@@ -162,7 +162,7 @@ class CgtpACE(Product):
         if hasattr(self, "stochastic_depth"):
             outs = self.stochastic_depth(outs, batch)
         if sc is not None:
-            outs = outs + sc
+            outs = torch.add(sc, outs, alpha=self.residual_scale)
         return outs
 
 
@@ -262,7 +262,7 @@ class MaceACE(Product):
         if hasattr(self, "stochastic_depth"):
             output = self.stochastic_depth(output, batch)
         if sc is not None:
-            output = output + sc
+            output = torch.add(sc, output, alpha=self.residual_scale)
         return output
 
 
@@ -435,7 +435,9 @@ class NonlinearCgtpACE(Product):
             output = self.linear(output)
         if hasattr(self, "stochastic_depth"):
             output = self.stochastic_depth(output, batch)
-        return output if sc is None else output + sc
+        if sc is not None:
+            output = torch.add(sc, output, alpha=self.residual_scale)
+        return output
 
 
 PRODUCT: Dict[str, torch.nn.Module] = {

@@ -11,6 +11,7 @@ from e3nn import o3
 from equivariantx import o2
 from equivariantx.nn import MergeLayerNorm, MergeRmsNorm
 from tace.lightning import create_model, export_tace, load_tace
+from tace.models.layer_norm import residual_update_count, residual_update_scale
 from tace.models.layout import LayoutTransform
 from tace.models.linear import (
     ElementEmbedding,
@@ -217,7 +218,7 @@ def test_unknown_model_mlp_type(mlp_type):
         check_model_config({"mlp_type": mlp_type})
 
 
-def test_model_mlp_type_defaults():
+def test_model_config_defaults():
     from tace.models.spherical.default import check_model_config
 
     assert set(MLP) == {"mlp_v1", "mlp_v2"}
@@ -235,6 +236,9 @@ def test_model_mlp_type_defaults():
         }
     )
     assert config["mlp_type"] == "mlp_v1"
+    deeper = check_model_config({"statistics": config["statistics"], "num_layers": 3})
+    assert deeper["product_basis"]["correlation"] == [2, 2, 2]
+    assert DEFAULT_MODEL_CONFIG["product_basis"]["correlation"] == 2
 
 
 @pytest.mark.parametrize(
@@ -903,10 +907,10 @@ def test_cutoff_scatter_norm():
 
 @pytest.fixture
 def small_model():
-    def build(key, interaction="cgtp"):
+    def build(key, interaction="cgtp", *, num_layers=2, **sections):
         config = deepcopy(DEFAULT_MODEL_CONFIG)
         config.update(
-            num_layers=2,
+            num_layers=num_layers,
             num_channel=2,
             Lmax=1,
             lmax=1,
@@ -923,6 +927,8 @@ def small_model():
         config["radial_basis"].update(hidden=[4], bias=True, apply_cutoff=False)
         config["readout_emlp"]["hidden"] = [4]
         config["scale_shift"]["enable"] = False
+        for section, options in sections.items():
+            config[section].update(options)
         statistics = [
             {"atomic_numbers": [1], "atomic_energy": {1: 0.0}, "avg_num_neighbors": 2.0}
         ]
@@ -931,17 +937,13 @@ def small_model():
     return build
 
 
-@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2"])
-def test_cutoff_scatter_norm_force_training(small_model, monkeypatch, interaction):
-    def weight_messages(_, args):
-        cutoff = cutoff_reference(args[7], args[6][1])
-        return (*args[:7], cutoff, *args[8:])
-
+@pytest.fixture
+def isolated_and_connected_atoms():
     positions = torch.tensor(
         [[0.0, 0.0, 0.0], [1.1, 0.1, 0.0], [0.0, 3.5, 0.2], [8.0, 0.0, 0.0]],
         device=DEVICE,
     )
-    data = dict(
+    return dict(
         positions=positions,
         node_type=torch.zeros(4, dtype=torch.long, device=DEVICE),
         edge_index=torch.tensor(
@@ -953,6 +955,16 @@ def test_cutoff_scatter_norm_force_training(small_model, monkeypatch, interactio
         ptr=torch.tensor([0, 4], device=DEVICE),
         fidelity_idx=torch.zeros(1, dtype=torch.long, device=DEVICE),
     )
+
+
+@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2"])
+def test_cutoff_scatter_norm_force_training(
+    small_model, isolated_and_connected_atoms, monkeypatch, interaction
+):
+    def weight_messages(_, args):
+        cutoff = cutoff_reference(args[7], args[6][1])
+        return (*args[:7], cutoff, *args[8:])
+
     results = []
     for key in ("identity", "cutoff"):
         monkeypatch.setenv(
@@ -966,9 +978,101 @@ def test_cutoff_scatter_norm_force_training(small_model, monkeypatch, interactio
                 layer.register_forward_pre_hook(weight_messages)
         else:
             model.load_state_dict(state)
-        out = model({k: v.clone() for k, v in data.items()})
+        out = model({k: v.clone() for k, v in isolated_and_connected_atoms.items()})
         gradient = torch.autograd.grad(
             out["forces"].square().sum(), next(layers[0].edge_info.parameters())
+        )[0]
+        results.append((out["energy"], out["forces"], gradient))
+    for actual, expected in zip(results[1], results[0]):
+        torch.testing.assert_close(actual, expected, rtol=2e-8, atol=2e-10)
+
+
+def test_final_norm_rejects_const_norm():
+    with pytest.raises(ValueError, match="final_norm_type='const_norm'.*pre_norm_type"):
+        check_model_config({"layer_norm": {"final_norm_type": "const_norm"}})
+
+
+def test_const_norm_cutoff_derivatives():
+    from tace.models.radial import C2PolynomialCutoff
+
+    assert residual_update_count(10, "BAB", False, True) == 18
+    assert residual_update_count(10, "BAB", True, True) == 20
+    assert residual_update_count(10, "AB", True, False) == 9
+    assert residual_update_count(10, "BB", True, True) == 10
+    assert residual_update_count(1, "BAB", False, False) == 0
+    assert residual_update_count(10, None, True, True) == 0
+    assert residual_update_scale(0) == 1
+    r = torch.tensor([5.8, 5.99, 5.9999, 6.0, 6.001], requires_grad=True)
+    update = C2PolynomialCutoff(6.0)(r) * r.sin()
+    skip = torch.ones_like(update, requires_grad=True)
+    y = torch.add(skip, update, alpha=residual_update_scale(18))
+    torch.testing.assert_close(y, skip + update / 18**0.5)
+    (skip_grad,) = torch.autograd.grad(y.sum(), skip, retain_graph=True)
+    torch.testing.assert_close(skip_grad, torch.ones_like(skip))
+    for _ in range(2):
+        y = torch.autograd.grad(y.sum(), r, create_graph=True)[0]
+        update = torch.autograd.grad(update.sum(), r, create_graph=True)[0]
+        torch.testing.assert_close(y, update / 18**0.5)
+        assert torch.equal(y[-2:], torch.zeros_like(y[-2:]))
+
+
+@pytest.mark.parametrize(
+    "layout,first_skip,first_norm,product,final_norm,count",
+    [
+        ("BB", True, False, "cgtp", "merge_rms_norm", 2),
+        ("AB", True, True, "cgtp", "merge_layer_norm", 3),
+        ("BAB", False, True, "nonlinear_cgtp", None, 4),
+        ("BAB", True, True, "nonlinear_cgtp", None, 6),
+    ],
+)
+def test_const_norm_force_training(
+    small_model,
+    isolated_and_connected_atoms,
+    layout,
+    first_skip,
+    first_norm,
+    product,
+    final_norm,
+    count,
+):
+    # The reference scales the last linear of each eligible branch before addition.
+    def scale_update(module, inputs, output):
+        return output / count**0.5
+
+    def build(pre_norm):
+        return small_model(
+            "cutoff",
+            num_layers=3,
+            resnet=dict(type=layout, use_first_resnet=first_skip),
+            layer_norm=dict(
+                pre_norm_type=pre_norm,
+                use_first_pre_norm=first_norm,
+                final_norm_type=final_norm,
+            ),
+            product_basis=dict(type=product),
+        ).train()
+
+    reference = build(None)
+    with patch(
+        "tace.models.spherical.representation.residual_update_count",
+        wraps=residual_update_count,
+    ) as count_updates:
+        model = build("const_norm")
+    count_updates.assert_called_once_with(3, layout, first_skip, first_norm)
+    model.load_state_dict(reference.state_dict(), strict=True)
+    rep = reference.readout_fn.representation
+    for i, (inter, prod) in enumerate(zip(rep.interactions, rep.products)):
+        if i or (first_skip and first_norm):
+            if layout == "BAB":
+                inter.linear_nonlinearity.register_forward_hook(scale_update)
+            prod.linear.register_forward_hook(scale_update)
+
+    results = []
+    for candidate in (reference, model):
+        out = candidate({k: v.clone() for k, v in isolated_and_connected_atoms.items()})
+        inter = candidate.readout_fn.representation.interactions[0]
+        gradient = torch.autograd.grad(
+            out["forces"].square().sum(), next(inter.edge_info.parameters())
         )[0]
         results.append((out["energy"], out["forces"], gradient))
     for actual, expected in zip(results[1], results[0]):

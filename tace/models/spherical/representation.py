@@ -13,7 +13,7 @@ from equivariantx import co3, o2
 
 from ...dataset.quantity import PROPERTIES
 from ...utils.env import acceleration_enabled, get_tace_use_dens
-from ..layer_norm import get_normalization_layer
+from ..layer_norm import get_normalization_layer, residual_update_count
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
@@ -371,12 +371,23 @@ class NodeRepresentation(torch.nn.Module):
             self.uee_embeddings = None
         self.products = torch.nn.ModuleList()
 
+        num_residual_updates = 0
+        if layer_norm["pre_norm_type"] == "const_norm":
+            num_residual_updates = residual_update_count(
+                num_layers,
+                resnet["type"],
+                resnet["use_first_resnet"],
+                layer_norm["use_first_pre_norm"],
+            )
+        scale_first = resnet["use_first_resnet"] and layer_norm["use_first_pre_norm"]
         for layer in range(num_layers):
+            layer_updates = num_residual_updates if layer > 0 or scale_first else 0
             # === Interaction ===
             self.interactions.append(
                 interaction_classes[layer](
                     **for_interactions,
                     layer=layer,
+                    num_residual_updates=layer_updates,
                     edge_feats_channel=self.edge_updates[layer].out_dim,
                     magnetic_node_info_channel=(
                         self.node_updates[layer].out_dim
@@ -430,6 +441,7 @@ class NodeRepresentation(torch.nn.Module):
                 product_cls(
                     layer=layer,
                     num_layers=num_layers,
+                    num_residual_updates=layer_updates,
                     num_elements=self.num_elements,
                     Lmax=Lmax,
                     lmax=lmax,

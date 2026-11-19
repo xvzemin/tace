@@ -6,6 +6,7 @@
 import logging
 import math
 from collections.abc import Mapping
+from copy import deepcopy
 from numbers import Real
 from typing import Any
 
@@ -174,7 +175,7 @@ def recursive_update(
 
     for key, default_val in default.items():
         if key not in cfg:
-            result[key] = default_val
+            result[key] = deepcopy(default_val)
             continue
 
         cfg_val = cfg[key]
@@ -215,6 +216,11 @@ def check_model_config(cfg: dict[str, Any]):
 
     if cfg["mlp_type"] not in MLP:
         raise ValueError("mlp_type must be 'mlp_v1' or 'mlp_v2'.")
+    if cfg["layer_norm"]["final_norm_type"] == "const_norm":
+        raise ValueError(
+            "layer_norm.final_norm_type='const_norm' is not supported. "
+            "Use 'const_norm' only for layer_norm.pre_norm_type."
+        )
     radial = cfg["radial_basis"]
     if "mlp_type" in radial:
         raise ValueError("Set model.config.mlp_type instead of radial_basis.mlp_type.")

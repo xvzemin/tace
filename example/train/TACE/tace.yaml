@@ -414,8 +414,8 @@ model:
       linear_type: aware # [aware, agnostic, identity]
       use_first_resnet: false
 
-    layer_norm: # If training is unstable, prioritize specifying pre_norm_type. If it is still unstable, specify final_norm_type.
-      pre_norm_type: null     # [merge_rms_norm, merge_layer_norm]
+    layer_norm:
+      pre_norm_type: null     # [merge_rms_norm, merge_layer_norm, const_norm]
       final_norm_type: null   # [merge_rms_norm, merge_layer_norm]
       use_first_pre_norm: false
 

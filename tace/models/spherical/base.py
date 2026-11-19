@@ -11,6 +11,7 @@ import torch
 from e3nn import o3
 
 from ..lammps import e3nnGhostExchangeMixin
+from ..layer_norm import residual_update_scale
 from ..time_reversal import with_natural_parity
 from .paths import to_possible_tp_irreps
 
@@ -214,6 +215,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         mlp_type: str = "mlp_v1",
         radial_mlp_norm: str | None = None,
         path_irreps: o3.Irreps | None = None,
+        num_residual_updates: int = 0,
     ) -> None:
         super().__init__()
 
@@ -271,6 +273,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.resnet_linear_type = resnet_linear_type
         self.pre_norm_type = pre_norm_type
         self.use_first_pre_norm = use_first_pre_norm
+        self.residual_scale = residual_update_scale(num_residual_updates)
         self.nonlinear = nonlinear
         self.edge_nonlinear = edge_nonlinear
         self.stochastic_depth_p = stochastic_depth
@@ -370,6 +373,7 @@ class Product(torch.nn.Module):
         agnostic: bool = False,
         use_time_reversal: bool = False,
         path_irreps: o3.Irreps | None = None,
+        num_residual_updates: int = 0,
     ) -> None:
         super().__init__()
 
@@ -406,6 +410,7 @@ class Product(torch.nn.Module):
         self.irreps_hidden = o3.Irreps(
             [(self.num_hidden_channel, ir) for _, ir in self.irreps_in]
         )
+        self.residual_scale = residual_update_scale(num_residual_updates)
 
         self.irreps_tp_out_list = []
         product_in = self.irreps_hidden

@@ -1036,6 +1036,6 @@ class BilinearMoEACE(Product):
             outs = self.stochastic_depth(outs, batch)
 
         if sc is not None:
-            outs = outs + sc
+            outs = torch.add(sc, outs, alpha=self.residual_scale)
 
         return outs

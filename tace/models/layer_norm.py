@@ -1,4 +1,7 @@
-"""EQX normalization layers and TACE state-dict compatibility."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import torch
 
@@ -41,8 +44,26 @@ def save_norm_state(module, state, prefix, metadata):
         )
 
 
-def get_normalization_layer(norm_type: str, irreps, **kwargs) -> MergeRmsNorm:
-    """Build an EQX normalization layer for a TACE model."""
+def residual_update_count(
+    num_layers: int,
+    resnet_type: str | None,
+    use_first_resnet: bool,
+    use_first_pre_norm: bool,
+) -> int:
+    per_layer = {"BB": 1, "AB": 1, "BAB": 2}.get(resnet_type, 0)
+    if not (use_first_resnet and use_first_pre_norm):
+        num_layers -= 1
+    return per_layer * max(0, num_layers)
+
+
+def residual_update_scale(num_updates: int) -> float:
+    if num_updates < 0:
+        raise ValueError("num_updates must be non-negative")
+    return max(1, num_updates) ** -0.5
+
+
+def get_normalization_layer(norm_type: str, irreps, **kwargs) -> torch.nn.Module:
+    """Build the selected feature normalization."""
     kwargs.setdefault("backend", None if acceleration_enabled("eqx") else "torch")
     if norm_type == "merge_layer_norm":
         module = MergeLayerNorm(irreps, **kwargs)

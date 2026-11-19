@@ -57,6 +57,19 @@ them to the radial MLP output; gated O(2) applies them to the completed edge
 messages before summation. The SO(2) attention interaction retains its own
 normalization.
 
+Constant residual normalization
+-------------------------------
+
+Set ``layer_norm.pre_norm_type: const_norm`` to replace feature
+normalization with :math:`h_{\rm skip} + \Delta h / \sqrt{B}` at each selected
+residual addition. All irreps share one constant; no feature statistics are
+computed. :math:`B` counts two additions per ``BAB`` layer or one per ``AB``
+or ``BB`` layer. The first layer counts only when both ``use_first_resnet``
+and ``use_first_pre_norm`` are true. Otherwise its update is unchanged.
+
+``final_norm_type`` accepts only ``null``, ``merge_layer_norm`` or
+``merge_rms_norm``. It does not scale the final features by the residual factor.
+
 O(2) CGTP
 ---------
 

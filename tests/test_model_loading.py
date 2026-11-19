@@ -178,6 +178,8 @@ def test_native_cartesian_model(
         config["atomic_basis"]["type"] = "cgtp"
     if interaction == "nonlinear_cgtp":
         config["product_basis"].update(type="nonlinear_cgtp", correlation=3)
+        config["resnet"]["type"] = "BAB"
+        config["layer_norm"]["pre_norm_type"] = "const_norm"
     if interaction == "normalization":
         config["layer_norm"].update(
             pre_norm_type="merge_layer_norm",

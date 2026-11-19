@@ -49,15 +49,16 @@ from equivariantx.ops.common.channel_product import channel_product
 
 
 @pytest.mark.parametrize(
-    ("radial_mode", "associate_norm", "scatter_norm", "edge_mode", "device"),
+    ("radial_mode", "associate_norm", "scatter_norm", "edge_mode", "device", "pre_norm"),
     [
-        ("stream", False, "density", "original", "cpu"),
-        ("materialize", True, "density", "original", "cpu"),
-        ("materialize", True, "cutoff", "scheduled", "cuda"),
+        ("stream", False, "density", "original", "cpu", "merge_rms_norm"),
+        ("materialize", True, "density", "original", "cpu", "merge_rms_norm"),
+        ("materialize", True, "cutoff", "scheduled", "cuda", "merge_rms_norm"),
+        ("stream", False, "cutoff", "original", "cpu", "const_norm"),
     ],
 )
 def test_conversion_checkpoint_and_mixed_derivatives(
-    monkeypatch, radial_mode, associate_norm, scatter_norm, edge_mode, device
+    monkeypatch, radial_mode, associate_norm, scatter_norm, edge_mode, device, pre_norm
 ):
     pytest.importorskip("tace")
     if device == "cuda" and not torch.cuda.is_available():
@@ -88,7 +89,7 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         config["atomic_basis"].update(type="cgtp", scatter_norm=scatter_norm)
         config["resnet"].update(type="BAB", linear_type="identity")
         config["layer_norm"].update(
-            pre_norm_type="merge_rms_norm", final_norm_type="merge_rms_norm"
+            pre_norm_type=pre_norm, final_norm_type="merge_rms_norm"
         )
         config["product_basis"].update(
             type="nonlinear_cgtp", correlation=2, num_expert=1, num_channel_per_expert=8
