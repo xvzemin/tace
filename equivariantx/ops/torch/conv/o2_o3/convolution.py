@@ -19,6 +19,8 @@ def evaluate(
     num_nodes,
     vectors,
     radial_network,
+    *,
+    unit=False,
 ):
     """Evaluate validated aligned-convolution operands."""
     if (
@@ -42,10 +44,18 @@ def evaluate(
             amplitudes=amplitudes,
         )
     else:
-        result = module.reference(
-            features, radial, projection, wigner, amplitudes, edge_index, num_nodes
+        result = reference(
+            module,
+            features,
+            radial,
+            projection,
+            wigner,
+            amplitudes,
+            edge_index,
+            num_nodes,
+            unit=unit and not config.TORCH_REFERENCE,
         )
-    return result if vectors is None else result + vectors.sum() * 0
+    return result if vectors is None else result + vectors[..., :0].sum()
 
 
 def transverse(
@@ -177,7 +187,16 @@ def transverse(
 
 
 def reference(
-    module, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
+    module,
+    features,
+    radial,
+    projection,
+    wigner,
+    amplitudes,
+    edge_index,
+    num_nodes,
+    *,
+    unit=False,
 ):
     """Evaluate validated aligned-convolution operands."""
     source, target = edge_index
@@ -209,7 +228,8 @@ def reference(
                 )
         elif mode == "uvw":
             value = value.sum(-1, keepdim=True).expand(-1, dim_out, mul_out)
-        value = value * amplitudes[:, harmonic, None, None]
+        if not unit:
+            value = value * amplitudes[:, harmonic, None, None]
         if end not in outputs:
             groups.setdefault((dend, dim_out), []).append((end, mul_out))
             matrices[dend] = wigner[:, dend : dend + dim_out * dim_out].reshape(

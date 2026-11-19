@@ -67,18 +67,16 @@ class UuuSymmetricContraction(torch.nn.Module):
         if self.indexed:
             weight = self.weight
             if self.projection is not None:
-                weight = torch.einsum("zau,ab->zbu", weight, self.projection)
+                weight = self.projection.T @ weight
             features = features.reshape(
                 features.shape[0], self.contraction.input_dim, self.num_channels
             ).transpose(1, 2)
         else:
-            weight = torch.cat(
-                [
-                    weight
-                    for part in self.contractions
-                    for weight in (part.weights_max, *part.weights)
-                ],
-                dim=1,
-            )
+            blocks = [
+                weight
+                for part in self.contractions
+                for weight in (part.weights_max, *part.weights)
+            ]
+            weight = blocks[0] if len(blocks) == 1 else torch.cat(blocks, dim=1)
             node_type = node_type.argmax(dim=-1)
         return self.contraction(features, weight, node_type)

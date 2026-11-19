@@ -16,9 +16,7 @@ class TensorProductScatter(Convolution):
     _nequip_custom_ops_libs = ("equivariantx.conv",)
 
     def forward(self, x, edge_attr, edge_weight, edge_dst, edge_src):
-        return super().forward(
-            x, edge_attr, edge_weight, torch.stack((edge_src, edge_dst))
-        )
+        return super().forward(x, edge_attr, edge_weight, (edge_src, edge_dst))
 
 
 def convert_nequip_to_eqx(

@@ -27,22 +27,26 @@ def element_grouping(node_type, elements, experts, width, *, tight=False):
     ends = torch.searchsorted(
         sorted_groups, torch.arange(1, elements * experts + 1, device=node_type.device)
     )
-    starts = torch.cat((ends.new_zeros(1), ends[:-1]))
-    counts = ends - starts
-    chunk_ends = torch.div(counts + width - 1, width, rounding_mode="floor").cumsum(0)
-    chunk_starts = torch.cat((chunk_ends.new_zeros(1), chunk_ends[:-1]))
-    ranks = positions - starts[sorted_groups]
-    slots = (chunk_starts[sorted_groups] + ranks // width) * width + ranks % width
-    slots = torch.empty_like(slots).index_copy(0, order, slots)
     nodes = node_type.shape[0]
     chunks = (
         experts * torch.sym_min(nodes, (nodes + (width - 1) * elements) // width)
         if tight
         else elements * experts + (nodes * experts + width - 1) // width
     )
+    return tile_layout(sorted_groups, order, ends, positions, width, chunks)
+
+
+def tile_layout(sorted_groups, order, ends, positions, width, chunks):
+    """Return the row slots and table indices for a sorted partition."""
+    starts = torch.cat((ends.new_zeros(1), ends[:-1]))
+    counts = ends - starts
+    chunk_ends = torch.div(counts + width - 1, width, rounding_mode="floor").cumsum(0)
+    chunk_starts = torch.cat((chunk_ends.new_zeros(1), chunk_ends[:-1]))
+    slots = positions + (chunk_starts * width - starts)[sorted_groups]
+    slots = torch.empty_like(slots).scatter_(0, order, slots)
     chunk_types = torch.searchsorted(
-        chunk_ends, torch.arange(chunks, device=node_type.device), right=True
-    ).clamp_max(elements * experts - 1)
+        chunk_ends, torch.arange(chunks, device=order.device), right=True
+    ).clamp_max(ends.shape[0] - 1)
     return slots, chunk_types, chunks
 
 
@@ -61,10 +65,7 @@ def element_path(features, weight, grouping, path, layout, width):
     matrix = weight[..., sw : sw + ci * co].reshape(weight.shape[0] * experts, ci, co)[
         chunk_types
     ]
-    if (
-        torch.compiler.is_compiling()
-        or (features.device.type == "cpu" and get_proxy_mode() is not None)
-    ) and not (
+    if (torch.compiler.is_compiling() or get_proxy_mode() is not None) and not (
         statically_known_true(chunks == 0)
         or (
             statically_known_true(chunks > 0)
@@ -144,8 +145,21 @@ def channel_groups(node_type, elements):
         elif not capture and isinstance(nodes, int) and nodes <= 2 * elements:
             width = max(1, width // 2)
     slots, owners, chunks = element_grouping(node_type, elements, 1, width, tight=True)
+    return channel_rows(width, slots, owners, chunks, nodes)
+
+
+def channel_rows(width, slots, owners, chunks, nodes, experts=1):
+    """Map padded matrix rows back to samples and flag padding in adjoints."""
+    if experts != 1:
+        expert = torch.arange(experts, device=slots.device)
+        slots = (
+            ((slots // width)[:, None] * experts + expert) * width
+            + (slots % width)[:, None]
+        ).flatten()
+        owners = (owners[:, None] * experts + expert).flatten()
+        nodes, chunks = nodes * experts, chunks * experts
     rows = slots.new_full((chunks * width,), nodes).scatter(
-        0, slots, torch.arange(nodes, device=node_type.device)
+        0, slots, torch.arange(nodes, device=slots.device)
     )
     return width, rows.clamp_max(nodes - 1), slots, owners, rows != nodes
 

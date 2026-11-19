@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 
+import e3nn
 import pytest
 import torch
 from e3nn import o3
@@ -19,7 +20,15 @@ def test_unweighted_without_weights(backend, rows, device, double_precision):
     torch.compiler.reset()
     arguments = ("2x1o", "2x1o", "2x0e", [(0, 0, 0, "uuu", False)])
     options = dict(internal_weights=False, shared_weights=False)
-    module = eqx_o3.TensorProduct(*arguments, backend=backend, **options).to(device)
+    defaults = e3nn.get_optimization_defaults()
+    scripted = (
+        {"jit_mode": "script"} if "jit_mode" in defaults else {"jit_script_fx": True}
+    )
+    try:
+        e3nn.set_optimization_defaults(**scripted)
+        module = eqx_o3.TensorProduct(*arguments, backend=backend, **options).to(device)
+    finally:
+        e3nn.set_optimization_defaults(**defaults)
     reference = o3.TensorProduct(*arguments, **options).to(device)
     inputs = tuple(
         torch.randn(rows, 6, device=device, requires_grad=True) for _ in range(2)

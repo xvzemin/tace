@@ -74,6 +74,8 @@ def symmetric_result(output, layout, output_dims):
     """Restore the declared angular/channel layout after contraction."""
     if layout == "ir_mul" or not output_dims:
         return output.flatten(1)
+    if len(output_dims) == 1:
+        return output.transpose(1, 2).flatten(1)
     return torch.cat(
         [part.transpose(1, 2).flatten(1) for part in output.split(output_dims, 1)], 1
     )

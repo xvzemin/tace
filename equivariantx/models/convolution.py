@@ -2,14 +2,21 @@
 
 import math
 import operator
+from typing import NamedTuple
 
 import torch
 
 from ..conv import O2O3TensorProductConv, O3TensorProductConv
 from ..o2.o3_tensor_product import O3TensorProduct
-from ..o2.wigner import WignerD
 from ..ops import resolve_backend
-from ..ops.common.wigner import wigner_D
+from ..utils.layout import permute
+
+
+class FrameInput(NamedTuple):
+    """Packed edge rotations and optional solid-harmonic amplitudes."""
+
+    packed: torch.Tensor
+    amplitudes: torch.Tensor | None
 
 
 def harmonic_convention(model):
@@ -180,10 +187,6 @@ class Convolution(torch.nn.Module):
             self.eqx_tp = O2O3TensorProductConv(
                 tensor_product, backend=backend, radial_mode=radial_mode
             )
-            if not packed_dim:
-                self.wigner = WignerD(
-                    tensor_product.lmax, tensor_product.lmax, backend=backend
-                )
             self.direction_start = next(
                 (
                     section.start
@@ -223,12 +226,9 @@ class Convolution(torch.nn.Module):
             index = torch.tensor(index, dtype=torch.long)
             if inverse:
                 index = index.argsort()
-            if layout == "ir_mul" or torch.equal(index, torch.arange(irreps.dim)):
+            if layout == "ir_mul":
                 index = torch.empty(0, dtype=torch.long)
-            self.register_buffer(name, index, persistent=False)
-        self.register_buffer(
-            "amplitudes", torch.ones(1, len(self.irreps_in2)), persistent=False
-        )
+            self.set_permutation(name, index)
         self.register_buffer(
             "degrees",
             torch.tensor([ir.l for _, ir in self.irreps_in2]),
@@ -246,6 +246,27 @@ class Convolution(torch.nn.Module):
                 projection.h_in * projection.var_in / projection.var_out
             ) ** -0.5
 
+    def set_permutation(self, name, index):
+        """Register a feature permutation and its adjoint index when needed."""
+        inverse = index.argsort()
+        order = torch.arange(index.numel(), device=index.device)
+        if torch.equal(index, order):
+            index = inverse = index[:0].clone()
+        elif not torch.equal(index[inverse], order):
+            raise ValueError("A feature layout must permute each component once.")
+        self.register_buffer(name, index, persistent=False)
+        if self.implementation == "o2" and name != "attribute_index":
+            self.register_buffer(name + "_inverse", inverse, persistent=False)
+
+    def change_layout(self, features, name):
+        """Apply the layout permutation used by the selected convolution."""
+        index = getattr(self, name)
+        if not index.numel():
+            return features
+        if self.implementation == "o3":
+            return features.index_select(-1, index)
+        return permute(features, index, getattr(self, name + "_inverse"))
+
     def forward(self, node_feats, edge_attrs, radial, edge_index):
         radial_network = None
         cutoff = None
@@ -253,8 +274,7 @@ class Convolution(torch.nn.Module):
             radial_network = radial.network
             cutoff = radial.cutoff
             radial = radial.features
-        if self.input_index.numel():
-            node_feats = node_feats.index_select(-1, self.input_index)
+        node_feats = self.change_layout(node_feats, "input_index")
         projection = self.empty_projection
         if self.projection is not None:
             if self.affine:
@@ -262,7 +282,9 @@ class Convolution(torch.nn.Module):
             elif hasattr(self.projection, "weights"):
                 projection = self.projection.weights
             else:
-                projection = self.projection.weight * self.projection_scale
+                projection = self.projection.weight
+                if self.projection_scale != 1.0:
+                    projection = projection * self.projection_scale
                 if hasattr(self.projection, "alpha"):
                     projection = projection * self.projection.alpha
             bias = getattr(self.projection, "bias", None)
@@ -270,8 +292,7 @@ class Convolution(torch.nn.Module):
                 projection = torch.cat((projection, bias[None]), dim=0)
         if self.implementation == "o3":
             attributes = edge_attrs[:, : self.harmonic_dim]
-            if self.attribute_index.numel():
-                attributes = attributes.index_select(-1, self.attribute_index)
+            attributes = self.change_layout(attributes, "attribute_index")
             if cutoff is not None:
                 # The tensor product is linear in both attributes and weights.
                 attributes = attributes * cutoff
@@ -285,13 +306,14 @@ class Convolution(torch.nn.Module):
             )
         else:
             vectors = None
-            if self.packed_dim:
+            if isinstance(edge_attrs, FrameInput):
+                packed = edge_attrs.packed
+                amplitudes = edge_attrs.amplitudes
+            elif self.packed_dim:
                 end = self.harmonic_dim + self.packed_dim
                 packed = edge_attrs[:, self.harmonic_dim : end].contiguous()
                 amplitudes = (
-                    self.amplitudes
-                    if self.normalize
-                    else edge_attrs[:, end:].contiguous()
+                    None if self.normalize else edge_attrs[:, end:].contiguous()
                 )
             else:
                 if self.direction_start >= 0:
@@ -303,13 +325,17 @@ class Convolution(torch.nn.Module):
                     vectors = edge_attrs.new_tensor([0.0, 1.0, 0.0]).expand(
                         edge_attrs.size(0), 3
                     )
-                packed = wigner_D(self.wigner, vectors, backend=self.backend)
+                # Vector methods build their own geometry; only the Wigner method
+                # needs a rotation, and it constructs it inside the convolution.
+                packed = None
                 amplitudes = (
-                    self.amplitudes
+                    None
                     if self.normalize
                     else vectors.norm(dim=-1, keepdim=True).pow(self.degrees)
                 )
             if cutoff is not None:
+                if amplitudes is None:
+                    amplitudes = self.eqx_tp.unit_amplitudes
                 amplitudes = amplitudes * cutoff
             message = self.eqx_tp(
                 node_feats.contiguous(),
@@ -322,6 +348,4 @@ class Convolution(torch.nn.Module):
                 vectors=vectors,
                 radial_network=radial_network,
             )
-        if self.output_index.numel():
-            message = message.index_select(-1, self.output_index)
-        return message
+        return self.change_layout(message, "output_index")

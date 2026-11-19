@@ -2,7 +2,7 @@
 
 import torch
 
-from ..ops import resolve_backend
+from ..ops import config, resolve_backend
 from ..ops.common.recompute import Replay
 from ..ops.precision import validate_precision
 from ..ops.torch.conv import attention as torch_kernel
@@ -88,6 +88,8 @@ class StreamingGraphAttention(Replay):
         self.normalizer_slot = normalizer_slot
         self.value_weight_slot = value_weight_slot
         self.valid_slot = valid_slot
+        if tile_size < 1:
+            raise ValueError("tile_size must be positive.")
         self.tile_size = tile_size
         self.eps = eps
         super().__init__(self.forward, fake_function=fake_function)
@@ -101,7 +103,10 @@ class StreamingGraphAttention(Replay):
 
     def tiles(self, inputs):
         edges = inputs[self.valid_slot].shape[0]
-        for start in range(0, max(edges, 1), self.tile_size):
+        if edges <= self.tile_size:
+            yield inputs
+            return
+        for start in range(0, edges, self.tile_size):
             count = min(self.tile_size, edges - start)
             yield [
                 value.narrow(self.edge_axes[i], start, count)
@@ -112,6 +117,8 @@ class StreamingGraphAttention(Replay):
 
     def forward(self, inputs, create_graph):
         validate_precision(inputs)
+        if self.backend == "torch" and config.TORCH_REFERENCE:
+            return torch_kernel.reference(self, inputs)
         return torch_kernel.stream(self, inputs, create_graph)
 
     def transpose(self, active, outputs, num_inputs):

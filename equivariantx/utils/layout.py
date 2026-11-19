@@ -9,7 +9,12 @@ from .autograd import nested_forward_ad
 @torch.compiler.allow_in_graph
 def permute(features, index, inverse):
     """Permute features with an inverse adjoint and nested forward derivatives."""
-    if config.TORCH_REFERENCE or nested_forward_ad():
+    if (
+        config.TORCH_REFERENCE
+        or not torch.is_grad_enabled()
+        or not features.requires_grad
+        or nested_forward_ad()
+    ):
         return features.index_select(-1, index)
     return Permute.apply(features, index, inverse)
 

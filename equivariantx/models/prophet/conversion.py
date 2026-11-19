@@ -14,7 +14,7 @@ class TensorProductConvolution(Convolution):
     """Use Prophet's convolution argument order."""
 
     def forward(self, features, sh, radial, receivers, senders):
-        return super().forward(features, sh, radial, torch.stack((senders, receivers)))
+        return super().forward(features, sh, radial, (senders, receivers))
 
 
 def convert_prophet_to_eqx(
@@ -113,8 +113,8 @@ def convert_prophet_to_eqx(
         index = convolution.output_index
         if not index.numel():
             index = torch.arange(module.tp.irreps_out.dim, device=parameter.device)
-        convolution.output_index = torch.cat(
-            [index[section] for section in module.sort.slices_sorted]
+        convolution.set_permutation(
+            "output_index", torch.cat([index[s] for s in module.sort.slices_sorted])
         )
         convolution.irreps_out = module.sort.irreps_sorted
         module.tp_conv = convolution

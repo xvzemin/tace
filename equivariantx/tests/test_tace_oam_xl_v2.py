@@ -430,6 +430,30 @@ def test_preserve_gradient_dtype_promotion():
     torch.testing.assert_close(module(*inputs), reference, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA angular preparation")
+def test_prepared_angular_cache():
+    from equivariantx.models.tace.tace_oam_xl_v2.prepared_angular import (
+        geometry_scope,
+        prepare_angular,
+    )
+
+    path = (0, 0, 0, 1, 1, 1, 2, 1, 0, 1.0, ((0, 0, 0, 2.0), (0, 1, 0, -1.0)))
+    metadata = repr(((path,), 1, False))
+    with geometry_scope():
+        value = torch.randn(4, 2, device="cuda")
+        out = prepare_angular(metadata, value)
+        assert prepare_angular(metadata, value) is out
+        value.add_(1)
+        torch.testing.assert_close(
+            prepare_angular(metadata, value)[:, 0], 2 * value[:, 0] - value[:, 1]
+        )
+        with torch.inference_mode():
+            data = value.clone()
+            first = prepare_angular(metadata, data)
+            data.add_(1)
+            torch.testing.assert_close(prepare_angular(metadata, data), first + 1)
+
+
 def test_scoped_sort_reuse_and_in_place_invalidation(monkeypatch):
     source = torch.tensor([2, 0, 1, 2, 0])
     target = torch.tensor([1, 2, 0, 0, 2])

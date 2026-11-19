@@ -1,6 +1,7 @@
 """Convert EquFlash FullConv interactions."""
 
 from collections import OrderedDict
+from itertools import groupby
 
 import torch
 from e3nn import o3
@@ -81,16 +82,19 @@ class FullConv(torch.nn.Module):
         )
         # Merge paths along channels after node aggregation, not on edges.
         indices = []
-        for _, ir in irreps_out.simplify():
+        sections = (
+            (mul, ir, s) for (mul, ir), s in zip(irreps_out, irreps_out.slices()) if mul
+        )
+        for ir, group in groupby(sections, key=lambda entry: entry[1]):
+            parts = list(group)
             for m in range(ir.dim):
-                for (mul, other), section in zip(irreps_out, irreps_out.slices()):
-                    if other == ir:
-                        indices.extend(
-                            range(
-                                section.start + m * mul, section.start + (m + 1) * mul
-                            )
-                        )
-        self.convolution.output_index = torch.tensor(indices, dtype=torch.long)
+                for mul, _, section in parts:
+                    indices.extend(
+                        range(section.start + m * mul, section.start + (m + 1) * mul)
+                    )
+        self.convolution.set_permutation(
+            "output_index", torch.tensor(indices, dtype=torch.long)
+        )
         self.weight_nn = RadialFeatures(
             OrderedDict(list(module.weight_nn.named_children())[:-1]),
             hs=module.weight_nn.hs[:-1],
@@ -107,12 +111,13 @@ class FullConv(torch.nn.Module):
             raise NotImplementedError(
                 "Distributed ghost-atom exchange is not supported."
             )
+        target, source = edge_index.to(dtype=torch.long)
         return (
             self.convolution(
                 x,
                 edge_attr,
                 self.weight_nn(edge_embedding),
-                edge_index.flip(0).to(dtype=torch.long),
+                (source, target),
             )
             / self.denominator
         )

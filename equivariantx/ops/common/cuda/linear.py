@@ -11,6 +11,47 @@ from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
+def transpose_plan(plan, dtype):
+    """Tile the independent channel matrices into one transposed table."""
+    _, _, numel, _, paths, _ = plan
+    offset, tiles, cases = 0, 0, []
+    if all(ci == 1 or co == 1 for _, _, _, ci, co, _, _ in paths):
+        return "", 0, True
+    for _, start, _, ci, co, _, _ in paths:
+        if start != offset:
+            return "", 0, False
+        offset += ci * co
+        cols = (co + 31) // 32
+        end = tiles + (ci + 31) // 32 * cols
+        cases.append(
+            f"if (tile < {end}) {{ ci={ci}; co={co}; offset={start}; "
+            f"u0=(tile-{tiles})/{cols}*32; v0=(tile-{tiles})%{cols}*32; }}"
+        )
+        tiles = end
+    if offset != numel:
+        return "", 0, False
+    scalar = "double" if dtype == torch.float64 else "float"
+    code = f"""
+    using scalar={scalar};
+    extern "C" __global__ void run(const scalar* __restrict__ w, scalar* __restrict__ wt) {{
+        __shared__ scalar block[32][33];
+        int tile=blockIdx.x%{tiles}, ci,co,offset,u0,v0;
+        {" else ".join(cases)} else return;
+        long long start=(long long)(blockIdx.x/{tiles})*{numel}+offset;
+        int x=threadIdx.x%32,y=threadIdx.x/32;
+        #pragma unroll
+        for (int i=0;i<32;i+=8)
+            if (u0+y+i<ci && v0+x<co) block[y+i][x]=w[start+(u0+y+i)*co+v0+x];
+        __syncthreads();
+        #pragma unroll
+        for (int i=0;i<32;i+=8)
+            if (v0+y+i<co && u0+x<ci) wt[start+(v0+y+i)*ci+u0+x]=block[x][y+i];
+    }}
+    """
+    return code, tiles, True
+
+
+@lru_cache(maxsize=128)
 def weight_source(metadata, dtype):
     """Reuse feature tiles across entries of each coefficient gradient."""
     din, dout, numel, experts, paths, layout = metadata
@@ -188,25 +229,11 @@ def contract(metadata, role, node_type, features, weight, output):
     operands = [value.contiguous() for value in (features, weight, output)]
     # Transpose small element tables, not sample-wise matrices. Large tables
     # use warp reductions to avoid an additional table-sized allocation.
-    transposed = role == 0 and weight.numel() * weight.element_size() <= 16 << 20
-    offsets = [path[1] for path in plan[4]]
-    sizes = [path[3] * path[4] for path in plan[4]]
-    end = 0
-    for offset, size in zip(offsets, sizes):
-        if offset != end:
-            transposed = False
-            break
-        end += size
-    transposed = transposed and end == plan[2]
-    if transposed:
-        parts = weight.split([ci * co for _, _, _, ci, co, _, _ in plan[4]], -1)
-        operands[1] = torch.cat(
-            [
-                part.reshape(*weight.shape[:2], ci, co).transpose(-1, -2).flatten(-2)
-                for part, (_, _, _, ci, co, _, _) in zip(parts, plan[4])
-            ],
-            -1,
-        ).contiguous()
+    transpose_code, tiles, transposed = (
+        transpose_plan(plan, result.dtype)
+        if role == 0 and weight.numel() * weight.element_size() <= 16 << 20
+        else ("", 0, False)
+    )
     node_type = node_type.contiguous()
     order = node_type.argsort() if role == 1 else node_type
     if role == 1:
@@ -220,15 +247,30 @@ def contract(metadata, role, node_type, features, weight, output):
         threads = 128
     if not complete:
         result.zero_()
-    kernel = kernels((code,), result.device)[code]
+    modules = kernels(
+        (transpose_code, code) if transpose_code else (code,), result.device
+    )
+    launches = []
+    if transpose_code:
+        original_table = operands[1]
+        table = torch.empty_like(original_table)
+        launches.append(
+            (
+                modules[transpose_code],
+                [original_table.data_ptr(), table.data_ptr()],
+                weight.shape[0] * weight.shape[1] * tiles,
+                1,
+                256,
+                0,
+            )
+        )
+        operands[1] = table
     args = [value.data_ptr() for value in operands] + [
         node_type.data_ptr(),
         order.data_ptr(),
         result.data_ptr(),
         node_type.numel(),
     ]
-    runtime().launch(
-        [(kernel, args, blocks, groups, threads, 0)],
-        torch.cuda.current_stream(result.device).cuda_stream,
-    )
+    launches.append((modules[code], args, blocks, groups, threads, 0))
+    runtime().launch(launches, torch.cuda.current_stream(result.device).cuda_stream)
     return result

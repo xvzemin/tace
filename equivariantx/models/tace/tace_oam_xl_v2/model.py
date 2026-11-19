@@ -890,7 +890,7 @@ class TACEOAMXLV2(torch.nn.Module):
         # FX deepcopy can register generated constants as persistent buffers.
         # Their execution values are retained, but checkpoint keys stay original.
         for path, child in readout.named_modules():
-            for name in child._buffers:
+            for name in child._buffers.keys():
                 key = f"{path}.{name}" if path else name
                 if key not in persistent:
                     child._non_persistent_buffers_set.add(name)
@@ -957,7 +957,7 @@ class TACEOAMXLV2(torch.nn.Module):
             # Refer to an already registered module without duplicate state.
             object.__setattr__(representation, "frame_source", largest)
             for item in representation.aligned.modules():
-                item._non_persistent_buffers_set.update(item._buffers)
+                item._non_persistent_buffers_set.update(item._buffers.keys())
         representation.products = torch.nn.ModuleList(
             [transplant(NodeProduct, product) for product in representation.products]
         )

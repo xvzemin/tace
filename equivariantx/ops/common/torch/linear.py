@@ -9,7 +9,14 @@ from torch.fx.experimental.symbolic_shapes import statically_known_true
 from ....utils.metadata import parse_metadata
 from ....utils.outputs import linear_output
 from ... import config
-from .grouped import element_expert_path, element_grouping, element_path
+from .grouped import (
+    channel_rows,
+    element_expert_path,
+    element_grouping,
+    element_path,
+    indexed_channel_product,
+    tile_layout,
+)
 
 
 class SharedCoefficients(torch.autograd.Function):
@@ -41,7 +48,10 @@ def indexed_parameters(weight, node_type, target_type, experts, numel):
     """Flatten independent element axes without copying the weight storage."""
     axes = 1 if target_type is None else 2
     if target_type is not None:
-        node_type = node_type * weight.shape[1] + target_type
+        ids = torch.arange(weight.shape[0] * weight.shape[1], device=node_type.device)
+        node_type = ids.view(weight.shape[:2])[node_type, target_type]
+    else:
+        node_type = torch.arange(weight.shape[0], device=node_type.device)[node_type]
     return weight.reshape(math.prod(weight.shape[:axes]), experts, numel), node_type
 
 
@@ -159,6 +169,11 @@ def grouped_linear_available(features, weight, paths, *, dynamic=False):
         return False
     nodes = features.shape[0]
     if isinstance(nodes, torch.SymInt):
+        if features.is_cuda:
+            return dynamic and (
+                statically_known_true(weight.shape[0] <= 32)
+                or statically_known_true(nodes >= 4 * weight.shape[0])
+            )
         return (
             dynamic
             and features.device.type == "cpu"
@@ -201,8 +216,8 @@ def element_linear_reference(features, weight, node_type, paths, output_dim, lay
 def element_linear_grouped(features, weight, node_type, paths, output_dim, layout):
     """Use bounded GEMM blocks instead of a weight matrix for every node."""
     nodes = features.shape[0]
-    zero = features[..., :0].sum() + weight[..., :0].sum()
     if not nodes or not paths:
+        zero = features[..., :0].sum() + weight[..., :0].sum()
         return features.new_zeros((nodes, output_dim)) + zero
     elements, experts = weight.shape[:2]
     width = (
@@ -266,25 +281,28 @@ def element_linear_grouped(features, weight, node_type, paths, output_dim, layou
         sy = path[2]
         value = execute(features, weight, grouping, path, layout, width)
         blocks[sy] = value if sy not in blocks else blocks[sy] + value
+    return element_blocks_output(features, blocks, output_dim)
+
+
+def element_blocks_output(features, blocks, output_dim):
+    """Join the output multiplicities and insert uncoupled zero blocks."""
+    nodes = features.shape[0]
     pieces, offset = [], 0
     for sy in sorted(blocks):
         value = blocks[sy]
         if sy > offset:
-            pieces.append(features.new_zeros((nodes, sy - offset)) + zero)
+            pieces.append(features.new_zeros((nodes, sy - offset)))
         pieces.append(value)
         offset = sy + value.shape[-1]
     if offset < output_dim:
-        pieces.append(features.new_zeros((nodes, output_dim - offset)) + zero)
-    return (
-        torch.cat(pieces, dim=-1) if pieces else features.new_zeros((nodes, 0)) + zero
-    )
+        pieces.append(features.new_zeros((nodes, output_dim - offset)))
+    return pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=-1)
 
 
 def element_linear_blocks(features, weight, paths, output_dim, layout):
     """Contract batches of equal-length element groups."""
     groups, nodes = features.shape[:2]
     experts = weight.shape[1]
-    zero = features[..., :0].sum() + weight[..., :0].sum()
     blocks = {}
     for sx, sw, sy, ci, co, dim, scale in paths:
         value = features[..., sx : sx + experts * ci * dim]
@@ -297,7 +315,9 @@ def element_linear_blocks(features, weight, paths, output_dim, layout):
                 0, 3, 1, 2, 4
             )
         matrix = weight[..., sw : sw + ci * co].reshape(groups * experts, ci, co)
-        value = (value.reshape(groups * experts, nodes * dim, ci) @ matrix) * scale
+        value = value.reshape(groups * experts, nodes * dim, ci) @ matrix
+        if scale != 1:
+            value = value * scale
         value = value.reshape(groups, experts, nodes, dim, co)
         value = (
             value.permute(0, 2, 1, 4, 3)
@@ -310,12 +330,108 @@ def element_linear_blocks(features, weight, paths, output_dim, layout):
     for sy in sorted(blocks):
         value = blocks[sy]
         if sy > offset:
-            pieces.append(features.new_zeros((groups, nodes, sy - offset)) + zero)
+            pieces.append(features.new_zeros((groups, nodes, sy - offset)))
         pieces.append(value)
         offset = sy + value.shape[-1]
     if offset < output_dim:
-        pieces.append(features.new_zeros((groups, nodes, output_dim - offset)) + zero)
-    return torch.cat(pieces, dim=-1)
+        pieces.append(features.new_zeros((groups, nodes, output_dim - offset)))
+    return pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=-1)
+
+
+def element_linear_tiles(
+    features, weight, node_type, paths, output_dim, layout, *, sparse=False
+):
+    """Pack each row once and share the same routing across experts and paths."""
+    nodes = features.shape[0]
+    elements = weight.shape[0]
+    graph = sparse and torch.cuda.is_current_stream_capturing()
+    if sparse and not graph:
+        sorted_types, order = node_type.sort()
+        types, inverse, counts = torch.unique_consecutive(
+            sorted_types, return_inverse=True, return_counts=True
+        )
+        elements = types.numel()
+        if elements == 1:
+            return element_linear_blocks(
+                features.unsqueeze(0),
+                weight.index_select(0, types),
+                paths,
+                output_dim,
+                layout,
+            ).squeeze(0)
+    width = (
+        1
+        if graph
+        else 32
+        if nodes >= 16 * elements
+        else 8
+        if nodes >= 4 * elements
+        else 1
+    )
+    if sparse:
+        if width == 1:
+            slots, owners, groups = (
+                torch.arange(nodes, device=node_type.device),
+                node_type,
+                nodes,
+            )
+        else:
+            groups = min(nodes, (nodes + (width - 1) * elements) // width)
+            slots, owners, groups = tile_layout(
+                inverse,
+                order,
+                counts.cumsum(0),
+                torch.arange(nodes, device=node_type.device),
+                width,
+                groups,
+            )
+            owners = types.index_select(0, owners)
+    else:
+        slots, owners, groups = element_grouping(
+            node_type, elements, 1, width, tight=True
+        )
+    if (
+        sparse
+        and width == 1
+        or groups * weight.shape[1] * weight.shape[2] * weight.element_size()
+        > config.ELEMENT_LINEAR_WORKSPACE
+    ):
+        grouping = channel_rows(width, slots, owners, groups, nodes, weight.shape[1])
+        return element_linear_stream(
+            features, weight, grouping, paths, output_dim, layout
+        )
+    packed = features.new_zeros((groups * width, features.shape[-1]))
+    # vmap may batch the element indices independently of the features.
+    packed = (
+        packed.index_copy(0, slots, features)
+        if torch._C._are_functorch_transforms_active()
+        else packed.index_copy_(0, slots, features)
+    )
+    packed = packed.reshape(groups, width, features.shape[-1])
+    matrices = weight.index_select(0, owners)
+    result = element_linear_blocks(packed, matrices, paths, output_dim, layout)
+    return result.reshape(groups * width, output_dim).index_select(0, slots)
+
+
+def element_linear_stream(features, weight, grouping, paths, output_dim, layout):
+    """Stream indexed matrix blocks and replay them in the adjoint."""
+    nodes = features.shape[0]
+    elements, experts, _ = weight.shape
+    blocks = {}
+    for sx, sw, sy, ci, co, dim, scale in paths:
+        x = features[:, sx : sx + experts * ci * dim]
+        x = (
+            x.reshape(nodes, experts, ci, dim).transpose(2, 3)
+            if layout == "mul_ir"
+            else x.reshape(nodes, dim, experts, ci).transpose(1, 2)
+        )
+        w = weight[..., sw : sw + ci * co].reshape(elements * experts, ci, co)
+        y = indexed_channel_product(x.reshape(nodes * experts, dim, ci), (w,), grouping)
+        y = y.reshape(nodes, experts, dim, co)
+        y = y.transpose(2, 3) if layout == "mul_ir" else y.transpose(1, 2)
+        y = y.reshape(nodes, experts * co * dim) * scale
+        blocks[sy] = y if sy not in blocks else blocks[sy] + y
+    return element_blocks_output(features, blocks, output_dim)
 
 
 def element_linear(
@@ -323,39 +439,68 @@ def element_linear(
 ):
     """Apply indexed element matrices to irreducible features."""
     nodes = features.shape[0]
-    zero = features[..., :0].sum() + weight[..., :0].sum()
     if not nodes or not paths:
+        zero = features[..., :0].sum() + weight[..., :0].sum()
         return features.new_zeros((nodes, output_dim)) + zero
     if expand_weights or config.TORCH_REFERENCE:
         return element_linear_reference(
             features, weight, node_type, paths, output_dim, layout
         )
-    # Eager grouping can inspect element counts; captured programs cannot.
-    if (
+    capture = (
         torch.compiler.is_compiling()
         or get_proxy_mode() is not None
         or torch._C._are_functorch_transforms_active()
+    )
+    dense_table = weight.shape[0] <= 32 or statically_known_true(
+        nodes >= 4 * weight.shape[0]
+    )
+    if (
+        config.TORCH_GROUPED_LINEAR
+        and features.is_cuda
+        and (dense_table or not capture)
     ):
+        if isinstance(nodes, torch.SymInt):
+            return element_linear_grouped(
+                features, weight, node_type, paths, output_dim, layout
+            )
+        return element_linear_tiles(
+            features,
+            weight,
+            node_type,
+            paths,
+            output_dim,
+            layout,
+            sparse=not dense_table,
+        )
+    # Eager grouping can inspect element counts; captured programs cannot.
+    if capture:
         execute = (
             element_linear_grouped
             if grouped_linear_available(features, weight, paths, dynamic=True)
             else element_linear_reference
         )
         return execute(features, weight, node_type, paths, output_dim, layout)
-    types, inverse, counts = torch.unique(
-        node_type, sorted=True, return_inverse=True, return_counts=True
+    sorted_types, order = node_type.sort()
+    types, inverse, counts = torch.unique_consecutive(
+        sorted_types, return_inverse=True, return_counts=True
     )
+    matrices = weight.index_select(0, types)
+    if types.numel() == 1:
+        return element_linear_blocks(
+            features.unsqueeze(0), matrices, paths, output_dim, layout
+        ).squeeze(0)
     sizes = counts.tolist()
     width = max(sizes)
-    order = node_type.argsort()
-    matrices = weight.index_select(0, types)
     if len(sizes) * width <= 2 * nodes:
         starts = counts.cumsum(0) - counts
-        ranks = torch.arange(nodes, device=node_type.device) - starts[inverse[order]]
-        ranks = torch.empty_like(order).index_copy(0, order, ranks)
-        index = inverse * width + ranks
+        index = (
+            torch.arange(nodes, device=node_type.device)
+            + inverse * width
+            - starts[inverse]
+        )
+        index = torch.empty_like(order).scatter_(0, order, index)
         packed = features.new_zeros((len(sizes) * width, features.shape[-1]))
-        packed = packed.index_copy(0, index, features).reshape(len(sizes), width, -1)
+        packed = packed.index_copy_(0, index, features).reshape(len(sizes), width, -1)
         values = element_linear_blocks(packed, matrices, paths, output_dim, layout)
         return values.reshape(len(sizes) * width, output_dim).index_select(0, index)
     outputs = [

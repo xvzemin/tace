@@ -54,13 +54,13 @@ class IrrepsConvolution(torch.nn.Module):
 
     def forward(self, data):
         radial = self.weight_nn(data[self.key_weight_input])
-        edge_index = data[self.key_edge_idx].flip(0)
+        target, source = data[self.key_edge_idx]
         data[self.key_x] = (
             self.convolution(
                 data[self.key_x],
                 data[self.key_filter],
                 radial,
-                edge_index,
+                (source, target),
             )
             / self.denominator
         )

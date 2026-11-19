@@ -50,6 +50,11 @@ def test_element_linear_parameters():
     torch.testing.assert_close(
         layer(x, weight, source, target), torch.arange(1.0, 5.0).reshape(4, 1)
     )
+    torch.testing.assert_close(
+        layer(x, weight, source - 2, target - 2), weight[source, target]
+    )
+    with pytest.raises(IndexError):
+        layer(x, weight, source, target + 2)
     source = torch.tensor([0] * 16 + [0, 1, 1])
     target = torch.tensor([0] * 16 + [1, 0, 1])
     x = torch.ones(19, 1, requires_grad=True)
@@ -126,6 +131,58 @@ def test_element_linear(backend, device, mode, dtype, expand_weights):
             actual, expected = [
                 torch.cat([g.flatten() for g in gs]) for gs in gradients
             ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU element schedules")
+@pytest.mark.parametrize("experts", [1, 2])
+def test_sparse_pair_table(experts, double_precision, monkeypatch):
+    linear = o3.Linear(
+        "3x0e+2x1o", "2x0e+0e+3x1o+2e", internal_weights=False, shared_weights=False
+    )
+    cls = eqx_o3.MoEElementLinear if experts > 1 else eqx_o3.ElementLinear
+    module = cls(
+        linear,
+        backend="torch",
+        element_mode="pair",
+        **({"num_experts": experts} if experts > 1 else {}),
+    )
+    reference = copy_model(module)
+    reference.expand_weights = True
+    w = torch.randn(
+        11, 13, experts, module.weight_numel, device="cuda", requires_grad=True
+    )
+    x = torch.randn(48, module.input_dim, device="cuda", requires_grad=True)
+    row = torch.arange(len(x), device=x.device)
+    monkeypatch.setattr(config, "ELEMENT_LINEAR_WORKSPACE", 1)
+    for count in (1, 4, 48):
+        keys = row % count
+        args = (x, w, keys // 13, keys % 13)
+
+        def joint(f):
+            y = f(*args)
+            e = y.sin().mean()
+            (dx,) = torch.autograd.grad(e, x, create_graph=True)
+            return y, dx, torch.autograd.grad(dx.square().sum() + e, w)[0]
+
+        torch.testing.assert_close(
+            joint(module), joint(reference), atol=2e-12, rtol=2e-12
+        )
+    types = torch.stack((row % 3, (row + 1) % 3))
+    table, target = w[:3, :4], row % 4
+    expected = torch.stack([reference(x, table, src, target) for src in types])
+    for budget in (1, 1 << 24):
+        monkeypatch.setattr(config, "ELEMENT_LINEAR_WORKSPACE", budget)
+        actual = torch.vmap(lambda src: module(x, table, src, target))(types)
+        torch.testing.assert_close(actual, expected)
+    if experts == 1:
+        source, target = row // 13, row % 13
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), torch.cuda.graph(graph):
+            captured = module(x, w, source, target)
+        with torch.no_grad():
+            target.zero_()
+            graph.replay()
+            torch.testing.assert_close(captured, reference(x, w, source, target))
 
 
 @pytest.mark.parametrize("space,experts", [("o3", 1), ("o3", 2), ("co3", 1), ("o2", 1)])

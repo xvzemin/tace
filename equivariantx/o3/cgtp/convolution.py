@@ -6,6 +6,7 @@ import torch
 from e3nn import o3
 
 from ...ops import config, resolve_backend
+from ...ops.common.convolution import edge_indices
 from ...ops.common.radial import cast_radial, radial_features
 from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...ops.common.torch.tensor_product import instruction_groups
@@ -227,8 +228,9 @@ class O3TensorProductConv(torch.nn.Module):
         projection : torch.Tensor
             Shared weights, shape ``(radial_dim, weight_numel)``. Shape
             ``(0, weight_numel)`` selects directly supplied path weights.
-        edge_index : torch.Tensor or None
-            Source and target indices, shape ``(2, edges)``, dtype int64.
+        edge_index : torch.Tensor, tuple of torch.Tensor or None
+            Source and target int64 indices, stacked as ``(2, edges)`` or
+            supplied as two vectors.
             None evaluates a row-wise tensor product without graph reduction.
         num_nodes : int, optional
             Number of target nodes. Defaults to the number of source nodes.
@@ -275,7 +277,9 @@ class O3TensorProductConv(torch.nn.Module):
             raise ValueError(
                 "Row-wise products require explicit attributes and weights."
             )
-        count = edge_index.size(1) if indexed else features.size(0)
+        if indexed:
+            edge_index = edge_indices(edge_index)
+        count = edge_index[0].numel() if indexed else features.size(0)
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         if radial_network is not None and (
@@ -295,7 +299,7 @@ class O3TensorProductConv(torch.nn.Module):
             )
             radial_network = None
         if vectors is not None:
-            if vectors.ndim != 2 or vectors.shape != (edge_index.size(1), 3):
+            if vectors.ndim != 2 or vectors.shape != (count, 3):
                 raise ValueError("vectors must have shape (edges, 3).")
             if self.normalize:
                 vectors = torch.nn.functional.normalize(vectors, dim=-1)
@@ -322,8 +326,6 @@ class O3TensorProductConv(torch.nn.Module):
             for value in (features, edge_attrs, radial_values, projection)
         ):
             raise ValueError("Features, radial inputs and projection must be matrices.")
-        if indexed and (edge_index.ndim != 2 or edge_index.size(0) != 2):
-            raise ValueError("edge_index must have shape (2, edges).")
         if features.size(1) != (
             self.harmonic_input_dim if vectors is not None else self.input_dim
         ) or edge_attrs.size(1) != (

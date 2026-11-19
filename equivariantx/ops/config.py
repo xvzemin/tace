@@ -63,6 +63,7 @@ UU_LINEAR_INLINE = True
 
 # Bound per-element packing without reading data-dependent counts on the host.
 TORCH_GROUPED_LINEAR = True
+ELEMENT_LINEAR_WORKSPACE = 16 << 20
 
 # Merge matching CPU coefficient maps while retaining independent gradients.
 TORCH_SHARED_COEFFICIENTS = True
@@ -72,6 +73,8 @@ SHARED_COEFFICIENTS_MAX_BYTES = 192 << 20
 TORCH_GROUPED_CG = True
 TORCH_CG_ANGULAR_MATRICES = True
 TORCH_CG_ANGULAR_WIDTH_RATIO = 24
+# Reuse one packed rotation across low-degree, multi-path aligned convolutions.
+TORCH_ALIGNED_MAX_DEGREE = 3
 TORCH_CHANNEL_SLICES = True
 CHANNEL_SLICES_MIN_WIDTH = 64
 
@@ -142,6 +145,8 @@ SYMMETRIC_PREFIX_MAX_NODES = 1024
 
 # Group wide CUDA-device Torch ACE polynomials. Keep their native CUDA counterpart during capture.
 TORCH_SYMMETRIC_MONOMIAL_GEMM = True
+SYMMETRIC_PROJECTION_MAX_ENTRIES = 1 << 18
+SYMMETRIC_MONOMIAL_WORKSPACE = 64 << 20
 TORCH_ACE_CHANNEL_POLYNOMIAL = True
 ACE_POLYNOMIAL_WORKSPACE = 12 << 20
 ACE_ELEMENT_BLOCK = 16

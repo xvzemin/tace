@@ -51,11 +51,12 @@ def test_online_attention_merge(dtype):
 
 @pytest.mark.parametrize("tile_size", [1, 4, 16])
 @pytest.mark.parametrize("edges", [0, 7])
-def test_streaming_attention_torch(tile_size, edges, double_precision):
+def test_streaming_attention_torch(tile_size, edges, double_precision, monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     from equivariantx.conv import StreamingGraphAttention
     from equivariantx.nn import graph_softmax
+    from equivariantx.ops import config
 
     def shapes(inputs):
         return tuple(
@@ -80,9 +81,12 @@ def test_streaming_attention_torch(tile_size, edges, double_precision):
     weight = torch.rand(edges, 1, device="cuda", requires_grad=True)
     target = torch.arange(edges, device="cuda") % 3
     valid = torch.arange(edges, device="cuda") % 4 != 0
-    actual, _, _ = module(
-        scores.new_empty(4, 1), scores, values, target, normalizer, weight, valid
-    )
+    args = (scores.new_empty(4, 1), scores, values, target, normalizer, weight, valid)
+    actual, denominator, maximum = module(*args)
+    with monkeypatch.context() as flags:
+        flags.setattr(config, "TORCH_REFERENCE", True)
+        reference = module(*args)
+    torch.testing.assert_close((actual, denominator, maximum), reference)
     scale = (
         graph_softmax(
             torch.where(valid[:, None], scores, -torch.inf),
@@ -115,8 +119,8 @@ def test_streaming_attention_torch(tile_size, edges, double_precision):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("nodes", [0, 5])
-def test_streaming_graph_attention_weights(device, nodes):
+@pytest.mark.parametrize("nodes,tile", [(0, 4), (5, 4), (5, 16)])
+def test_streaming_graph_attention_weights(device, nodes, tile):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     from equivariantx.conv import StreamingGraphAttention
@@ -151,10 +155,10 @@ def test_streaming_graph_attention_weights(device, nodes):
         normalizer_slot=3,
         value_weight_slot=4,
         valid_slot=6,
-        tile_size=4,
+        tile_size=tile,
         eps=1e-3,
     )
-    actual = attention(*inputs)[0]
+    actual, denominator, maximum = attention(*inputs)
     weight = (
         GraphSoftmax(eps=1e-3, backend="torch")(
             inputs[1], target, num_nodes=nodes, exp_rescale=inputs[3]
@@ -166,7 +170,22 @@ def test_streaming_graph_attention_weights(device, nodes):
     )
     expected = value.new_zeros(nodes, 3, 4).index_add(0, target, value)
     torch.testing.assert_close(actual, expected)
-    losses = [x.square().sum() for x in (actual, expected)]
+    scores = inputs[1]
+    peak = scores.new_full((nodes, heads), -torch.inf).scatter_reduce(
+        0, target[:, None].expand_as(scores), scores.detach(), reduce="amax"
+    )
+    peak = torch.where(torch.isneginf(peak), 0, peak)
+    total = (
+        torch.zeros_like(peak).index_add(
+            0, target, (scores - peak[target]).exp() * inputs[3]
+        )
+        + 1e-3
+    )
+    torch.testing.assert_close((denominator, maximum), (total, peak))
+    losses = [
+        actual.square().sum() + denominator.sin().sum(),
+        expected.square().sum() + total.sin().sum(),
+    ]
     for _ in range(3):
         grads = [
             torch.autograd.grad(loss, inputs[1:5], create_graph=True) for loss in losses

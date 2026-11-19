@@ -19,7 +19,14 @@ from .testing import (
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU GEMM schedule")
 @pytest.mark.parametrize("layout", ["ir_mul", "mul_ir"])
-def test_shared_monomials_preserve_independent_coefficients(layout, monkeypatch):
+@pytest.mark.parametrize("elements,scalar", [(4, False), (89, False), (89, True)])
+def test_shared_monomials_preserve_independent_coefficients(
+    layout, elements, scalar, monkeypatch
+):
+    torch.compiler.reset()
+    if elements == 89:
+        monkeypatch.setattr(config, "SYMMETRIC_MONOMIAL_WORKSPACE", 1)
+    paths = 12 if scalar else 8
     entries = [
         (
             (j, (p + j + 1) % 4, (p + 2 * j) % 4)[: 1 + (p + j) % 3],
@@ -27,21 +34,30 @@ def test_shared_monomials_preserve_independent_coefficients(layout, monkeypatch)
             out,
             (p + out + 1) / 11,
         )
-        for p in range(8)
+        for p in range(paths)
         for j in range(4)
         for out in (j, (j + 1) % 4)
     ]
+    if scalar:
+        entries = [(indices, p, 0, value) for indices, p, _, value in entries]
     layer = (
         UuuSymmetricContraction.from_entries(
-            "16x0e+16x1o", "16x0e+16x1e", entries, 8, backend="torch", layout=layout
+            "16x0e+16x1o",
+            "16x0e" if scalar else "16x0e+16x1e",
+            entries,
+            paths,
+            backend="torch",
+            layout=layout,
         )
         .double()
         .cuda()
     )
     assert layer.monomial_count > 0
-    types = torch.tensor([2, 0, 2, 1], device="cuda")
+    types = torch.tensor([elements - 1, 0, elements - 1, 1], device="cuda")
     x = torch.randn(4, 16, 4, device="cuda", dtype=torch.float64, requires_grad=True)
-    w = torch.randn(4, 8, 16, device="cuda", dtype=torch.float64, requires_grad=True)
+    w = torch.randn(
+        elements, paths, 16, device="cuda", dtype=torch.float64, requires_grad=True
+    )
     actual = layer(x, w, types)
     compiled = torch.compile(layer, fullgraph=True, backend="aot_eager", dynamic=True)
     for n in (4, 2, 0):

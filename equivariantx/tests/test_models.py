@@ -131,7 +131,7 @@ def test_radial_adapter(
 
     def evaluate(x, vectors, inputs, cutoff, edges):
         sh = harmonics(vectors)
-        return convolution(x, sh, radial(inputs) * cutoff, edges)
+        return convolution(x, sh, radial(inputs) * cutoff, (edges[0], edges[1]))
 
     compiled = torch.compile(
         evaluate, backend="aot_eager", fullgraph=True, dynamic=True
@@ -144,7 +144,7 @@ def test_radial_adapter(
         cutoff = torch.rand(num_edges, 1, device=device)
         cutoff[::2] = 0
         cutoff.requires_grad_()
-        edges = torch.randint(3, (2, num_edges), device=device)
+        edges = torch.randint(3, (num_edges, 2), device=device).T
         deferred = radial(inputs)
         if stream_radial:
             assert isinstance(deferred, RadialInput) and deferred.features is inputs
@@ -155,7 +155,7 @@ def test_radial_adapter(
         convolution.backend = "torch"
         convolution.eqx_tp.backend = "torch"
         radial.stream_radial = False
-        expected = evaluate(x, vectors, inputs, cutoff, edges)
+        expected = convolution(x, harmonics(vectors), radial(inputs) * cutoff, edges)
         torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
         variables = (x, vectors, inputs, cutoff, *parameters)
         for result in (actual, expected):

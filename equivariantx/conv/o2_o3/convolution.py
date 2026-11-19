@@ -6,6 +6,7 @@ import torch
 from e3nn import o3
 
 from ...ops import config, resolve_backend
+from ...ops.common.convolution import edge_indices
 from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.o2_o3 import convolution as torch_kernel
 from ...ops.torch.o2 import wigner as torch_wigner
@@ -35,6 +36,8 @@ class O2O3TensorProductConv(torch.nn.Module):
         ``"auto"`` measures complete CUDA evaluations and caches the fastest
         method. Warm up before compilation or CUDA Graph capture; otherwise
         these use the baseline until a method has been measured in eager mode.
+        On the PyTorch GPU backend, low-degree paths can share a rotation
+        when their angular amplitudes are known to be one.
     radial_mode : {"last", "full"}, optional
         ``"last"`` retains hidden MLP activations. ``"full"`` includes all
         radial layers in the derivative program and recomputes activations.
@@ -208,6 +211,23 @@ class O2O3TensorProductConv(torch.nn.Module):
                 )
             )
 
+        self.register_buffer(
+            "unit_amplitudes",
+            tensor_product.weight.new_ones((1, len(tensor_product.irreps_in2))),
+            persistent=False,
+        )
+        # Compare repeated non-scalar channel work with one packed rotation.
+        coupled = [
+            path
+            for (_, path), degree in zip(self.path_data, harmonic_degrees)
+            if degree and min(path[4:6]) > 1
+        ]
+        self.reuse_rotation = (
+            tensor_product.lmax <= config.TORCH_ALIGNED_MAX_DEGREE
+            and len(coupled) >= 2
+            and sum(path[2] * path[5] for path in coupled)
+            >= sum((2 * ell + 1) ** 2 for ell in range(tensor_product.lmax + 1))
+        )
         self.has_unweighted = any(path[8] < 0 for _, path in self.path_data)
         self.kernel_metadata = repr(
             (
@@ -300,11 +320,12 @@ class O2O3TensorProductConv(torch.nn.Module):
             ``(edges, sum((2*l+1)**2))`` or a shared leading dimension of one.
             Used when vectors are absent. With vectors, each method evaluates
             its own geometry, including Wigner construction when requested.
-        amplitudes : torch.Tensor
+        amplitudes : torch.Tensor or None
             Invariant harmonic amplitudes of shape ``(edges, num_harmonics)``
-            or ``(1, num_harmonics)``.
-        edge_index : torch.Tensor
-            Source and target indices of shape ``(2, edges)``.
+            or ``(1, num_harmonics)``. None uses unit amplitudes.
+        edge_index : torch.Tensor or tuple of torch.Tensor
+            Source and target indices, stacked as ``(2, edges)`` or supplied
+            as two vectors.
         num_nodes : int
             Number of target nodes.
         vectors : torch.Tensor, optional
@@ -342,9 +363,11 @@ class O2O3TensorProductConv(torch.nn.Module):
         )
         from ...ops.common.radial import cast_radial
 
+        edge_index = edge_indices(edge_index)
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
-        amplitudes = amplitudes.to(features)
+        unit = amplitudes is None
+        amplitudes = (self.unit_amplitudes if unit else amplitudes).to(features)
         if radial_network is not None and (
             self.radial_mode == "last"
             or (
@@ -394,6 +417,15 @@ class O2O3TensorProductConv(torch.nn.Module):
             if method == "auto":
                 if forward_ad_active():
                     method = "baseline"
+                elif (
+                    unit
+                    and self.reuse_rotation
+                    and self.radial_mode == "last"
+                    and self.backend == "torch"
+                    and features.is_cuda
+                    and not reference
+                ):
+                    method = "wigner"
                 else:
                     from .autotune import select_method
 
@@ -460,6 +492,7 @@ class O2O3TensorProductConv(torch.nn.Module):
             num_nodes,
             vectors,
             radial_network,
+            unit=unit,
         )
 
     def forward_transverse(
@@ -508,6 +541,8 @@ class O2O3TensorProductConv(torch.nn.Module):
         self, features, radial, projection, wigner, amplitudes, edge_index, num_nodes
     ):
         """Rotate, contract order-zero CG slices, rotate back and aggregate."""
+        if amplitudes is None:
+            amplitudes = self.unit_amplitudes.to(features)
         return torch_kernel.reference(
             self,
             features,

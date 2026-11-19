@@ -39,16 +39,19 @@ def backward(ctx, grad_output):
     gradients = [None, None, None]
     for role in range(3):
         if role != ctx.role and ctx.needs_input_grad[role + 3]:
-            gradients[role] = contract(ctx.kernel_metadata, role, node_type, *operands)
+            gradients[role] = contract(
+                ctx.kernel_metadata, role, node_type, *operands, indexed=True
+            )
     return None, None, None, *gradients
 
 
 contract_cuda.register_autograd(backward, setup_context=setup_context)
 
 
-def contract(metadata, role, node_type, features, weight, output):
+def contract(metadata, role, node_type, features, weight, output, *, indexed=False):
     """Apply native indexed maps with explicit functional-transform rules."""
-    node_type = torch.arange(weight.shape[0], device=node_type.device)[node_type]
+    if not indexed:
+        node_type = torch.arange(weight.shape[0], device=node_type.device)[node_type]
     program = repr((((0, 1, 2), role, 0),))
     return native_polynomial(
         "linear", metadata, program, node_type, features, weight, output

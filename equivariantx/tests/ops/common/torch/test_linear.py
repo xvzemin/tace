@@ -664,7 +664,7 @@ def test_expert_symbolic_metadata(double_precision, monkeypatch):
             16,
             64,
             "cuda",
-            False,
+            True,
             marks=pytest.mark.skipif(
                 not torch.cuda.is_available(), reason="CUDA symbolic policy"
             ),

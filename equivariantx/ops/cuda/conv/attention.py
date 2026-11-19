@@ -12,10 +12,10 @@ def transpose(module, active, outputs, num_inputs):
 
         def tile_adjoint(values, create_graph):
             arguments = values[:num_inputs]
-            result, denominator, maximum, grad_result, grad_denominator = values[
+            node_dot, denominator, maximum, grad_result, grad_denominator = values[
                 num_inputs:
             ]
-            nodes, angular, channels = result.shape
+            _, angular, channels = grad_result.shape
             heads = denominator.shape[1]
             index = arguments[module.target_slot]
             target = index[1] if index.ndim == 2 else index
@@ -29,13 +29,8 @@ def transpose(module, active, outputs, num_inputs):
             quotient = exp / denominator[target]
             incoming = grad_result[target].view(-1, angular, heads, channels // heads)
             dot_value = (value.view_as(incoming) * incoming).sum((1, 3))
-            dot_result = (
-                (result * grad_result)
-                .view(nodes, angular, heads, channels // heads)
-                .sum((1, 3))[target]
-            )
             grad_normalizer = (
-                quotient * (value_weight * dot_value - dot_result)
+                quotient * (value_weight * dot_value - node_dot[target])
                 + exp * grad_denominator[target]
             )
             grad_value_weight = quotient * normalizer * dot_value
@@ -78,14 +73,24 @@ def transpose(module, active, outputs, num_inputs):
             arguments = values[:num_inputs]
             result, denominator, maximum = values[num_inputs : num_inputs + 3]
             vectors = dict(zip(outputs, values[num_inputs + 3 :]))
-            grad_result = vectors.get(0, torch.zeros_like(result))
-            grad_denominator = vectors.get(1, torch.zeros_like(denominator))
+            grad_result = vectors[0] if 0 in vectors else torch.zeros_like(result)
+            grad_denominator = (
+                vectors[1] if 1 in vectors else torch.zeros_like(denominator)
+            )
+            nodes, angular, channels = result.shape
+            heads = denominator.shape[1]
+            node_dot = (
+                (result * grad_result)
+                .reshape(nodes, angular, heads, channels // heads)
+                .sum((1, 3))
+            )
+            state = (node_dot, denominator, maximum, grad_result, grad_denominator)
+            if arguments[module.valid_slot].shape[0] <= module.tile_size:
+                return tile_adjoint((*arguments, *state), create_graph)
             shared = [None] * len(active)
             edges = [[] for _ in active]
             for chunk in module.tiles(arguments):
-                gradients = tile_program(
-                    *chunk, result, denominator, maximum, grad_result, grad_denominator
-                )
+                gradients = tile_program(*chunk, *state)
                 for slot, (i, grad) in enumerate(zip(active, gradients)):
                     if i in module.edge_axes:
                         edges[slot].append(grad)

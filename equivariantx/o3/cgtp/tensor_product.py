@@ -69,6 +69,16 @@ class TensorProduct(o3.TensorProduct):
             default=0,
         )
 
+    def _codegen_register(self, funcs):
+        """Keep e3nn's generated reference graphs traceable by torch.compile."""
+        for name, graph in funcs.items():
+            if any(node.op == "output" for node in graph.graph.nodes):
+                self.add_module(name, graph)
+            else:
+                # Disabled operations in older e3nn are throwing, non-pickleable
+                # FX stubs; leave their registration to e3nn.
+                super()._codegen_register({name: graph})
+
     def forward(self, x, y, weight=None):
         """Evaluate ``(..., input_dim)`` features with shared or batched weights."""
         validate_module_precision(self, (x, y, weight))

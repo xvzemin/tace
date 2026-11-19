@@ -9,26 +9,23 @@ from ...o2.wigner import WignerD
 from ...ops import resolve_backend
 from ...ops.common.wigner import wigner_D
 from ...utils.module import copy_model, default_dtype
-from ..convolution import Convolution, RadialFeatures
+from ..convolution import Convolution, FrameInput, RadialFeatures
 from .symmetric_contraction import UuuSymmetricContraction
 
 __all__ = ["convert_mace_to_eqx"]
 
 
 class FrameAttributes(torch.nn.Module):
-    """Keep the original harmonics and append one shared packed Wigner matrix.
+    """Prepare shared rotations, retaining harmonics for other consumers if needed."""
 
-    The harmonic prefix remains available to other model components. Only
-    the replaced convolution reads the appended entries.
-    """
-
-    def __init__(self, harmonics, lmax, backend):
+    def __init__(self, harmonics, lmax, backend, *, convolution_only=False):
         super().__init__()
         self.harmonics = harmonics
         self.backend = backend
         self.irreps_out = harmonics.irreps_out
         self.normalization = harmonics.normalization
         self.normalize = harmonics.normalize
+        self.convolution_only = convolution_only
         self._lmax = harmonics._lmax
         self.wigner = WignerD(lmax, lmax, backend=backend)
         self.packed_dim = sum((2 * ell + 1) ** 2 for ell in range(lmax + 1))
@@ -39,12 +36,17 @@ class FrameAttributes(torch.nn.Module):
         )
 
     def forward(self, vectors):
-        values = [
-            self.harmonics(vectors),
-            wigner_D(self.wigner, vectors, backend=self.backend),
-        ]
-        if not self.normalize:
-            values.append(vectors.norm(dim=-1, keepdim=True).pow(self.degrees))
+        packed = wigner_D(self.wigner, vectors, backend=self.backend)
+        amplitudes = (
+            None
+            if self.normalize
+            else vectors.norm(dim=-1, keepdim=True).pow(self.degrees)
+        )
+        if self.convolution_only:
+            return FrameInput(packed, amplitudes)
+        values = [self.harmonics(vectors), packed]
+        if amplitudes is not None:
+            values.append(amplitudes)
         return torch.cat(values, dim=-1)
 
 
@@ -232,9 +234,17 @@ def convert_mace_to_eqx(
         attributes = model.spherical_harmonics
         if implementation == "o2":
             lmax = max(max(tp.irreps_in1.lmax, tp.irreps_out.lmax) for tp in products)
-            attributes = FrameAttributes(attributes, lmax, backend).train(
-                attributes.training
+            # These forwards pass edge_attrs only to the converted interactions.
+            # A different forward can still consume the original harmonic prefix.
+            from mace.modules.models import MACE, ScaleShiftMACE
+
+            convolution_only = type(model) in (MACE, ScaleShiftMACE) and all(
+                type(layer).__module__ == "mace.modules.blocks"
+                for layer in model.interactions
             )
+            attributes = FrameAttributes(
+                attributes, lmax, backend, convolution_only=convolution_only
+            ).train(attributes.training)
         convolutions, radial_features = [], []
         for layer, tp, (radial, net, projection, affine) in zip(
             model.interactions, products, radials

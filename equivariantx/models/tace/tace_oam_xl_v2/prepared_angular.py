@@ -86,9 +86,20 @@ def angular_tables(metadata, dtype, device):
 def prepare_angular(metadata, value):
     """Build live angular forms, with optional invocation-scoped reuse."""
     cache = GEOMETRY_SCOPE.get()
-    key = (metadata, value.data_ptr(), value.shape, value.stride(), value._version)
-    if cache is not None and key in cache:
-        return cache[key]
+    if cache is not None and not value.is_inference():
+        key = (
+            metadata,
+            value.device,
+            value.dtype,
+            value.data_ptr(),
+            value.shape,
+            value.stride(),
+            value._version,
+        )
+        if key in cache:
+            return cache[key][1]
+    else:
+        key = None
     indices, coefficients = angular_tables(metadata, value.dtype, value.device)
     out = value.new_empty((value.shape[0], indices.shape[1]))
     width = out.shape[1]
@@ -104,11 +115,9 @@ def prepare_angular(metadata, value):
         out[i]=total;
         """,
     )
-    if cache is not None:
-        # Retain the original to prevent its allocator address from being
-        # reused while this invocation still holds a prepared value.
-        cache[key] = out
-        cache["input", key] = value
+    if key is not None:
+        # Keep the input alive while the cache refers to its storage address.
+        cache[key] = value, out
     return out
 
 

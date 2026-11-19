@@ -26,7 +26,8 @@ def select_method(
     """
     if torch.compiler.is_compiling():
         return module.selected_method
-    if module.backend != "cuda" or not features.is_cuda or not edge_index.numel():
+    edges = edge_index[0].numel()
+    if module.backend != "cuda" or not features.is_cuda or not edges:
         return "baseline"
     with torch.cuda.device(features.device):
         if torch.cuda.is_current_stream_capturing():
@@ -54,7 +55,7 @@ def select_method(
         features.device,
         features.dtype,
         max(0, num_nodes - 1).bit_length(),
-        max(0, edge_index.size(1) - 1).bit_length(),
+        max(0, edges - 1).bit_length(),
         shapes,
         tuple(tuple(x.stride()) for x in inputs),
         required,
@@ -170,6 +171,6 @@ def select_method(
         "method": module.selected_method,
         "milliseconds": measured,
         "derivatives": order,
-        "edges": edge_index.size(1),
+        "edges": edges,
     }
     return module.selected_method

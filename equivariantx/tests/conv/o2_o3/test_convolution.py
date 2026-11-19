@@ -9,6 +9,42 @@ from equivariantx import o2
 from equivariantx.tests.conv.testing import assert_native_autograd, layout
 
 
+def test_unit_amplitudes_match_trainable_amplitudes(double_precision):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = o2.O3TensorProduct(
+        "16x1o",
+        "2e",
+        "16x1o+16x1o",
+        [(0, 0, i, "uvu", True) for i in range(2)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    conv = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+    assert conv.reuse_rotation
+    x = torch.randn(3, 48, device="cuda", requires_grad=True)
+    r = torch.randn(7, 3, device="cuda", requires_grad=True)
+    w = torch.randn(7, tp.weight_numel, device="cuda", requires_grad=True)
+    sh = torch.ones(7, 1, device="cuda", requires_grad=True)
+    graph = torch.randint(3, (2, 7), device="cuda")
+    args = x, w, w.new_empty(0, tp.weight_numel), None
+    actual = conv(*args, None, graph, 3, vectors=r)
+    expected = conv(*args, sh, (graph[0], graph[1]), 3, vectors=r, method="baseline")
+    torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+    assert (
+        torch.autograd.grad(expected.square().sum(), sh, retain_graph=True)[0]
+        .abs()
+        .max()
+        > 0
+    )
+    values = []
+    for y in (actual, expected):
+        (dr,) = torch.autograd.grad(y.square().sum(), r, create_graph=True)
+        values.append((dr, *torch.autograd.grad(dr.square().sum(), (x, w))))
+    for a, b in zip(*values):
+        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-10)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("method", ["wigner", "baseline"])
 @pytest.mark.parametrize("radial_mode", ["last", "full"])

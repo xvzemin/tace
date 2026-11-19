@@ -102,7 +102,7 @@ def radial_features(network, radial, edge_index, projection=None, *, reference=N
         root = radial_input(program, inputs, radial, network)
         validate_precision(inputs)
         if not isinstance(radial, tuple) and radial.shape[0] == 1:
-            source = target = edge_index.new_zeros(1)
+            source = target = edge_index[0].new_zeros(1)
         else:
             source, target = edge_index
         metadata = repr((tuple(program.nodes), ((root, 0, "edge"),)))
@@ -281,10 +281,10 @@ def materialize(radial, edge_index):
     for value, kind in radial_parts(radial):
         if kind in ("edge", "shared"):
             if value.shape[0] == 1:
-                value = value.expand(edge_index.shape[1], -1)
+                value = value.expand(edge_index[0].numel(), -1)
             elif kind == "shared":
                 raise ValueError("Shared radial inputs must contain exactly one row.")
-            elif value.shape[0] != edge_index.shape[1]:
+            elif value.shape[0] != edge_index[0].numel():
                 raise ValueError("Radial edge inputs must match the number of edges.")
         elif kind in ("source", "target"):
             value = value[edge_index[0 if kind == "source" else 1]]

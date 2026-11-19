@@ -151,7 +151,7 @@ def evaluate(
 def reference(module, features, edge_attrs, radial, projection, edge_index, num_nodes):
     """Evaluate validated convolution operands."""
     indexed = edge_index is not None
-    edges = edge_index.size(1) if indexed else features.size(0)
+    edges = edge_index[0].numel() if indexed else features.size(0)
     if indexed:
         source, target = edge_index
     weights = radial @ projection if projection.numel() else radial

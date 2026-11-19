@@ -16,4 +16,5 @@ def evaluate(module, features, weight, node_type, target_type=None):
         features,
         weight,
         features.new_empty((0, module.output_dim)),
+        indexed=True,
     )

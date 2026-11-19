@@ -7,6 +7,7 @@ import torch
 from torch._subclasses.fake_tensor import is_fake
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
+from .....utils.autograd import forward_ad_active, torch_gradient_mask
 from .....utils.metadata import parse_metadata
 from .... import config, get_kernel
 from ....common.ace import ace_inputs
@@ -263,10 +264,27 @@ def register_monomials(module, rows):
         module.register_buffer(
             name, torch.tensor(values, dtype=dtype), persistent=False
         )
+    columns = module.num_paths * module.output_dim
+    if (
+        columns <= len(rows)
+        and len(terms) * columns <= config.SYMMETRIC_PROJECTION_MAX_ENTRIES
+    ):
+        projection = torch.zeros(len(terms), columns, dtype=torch.float64)
+        row = torch.tensor([positions[s] for s, _, _, _ in rows])
+        column = torch.tensor([a * module.num_paths + p for _, p, a, _ in rows])
+        projection[row, column] = module.monomial_factors
+        module.register_buffer("monomial_projection", projection, persistent=False)
+        if module.output_dim == 1 and len(orders) > 1:
+            padded = [s + (module.input_dim,) * (orders[-1] - len(s)) for s in terms]
+            module.register_buffer(
+                "scalar_monomial_indices",
+                torch.tensor(padded).T.contiguous(),
+                persistent=False,
+            )
 
 
-def channel_polynomial(module, features, weight, node_type):
-    """Combine coefficients per element, then contract each channel by GEMM."""
+def monomial_basis(module, features):
+    """Evaluate each distinct angular monomial once."""
     monomials = []
     for order in module.monomial_orders:
         indices = getattr(module, f"monomial_indices_{order}")
@@ -274,7 +292,95 @@ def channel_polynomial(module, features, weight, node_type):
         for axis in range(1, order):
             product = product * features.index_select(2, indices[axis])
         monomials.append(product)
-    basis = torch.cat(monomials, dim=2) if len(monomials) > 1 else monomials[0]
+    return torch.cat(monomials, dim=2) if len(monomials) > 1 else monomials[0]
+
+
+def projected_polynomial(module, features, coefficients):
+    """Project shared monomials and apply independent per-sample coefficients."""
+    n, channels = features.shape[:2]
+    selected = coefficients.transpose(1, 2)
+    if hasattr(module, "scalar_monomial_indices"):
+        x = torch.nn.functional.pad(features, (0, 1), value=1)
+        indices = module.scalar_monomial_indices
+        basis = x.index_select(2, indices[0])
+        for k in range(1, module.correlation):
+            basis = basis * x.index_select(2, indices[k])
+        return ((basis @ module.monomial_projection.to(features)) * selected).sum(2)
+    basis = monomial_basis(module, features)
+    paths = (basis @ module.monomial_projection.to(features)).reshape(
+        n, channels, module.output_dim, module.num_paths
+    )
+    result = (paths @ selected.unsqueeze(-1)).squeeze(-1).transpose(1, 2)
+    return symmetric_result(result, module.layout, module.output_dims)
+
+
+class TiledPolynomial(torch.autograd.Function):
+    """Replay disjoint node tiles without retaining their angular products."""
+
+    @staticmethod
+    def forward(ctx, module, width, features, weight, node_type):
+        ctx.module, ctx.width = module, width
+        ctx.save_for_backward(features, weight, node_type)
+        result = features.new_empty(
+            (features.size(0), module.output_dim * module.num_channels)
+        )
+        for start in range(0, features.size(0), width):
+            rows = slice(start, start + width)
+            result[rows] = projected_polynomial(
+                module, features[rows], weight.index_select(0, node_type[rows])
+            )
+        return result
+
+    @staticmethod
+    def backward(ctx, gradient):
+        features, weight, node_type = ctx.saved_tensors
+        dx, dw, _ = torch_gradient_mask(ctx, ctx.needs_input_grad[2:])
+        if not (dx or dw):
+            return None, None, None, None, None
+        higher = torch.is_grad_enabled()
+        feature_grad = [] if dx else None
+        weight_grad = torch.zeros_like(weight) if dw else None
+        for start in range(0, features.size(0), ctx.width):
+            rows = slice(start, start + ctx.width)
+            types = node_type[rows]
+            with torch.enable_grad():
+                x, w = features[rows], weight.index_select(0, types)
+                y = projected_polynomial(ctx.module, x, w)
+                active = (x, w) if dx and dw else (x,) if dx else (w,)
+                deriv = torch.autograd.grad(
+                    y, active, gradient[rows], create_graph=higher
+                )
+            if dx:
+                feature_grad.append(deriv[0])
+            if dw:
+                weight_grad = weight_grad.index_add_(0, types, deriv[-1])
+            del y, w, x, deriv
+        return None, None, torch.cat(feature_grad) if dx else None, weight_grad, None
+
+
+def indexed_polynomial(module, features, weight, node_type):
+    """Use a bounded node schedule for large eager evaluations."""
+    types = node_type.long()
+    if not (
+        torch.compiler.is_compiling()
+        or get_proxy_mode() is not None
+        or is_fake(features)
+        or forward_ad_active()
+    ):
+        entries = 3 * module.monomial_count + (module.output_dim + 1) * module.num_paths
+        width = max(
+            1,
+            config.SYMMETRIC_MONOMIAL_WORKSPACE
+            // (features.element_size() * module.num_channels * entries),
+        )
+        if features.size(0) > width:
+            return TiledPolynomial.apply(module, width, features, weight, types)
+    return projected_polynomial(module, features, weight.index_select(0, types))
+
+
+def channel_polynomial(module, features, weight, node_type):
+    """Combine coefficients per element, then contract each channel by GEMM."""
+    basis = monomial_basis(module, features)
     n, channels, count = basis.shape
     elements, outputs = weight.shape[0], module.output_dim
     values = (
@@ -360,9 +466,11 @@ def uuu(module, features, weight, node_type):
         and not config.TORCH_RECOMPUTE
         and module.monomial_count
         and features.is_cuda
-        and weight.shape[0] * module.output_dim <= 128
     ):
-        return channel_polynomial(module, features, weight, node_type)
+        if weight.shape[0] >= 16 and hasattr(module, "monomial_projection"):
+            return indexed_polynomial(module, features, weight, node_type)
+        if weight.shape[0] * module.output_dim <= 128:
+            return channel_polynomial(module, features, weight, node_type)
     program, operands = symmetric_inputs(
         features, weight, module.correlation, module.output_dim
     )

@@ -14,6 +14,20 @@ from ..precision import validate_precision
 from .torch.edge import evaluate_recomputed, evaluate_torch
 
 
+def edge_indices(edge_index):
+    """Return source and target vectors without repacking the graph."""
+    if isinstance(edge_index, tuple):
+        source, target = edge_index
+        if source.ndim != 1 or source.shape != target.shape:
+            raise ValueError(
+                "Source and target indices must be vectors of equal length."
+            )
+        return edge_index
+    if edge_index.ndim != 2 or edge_index.size(0) != 2:
+        raise ValueError("edge_index must have shape (2, edges).")
+    return edge_index[0], edge_index[1]
+
+
 def radial_input(program, inputs, radial, network=None):
     """Append partitioned radial inputs and optional network parameters."""
     from .radial import radial_parts, radial_program

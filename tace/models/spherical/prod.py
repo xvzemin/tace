@@ -348,7 +348,9 @@ class NonlinearCgtpACE(Product):
             )
 
         self.linear_up = e3nnLinear(
-            self.irreps_in.simplify(), irreps_up.regroup(), bias=self.use_bias
+            self.irreps_in.simplify(),
+            irreps_up.sort().irreps.simplify(),
+            bias=self.use_bias,
         )
         self.embedding = torch.nn.Embedding(self.num_elements, self.num_hidden_channel)
         self.gate = torch.nn.Sequential(
