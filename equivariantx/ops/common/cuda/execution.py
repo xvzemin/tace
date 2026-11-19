@@ -84,6 +84,40 @@ def execution_plan(metadata):
         elif op == "add" and all(j in frame_terms and consumers[j] == 1 for j in args):
             frame_terms[i] = tuple(k for j in args for k in frame_terms[j])
     frame_sums = {i: terms for i, terms in frame_terms.items() if len(terms) > 1}
+    indexed_affine = {}
+    if any(op == "input" and isinstance(data[1], tuple) for op, _, _, data in nodes):
+
+        def summands(i):
+            if nodes[i][0] == "add" and consumers[i] == 1:
+                return tuple(k for j in nodes[i][2] for k in summands(j))
+            return (i,)
+
+        for i in live:
+            if nodes[i][0] != "add":
+                continue
+            terms = tuple(k for j in nodes[i][2] for k in summands(j))
+            matrices = [j for j in terms if nodes[j][0] == "matmul"]
+            if len(matrices) != 1:
+                continue
+            m = matrices[0]
+            _, _, (left, right), shape = nodes[m]
+            rest = tuple(j for j in terms if j != m)
+            if (
+                shape[0] == 1
+                and result[left]
+                and not result[right]
+                and any(
+                    nodes[j][0] == "input" and isinstance(nodes[j][3][1], tuple)
+                    for j in rest
+                )
+                and all(
+                    nodes[j][0] == "input"
+                    and nodes[j][1] == shape[2]
+                    and (not result[j] or isinstance(nodes[j][3][1], tuple))
+                    for j in rest
+                )
+            ):
+                indexed_affine[i] = (m, rest)
     affine = {}
     for i in live:
         op, _, args, _ = nodes[i]
@@ -120,6 +154,7 @@ def execution_plan(metadata):
         )
         | frame_sums.keys()
         | affine.keys()
+        | indexed_affine.keys()
     )
     expressions, dependencies, uses = {}, {}, Counter()
 
@@ -140,6 +175,13 @@ def execution_plan(metadata):
                 children = (("value", factor[0]),)
             elif node_projection(nodes, i, result):
                 children = (("value", matrix_input(nodes, args[1], data[1:])),)
+            elif i in indexed_affine:
+                m, _ = indexed_affine[i]
+                _, _, (left, right), shape = nodes[m]
+                children = tuple(
+                    ("value", matrix_input(nodes, j, dims))
+                    for j, dims in zip((left, right), (shape[:2], shape[1:]))
+                )
             elif i in affine:
                 matrix, bias = affine[i]
                 _, _, (left, right), shape = nodes[matrix]
@@ -250,6 +292,7 @@ def execution_plan(metadata):
         expressions,
         dependencies,
         affine,
+        indexed_affine,
         frame_sums,
         uses,
     )
@@ -258,18 +301,22 @@ def execution_plan(metadata):
 @lru_cache(maxsize=128)
 def uses_matrix_products(metadata):
     """Select tiled execution for contractions and normalization expressions."""
-    nodes, _ = parse_metadata(metadata)
+    nodes, outputs = parse_metadata(metadata)
+    if any(isinstance(kind, tuple) for _, _, kind in outputs):
+        return True
     dependent = []
     for op, _, args, data in nodes:
         dependent.append(
             data[1] != "shared" if op == "input" else any(dependent[j] for j in args)
         )
     return any(
-        op
+        op == "input"
+        and isinstance(data[1], tuple)
+        or op
         in ("convolution", "product", "frame", "normalize", "inv_norm", "mean", "rsqrt")
         or op == "matmul"
         and not can_inline_matmul(nodes, i, dependent)
-        for i, (op, _, _, _) in enumerate(nodes)
+        for i, (op, _, _, data) in enumerate(nodes)
     )
 
 
@@ -296,7 +343,7 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
                 leaves.append(i)
                 kind = (
                     data[1]
-                    if op == "input"
+                    if op == "input" and not isinstance(data[1], tuple)
                     else "shared"
                     if not dependent[i]
                     else nodes[args[0]][3][1]
@@ -414,6 +461,7 @@ class TiledProgram:
             self.expressions,
             self.dependencies,
             self.affine,
+            self.indexed_affine,
             self.frame_sums,
             uses,
         ) = plan
@@ -455,6 +503,8 @@ class TiledProgram:
                 )
                 if kind == "edge":
                     x = x[self.begin : self.end]
+                elif isinstance(kind, tuple):
+                    x = x.index_select(0, self.inputs[kind[1]][self.begin : self.end])
                 elif kind in ("source", "target"):
                     x = x.index_select(
                         0, self.source if kind == "source" else self.target
@@ -471,6 +521,28 @@ class TiledProgram:
                 _, kind = self.nodes[args[0]][3]
                 x = self.project_node(i).index_select(
                     0, self.source if kind == "source" else self.target
+                )
+            elif i in self.indexed_affine:
+                from .layout import gather_sum
+
+                m, terms = self.indexed_affine[i]
+                _, _, (left, right), (_, inner, width) = self.nodes[m]
+                rows = self.end - self.begin
+                tables, indices = [], []
+                for j in terms:
+                    slot, kind = self.nodes[j][3]
+                    if kind == "shared":
+                        tables.append(
+                            self.inputs[slot].reshape(1, width).expand(rows, -1)
+                        )
+                        indices.append(None)
+                    else:
+                        tables.append(self.inputs[slot])
+                        indices.append(self.inputs[kind[1]][self.begin : self.end])
+                x = gather_sum(tables, indices)
+                x.addmm_(
+                    self.matrix(left, 1, inner).reshape(rows, inner),
+                    self.matrix(right, inner, width)[0],
                 )
             elif i in self.affine:
                 matrix, bias = self.affine[i]
@@ -923,8 +995,8 @@ class TiledProgram:
 @lru_cache(maxsize=128)
 def tile_width(metadata):
     """Estimate peak per-row storage using the tile's evaluation/release order."""
-    nodes, outputs, dependent, expressions, dependencies, _, _, counts = execution_plan(
-        metadata
+    nodes, outputs, dependent, expressions, dependencies, _, _, _, counts = (
+        execution_plan(metadata)
     )
     uses, values, references = counts.copy(), {}, Counter()
     resident = peak = 0
@@ -1097,6 +1169,9 @@ def launch(metadata, inputs, source, target, outputs, tile_size=None):
             output = destinations[slot]
             if kind == "shared":
                 tile.accumulate(root, output)
+            elif isinstance(kind, tuple):
+                output.index_add_(0, inputs[kind[1]][begin:end], tile.value(root))
+                tile.release("value", root)
             elif kind == "edge":
                 if writes[slot] == 1:
                     destination = output[begin:end]

@@ -15,6 +15,7 @@ from .radial import (
     radial_reference,
     split_radial,
 )
+from .weights import IndexedProjection, radial_policy
 
 
 def frame_rows(program, rows, rotation, rank, count):
@@ -232,7 +233,16 @@ class CartesianEdgeProgram(torch.nn.Module):
         *,
         radial_network=None,
         projection=None,
+        edge_pairs=None,
     ):
+        if edge_pairs is not None:
+            from .edge_pairs import reciprocal_weights
+
+            weights, projection, radial_network = reciprocal_weights(
+                self, edge_pairs, weights, projection, radial_network, edge_index
+            )
+            if projection is not None and not projection.shape[0]:
+                projection = None
         validate_module_precision(
             self, (features, weights, rotation, cutoff, projection, operands)
         )
@@ -271,8 +281,10 @@ class CartesianEdgeProgram(torch.nn.Module):
         from .edge import evaluate
         from .torch.edge import evaluate_recomputed, evaluate_tiled
 
-        if self.radial_mode == "last" and (
-            radial_network is not None or projection is not None
+        if (
+            radial_policy(self, radial_network) == "last"
+            and not isinstance(radial_network, IndexedProjection)
+            and (radial_network is not None or projection is not None)
         ):
             hidden, tail = (
                 (radial_network, ())

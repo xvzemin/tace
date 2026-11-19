@@ -23,6 +23,7 @@ from .utils import (
     compute_hessians_vmap,
     compute_symmetric_displacement,
     prepare_direct_hessian_inputs,
+    prepare_edge_pairs,
     stress_from_virials,
 )
 
@@ -92,11 +93,31 @@ class TensorModel(torch.nn.Module):
             value = data.get(key)
             if isinstance(value, torch.Tensor) and value.is_floating_point():
                 data[key] = value.to(dtype=DATA_DTYPE)
+        if self.uses_reciprocal_weights():
+            if not torch.compiler.is_compiling():
+                prepare_edge_pairs(data)
+        else:
+            data.pop("edge_pair_rows", None)
+            data.pop("edge_pair_inverse", None)
         if "direct_hessian" in self.get_target_property() and not self.lmp:
             data = prepare_direct_hessian_inputs(
                 data, self.readout_fn.pair_representation.cutoff
             )
         return data
+
+    def uses_reciprocal_weights(self) -> bool:
+        """Whether the radial branch and requested derivatives permit reciprocal edges."""
+        rep = getattr(self.readout_fn, "representation", None)
+        return (
+            not self.lmp
+            and getattr(rep, "reciprocal_radial", False)
+            and rep.interactions[0].use_eqx
+            and not (
+                self.flags.compute_edge_forces
+                or self.flags.compute_atomic_virials
+                or self.flags.compute_atomic_stresses
+            )
+        )
 
     def denorm(
         self, out: Dict[str, Union[torch.Tensor, None]]

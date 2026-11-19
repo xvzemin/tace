@@ -137,6 +137,7 @@ class CartesianTensorProductConvLayer(torch.nn.Module):
         edge_cutoff,
         edge_vector=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Fuse the radial network, tensor contractions and graph reduction."""
         if edge_cutoff is not None and edge_vector is None:
@@ -150,6 +151,7 @@ class CartesianTensorProductConvLayer(torch.nn.Module):
             vectors=edge_vector,
             amplitudes=edge_cutoff,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
 
 
@@ -306,7 +308,9 @@ def cartesian_modules(module):
         gate.metadata = gate.build_program()
         return gate
     if isinstance(module, O3TensorProductConv):
-        return CartesianTensorProductConvLayer(module.tp)
+        conv = CartesianTensorProductConvLayer(module.tp)
+        conv.eqx_tp.radial_mode = module.eqx_tp.radial_mode
+        return conv
     if isinstance(module, (UuuTensorProduct, UvuTensorProduct)):
         module.tp = cartesian_tensor_product(module.tp)
         module.irreps_in1 = module.tp.irreps_in1

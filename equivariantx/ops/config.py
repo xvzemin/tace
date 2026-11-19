@@ -107,6 +107,12 @@ ROTARY_INLINE = True
 RADIAL_PROJECT_MIN_WIDTH = 1024
 RADIAL_PROJECT_MAX_BYTES = 256 << 20
 
+# Tiny shared row maps can be cheaper as columns of the native final GEMM.
+INDEXED_PROJECTION_MAX_ROWS = 8
+# PyTorch benefits from wider packed GEMMs without a native indexed epilogue.
+INDEXED_TORCH_PROJECTION_MAX_ROWS = 128
+INDEXED_PROJECTION_MAP_BYTES = 8 << 20
+
 # Keep a packed affine bias outside wide, aligned radial GEMMs; zero disables it.
 RADIAL_AFFINE_MIN_WIDTH = 1024
 

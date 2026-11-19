@@ -10,6 +10,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import co3, o2
+from equivariantx.conv import EdgePairs, indexed_rows
 
 from ...dataset.quantity import PROPERTIES
 from ...utils.env import acceleration_enabled, get_tace_use_dens
@@ -17,11 +18,17 @@ from ..layer_norm import get_normalization_layer, residual_update_count
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
-from .edge import EDGE_EMBEDDING, EDGE_UPDATE
+from .edge import (
+    EDGE_EMBEDDING,
+    EDGE_UPDATE,
+    Element2EdgeEmbedding,
+    ElementEdgeEmbedding,
+)
 from .edge_inter import EDGE_INTERACTION
 from .inter import (
     INTERACTION,
     O2CgtpInteraction,
+    O3CgtpInteraction,
     O3IctdInteraction,
     UuO2Interaction,
     UvO2Interaction,
@@ -102,6 +109,29 @@ class NodeRepresentation(torch.nn.Module):
         interaction_classes = [
             INTERACTION[interaction] for interaction in atomic_basis["type"]
         ]
+        self.reciprocal_radial = (
+            edge_update["type"] == "identity"
+            and all(
+                cls
+                in (
+                    O3CgtpInteraction,
+                    O2CgtpInteraction,
+                    O3IctdInteraction,
+                    UuO2Interaction,
+                    UvO2Interaction,
+                )
+                for cls in interaction_classes
+            )
+            and edge_embedding["type"]
+            in ("identity", "linear", "nonlinear", "element", "element2")
+        )
+        if edge_embedding["type"] in ("element", "element2") and any(
+            cls not in (O3CgtpInteraction, O2CgtpInteraction, O3IctdInteraction)
+            for cls in interaction_classes
+        ):
+            raise ValueError(
+                "Element edge embedding requires CGTP convolution paths in every layer."
+            )
         uses_so2_interaction = any(
             issubclass(interaction_cls, UvSO2Interaction)
             for interaction_cls in interaction_classes
@@ -465,6 +495,10 @@ class NodeRepresentation(torch.nn.Module):
             )
             self.irreps_out = self.products[-1].irreps_out
 
+        if isinstance(self.edge_embedding, ElementEdgeEmbedding):
+            self.edge_embedding.build_paths(
+                inter.rejector for inter in self.interactions
+            )
         self.use_cutoff_scatter_norm = any(
             isinstance(inter.scatter_norm, CutoffScatterNorm)
             for inter in self.interactions
@@ -513,11 +547,31 @@ class NodeRepresentation(torch.nn.Module):
         node_type_local = node_type[: graph.lmp_natoms[0]] if graph.lmp else node_type
 
         # === edge initialize (radial) ===
-        edge_radial_basis, edge_cutoff = self.radial_basis(
-            graph.edge_length,
+        pairs = (
+            EdgePairs(data["edge_pair_rows"], data["edge_pair_inverse"])
+            if "edge_pair_rows" in data
+            else None
+        )
+        radial_index = (
+            data["edge_index"]
+            if pairs is None
+            else data["edge_index"][:, pairs.representatives]
+        )
+        radial_length = (
+            graph.edge_length
+            if pairs is None
+            else graph.edge_length[pairs.representatives]
+        )
+        pair_basis, pair_cutoff = self.radial_basis(
+            radial_length,
             node_type,
-            data["edge_index"],
+            radial_index,
             self.atomic_numbers,
+        )
+        edge_cutoff = (
+            pair_cutoff
+            if pairs is None or pair_cutoff is None
+            else pairs.expand(pair_cutoff)
         )
         message_cutoff = None
         if self.use_cutoff_scatter_norm:
@@ -564,7 +618,8 @@ class NodeRepresentation(torch.nn.Module):
             else None
         )
 
-        edge_radial_basis = edge_radial_basis.to(self.model_dtype)
+        pair_basis = pair_basis.to(self.model_dtype)
+        edge_radial_basis = pair_basis if pairs is None else pairs.expand(pair_basis)
         edge_attrs = edge_attrs.to(self.model_dtype)
         if edge_cutoff is not None:
             edge_cutoff = edge_cutoff.to(self.model_dtype)
@@ -628,10 +683,28 @@ class NodeRepresentation(torch.nn.Module):
         edge_feats = self.edge_embedding(
             node_feats,
             node_type,
-            edge_radial_basis,
-            data["edge_index"],
-            edge_cutoff,
+            pair_basis,
+            radial_index,
+            None if pair_cutoff is None else pair_cutoff.to(self.model_dtype),
         )
+        directed_elements = isinstance(self.edge_embedding, Element2EdgeEmbedding)
+        endpoint_types = (
+            node_type[data["edge_index"] if directed_elements else radial_index]
+            if isinstance(self.edge_embedding, ElementEdgeEmbedding)
+            else None
+        )
+        if (
+            endpoint_types is not None
+            and not directed_elements
+            and self.interactions[0].use_eqx
+        ):
+            endpoint_types = indexed_rows(
+                endpoint_types,
+                self.num_elements,
+                dtype=edge_feats.dtype,
+                reduce="mean",
+                backend=self.interactions[0].rejector.eqx_tp.backend,
+            )
 
         forces_embedding = None
         noise_mask_tensor = None
@@ -665,9 +738,11 @@ class NodeRepresentation(torch.nn.Module):
             )
             if graph.lmp and idx > 0:
                 local_node_type = node_type_local
-            magnetic_inputs = {}
+            interaction_inputs = {}
+            if pairs is not None:
+                interaction_inputs["edge_pairs"] = pairs
             if isinstance(inter, O3MagneticWigner6jInteraction):
-                magnetic_inputs = {
+                interaction_inputs = {
                     "magnetic_node_attrs": magnetic_node_attrs,
                     "magnetic_edge_feats": self.magnetic_edge_updates[idx](
                         node_feats,
@@ -677,6 +752,11 @@ class NodeRepresentation(torch.nn.Module):
                         edge_cutoff,
                     ),
                 }
+            if isinstance(self.edge_embedding, ElementEdgeEmbedding):
+                interaction_inputs["element"] = (
+                    self.edge_embedding.layer_weights(idx),
+                    endpoint_types,
+                )
             node_feats, sc = inter(
                 node_feats,
                 node_types,
@@ -695,7 +775,7 @@ class NodeRepresentation(torch.nn.Module):
                 data["batch"],
                 graph,
                 message_cutoff=message_cutoff,
-                **magnetic_inputs,
+                **interaction_inputs,
             )
             if graph.lmp and idx == 0:
                 local_node_type = node_type_local

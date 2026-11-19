@@ -5,6 +5,8 @@ from statistics import median
 
 import torch
 
+from ...ops.common.weights import IndexedProjection
+
 
 def select_method(
     module,
@@ -35,9 +37,15 @@ def select_method(
 
     parts = radial if isinstance(radial, tuple) else ((radial, "edge"),)
     inputs = features, projection, amplitudes, *(x for x, _ in parts), vectors
-    parameters = (
-        tuple(radial_network.parameters()) if radial_network is not None else ()
-    )
+    network = radial_network
+    external = ()
+    if isinstance(network, IndexedProjection):
+        external = (network.projection, *(t for t, _ in network.terms))
+        if network.bias is not None:
+            external += (network.bias,)
+        external = tuple(dict.fromkeys(external))
+        network = network.network
+    parameters = external + (tuple(network.parameters()) if network is not None else ())
     required = tuple(torch.is_grad_enabled() and x.requires_grad for x in inputs)
     parameter_grads = tuple(
         torch.is_grad_enabled() and p.requires_grad for p in parameters
@@ -62,10 +70,11 @@ def select_method(
         parameter_grads,
         tuple(
             (type(layer), tuple(p.shape for p in layer.parameters(recurse=False)))
-            for layer in radial_network.modules()
+            for layer in network.modules()
         )
-        if radial_network is not None
+        if network is not None
         else (),
+        tuple(t.shape for t in external),
         tuple(kind for _, kind in parts),
         order,
         torch.get_float32_matmul_precision(),

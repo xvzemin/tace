@@ -10,6 +10,7 @@ from ...ops.common.convolution import edge_indices
 from ...ops.common.radial import cast_radial, radial_features
 from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...ops.common.torch.tensor_product import instruction_groups
+from ...ops.common.weights import IndexedProjection, prepare_indexed, radial_policy
 from ...ops.precision import validate_module_precision
 from ...ops.torch.o3.cgtp import convolution as torch_kernel
 
@@ -211,6 +212,7 @@ class O3TensorProductConv(torch.nn.Module):
         vectors=None,
         amplitudes=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Evaluate the indexed convolution.
 
@@ -250,12 +252,33 @@ class O3TensorProductConv(torch.nn.Module):
             and fuse only the final projection. ``radial_mode`` controls hidden
             layer evaluation on either backend. Append an affine bias as the last projection row
             and a constant input channel when no network is supplied.
+        edge_pairs : equivariantx.conv.EdgePairs, optional
+            Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
 
         Returns
         -------
         torch.Tensor
             Target features, shape ``(num_nodes, irreps_out.dim)``.
         """
+        pair_index = None
+        if edge_pairs is not None:
+            if edge_index is None:
+                raise ValueError("Pair weights require a graph convolution.")
+            from ...ops.common.edge_pairs import reciprocal_weights
+
+            compact = self.backend == "cuda" and features.is_cuda
+            radial, projection, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                radial,
+                projection,
+                radial_network,
+                edge_index,
+                compact=compact,
+                dtype=features.dtype,
+            )
+            if compact and radial_network is None and not projection.shape[0]:
+                pair_index = edge_pairs.inverse
         validate_module_precision(
             self,
             (
@@ -282,8 +305,12 @@ class O3TensorProductConv(torch.nn.Module):
         count = edge_index[0].numel() if indexed else features.size(0)
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
-        if radial_network is not None and (
-            self.radial_mode == "last"
+        if isinstance(radial_network, IndexedProjection):
+            radial, radial_network = prepare_indexed(
+                self, radial, radial_network, edge_index, projection
+            )
+        elif radial_network is not None and (
+            radial_policy(self, radial_network) == "last"
             or (
                 config.TORCH_REFERENCE
                 and (self.backend == "torch" or not features.is_cuda)
@@ -345,7 +372,9 @@ class O3TensorProductConv(torch.nn.Module):
         if any(
             value.size(0) not in (1, count)
             for value in (
-                (edge_attrs,) if isinstance(radial, tuple) else (edge_attrs, radial)
+                (edge_attrs,)
+                if isinstance(radial, tuple) or pair_index is not None
+                else (edge_attrs, radial)
             )
         ):
             raise ValueError(
@@ -372,6 +401,7 @@ class O3TensorProductConv(torch.nn.Module):
                 vectors,
                 amplitudes,
                 radial_network,
+                pair_index,
             )
         return torch_kernel.evaluate(
             self,

@@ -31,6 +31,7 @@ def execution_plan(
     initialize,
     batch_paths=False,
     indexed=True,
+    paired=False,
 ):
     """Group shared inputs and derivative factors using compiled resource usage."""
     paths, _, _, *geometry = parse_metadata(metadata)
@@ -108,6 +109,7 @@ def execution_plan(
                 angular_derivatives=geometry[2] if len(geometry) > 2 else False,
                 direction_offset=geometry[3] if len(geometry) > 3 else 0,
                 indexed=indexed,
+                paired=paired,
             )
             # Bound compiler work before querying the kernel's register usage.
             if len(code) > SOURCE_SIZE_LIMIT:
@@ -189,6 +191,7 @@ def execution_plan(
                 angular_derivatives=geometry[2] if len(geometry) > 2 else False,
                 direction_offset=geometry[3] if len(geometry) > 3 else 0,
                 indexed=indexed,
+                paired=paired,
             )
             if len(code) > SOURCE_SIZE_LIMIT:
                 half = len(indices) // 2
@@ -227,7 +230,14 @@ def execution_plan(
 
 
 def contract_direct(
-    metadata, source, target, calls, shared=None, initialize=(), batch_paths=False
+    metadata,
+    source,
+    target,
+    calls,
+    shared=None,
+    initialize=(),
+    batch_paths=False,
+    pair_index=None,
 ):
     """Share angular factors across derivative terms and reduce on their owners."""
     operands, results = [], []
@@ -265,6 +275,7 @@ def contract_direct(
         tuple(result_ids[id(value)] for value in initialize),
         batch_paths,
         indexed,
+        pair_index is not None,
     )
     orders = {
         owner: prepare_graph(source, target, owner)
@@ -278,6 +289,8 @@ def contract_direct(
         if owner >= 0
     }
     pointers = [value.data_ptr() for value in (*operands, *results)]
+    if pair_index is not None:
+        pointers.append(pair_index.data_ptr())
     launches = []
     for kernel, width, owner, threads in phases:
         if isinstance(owner, tuple):
@@ -327,7 +340,16 @@ def contract_direct(
     )
 
 
-def contract(metadata, program, source, target, operands, results, batch_paths=False):
+def contract(
+    metadata,
+    program,
+    source,
+    target,
+    operands,
+    results,
+    batch_paths=False,
+    pair_index=None,
+):
     """Contract without saving edge messages or full projected edge weights."""
     device, dtype = operands[0].device, operands[0].dtype
     if dtype not in (torch.float32, torch.float64):
@@ -371,6 +393,17 @@ def contract(metadata, program, source, target, operands, results, batch_paths=F
     paths, weight_numel, *_ = parse_metadata(metadata)
     projected = [call for call in calls if call[1][2].numel()]
     direct = [call for call in calls if not call[1][2].numel()]
+    if pair_index is not None:
+        if (
+            projected
+            or pair_index.dtype != torch.long
+            or pair_index.device != device
+            or pair_index.shape != source.shape
+        ):
+            raise ValueError(
+                "Compact weights require direct weights and an int64 pair index per edge."
+            )
+        pair_index = pair_index.contiguous()
     with torch.cuda.device(device):
         if direct:
             # A zero-sized projection has an identically zero derivative.
@@ -388,7 +421,12 @@ def contract(metadata, program, source, target, operands, results, batch_paths=F
             ]
             if direct:
                 contract_direct(
-                    metadata, source, target, direct, batch_paths=batch_paths
+                    metadata,
+                    source,
+                    target,
+                    direct,
+                    batch_paths=batch_paths,
+                    pair_index=pair_index,
                 )
         if projected:
             if source is None:

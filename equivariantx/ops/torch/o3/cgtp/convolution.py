@@ -137,7 +137,7 @@ def evaluate(
             num_nodes,
             module.output_dim,
             network=radial_network,
-            recompute=module.radial_mode == "full",
+            recompute=module.radial_mode == "full" or radial_network is not None,
             angular_groups=tuple(
                 (getattr(module, name).to(features), *group)
                 for name, *group in module.angular_groups

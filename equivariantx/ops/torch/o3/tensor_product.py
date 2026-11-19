@@ -266,7 +266,9 @@ def convolve(
     from ...common.convolution import radial_input
     from ...common.radial import radial_features, split_radial
     from ...common.torch.edge import evaluate_recomputed, evaluate_torch
+    from ...common.weights import radial_policy
 
+    mode = radial_policy(module, network)
     captured = torch.compiler.is_compiling() or get_proxy_mode() is not None
     eager_torch = backend == "torch" and not captured
     if (
@@ -274,7 +276,7 @@ def convolve(
         and features.is_cuda
         and not config.TORCH_REFERENCE
         and config.TORCH_FACTORIZED_PRODUCT
-        and module.radial_mode == "last"
+        and mode == "last"
         and module.tensor_product.routes
         and len(module.tensor_product.edge_matrices)
         == len(module.tensor_product.routes)
@@ -295,14 +297,14 @@ def convolve(
         (backend == "torch" and config.TORCH_REFERENCE)
         or getattr(module, "program_metadata", None) is None
         or eager_torch
-        and module.radial_mode == "last"
+        and mode == "last"
     ):
         return convolution_reference(
             module, features, attributes, edge_index, weight, num_nodes, radial, network
         )
     if (
         captured
-        and module.radial_mode == "full"
+        and mode == "full"
         and network is not None
         and (backend == "torch" or config.EDGE_PROGRAM_INLINE)
     ):
@@ -334,7 +336,7 @@ def convolve(
             result = program.compose(metadata, (x, y, w))[0]
             metadata = repr((tuple(program.nodes), ((result, 0, "target"),)))
     else:
-        if module.radial_mode == "last":
+        if mode == "last":
             hidden, network = split_radial(network)
             radial = radial_features(hidden, radial, edge_index)
         program = Program()
@@ -350,7 +352,7 @@ def convolve(
         from ...common.edge import evaluate
 
         return evaluate(metadata, inputs, *edge_index.unbind(0), num_nodes)[0]
-    if module.radial_mode == "full" or config.TORCH_RECOMPUTE:
+    if mode == "full" or config.TORCH_RECOMPUTE:
         return evaluate_recomputed(metadata, inputs, *edge_index.unbind(0), num_nodes)[
             0
         ]

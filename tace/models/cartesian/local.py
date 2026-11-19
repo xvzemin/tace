@@ -157,6 +157,7 @@ class UuConvolution(torch.nn.Module):
         graph,
         *,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Evaluate radial coefficients without changing Cartesian storage."""
         if use_streamed_convolution(self.eqx_tp, features, edge_index):
@@ -169,17 +170,19 @@ class UuConvolution(torch.nn.Module):
                     cutoff,
                     projection=projection,
                     radial_network=radial_network,
+                    edge_pairs=edge_pairs,
                 )
                 * self.scale
             )
-        radial = materialize(radial, edge_index)
+        radial = materialize(radial, edge_index if edge_pairs is None else edge_index[:, edge_pairs.representatives])
         if radial_network is not None:
-            radial = radial_network(radial)
+            from equivariantx.ops.common.radial import radial_reference
+
+            radial = radial_reference(radial_network, radial)
         if radial.shape[-1] + 1 == projection.shape[0]:
             radial = torch.cat((radial, torch.ones_like(radial[..., :1])), dim=-1)
-        return self(
-            features, radial @ projection, edge_index, rotation, rotation, cutoff
-        )
+        weights = radial @ projection if projection.shape[0] else radial
+        return self(features, weights if edge_pairs is None else edge_pairs.expand(weights), edge_index, rotation, rotation, cutoff)
 
 
 class UvConvolution(torch.nn.Module):

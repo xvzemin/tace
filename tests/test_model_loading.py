@@ -624,7 +624,7 @@ def test_graph_precision_independent_of_network(dtype):
     )
 
 
-def make_model(interaction="cgtp", matrix=False, v2=False):
+def make_model(interaction="cgtp", matrix=False, v2=False, *, edge_embedding=None):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
         num_layers=2,
@@ -649,6 +649,9 @@ def make_model(interaction="cgtp", matrix=False, v2=False):
     if v2:
         config["edge_update"]["type"] = "element2_v2"
         config["mlp_type"] = "mlp_v2"
+    if edge_embedding is not None:
+        config["edge_embedding"]["type"] = edge_embedding
+        config["edge_update"]["type"] = "identity"
     config["readout_emlp"]["hidden"] = [4]
     config["scale_shift"].update(
         scale_type="rms_forces",
@@ -703,6 +706,45 @@ def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
             ),
         }
     )
+
+
+@pytest.mark.parametrize("interaction", ["cgtp", "o2_cgtp", "co3", "nonlinear_ictd"])
+@pytest.mark.parametrize("embedding", ["element", "element2"])
+def test_element_edge_convolution(interaction, embedding, double_precision, monkeypatch):
+    torch.manual_seed(19)
+    reference = make_model(interaction, edge_embedding="identity").train()
+    torch.manual_seed(19)
+    model = make_model(interaction, edge_embedding=embedding).train()
+    embed = model.readout_fn.representation.edge_embedding
+    tables = tuple(getattr(embed, name).weight for name in embed.table_names)
+    keys = ("energy", "forces", "stress")
+    initial, baseline = evaluate(model), evaluate(reference)
+    for key in keys:
+        torch.testing.assert_close(initial[key], baseline[key], rtol=0, atol=0)
+    with torch.no_grad():
+        for table in tables:
+            table.normal_(std=0.2)
+    expected = evaluate(model)
+    assert not torch.equal(initial["energy"], expected["energy"])
+
+    def gradient(output):
+        loss = sum(output[key].square().sum() for key in keys)
+        return torch.autograd.grad(loss, tables)
+
+    grad = gradient(expected)
+    assert all(g.abs().max() > 0 for g in grad)
+    selected = select_elements(model, [1, 8])
+    for name,table in zip(embed.table_names,tables):
+        torch.testing.assert_close(getattr(selected.readout_fn.representation.edge_embedding,name).weight,table[[0,2]])
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    for memory_first in ("0", "1"):
+        monkeypatch.setenv("TACE_MEMORY_FIRST", memory_first)
+        actual = evaluate(model)
+        for key in keys:
+            torch.testing.assert_close(
+                actual[key], expected[key], rtol=1e-9, atol=1e-10
+            )
+        torch.testing.assert_close(gradient(actual), grad, rtol=1e-8, atol=1e-10)
 
 
 @pytest.mark.parametrize("product", ["nonlinear_cgtp", "nonlinear_ictd"])

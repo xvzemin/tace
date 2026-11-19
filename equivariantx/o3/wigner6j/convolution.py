@@ -53,6 +53,7 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
         num_nodes=None,
         *,
         backend=None,
+        edge_pairs=None,
     ):
         """Sum recoupled edge messages at destination nodes.
 
@@ -71,6 +72,9 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
             Destination-node count. Defaults to the first input's node count.
         backend : {None, "torch", "cuda"}, optional
             Override the construction-time backend for this call.
+        edge_pairs : EdgePairs or pair of EdgePairs or None, optional
+            Pair maps for the two external weight tables. A single map is
+            shared by both. Use None for a directional factor.
 
         Returns
         -------
@@ -88,16 +92,52 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
             if value.shape[-1] != width:
                 raise ValueError("Input widths must match their irreps.")
         weight1, weight2 = self.get_weights(weight1, weight2)
+        backend = self.backend if backend is None else backend
+        if backend not in ("cuda", "torch"):
+            raise ValueError("backend must be cuda or torch.")
+        num_nodes = x1.shape[0] if num_nodes is None else num_nodes
+        if edge_pairs is not None:
+            from ...ops.common.edge_pairs import EdgePairs
+
+            maps = (
+                (edge_pairs, edge_pairs)
+                if isinstance(edge_pairs, EdgePairs)
+                else edge_pairs
+            )
+            if len(maps) != 2:
+                raise ValueError("Provide one pair map or one map per weight.")
+            weights = (weight1, weight2)
+            rows = []
+            for w, m in zip(weights, maps):
+                if w.ndim == 1 or (w.ndim == 2 and w.shape[0] == 1):
+                    continue
+                count = x2.shape[0] if m is None else m.representatives.numel()
+                if w.ndim != 2 or w.shape[0] != count:
+                    raise ValueError(
+                        "Each weight table must match its pair map or edge count."
+                    )
+                rows.append(m)
+            common = rows[0] if rows and all(m is rows[0] for m in rows) else None
+            if common is not None and backend == "cuda" and x1.is_cuda:
+                from ...ops.cuda.o3.wigner6j import convolution as cuda_kernel
+
+                values = (x1, x2, x3, *weights)
+                if cuda_kernel.use_pair_contraction(self, values, common):
+                    return cuda_kernel.recoupled(
+                        self, values, edge_index, num_nodes, common
+                    )
+            weight1, weight2 = (
+                pairs.expand(w)
+                if pairs is not None and w.ndim == 2 and w.shape[0] != 1
+                else w
+                for pairs, w in zip(maps, (weight1, weight2), strict=True)
+            )
         if any(
             weight.ndim > 2
             or (weight.ndim == 2 and weight.shape[0] not in (1, x2.shape[0]))
             for weight in (weight1, weight2)
         ):
             raise ValueError("Weights must be shared or have one row per edge.")
-        backend = self.backend if backend is None else backend
-        if backend not in ("cuda", "torch"):
-            raise ValueError("backend must be cuda or torch.")
-        num_nodes = x1.shape[0] if num_nodes is None else num_nodes
         values = x1, x2, x3, weight1, weight2
         if backend == "cuda" and x1.is_cuda:
             from ...ops.cuda.o3.wigner6j import convolution as cuda_kernel

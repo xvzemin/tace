@@ -30,17 +30,85 @@ def contraction_cuda(
 contraction_cuda.register_fake(o3_outputs)
 
 
+@torch.library.custom_op(
+    "eqx::o3_pair_contraction", mutates_args=(), device_types="cuda"
+)
+def pair_contraction_cuda(
+    metadata: str,
+    program: str,
+    source: torch.Tensor,
+    target: torch.Tensor,
+    operands: list[torch.Tensor],
+    pair_index: torch.Tensor,
+    *,
+    batch_paths: bool = False,
+) -> list[torch.Tensor]:
+    """Read and differentiate path weights in undirected pair storage."""
+    from .cuda.o3.convolution import contract
+
+    outputs = o3_outputs(metadata, program, source, target, operands)
+    for value in outputs:
+        value.zero_()
+    if source.numel() and parse_metadata(metadata)[0]:
+        contract(
+            metadata,
+            parse_metadata(program),
+            source,
+            target,
+            operands,
+            outputs,
+            batch_paths,
+            pair_index,
+        )
+    return outputs
+
+
+@pair_contraction_cuda.register_fake
+def pair_outputs(
+    metadata, program, source, target, operands, pair_index, *, batch_paths=False
+):
+    return o3_outputs(metadata, program, source, target, operands)
+
+
+def pair_reference(metadata, program, source, target, operands, pair_index):
+    """Evaluate pair-indexed polynomial factors and their transposes in Torch."""
+    from .torch.o3 import contraction as torch_contraction
+
+    terms = parse_metadata(program)
+    outputs = [
+        torch.zeros_like(v)
+        for v in o3_outputs(metadata, program, source, target, operands)
+    ]
+    for mapping, weighted, destinations in terms:
+        values = [operands[i] for i in mapping]
+        values[1] = values[1].index_select(0, pair_index)
+        slots = tuple((role, i) for i, (role, _) in enumerate(destinations))
+        parts = torch_contraction(
+            metadata,
+            repr(((tuple(range(len(values))), weighted, slots),)),
+            source,
+            target,
+            values,
+        )
+        for (role, slot), part in zip(destinations, parts):
+            if role == 1:
+                outputs[slot] = outputs[slot].index_add(0, pair_index, part)
+            else:
+                outputs[slot] = outputs[slot] + part
+    return outputs
+
+
 def contraction_setup_context(ctx, inputs, keyword_only_inputs, output):
-    metadata, program, source, target, operands = inputs
+    metadata, program, source, target, operands, *pair = inputs
     ctx.kernel_metadata = metadata
     ctx.program = parse_metadata(program)
     ctx.batch_paths = keyword_only_inputs["batch_paths"]
     ctx.set_materialize_grads(False)
-    ctx.save_for_backward(source, target, *operands)
+    ctx.save_for_backward(source, target, pair[0] if pair else None, *operands)
 
 
 def contraction_backward(ctx, grad_outputs):
-    source, target, *operands = ctx.saved_tensors
+    source, target, pair_index, *operands = ctx.saved_tensors
     metadata = parse_metadata(ctx.kernel_metadata)
     geometric = len(metadata) > 3
     angular = (
@@ -91,6 +159,7 @@ def contraction_backward(ctx, grad_outputs):
             target,
             values,
             batch_paths=ctx.batch_paths,
+            pair_index=pair_index,
         )
         for index, slot in destinations.items():
             gradients[index] = results[slot]
@@ -109,16 +178,18 @@ def contraction_backward(ctx, grad_outputs):
                 operands,
                 grad_outputs,
                 indices,
+                pair_index,
             )
             for index, value in zip(indices, partials):
                 gradients[index] = (
                     value if gradients[index] is None else gradients[index] + value
                 )
-    return None, None, None, None, gradients
+    result = (None, None, None, None, gradients)
+    return result if pair_index is None else (*result, None)
 
 
 def angular_base_gradient(
-    metadata, program, source, target, operands, cotangents, indices
+    metadata, program, source, target, operands, cotangents, indices, pair_index=None
 ):
     """Differentiate base coordinates while holding Lie directions fixed.
 
@@ -140,6 +211,17 @@ def angular_base_gradient(
     )
 
     def function(*vectors):
+        if pair_index is not None:
+            return tuple(
+                pair_reference(
+                    metadata,
+                    repr(terms),
+                    source,
+                    target,
+                    [*operands, *vectors],
+                    pair_index,
+                )
+            )
         return tuple(
             torch_contraction(
                 metadata, repr(terms), source, target, [*operands, *vectors]
@@ -160,10 +242,15 @@ def angular_base_gradient(
 contraction_cuda.register_autograd(
     contraction_backward, setup_context=contraction_setup_context
 )
+pair_contraction_cuda.register_autograd(
+    contraction_backward, setup_context=contraction_setup_context
+)
 
 
 @torch.compiler.allow_in_graph
-def contraction(metadata, program, source, target, operands, *, batch_paths=False):
+def contraction(
+    metadata, program, source, target, operands, *, batch_paths=False, pair_index=None
+):
     """Expose supported O3 contractions inside functional transformations."""
     validate_uniform(operands)
     description = parse_metadata(metadata)
@@ -180,10 +267,24 @@ def contraction(metadata, program, source, target, operands, *, batch_paths=Fals
         metadata = repr((*description[:6], 0, *description[7:]))
         program, operands = repr(tuple(terms)), values
     if torch._C._are_functorch_transforms_active():
+        if pair_index is not None:
+            return pair_reference(
+                metadata, program, source, target, operands, pair_index
+            )
         from .torch.o3 import contraction as torch_contraction
 
         return torch_contraction(
             metadata, program, source, target, operands, batch_paths=batch_paths
+        )
+    if pair_index is not None:
+        return torch.ops.eqx.o3_pair_contraction(
+            compact_metadata(metadata),
+            compact_metadata(program),
+            source,
+            target,
+            operands,
+            pair_index,
+            batch_paths=batch_paths,
         )
     program, operands = project_radial(program, operands, 4)
     return torch.ops.eqx.o3_contraction(

@@ -520,6 +520,8 @@ def ensure_sample_inputs(
 
 def graph_aoti_input_keys(model: CompileTensorModel) -> tuple[str, ...]:
     keys = list(TACE_AOTI_INPUT_KEYS)
+    if model.uses_reciprocal_weights():
+        keys.extend(("edge_pair_rows", "edge_pair_inverse"))
     if model._requires_noncollinear_magmoms():
         keys.append("initial_noncollinear_magmoms")
     if model._requires_total_charge():
@@ -549,6 +551,8 @@ def graph_dynamic_shapes(
         "node_type": {0: num_nodes},
         "edge_index": {1: num_edges},
         "edge_shifts": {0: num_edges},
+        "edge_pair_inverse": {0: num_edges},
+        "edge_pair_rows": {0: torch.export.Dim("num_edge_pairs", min=0)},
         "lattice": {} if num_graphs_dim is None else {0: num_graphs_dim},
         "pbc": {} if num_graphs_dim is None else {0: num_graphs_dim},
         "batch": {0: num_nodes},
@@ -663,6 +667,10 @@ def canonicalize_inputs(
             data[key] = value.to(torch.float64)
     if "edge_shifts" in data:
         data["edge_shifts"] = data["edge_shifts"].to(torch.int64)
+    if "edge_pair_rows" in input_keys:
+        from ..utils import prepare_edge_pairs
+
+        prepare_edge_pairs(data)
     if direct_hessian_cutoff is not None:
         data = prepare_direct_hessian_inputs(data, direct_hessian_cutoff)
     if "fidelity_idx" in input_keys and "fidelity_idx" not in data:

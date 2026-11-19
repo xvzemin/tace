@@ -228,6 +228,16 @@ def check_model_config(cfg: dict[str, Any]):
         raise ValueError(
             "radial_basis.mlp_norm must be null, 'layer_norm' or 'rms_norm'."
         )
+    if cfg["edge_embedding"]["type"] in ("element", "element2"):
+        if cfg["edge_update"]["type"] != "identity":
+            raise ValueError(
+                "Element path embeddings require edge_update.type='identity'."
+            )
+        if radial["apply_cutoff"]:
+            raise ValueError(
+                "Element path embeddings require radial_basis.apply_cutoff=false "
+                "to cut off both the radial and element weights."
+            )
     if cfg["edge_update"]["type"] == "element2_v2" and radial["apply_cutoff"]:
         raise ValueError(
             "edge_update.type='element2_v2' requires radial_basis.apply_cutoff=false "

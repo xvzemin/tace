@@ -53,3 +53,43 @@ def test_wigner6j_convolution(edges, backend, shared, double_precision):
         atol=1e-12,
         rtol=1e-12,
     )
+
+
+@pytest.mark.parametrize("second", ["pair", "directed", "shared"])
+def test_pair_weights(second, device, double_precision):
+    layer = eqx_conv.Wigner6jTensorProductConv(
+        "2x1o",
+        "1o",
+        "1e",
+        "2x1e",
+        "2x0e+2x1e+2x2e",
+        [(0, 0, 0, "uvu", True)],
+        [(0, 0, i, "uvu", True) for i in range(3)],
+        internal_weights=False,
+        shared_weights=False,
+        recouple=True,
+        backend="cuda" if device == "cuda" else "torch",
+    ).to(device)
+    edge_index = torch.tensor([[0, 1, 0, 2], [1, 0, 2, 0]], device=device)
+    pairs = eqx_conv.undirected_edge_pairs(edge_index, num_nodes=3)
+    second_rows = {"pair": 2, "directed": 4, "shared": 1}[second]
+    inputs = tuple(
+        torch.randn(*shape, device=device, requires_grad=True)
+        for shape in ((3, 6), (4, 3), (3, 3), (2, 2), (second_rows, 6))
+    )
+    x, y, z, a, b = inputs
+    maps = pairs if second == "pair" else (pairs, None)
+    result = layer(x, y, z, edge_index, a, b, edge_pairs=maps)
+    expected = layer.forward_reference(
+        x, y, z, edge_index, pairs.expand(a), pairs.expand(b) if second == "pair" else b
+    )
+    for _ in range(2):
+        torch.testing.assert_close(result, expected, rtol=1e-10, atol=1e-10)
+        directions = tuple(torch.randn_like(x) for x in inputs)
+
+        def derivative(value):
+            grads = torch.autograd.grad(value.sin().mean(), inputs, create_graph=True)
+            return sum((g * v).sum() for g, v in zip(grads, directions))
+
+        result, expected = derivative(result), derivative(expected)
+    torch.testing.assert_close(result, expected, rtol=1e-10, atol=1e-10)

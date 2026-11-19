@@ -7,6 +7,7 @@ from ..ops.common.cartesian_frame import analysis, build_plan, uu_paths
 from ..ops.common.gate import gate_program
 from ..ops.common.linear import linear_program
 from ..ops.common.radial import materialize, radial_reference
+from ..ops.common.weights import IndexedProjection, prepare_indexed
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co2 import gate as torch_gate
 from ..ops.torch.co2 import linear as torch_linear
@@ -29,6 +30,7 @@ class CartesianConvolution(torch.nn.Module):
         *,
         radial_network=None,
         projection=None,
+        edge_pairs=None,
     ):
         """Sum edge contributions at the target nodes.
 
@@ -49,13 +51,34 @@ class CartesianConvolution(torch.nn.Module):
         projection : torch.Tensor, optional
             Final radial projection in (input, output) layout, optionally
             with the affine bias in its last row.
+        edge_pairs : equivariantx.conv.EdgePairs, optional
+            Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
 
         Returns
         -------
         torch.Tensor
             Cartesian node features of shape ``(nodes, frame_out.input_dim)``.
         """
+        if edge_pairs is not None:
+            from ..ops.common.edge_pairs import reciprocal_weights
+
+            weights, projection, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                weights,
+                projection,
+                radial_network,
+                edge_index,
+                local=True,
+            )
+            if projection is not None and not projection.shape[0]:
+                projection = None
         backend = self.backend if features.is_cuda else "torch"
+        if isinstance(radial_network, IndexedProjection):
+            weights, radial_network = prepare_indexed(
+                self.plan, weights, radial_network, edge_index, projection
+            )
+            projection = None
         if backend == "torch" and config.TORCH_REFERENCE:
             validate_module_precision(
                 self.plan,

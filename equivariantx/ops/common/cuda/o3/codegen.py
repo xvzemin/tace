@@ -130,6 +130,7 @@ def convolution_source(
     angular_derivatives=False,
     direction_offset=0,
     indexed=True,
+    paired=False,
 ):
     """Emit a path tile, accumulating shared destinations before global writes."""
     mul = paths[0][3]
@@ -137,6 +138,8 @@ def convolution_source(
     concurrent = function is not None
     args = [f"const T* p{i}" for i in range(len(dimensions))]
     args += [f"T* g{i}" for i in range(outputs)]
+    if paired:
+        args.append("const int64_t* pair")
     args += [
         "const int64_t* source",
         "const int64_t* target",
@@ -194,7 +197,7 @@ def convolution_source(
                 w = f"T({factor:.17g})"
                 if needed - {1, 2} and weight >= 0:
                     pointer = mapping[1]
-                    row = "0" if shared[pointer] else "edge"
+                    row = "0" if shared[pointer] else "pair[edge]" if paired else "edge"
                     key = "radial", pointer, weight, mul2, v, factor
                     if key not in cache:
                         name = f"v{len(cache)}"
@@ -344,8 +347,9 @@ def convolution_source(
         lines += ["{ T value = 0;"]
         for a, b in terms:
             lines.append(f"value = fma({a}, {b}, value);")
-        address = f"g{slot}[{'0' if is_shared else 'edge'} * {dim} + {offset} + u * {mul2} + {v}]"
-        if is_shared or slot in atomic_weights:
+        row = "0" if is_shared else "pair[edge]" if paired else "edge"
+        address = f"g{slot}[{row} * {dim} + {offset} + u * {mul2} + {v}]"
+        if paired or is_shared or slot in atomic_weights:
             lines.append(f"if (active) atomicAdd(&{address}, value);")
         else:
             lines.append(
@@ -386,6 +390,7 @@ def fused_source(
     angular_derivatives=False,
     direction_offset=0,
     indexed=True,
+    paired=False,
 ):
     """Execute independent path tiles in one grid with shared launch operands."""
     header = HEADER.replace("SCALAR", dtype) + ACCUMULATION
@@ -394,6 +399,9 @@ def fused_source(
     names = [f"p{i}" for i in range(len(dimensions))] + [
         f"g{i}" for i in range(outputs)
     ]
+    if paired:
+        args.append("const int64_t* pair")
+        names.append("pair")
     writers = {}
     for i, (paths, program, _) in enumerate(phases):
         for _, _, pairs in program:
@@ -422,6 +430,7 @@ def fused_source(
                 angular_derivatives,
                 direction_offset,
                 indexed,
+                paired,
             )
         )
     args += [

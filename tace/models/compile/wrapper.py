@@ -163,6 +163,8 @@ class CompileTensorModel(TensorModel):
             required.append("fidelity_idx")
         if "pbc" in data:
             required.append("pbc")
+        if "edge_pair_rows" in data:
+            required.extend(("edge_pair_rows", "edge_pair_inverse"))
         if self._requires_noncollinear_magmoms():
             required.append("initial_noncollinear_magmoms")
         if self._requires_total_charge():

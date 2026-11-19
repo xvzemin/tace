@@ -16,6 +16,8 @@ def evaluate(
     vectors,
     amplitudes,
     radial_network,
+    *,
+    edge_pairs=None,
 ):
     """Evaluate validated Cartesian operands."""
     from equivariantx.o3.cgtp.convolution import O3TensorProductConv
@@ -96,6 +98,7 @@ def evaluate(
         vectors=vectors,
         amplitudes=amplitudes,
         radial_network=radial_network,
+        edge_pairs=edge_pairs,
     )
     if vectors is not None and module.compact_output:
         return output

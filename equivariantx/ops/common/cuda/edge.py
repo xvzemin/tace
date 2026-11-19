@@ -37,6 +37,13 @@ def input_specifications(metadata):
 
 
 @lru_cache(maxsize=256)
+def row_index_slots(metadata):
+    return {
+        k[1] for _, k, _ in input_specifications(metadata) if isinstance(k, tuple)
+    } | {k[1] for _, _, k in parse_metadata(metadata)[1] if isinstance(k, tuple)}
+
+
+@lru_cache(maxsize=256)
 def padding_layout(metadata, indexed=False):
     """Prove that padded rows cannot contribute to any shared output."""
     nodes, outputs = parse_metadata(metadata)
@@ -59,6 +66,8 @@ def padding_layout(metadata, indexed=False):
     for op, _, args, data in nodes:
         if op == "input":
             slot, kind = data
+            if isinstance(kind, tuple):
+                return None
             if not indexed and kind not in ("edge", "shared"):
                 return None
             if not merge(kinds, slot, kind):
@@ -104,7 +113,8 @@ def padding_layout(metadata, indexed=False):
     output_kinds = {}
     for root, slot, kind in outputs:
         if (
-            (not indexed and kind not in ("edge", "shared"))
+            isinstance(kind, tuple)
+            or (not indexed and kind not in ("edge", "shared"))
             or (kind == "shared" and not zeros[root])
             or not merge(output_kinds, slot, kind)
         ):
@@ -128,26 +138,37 @@ def evaluate(
         raise TypeError("Fused edge expressions require float32 or float64.")
     if source.ndim != 1 or target.shape != source.shape:
         raise ValueError("Source and target must be one-dimensional edge indices.")
-    if any(x.device != inputs[0].device or x.dtype != inputs[0].dtype for x in inputs):
+    if any(
+        x.device != inputs[0].device or x.dtype not in (inputs[0].dtype, torch.int64)
+        for x in inputs
+    ):
         raise ValueError("Expression inputs must have the same dtype and device.")
     if any(
         x.device != inputs[0].device or x.dtype != torch.int64 for x in (source, target)
     ):
         raise ValueError("Edge indices must be int64 tensors on the input device.")
     counts = edge_node_counts(metadata, inputs, num_nodes)
+    descriptions = parse_metadata(metadata)[1]
+    for slot in row_index_slots(metadata):
+        if inputs[slot].dtype != torch.int64 or inputs[slot].shape != source.shape:
+            raise ValueError("Each row index must supply one int64 index per edge.")
     for slot, kind, width in input_specifications(metadata):
         rows = (
             1
             if kind == "shared"
             else source.numel()
             if kind == "edge"
+            else inputs[kind[2]].shape[0]
+            if isinstance(kind, tuple)
             else counts[kind]
         )
-        if inputs[slot].numel() != rows * width:
+        if (
+            inputs[slot].dtype != inputs[0].dtype
+            or inputs[slot].numel() != rows * width
+        ):
             raise ValueError("Input shape does not match the fused expression layout.")
     inputs = [x.contiguous() for x in inputs]
     outputs = edge_outputs(metadata, inputs, source, target, num_nodes)
-    descriptions = parse_metadata(metadata)[1]
     slots = sorted({slot for _, slot, _ in descriptions})
     matrix_products = uses_matrix_products(metadata)
 

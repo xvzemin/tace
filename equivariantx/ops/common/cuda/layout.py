@@ -16,12 +16,16 @@ from .runtime import kernels, runtime
 @lru_cache(maxsize=128)
 def gather_sum_source(dtype, indexed):
     scalar = "double" if dtype == torch.float64 else "float"
-    arguments, values = [], []
+    arguments, checks, values = [], [], []
     for i, gather in enumerate(indexed):
         arguments.extend((f"const T* input{i}", f"int64_t s{i}0", f"int64_t s{i}1"))
         if gather:
-            arguments.append(f"const int64_t* index{i}")
-        row = f"index{i}[row]" if gather else "row"
+            arguments.extend((f"const int64_t* index{i}", f"int64_t rows{i}"))
+            checks.append(
+                f"const int64_t r{i} = index{i}[row]; "
+                f'if (r{i} < 0 || r{i} >= rows{i}) {{ asm("trap;"); return; }}'
+            )
+        row = f"r{i}" if gather else "row"
         values.append(f"input{i}[({row}) * s{i}0 + col * s{i}1]")
     accumulation = "\n".join(f"value += {value};" for value in values[1:])
     return f"""
@@ -32,6 +36,7 @@ def gather_sum_source(dtype, indexed):
         const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
         if (i >= rows * width) return;
         const int64_t row = i / width, col = i % width;
+        {" ".join(checks)}
         T value = {values[0]};
         {accumulation}
         output[i] = value;
@@ -146,7 +151,7 @@ def gather_sum(
         for value, index in zip(features, indices):
             arguments.extend((value.data_ptr(), *value.stride()))
             if index is not None:
-                arguments.append(index.data_ptr())
+                arguments.extend((index.data_ptr(), value.size(0)))
         arguments.extend((result.data_ptr(), *result.shape))
         runtime().launch(
             [(kernel, arguments, (result.numel() + 255) // 256, 1, 256, 0)],

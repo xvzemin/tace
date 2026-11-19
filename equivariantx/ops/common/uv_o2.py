@@ -5,6 +5,7 @@ from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...utils.metadata import static_dimensions
 from .. import config
+from .weights import radial_policy
 
 
 def rotation_layout(wigner):
@@ -22,7 +23,7 @@ def prepare(
     expanded = (
         module.backend == "torch"
         and transverse
-        and (radial_network is None or module.radial_mode == "last")
+        and (radial_network is None or radial_policy(module, radial_network) == "last")
         and (not config.TORCH_REFERENCE)
         and (module.degree <= config.TRANSVERSE_POLYNOMIAL_DEGREE)
         and (
@@ -33,11 +34,16 @@ def prepare(
     )
     if radial_network is not None:
         from .radial import radial_features, split_radial
+        from .weights import IndexedProjection, prepare_indexed
 
-        if module.backend == "torch" and config.TORCH_REFERENCE:
+        if isinstance(radial_network, IndexedProjection):
+            conv_weights, radial_network = prepare_indexed(
+                module, conv_weights, radial_network, edge_index
+            )
+        elif module.backend == "torch" and config.TORCH_REFERENCE:
             conv_weights = radial_features(radial_network, conv_weights, edge_index)
             radial_network = None
-        elif module.radial_mode == "last":
+        elif radial_policy(module, radial_network) == "last":
             hidden, projection = split_radial(radial_network)
             if hidden or not projection:
                 conv_weights = radial_features(hidden, conv_weights, edge_index)

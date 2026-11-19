@@ -78,6 +78,8 @@ def edge_outputs(metadata, inputs, source, target, num_nodes):
                 if kind == "shared"
                 else source.numel()
                 if kind == "edge"
+                else inputs[kind[2]].shape[0]
+                if isinstance(kind, tuple)
                 else counts[kind]
             ),
             width,

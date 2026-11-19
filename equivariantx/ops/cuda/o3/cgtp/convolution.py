@@ -14,6 +14,7 @@ def evaluate(
     vectors,
     amplitudes,
     radial_network,
+    pair_index=None,
 ):
     """Evaluate validated convolution operands."""
     indexed = edge_index is not None
@@ -46,4 +47,5 @@ def evaluate(
         edge_index[1] if indexed else None,
         operands,
         batch_paths=module.batch_paths,
+        pair_index=pair_index,
     )[0]

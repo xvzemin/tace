@@ -429,3 +429,14 @@ def repr_without(module: torch.nn.Module, *names: str) -> str:
         name: child for name, child in module._modules.items() if name not in names
     }
     return torch.nn.Module.__repr__(visible)
+
+
+def prepare_edge_pairs(data):
+    """Populate the reciprocal edge map before tracing the model."""
+    from equivariantx.conv import undirected_edge_pairs
+
+    if "edge_pair_rows" not in data:
+        pairs = undirected_edge_pairs(
+            data["edge_index"], data["edge_shifts"], num_nodes=data["positions"].size(0)
+        )
+        data["edge_pair_rows"], data["edge_pair_inverse"] = pairs

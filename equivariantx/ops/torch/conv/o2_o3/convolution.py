@@ -24,7 +24,7 @@ def evaluate(
 ):
     """Evaluate validated aligned-convolution operands."""
     if (
-        module.radial_mode == "full"
+        (module.radial_mode == "full" or radial_network is not None)
         and not config.TORCH_REFERENCE
         and not forward_ad_active()
     ):
@@ -78,7 +78,7 @@ def transverse(
     )
     direction = vectors / vectors.square().sum(dim=-1, keepdim=True).sqrt()
     if (
-        module.radial_mode == "full"
+        (module.radial_mode == "full" or radial_network is not None)
         and not config.TORCH_REFERENCE
         and not forward_ad_active()
     ):

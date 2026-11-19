@@ -177,7 +177,14 @@ class JointTraining:
         node_fields.update(
             key for key, spec in PROPERTIES.items() if spec["scope"] == "per-atom"
         )
-        edge_fields = {"edge_index": 1, "edge_shifts": 0}
+        edge_fields = {"edge_index": 1, "edge_shifts": 0, "edge_pair_inverse": 0}
+        bond_rows = None
+        if "edge_pair_rows" in data and data["edge_pair_rows"].numel() > 1:
+            bond_rows = ShapeVar(
+                "undirected_edges",
+                min=2,
+                optimization_hint=data["edge_pair_rows"].numel(),
+            )
         pair_fields = {"direct_hessian": 0, "direct_hessian_pair_index": 1}
         pair_edge_fields = {"direct_hessian_edge_pairs", "direct_hessian_edge_shifts"}
         pairs = pair_edges = None
@@ -201,6 +208,7 @@ class JointTraining:
             for name, value in (
                 ("nodes", nodes),
                 ("edges", edges),
+                ("undirected_edges", bond_rows),
                 ("pairs", pairs),
                 ("pair_edges", pair_edges),
             )
@@ -212,6 +220,8 @@ class JointTraining:
                 dims[0] = nodes
             elif key in edge_fields:
                 dims[edge_fields[key]] = edges
+            elif key == "edge_pair_rows":
+                dims[0] = bond_rows
             elif key in pair_fields:
                 dims[pair_fields[key]] = pairs
             elif key in pair_edge_fields:

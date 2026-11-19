@@ -475,6 +475,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         *,
         vectors=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Evaluate the convolution and its differentiable radial projection.
 
@@ -508,12 +509,26 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             Sequential network preceding ``projection``. CUDA streams its
             layers with the convolution and recomputes activations in backward.
             Supply a nonempty final projection when using this network.
+        edge_pairs : equivariantx.conv.EdgePairs, optional
+            Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
 
         Returns
         -------
         torch.Tensor
             Aggregated features, ``(num_nodes, irreps_out.dim)``, in ir_mul order.
         """
+        if edge_pairs is not None:
+            from ...ops.common.edge_pairs import reciprocal_weights
+
+            radial, projection, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                radial,
+                projection,
+                radial_network,
+                edge_index,
+                dtype=features.dtype,
+            )
         validate_module_precision(
             self,
             (
@@ -529,12 +544,21 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             ),
         )
         from ...ops.common.radial import cast_radial
+        from ...ops.common.weights import (
+            IndexedProjection,
+            prepare_indexed,
+            radial_policy,
+        )
 
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         cutoff = cutoff.to(features)
-        if radial_network is not None and (
-            self.radial_mode == "last" or config.TORCH_REFERENCE
+        if isinstance(radial_network, IndexedProjection):
+            radial, radial_network = prepare_indexed(
+                self, radial, radial_network, edge_index, projection
+            )
+        elif radial_network is not None and (
+            radial_policy(self, radial_network) == "last" or config.TORCH_REFERENCE
         ):
             from ...ops.common.radial import radial_features
 

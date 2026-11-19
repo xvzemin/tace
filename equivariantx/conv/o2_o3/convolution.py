@@ -298,6 +298,7 @@ class O2O3TensorProductConv(torch.nn.Module):
         vectors=None,
         method=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Gather, couple and sum features at target nodes.
 
@@ -339,6 +340,8 @@ class O2O3TensorProductConv(torch.nn.Module):
             Sequential network preceding ``projection``. ``radial_mode``
             selects its evaluation schedule; CUDA full mode uses bounded tiles.
             Append a final affine bias to ``projection`` as an extra row.
+        edge_pairs : equivariantx.conv.EdgePairs, optional
+            Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
 
         Returns
         -------
@@ -346,6 +349,18 @@ class O2O3TensorProductConv(torch.nn.Module):
             Target features of shape ``(num_nodes, irreps_out.dim)`` in the
             declared, unsimplified ``ir_mul`` layout.
         """
+        if edge_pairs is not None:
+            from ...ops.common.edge_pairs import reciprocal_weights
+
+            radial, projection, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                radial,
+                projection,
+                radial_network,
+                edge_index,
+                dtype=features.dtype,
+            )
         validate_module_precision(
             self,
             (
@@ -362,14 +377,23 @@ class O2O3TensorProductConv(torch.nn.Module):
             ),
         )
         from ...ops.common.radial import cast_radial
+        from ...ops.common.weights import (
+            IndexedProjection,
+            prepare_indexed,
+            radial_policy,
+        )
 
         edge_index = edge_indices(edge_index)
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         unit = amplitudes is None
         amplitudes = (self.unit_amplitudes if unit else amplitudes).to(features)
-        if radial_network is not None and (
-            self.radial_mode == "last"
+        if isinstance(radial_network, IndexedProjection):
+            radial, radial_network = prepare_indexed(
+                self, radial, radial_network, edge_index, projection
+            )
+        elif radial_network is not None and (
+            radial_policy(self, radial_network) == "last"
             or (
                 (self.backend == "torch" or not features.is_cuda)
                 and config.TORCH_REFERENCE
@@ -420,7 +444,7 @@ class O2O3TensorProductConv(torch.nn.Module):
                 elif (
                     unit
                     and self.reuse_rotation
-                    and self.radial_mode == "last"
+                    and radial_policy(self, radial_network) == "last"
                     and self.backend == "torch"
                     and features.is_cuda
                     and not reference

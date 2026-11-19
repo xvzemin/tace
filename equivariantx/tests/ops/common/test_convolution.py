@@ -5,7 +5,12 @@ import torch
 from e3nn import o3
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.conv import O3TensorProductConv
+from equivariantx.conv import (
+    O3TensorProductConv,
+    indexed_rows,
+    indexed_weights,
+    undirected_edge_pairs,
+)
 from equivariantx.ops import config
 from equivariantx.ops.common.convolution import convolve
 from equivariantx.tests.utils.testing import package_script
@@ -37,6 +42,247 @@ def convolution_case(width=4, edges=7, shared=False, device="cpu"):
         )
     )
     return module, inputs, index
+
+
+@pytest.mark.parametrize("mode", ["last", "full"])
+@pytest.mark.parametrize("ordered", [False, True])
+def test_pair_weight_derivatives(mode, ordered, device, double_precision, monkeypatch):
+    # Include an unpaired edge, periodic images, duplicate arcs and self images.
+    idx = torch.tensor(
+        [[0, 1, 1, 0, 0, 0, 0, 2], [1, 0, 0, 1, 0, 0, 0, 1]], device=device
+    )
+    shifts = torch.tensor(
+        [
+            [0, 0, 0],
+            [0, 0, 0],
+            [-1, 0, 0],
+            [1, 0, 0],
+            [0, -2, 1],
+            [0, 2, -1],
+            [0, 2, -1],
+            [0, 0, 0],
+        ],
+        device=device,
+    )
+    pairs = undirected_edge_pairs(idx, shifts, num_nodes=3)
+    assert pairs.representatives.numel() == 4
+    arc = torch.tensor([0, 0, 1, 1, 2, 2, 2, 3], device=device)
+    torch.testing.assert_close(
+        pairs.inverse[:, None] == pairs.inverse, arc[:, None] == arc
+    )
+    general = undirected_edge_pairs(idx, shifts)
+    torch.testing.assert_close(general.inverse, pairs.inverse)
+    empty = undirected_edge_pairs(idx[:, :0], shifts[:0], num_nodes=3)
+    assert empty.inverse.numel() == empty.representatives.numel() == 0
+    module, (x, y, _, matrix), _ = convolution_case(edges=idx.size(1), device=device)
+    module.radial_mode = mode
+    r = x.new_empty(4, 4).normal_().requires_grad_()
+    source = x.new_empty(3, module.weight_numel).normal_().requires_grad_()
+    target = torch.randn_like(source, requires_grad=True)
+    net = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.SiLU()).to(x)
+    variables = (x, y, r, matrix, *net.parameters())
+    refweights = net(r[pairs.inverse]) @ matrix
+    if ordered:
+        refweights = refweights + source[idx[0]] + target[idx[1]]
+        variables += source, target
+        rad, p, network = indexed_weights(
+            r,
+            matrix,
+            ((source, idx[0]), (target, idx[1])),
+            radial_network=net,
+            edge_pairs=pairs,
+            radial_mode=mode,
+        )
+        actual = module(x, y, rad, p, idx, radial_network=network)
+    else:
+        actual = module(x, y, r, matrix, idx, radial_network=net, edge_pairs=pairs)
+    expected = module.reference(
+        x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
+    )
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-9)
+        probes = tuple(torch.randn_like(v) for v in variables)
+
+        def derivative(value):
+            gradients = torch.autograd.grad(
+                value.sin().mean(), variables, create_graph=True
+            )
+            return sum((g * d).sum() for g, d in zip(gradients, probes))
+
+        actual, expected = derivative(actual), derivative(expected)
+    torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-9)
+    # Large-table policy: keep the directed streaming kernel and narrow inputs.
+    monkeypatch.setattr(config, "RADIAL_PROJECT_MAX_BYTES", 0)
+    module.radial_mode = "full"
+    if ordered:
+        rad, p, network = indexed_weights(
+            r,
+            matrix,
+            ((source, idx[0]), (target, idx[1])),
+            radial_network=net,
+            edge_pairs=pairs,
+            radial_mode="full",
+        )
+        out = module(x, y, rad, p, idx, radial_network=network)
+    else:
+        out = module(x, y, r, matrix, idx, radial_network=net, edge_pairs=pairs)
+    torch.testing.assert_close(
+        out,
+        module.reference(
+            x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
+        ),
+    )
+
+
+@pytest.mark.parametrize("mode", ["last", "full"])
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_indexed_weight_derivatives(mode, backend, device, double_precision):
+    if backend == "cuda" and device != "cuda":
+        pytest.skip("CUDA is unavailable")
+    module, (x, attrs, radial, matrix), index = convolution_case(device=device)
+    module.radial_mode, module.backend = mode, backend
+    # Differently sized tables, repeated rows and one table used twice.
+    a, b, bias = (
+        x.new_empty(shape).normal_().requires_grad_()
+        for shape in (
+            (2, module.weight_numel),
+            (5, module.weight_numel),
+            (module.weight_numel,),
+        )
+    )
+    src, dst = index % 2
+    ids = index[0] + 1
+    terms = ((a, src), (a, dst), (b.square(), ids))
+    r, p, net = indexed_weights(radial, matrix, terms, bias=bias)
+    result = module(x, attrs, r, p, index, radial_network=net)
+    weights = radial @ matrix + bias + a[src] + a[dst] + b[ids].square()
+    expected = module.reference(x, attrs, weights, p, index, len(x))
+    variables = (x, attrs, radial, matrix, a, b, bias)
+    for _ in range(3):
+        torch.testing.assert_close(result, expected)
+        directions = tuple(torch.randn_like(v) for v in variables)
+
+        def derivative(value):
+            grads = torch.autograd.grad(value.sin().sum(), variables, create_graph=True)
+            return sum((g * d).sum() for g, d in zip(grads, directions))
+
+        result, expected = derivative(result), derivative(expected)
+    torch.testing.assert_close(result, expected)
+
+
+@pytest.mark.parametrize(
+    "categories,edges,mode",
+    [(4, 0, "full"), (4, 9, "last"), (89, 9, "full"), (9, 75, "last")],
+)
+def test_reusable_weight_rows(
+    categories, edges, mode, device, double_precision, monkeypatch
+):
+    module, (x, attrs, radial, matrix), index = convolution_case(
+        edges=edges, device=device
+    )
+    module.radial_mode = "last" if mode == "full" else "full"
+    monkeypatch.setattr(config, "RADIAL_PROJECT_MIN_WIDTH", 1)
+    if categories == 89:
+        monkeypatch.setattr(config, "INDEXED_PROJECTION_MAP_BYTES", 1)
+    table = x.new_empty((categories, module.weight_numel)).normal_().requires_grad_()
+    rows = indexed_rows(index, categories, dtype=x.dtype, reduce="mean")
+
+    class QuadraticWeights(torch.nn.Module):
+        def forward(self, v):
+            return v + v.square()
+
+        def to_edge_program(self, inputs, program, v):
+            return program.binary("add", v, program.binary("mul", v, v))
+
+    bias = torch.randn_like(matrix[0], requires_grad=True)
+    r, p, net = indexed_weights(
+        radial,
+        matrix,
+        [(table, rows)],
+        radial_network=QuadraticWeights(),
+        bias=bias,
+        radial_mode=mode,
+    )
+    result = module(x, attrs, r, p, index, radial_network=net)
+    ref = (
+        (radial + radial.square()) @ matrix
+        + (table[index[0]] + table[index[1]]) / 2
+        + bias
+    )
+    expected = module.reference(x, attrs, ref, matrix[:0], index, len(x))
+    torch.testing.assert_close(result, expected)
+    if edges:
+        for v in (matrix, table, bias):
+            torch.testing.assert_close(
+                torch.autograd.grad(result.sum(), v, retain_graph=True)[0],
+                torch.autograd.grad(expected.sum(), v, retain_graph=True)[0],
+            )
+
+
+@pytest.mark.parametrize("kind", ["uv", "mtp", "gtp"])
+@pytest.mark.parametrize("mode,rows", [("last", 4), ("full", 13)])
+def test_indexed_network_interface(kind, mode, rows, device, double_precision):
+    from equivariantx import conv
+    from equivariantx import o3 as eqx_o3
+    from equivariantx.tests.conv.uv_o2.test_convolution import RadialConvolution
+
+    backend = "cuda" if device == "cuda" else "torch"
+    edges = torch.randint(4, (2, 7), device=device)
+    if kind == "uv":
+        model = RadialConvolution(backend, mode).to(device)
+        layer = model.conv
+        vectors = torch.randn(7, 3, device=device)
+        parameters = (
+            model.up.weight,
+            model.up.bias,
+            model.down.weight,
+            model.down.bias,
+        )
+
+        def run(x, w, net):
+            return layer(
+                x,
+                None,
+                w,
+                edges,
+                None,
+                None,
+                w.new_ones((7, 1)),
+                parameters,
+                vectors=vectors,
+                radial_network=net,
+            )
+    else:
+        name = "MatrixTensorProduct" if kind == "mtp" else "GauntTensorProduct"
+        tp = getattr(eqx_o3, name)("0e+1o", "0e+1o", "0e+1o+2e", shared_weights=False)
+        layer = getattr(conv, name + "Conv")(tp, backend=backend, radial_mode=mode).to(
+            device
+        )
+        attrs = torch.randn(7, 4, device=device)
+
+        def run(x, w, net):
+            return (
+                layer(x, attrs, edges, w)
+                if net is None
+                else layer(x, attrs, edges, radial=w, radial_network=net)
+            )
+
+    x = torch.randn(4, layer.input_dim, device=device)
+    r = x.new_empty((7, 3)).normal_().requires_grad_()
+    p = x.new_empty((3, layer.weight_numel)).normal_().requires_grad_()
+    table = x.new_empty((rows, layer.weight_numel)).normal_().requires_grad_()
+    mapping = indexed_rows(edges, rows, dtype=x.dtype, reduce="sum")
+    value, network = indexed_weights(r, p, [(table, mapping)]).as_network()
+    actual, expected = (
+        run(x, value, network),
+        run(x, r @ p + table[edges[0]] + table[edges[1]], None),
+    )
+    torch.testing.assert_close(actual, expected)
+    for lhs, rhs in zip(
+        torch.autograd.grad(actual.square().sum(), (r, p, table)),
+        torch.autograd.grad(expected.square().sum(), (r, p, table)),
+    ):
+        torch.testing.assert_close(lhs, rhs)
 
 
 @pytest.mark.parametrize("edges", [0, 7])

@@ -375,7 +375,7 @@ model:
       type: linear # [linear, spherical_tensor, spherical_tensor_element2, wigner_tensor, wigner_tensor_element2]
 
     edge_embedding:
-      type: identity # identity  # [identity, linear, nonlinear, element2], identity is safer
+      type: identity # [identity, linear, nonlinear, element, element2]
 
     edge_update:
       type: element2  # [identity, element2, element2_v2]; element2_v2 requires apply_cutoff: false

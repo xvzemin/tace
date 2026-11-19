@@ -8,6 +8,7 @@ from torch.fx.experimental.proxy_tensor import get_proxy_mode
 from ...ops import config
 from ...ops.common.radial import cast_radial, materialize, radial_features, radial_parts
 from ...ops.common.torch.cartesian import coupling_size, normalized_coefficients
+from ...ops.common.weights import IndexedProjection, prepare_indexed, radial_policy
 from ...ops.torch.co3.ictp import tensor_product as torch_product
 from ...utils.metadata import static_dimensions
 from ...utils.program import Program
@@ -257,7 +258,9 @@ def evaluate(
     if (
         module.analytic_literal
         and not ordinary
-        and (native or (network is not None and module.radial_mode == "full"))
+        and (
+            native or (network is not None and radial_policy(module, network) == "full")
+        )
     ):
         if vectors is not None and not (native and vectors.dtype == x.dtype):
             attrs = attributes(module, vectors, amplitudes)
@@ -289,6 +292,8 @@ def evaluate(
 
     radial = cast_radial(radial, x.dtype)
     projection = projection.to(x)
+    if isinstance(network, IndexedProjection):
+        radial, network = prepare_indexed(module, radial, network, index, projection)
     rows = x.size(0) if index is None else index.size(1)
     nodes = x.size(0) if nodes is None else nodes
     if index is None and nodes != rows:
@@ -318,7 +323,11 @@ def evaluate(
         raise ValueError(
             "Radial input width does not match the projection or path weights."
         )
-    recompute = network is not None and module.radial_mode == "full" and not ordinary
+    recompute = (
+        network is not None
+        and radial_policy(module, network) == "full"
+        and not ordinary
+    )
     tile = max(
         1,
         EDGE_WORKSPACE_BYTES
@@ -345,6 +354,11 @@ def evaluate(
     for start, stop in tiles:
         e = None if index is None else index[:, start:stop]
         r = tuple((v[start:stop] if kind == "edge" else v, kind) for v, kind in parts)
+        local_network = (
+            network.narrow_edges(start, stop)
+            if isinstance(network, IndexedProjection)
+            else network
+        )
         if network is None:
             if len(r) == 1 and r[0][1] in ("edge", "shared"):
                 w = r[0][0]
@@ -353,9 +367,11 @@ def evaluate(
             else:
                 w = torch.cat([v.expand(stop - start, -1) for v, _ in r], -1)
         elif recompute:
-            w = radial_weights(network, r, e, projection, "cuda" if native else "torch")
+            w = radial_weights(
+                local_network, r, e, projection, "cuda" if native else "torch"
+            )
         else:
-            w = radial_features(network, r, e, projection, reference=ordinary)
+            w = radial_features(local_network, r, e, projection, reference=ordinary)
         if projection.numel() and not recompute:
             w = w @ projection
         if vectors is None:

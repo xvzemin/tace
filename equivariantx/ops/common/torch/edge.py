@@ -236,7 +236,7 @@ def convolution(data, operands, rows):
     )
 
 
-def collect_output(value, kind, shared, optimized, source, target, counts):
+def collect_output(value, kind, shared, optimized, source, target, counts, inputs):
     """Reduce a completed edge block before evaluating the next output."""
     if kind == "shared":
         return value if optimized else value.sum(0, keepdim=True)
@@ -244,6 +244,10 @@ def collect_output(value, kind, shared, optimized, source, target, counts):
         value = value.expand(source.numel(), -1)
     if kind == "edge":
         return value
+    if isinstance(kind, tuple):
+        return value.new_zeros((inputs[kind[2]].shape[0], value.shape[1])).index_add(
+            0, inputs[kind[1]], value
+        )
     index = source if kind == "source" else target
     return value.new_zeros((counts[kind], value.shape[1])).index_add(0, index, value)
 
@@ -257,12 +261,16 @@ def tile_layout(metadata, static_columns):
     for op, _, _, data in nodes:
         if op == "input":
             inputs.setdefault(data[0], set()).add(data[1])
+            if isinstance(data[1], tuple):
+                inputs.setdefault(data[1][1], set()).add("edge")
     width = 1
     for (i, reduced), _, _ in order:
         if not reduced and not shared[i]:
             width = max(width, nodes[i][1])
     for _, slot, kind in outputs:
         kinds.setdefault(slot, set()).add(kind)
+        if isinstance(kind, tuple):
+            inputs.setdefault(kind[1], set()).add("edge")
     if any(
         "edge" in values and len(values) != 1
         for values in (*inputs.values(), *kinds.values())
@@ -371,7 +379,9 @@ def evaluate_torch(metadata, inputs, source, target, num_nodes, *, optimized=Fal
         elif op == "input":
             slot, kind = data
             value = inputs[slot].flatten(1)
-            if kind in ("source", "target"):
+            if isinstance(kind, tuple):
+                value = value.index_select(0, inputs[kind[1]])
+            elif kind in ("source", "target"):
                 value = value[source if kind == "source" else target]
             elif kind == "shared" and not optimized:
                 value = value.expand(edges, -1)
@@ -529,7 +539,14 @@ def evaluate_torch(metadata, inputs, source, target, num_nodes, *, optimized=Fal
             for output in destinations.get(key, ()):
                 root, _, kind = outputs[output]
                 parts[output] = collect_output(
-                    values[key], kind, shared[root], True, source, target, counts
+                    values[key],
+                    kind,
+                    shared[root],
+                    True,
+                    source,
+                    target,
+                    counts,
+                    inputs,
                 )
                 users[key] -= 1
             if not users.get(key, 0):
@@ -550,14 +567,18 @@ def evaluate_torch(metadata, inputs, source, target, num_nodes, *, optimized=Fal
         if optimized
         else set()
     )
-    unused = tuple(value for slot, value in enumerate(inputs) if slot not in used)
+    unused = tuple(
+        value
+        for slot, value in enumerate(inputs)
+        if slot not in used and value.is_floating_point()
+    )
     zero = sum(value[..., :0].sum() for value in unused)
     for index, ((root, slot, kind), key) in enumerate(zip(outputs, roots)):
         value = (
             parts[index]
             if optimized
             else collect_output(
-                values[key], kind, shared[root], False, source, target, counts
+                values[key], kind, shared[root], False, source, target, counts, inputs
             )
         )
         result[slot] = result[slot] + value if slot in result else value

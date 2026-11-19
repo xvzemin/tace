@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -29,7 +30,11 @@ from tace.models.spherical.base import (
     NodeEmbedding,
 )
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models.spherical.edge import Element2EdgeUpdate, Element2EdgeUpdateV2
+from tace.models.spherical.edge import (
+    Element2EdgeUpdate,
+    Element2EdgeUpdateV2,
+    ElementEdgeEmbedding,
+)
 from tace.models.spherical.fused import UvO2TensorProduct
 from tace.models.spherical.node import NODE_EMBEDDING, NODE_UPDATE, LinearNodeEmbedding
 from tace.models.spherical.readout import EdgeReadOut
@@ -47,6 +52,44 @@ from tace.utils.precision import torch_default_dtype
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+def test_element_edge_path_lookup():
+    # Reordered blocks, different multiplicities, and two distinct output copies.
+    def conv(node, angular, output, paths):
+        a, b, c = map(o3.Irreps, (node, angular, output))
+        return SimpleNamespace(
+            irreps_in1=a,
+            irreps_in2=b,
+            irreps_out=c,
+            instructions=[(i, j, k, "uvu", True) for i, j, k in paths],
+            weight_numel=sum(a[i].mul * b[j].mul for i, j, _ in paths),
+        )
+
+    first = conv("2x0e", "0e + 1o", "2x0e + 2x1o", [(0, 0, 0), (0, 1, 1)])
+    second = conv(
+        "1o + 3x0e",
+        "1o + 0e",
+        "1o + 3x1o + 0e + 3x0e",
+        [(0, 1, 0), (1, 0, 1), (0, 0, 2), (1, 1, 3)],
+    )
+    third = conv("1o", "1o", "1e + 1e", [(0, 0, 0), (0, 0, 1)])
+    module = ElementEdgeEmbedding(3, 4, 2)
+    module.build_paths([first, second, third])
+    table = module.embedding.weight
+    assert table.shape == (3, 10)
+    assert list(module.state_dict()) == ["embedding.weight"]
+    assert torch.count_nonzero(table) == 0
+    with torch.no_grad():
+        table.copy_(torch.arange(table.numel()).reshape_as(table))
+    a, b = (module.layer_weights(i) for i in range(2))
+    torch.testing.assert_close(a, b[:, [5, 6, 1, 2]])
+    assert torch.cat((b[0], module.layer_weights(2)[0])).unique().numel() == 10
+    (a[1, 2] + 2 * b[1, 1] + b[1, 0]).backward()
+    grad = table.grad[1]
+    assert grad[int(a[0, 2])] == 3
+    assert grad[int(b[0, 0])] == 1
+    assert table.grad.count_nonzero() == 2
 
 
 @pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])

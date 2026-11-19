@@ -360,6 +360,7 @@ class TensorProductConv(torch.nn.Module):
         *,
         radial=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Evaluate messages and sum them at destination nodes.
 
@@ -383,6 +384,8 @@ class TensorProductConv(torch.nn.Module):
             Network producing edge factors from radial inputs. Requires an
             externally weighted tensor product with shared_weights=False.
             Cannot be combined with weight.
+        edge_pairs : equivariantx.conv.EdgePairs, optional
+            Supply external weights or radial inputs per undirected pair.
 
         Returns
         -------
@@ -423,6 +426,25 @@ class TensorProductConv(torch.nn.Module):
                 raise ValueError("radial_network requires external, unshared weights.")
         elif radial is not None:
             raise ValueError("radial inputs require radial_network.")
+        if edge_pairs is not None:
+            from ..ops.common.edge_pairs import reciprocal_weights
+
+            if radial_network is not None:
+                radial, _, radial_network = reciprocal_weights(
+                    self, edge_pairs, radial, None, radial_network, edge_index
+                )
+                if radial_network is None:
+                    weight, radial = radial, None
+            elif weight is not None and weight.ndim == 2:
+                weight = edge_pairs.expand(weight)
+        from ..ops.common.weights import IndexedProjection, prepare_indexed
+
+        if isinstance(radial_network, IndexedProjection):
+            radial, radial_network = prepare_indexed(
+                self, radial, radial_network, edge_index
+            )
+            if radial_network is None:
+                weight, radial = radial.expand(edge_index.size(1), -1), None
         if (
             weight is not None
             and weight.ndim > 1

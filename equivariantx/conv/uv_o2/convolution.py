@@ -409,6 +409,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         *,
         vectors=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Evaluate the radially weighted local MLP and sum at target nodes.
 
@@ -442,6 +443,8 @@ class UvO2TensorProductConv(torch.nn.Module):
         radial_network : torch.nn.Module, optional
             Network mapping ``conv_weights`` inputs to radial coefficients.
             ``radial_mode`` selects final-projection or full-network fusion.
+        edge_pairs : equivariantx.conv.EdgePairs, optional
+            Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
 
         Returns
         -------
@@ -449,6 +452,19 @@ class UvO2TensorProductConv(torch.nn.Module):
             Aggregated node features in flattened ``ir_mul`` layout with
             the global output representation declared by ``frame_out``.
         """
+        if edge_pairs is not None:
+            from ...ops.common.edge_pairs import reciprocal_weights
+
+            conv_weights, _, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                conv_weights,
+                None,
+                radial_network,
+                edge_index,
+                local=True,
+                dtype=features.dtype,
+            )
         validate_module_precision(
             self,
             (

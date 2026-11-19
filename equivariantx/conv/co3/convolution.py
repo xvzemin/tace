@@ -334,12 +334,26 @@ class CartesianTensorProductConv(O3TensorProductConv):
         vectors=None,
         amplitudes=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Convolve node tensors with edge attributes or Cartesian harmonics.
 
         Parameters follow :meth:`equivariantx.conv.O3TensorProductConv.forward`, with all tensor
         features in flattened ``mul_ir`` layout and Cartesian dimensions.
         """
+        native_pairs = self.backend == "cuda" and features.is_cuda and not self.analytic
+        if edge_pairs is not None and not native_pairs:
+            from ...ops.common.edge_pairs import reciprocal_weights
+
+            radial, projection, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                radial,
+                projection,
+                radial_network,
+                edge_index,
+                dtype=features.dtype,
+            )
         validate_module_precision(
             self,
             (
@@ -385,6 +399,7 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 vectors,
                 amplitudes,
                 radial_network,
+                edge_pairs=edge_pairs,
             )
         return torch_kernel.evaluate(
             self,

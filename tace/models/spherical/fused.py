@@ -375,6 +375,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
         edge_cutoff,
         edge_vector=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Contract Cartesian edge tensors and reduce directly to nodes."""
         if edge_cutoff is not None and edge_vector is None:
@@ -388,6 +389,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
             vectors=edge_vector,
             amplitudes=edge_cutoff,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
 
 
@@ -548,6 +550,7 @@ class O3TensorProductConv(torch.nn.Module):
         edge_cutoff,
         edge_vector=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Stream radial projection and optional preceding MLP with the CGTP."""
         if edge_cutoff is not None and edge_vector is None:
@@ -561,6 +564,7 @@ class O3TensorProductConv(torch.nn.Module):
             vectors=edge_vector,
             amplitudes=edge_cutoff,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
         return self.reshape_out(message)
 
@@ -632,6 +636,7 @@ class O2TensorProductConv(torch.nn.Module):
         graph,
         *,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Evaluate the radial projection and fused angular convolution."""
         harmonic_scale = (graph.edge_length / graph.edge_length.clamp_min(1e-12)).pow(
@@ -649,6 +654,7 @@ class O2TensorProductConv(torch.nn.Module):
             node_feats.size(0),
             vectors=graph.edge_vector,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
         return self.reshape_out(message)
 
@@ -729,6 +735,7 @@ class UuO2TensorProductConv(torch.nn.Module):
         graph,
         *,
         radial_network=None,
+        edge_pairs=None,
     ):
         """Fuse rotations, local paths, radial projection, and gather/scatter."""
         vectors = graph.edge_vector if graph is not None else None
@@ -767,6 +774,7 @@ class UuO2TensorProductConv(torch.nn.Module):
             node_feats.size(0),
             vectors=vectors,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
         return self.reshape_out.inverse(message)
 

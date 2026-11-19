@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from collections import Counter
 from math import sqrt
 from typing import Union
 
@@ -105,6 +106,96 @@ class NonLinearEdgeEmbedding(EdgeEmbedding):
     ) -> torch.Tensor:
 
         return self.act1(self.radial_proj(edge_feats))
+
+
+class ElementEdgeEmbedding(IdentityEdgeEmbedding):
+    """Share one element offset per CGTP path and multiplicity channel.
+
+    The radial features are unchanged. Both endpoints use the same table.
+    Its rows are initialized to zero. In each layer the mean of the endpoint
+    rows, indexed by that layer's instructions, is added to the radial weights
+    before applying the cutoff.
+    """
+
+    table_names = ("embedding",)
+
+    @staticmethod
+    def path_keys(conv):
+        """Return semantic keys in the convolution's external weight order."""
+
+        def channels(irreps):
+            counts = Counter()
+            blocks = []
+            for mul, ir in irreps:
+                key = (ir.l, ir.p, getattr(ir, "t", 1))
+                start = counts[key]
+                blocks.append((key, range(start, start + mul)))
+                counts[key] += mul
+            return blocks
+
+        node, angular = channels(conv.irreps_in1), channels(conv.irreps_in2)
+        copies = Counter()
+        keys = []
+        for instruction in conv.instructions:
+            i, j, k, mode, weighted = instruction[:5]
+            if not weighted:
+                continue
+            if mode != "uvu":
+                raise ValueError("Element edge embedding requires uvu CGTP paths.")
+            ir = conv.irreps_out[k].ir
+            out = (ir.l, ir.p, getattr(ir, "t", 1))
+            a, us = node[i]
+            b, vs = angular[j]
+            copy = copies[i, j, out]
+            copies[i, j, out] += 1
+            keys.extend((out, a, b, copy, u, v) for u in us for v in vs)
+        if len(keys) != conv.weight_numel:
+            raise ValueError("CGTP paths do not match the convolution weight layout.")
+        return keys
+
+    def build_paths(self, convolutions) -> None:
+        """Index each layer into the union of its weighted CGTP paths."""
+        layers = [self.path_keys(conv) for conv in convolutions]
+        keys = sorted(set().union(*layers))
+        columns = {key: i for i, key in enumerate(keys)}
+        for name in self.table_names:
+            setattr(
+                self,
+                name,
+                torch.nn.Embedding.from_pretrained(
+                    torch.zeros(self.num_elements, len(keys)), freeze=False
+                ),
+            )
+        for layer, paths in enumerate(layers):
+            index = [columns[key] for key in paths]
+            self.register_buffer(
+                f"path_index_{layer}",
+                None if paths == keys else torch.tensor(index, dtype=torch.long),
+                persistent=False,
+            )
+
+    def layer_weights(self, layer: int) -> torch.Tensor:
+        """Return the element table in the requested layer's path order."""
+        index = getattr(self, f"path_index_{layer}")
+        table = self.embedding.weight
+        return table if index is None else table.index_select(1, index)
+
+
+class Element2EdgeEmbedding(ElementEdgeEmbedding):
+    """Add the mean of independent source and target element rows to radial path weights.
+
+    Each bias-free table has one row per element and one column per distinct
+    weighted path and channel. Both are zero-initialized and shared across layers.
+    """
+
+    table_names = ("source_embedding", "target_embedding")
+
+    def layer_weights(self, layer: int) -> tuple[torch.Tensor, torch.Tensor]:
+        index = getattr(self, f"path_index_{layer}")
+        source, target = self.source_embedding.weight, self.target_embedding.weight
+        if index is None:
+            return source, target
+        return source.index_select(1, index), target.index_select(1, index)
 
 
 class IdentityEdgeUpdate(EdgeUpdate):
@@ -244,6 +335,8 @@ class Element2EdgeUpdateV2(EdgeUpdate):
 
 EDGE_EMBEDDING = {
     "identity": IdentityEdgeEmbedding,
+    "element": ElementEdgeEmbedding,
+    "element2": Element2EdgeEmbedding,
     "linear": LinearEdgeEmbedding,
     "nonlinear": NonLinearEdgeEmbedding,
 }

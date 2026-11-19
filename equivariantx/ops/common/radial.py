@@ -26,6 +26,8 @@ def radial_program(network, inputs, program, value):
     value : int
         Input expression index.
     """
+    if hasattr(network, "to_edge_program"):
+        return network.to_edge_program(inputs, program, value)
 
     def parameter(tensor):
         slot = len(inputs)
@@ -90,6 +92,8 @@ def radial_program(network, inputs, program, value):
 
 def radial_features(network, radial, edge_index, projection=None, *, reference=None):
     """Evaluate hidden layers with higher-order normalization derivatives."""
+    from .weights import IndexedProjection
+
     if reference is None:
         reference = config.TORCH_REFERENCE
     if reference:
@@ -101,7 +105,11 @@ def radial_features(network, radial, edge_index, projection=None, *, reference=N
         program, inputs = Program(), []
         root = radial_input(program, inputs, radial, network)
         validate_precision(inputs)
-        if not isinstance(radial, tuple) and radial.shape[0] == 1:
+        if (
+            not isinstance(radial, tuple)
+            and radial.shape[0] == 1
+            and not isinstance(network, IndexedProjection)
+        ):
             source = target = edge_index[0].new_zeros(1)
         else:
             source, target = edge_index
@@ -130,6 +138,10 @@ def radial_layers(network):
 
 def split_radial(network):
     """Separate hidden layers from the last projection and its pointwise tail."""
+    from .weights import IndexedProjection
+
+    if isinstance(network, IndexedProjection):
+        return network.network or (), network._replace(network=None)
     layers = radial_layers(network)
     for index in range(len(layers) - 1, -1, -1):
         layer = layers[index]
@@ -316,6 +328,8 @@ def radial_parts(radial):
 def radial_reference(network, value):
     """Evaluate independent Torch layers with differentiable normalization."""
     validate_precision((value,))
+    if hasattr(network, "to_edge_program"):
+        return network.forward(value)
     for layer in radial_layers(network):
         validate_precision((tuple(layer.parameters()), tuple(layer.buffers())))
         if isinstance(layer, (torch.nn.LayerNorm, torch.nn.RMSNorm)):
