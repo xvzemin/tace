@@ -140,9 +140,10 @@ def test_eval_u_shift_only_changes_reference_labels(
 
 @pytest.mark.parametrize("interface", ["ase", "general_ase", "torchsim", "nvalchemi"])
 @pytest.mark.parametrize(
-    "enabled, previous", [(False, None), (False, "1"), (True, "0")]
+    "enabled, previous, matmul",
+    [(False, None, None), (False, "1", "ieee"), (True, "0", "tf32")],
 )
-def test_luna_acceleration_option(monkeypatch, interface, enabled, previous):
+def test_calculator_loading_options(monkeypatch, interface, enabled, previous, matmul):
     if interface == "nvalchemi":
         pytest.importorskip("nvalchemi")
         module = importlib.import_module("tace.interface.nvalchemi.wrapper")
@@ -161,32 +162,22 @@ def test_luna_acceleration_option(monkeypatch, interface, enabled, previous):
             from tace.interface.ase import GeneralTACEAseCalc
 
             factory = GeneralTACEAseCalc
-    if previous is not None:
+    if previous is None:
+        monkeypatch.delenv("TACE_USE_LUNA", raising=False)
+    else:
         monkeypatch.setenv("TACE_USE_LUNA", previous)
     loader = Mock(side_effect=RuntimeError("model loading reached"))
     monkeypatch.setattr(module, "load_tace", loader)
     options = {"enable_luna": True} if enabled else {}
+    if interface != "nvalchemi":
+        options["matmul"] = matmul
     with pytest.raises(RuntimeError, match="model loading reached"):
         factory("model.pt2", device="cpu", **options)
     loader.assert_called_once()
     assert os.environ.get("TACE_USE_LUNA") == ("1" if enabled else previous)
 
-
-@pytest.mark.parametrize("interface", ["ase", "torchsim"])
-@pytest.mark.parametrize("matmul", [None, "ieee", "tf32"])
-def test_matmul_precision_option(monkeypatch, interface, matmul):
-    if interface == "torchsim":
-        pytest.importorskip("torch_sim")
-        module = importlib.import_module("tace.interface.torchsim.torchsim")
-        factory = module.TACETorchSimCalc
-    else:
-        module = importlib.import_module("tace.interface.ase.calculator")
-        factory = module.TACEAseCalc
-    loader = Mock(side_effect=RuntimeError("model loading reached"))
-    monkeypatch.setattr(module, "load_tace", loader)
-    with pytest.raises(RuntimeError, match="model loading reached"):
-        factory("model.pt", device="cpu", matmul=matmul)
-    assert loader.call_args.kwargs["matmul"] == matmul
+    if interface != "nvalchemi":
+        assert loader.call_args.kwargs["matmul"] == matmul
 
 
 @pytest.fixture(params=["TACE-OAM-7M", "TACE-OAM-L", "TECE-OAM-RRA-1.0"])
@@ -221,9 +212,11 @@ def atoms():
 
 def test_ase(checkpoint, calculator, atoms):
     atoms.calc = calculator
-    energy = atoms.get_potential_energy()
+    with torch.no_grad():
+        energy = atoms.get_potential_energy()
     forces = atoms.get_forces()
     stress = atoms.get_stress(voigt=False)
+    assert "fidelity_idx" not in atoms.info
     assert np.isfinite(energy)
     assert np.isfinite(forces).all() and np.isfinite(stress).all()
     np.testing.assert_allclose(forces.sum(axis=0), 0, atol=1e-8)
@@ -320,14 +313,32 @@ def test_torchsim(calculator, atoms):
     assert torch.isfinite(state.forces).all()
 
 
+@pytest.fixture(scope="session")
+def lammps_kokkos():
+    if not torch.cuda.is_available():
+        pytest.skip("LAMMPS ML-IAP requires CUDA Kokkos.")
+    lammps = pytest.importorskip("lammps")
+    probe = lammps.lammps(cmdargs=["-screen", "none", "-log", "none"])
+    try:
+        if (
+            not probe.has_package("ML-IAP")
+            or "cuda" not in probe.accelerator_config["KOKKOS"]["api"]
+        ):
+            pytest.skip("LAMMPS was built without ML-IAP or CUDA Kokkos.")
+    finally:
+        probe.close()
+    try:
+        yield lammps, pytest.importorskip("lammps.mliap")
+    finally:
+        probe.lib.lammps_kokkos_finalize()
+
+
 @pytest.mark.parametrize("accelerated", [False, True])
 @pytest.mark.parametrize("geometry", ["periodic", "isolated"])
-def test_lammps(checkpoint, atoms, tmp_path, accelerated, geometry):
-    if not torch.cuda.is_available():
-        pytest.skip("The LAMMPS interface requires CUDA Kokkos.")
-    lammps = pytest.importorskip("lammps")
-    mliap = pytest.importorskip("lammps.mliap")
+def test_lammps(checkpoint, atoms, tmp_path, accelerated, geometry, lammps_kokkos):
     from tace.interface.lammps import TACELammpsCalc
+
+    lammps, mliap = lammps_kokkos
 
     if geometry == "isolated":
         atoms = Atoms("Cu", positions=[[10, 10, 10]], cell=[20, 20, 20], pbc=True)
@@ -546,16 +557,22 @@ def torchsim_calculator():
 
 
 @pytest.mark.parametrize("field", ["atomic_numbers", "system_idx"])
+@pytest.mark.parametrize("fixed", [False, True])
 def test_torchsim_cache_detects_in_place_changes(
-    torchsim_state, torchsim_calculator, field
+    torchsim_state, torchsim_calculator, field, fixed
 ):
-    calc = torchsim_calculator()
+    kwargs = {field: getattr(torchsim_state, field)} if fixed else {}
+    calc = torchsim_calculator(**kwargs)
     calc(torchsim_state)
     assert getattr(calc, field).data_ptr() != getattr(torchsim_state, field).data_ptr()
     if field == "atomic_numbers":
         torchsim_state.atomic_numbers[0] = 13
     else:
         torchsim_state.system_idx[1] = 1
+    if fixed:
+        with pytest.raises(ValueError, match=field):
+            calc(torchsim_state)
+        return
     actual = calc(torchsim_state)
     expected = torchsim_calculator()(torchsim_state.clone())
     for key in ("energy", "forces", "stress"):
@@ -566,20 +583,6 @@ def test_torchsim_cache_detects_in_place_changes(
         if field == "system_idx"
         else torch.tensor([0, 2, 4], device=DEVICE),
     )
-
-
-@pytest.mark.parametrize("field", ["atomic_numbers", "system_idx"])
-def test_torchsim_fixed_inputs_are_snapshots_and_checked(
-    torchsim_state, torchsim_calculator, field
-):
-    calc = torchsim_calculator(**{field: getattr(torchsim_state, field)})
-    calc(torchsim_state)
-    if field == "atomic_numbers":
-        torchsim_state.atomic_numbers[0] = 13
-    else:
-        torchsim_state.system_idx[1] = 1
-    with pytest.raises(ValueError, match=field):
-        calc(torchsim_state)
 
 
 @pytest.mark.parametrize("compute_forces", [False, True])
@@ -636,7 +639,8 @@ def test_torchsim_boundary_conditions(torchsim_state, torchsim_calculator, perio
     torchsim_state.pbc.fill_(periodic)
     if periodic:
         torchsim_state.positions[1, 0] = 7.0
-    actual = torchsim_calculator()(torchsim_state)
+    with torch.no_grad():
+        actual = torchsim_calculator()(torchsim_state)
     energy = torch.tensor([4.0, 6.5], dtype=DTYPE, device=DEVICE)
     forces = torch.tensor(
         [[4.0, 0.0, 0.0], [-4.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, -6.0, 0.0]],
@@ -671,7 +675,7 @@ def test_torchsim_derivative_dependencies_are_retained(
     assert "forces" not in actual
 
 
-@pytest.mark.parametrize("device", [DEVICE, torch.device("cpu")])
+@pytest.mark.parametrize("device", tuple(dict.fromkeys((DEVICE, torch.device("cpu")))))
 @pytest.mark.parametrize("dtype", [torch.float32, DTYPE])
 def test_torchsim_direct_call_converts_inputs_without_mutation(
     torchsim_state, torchsim_calculator, device, dtype

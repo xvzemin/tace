@@ -6,7 +6,7 @@
 import numpy as np
 from scipy.fftpack import dct
 
-from .units import Boltzmann, c, hbar
+from .units import c
 
 
 def ACF(x):

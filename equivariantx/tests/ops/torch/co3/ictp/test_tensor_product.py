@@ -5,6 +5,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co3
 from equivariantx.ops import config
+from equivariantx.tests.ops.testing import assert_joint_training
 
 
 def training_problem(device="cpu", backend="torch", degrees=(2, 2, 2)):
@@ -38,17 +39,7 @@ def training_problem(device="cpu", backend="torch", degrees=(2, 2, 2)):
 
 
 def test_joint_inductor(monkeypatch):
-    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
-    operation, values = training_problem()
-    graph = make_fx(operation)(*values)
-    run = torch.compile(graph, fullgraph=True)
-    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
-    x, y, w = values
-    for _ in range(3):
-        expected = operation(x, y, w)
-        actual = run(x.detach(), y.detach(), w.detach())
-        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
-        w = (w - 0.01 * expected[-1]).detach().requires_grad_()
+    assert_joint_training(training_problem, monkeypatch)
 
 
 def test_angular_joint(monkeypatch):

@@ -504,6 +504,7 @@ class UvO2Interaction(O3CgtpInteraction):
         edge_radial_basis: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
         radial_network=None,
+        edge_pairs=None,
     ) -> torch.Tensor:
         return self.rejector(
             node_feats,
@@ -513,6 +514,7 @@ class UvO2Interaction(O3CgtpInteraction):
             edge_wigner_inv,
             edge_cutoff=edge_cutoff,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
 
     def _prepare_setup(self) -> None:
@@ -551,15 +553,16 @@ class UvO2Interaction(O3CgtpInteraction):
         graph: Union[Graph, None] = None,
         edge_pairs=None,
     ) -> torch.Tensor:
-        if edge_pairs is not None:
-            conv_weights, radial_network = edge_pairs.expand(self.edge_info(edge_feats)), None
-        elif self.use_eqx and self.rejector.eqx_tp is not None and node_feats.is_cuda:
+        if self.use_eqx and self.rejector.eqx_tp is not None and node_feats.is_cuda:
             conv_weights, radial_network = (
                 radial_features(edge_feats),
                 self.edge_info.mlp,
             )
         else:
             conv_weights, radial_network = self.edge_info(edge_feats), None
+            if edge_pairs is not None:
+                conv_weights = edge_pairs.expand(conv_weights)
+                edge_pairs = None
         return self._apply_rejector(
             node_feats,
             magnetic_node_info,
@@ -571,6 +574,7 @@ class UvO2Interaction(O3CgtpInteraction):
             edge_radial_basis,
             edge_cutoff,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )
 
 

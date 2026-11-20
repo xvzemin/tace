@@ -8,17 +8,22 @@ from typing import Union
 import torch
 from e3nn import o3
 
-try:
-    import cuequivariance as cue
-    import cuequivariance_torch as cuet
-except Exception:
-    pass
-
-
 from .paths import generate_cueq_paths
 
 
 class CueTensorProductConv(torch.nn.Module):
+    """Gather source features, apply a weighted tensor product, and sum at targets.
+
+    Parameters
+    ----------
+    irreps_in1, irreps_in2 : e3nn.o3.Irreps
+        Node and edge representations. Each edge harmonic has multiplicity one.
+    irreps_out : e3nn.o3.Irreps
+        Output representation with a separate block for each retained path.
+    l1l2, l2l3, l3l1 : str, optional
+        Comparisons between the corresponding input and output degrees.
+    """
+
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -28,6 +33,9 @@ class CueTensorProductConv(torch.nn.Module):
         l2l3: Union[str, None] = None,
         l3l1: Union[str, None] = None,
     ) -> None:
+        import cuequivariance as cue
+        import cuequivariance_torch as cuet
+
         super().__init__()
 
         self.irreps_in1 = irreps_in1

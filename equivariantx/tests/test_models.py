@@ -17,6 +17,25 @@ from equivariantx.models.sevennet import convert_sevennet_to_eqx
 from equivariantx.utils import copy_model
 
 
+@pytest.mark.parametrize(
+    "convert",
+    [
+        convert_mace_to_eqx,
+        convert_nequip_to_eqx,
+        convert_sevennet_to_eqx,
+        convert_prophet_to_eqx,
+        convert_equflash_to_eqx,
+    ],
+)
+def test_conversion_rejects_unsupported_inputs(convert):
+    model = torch.nn.Identity()
+    with pytest.raises(ValueError, match="implementation"):
+        convert(model, implementation="invalid", backend="torch")
+    error = TypeError if convert is convert_mace_to_eqx else ValueError
+    with pytest.raises(error, match="MACE model|No supported"):
+        convert(model, backend="torch")
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("residual", [False, True])
 def test_magnetic_mace_recoupling(backend, residual, double_precision, tmp_path):

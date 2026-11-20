@@ -5,7 +5,7 @@ import math
 import torch
 
 from equivariantx import o2
-from equivariantx.ops.common.torch.linear import linear, linear_layout
+from equivariantx.ops.common.torch.linear import linear_layout
 
 from ..nn.element_linear import ElementLinear as ElementLinearBase
 from ..ops import resolve_backend

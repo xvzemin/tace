@@ -4,7 +4,6 @@ import torch
 from e3nn.math import normalize2mom
 
 from ..ops import resolve_backend
-from ..ops.common.torch.gate import GateExpand, expand_gates
 from ..ops.precision import validate_module_precision
 from ..ops.torch.nn.activation import scalar_blocks, scalars
 from ..ops.torch.o2 import gate as torch_kernel

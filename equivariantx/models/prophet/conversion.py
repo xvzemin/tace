@@ -5,9 +5,13 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from ...ops import resolve_backend
-from ...utils.module import convert_modules, default_dtype
-from ..convolution import Convolution, RadialFeatures
+from ...utils.module import default_dtype
+from ..convolution import (
+    Convolution,
+    RadialFeatures,
+    convert_interactions,
+    spatial_backend,
+)
 
 
 class TensorProductConvolution(Convolution):
@@ -31,17 +35,14 @@ def convert_prophet_to_eqx(
     inplace : bool, optional
         Modify the model instead of returning a copy.
     backend : {None, "cuda", "torch"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Convolution backend.
+        Execution backend. Defaults to CUDA when available, otherwise PyTorch.
     stream_radial : bool, optional
-        Fuse the complete radial MLP when True. Defaults to False: evaluate
-        hidden layers with PyTorch and fuse only the final projection.
+        Fuse the complete radial MLP if True, or its final projection if False.
 
     Returns
     -------
     torch.nn.Module
-        Model with the original forward interface. Convert before constructing
-        the optimizer, or assign the returned model to KairosCalculator.model.
+        Converted spatial model with the original forward interface.
 
     Notes
     -----
@@ -50,38 +51,25 @@ def convert_prophet_to_eqx(
 
     Examples
     --------
-    Convert a spatial Prophet model loaded with ``use_kernel=False``:
-
     .. code-block:: python
 
         from equivariantx.models.prophet import convert_prophet_to_eqx
 
         model = convert_prophet_to_eqx(model, implementation="o3")
     """
-    backend = resolve_backend(backend)
-    if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
-        raise ValueError(
-            "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
-        )
-    count = 0
+    backend = spatial_backend(implementation, backend)
 
     def factory(module):
-        nonlocal count
         if (
             type(module).__name__ != "TPConvolution"
             or type(module).__module__ != "prophet.model"
         ):
             return None
-        count += 1
+
         if isinstance(getattr(module, "tp_conv", None), TensorProductConvolution):
-            if (
-                module.tp_conv.implementation != implementation
-                or module.tp_conv.backend != backend
-                or module.radial_mlp.stream_radial != stream_radial
-            ):
-                raise ValueError(
-                    "Convert the original model to select another implementation."
-                )
+            module.tp_conv.check_options(
+                module.radial_mlp, implementation, backend, stream_radial
+            )
             return module
         if module.kernel or not isinstance(module.tp, o3.TensorProduct):
             raise NotImplementedError(
@@ -124,7 +112,6 @@ def convert_prophet_to_eqx(
         module.kernel = True
         return module
 
-    converted = convert_modules(model, factory, inplace=inplace)
-    if not count:
-        raise ValueError("No supported spatial Prophet convolutions were found.")
-    return converted
+    return convert_interactions(
+        model, factory, inplace=inplace, name="spatial Prophet convolutions"
+    )

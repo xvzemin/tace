@@ -6,7 +6,7 @@ Installation
 Requirements
 ------------
 
-TACE requires Python 3.9 or newer and PyTorch 2.4 or newer. AOTInductor
+TACE requires Python 3.10 or newer and PyTorch 2.4 or newer. AOTInductor
 export additionally requires ``torch>=2.13``. We recommend installing
 TACE in a clean environment:
 

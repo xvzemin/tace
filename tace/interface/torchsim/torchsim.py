@@ -3,9 +3,10 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from pathlib import Path
-from typing import Union
 
 import torch
 
@@ -13,12 +14,12 @@ try:
     import torch_sim as ts
     from torch_sim.models.interface import ModelInterface
     from torch_sim.neighbors import torchsim_nl
-except ImportError as e:
+except ModuleNotFoundError as e:
+    if e.name != "torch_sim":
+        raise
     raise ImportError(
-        "The TACE TorchSim interface requires 'torch-sim-atomistic'. "
-        "Install it with `pip install 'torch-sim-atomistic==0.6.2'`."
+        "Install the TorchSim interface with `pip install tace[torchsim]`."
     ) from e
-
 
 from tace.dataset.quantity import PROPERTIES
 from tace.lightning import load_tace
@@ -26,42 +27,53 @@ from tace.utils.env import DEVICE, enable_acceleration
 
 
 class TACETorchSimCalc(ModelInterface):
-    """Computes energies for multiple systems using a TACE model.
+    """Evaluate a TACE model on a batched TorchSim state.
 
-    This class wraps a TACE model to compute energies, forces, and stresses for
-    atomic systems within the TorchSim framework. It supports batched calculations
-    for multiple systems and handles the necessary transformations between
-    TorchSim's data structures and TACE's expected inputs.
+    Parameters
+    ----------
+    model : str, pathlib.Path or torch.nn.Module
+        Foundation model name, model file, or loaded TACE model.
+    device : torch.device or str, optional
+        Execution device. Defaults to CUDA when available, otherwise CPU.
+    dtype : torch.dtype, optional
+        Model precision. Defaults to ``torch.float32``.
+    matmul : {"ieee", "tf32"}, optional
+        FP32 matrix multiplication precision.
+    neighbor_list_fn : callable, optional
+        Neighbor search with the signature of `torch_sim.neighbors.torchsim_nl`.
+    compute_forces, compute_stress : bool, optional
+        Include forces and stress in the output. Both default to True.
+    atomic_numbers, system_idx : torch.Tensor, optional
+        Fixed atomic numbers and system indices, each of shape ``(n_atoms,)``.
+    fidelity_idx : int, optional
+        Default fidelity. ``state.system_extras["fidelity_idx"]`` overrides it per system.
+    target_property : list of str, optional
+        Additional model outputs.
+    enable_oeq, enable_cue, enable_eqt, enable_eqx, enable_luna : bool, optional
+        Enable the corresponding acceleration backend when loading the model.
+    enable_compile : bool, optional
+        Enable the compiled model path.
 
-    Attributes:
-        r_max (float): Cutoff radius for neighbor interactions.
-        z_table (utils.AtomicNumberTable): Table mapping atomic numbers to indices.
-        model (torch.nn.Module): The underlying TACE neural network model.
-        neighbor_list_fn (Callable): Function used to compute neighbor lists.
-        atomic_numbers (torch.Tensor): Atomic numbers with shape [n_atoms].
-        system_idx (torch.Tensor): System indices with shape [n_atoms].
-        n_systems (int): Number of systems in the batch.
-        n_atoms_per_system (list[int]): Number of atoms in each system.
-        ptr (torch.Tensor): Pointers to the start of each system in the batch with
-            shape [n_systems + 1].
-        total_atoms (int): Total number of atoms across all systems.
-        node_type (torch.Tensor): Element indices with shape [n_atoms].
+    Examples
+    --------
+    >>> from tace.interface.torchsim import TACETorchSimCalc
+    >>> calc = TACETorchSimCalc("TACE-OAM-L", compute_stress=False)  # doctest: +SKIP
     """
 
     def __init__(
         self,
-        model: Union[str, Path, torch.nn.Module, None] = None,
+        model: str | Path | torch.nn.Module,
         *,
-        device: Union[torch.device, None] = None,
+        device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
         matmul: str | None = None,
-        neighbor_list_fn: Union[Callable, None] = None,
+        neighbor_list_fn: Callable | None = None,
         compute_forces: bool = True,
         compute_stress: bool = True,
-        atomic_numbers: Union[torch.Tensor, None] = None,
-        system_idx: Union[torch.Tensor, None] = None,
-        fidelity_idx: Union[int, None] = None,
-        target_property: Union[list[str], None] = None,
+        atomic_numbers: torch.Tensor | None = None,
+        system_idx: torch.Tensor | None = None,
+        fidelity_idx: int | None = None,
+        target_property: list[str] | None = None,
         enable_oeq: bool = False,
         enable_cue: bool = False,
         enable_eqt: bool = False,
@@ -69,45 +81,6 @@ class TACETorchSimCalc(ModelInterface):
         enable_eqx: bool = False,
         enable_luna: bool = False,
     ) -> None:
-        """Initialize the TACE model for energy, force, and stress calculations within
-        the TorchSim framework. The model can be initialized with atomic numbers
-        and system indices, or these can be provided during the forward pass.
-
-        Args:
-            model (str | Path | torch.nn.Module | None): The TACE neural network model,
-                as a model file, a registered foundation model name, or a loaded
-                torch.nn.Module instance.
-            device (torch.device | None): The device to run computations on.
-                Defaults to CUDA if available, otherwise CPU.
-            dtype (torch.dtype): The data type for tensor operations.
-                Defaults to torch.float32.
-            matmul (str | None): FP32 matrix multiplication precision, "ieee" or
-                "tf32". Uses the environment setting, or "ieee" when unset.
-            atomic_numbers (torch.Tensor | None): Atomic numbers with shape [n_atoms].
-                If provided, each state's atomic numbers must match these values.
-            system_idx (torch.Tensor | None): System indices with shape [n_atoms]
-                indicating which system each atom belongs to. If provided, each
-                state's system indices must match these values.
-            neighbor_list_fn (Callable): Function to compute neighbor lists.
-                Defaults to torchsim_nl.
-            compute_forces (bool): Whether to compute forces. Defaults to True.
-            compute_stress (bool): Whether to compute stress. Defaults to True.
-            fidelity_idx : int
-                Default fidelity. A state's system_extras["fidelity_idx"] may
-                override it with one integer index per system.
-            target_property: list(str)
-                Requested model outputs. Forces and stress are controlled by
-                compute_forces and compute_stress; required derivatives are retained.
-            enable_oeq (bool): Whether to enable Oeq acceleration. Defaults to False.
-            enable_cue (bool): Whether to enable CuE acceleration. Defaults to False.
-            enable_eqt (bool): Whether to enable Eqt acceleration. Defaults to False.
-            enable_compile (bool): Whether to enable the torch.compile model path.
-                Defaults to False.
-            enable_eqx (bool): Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
-                Defaults to False.
-            enable_luna (bool): Whether to enable LunaEquivariance convolutions.
-                Defaults to False.
-        """
         super().__init__()
         enable_acceleration(
             enable_oeq=enable_oeq,
@@ -126,9 +99,7 @@ class TACETorchSimCalc(ModelInterface):
         self.neighbor_list_fn = (
             torchsim_nl if neighbor_list_fn is None else neighbor_list_fn
         )
-        self._memory_scales_with = "n_atoms_x_density"
 
-        # Load TACE model
         model = load_tace(
             model,
             self._device,
@@ -144,7 +115,9 @@ class TACETorchSimCalc(ModelInterface):
             ("forces", self._compute_forces),
             ("stress", self._compute_stress),
         ):
-            required = any(name in PROPERTIES[p]["must_be_with"] for p in target_property)
+            required = any(
+                name in PROPERTIES[p]["must_be_with"] for p in target_property
+            )
             if enabled or required:
                 if name not in target_property:
                     target_property.append(name)
@@ -152,19 +125,11 @@ class TACETorchSimCalc(ModelInterface):
                 target_property.remove(name)
         model.reset_target_property(target_property)
         model.reset_fidelity_idx(fidelity_idx)
-        model.eval()
-        for param in model.parameters():
-            param.requires_grad = False
-        self.model = model
-        # Set model properties
-        self.r_max = self.model.get_cutoff()
-        atomic_nums = torch.tensor(
-            self.model.get_atomic_numbers(),
-            dtype=torch.int64,
-            device=self.device,
-        )
+        self.model = model.eval().requires_grad_(False)
+        self.r_max = model.get_cutoff()
         self.torch_element = model.get_torch_element()
-        self.model.atomic_numbers = atomic_nums.detach().clone()
+        self.atomic_numbers = None
+        self.system_idx = None
 
         self.atomic_numbers_in_init = atomic_numbers is not None
         self.system_idx_in_init = system_idx is not None
@@ -192,53 +157,37 @@ class TACETorchSimCalc(ModelInterface):
             )
 
     def _setup_ptr(self, system_idx: torch.Tensor) -> None:
-        """Compute system boundary pointers from system indices.
-
-        Args:
-            system_idx (torch.Tensor): System indices tensor with shape [n_atoms].
-        """
         counts = torch.bincount(system_idx)
         self.n_systems = len(counts)
-        self.n_atoms_per_system = counts.tolist()
         self.ptr = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
 
-    def _setup_node_type(self, atomic_numbers: torch.Tensor) -> None:
-        """Map atomic numbers to element indices.
+    @property
+    def n_atoms_per_system(self) -> list[int]:
+        """Number of atoms in each system of the current batch."""
+        return self.ptr.diff().tolist()
 
-        Args:
-            atomic_numbers (torch.Tensor): Atomic numbers tensor with shape [n_atoms].
-        """
-        if (
-            (atomic_numbers < 0).any()
-            or (atomic_numbers >= self.torch_element.lookup_table.numel()).any()
-        ):
+    def _setup_node_type(self, atomic_numbers: torch.Tensor) -> None:
+        if (atomic_numbers < 0).any() or (
+            atomic_numbers >= self.torch_element.lookup_table.numel()
+        ).any():
             raise ValueError("State contains atomic numbers unsupported by the model.")
         self.node_type = self.torch_element.z2idx(atomic_numbers)
         if (self.node_type < 0).any():
             raise ValueError("State contains atomic numbers unsupported by the model.")
 
     def forward(self, state: ts.SimState, **_kwargs: object) -> dict[str, torch.Tensor]:
-        """Compute energies, forces, and stresses for the given atomic systems.
+        """Evaluate one or more systems.
 
-        Processes the provided state information and computes energies, forces, and
-        stresses using the underlying TACE model. Handles batched calculations for
-        multiple systems and constructs the necessary neighbor lists.
+        Parameters
+        ----------
+        state : torch_sim.SimState
+            Batched atomic positions, cells, boundary conditions and species.
 
-        Args:
-            state (SimState): State object containing positions, cell, and other
-                system information.
-            **_kwargs: Unused; accepted for interface compatibility.
-
-        Returns:
-            dict[str, torch.Tensor]: Computed properties:
-                - 'energy': System energies with shape [n_systems]
-                - 'forces': Atomic forces with shape [n_atoms, 3] if compute_forces=True
-                - 'stress': System stresses with shape [n_systems, 3, 3] if
-                    compute_stress=True
-
-        Raises:
-            ValueError: If atomic numbers or system indices differ from the
-                values fixed at initialization, or fidelity indices have the wrong shape.
+        Returns
+        -------
+        dict of str to torch.Tensor
+            Energy ``(n_systems,)``, requested forces ``(n_atoms, 3)``,
+            stress ``(n_systems, 3, 3)``, and other requested properties.
         """
         atomic_numbers = state.atomic_numbers.to(device=self.device, dtype=torch.int64)
         if self.atomic_numbers_in_init:
@@ -246,7 +195,7 @@ class TACETorchSimCalc(ModelInterface):
                 raise ValueError(
                     "State atomic_numbers must match those provided at initialization."
                 )
-        elif not hasattr(self, "atomic_numbers") or not torch.equal(
+        elif self.atomic_numbers is None or not torch.equal(
             atomic_numbers, self.atomic_numbers
         ):
             self._setup_node_type(atomic_numbers)
@@ -258,9 +207,7 @@ class TACETorchSimCalc(ModelInterface):
                 raise ValueError(
                     "State system_idx must match those provided at initialization."
                 )
-        elif not hasattr(self, "system_idx") or not torch.equal(
-            system_idx, self.system_idx
-        ):
+        elif self.system_idx is None or not torch.equal(system_idx, self.system_idx):
             self._setup_ptr(system_idx)
             self.system_idx = system_idx.clone()
 
@@ -305,37 +252,16 @@ class TACETorchSimCalc(ModelInterface):
                 device=self.device, dtype=torch.int64
             )
 
-        # Get model output
-        out = self.model(data_dict)
+        with torch.enable_grad():
+            output = self.model(data_dict)
 
-        results: dict[str, torch.Tensor] = {}
-
-        # Process energy
-        energy = out["energy"]
-        if energy is not None:
-            results["energy"] = energy.detach()
-        else:
-            results["energy"] = torch.zeros(
-                self.n_systems, device=self.device, dtype=torch.float64
-            )
-
-        # Process forces
-        if self.compute_forces:
-            forces = out["forces"]
-            if forces is not None:
-                results["forces"] = forces.detach()
-
-        # Process stress
-        if self.compute_stress:
-            stress = out["stress"]
-            if stress is not None:
-                results["stress"] = stress.detach()
-
-        # Propagate additional model outputs (e.g. dipole, charges, etc.)
-        for key, val in out.items():
-            if key not in ("energy", "forces", "stress") and isinstance(
-                val, torch.Tensor
-            ):
-                results[key] = val.detach()
-
+        results = {
+            name: value.detach()
+            for name, value in output.items()
+            if isinstance(value, torch.Tensor)
+            and (name != "forces" or self.compute_forces)
+            and (name != "stress" or self.compute_stress)
+        }
+        if output["energy"] is None:
+            results["energy"] = positions.new_zeros(self.n_systems)
         return results

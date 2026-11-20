@@ -113,7 +113,7 @@ See :ref:`eqx-streaming` for training support and requirements.
 .. autofunction:: tace.lightning.convert_cgtp
 
 Cartesian O(3) ICTD
-------------------
+-------------------
 
 For spherical node storage, ``atomic_basis.type: co3`` selects
 ``O3IctdInteraction`` and automatically constructs the

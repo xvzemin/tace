@@ -8,10 +8,8 @@ from itertools import combinations
 from typing import Any, Dict, List, Union
 
 import torch
-from e3nn import get_optimization_defaults
 from e3nn.o3._irreps import Irreps
 from e3nn.o3._spherical_harmonics import _spherical_harmonics
-from e3nn.util.jit import compile_mode
 
 from .ictd import ICTD
 from .time_reversal import make_irrep
@@ -91,7 +89,6 @@ def symmetric_traceless_outer_product(
     return subtract_traces(T, n)
 
 
-
 class CartesianHarmonics(torch.nn.Module):
     def __init__(
         self,
@@ -162,8 +159,23 @@ class CartesianHarmonics(torch.nn.Module):
 
 
 class SphericalHarmonics(torch.nn.Module):
-    """
-    Copy from e3nn for torch.save
+    """Real spherical harmonics of vectors with spatial and time parity.
+
+    Parameters
+    ----------
+    irreps_out : int, sequence of int or Irreps
+        Output degrees or irreducible representations.
+    normalize : bool
+        Normalize input vectors to unit length.
+    normalization : {"integral", "component", "norm"}
+        Output normalization.
+    irreps_in : Irreps, optional
+        Representation of the input vector.
+
+    Examples
+    --------
+    >>> SphericalHarmonics([0, 1], normalize=True)(torch.ones(2, 3)).shape
+    torch.Size([2, 4])
     """
 
     normalize: bool
@@ -171,7 +183,6 @@ class SphericalHarmonics(torch.nn.Module):
     _ls_list: List[int]
     _lmax: int
     _is_range_lmax: bool
-    _prof_str: str
 
     def __init__(
         self,
@@ -190,19 +201,13 @@ class SphericalHarmonics(torch.nn.Module):
         if isinstance(irreps_out, Irreps) and irreps_in is None:
             for _, ir in irreps_out:
                 if ir.l % 2 == 1:
-                    irreps_in = Irreps(
-                        [(1, make_irrep(1, ir.p, getattr(ir, "t", 1)))]
-                    )
+                    irreps_in = Irreps([(1, make_irrep(1, ir.p, getattr(ir, "t", 1)))])
                     break
         if irreps_in is None:
             irreps_in = Irreps("1o")
 
         irreps_in = Irreps(irreps_in)
-        if (
-            len(irreps_in) != 1
-            or irreps_in[0].mul != 1
-            or irreps_in[0].ir.l != 1
-        ):
+        if len(irreps_in) != 1 or irreps_in[0].mul != 1 or irreps_in[0].ir.l != 1:
             raise ValueError(
                 "irreps_in for SphericalHarmonics must contain exactly one "
                 f"l=1 irrep, not `{irreps_in}`"
@@ -240,30 +245,20 @@ class SphericalHarmonics(torch.nn.Module):
         self._ls_list = ls
         self._lmax = max(ls)
         self._is_range_lmax = ls == list(range(max(ls) + 1))
-        self._prof_str = f"spherical_harmonics({ls})"
 
         _lmax = 11
         if self._lmax > _lmax:
             raise NotImplementedError(
-                f"spherical_harmonics maximum l implemented is {_lmax}, send us an email to ask for more"
+                f"Spherical harmonics support degrees up to {_lmax}."
             )
 
-        # if get_optimization_defaults()["jit_mode"] == "script":
-        #     self.sph_func = torch.jit.script(_spherical_harmonics)
-        # elif get_optimization_defaults()["jit_mode"] == "compile":
-        #     self.sph_func = torch.compile(_spherical_harmonics, fullgraph=True)
-        # else:
-        #     self.sph_func = _spherical_harmonics
-        self.sph_func = _spherical_harmonics
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # - PROFILER - with torch.autograd.profiler.record_function(self._prof_str):
         if self.normalize:
             x = torch.nn.functional.normalize(
                 x, dim=-1
             )  # forward 0's instead of nan for zero-radius
 
-        sh = self.sph_func(self._lmax, x[..., 0], x[..., 1], x[..., 2])
+        sh = _spherical_harmonics(self._lmax, x[..., 0], x[..., 1], x[..., 2])
 
         if not self._is_range_lmax:
             sh = torch.cat(

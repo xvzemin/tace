@@ -31,10 +31,19 @@ def _same_value(previous, current, tol: float) -> bool:
 class GeneralTACEAseCalc(TACEAseCalc):
     """TACE ASE calculator with additional named embedding inputs.
 
-    ``keys`` maps a TACE embedding property to its key in ``Atoms.info`` or
-    ``Atoms.arrays``. For example,
-    ``{"initial_noncollinear_magmoms": "spin"}`` reads the noncollinear
-    magnetic input from ``atoms.arrays["spin"]``.
+    Parameters
+    ----------
+    model : str, pathlib.Path or torch.nn.Module
+        Foundation model name, model file, or loaded model.
+    keys : dict of str to str, optional
+        Mapping from embedding property to an ``Atoms.info`` or ``Atoms.arrays`` key.
+    **kwargs
+        Arguments to `TACEAseCalc`.
+
+    Examples
+    --------
+    >>> from tace.interface.ase import GeneralTACEAseCalc
+    >>> calc = GeneralTACEAseCalc("model.pt", keys={"initial_noncollinear_magmoms": "spin"})  # doctest: +SKIP
     """
 
     def __init__(

@@ -5,7 +5,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from equivariantx.tests.o2.testing import spherical_layout
+from equivariantx.tests.conv.testing import layout
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -93,9 +93,7 @@ def test_o3_tensor_product_matches_edge_cgtp(
     w = torch.randn(batch_size, module.weight_numel, requires_grad=True)
 
     d, di = o2.WignerD(3, 3)(r)
-    actual = spherical_layout(
-        module(spherical_layout(x, irreps_in), d, di, w), irreps_out, inverse=True
-    )
+    actual = layout(module(layout(x, irreps_in), d, di, w), irreps_out, inverse=True)
     expected = reference(
         x, o3.spherical_harmonics(irreps_sh, r, True, normalization), w
     )
@@ -149,8 +147,8 @@ def test_o3_tensor_product_normalization_and_second_derivatives(
     d, di = o2.WignerD(2, 2)(r)
     # A nonunit input vector tests the optional per-degree amplitude and its gradient.
     scale = r.square().sum(-1, keepdim=True).sqrt().pow(torch.arange(3))
-    actual = spherical_layout(
-        module(spherical_layout(x, irreps_in), d, di, weight, scale),
+    actual = layout(
+        module(layout(x, irreps_in), d, di, weight, scale),
         irreps_out,
         inverse=True,
     )
@@ -192,8 +190,8 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(
     x = torch.randn(6, 3, 6)
 
     d, di = o2.WignerD(2, 2)(r)
-    actual = spherical_layout(
-        module(spherical_layout(x, module.irreps_in1), d, di),
+    actual = layout(
+        module(layout(x, module.irreps_in1), d, di),
         module.irreps_out,
         inverse=True,
     )
@@ -202,7 +200,7 @@ def test_o3_tensor_product_internal_weights_axes_and_truncated_frames(
     torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-10)
     d, di = o2.WignerD(1, 2)(r)
     with pytest.raises(ValueError, match="orders"):
-        module(spherical_layout(x, module.irreps_in1), d, di)
+        module(layout(x, module.irreps_in1), d, di)
     with pytest.raises(ValueError, match="spherical harmonics"):
         o2.O3TensorProduct("1o", "1e", "0o", [(0, 0, 0, "uvu", True)])
 

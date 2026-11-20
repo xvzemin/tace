@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import argparse
 import shutil
 from pathlib import Path
 
@@ -11,11 +12,9 @@ MAX_SIZE_BYTES = GB * 1024**3  # 1 GB
 
 
 def get_size(path: Path) -> int:
-    """
-    Return size of file or directory in bytes.
-    - For files: directly use stat().st_size
-    - For directories: sum sizes of all contained files
-    """
+    """Return the file or directory size in bytes."""
+    if path.is_symlink():
+        return path.lstat().st_size
     if path.is_file():
         return path.stat().st_size
     elif path.is_dir():
@@ -24,10 +23,7 @@ def get_size(path: Path) -> int:
 
 
 def all_under_limit(paths) -> bool:
-    """
-    Check if all given paths are under MAX_SIZE_BYTES.
-    Returns True if all pass the size limit, otherwise False.
-    """
+    """Check the per-target size limit before removing any outputs."""
     for path in paths:
         if not path.exists():
             continue
@@ -40,16 +36,19 @@ def all_under_limit(paths) -> bool:
 
 
 def delete_path(path: Path):
-    """
-    Delete a file or directory without checking size.
-    """
-    if path.is_dir():
+    """Remove a training output without following a directory symlink."""
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
         shutil.rmtree(path)
     elif path.is_file():
         path.unlink()
 
 
-def main():
+def main(argv=None):
+    argparse.ArgumentParser(
+        description="Remove training outputs from the current directory (1 GiB limit per target)."
+    ).parse_args(argv)
     targets = [
         "train.index",
         "valid.index",
@@ -61,12 +60,9 @@ def main():
         "_full_config.yaml",
         "out.txt",
         "finetune_config.yaml",
-        # "graphCache",
     ]
     current_dir = Path.cwd()
     target_paths = [current_dir / t for t in targets]
-    # extra_stats = list(current_dir.glob("statistics_*.yaml"))
-    # target_paths.extend(extra_stats)
 
     if all_under_limit(target_paths):
         for path in target_paths:

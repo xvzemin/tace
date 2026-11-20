@@ -68,49 +68,33 @@ def convert_mace_to_eqx(
         and floating-point precision before conversion.
     implementation : {"o3", "o2", "wigner6j"}, optional
         Direct or aligned convolution, or magnetic Wigner-6j recoupling.
-        Defaults to "o3". Magnetic conversion replaces only interactions;
-        radial networks, products and readouts are unchanged.
+        The aligned form requires natural-parity edge harmonics. The magnetic form
+        retains the original radial networks, products and readouts.
     enable_cueq : bool, optional
-        Also convert the remaining operators using MACE's CuEquivariance
-        converter. Defaults to False. Existing CuEquivariance operators
-        are retained without requiring another conversion. If enabled, apply
-        selective parameter freezing after MACE's conversion rebuilds the model.
+        Use MACE's CuEquivariance converter for the remaining operators.
+        Not supported with ``"wigner6j"``.
     inplace : bool, optional
-        Modify the supplied model. Defaults to False, returning an independent
-        copy. Enabling cuEquivariance may construct a new model even when
-        this is True.
+        Modify the supplied model instead of copying it. CuEquivariance may return a new model.
     backend : {None, "cuda", "torch"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Operator backend.
-        Select "cuda" for native CUDA kernels.
+        Execution backend. Defaults to CUDA when available, otherwise PyTorch.
     stream_radial : bool, optional
-        Fuse the complete radial MLP when True. Defaults to False: evaluate
-        hidden layers with PyTorch and fuse only the final projection.
+        Fuse the full radial MLP or only its final projection. Must be False
+        with ``"wigner6j"``.
 
     Returns
     -------
     torch.nn.Module
-        Model with the original forward interface, supporting energy, force
-        and stress training and ``MACECalculator(models=...)`` or
-        ``MagneticMACECalculator(models=...)``. Learned
-        parameters and all tensor-product paths are retained.
+        Converted model with the original forward interface and learned parameters.
 
     Notes
     -----
     Supports RealAgnosticInteractionBlock, RealAgnosticResidualInteractionBlock,
     RealAgnosticDensityInteractionBlock, RealAgnosticDensityResidualInteractionBlock,
     RealAgnosticAttResidualInteractionBlock and
-    RealAgnosticResidualNonLinearInteractionBlock. Edge harmonics must have
-    natural spatial parity for the aligned implementation. ``"wigner6j"``
-    supports the magnetic density and residual density interactions of MACE
-    v0.3.17, with their original external edge weights. It does not support
-    ``enable_cueq`` or ``stream_radial``.
-    Chemical node attributes must be one-hot element indicators.
-
-    Load weights before conversion, and construct the optimizer afterwards.
-    Force training requires ``training=True`` in the model's forward call.
-    Converted state dictionaries require an identically converted architecture.
-    Use a separate model instance for ASE, which disables parameter gradients.
+    RealAgnosticResidualNonLinearInteractionBlock. Magnetic conversion supports
+    MACE v0.3.17 density and residual density interactions. Chemical node
+    attributes must be one-hot. Pass ``training=True`` to the MACE forward
+    call for force training.
 
     Examples
     --------
@@ -142,23 +126,23 @@ def convert_mace_to_eqx(
         from .magnetic import convert_magnetic_mace
 
         return convert_magnetic_mace(model, backend=backend, inplace=inplace)
-    from mace.modules.irreps_tools import tp_out_irreps_with_instructions
-    from mace.modules.wrapper_ops import get_layout
-
     if implementation not in ("o3", "o2"):
         raise ValueError("implementation must be 'o3', 'o2', or 'wigner6j'.")
     if not hasattr(model, "spherical_harmonics") or not hasattr(model, "interactions"):
         raise TypeError("Expected a MACE model with spatial interactions.")
+
+    from mace.modules.irreps_tools import tp_out_irreps_with_instructions
+    from mace.modules.wrapper_ops import get_layout
+
     converted = [isinstance(layer.conv_tp, Convolution) for layer in model.interactions]
     if any(converted):
-        if not all(converted) or any(
-            layer.conv_tp.implementation != implementation
-            or layer.conv_tp.backend != backend
-            or layer.conv_tp_weights.stream_radial != stream_radial
-            for layer in model.interactions
-        ):
+        if not all(converted):
             raise ValueError(
                 "Convert the original model to select another implementation."
+            )
+        for layer in model.interactions:
+            layer.conv_tp.check_options(
+                layer.conv_tp_weights, implementation, backend, stream_radial
             )
         if any(
             not isinstance(block.symmetric_contractions, UuuSymmetricContraction)

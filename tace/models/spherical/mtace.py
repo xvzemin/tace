@@ -528,6 +528,7 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
         edge_radial_basis: Optional[torch.Tensor] = None,
         edge_cutoff: Optional[torch.Tensor] = None,
         radial_network=None,
+        edge_pairs=None,
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
@@ -551,6 +552,7 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
                 wigner_inv,
                 edge_cutoff,
                 radial_network=radial_network,
+                edge_pairs=edge_pairs,
             )
         (
             node_features,
@@ -803,6 +805,7 @@ class O2MagneticInteraction(UvO2Interaction):
         edge_radial_basis: torch.Tensor,
         edge_cutoff: Union[torch.Tensor, None],
         radial_network=None,
+        edge_pairs=None,
     ) -> torch.Tensor:
         if magnetic_node_info is None or magnetic_edge_attrs is None:
             raise ValueError(
@@ -823,4 +826,5 @@ class O2MagneticInteraction(UvO2Interaction):
             edge_radial_basis,
             edge_cutoff,
             radial_network=radial_network,
+            edge_pairs=edge_pairs,
         )

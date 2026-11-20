@@ -8,7 +8,7 @@ version = "0.2.5"
 description = "TACE - ST and ICT based equivariant atomistic model."
 authors = [{ name = "Zemin Xu", email = "xv_chana@163.com" }]
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4",
     "torch_geometric>=2.4",
@@ -72,12 +72,7 @@ cueq13 = [
 ]
 
 
-openmm = [
-    "openmm",
-    "openmm-ml",
-    "openmmtorch",
-    # conda install -c conda-forge nnpops
-]
+openmm = ["openmmml>=1.8"]
 
 lammps12 = [
     "cython",
@@ -136,7 +131,7 @@ exclude = [
 "equivariantx" = ["README.md", "LICENSE.md", "ops/common/cuda/csrc/*.cpp", "ops/cuda/co2/*.cu", "models/tace/tace_oam_xl_v2/README.rst"]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 88
 extend-exclude = [
     "tace/models/backends/equitorch/equitorch",

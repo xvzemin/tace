@@ -3,83 +3,67 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Union
+from pathlib import Path
 
-import numpy as np
 import torch
 from ase import units
-from ase.calculators.calculator import (
-    Calculator,
-    PropertyNotImplementedError,
-    all_changes,
-)
+from ase.calculators.calculator import Calculator, all_changes
 from ase.calculators.mixing import SumCalculator
-from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch
 
-from tace.dataset.graph import from_atoms
+from tace.dataset.graph import from_record
 from tace.dataset.quantity import (
     KEYS,
     PROPERTIES,
     KeySpecification,
     update_keyspec_from_kwargs,
 )
+from tace.dataset.records import record_from_atoms
 from tace.lightning import load_tace
 from tace.utils.env import DEVICE, enable_acceleration
 
 
 class TACEAseCalc(Calculator):
-    """
-    Initialize a TACEAseCalc. We support the most fundamental potential energy surface property and multi-fidelity,
-    multi-head, etc. For some advanced features, you need to store the attributes that need to be embedded in atoms.info,
-    atoms.arrays or add a funciton by yourself. If you only need to predict, you can directly use the `tace-eval`
-    command. It will output the predicted files, and if you add the `--test` option, it will also output the errors.
+    """Evaluate a TACE model on ASE atoms.
 
     Parameters
     ----------
     model : str, pathlib.Path or torch.nn.Module
-        Model file, registered foundation model name, or loaded model instance.
-        Files may end in .pt, .pth, .ckpt, or .pt2.
-    dtype : str, optional
-        Model dtype for computations, e.g., float32 or float64.
+        Foundation model name, model file, or loaded model.
+    dtype : str or torch.dtype, optional
+        Model precision.
     matmul : {"ieee", "tf32"}, optional
-        FP32 matrix multiplication precision. Uses the environment setting,
-        or "ieee" when unset.
-    device : str, optional
-        The device to run computations on, e.g., cpu or cuda.
-        If None, the device is automatically inferred.
+        FP32 matrix multiplication precision.
+    device : str or torch.device, optional
+        Execution device. Defaults to CUDA when available, otherwise CPU.
     fidelity_idx : int, optional
-        Specify which fidelity fidelity_idx to use.
-    target_property: list(str), optional
-        Extra caculate hessian, atomic_virials, Conservative polarizability, etc,
-        If you want to use this parameter, you must provide all the required physical quantities.
-    neighborlist_backend: str
-        Support backend in one of [ase, matscipy, vesin, alchemiops],
-        recommend matscipy.
-    enable_oeq : bool, optional
-        Whether to enable OpenEquivariance acceleration.
-    enable_cue : bool, optional
-        Whether to enable CuEquivariance acceleration.
-    enable_eqt : bool, optional
-        Whether to enable EquiTriton acceleration.
+        Model fidelity index.
+    target_property : list of str, optional
+        Model outputs to evaluate. Defaults to the model's target properties.
+    neighborlist_backend : str, optional
+        Neighbor-list backend. Defaults to "matscipy".
+    enable_oeq, enable_cue, enable_eqt, enable_eqx, enable_luna : bool, optional
+        Enable the corresponding acceleration backend when loading the model.
     enable_compile : bool, optional
-        Whether to enable the torch.compile model path.
-    enable_eqx : bool, optional
-        Whether to enable fused O(2) or O(3) EQX CGTP convolutions.
-    enable_luna : bool, optional
-        Whether to enable LunaEquivariance convolutions.
+        Enable the compiled model path.
     **kwargs
-        Additional keyword arguments passed to the ASE Calculator base class.
+        Arguments to the ASE calculator.
+
+    Examples
+    --------
+    >>> from tace.interface.ase import TACEAseCalc
+    >>> calc = TACEAseCalc("TACE-OAM-L", dtype="float32")  # doctest: +SKIP
     """
 
     def __init__(
         self,
-        model: str,
+        model: str | Path | torch.nn.Module,
         *,
-        dtype: Union[str, None] = None,
+        dtype: str | torch.dtype | None = None,
         matmul: str | None = None,
-        device: Union[str, None] = None,
-        fidelity_idx: Union[int, None] = None,
-        target_property: Union[list[str], None] = None,
+        device: str | torch.device | None = None,
+        fidelity_idx: int | None = None,
+        target_property: list[str] | None = None,
         neighborlist_backend: str = "matscipy",
         enable_oeq: bool = False,
         enable_cue: bool = False,
@@ -98,10 +82,9 @@ class TACEAseCalc(Calculator):
             enable_eqx=enable_eqx,
             enable_luna=enable_luna,
         )
-        self.device = DEVICE[
-            device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ]
-        # === init ===
+        self.device = DEVICE[device] or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
         model = load_tace(
             model,
             self.device,
@@ -111,9 +94,7 @@ class TACEAseCalc(Calculator):
             dtype=dtype,
             matmul=matmul,
         )
-        model.eval()
-        for param in model.parameters():
-            param.requires_grad = False
+        model.eval().requires_grad_(False)
 
         self.dtype = model.get_model_dtype()
         self.target_property = model.get_target_property()
@@ -140,47 +121,25 @@ class TACEAseCalc(Calculator):
         self.model = model
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
-        Calculator.calculate(self, atoms)
-        # stress_defined = bool(atoms.pbc.any()) and abs(np.linalg.det(atoms.cell)) > 0
-        # if not stress_defined and set(properties or ()) & {"stress", "stresses"}:
-        #     raise PropertyNotImplementedError(
-        #         "Stress requires a periodic direction and a non-singular cell."
-        #     )
-        atoms.info["fidelity_idx"] = self.fidelity_idx  # fidelity fidelity_idx
-        # === dataloader ===
-        data = [
-            from_atoms(
-                self.element,
-                atoms,
-                self.cutoff,
-                max_neighbors=self.max_neighbors,
-                target_property=self.target_property,
-                embedding_property=self.embedding_property,
-                keyspec=self.keySpecification,
-                training=False,
-                neighborlist_backend=self.neighborlist_backend,
-            )
-        ]
-        dataloader = DataLoader(
-            dataset=data,
-            batch_size=1,
-            shuffle=False,
-            drop_last=False,
+        super().calculate(atoms, properties, system_changes)
+        record = record_from_atoms(self.atoms if atoms is None else atoms)
+        record.info["fidelity_idx"] = self.fidelity_idx
+        graph = from_record(
+            self.element,
+            record,
+            self.cutoff,
+            max_neighbors=self.max_neighbors,
+            target_property=self.target_property,
+            embedding_property=self.embedding_property,
+            keyspec=self.keySpecification,
+            training=False,
+            neighborlist_backend=self.neighborlist_backend,
         )
-
-        batch = next(iter(dataloader)).to(self.device)
-
-        # === forward ===
-        outs = self.model(batch)
-        # === update ===
+        batch = Batch.from_data_list([graph]).to(self.device)
+        with torch.enable_grad():
+            outs = self.model(batch)
         self.results = {}
         for p in self.target_property:
-            # if not stress_defined and p in {
-            #     "stress",
-            #     "direct_stress",
-            #     "atomic_stresses",
-            # }:
-            #     continue
             p_rank = PROPERTIES[p]["rank"]
             p_scope = PROPERTIES[p]["scope"]
             ase_name = PROPERTIES[p]["ase_name"]
@@ -203,17 +162,36 @@ class TACEAseCalc(Calculator):
 
 def add_dispersion(
     base_calc: Calculator,
-    damping: str = "bj",  # choices: ["zero", "bj", "zerom", "bjm"]
+    damping: str = "bj",
     dispersion_xc: str = "pbe",
     dispersion_cutoff: float = 40.0 * units.Bohr,
     **kwargs,
 ) -> SumCalculator:
+    """Add a D3 energy and force correction to a calculator.
+
+    Parameters
+    ----------
+    base_calc : ase.calculators.calculator.Calculator
+        Calculator with ``device`` and ``dtype`` attributes.
+    damping : {"bj", "zero", "bjm", "zerom"}, optional
+        Damping function.
+    dispersion_xc : str, optional
+        Exchange-correlation functional for the D3 parameters.
+    dispersion_cutoff : float, optional
+        Pair cutoff in angstroms.
+    **kwargs
+        Additional arguments to TorchDFTD3Calculator.
+
+    Examples
+    --------
+    >>> calc = add_dispersion(TACEAseCalc("TACE-OAM-L"))  # doctest: +SKIP
+    """
     try:
         from torch_dftd.torch_dftd3_calculator import TorchDFTD3Calculator
-    except ImportError as e:
-        raise RuntimeError(
-            "Please install torch-dftd to use dispersion corrections (see https://github.com/pfnet-research/torch-dftd)"
-        ) from e
+    except ModuleNotFoundError as e:
+        if e.name != "torch_dftd":
+            raise
+        raise ImportError("Install D3 with `pip install tace[d3]`.") from e
 
     d3_calc = TorchDFTD3Calculator(
         dtype=base_calc.dtype,

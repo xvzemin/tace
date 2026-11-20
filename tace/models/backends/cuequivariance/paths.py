@@ -8,38 +8,17 @@ from typing import Union
 
 from e3nn import o3
 
-try:
-    import cuequivariance as cue
-    from cuequivariance.group_theory.experimental.e3nn import O3_e3nn
-    from cuequivariance.group_theory.irreps_array.irrep_utils import into_list_of_irrep
-except Exception:
-    pass
+from ...spherical.paths import satisfy
 
 
 def _to_cue_irreps(irreps: o3.Irreps):
+    import cuequivariance as cue
+    from cuequivariance.group_theory.experimental.e3nn import O3_e3nn
+
     return cue.Irreps(
         O3_e3nn,
         [(mul, (ir.l, ir.p)) for mul, ir in o3.Irreps(irreps)],
     )
-
-
-def satisfy(l1: int, l2: int, restriction: Union[str, None] = None) -> bool:
-    if restriction == None:
-        return True
-    elif restriction == "<":
-        return l1 < l2
-    elif restriction == "<=":
-        return l1 <= l2
-    elif restriction == ">":
-        return l1 > l2
-    elif restriction == ">=":
-        return l1 >= l2
-    elif restriction == "==":
-        return l1 == l2
-    elif restriction == "!=":
-        return l1 != l2
-    else:
-        raise ValueError(f"Unknown restriction: {restriction}")
 
 
 def generate_cueq_paths(
@@ -50,9 +29,12 @@ def generate_cueq_paths(
     l2l3: Union[str, None] = None,
     l3l1: Union[str, None] = None,
 ):
-    irreps_in1: cue.Irreps = _to_cue_irreps(irreps_in1)
-    irreps_in2: cue.Irreps = _to_cue_irreps(irreps_in2)
-    irreps_out: cue.Irreps = _to_cue_irreps(irreps_out)
+    import cuequivariance as cue
+    from cuequivariance.group_theory.irreps_array.irrep_utils import into_list_of_irrep
+
+    irreps_in1 = _to_cue_irreps(irreps_in1)
+    irreps_in2 = _to_cue_irreps(irreps_in2)
+    irreps_out = _to_cue_irreps(irreps_out)
     G = irreps_in1.irrep_class
     target_irreps_out = into_list_of_irrep(G, irreps_out)
 
@@ -109,16 +91,13 @@ def generate_cueq_uuu_paths(
     l3l1: Union[str, None] = None,
     trainable: bool = False,
 ):
-    """
-    Cuequivariance descriptor for e3nn ``uuu`` tensor products.
+    """Build a CuEquivariance ``uuu`` descriptor and its path-ordered output irreps."""
+    import cuequivariance as cue
 
-    The output path order follows ``tace.models.spherical.paths.generate_paths`` so
-    this can be used as a drop-in replacement for ``o3.TensorProduct`` in ACE.
-    """
     e3nn_irreps_out = o3.Irreps(irreps_out)
-    irreps_in1: cue.Irreps = _to_cue_irreps(irreps_in1)
-    irreps_in2: cue.Irreps = _to_cue_irreps(irreps_in2)
-    irreps_out: cue.Irreps = _to_cue_irreps(e3nn_irreps_out)
+    irreps_in1 = _to_cue_irreps(irreps_in1)
+    irreps_in2 = _to_cue_irreps(irreps_in2)
+    irreps_out = _to_cue_irreps(e3nn_irreps_out)
     G = irreps_in1.irrep_class
 
     if trainable:

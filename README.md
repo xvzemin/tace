@@ -124,7 +124,7 @@ TACE currently supports the following plugin:
 - ✅ Supports integration with [OpenMM-ML](https://github.com/openmm/openmm-ml) (OpenMM-ML -> ASE -> TACE).
 
 - ✅ Supports integration with [USPEX](https://uspex-team.org/)
-  (USPEX -> LAMMPS-ML-IAP -> TACE) (Python=3.9).
+  (USPEX -> LAMMPS-ML-IAP -> TACE).
 
 ## Contact
 

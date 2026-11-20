@@ -1639,15 +1639,10 @@ def test_wigner6j_matches_reference_and_time_reversal():
         parity=True,
         lmax=2,
     )
-    output_irreps = (
-        to_possible_tp_irreps(
-            intermediate_irreps,
-            magnetic_irreps,
-            parity=True,
-            lmax=1,
-        )
-        * 2
-    ).regroup()
+    output_irreps = to_possible_tp_irreps(
+        intermediate_irreps, magnetic_irreps, parity=True, lmax=1
+    )
+    output_irreps = (output_irreps * 2).sort().irreps.simplify()
     tensor_product = O3Wigner6jTensorProductConv(
         node_irreps,
         edge_irreps,

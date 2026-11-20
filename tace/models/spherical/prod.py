@@ -3,7 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from typing import Dict, Union
+from typing import Dict
 
 import torch
 from e3nn import o3
@@ -87,9 +87,7 @@ class CgtpACE(Product):
             )
 
         self.linear_up = (
-            e3nnLinear(
-                self.irreps_in, self.irreps_hidden, bias=self.use_bias
-            )
+            e3nnLinear(self.irreps_in, self.irreps_hidden, bias=self.use_bias)
             if self.num_channel != self.num_hidden_channel
             else torch.nn.Identity()
         )
@@ -203,9 +201,7 @@ class MaceACE(Product):
             raise ValueError("MACE products require nonlinear=None.")
 
         self.linear_up = (
-            e3nnLinear(
-                self.irreps_in, self.irreps_hidden, bias=self.use_bias
-            )
+            e3nnLinear(self.irreps_in, self.irreps_hidden, bias=self.use_bias)
             if self.num_channel != self.num_hidden_channel
             else torch.nn.Identity()
         )
@@ -329,7 +325,10 @@ class NonlinearCgtpACE(Product):
         )
         slices = irreps_up.slices()
         order = torch.cat(
-            [torch.arange(slices[i].start, slices[i].stop) for i in irreps_up.sort().inv]
+            [
+                torch.arange(slices[i].start, slices[i].stop)
+                for i in irreps_up.sort().inv
+            ]
         )
         self.register_buffer("factor_index", order.argsort(), persistent=False)
         for degree, irreps in enumerate(
@@ -372,8 +371,7 @@ class NonlinearCgtpACE(Product):
 
         self.eqx_metadata, self.eqx_bindings = build(self)
         self.eqx_products = tuple(
-            (build_product(product.tp), product.irreps_out.dim)
-            for product in self.aces
+            (build_product(product.tp), product.irreps_out.dim) for product in self.aces
         )
 
     def forward(
@@ -450,9 +448,4 @@ product_aliases = {
     "coupled": "cgtp",
 }
 
-PRODUCT.update(
-    {
-        alias: PRODUCT[target]
-        for alias, target in product_aliases.items()
-    }
-)
+PRODUCT.update({alias: PRODUCT[target] for alias, target in product_aliases.items()})

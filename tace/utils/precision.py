@@ -154,13 +154,13 @@ def apply_model_precision(model, fn, recurse=True):
         geometry = getattr(module, "geometry_precision", False)
         protected = module.modules() if geometry else (module,)
         for child in protected:
-            names = (
-                child._buffers if geometry else getattr(child, "float64_buffers", ())
-            )
-            for name in names:
-                value = child._buffers.get(name)
-                if value is not None and value.is_floating_point():
-                    preserved[(child, name)] = value
+            names = getattr(child, "float64_buffers", ())
+            if geometry or names:
+                for name, value in child.named_buffers(
+                    recurse=False, remove_duplicate=False
+                ):
+                    if (geometry or name in names) and value.is_floating_point():
+                        preserved[(child, name)] = value
             if geometry:
                 for name, value in child.named_parameters(recurse=False):
                     parameters[(child, name)] = id(value)

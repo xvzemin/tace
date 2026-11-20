@@ -1,7 +1,5 @@
 """Compile a gated CG product as one differentiable multilinear operation."""
 
-import torch
-
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.utils.metadata import channel_product_layout
 

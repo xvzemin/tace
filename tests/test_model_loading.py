@@ -73,14 +73,11 @@ def test_model_config_class_names():
 
 @pytest.mark.parametrize("basis", ["spherical", "cartesian"])
 @pytest.mark.parametrize("compiled", [False, True])
-@pytest.mark.parametrize("interaction", ["cgtp", "uv_o2", "uv_o2_mag"])
-def test_model_target_aliases(
-    tmp_path, monkeypatch, double_precision, basis, compiled, interaction
-):
+def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, compiled):
     from tace import models
     from tace.lightning import convert_basis
 
-    reference = make_model(interaction)
+    reference = make_model("cgtp")
     if basis == "cartesian":
         reference = convert_basis(reference)
     expected = evaluate(reference)

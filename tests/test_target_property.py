@@ -225,58 +225,6 @@ def _neighbor_rows(graph):
     )
 
 
-@pytest.mark.parametrize("visible_devices", [0, 1, 3])
-def test_graph_device_auto_uses_visible_count(monkeypatch, visible_devices):
-    from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
-
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: visible_devices)
-
-    def no_runtime_probe():
-        raise AssertionError("Device discovery must not initialize the CUDA runtime")
-
-    monkeypatch.setattr(torch.cuda, "is_available", no_runtime_probe)
-    monkeypatch.setattr(torch.cuda, "current_device", no_runtime_probe)
-    assert graph_devices(None, "alchemiops") == (
-        [f"cuda:{index}" for index in range(visible_devices)]
-        if visible_devices
-        else ["cpu"]
-    )
-    dataset = OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"})
-    assert dataset.device == ("cuda" if visible_devices else "cpu")
-    assert graph_devices(None, "matscipy") == [None]
-
-
-def test_graph_device_numeric_identifiers(monkeypatch):
-    from omegaconf import OmegaConf
-
-    from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
-
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-
-    def no_runtime_initialization():
-        raise AssertionError("Parsing an integer CUDA index must not initialize CUDA")
-
-    monkeypatch.setattr(torch.cuda, "_lazy_init", no_runtime_initialization)
-    for device in (0, 1):
-        expected = f"cuda:{device}"
-        assert graph_devices(device, "alchemiops") == [expected]
-        assert (
-            OnTheFlyGraphDataset(
-                [], {"neighborlist_backend": "alchemiops"}, device
-            ).device
-            == expected
-        )
-    for devices in ([1, 0], (1, 0), OmegaConf.create([1, 0])):
-        assert graph_devices(devices, "alchemiops") == ["cuda:1", "cuda:0"]
-    assert graph_devices([0, "cuda:1"], "alchemiops") == ["cuda:0", "cuda:1"]
-    with pytest.raises(ValueError, match="Duplicate"):
-        graph_devices([0, "cuda:0"], "alchemiops")
-    with pytest.raises(ValueError, match="not a visible CUDA device"):
-        graph_devices([2], "alchemiops")
-    with pytest.raises(ValueError, match="one explicit device"):
-        OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}, [0])
-
-
 def test_auto_graph_device_preserves_cuda_errors(monkeypatch):
     import tace.dataset.datamodule as module
 

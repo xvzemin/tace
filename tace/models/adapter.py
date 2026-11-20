@@ -53,9 +53,7 @@ class TensorModel(torch.nn.Module):
         RESULTS = self.readout_fn(data, graph)
         FIRST = self.first_derivative_fn(data, graph, RESULTS)
         SECOND = self.second_derivative_fn(data, graph, RESULTS, FIRST)
-        OUT = {**RESULTS, **FIRST, **SECOND}
-        # return self.denorm(OUT)
-        return OUT
+        return {**RESULTS, **FIRST, **SECOND}
 
     def prepare_property_data(
         self, data: Dict[str, torch.Tensor]
@@ -144,7 +142,6 @@ class TensorModel(torch.nn.Module):
         V = None
         S = None
         P = None
-        M = None
         C_MAG_F = None
         NC_MAG_F = None
         EDGE_F = None
@@ -158,8 +155,6 @@ class TensorModel(torch.nn.Module):
             inputs.append(graph.displacement)
         if self.flags.compute_polarization or self.flags.compute_conservative_dipole:
             inputs.append(data["electric_field"])
-        # if self.flags.compute_magnetization:
-        #     inputs.append(data["magnetic_field"])
         if self.flags.compute_collinear_magnetic_forces:
             inputs.append(data["initial_collinear_magmoms"])
         if self.flags.compute_noncollinear_magnetic_forces:
@@ -196,9 +191,6 @@ class TensorModel(torch.nn.Module):
             grad = grads[idx]
             P = torch.zeros_like(data["electric_field"]) if grad is None else -grad
             idx += 1
-        # if self.flags.compute_magnetization:
-        #     M = -grads[idx]
-        #     idx += 1
         if self.flags.compute_collinear_magnetic_forces:
             grad = grads[idx]
             C_MAG_F = (
@@ -244,7 +236,7 @@ class TensorModel(torch.nn.Module):
             "stress": S,
             "polarization": P,
             "conservative_dipole": P,
-            "magnetization": M,
+            "magnetization": None,
             "collinear_magnetic_forces": C_MAG_F,
             "noncollinear_magnetic_forces": NC_MAG_F,
             "edge_forces": EDGE_F,
@@ -268,7 +260,6 @@ class TensorModel(torch.nn.Module):
 
         forces = first_derivative["forces"]
         polarization = first_derivative["polarization"]
-        magnetization = first_derivative["magnetization"]
 
         inputs_list: list[torch.Tensor] = []
         if self.flags.compute_born_effective_charges:
@@ -278,12 +269,10 @@ class TensorModel(torch.nn.Module):
 
         BEC = None
         ALPHA = None
-        CHI_M = None
         HESSIAN = None
 
         BECList = []
         ALPHAList = []
-        # CHI_MList = []
         if (
             self.flags.compute_conservative_polarizability
             or self.flags.compute_born_effective_charges
@@ -323,25 +312,6 @@ class TensorModel(torch.nn.Module):
             BEC = BEC.transpose(1, 0)  #        # [atoms, 3 (pol), 3 (pos)]
             ALPHA = torch.stack(ALPHAList, dim=1)  # [B,3,3]
 
-        # if self.flags.compute_magnetization:
-        #     MF = data["magnetic_field"]
-        #     for i in range(3):
-        #         mag_i = magnetization.sum(dim=0)[i]
-        #         CHI_M = torch.autograd.grad(
-        #             outputs=mag_i,
-        #             inputs=[MF],
-        #             retain_graph=(
-        #                 i != 2
-        #                 or self.training
-        #                 or self.flags.compute_hessians
-        #             ),
-        #             create_graph=self.training,
-        #             allow_unused=True,
-        #         )[0]
-        #         if CHI_M is None:
-        #             CHI_M = torch.zeros_like(MF)
-        #         CHI_MList.append(CHI_M)  # [B,3]
-        #     CHI_M = torch.stack(CHI_MList, dim=1)  # [B,3,3]
 
         # Sampled Hessian training is disabled, only allow eval.
         if self.flags.compute_hessian:
@@ -357,7 +327,7 @@ class TensorModel(torch.nn.Module):
             "hessian": HESSIAN,
             "conservative_polarizability": ALPHA,
             "born_effective_charges": BEC,
-            "magnetic_susceptibility": CHI_M,
+            "magnetic_susceptibility": None,
         }
 
     def prepare_graph(self, data: Dict[str, torch.Tensor]) -> Graph:
@@ -527,7 +497,7 @@ class TensorModel(torch.nn.Module):
     def get_cutoff(self) -> float:
         return float(self.readout_fn.cutoff.item())
 
-    def get_atomic_numbers(self) -> float:
+    def get_atomic_numbers(self) -> list[int]:
         return [int(z) for z in self.readout_fn.atomic_numbers.cpu().tolist()]
 
     def get_torch_element(self) -> TorchElement:

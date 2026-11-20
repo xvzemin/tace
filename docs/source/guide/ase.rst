@@ -1,99 +1,46 @@
-ASE Calculator
-==============
-
-This tutorial demonstrates how to use a TACE model as a calculator within ASE (Atomic Simulation Environment).
-
-ASE Calculator documentation: `ASE Calculator <https://wiki.fysik.dtu.dk/ase/ase/calculators/calculator.html>`_
-
-For optimization, molecular dynamics, and other examples, see the
-`TACE ASE examples <https://github.com/xvzemin/tace/tree/main/example/ase>`_.
+ASE calculators
+===============
 
 .. code-block:: python
 
-    from ase import units
-    from ase.io import read
-    from tace.interface.ase import TACEAseCalc, add_dispersion
+    from ase.build import bulk
+    from tace.interface.ase import TACEAseCalc
 
-    device = "cuda"           # Use "cpu" when CUDA is unavailable
-    dtype = "float32"         # "float32" or "float64"
-    model_path = "model.pt"   # .pt, .pth, .ckpt, or compatible .pt2
-    fidelity_idx = 0
-    atoms = read("structure.xyz", index=0)
+    atoms = bulk("Cu")
+    atoms.calc = TACEAseCalc("TACE-OAM-L", dtype="float32")
+    energy = atoms.get_potential_energy()
+    forces = atoms.get_forces()
+    stress = atoms.get_stress()
 
-    dispersion = False
-
-    calc = TACEAseCalc(
-        model_path,
-        device=device,
-        dtype=dtype,
-        fidelity_idx=fidelity_idx,
-    )
-    if dispersion:  # Requires: pip install torch-dftd
-        calc = add_dispersion(
-            base_calc=calc,
-            damping="bj",  # choices: ["zero", "bj", "zerom", "bjm"]
-            dispersion_xc="pbe",
-            dispersion_cutoff=40.0 * units.Bohr,
-        )
-    atoms.calc = calc
-
+For D3 dispersion, use ``atoms.calc = add_dispersion(atoms.calc)`` with
+``add_dispersion`` from ``tace.interface.ase``.
 
 .. _ase-neighbor-lists:
 
 Neighbor lists
 --------------
 
-Set ``neighborlist_backend`` on either ``TACEAseCalc`` or
-``GeneralTACEAseCalc``; the default is ``matscipy``. See
-:doc:`neighbor_list` for backends and installation.
+``neighborlist_backend`` selects the backend for either calculator.
+The default is ``"matscipy"``. See :doc:`neighbor_list`.
 
-Examples
-~~~~~~~~
+Additional inputs
+-----------------
 
->>> from tace.interface.ase import TACEAseCalc
->>> calc = TACEAseCalc(
-...     "model.pt", device="cuda", neighborlist_backend="alchemiops"
-... )
-
-Models with additional inputs
------------------------------
-
-``GeneralTACEAseCalc`` is intended for TACE models that require physical input
-quantities beyond atomic numbers, positions, and the cell. For example,
-mTACE requires initial non-collinear magnetic moments.
-
-The ``keys`` argument maps each TACE embedding property to the corresponding
-key stored in ``Atoms.info`` or ``Atoms.arrays``.  The calculator determines the
-storage location from the property scope:
-
-- Per-system inputs, such as ``total_charge``, are read from ``Atoms.info``.
-- Per-atom inputs, such as ``initial_noncollinear_magmoms``, are read from
-  ``Atoms.arrays``.
-
-For an mTACE model whose non-collinear magnetic moments are stored as ``spin``:
+``GeneralTACEAseCalc.keys`` maps each model input to a key in
+``Atoms.info`` (per system) or ``Atoms.arrays`` (per atom):
 
 .. code-block:: python
 
-   from ase.io import read
+    from ase.io import read
+    from tace.interface.ase import GeneralTACEAseCalc
 
-   from tace.interface.ase import GeneralTACEAseCalc
+    atoms = read("magnetic_structure.xyz")
+    atoms.calc = GeneralTACEAseCalc(
+        "mtace.pt", keys={"initial_noncollinear_magmoms": "spin"}
+    )
 
-   atoms = read("magnetic_structure.xyz")
-   atoms.calc = GeneralTACEAseCalc(
-       model="mtace.ckpt",
-       keys={"initial_noncollinear_magmoms": "spin"},
-       neighborlist_backend="matscipy",
-   )
-
-Multiple additional inputs can be mapped in the same ``keys`` dictionary.  Use
-the original ``TACEAseCalc`` for models that do not require such inputs.
-
-
-.. autoclass:: tace.interface.ase.calculator.TACEAseCalc
+.. autoclass:: tace.interface.ase.TACEAseCalc
    :no-members:
-   :show-inheritance:
 
-   
-.. autoclass:: tace.interface.ase.general_calculator.GeneralTACEAseCalc
+.. autoclass:: tace.interface.ase.GeneralTACEAseCalc
    :no-members:
-   :show-inheritance:

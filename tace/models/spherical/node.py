@@ -14,7 +14,7 @@ from equivariantx import o2
 
 from ...utils.torch_scatter import scatter_sum
 from ..layout import LayoutTransform
-from ..linear import ElementEmbedding, e3nnElementLinear, e3nnLinear
+from ..linear import ElementEmbedding, e3nnElementLinear
 from ..mlp import MLP
 from .base import NodeEmbedding, NodeUpdate
 
@@ -27,6 +27,7 @@ class LinearNodeEmbedding(NodeEmbedding):
     into a continuous feature space using a single linear layer,
     without introducing nonlinearity or structural information.
     """
+
     def _setup(self) -> None:
         self.embedding = torch.nn.Embedding(self.num_elements, self.num_channel)
         self.irreps_out = o3.Irreps(f"{self.num_channel}x0e")
@@ -140,7 +141,9 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
             rms_norm=radial_norm == "rms_norm",
         )
         self.normalization = math.sqrt(self.avg_num_neighbors)
-        self.angular_sections = [slice(ir.l**2, (ir.l + 1)**2) for _, ir in self.irreps_out]
+        self.angular_sections = [
+            slice(ir.l**2, (ir.l + 1) ** 2) for _, ir in self.irreps_out
+        ]
         self.reshape = LayoutTransform(
             self.irreps_out,
             layout_in="flatten_ir_mul",
@@ -175,10 +178,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         else:
             message = torch.cat(
                 [
-                    (
-                        edge_attrs[:, section, None]
-                        * features[:, i, None, :]
-                    ).flatten(1)
+                    (edge_attrs[:, section, None] * features[:, i, None, :]).flatten(1)
                     for i, section in enumerate(self.angular_sections)
                 ],
                 dim=-1,

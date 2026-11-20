@@ -55,19 +55,6 @@ def _asymmetric_contractions(correlation=3, path_mode="sum"):
     return recursive, dense
 
 
-def spherical_layout(features, irreps, inverse=False):
-    values = []
-    for (mul, ir), section in zip(irreps, irreps.slices()):
-        shape = (ir.dim, mul) if inverse else (mul, ir.dim)
-        values.append(
-            features[..., section]
-            .reshape(*features.shape[:-1], *shape)
-            .transpose(-1, -2)
-            .flatten(-2)
-        )
-    return torch.cat(values, dim=-1)
-
-
 def operator_training_problem(kind, backend, device):
     """Return one smooth force-loss chain for the corresponding O(2) module."""
     from equivariantx.o2.clebsch_gordan import clebsch_gordan_product

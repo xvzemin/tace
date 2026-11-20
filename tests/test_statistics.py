@@ -71,40 +71,84 @@ from tace.dataset.store import (
 from tace.models.blocks import ScaleShift
 
 
+def test_clean_cli_preserves_outputs_on_help_and_invalid_arguments(tmp_path, monkeypatch):
+    from tace.scripts.clean import main
+
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "out.txt"
+    log.write_text("training")
+    for args, code in ((["--help"], 0), (["--unknown"], 2)):
+        with pytest.raises(SystemExit) as exc:
+            main(args)
+        assert exc.value.code == code
+        assert log.read_text() == "training"
+
+
+@pytest.mark.parametrize("visible_devices", [0, 1, 3])
+def test_graph_device_auto_uses_visible_count(monkeypatch, visible_devices):
+    from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: visible_devices)
+
+    def no_runtime_probe():
+        raise AssertionError("Device discovery must not initialize the CUDA runtime")
+
+    monkeypatch.setattr(torch.cuda, "is_available", no_runtime_probe)
+    monkeypatch.setattr(torch.cuda, "current_device", no_runtime_probe)
+    assert graph_devices(None, "alchemiops") == (
+        [f"cuda:{index}" for index in range(visible_devices)]
+        if visible_devices
+        else ["cpu"]
+    )
+    dataset = OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"})
+    assert dataset.device == ("cuda" if visible_devices else "cpu")
+    assert graph_devices(None, "matscipy") == [None]
+
+
 def test_graph_device_selection(monkeypatch):
     from tace.dataset.datamodule import OnTheFlyGraphDataset, graph_devices
 
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    assert graph_devices(None, "ase") == [None]
-    assert graph_devices(None, "alchemiops") == ["cuda:0", "cuda:1"]
-    assert (
-        OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}).device
-        == "cuda"
+    monkeypatch.setattr(
+        torch.cuda, "_lazy_init", lambda: pytest.fail("Unexpected CUDA initialization")
     )
+    assert graph_devices(None, "ase") == [None]
     assert graph_devices("cpu", "alchemiops") == ["cpu"]
     assert graph_devices("all", "alchemiops") == ["cuda:0", "cuda:1"]
-    assert graph_devices(OmegaConf.create(["cuda:1", "cuda:0"]), "alchemiops") == [
-        "cuda:1",
-        "cuda:0",
-    ]
-    for invalid in ([], ["cuda:0", "cuda:0"], ["cuda", "cuda:1"], ["cuda:2"], ["cpu"]):
+    for devices in (
+        [1, 0],
+        (1, 0),
+        OmegaConf.create([1, 0]),
+        OmegaConf.create(["cuda:1", "cuda:0"]),
+    ):
+        assert graph_devices(devices, "alchemiops") == ["cuda:1", "cuda:0"]
+    assert graph_devices([0, "cuda:1"], "alchemiops") == ["cuda:0", "cuda:1"]
+    for device in (0, 1):
+        expected = f"cuda:{device}"
+        assert graph_devices(device, "alchemiops") == [expected]
+        assert (
+            OnTheFlyGraphDataset(
+                [], {"neighborlist_backend": "alchemiops"}, device
+            ).device
+            == expected
+        )
+    for invalid in ([], ["cuda:0", "cuda:0"], ["cuda", "cuda:1"], ["cpu"]):
         with pytest.raises(ValueError):
+            graph_devices(invalid, "alchemiops")
+    with pytest.raises(ValueError, match="Duplicate"):
+        graph_devices([0, "cuda:0"], "alchemiops")
+    for invalid in ([2], ["cuda:2"]):
+        with pytest.raises(ValueError, match="not a visible CUDA device"):
             graph_devices(invalid, "alchemiops")
     with pytest.raises(ValueError, match="alchemiops"):
         graph_devices("all", "matscipy")
-    for devices in ("all", ["cuda:0", "cuda:1"]):
+    for devices in ("all", ["cuda:0", "cuda:1"], [0, 1]):
         with pytest.raises(ValueError, match="one explicit device"):
-            OnTheFlyGraphDataset([], {}, devices)
+            OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}, devices)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
     with pytest.raises(ValueError, match="at least one CUDA"):
         graph_devices("all", "alchemiops")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    assert graph_devices(None, "alchemiops") == ["cpu"]
-    assert (
-        OnTheFlyGraphDataset([], {"neighborlist_backend": "alchemiops"}).device == "cpu"
-    )
 
 
 @pytest.mark.parametrize(
@@ -3645,6 +3689,7 @@ def test_raw_statistics_reused_after_compression_and_online_u_shift(
     import tace.scripts.train as train_module
     from tace.foundations.u_shift import shift_energy_labels
 
+    cuda_initialized = torch.cuda.is_initialized()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TACE_USE_U_SHIFT", "0")
     source, destination = tmp_path / "raw", tmp_path / "compressed"
@@ -3718,7 +3763,7 @@ def test_raw_statistics_reused_after_compression_and_online_u_shift(
     module.val_dataset.close()
     assert (tmp_path / "statistics_0.yaml").read_bytes() == yaml_before
     assert file_snapshot(source) == source_before
-    assert not torch.cuda.is_initialized()
+    assert torch.cuda.is_initialized() == cuda_initialized
 
 
 @pytest.mark.parametrize("overlap", ["same", "child", "parent"])

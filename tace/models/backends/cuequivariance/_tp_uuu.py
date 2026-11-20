@@ -3,25 +3,29 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-import os
 from typing import Union
 
 import torch
 from e3nn import o3
 
-# # Hardcode to avoid retaining every uniform_1d candidate kernel for large ACE products.
-# os.environ.setdefault("CUEQUIVARIANCE_OPS_U1D_ALGOS", "0")
-
-try:
-    import cuequivariance as cue
-    import cuequivariance_torch as cuet
-except Exception:
-    pass
-
 from .paths import generate_cueq_uuu_paths
 
 
 class CueTensorProduct(torch.nn.Module):
+    """Channelwise tensor product with independent output paths.
+
+    Parameters
+    ----------
+    irreps_in1, irreps_in2 : e3nn.o3.Irreps
+        Input representations with equal multiplicities on each coupled path.
+    irreps_out : e3nn.o3.Irreps
+        Output representation types to retain.
+    l1l2, l2l3, l3l1 : str, optional
+        Comparisons between the corresponding input and output degrees.
+    trainable : bool, optional
+        Require external weights of shape ``(batch, weight_numel)``.
+    """
+
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -33,6 +37,9 @@ class CueTensorProduct(torch.nn.Module):
         l3l1: Union[str, None] = None,
         trainable: bool = False,
     ) -> None:
+        import cuequivariance as cue
+        import cuequivariance_torch as cuet
+
         super().__init__()
 
         self.irreps_in1 = o3.Irreps(irreps_in1)
@@ -50,11 +57,9 @@ class CueTensorProduct(torch.nn.Module):
             trainable=trainable,
         )
         self.irreps_out = actual_irreps_out
-        self._cue_weight_numel = descriptor.inputs[0].dim if trainable else 0
-        self.weight_numel = self._cue_weight_numel if trainable else 0
+        self.weight_numel = descriptor.inputs[0].dim if trainable else 0
         self.cueq_tp = cuet.SegmentedPolynomial(
             descriptor.flatten_coefficient_modes().squeeze_modes().polynomial,
-            # method="naive" if trainable else "uniform_1d",
             method="uniform_1d",
             math_dtype=torch.get_default_dtype(),
         )

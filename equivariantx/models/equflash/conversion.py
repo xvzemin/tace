@@ -6,9 +6,14 @@ from itertools import groupby
 import torch
 from e3nn import o3
 
-from ...ops import resolve_backend
-from ...utils.module import convert_modules, default_dtype
-from ..convolution import Convolution, RadialFeatures, harmonic_convention
+from ...utils.module import default_dtype
+from ..convolution import (
+    Convolution,
+    RadialFeatures,
+    convert_interactions,
+    harmonic_convention,
+    spatial_backend,
+)
 
 
 class FullConv(torch.nn.Module):
@@ -137,65 +142,39 @@ def convert_equflash_to_eqx(
     ----------
     model : torch.nn.Module
         Uncompiled EquFlashV2 model with uniform-channel FullConv interactions.
+        EfficientConv and distributed ghost exchange are not supported.
     implementation : {"o3", "o2"}, optional
         Direct or aligned tensor product. Defaults to "o3".
     inplace : bool, optional
-        Modify the supplied model instead of returning a copy.
+        Modify the supplied model instead of returning a copy. Use True with UCalculator.
     backend : {None, "cuda", "torch"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Convolution backend.
+        Execution backend. Defaults to CUDA when available, otherwise PyTorch.
     stream_radial : bool, optional
-        Fuse the complete radial MLP when True. Defaults to False: evaluate
-        hidden layers with PyTorch and fuse only the final projection.
+        Fuse the complete radial MLP if True, or its final projection if False.
 
     Returns
     -------
     torch.nn.Module
-        Model with the original forward interface and differentiable parameters.
-        Load original weights before conversion and construct the optimizer after it.
-
-    Notes
-    -----
-    Supports uniform-channel FullConv interactions in EquFlashV2. EfficientConv
-    and distributed ghost-atom exchange are not supported. With UCalculator,
-    use ``inplace=True`` to preserve its EMA parameter references.
+        Converted model with the original forward interface.
 
     Examples
     --------
-    Convert a loaded EquFlashV2 model with FullConv interactions:
-
     .. code-block:: python
 
         from equivariantx.models.equflash import convert_equflash_to_eqx
 
         model = convert_equflash_to_eqx(model, implementation="o3")
     """
-    backend = resolve_backend(backend)
-    if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
-        raise ValueError(
-            "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
-        )
+    backend = spatial_backend(implementation, backend)
     normalization, normalize = (
         harmonic_convention(model) if implementation == "o2" else ("component", True)
     )
-    count = 0
 
     def factory(module):
-        nonlocal count
         if isinstance(module, FullConv):
-            count += 1
-            if (
-                module.convolution.implementation,
-                module.convolution.backend,
-                module.weight_nn.stream_radial,
-            ) != (
-                implementation,
-                backend,
-                stream_radial,
-            ):
-                raise ValueError(
-                    "Convert the original model to select another implementation."
-                )
+            module.convolution.check_options(
+                module.weight_nn, implementation, backend, stream_radial
+            )
             return module
         if not type(module).__module__.startswith("GGNN.model.EquFlashV2."):
             return None
@@ -203,7 +182,7 @@ def convert_equflash_to_eqx(
             raise NotImplementedError("Only EquFlash FullConv is supported.")
         if type(module).__name__ != "FullConv":
             return None
-        count += 1
+
         parameter = module.weight_nn[-1].weight
         with default_dtype(parameter.dtype):
             return (
@@ -219,7 +198,6 @@ def convert_equflash_to_eqx(
                 .train(module.training)
             )
 
-    converted = convert_modules(model, factory, inplace=inplace)
-    if not count:
-        raise ValueError("No supported EquFlash FullConv interactions were found.")
-    return converted
+    return convert_interactions(
+        model, factory, inplace=inplace, name="EquFlash FullConv interactions"
+    )

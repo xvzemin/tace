@@ -23,7 +23,7 @@ except ImportError as error:
 
 
 class EdgeForcesWrapper(torch.nn.Module):
-    def __init__(self, model: torch.nn.Module, **kwargs):
+    def __init__(self, model: torch.nn.Module):
         super().__init__()
         model.lmp = True
         model.flags.compute_forces = False
@@ -31,11 +31,9 @@ class EdgeForcesWrapper(torch.nn.Module):
         model.flags.compute_virials = False
         model.flags.compute_edge_forces = True
 
-        self.model = model
+        self.model = model.eval().requires_grad_(False)
         self.register_buffer("cutoff", model.readout_fn.cutoff)
         self.register_buffer("atomic_numbers", model.readout_fn.atomic_numbers)
-        for p in self.model.parameters():
-            p.requires_grad = False
 
     def forward(
         self, data: Dict[str, torch.Tensor]
@@ -53,12 +51,18 @@ class EdgeForcesWrapper(torch.nn.Module):
 
 
 class TACELammpsCalc(MLIAPUnified):
-    """LAMMPS ML-IAP interface for eager TACE models."""
+    """Evaluate an eager TACE model with LAMMPS ML-IAP/Kokkos.
 
-    def __init__(self, model, **kwargs):
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Loaded TACE model with atomic energies and an interaction cutoff.
+    """
+
+    def __init__(self, model):
         super().__init__()
 
-        self.model = EdgeForcesWrapper(model, **kwargs)
+        self.model = EdgeForcesWrapper(model)
         self.element_types = [
             chemical_symbols[s] for s in model.readout_fn.atomic_numbers
         ]
@@ -104,7 +108,8 @@ class TACELammpsCalc(MLIAPUnified):
 
         batch = self._prepare_batch(data, nlocal, nghosts, species)
 
-        _, node_energy, pair_forces = self.model(batch)
+        with torch.enable_grad():
+            _, node_energy, pair_forces = self.model(batch)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
@@ -136,6 +141,7 @@ class TACELammpsCalc(MLIAPUnified):
         }
 
     @staticmethod
+    @torch.no_grad()
     def _update_lammps_data(data, node_energy, pair_forces, nlocal):
         pair_forces = pair_forces.to(dtype=torch.float64).contiguous()
         node_energy = node_energy.to(dtype=torch.float64).contiguous()
@@ -153,6 +159,20 @@ class TACELammpsCalc(MLIAPUnified):
 
 
 class TACEAOTILammpsCalc(TACELammpsCalc):
+    """Evaluate an AOTInductor package with LAMMPS ML-IAP/Kokkos.
+
+    Parameters
+    ----------
+    package_path : str or pathlib.Path
+        Exported LAMMPS package.
+    atomic_numbers : sequence of int
+        Atomic numbers in model order.
+    cutoff : float
+        Neighbor cutoff in angstroms.
+    dtype : torch.dtype
+        Model precision.
+    """
+
     def __init__(
         self,
         package_path: Union[str, Path],

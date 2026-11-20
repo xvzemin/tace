@@ -5,9 +5,14 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from ...ops import resolve_backend
-from ...utils.module import convert_modules, default_dtype
-from ..convolution import Convolution, RadialFeatures, harmonic_convention
+from ...utils.module import default_dtype
+from ..convolution import (
+    Convolution,
+    RadialFeatures,
+    convert_interactions,
+    harmonic_convention,
+    spatial_backend,
+)
 
 
 class TensorProductScatter(Convolution):
@@ -33,55 +38,38 @@ def convert_nequip_to_eqx(
     inplace : bool, optional
         Modify the model instead of returning a copy.
     backend : {None, "cuda", "torch"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Convolution backend.
+        Execution backend. Defaults to CUDA when available, otherwise PyTorch.
     stream_radial : bool, optional
-        Fuse the complete radial MLP when True. Defaults to False: evaluate
-        hidden layers with PyTorch and fuse only the final projection.
+        Fuse the complete radial MLP if True, or its final projection if False.
 
     Returns
     -------
     torch.nn.Module
-        Model with the same graph interface and differentiable parameters.
-        Convert before constructing the optimizer. Load original checkpoints
-        before conversion; converted state dictionaries use adapted names.
+        Converted model with the original graph interface.
 
     Examples
     --------
-    Convert a loaded NequIP model:
-
     .. code-block:: python
 
         from equivariantx.models.nequip import convert_nequip_to_eqx
 
         model = convert_nequip_to_eqx(model, implementation="o3")
     """
-    backend = resolve_backend(backend)
-    if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
-        raise ValueError(
-            "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
-        )
+    backend = spatial_backend(implementation, backend)
     normalization, normalize = (
         harmonic_convention(model) if implementation == "o2" else ("component", True)
     )
-    count = 0
 
     def factory(module):
-        nonlocal count
         if type(module).__name__ != "InteractionBlock" or not type(
             module
         ).__module__.split(">.")[-1].startswith("nequip."):
             return None
-        count += 1
+
         if isinstance(module.tp_scatter, TensorProductScatter):
-            if (
-                module.tp_scatter.implementation != implementation
-                or module.tp_scatter.backend != backend
-                or module.edge_mlp.stream_radial != stream_radial
-            ):
-                raise ValueError(
-                    "Convert the original model to select another implementation."
-                )
+            module.tp_scatter.check_options(
+                module.edge_mlp, implementation, backend, stream_radial
+            )
             return module
         tp = getattr(module.tp_scatter, "tp", None)
         if (
@@ -145,7 +133,6 @@ def convert_nequip_to_eqx(
         module.edge_mlp = radial
         return module
 
-    converted = convert_modules(model, factory, inplace=inplace)
-    if not count:
-        raise ValueError("No supported NequIP interactions were found.")
-    return converted
+    return convert_interactions(
+        model, factory, inplace=inplace, name="NequIP interactions"
+    )

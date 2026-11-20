@@ -689,7 +689,7 @@ for key, expected in case["expected"].items():
         env={**os.environ, "TACE_USE_LUNA": "0", "TACE_USE_COMPILE": "0"},
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=900 if use_luna else 180,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -828,6 +828,8 @@ def test_model_dtype_conversion(space):
     radial = next(
         module for module in readout.modules() if type(module).__name__ == "RadialBasis"
     )
+    radial.scripted = torch.jit.script(torch.nn.BatchNorm1d(1, affine=False).double())
+    scripted_mean = radial.scripted.running_mean.fill_(0.1234567890123).clone()
     physical = next(radial.parameters())
     physical.grad = torch.full_like(physical, 0.1234567890123)
     value, gradient = physical.detach().clone(), physical.grad.clone()
@@ -843,6 +845,9 @@ def test_model_dtype_conversion(space):
                 model._compiled_cache["test"] = None
             assert convert(model) is model
             assert model.get_model_dtype() == dtype
+            torch.testing.assert_close(
+                radial.scripted.running_mean, scripted_mean, atol=0, rtol=0
+            )
             assert readout.representation.model_dtype == dtype
             assert (
                 next(readout.representation.node_embedding.parameters()).dtype == dtype

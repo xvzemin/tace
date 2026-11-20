@@ -28,6 +28,7 @@ def uv_convolution(
     wigner_inv,
     edge_cutoff,
     radial_network=None,
+    edge_pairs=None,
 ):
     """Evaluate radial weighting and the fused local O(2) MLP."""
     linears = [module.linear_up, module.linear_down]
@@ -43,6 +44,7 @@ def uv_convolution(
         edge_cutoff,
         tuple(value for linear in linears for value in (linear.weight, linear.bias)),
         radial_network=radial_network,
+        edge_pairs=edge_pairs,
     )
     return module.reshape_out.inverse(message)
 
@@ -242,6 +244,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         wigner_inv: Optional[torch.Tensor],
         edge_cutoff: Optional[torch.Tensor] = None,
         radial_network=None,
+        edge_pairs=None,
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
@@ -261,6 +264,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                 wigner_inv,
                 edge_cutoff,
                 radial_network=radial_network,
+                edge_pairs=edge_pairs,
             )
         node_features, source_features, target_features = self._to_local(
             node_feats, edge_index, wigner

@@ -162,7 +162,7 @@ class SymmetricProductPaths:
 
 
 def satisfy(l1: int, l2: int, restriction: Union[str, None] = None) -> bool:
-    if restriction == None:
+    if restriction is None:
         return True
     elif restriction == "<":
         return l1 < l2

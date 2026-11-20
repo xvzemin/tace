@@ -24,13 +24,18 @@ def assert_functional_derivatives(function, reference, values, compiler=None):
 
     expected = transformed(reference, *values)
     torch.compiler.reset()
-    run = lambda *values: transformed(function, *values)
+
+    def run(*values):
+        return transformed(function, *values)
+
     if compiler:
         run = torch.compile(run, backend=compiler, fullgraph=True)
     torch.testing.assert_close(run(*values), expected, atol=2e-9, rtol=2e-9)
 
     def nested(function, *values):
-        continuous = lambda *inputs: function(*inputs, values[-1])
+        def continuous(*inputs):
+            return function(*inputs, values[-1])
+
         return torch.func.jvp(
             lambda *inputs: torch.func.jvp(continuous, inputs, tangents)[1],
             values[:-1],
@@ -38,10 +43,13 @@ def assert_functional_derivatives(function, reference, values, compiler=None):
         )
 
     expected = nested(reference, *values)
-    run = lambda *values: nested(function, *values)
-    torch.testing.assert_close(run(*values), expected, atol=2e-9, rtol=2e-9)
+
+    def run_nested(*values):
+        return nested(function, *values)
+
+    torch.testing.assert_close(run_nested(*values), expected, atol=2e-9, rtol=2e-9)
     if compiler:
-        graph = make_fx(run)(*values)
+        graph = make_fx(run_nested)(*values)
         graph.graph.eliminate_dead_code()
         graph.recompile()
         torch.testing.assert_close(
@@ -58,3 +66,19 @@ def assert_functional_derivatives(function, reference, values, compiler=None):
         atol=2e-10,
         rtol=2e-10,
     )
+
+
+def assert_joint_training(training_problem, monkeypatch):
+    """Compare three compiled force-loss parameter updates with the reference."""
+    from equivariantx.ops import config
+
+    monkeypatch.setattr(config, "TORCH_REFERENCE", False)
+    operation, values = training_problem()
+    run = torch.compile(make_fx(operation)(*values), fullgraph=True)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    x, y, w = values
+    for _ in range(3):
+        expected = operation(x, y, w)
+        actual = run(x.detach(), y.detach(), w.detach())
+        torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+        w = (w - 0.01 * expected[-1]).detach().requires_grad_()

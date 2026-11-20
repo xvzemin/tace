@@ -1,9 +1,4 @@
-"""NValCHEMI wrapper for an energy-based TACE model.
-
-The numerical mapping in this file is intentionally small: eager TACE predicts
-the total energy, while forces and stress are obtained as conservative
-derivatives.
-"""
+"""NValCHEMI adapter for energy, forces and stress."""
 
 import os
 from pathlib import Path
@@ -21,73 +16,35 @@ try:
         NeighborConfig,
         NeighborListFormat,
     )
-except ImportError as e:
+except ModuleNotFoundError as e:
+    if e.name not in {"nvalchemi", "nvalchemiops"}:
+        raise
     raise ImportError(
-        "The TACE NValCHEMI interface requires the optional "
-        "'nvalchemi-toolkit' and 'nvalchemi-toolkit-ops' dependencies. "
-        "Install them with "
-        "`pip install nvalchemi-toolkit nvalchemi-toolkit-ops`."
+        "Install the NValCHEMI interface with `pip install tace[nvalchemi]`."
     ) from e
 
 from tace.foundations import resolve_model_path
 from tace.lightning import export_tace, load_tace
 from tace.models.adapter import TensorModel
 from tace.models.utils import compute_symmetric_displacement, stress_from_virials
-from tace.utils.env import select_acceleration
-
-
-def _enable_tace_acceleration(
-    *,
-    enable_oeq: bool,
-    enable_cue: bool,
-    enable_eqt: bool,
-    enable_compile: bool,
-    enable_eqx: bool,
-    enable_luna: bool,
-    force: bool = False,
-) -> None:
-    """Configure the supported TACE acceleration flags before model loading.
-
-    Operators select enabled backends in EQX, Luna, OEQ, EQT, CUEQ order.
-    AOTInductor is used for compiled deployment; CUE currently conflicts
-    with AOTI.
-    """
-
-    if enable_compile:
-        raise ValueError(
-            "In-process TACE compile is not supported by this wrapper. "
-            "Export an AOTI .pt2 package and load it with load_tace instead."
-        )
-    os.environ["TACE_USE_COMPILE"] = "0"
-
-    flags = {
-        "TACE_USE_OEQ": enable_oeq,
-        "TACE_USE_CUE": enable_cue,
-        "TACE_USE_EQT": enable_eqt,
-        "TACE_USE_COMPILE": False,
-        "TACE_USE_EQX": enable_eqx,
-        "TACE_USE_LUNA": enable_luna,
-    }
-    try:
-        from tace.utils.env import enable_acceleration
-    except ImportError:
-        for name, enabled in flags.items():
-            if enabled or force:
-                os.environ[name] = "1" if enabled else "0"
-    else:
-        enable_acceleration(
-            enable_oeq=enable_oeq,
-            enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
-            enable_compile=False,
-            enable_eqx=enable_eqx,
-            enable_luna=enable_luna,
-            force=force,
-        )
+from tace.utils.env import ACCELERATION_ENV, enable_acceleration, select_acceleration
 
 
 class TACEWrapper(nn.Module, BaseModelMixin):
-    """Adapt TACE tensors and conservative derivatives to NValCHEMI."""
+    """Evaluate a TACE model on NValCHEMI atomic data.
+
+    Parameters
+    ----------
+    model : TensorModel
+        Loaded model with an energy target.
+    fidelity_idx : int, optional
+        Default fidelity index.
+
+    Examples
+    --------
+    >>> from tace.interface.nvalchemi import TACEWrapper
+    >>> wrapper = TACEWrapper.from_checkpoint("TACE-OAM-L")  # doctest: +SKIP
+    """
 
     def __init__(self, model: TensorModel, fidelity_idx: int | None = None) -> None:
         super().__init__()
@@ -145,10 +102,6 @@ class TACEWrapper(nn.Module, BaseModelMixin):
     @property
     def cutoff(self) -> float:
         return self.model.get_cutoff()
-
-    @property
-    def _model_dtype(self) -> torch.dtype:
-        return self.model.get_model_dtype()
 
     @property
     def _model_device(self) -> torch.device:
@@ -350,18 +303,34 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         enable_eqx: bool = False,
         enable_luna: bool = False,
     ) -> "TACEWrapper":
-        """Load TACE and expose it through the NValCHEMI model contract.
+        """Load a TACE model file or foundation model name.
 
-        Acceleration flags must be applied before ``load_tace`` constructs the
-        model, so they belong to this factory rather than ``__init__``.
+        Parameters
+        ----------
+        checkpoint_path : str or pathlib.Path
+            TACE parameters or an exported AOTInductor package.
+        device : str or torch.device, optional
+            Execution device.
+        dtype : torch.dtype, optional
+            Model precision.
+        fidelity_idx : int, optional
+            Fidelity head index.
+        enable_oeq, enable_cue, enable_eqt, enable_eqx, enable_luna : bool, optional
+            Enable the corresponding acceleration backend.
+        enable_compile : bool, optional
+            Must be False. Pass a ``.pt2`` package for compiled inference.
         """
 
         checkpoint_path = resolve_model_path(checkpoint_path)
-        _enable_tace_acceleration(
+        if enable_compile:
+            raise ValueError(
+                "Use an exported .pt2 package for compiled NValCHEMI inference."
+            )
+        os.environ[ACCELERATION_ENV["compile"]] = "0"
+        enable_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
             enable_eqt=enable_eqt,
-            enable_compile=enable_compile,
             enable_eqx=enable_eqx,
             enable_luna=enable_luna,
         )
@@ -372,8 +341,6 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             raise ValueError(
                 "TACE cuEquivariance (CUEQ) currently conflicts with AOTI."
             )
-        # Let TACE manage the dtype to avoid runtime dtype conversions,
-        # which are unsupported by AOTI and similar backends.
         model = load_tace(checkpoint_path, device=device, dtype=dtype)
         model.eval()
         wrapper = cls(model, fidelity_idx=fidelity_idx)

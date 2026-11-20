@@ -10,6 +10,30 @@ from ..conv import O2O3TensorProductConv, O3TensorProductConv
 from ..o2.o3_tensor_product import O3TensorProduct
 from ..ops import resolve_backend
 from ..utils.layout import permute
+from ..utils.module import convert_modules
+
+
+def spatial_backend(implementation, backend):
+    if implementation not in ("o3", "o2"):
+        raise ValueError("implementation must be 'o3' or 'o2'.")
+    return resolve_backend(backend)
+
+
+def convert_interactions(model, factory, *, inplace, name):
+    """Replace matching interactions; reject models with no supported layers."""
+    matched = False
+
+    def replace(module):
+        nonlocal matched
+        result = factory(module)
+        if result is not None:
+            matched = True
+        return result
+
+    result = convert_modules(model, replace, inplace=inplace)
+    if not matched:
+        raise ValueError(f"No supported {name} were found.")
+    return result
 
 
 class FrameInput(NamedTuple):
@@ -115,8 +139,7 @@ class Convolution(torch.nn.Module):
     implementation : {"o3", "o2"}
         Direct or aligned tensor product.
     backend : {None, "cuda", "torch"}
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Kernel backend. CPU tensors use PyTorch.
+        Execution backend. CPU inputs use PyTorch.
     layout : {"mul_ir", "ir_mul"}
         Input and output feature storage.
     normalization : {"component", "integral", "norm"}
@@ -142,10 +165,8 @@ class Convolution(torch.nn.Module):
         packed_dim=0,
         radial_mode="last",
     ):
-        backend = resolve_backend(backend)
         super().__init__()
-        if implementation not in ("o3", "o2"):
-            raise ValueError("implementation must be 'o3' or 'o2'.")
+        backend = spatial_backend(implementation, backend)
         if layout not in ("mul_ir", "ir_mul"):
             raise ValueError("layout must be 'mul_ir' or 'ir_mul'.")
         self.implementation = implementation
@@ -245,6 +266,17 @@ class Convolution(torch.nn.Module):
             self.projection_scale = (
                 projection.h_in * projection.var_in / projection.var_out
             ) ** -0.5
+
+    def check_options(self, radial, implementation, backend, stream_radial):
+        """Check the options of an already converted interaction."""
+        if (self.implementation, self.backend, radial.stream_radial) != (
+            implementation,
+            backend,
+            stream_radial,
+        ):
+            raise ValueError(
+                "Convert the original model to select another implementation."
+            )
 
     def set_permutation(self, name, index):
         """Register a feature permutation and its adjoint index when needed."""

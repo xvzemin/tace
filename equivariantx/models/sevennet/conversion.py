@@ -5,9 +5,14 @@ from collections import OrderedDict
 import torch
 from e3nn import o3
 
-from ...ops import resolve_backend
-from ...utils.module import convert_modules, default_dtype
-from ..convolution import Convolution, RadialFeatures, harmonic_convention
+from ...utils.module import default_dtype
+from ..convolution import (
+    Convolution,
+    RadialFeatures,
+    convert_interactions,
+    harmonic_convention,
+    spatial_backend,
+)
 
 
 class IrrepsConvolution(torch.nn.Module):
@@ -81,17 +86,14 @@ def convert_sevennet_to_eqx(
     inplace : bool, optional
         Modify the model instead of returning a copy.
     backend : {None, "cuda", "torch"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        Convolution backend.
+        Execution backend. Defaults to CUDA when available, otherwise PyTorch.
     stream_radial : bool, optional
-        Fuse the complete radial MLP when True. Defaults to False: evaluate
-        hidden layers with PyTorch and fuse only the final projection.
+        Fuse the complete radial MLP if True, or its final projection if False.
 
     Returns
     -------
     torch.nn.Module
-        Model for training or SevenNetCalculator with file_type="model_instance".
-        Load checkpoints before conversion and construct the optimizer afterwards.
+        Converted model, accepted by ``SevenNetCalculator(file_type="model_instance")``.
 
     Notes
     -----
@@ -100,42 +102,28 @@ def convert_sevennet_to_eqx(
 
     Examples
     --------
-    Convert a loaded serial SevenNet model:
-
     .. code-block:: python
 
         from equivariantx.models.sevennet import convert_sevennet_to_eqx
 
         model = convert_sevennet_to_eqx(model, implementation="o3")
     """
-    backend = resolve_backend(backend)
-    if implementation not in ("o3", "o2") or backend not in ("cuda", "torch"):
-        raise ValueError(
-            "Expected implementation 'o3'/'o2' and backend 'cuda'/'torch'."
-        )
+    backend = spatial_backend(implementation, backend)
     normalization, normalize = (
         harmonic_convention(model) if implementation == "o2" else ("component", True)
     )
-    count = 0
 
     def factory(module):
-        nonlocal count
         if isinstance(module, IrrepsConvolution):
-            count += 1
-            if (
-                module.convolution.implementation != implementation
-                or module.convolution.backend != backend
-                or module.weight_nn.stream_radial != stream_radial
-            ):
-                raise ValueError(
-                    "Convert the original model to select another implementation."
-                )
+            module.convolution.check_options(
+                module.weight_nn, implementation, backend, stream_radial
+            )
             return module
         if type(module).__name__ != "IrrepsConvolution" or not type(
             module
         ).__module__.startswith("sevenn."):
             return None
-        count += 1
+
         parameter = next(module.parameters())
         with default_dtype(parameter.dtype):
             return (
@@ -154,7 +142,6 @@ def convert_sevennet_to_eqx(
                 .train(module.training)
             )
 
-    converted = convert_modules(model, factory, inplace=inplace)
-    if not count:
-        raise ValueError("No supported SevenNet convolutions were found.")
-    return converted
+    return convert_interactions(
+        model, factory, inplace=inplace, name="SevenNet convolutions"
+    )
