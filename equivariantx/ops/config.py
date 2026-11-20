@@ -106,6 +106,8 @@ ROTARY_INLINE = True
 # Zero disables this schedule; full-network fusion retains its tiled execution.
 RADIAL_PROJECT_MIN_WIDTH = 1024
 RADIAL_PROJECT_MAX_BYTES = 256 << 20
+# No-gradient pair MLPs can run directly if all their hidden rows fit.
+PAIR_EAGER_MAX_BYTES = 64 << 20
 
 # Tiny shared row maps can be cheaper as columns of the native final GEMM.
 INDEXED_PROJECTION_MAX_ROWS = 8

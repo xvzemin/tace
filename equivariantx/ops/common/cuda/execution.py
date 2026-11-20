@@ -13,6 +13,7 @@ from .graph import CAPTURE_CONSTANTS
 from .runtime import kernels, runtime
 
 TILE_BYTES = 64 << 20
+RADIAL_TILE_BYTES = 128 << 20
 FRAME_TILE_BYTES = 256 << 20
 PRODUCT_TILE_BYTES = 512 << 20
 CONVOLUTION_TILE_BYTES = 384 << 20
@@ -1121,6 +1122,22 @@ def tile_rows(metadata, element_size, workspace):
             default=128,
         )
     )
+    # The mixed adjoint of an ordinary radial MLP keeps several wide rows
+    # live at once. Bound their sum, not just the widest GEMM operand.
+    radial = (
+        not node_product
+        and any(
+            op in ("silu", "sigmoid", "tanh", "activation_vjp") for op, *_ in plan[0]
+        )
+        and any(op == "matmul" for op, *_ in plan[0])
+        and not any(
+            op in ("convolution", "frame", "product")
+            or (op == "input" and data[1] not in ("edge", "shared"))
+            for op, _, _, data in plan[0]
+        )
+    )
+    if radial:
+        width = max(width, tile_width(metadata))
     channel_frame = any(op == "frame" for op, _, _, _ in plan[0]) and any(
         op == "matmul" and data[0] > 1 and not plan[2][args[1]]
         for op, _, args, data in plan[0]
@@ -1130,6 +1147,8 @@ def tile_rows(metadata, element_size, workspace):
         if node_product
         else FRAME_TILE_BYTES
         if channel_frame
+        else RADIAL_TILE_BYTES
+        if radial
         else TILE_BYTES
     )
     rows = min(TILE_SIZE, budget // (max(1, width) * element_size))

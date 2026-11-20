@@ -97,6 +97,43 @@ class RadialWithContext(torch.nn.Module):
         return program.concatenate((hidden, program.slice(value, width, self.width)))
 
 
+class PairRadial(NamedTuple):
+    features: torch.Tensor
+    rows: torch.Tensor
+    inverse: torch.Tensor
+
+
+class PackedProjection(torch.autograd.Function):
+    """Write a projected pair table and its additive lookup tables into one allocation."""
+
+    @staticmethod
+    def forward(ctx, radial, weight, bias, *tables):
+        sizes = (radial.size(0), *(t.size(0) for t in tables))
+        result = radial.new_empty(sum(sizes), weight.size(1))
+        head, *tail = result.split(sizes)
+        if bias is None:
+            torch.mm(radial, weight, out=head)
+        else:
+            torch.addmm(bias, radial, weight, out=head)
+        for section, table in zip(tail, tables):
+            section.copy_(table)
+        ctx.save_for_backward(radial, weight)
+        ctx.sizes = sizes
+        return result
+
+    @staticmethod
+    def backward(ctx, grad):
+        radial, weight = ctx.saved_tensors
+        head, *tail = grad.split(ctx.sizes)
+        need = ctx.needs_input_grad
+        return (
+            head @ weight.T if need[0] else None,
+            radial.T @ head if need[1] else None,
+            head.sum(0) if need[2] else None,
+            *tail,
+        )
+
+
 class IndexedProjection(NamedTuple):
     projection: torch.Tensor
     terms: tuple
@@ -105,11 +142,154 @@ class IndexedProjection(NamedTuple):
     mode: str | None
     scales: tuple = ()
     lookup_only: bool = False
+    pair: PairRadial | None = None
+
+    def bind_pairs(self, value, module):
+        """Choose the pair producer using the consuming convolution's backend."""
+        from .edge_pairs import pair_workspace, project_rows
+
+        pair = self.pair
+        if pair is None:
+            return value, self
+        mode = radial_policy(module, self)
+        size = pair_workspace(
+            pair.features.shape[0],
+            pair.inverse.numel(),
+            self.projection.shape[1],
+            self.projection.element_size(),
+            self.network,
+            compact=True,
+            mode=mode,
+        )
+        if not statically_known_true(size <= config.RADIAL_PROJECT_MAX_BYTES):
+            # The final path vector may not fit even though its hidden row does.
+            # Recompute the MLP only on pair rows and let the directed tile
+            # consume the narrow indexed hidden features in its projection.
+            hidden_width, width = self.projection.shape
+            if (
+                self.network is not None
+                and 0 < hidden_width < width
+                and statically_known_true(
+                    pair.features.shape[0]
+                    * hidden_width
+                    * self.projection.element_size()
+                    <= config.RADIAL_PROJECT_MAX_BYTES
+                )
+            ):
+                hidden = project_rows(
+                    pair.features,
+                    None,
+                    self.network,
+                    None,
+                    module.backend,
+                    "full",
+                    pair.rows,
+                )
+                if hidden.shape[1] + 1 == hidden_width:
+                    hidden = torch.cat((hidden, torch.ones_like(hidden[:, :1])), 1)
+                pair = pair._replace(features=hidden)
+                return value, self._replace(network=None, pair=pair, mode="full")
+            return value, self._replace(mode="full")
+        table = project_rows(
+            pair.features,
+            self.projection,
+            self.network,
+            self.bias,
+            module.backend,
+            mode,
+            pair.rows,
+        )
+        if table.shape[1] != self.projection.shape[1]:
+            raise ValueError("Radial output width must match the path weights.")
+        return value, self._replace(
+            projection=self.projection.new_empty((0, table.shape[1])),
+            terms=((table, pair.inverse), *self.terms),
+            scales=(1.0, *self.scales) if self.scales else (),
+            network=None,
+            bias=None,
+            lookup_only=True,
+            pair=None,
+        )
+
+    def packable_projection(self):
+        """Whether the complete projected pair table fits the compact weight budget."""
+        from ...utils.autograd import forward_ad_active
+        from .edge_pairs import pair_workspace
+
+        return (
+            self.pair is not None
+            and self.projection.shape[0] > 0
+            and not torch.compiler.is_compiling()
+            and not forward_ad_active()
+            and (
+                self.network is None
+                or (
+                    not torch.is_grad_enabled()
+                    and not hasattr(self.network, "to_edge_program")
+                    and self.projection.shape[0] < self.projection.shape[1]
+                    and statically_known_true(
+                        pair_workspace(
+                            self.pair.features.size(0),
+                            0,
+                            self.projection.shape[0],
+                            self.projection.element_size(),
+                            self.network,
+                            compact=True,
+                        )
+                        <= min(
+                            config.RADIAL_PROJECT_MAX_BYTES, config.PAIR_EAGER_MAX_BYTES
+                        )
+                    )
+                )
+            )
+            and statically_known_true(
+                (self.pair.features.size(0) + sum(t.size(0) for t, _ in self.terms))
+                * self.projection.size(1)
+                * self.projection.element_size()
+                <= config.RADIAL_PROJECT_MAX_BYTES
+            )
+        )
+
+    def packed_terms(self, project=False):
+        """Pack row tables and offset indices for an additive sparse contraction."""
+        tables, indices, offsets = [], [], []
+        rows = self.pair.features.size(0) if project else 0
+        if project:
+            indices.append(self.pair.inverse)
+        for table, index in self.terms:
+            for previous, offset in zip(tables, offsets):
+                if previous is table:
+                    break
+            else:
+                offset = rows
+                offsets.append(offset)
+                tables.append(table)
+                rows += table.shape[0]
+            indices.append(index if len(indices) == 0 else index + offset)
+        if project:
+            radial, weight, bias = self.pair.features, self.projection, self.bias
+            if self.network is not None:
+                radial = radial_reference(self.network, radial)
+            if weight.size(0) == radial.size(1) + 1:
+                bias = weight[-1] if bias is None else weight[-1] + bias
+                weight = weight[:-1]
+            table = PackedProjection.apply(radial, weight, bias, *tables)
+        else:
+            table = tables[0] if len(tables) == 1 else torch.cat(tables)
+        return table, indices[0] if len(indices) == 1 else torch.stack(indices)
 
     def narrow_edges(self, start, stop):
-        return self._replace(terms=tuple((t, i[start:stop]) for t, i in self.terms))
+        pair = self.pair
+        return self._replace(
+            terms=tuple((t, i[start:stop]) for t, i in self.terms),
+            pair=None
+            if pair is None
+            else pair._replace(inverse=pair.inverse[start:stop]),
+        )
 
     def forward(self, value):
+        if self.pair is not None:
+            value = self.pair.features.index_select(0, self.pair.inverse)
         if self.network is not None:
             value = radial_reference(self.network, value)
         if self.projection.shape[0]:
@@ -179,6 +359,15 @@ class IndexedProjection(NamedTuple):
         return offsets.addmm_(value, self.projection)
 
     def to_edge_program(self, inputs, program, value):
+        if self.pair is not None:
+            slot = len(inputs)
+            pair = self.pair
+            inputs.extend((pair.features, pair.inverse))
+            value = program.input(
+                slot,
+                ("indexed", slot + 1, slot),
+                static_dimensions(pair.features, (-1,))[0],
+            )
         if self.network is not None:
             value = radial_program(self.network, inputs, program, value)
         rows, width = static_dimensions(self.projection)
@@ -218,7 +407,7 @@ class IndexedProjection(NamedTuple):
 
 
 def radial_policy(module, network):
-    if isinstance(network, (IndexedProjection, RadialWithContext)) and network.mode:
+    if hasattr(network, "to_edge_program") and getattr(network, "mode", None):
         return network.mode
     return module.radial_mode
 
@@ -324,10 +513,8 @@ def indexed_weights(
             )
         if table.dtype != projection.dtype:
             raise ValueError("Tables and projection must have the same dtype.")
-    lookup_only = False
+    pair = None
     if edge_pairs is not None:
-        from .edge_pairs import pair_workspace
-
         if (
             not isinstance(radial, torch.Tensor)
             or radial.ndim != 2
@@ -349,55 +536,24 @@ def indexed_weights(
             for _, i in terms
         ):
             raise ValueError("Endpoint terms must contain one index per directed edge.")
-        if statically_known_true(
-            pair_workspace(
-                radial.shape[0],
-                inverse.numel(),
-                width,
-                projection.element_size(),
-                radial_network,
-            )
-            <= config.RADIAL_PROJECT_MAX_BYTES
-        ):
-            value = (
-                radial_reference(radial_network, radial)
-                if radial_network is not None
-                else radial
-            )
-            if projection.shape[0]:
-                value = (
-                    value @ projection
-                    if bias is None
-                    else torch.addmm(bias, value, projection)
-                )
-            elif bias is not None:
-                value = value + bias
-            if value.shape[1] != width:
-                raise ValueError("Radial output width must match the path weights.")
-            if len(terms) == 2 and all(
-                isinstance(ids, torch.Tensor) for _, ids in terms
+        if len(terms) == 2 and all(isinstance(ids, torch.Tensor) for _, ids in terms):
+            (a, ia), (b, ib) = terms
+            count = a.shape[0] * b.shape[0]
+            if statically_known_true(
+                8 * count <= inverse.numel()
+            ) and statically_known_true(
+                count * width * projection.element_size()
+                <= config.INDEXED_PROJECTION_MAP_BYTES
             ):
-                (a, ia), (b, ib) = terms
-                count = a.shape[0] * b.shape[0]
-                if statically_known_true(
-                    8 * count <= inverse.numel()
-                ) and statically_known_true(
-                    count * width * value.element_size()
-                    <= config.INDEXED_PROJECTION_MAP_BYTES
-                ):
-                    # Small ordered vocabularies: form each distinct sum once.
-                    terms = (((a[:, None] + b).flatten(0, 1), ia * b.shape[0] + ib),)
-            # One multi-table gather sums the invariant and oriented terms.
-            terms = ((value, inverse), *terms)
-            projection = projection.new_empty((0, width))
-            radial = value.new_zeros((1, 1)).expand(1, width)
-            radial_network, bias, lookup_only = None, None, True
-        else:
-            radial = edge_pairs.expand(radial)
-    if bias is None and not terms:
+                # Small ordered vocabularies: form each distinct sum once.
+                terms = (((a[:, None] + b).flatten(0, 1), ia * b.shape[0] + ib),)
+        pair = PairRadial(radial, edge_pairs.representatives, inverse)
+        radial = radial.new_zeros(1, 1).expand(1, width)
+    if bias is None and not terms and pair is None:
         return ConvolutionWeights(radial, projection, radial_network)
     if (
-        terms
+        pair is None
+        and terms
         and projection.shape[0]
         and all(
             isinstance(rows, IndexedRows) and rows.coefficients is not None
@@ -468,17 +624,21 @@ def indexed_weights(
             bias,
             radial_mode,
             tuple(scales) if any(s != 1.0 for s in scales) else (),
-            lookup_only,
+            pair=pair,
         ),
     )
 
 
-def prepare_indexed(module, radial, network, edge_index, projection=None):
+def prepare_indexed(
+    module, radial, network, edge_index, projection=None, *, bound=False
+):
     """Resolve the reference, bounded last-projection or streamed schedule."""
     from ...utils.autograd import forward_ad_active
 
     if projection is not None and projection.shape != (0, network.projection.shape[1]):
         raise ValueError("Indexed weights already include the output projection.")
+    if not bound:
+        radial, network = network.bind_pairs(radial, module)
     edges = edge_index[0].numel()
     if network.terms and network.terms[0][1].numel() != edges:
         raise ValueError("Row indices must have one entry per edge.")
@@ -487,9 +647,13 @@ def prepare_indexed(module, radial, network, edge_index, projection=None):
         and (module.backend == "torch" or not network.projection.is_cuda)
     ) or forward_ad_active():
         return network.forward(materialize(radial, edge_index)), None
-    if network.lookup_only and statically_known_true(
-        edges * network.projection.shape[1] * network.projection.element_size()
-        <= config.RADIAL_PROJECT_MAX_BYTES
+    if (
+        network.lookup_only
+        and radial_policy(module, network) != "full"
+        and statically_known_true(
+            edges * network.projection.shape[1] * network.projection.element_size()
+            <= config.RADIAL_PROJECT_MAX_BYTES
+        )
     ):
         return network.project(radial, module.backend), None
     if radial_policy(module, network) == "full":

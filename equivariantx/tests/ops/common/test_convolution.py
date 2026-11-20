@@ -111,6 +111,53 @@ def test_pair_weight_derivatives(mode, ordered, device, double_precision, monkey
 
         actual, expected = derivative(actual), derivative(expected)
     torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-9)
+    if ordered and mode == "last":
+        bias = r.new_empty(module.weight_numel).normal_().requires_grad_()
+        direct = (r @ matrix + bias)[pairs.inverse] + source[idx[0]] + target[idx[1]]
+        packed = indexed_weights(
+            r,
+            torch.cat((matrix, bias[None])),
+            ((source, idx[0]), (target, idx[1])),
+            edge_pairs=pairs,
+        )
+        actual = module(
+            x, y, packed.radial, packed.projection, idx, radial_network=packed.network
+        )
+        ref = module.reference(
+            x, y, direct, matrix.new_empty(0, module.weight_numel), idx, len(x)
+        )
+        inputs = (x, y, r, matrix, bias, source, target)
+        probes = [torch.randn_like(value) for value in inputs]
+        torch.testing.assert_close(actual, ref)
+        for i in range(2):
+            a = torch.autograd.grad(actual.sin().sum(), inputs, create_graph=i == 0)
+            b = torch.autograd.grad(ref.sin().sum(), inputs, create_graph=i == 0)
+            torch.testing.assert_close(a, b, rtol=1e-9, atol=1e-9)
+            if i == 0:
+                actual = sum((v * q).sum() for v, q in zip(a, probes))
+                ref = sum((v * q).sum() for v, q in zip(b, probes))
+    if ordered:
+        # Exactly enough room for pair outputs, not for last-mode hidden states.
+        monkeypatch.setattr(
+            config,
+            "RADIAL_PROJECT_MAX_BYTES",
+            len(r) * module.weight_numel * r.element_size(),
+        )
+        _, selected = network.bind_pairs(rad, module)
+        assert (selected.pair is None) == (mode == "full")
+        monkeypatch.setattr(
+            config, "RADIAL_PROJECT_MAX_BYTES", r.numel() * r.element_size()
+        )
+        _, selected = network.bind_pairs(rad, module)
+        assert selected.pair is not None and selected.network is None
+        torch.testing.assert_close(selected.pair.features, net(r))
+        hidden_only = module(x, y, rad, p, idx, radial_network=network)
+        torch.testing.assert_close(
+            hidden_only,
+            module.reference(
+                x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
+            ),
+        )
     # Large-table policy: keep the directed streaming kernel and narrow inputs.
     monkeypatch.setattr(config, "RADIAL_PROJECT_MAX_BYTES", 0)
     module.radial_mode = "full"
@@ -126,11 +173,13 @@ def test_pair_weight_derivatives(mode, ordered, device, double_precision, monkey
         out = module(x, y, rad, p, idx, radial_network=network)
     else:
         out = module(x, y, r, matrix, idx, radial_network=net, edge_pairs=pairs)
+    ref = module.reference(
+        x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
+    )
+    torch.testing.assert_close(out, ref)
     torch.testing.assert_close(
-        out,
-        module.reference(
-            x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
-        ),
+        torch.autograd.grad(out.square().sum(), variables),
+        torch.autograd.grad(ref.square().sum(), variables),
     )
 
 

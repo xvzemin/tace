@@ -9,6 +9,72 @@ from .. import config
 from .radial import materialize, radial_layers, radial_reference
 
 
+def project_rows(radial, projection, network, bias, backend, mode, rows):
+    """Evaluate an invariant radial program once per row, replaying it in full mode."""
+    from ...utils.program import Program
+    from .convolution import radial_input
+    from .edge import edge_program
+    from .weights import IndexedProjection, RadialWithContext
+
+    optimized = not (
+        config.TORCH_REFERENCE and (backend == "torch" or not radial.is_cuda)
+    )
+    if (
+        network is not None
+        and mode == "full"
+        and optimized
+        and (
+            torch.is_grad_enabled()
+            or projection is None
+            or hasattr(
+                network.network if isinstance(network, RadialWithContext) else network,
+                "to_edge_program",
+            )
+            or not statically_known_true(
+                pair_workspace(
+                    radial.shape[0],
+                    0,
+                    projection.shape[1],
+                    radial.element_size(),
+                    network,
+                    compact=True,
+                )
+                <= min(config.RADIAL_PROJECT_MAX_BYTES, config.PAIR_EAGER_MAX_BYTES)
+            )
+        )
+    ):
+        program, inputs = Program(), []
+        root = radial_input(program, inputs, radial, network)
+        if projection is not None:
+            if projection.shape[0] == program.size(root) + 1:
+                root = program.concatenate((root, program.constant(1, 1)))
+            root = IndexedProjection(projection, (), None, bias, None).to_edge_program(
+                inputs, program, root
+            )
+        metadata = repr((tuple(program.nodes), ((root, 0, "edge"),)))
+        return edge_program(
+            backend if radial.is_cuda else "torch",
+            metadata,
+            0,
+            rows,
+            rows,
+            *inputs,
+            inline=False,
+        )[0]
+    if network is not None:
+        radial = radial_reference(network, radial)
+    if projection is not None and projection.shape[0]:
+        if projection.shape[0] == radial.shape[1] + 1:
+            bias = projection[-1] if bias is None else projection[-1] + bias
+            projection = projection[:-1]
+        return (
+            radial @ projection
+            if bias is None
+            else torch.addmm(bias, radial, projection)
+        )
+    return radial if bias is None else radial + bias
+
+
 class EdgePairs(NamedTuple):
     """Representative edge indices and the pair index of each directed edge."""
 
@@ -102,10 +168,13 @@ def undirected_edge_pairs(edge_index, edge_shifts=None, *, num_nodes=None):
     return EdgePairs(representatives, inverse)
 
 
-def pair_workspace(rows, edges, width, itemsize, network, compact=False):
-    """Estimate the pair activations and the optional directed weight table."""
+def pair_workspace(rows, edges, width, itemsize, network, compact=False, mode="last"):
+    """Estimate retained pair features, excluding the separately tiled full-mode workspace."""
     from .weights import IndexedProjection, RadialWithContext
 
+    retained = (rows + (0 if compact else edges)) * width
+    if mode == "full":
+        return retained * itemsize
     while isinstance(network, (IndexedProjection, RadialWithContext)):
         network = network.network
     hidden = 0
@@ -123,7 +192,7 @@ def pair_workspace(rows, edges, width, itemsize, network, compact=False):
             )
             if isinstance(width_out, int):
                 hidden += width_out
-    return (rows * (width + hidden) + (0 if compact else edges * width)) * itemsize
+    return (retained + rows * hidden) * itemsize
 
 
 def reciprocal_weights(
@@ -169,15 +238,38 @@ def reciprocal_weights(
     # Preserve bounded streaming when even the directed weight gather would
     # exceed the existing projection budget. Expand the narrow input instead.
     if network is not None or (projection is not None and projection.shape[0]):
+        mode = radial_policy(module, network)
         size = pair_workspace(
-            rows.numel(), source.numel(), width, radial.element_size(), network, compact
+            rows.numel(),
+            source.numel(),
+            width,
+            radial.element_size(),
+            network,
+            compact,
+            mode,
         )
         bounded = (
             not statically_known_true(size <= config.RADIAL_PROJECT_MAX_BYTES)
-            if radial_policy(module, network) == "full"
+            if mode == "full"
             else statically_known_true(size > config.RADIAL_PROJECT_MAX_BYTES)
         )
         if bounded:
+            if (
+                compact
+                and projection is not None
+                and projection.shape[0]
+                and not isinstance(network, IndexedProjection)
+            ):
+                from .weights import indexed_weights
+
+                return indexed_weights(
+                    radial,
+                    projection,
+                    (),
+                    radial_network=network,
+                    radial_mode="full",
+                    edge_pairs=pairs,
+                )
             if isinstance(network, IndexedProjection):
                 network = network._replace(
                     terms=tuple((t, i[pairs.inverse]) for t, i in network.terms)
@@ -207,13 +299,15 @@ def reciprocal_weights(
         if 0 < hidden_width <= 128 and hidden_width < width and hidden:
             value = pairs.expand(radial_reference(hidden, radial))
             return ConvolutionWeights(value, projection, tail or None)
-    if network is not None:
-        radial = radial_reference(network, radial)
-    if projection is not None and projection.shape[0]:
-        if radial.shape[1] + 1 == projection.shape[0]:
-            radial = torch.addmm(projection[-1], radial, projection[:-1])
-        else:
-            radial = radial @ projection
+    radial = project_rows(
+        radial,
+        projection,
+        network,
+        None,
+        module.backend,
+        radial_policy(module, network),
+        rows,
+    )
     if radial.shape[1] != width:
         raise ValueError("The radial output width must equal weight_numel.")
     direct = radial if compact else pairs.expand(radial)

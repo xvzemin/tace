@@ -64,14 +64,13 @@ class O3CgtpInteraction(Interaction):
         if element is not None:
             table, endpoints = element
             ordered = isinstance(table, tuple)
-            terms = (
-                tuple(
-                    (t.to(projection) * 0.5, i)
-                    for t, i in zip(table, endpoints.unbind(0))
+            if ordered:
+                terms = (
+                    (table[0].to(projection) * 0.5, endpoints[0]),
+                    (table[1].to(projection) * 0.5, endpoints[1]),
                 )
-                if ordered
-                else ((table.to(projection), endpoints),)
-            )
+            else:
+                terms = ((table.to(projection), endpoints),)
             return indexed_weights(
                 radial,
                 projection,
@@ -218,6 +217,15 @@ class O3CgtpInteraction(Interaction):
             radial, projection, radial_network = self._radial_projection(
                 edge_feats, element, edge_pairs
             )
+            # Mixed-precision geometry already produced the spherical harmonics
+            # before the interaction. The native vector kernel requires like dtypes.
+            reuse_attrs = (
+                isinstance(self.rejector, O3TensorProductConv)
+                and edge_attrs is not None
+                and edge_attrs.shape[-1] == self.rejector.eqx_tp.edge_dim
+                and graph is not None
+                and graph.edge_vector.dtype != node_feats.dtype
+            )
             return self.rejector.forward_stream(
                 node_feats,
                 edge_attrs,
@@ -226,7 +234,7 @@ class O3CgtpInteraction(Interaction):
                 edge_index,
                 edge_cutoff,
                 edge_vector=graph.edge_vector / graph.edge_length.clamp_min(1e-12)
-                if graph is not None
+                if graph is not None and not reuse_attrs
                 else None,
                 radial_network=radial_network,
                 edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,

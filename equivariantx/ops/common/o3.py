@@ -79,9 +79,13 @@ def pair_reference(metadata, program, source, target, operands, pair_index):
         torch.zeros_like(v)
         for v in o3_outputs(metadata, program, source, target, operands)
     ]
+    maps = (pair_index,) if pair_index.ndim == 1 else pair_index.unbind(0)
     for mapping, weighted, destinations in terms:
         values = [operands[i] for i in mapping]
-        values[1] = values[1].index_select(0, pair_index)
+        table = values[1]
+        values[1] = sum(
+            (table.index_select(0, i) for i in maps[1:]), table.index_select(0, maps[0])
+        )
         slots = tuple((role, i) for i, (role, _) in enumerate(destinations))
         parts = torch_contraction(
             metadata,
@@ -92,7 +96,8 @@ def pair_reference(metadata, program, source, target, operands, pair_index):
         )
         for (role, slot), part in zip(destinations, parts):
             if role == 1:
-                outputs[slot] = outputs[slot].index_add(0, pair_index, part)
+                for i in maps:
+                    outputs[slot] = outputs[slot].index_add(0, i, part)
             else:
                 outputs[slot] = outputs[slot] + part
     return outputs

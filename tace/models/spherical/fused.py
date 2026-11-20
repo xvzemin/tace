@@ -13,7 +13,7 @@ from e3nn import o3
 from equivariantx import co3, o2
 from equivariantx import conv as eqx_conv
 from equivariantx.mbe.ace import UuuSymmetricContraction as EqxUuuSymmetricContraction
-from tace.utils.env import acceleration_enabled, select_acceleration
+from tace.utils.env import acceleration_enabled, memory_first, select_acceleration
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
@@ -344,6 +344,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
         self.eqx_tp = eqx_conv.CartesianTensorProductConv(
             self.tp,
             backend="cuda",
+            radial_mode="full" if memory_first() else "last",
             normalize=False,
             symmetric_inputs=True,
             input_basis="spherical",
@@ -440,7 +441,11 @@ class O3TensorProductConv(torch.nn.Module):
         self.weight_numel = self.tp.weight_numel
 
         self.eqx_tp = eqx_conv.O3TensorProductConv(
-            self.tp, normalize=False, batch_paths=True, backend="cuda"
+            self.tp,
+            normalize=False,
+            batch_paths=True,
+            backend="cuda",
+            radial_mode="full" if memory_first() else "last",
         )
         self.reshape_in = LayoutTransform(
             self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
@@ -592,7 +597,9 @@ class O2TensorProductConv(torch.nn.Module):
             shared_weights=False,
             backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
         )
-        self.eqx_tp = eqx_conv.O2O3TensorProductConv(self.tp, backend="cuda")
+        self.eqx_tp = eqx_conv.O2O3TensorProductConv(
+            self.tp, backend="cuda", radial_mode="full" if memory_first() else "last"
+        )
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
             self.irreps_in1,
