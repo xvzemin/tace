@@ -81,7 +81,7 @@ def activation_slope(layer, value):
     raise ValueError(f"Unsupported radial jet activation: {type(layer).__name__}")
 
 
-def hidden_jets(representation, radius, node_type, edge_index):
+def hidden_jets(representation, basis_fn, radius, node_type, edge_index):
     """Evaluate analytic scalar-radius JVPs without dual-tensor shape guards."""
     embedding = representation.edge_embedding
     if type(embedding).__name__ != "LinearEdgeEmbedding":
@@ -90,11 +90,9 @@ def hidden_jets(representation, radius, node_type, edge_index):
     if len(projection.weight) != 1 or len(projection.linear.instructions) != 1:
         raise ValueError("Expected one scalar radial embedding matrix")
     length = radius.detach()
-    basis, _ = representation.radial_basis(
-        length, node_type, edge_index, representation.atomic_numbers
-    )
+    basis, _ = basis_fn(length, node_type, edge_index, representation.atomic_numbers)
     basis = basis.to(representation.model_dtype)
-    slope = bessel_slope(representation.radial_basis, length).to(basis)
+    slope = bessel_slope(basis_fn, length).to(basis)
     weight = projection.weight[0] * projection.linear.instructions[0].path_weight
     radial, radial_slope = basis @ weight, slope @ weight
     if projection.bias is not None:

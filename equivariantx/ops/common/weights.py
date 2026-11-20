@@ -96,6 +96,13 @@ class RadialWithContext(torch.nn.Module):
         )
         return program.concatenate((hidden, program.slice(value, width, self.width)))
 
+    def narrow_edges(self, start, stop):
+        if hasattr(self.network, "narrow_edges"):
+            return RadialWithContext(
+                self.network.narrow_edges(start, stop), self.width, self.mode
+            )
+        return self
+
 
 class PairRadial(NamedTuple):
     features: torch.Tensor
@@ -143,6 +150,7 @@ class IndexedProjection(NamedTuple):
     scales: tuple = ()
     lookup_only: bool = False
     pair: PairRadial | None = None
+    term_envelope: torch.Tensor | None = None
 
     def bind_pairs(self, value, module):
         """Choose the pair producer using the consuming convolution's backend."""
@@ -201,6 +209,14 @@ class IndexedProjection(NamedTuple):
         )
         if table.shape[1] != self.projection.shape[1]:
             raise ValueError("Radial output width must match the path weights.")
+        if self.term_envelope is not None:
+            # Only the additional lookup terms receive the envelope, not the radial table.
+            return value, self._replace(
+                projection=self.projection.new_empty((0, table.shape[1])),
+                network=None,
+                bias=None,
+                pair=pair._replace(features=table),
+            )
         return value, self._replace(
             projection=self.projection.new_empty((0, table.shape[1])),
             terms=((table, pair.inverse), *self.terms),
@@ -218,6 +234,7 @@ class IndexedProjection(NamedTuple):
 
         return (
             self.pair is not None
+            and self.term_envelope is None
             and self.projection.shape[0] > 0
             and not torch.compiler.is_compiling()
             and not forward_ad_active()
@@ -281,7 +298,15 @@ class IndexedProjection(NamedTuple):
     def narrow_edges(self, start, stop):
         pair = self.pair
         return self._replace(
+            network=(
+                self.network.narrow_edges(start, stop)
+                if hasattr(self.network, "narrow_edges")
+                else self.network
+            ),
             terms=tuple((t, i[start:stop]) for t, i in self.terms),
+            term_envelope=None
+            if self.term_envelope is None
+            else self.term_envelope[start:stop],
             pair=None
             if pair is None
             else pair._replace(inverse=pair.inverse[start:stop]),
@@ -304,11 +329,10 @@ class IndexedProjection(NamedTuple):
         for i, (table, index) in enumerate(self.terms):
             if self.lookup_only and i == 0:
                 continue
-            value = torch.add(
-                value,
-                table.index_select(0, index),
-                alpha=self.scales[i] if self.scales else 1,
-            )
+            term = table.index_select(0, index)
+            if self.term_envelope is not None:
+                term = term * self.term_envelope
+            value = torch.add(value, term, alpha=self.scales[i] if self.scales else 1)
         return value
 
     def project(self, value, backend):
@@ -316,7 +340,7 @@ class IndexedProjection(NamedTuple):
         from .layout import gather_sum
         from .torch.layout import gather_sum as torch_gather_sum
 
-        if not self.terms or self.scales:
+        if not self.terms or self.scales or self.term_envelope is not None:
             return self.forward(value)
         tables, indices = map(list, zip(*self.terms))
         rows = indices[0].numel()
@@ -385,6 +409,11 @@ class IndexedProjection(NamedTuple):
             bias = program.input(len(inputs), "shared", width)
             inputs.append(self.bias.reshape(1, width))
             value = program.binary("add", value, bias)
+        envelope = None
+        if self.term_envelope is not None:
+            slot = program.input(len(inputs), "edge", 1)
+            inputs.append(self.term_envelope)
+            envelope = program.gather(slot, (0,) * width)
         slots = []
         for i, (table, index) in enumerate(self.terms):
             for previous, slot in slots:
@@ -398,6 +427,8 @@ class IndexedProjection(NamedTuple):
             inputs.append(index)
             if self.scales:
                 term = program.scale(term, self.scales[i])
+            if envelope is not None:
+                term = program.binary("mul", term, envelope)
             value = (
                 term
                 if self.lookup_only and i == 0
@@ -442,6 +473,7 @@ def indexed_weights(
     bias=None,
     radial_mode=None,
     edge_pairs=None,
+    term_envelope=None,
 ):
     """Add indexed rows to a convolution's radial path weights.
 
@@ -467,6 +499,8 @@ def indexed_weights(
     edge_pairs : equivariantx.conv.EdgePairs, optional
         Evaluate the invariant radial tensor on pair rows. Indices in
         ``terms`` are still directed, and may select different rows on reversal.
+    term_envelope : torch.Tensor, optional
+        Multiply only the indexed terms by this column, one value per lookup row.
 
     Returns
     -------
@@ -513,6 +547,14 @@ def indexed_weights(
             )
         if table.dtype != projection.dtype:
             raise ValueError("Tables and projection must have the same dtype.")
+        if term_envelope is not None and (
+            term_envelope.shape != (index.numel(), 1)
+            or term_envelope.dtype != projection.dtype
+            or term_envelope.device != projection.device
+        ):
+            raise ValueError(
+                "term_envelope must have one row per lookup and match the projection."
+            )
     pair = None
     if edge_pairs is not None:
         if (
@@ -577,7 +619,12 @@ def indexed_weights(
             <= config.RADIAL_PROJECT_MAX_BYTES
         )
     ):
-        contexts = tuple(rows.coefficients for _, rows in terms)
+        contexts = tuple(
+            rows.coefficients
+            if term_envelope is None
+            else rows.coefficients * term_envelope
+            for _, rows in terms
+        )
         matrices = (projection, *(table for table, _ in terms))
         if bias is not None:
             matrices = (*matrices, bias.unsqueeze(0))
@@ -625,6 +672,7 @@ def indexed_weights(
             radial_mode,
             tuple(scales) if any(s != 1.0 for s in scales) else (),
             pair=pair,
+            term_envelope=term_envelope,
         ),
     )
 

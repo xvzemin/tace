@@ -261,6 +261,39 @@ def test_unknown_model_mlp_type(mlp_type):
         check_model_config({"mlp_type": mlp_type})
 
 
+def test_multi_cutoff_configuration():
+    from tace.models.spherical.default import check_model_config
+
+    assert DEFAULT_MODEL_CONFIG["radial_basis"]["multi_cutoff"] is None
+    for multi_cutoff in (
+        3,
+        [],
+        [3, 2, 6],
+        [2, 2, 6],
+        [1, 5],
+        [0, 6],
+        [True, 6],
+        [float("nan"), 6],
+    ):
+        with pytest.raises(ValueError, match="strictly increasing radii"):
+            check_model_config(
+                {
+                    "cutoff": 6,
+                    "radial_basis": {
+                        "multi_cutoff": multi_cutoff,
+                        "apply_cutoff": False,
+                    },
+                }
+            )
+    for options in ({}, {"apply_cutoff": True}, {"apply_cutoff": None}):
+        with pytest.raises(
+            ValueError, match="multi_cutoff requires radial_basis.apply_cutoff=false"
+        ):
+            check_model_config(
+                {"cutoff": 6, "radial_basis": {"multi_cutoff": [2, 6], **options}}
+            )
+
+
 def test_model_config_defaults():
     from tace.models.spherical.default import check_model_config
 
@@ -279,8 +312,19 @@ def test_model_config_defaults():
         }
     )
     assert config["mlp_type"] == "mlp_v1"
-    deeper = check_model_config({"statistics": config["statistics"], "num_layers": 3})
+    assert config["max_neighbors"] is None
+    assert config["radial_basis"]["apply_cutoff"] is True
+    components = [0, "1o", 2]
+    deeper = check_model_config(
+        {
+            "statistics": config["statistics"],
+            "num_layers": 3,
+            "product_basis": {"return_components": components},
+        }
+    )
     assert deeper["product_basis"]["correlation"] == [2, 2, 2]
+    assert deeper["product_basis"]["return_components"] == ["0e", "1o", "2e"]
+    assert components == [0, "1o", 2]
     assert DEFAULT_MODEL_CONFIG["product_basis"]["correlation"] == 2
 
 

@@ -4,8 +4,10 @@ import warnings
 from statistics import median
 
 import torch
+from torch.utils._pytree import tree_leaves
 
-from ...ops.common.weights import IndexedProjection
+from ...ops.common.weights import IndexedProjection, RadialWithContext
+from ..radial import _PairBranches
 
 
 def select_method(
@@ -39,13 +41,48 @@ def select_method(
     inputs = features, projection, amplitudes, *(x for x, _ in parts), vectors
     network = radial_network
     external = ()
+    edge_inputs = ()
     if isinstance(network, IndexedProjection):
         external = (network.projection, *(t for t, _ in network.terms))
         if network.bias is not None:
             external += (network.bias,)
-        external = tuple(dict.fromkeys(external))
+        if network.term_envelope is not None:
+            edge_inputs += (network.term_envelope,)
+        if network.pair is not None:
+            edge_inputs += (network.pair.features,)
         network = network.network
-    parameters = external + (tuple(network.parameters()) if network is not None else ())
+    if isinstance(network, RadialWithContext):
+        network = network.network
+    if isinstance(network, _PairBranches):
+        edge_inputs += (network.features, network.inverse)
+        network = network.network
+    leaves = (
+        ()
+        if network is None
+        else (
+            (network,) if isinstance(network, torch.nn.Module) else tree_leaves(network)
+        )
+    )
+    layers = tuple(
+        dict.fromkeys(
+            child
+            for leaf in leaves
+            if isinstance(leaf, torch.nn.Module)
+            for child in leaf.modules()
+        )
+    )
+    external = tuple(
+        dict.fromkeys((*external, *(x for x in leaves if isinstance(x, torch.Tensor))))
+    )
+    parameters = tuple(
+        dict.fromkeys(
+            (
+                *external,
+                *edge_inputs,
+                *(p for layer in layers for p in layer.parameters(recurse=False)),
+            )
+        )
+    )
     required = tuple(torch.is_grad_enabled() and x.requires_grad for x in inputs)
     parameter_grads = tuple(
         torch.is_grad_enabled() and p.requires_grad for p in parameters
@@ -53,11 +90,14 @@ def select_method(
     order = (
         2 if module.training and required[-1] else int(any(required + parameter_grads))
     )
+
     # Neighbor counts vary between MD steps and training batches. Tune a size
     # range rather than recompiling and timing for each individual edge count.
+    def row_shape(x):
+        return (max(0, x.size(0) - 1).bit_length(), *x.shape[1:])
+
     shapes = tuple(
-        tuple(x.shape) if i == 1 else (max(0, x.size(0) - 1).bit_length(), *x.shape[1:])
-        for i, x in enumerate(inputs)
+        tuple(x.shape) if i == 1 else row_shape(x) for i, x in enumerate(inputs)
     )
     key = (
         features.device,
@@ -70,11 +110,11 @@ def select_method(
         parameter_grads,
         tuple(
             (type(layer), tuple(p.shape for p in layer.parameters(recurse=False)))
-            for layer in network.modules()
-        )
-        if network is not None
-        else (),
+            for layer in layers
+        ),
+        type(network),
         tuple(t.shape for t in external),
+        tuple(row_shape(t) for t in edge_inputs),
         tuple(kind for _, kind in parts),
         order,
         torch.get_float32_matmul_precision(),

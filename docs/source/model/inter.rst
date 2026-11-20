@@ -32,6 +32,37 @@ each module.
          hidden: [64, 64]
          mlp_norm: null
 
+Multi-cutoff radial weights
+--------------------------
+
+``radial_basis.multi_cutoff`` defaults to ``null`` (one radial network).
+For ``cgtp``, ``co3`` and ``o2_cgtp``, specify positive, strictly increasing
+radii in angstroms ending at the model cutoff:
+
+.. code-block:: yaml
+
+   model:
+     config:
+       cutoff: 6.0
+       radial_basis:
+         multi_cutoff: [2.0, 4.0, 6.0]
+         apply_cutoff: false
+
+An explicit list requires ``apply_cutoff: false``; omitting it retains the
+default ``true`` and raises a configuration error. All listed bases are stored
+in ``multi_cutoff_radial_basis`` in the specified order. At the same cutoff
+placement, ``[cutoff]`` and ``null`` use the same single radial MLP and give
+the same outputs for matching weights.
+Each interaction sums the outputs of independent radial MLPs before a single
+tensor product. Each MLP uses the basis and cutoff envelope for its own radius.
+For :math:`S` radii, TACE scales each MLP's final weight matrix by
+:math:`1/\sqrt{S}` at initialization only. The neighbor list uses the largest
+radius. The optional ``element`` or ``element2`` path correction is added once
+with the largest-radius envelope.
+With ``scatter_norm: cutoff``, each radial branch uses its own envelope in
+the numerator and denominator. The element correction uses the normalized
+envelope of the largest radius. Both EQX radial modes are supported.
+
 O(3) Cgtp
 ---------
 

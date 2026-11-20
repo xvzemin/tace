@@ -272,7 +272,10 @@ def reciprocal_weights(
                 )
             if isinstance(network, IndexedProjection):
                 network = network._replace(
-                    terms=tuple((t, i[pairs.inverse]) for t, i in network.terms)
+                    terms=tuple((t, i[pairs.inverse]) for t, i in network.terms),
+                    term_envelope=None
+                    if network.term_envelope is None
+                    else pairs.expand(network.term_envelope),
                 )
             return ConvolutionWeights(pairs.expand(radial), projection, network)
     if (

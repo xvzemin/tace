@@ -8,7 +8,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from equivariantx.conv import indexed_weights
+from equivariantx.conv import MultiCutoffRadial, indexed_weights
 from tace.utils.env import acceleration_enabled, memory_first
 
 from ..lammps import Graph
@@ -54,13 +54,31 @@ class O3CgtpInteraction(Interaction):
     def _setup_additional_modules(self) -> None:
         pass
 
-    def _radial_projection(self, edge_feats, element=None, edge_pairs=None):
-        radial, layers = convolution_radial(self.edge_info, edge_feats)
-        last = layers[-1]
-        projection = last.get_weight()
-        radial_network = (
-            layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
-        )
+    def _radial_projection(
+        self, edge_feats, element=None, edge_pairs=None, edge_index=None
+    ):
+        mode = "full" if memory_first() else "last"
+        envelope = None
+        if isinstance(self.edge_info, MultiCutoffRadial):
+            features, envelopes, radial_pairs = edge_feats
+            radial, projection, radial_network = self.edge_info.convolution_weights(
+                tuple(radial_features(value) for value in features),
+                envelopes,
+                radial_mode=mode,
+                edge_index=edge_index,
+                edge_pairs=radial_pairs,
+                backend=self.rejector.eqx_tp.backend,
+            )
+            bias = None
+            envelope = envelopes[:, -1:]
+        else:
+            radial, layers = convolution_radial(self.edge_info, edge_feats)
+            last = layers[-1]
+            projection = last.get_weight()
+            bias = last.bias
+            radial_network = (
+                layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
+            )
         if element is not None:
             table, endpoints = element
             ordered = isinstance(table, tuple)
@@ -69,6 +87,8 @@ class O3CgtpInteraction(Interaction):
                     (table[0].to(projection) * 0.5, endpoints[0]),
                     (table[1].to(projection) * 0.5, endpoints[1]),
                 )
+                if envelope is not None and edge_pairs is not None:
+                    envelope = edge_pairs.expand(envelope)
             else:
                 terms = ((table.to(projection), endpoints),)
             return indexed_weights(
@@ -76,24 +96,38 @@ class O3CgtpInteraction(Interaction):
                 projection,
                 terms,
                 radial_network=radial_network,
-                bias=last.bias,
-                radial_mode="full" if memory_first() else "last",
+                bias=bias,
+                radial_mode=mode,
                 edge_pairs=edge_pairs if ordered else None,
+                term_envelope=envelope,
             )
-        if last.bias is not None:
-            projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
+        if bias is not None:
+            projection = torch.cat((projection, bias.unsqueeze(0)), dim=0)
             if radial_network is None:
                 radial = torch.cat((radial, torch.ones_like(radial[:, :1])), dim=-1)
         return radial, projection, radial_network
 
-    def _conv_weights(self, edge_feats, element):
-        weights = self.edge_info(edge_feats)
+    def _conv_weights(self, edge_feats, element, edge_pairs=None):
+        envelope = None
+        if isinstance(self.edge_info, MultiCutoffRadial):
+            features, envelopes, radial_pairs = edge_feats
+            weights = self.edge_info(features, envelopes, edge_pairs=radial_pairs)
+            envelope = envelopes[:, -1:]
+        else:
+            weights = self.edge_info(edge_feats)
         if element is not None:
             table, endpoints = element
+            if edge_pairs is not None and isinstance(table, tuple):
+                weights = edge_pairs.expand(weights)
+                if envelope is not None:
+                    envelope = edge_pairs.expand(envelope)
+                edge_pairs = None
             a, b = table if isinstance(table, tuple) else (table, table)
             offset = a[endpoints[0]] + b[endpoints[1]]
+            if envelope is not None:
+                offset = offset * envelope
             weights = torch.add(weights, offset.to(weights), alpha=0.5)
-        return weights
+        return weights if edge_pairs is None else edge_pairs.expand(weights)
 
     def _setup(self) -> None:
         self._prepare_setup()
@@ -132,13 +166,27 @@ class O3CgtpInteraction(Interaction):
                 if self.mlp_type == "mlp_v1" and self.radial_layer_norm
                 else None
             )
-        self.edge_info = MLP[self.mlp_type](
-            [self.edge_feats_channel] + self.radial_mlp + [self.rejector.weight_numel],
-            bias=self.radial_bias,
-            layer_norm=radial_norm == "layer_norm",
-            rms_norm=radial_norm == "rms_norm",
-            act="silu",
-        )
+
+        def radial_mlp():
+            return MLP[self.mlp_type](
+                [self.edge_feats_channel]
+                + self.radial_mlp
+                + [self.rejector.weight_numel],
+                bias=self.radial_bias,
+                layer_norm=radial_norm == "layer_norm",
+                rms_norm=radial_norm == "rms_norm",
+                act="silu",
+            )
+
+        if self.multi_cutoff is not None and len(self.multi_cutoff) > 1:
+            networks = [radial_mlp() for _ in self.multi_cutoff]
+            output_scale = len(networks) ** -0.5
+            with torch.no_grad():
+                for network in networks:
+                    network.mlp[-1].weight.mul_(output_scale)
+            self.edge_info = MultiCutoffRadial(networks)
+        else:
+            self.edge_info = radial_mlp()
         self._setup_additional_modules()
 
         self.scatter_norm = get_scatter_norm_layer(
@@ -215,7 +263,7 @@ class O3CgtpInteraction(Interaction):
     ) -> torch.Tensor:
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(
-                edge_feats, element, edge_pairs
+                edge_feats, element, edge_pairs, edge_index
             )
             # Mixed-precision geometry already produced the spherical harmonics
             # before the interaction. The native vector kernel requires like dtypes.
@@ -239,7 +287,7 @@ class O3CgtpInteraction(Interaction):
                 radial_network=radial_network,
                 edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,
             )
-        conv_weights = self._conv_weights(edge_feats, element)
+        conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
         return self.rejector(node_feats, edge_attrs, conv_weights, edge_index)
@@ -265,6 +313,7 @@ class O3CgtpInteraction(Interaction):
         message_cutoff: torch.Tensor | None = None,
         element: tuple[torch.Tensor, torch.Tensor | None] | None = None,
         edge_pairs=None,
+        multi_radial=None,
     ):
 
         lmp_data = graph.lmp_data
@@ -275,6 +324,7 @@ class O3CgtpInteraction(Interaction):
         # retains the partitions until each edge tile is evaluated.
         if (
             isinstance(edge_feats, tuple)
+            and multi_radial is None
             and self.edge_info.num_layers == 1
             and not self.use_eqx
         ):
@@ -318,22 +368,34 @@ class O3CgtpInteraction(Interaction):
         )
         if element is not None:
             message_inputs["element"] = element
-        if edge_pairs is not None:
-            message_inputs["edge_pairs"] = edge_pairs
+        conv_features = edge_feats
+        conv_pairs = edge_pairs
         if isinstance(self.scatter_norm, CutoffScatterNorm):
             if message_cutoff is None:
+                envelopes = edge_cutoff if multi_radial is None else multi_radial[1]
+                if multi_radial is not None and edge_pairs is not None:
+                    envelopes = edge_pairs.expand(envelopes)
                 message_cutoff = self.scatter_norm.edge_weights(
-                    edge_cutoff, edge_index[1], node_types.size(0)
+                    envelopes, edge_index[1], node_types.size(0)
                 )
+            if multi_radial is not None:
+                # Share the radial features, not the target-dependent branch weights.
+                conv_features = (multi_radial[0], message_cutoff, edge_pairs)
+                conv_pairs = None
+                message_cutoff = None
         else:
-            message_cutoff = edge_cutoff
+            message_cutoff = edge_cutoff if multi_radial is None else None
+            if multi_radial is not None:
+                conv_features = (*multi_radial, None)
+        if conv_pairs is not None:
+            message_inputs["edge_pairs"] = conv_pairs
         m_i = self.linear_down(
             self.truncate_ghosts(
                 self._compute_messages(
                     node_feats,
                     node_types,
                     edge_radial_basis,
-                    edge_feats,
+                    conv_features,
                     edge_attrs,
                     edge_index,
                     message_cutoff,
@@ -349,7 +411,12 @@ class O3CgtpInteraction(Interaction):
         )
 
         m_i = self.scatter_norm(
-            m_i, edge_feats, edge_index, edge_cutoff, node_types.size(0)
+            m_i,
+            edge_feats,
+            edge_index,
+            edge_cutoff,
+            node_types.size(0),
+            edge_pairs=edge_pairs,
         )
 
         m_i = self.linear_nonlinearity(self.nonlinearity(m_i))
@@ -437,7 +504,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
     ) -> torch.Tensor:
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(
-                edge_feats, element, edge_pairs
+                edge_feats, element, edge_pairs, edge_index
             )
             return self.rejector.forward_stream(
                 node_feats,
@@ -450,7 +517,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
                 radial_network=radial_network,
                 edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,
             )
-        conv_weights = self._conv_weights(edge_feats, element)
+        conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
         return self.rejector(

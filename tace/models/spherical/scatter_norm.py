@@ -7,6 +7,7 @@ import abc
 
 import torch
 
+from equivariantx.conv import EdgePairs
 from tace.utils.torch_scatter import scatter_sum
 
 from ..linear import IndexedFeatures
@@ -53,6 +54,7 @@ class ScatterNorm(torch.nn.Module):
         edge_index: torch.Tensor,
         edge_cutoff: torch.Tensor | None,
         num_nodes: int,
+        edge_pairs: EdgePairs | None = None,
     ) -> torch.Tensor:
         """Normalize local node features using edges over local and ghost nodes."""
         raise NotImplementedError
@@ -68,6 +70,7 @@ class IdentityScatterNorm(ScatterNorm):
         edge_index: torch.Tensor,
         edge_cutoff: torch.Tensor | None,
         num_nodes: int,
+        edge_pairs: EdgePairs | None = None,
     ) -> torch.Tensor:
         return node_feats
 
@@ -78,7 +81,7 @@ class CutoffScatterNorm(IdentityScatterNorm):
     def edge_weights(
         edge_cutoff: torch.Tensor | None, target: torch.Tensor, num_nodes: int
     ) -> torch.Tensor:
-        """Map cutoff values of shape ``(num_edges, 1)`` to message amplitudes."""
+        """Normalize each cutoff column over the other edges entering the same node."""
         if edge_cutoff is None:
             raise ValueError(
                 "scatter_norm='cutoff' requires radial_basis.apply_cutoff=false."
@@ -100,6 +103,7 @@ class AvgNumNeighborsScatterNorm(ScatterNorm):
         edge_index: torch.Tensor,
         edge_cutoff: torch.Tensor | None,
         num_nodes: int,
+        edge_pairs: EdgePairs | None = None,
     ) -> torch.Tensor:
         return node_feats / self.avg_num_neighbors
 
@@ -114,6 +118,7 @@ class SqrtAvgNumNeighborsScatterNorm(ScatterNorm):
         edge_index: torch.Tensor,
         edge_cutoff: torch.Tensor | None,
         num_nodes: int,
+        edge_pairs: EdgePairs | None = None,
     ) -> torch.Tensor:
         return node_feats / self.avg_num_neighbors**0.5
 
@@ -161,8 +166,11 @@ class DensityScatterNorm(ScatterNorm):
         edge_index: torch.Tensor,
         edge_cutoff: torch.Tensor | None,
         num_nodes: int,
+        edge_pairs: EdgePairs | None = None,
     ) -> torch.Tensor:
         density = torch.tanh(self.edge_density(edge_feats) ** 2)
+        if edge_pairs is not None:
+            density = edge_pairs.expand(density)
         if edge_cutoff is not None and self.apply_cutoff:
             density = density * edge_cutoff
         density = scatter_sum(density, edge_index[1], dim=0, dim_size=num_nodes)

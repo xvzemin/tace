@@ -92,9 +92,9 @@ class NodeRepresentation(torch.nn.Module):
         self.use_dens = get_tace_use_dens() == "1"
 
         # === radial basis ===
-        self.radial_basis = RadialBasis(
-            cutoff=cutoff,
-            num_basis=radial_basis["num_radial_basis"],
+        num_radial_basis = radial_basis["num_radial_basis"]
+        radial_options = dict(
+            num_basis=num_radial_basis,
             cutoff_fn=radial_basis["cutoff_fn"],
             polynomial_cutoff=radial_basis["polynomial_cutoff"],
             radial_basis=radial_basis["radial_basis"],
@@ -103,12 +103,27 @@ class NodeRepresentation(torch.nn.Module):
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],
         )
+        multi_cutoff = radial_basis["multi_cutoff"]
+        if multi_cutoff is None:
+            self.radial_basis = RadialBasis(cutoff=cutoff, **radial_options)
+            self.multi_cutoff_radial_basis = None
+        else:
+            self.multi_cutoff_radial_basis = torch.nn.ModuleList(
+                RadialBasis(cutoff=r, **radial_options) for r in multi_cutoff
+            )
 
         # === module classes ===
         node_embedding_cls = NODE_EMBEDDING[node_embedding["type"]]
         interaction_classes = [
             INTERACTION[interaction] for interaction in atomic_basis["type"]
         ]
+        equivalent_cgtp = (O3CgtpInteraction, O2CgtpInteraction, O3IctdInteraction)
+        if multi_cutoff is not None and any(
+            cls not in equivalent_cgtp for cls in interaction_classes
+        ):
+            raise ValueError(
+                "multi_cutoff supports only cgtp and its co3 and o2_cgtp equivalents."
+            )
         self.reciprocal_radial = (
             edge_update["type"] == "identity"
             and all(
@@ -126,8 +141,7 @@ class NodeRepresentation(torch.nn.Module):
             in ("identity", "linear", "nonlinear", "element", "element2")
         )
         if edge_embedding["type"] in ("element", "element2") and any(
-            cls not in (O3CgtpInteraction, O2CgtpInteraction, O3IctdInteraction)
-            for cls in interaction_classes
+            cls not in equivalent_cgtp for cls in interaction_classes
         ):
             raise ValueError(
                 "Element edge embedding requires CGTP convolution paths in every layer."
@@ -273,7 +287,7 @@ class NodeRepresentation(torch.nn.Module):
         # === node/edge embedding ===
         self.node_embedding = node_embedding_cls(
             num_elements=self.num_elements,
-            num_radial_basis=self.radial_basis.num_basis,
+            num_radial_basis=num_radial_basis,
             num_channel=num_channel,
             Lmax=Lmax,
             lmax=lmax,
@@ -285,7 +299,7 @@ class NodeRepresentation(torch.nn.Module):
         )
         self.edge_embedding = EDGE_EMBEDDING[edge_embedding["type"]](
             num_elements=self.num_elements,
-            num_radial_basis=self.radial_basis.num_basis,
+            num_radial_basis=num_radial_basis,
             num_channel=num_channel,
             bias=False,
         )
@@ -310,7 +324,7 @@ class NodeRepresentation(torch.nn.Module):
                     layer=layer,
                     num_layers=num_layers,
                     num_elements=self.num_elements,
-                    num_radial_basis=self.radial_basis.num_basis,
+                    num_radial_basis=num_radial_basis,
                     edge_embedding_channel=self.edge_embedding.out_dim,
                     num_channel=num_channel,
                 )
@@ -367,9 +381,10 @@ class NodeRepresentation(torch.nn.Module):
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "path_irreps": path_irreps,
-            "num_radial_basis": radial_basis["num_radial_basis"],
+            "num_radial_basis": num_radial_basis,
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
+            "multi_cutoff": multi_cutoff,
             "radial_bias": radial_basis["bias"],
             "mlp_type": mlp_type,
             "radial_mlp_norm": radial_basis["mlp_norm"],
@@ -562,22 +577,35 @@ class NodeRepresentation(torch.nn.Module):
             if pairs is None
             else graph.edge_length[pairs.representatives]
         )
-        pair_basis, pair_cutoff = self.radial_basis(
-            radial_length,
-            node_type,
-            radial_index,
-            self.atomic_numbers,
+        radial_bases = (
+            (self.radial_basis,)
+            if self.multi_cutoff_radial_basis is None
+            else self.multi_cutoff_radial_basis
         )
-        edge_cutoff = (
-            pair_cutoff
-            if pairs is None or pair_cutoff is None
-            else pairs.expand(pair_cutoff)
+        num_scales = len(radial_bases)
+        radial_inputs = [
+            basis(radial_length, node_type, radial_index, self.atomic_numbers)
+            for basis in radial_bases
+        ]
+        pair_basis, pair_cutoff = radial_inputs[-1]
+        envelopes = (
+            torch.cat([c for _, c in radial_inputs], dim=-1)
+            if num_scales > 1
+            else pair_cutoff
         )
         message_cutoff = None
         if self.use_cutoff_scatter_norm:
+            directed = envelopes if pairs is None else pairs.expand(envelopes)
             message_cutoff = CutoffScatterNorm.edge_weights(
-                edge_cutoff, data["edge_index"][1], node_type.size(0)
+                directed, data["edge_index"][1], node_type.size(0)
             ).to(self.model_dtype)
+            edge_cutoff = directed[:, -1:]
+        else:
+            edge_cutoff = (
+                pair_cutoff
+                if pairs is None or pair_cutoff is None
+                else pairs.expand(pair_cutoff)
+            )
 
         # === angular basis ===
         edge_wigner = None
@@ -687,9 +715,24 @@ class NodeRepresentation(torch.nn.Module):
             radial_index,
             None if pair_cutoff is None else pair_cutoff.to(self.model_dtype),
         )
+        if num_scales > 1:
+            envelopes = envelopes.to(self.model_dtype)
+            inner_features = [
+                self.edge_embedding(
+                    node_feats,
+                    node_type,
+                    b.to(self.model_dtype),
+                    radial_index,
+                    envelopes[:, s : s + 1],
+                )
+                for s, (b, _) in enumerate(radial_inputs[:-1])
+            ]
         directed_elements = isinstance(self.edge_embedding, Element2EdgeEmbedding)
+        directed_weights = directed_elements or (
+            num_scales > 1 and self.use_cutoff_scatter_norm
+        )
         endpoint_types = (
-            node_type[data["edge_index"] if directed_elements else radial_index]
+            node_type[data["edge_index"] if directed_weights else radial_index]
             if isinstance(self.edge_embedding, ElementEdgeEmbedding)
             else None
         )
@@ -739,6 +782,21 @@ class NodeRepresentation(torch.nn.Module):
             if graph.lmp and idx > 0:
                 local_node_type = node_type_local
             interaction_inputs = {}
+            if num_scales > 1:
+                features = tuple(
+                    edge_update(
+                        node_feats,
+                        node_types,
+                        feat,
+                        data["edge_index"],
+                        envelopes[:, s : s + 1],
+                    )
+                    for s, feat in enumerate(inner_features)
+                )
+                interaction_inputs["multi_radial"] = (
+                    (*features, this_edge_feats),
+                    envelopes,
+                )
             if pairs is not None:
                 interaction_inputs["edge_pairs"] = pairs
             if isinstance(inter, O3MagneticWigner6jInteraction):

@@ -11,6 +11,26 @@ from .. import config
 from ..precision import validate_precision
 
 
+def radial_linear_weight(layer):
+    """Return a radial layer's scaled input-by-output matrix."""
+    if isinstance(layer, torch.nn.Linear):
+        weight = layer.weight.T
+    elif hasattr(layer, "get_weight"):
+        weight = layer.get_weight()
+    elif hasattr(layer, "weights"):
+        weight = layer.weights
+    else:
+        weight = layer.weight
+        if hasattr(layer, "alpha"):
+            weight = weight * layer.alpha
+    if hasattr(layer, "h_in"):
+        scale = layer.h_in * layer.var_in
+        if layer.act is None:
+            scale /= layer.var_out
+        weight = weight / math.sqrt(scale)
+    return weight
+
+
 def radial_program(network, inputs, program, value):
     """Append a radial network to an edge expression graph.
 
@@ -52,22 +72,12 @@ def radial_program(network, inputs, program, value):
                 value = program.binary("mul", value, parameter(layer.weight))
             if getattr(layer, "bias", None) is not None:
                 value = program.binary("add", value, parameter(layer.bias))
-        elif hasattr(layer, "weight") or hasattr(layer, "weights"):
-            if isinstance(layer, torch.nn.Linear):
-                weight = layer.weight.T
-            elif hasattr(layer, "get_weight"):
-                weight = layer.get_weight()
-            elif hasattr(layer, "weights"):
-                weight = layer.weights
-            else:
-                weight = layer.weight
-                if hasattr(layer, "alpha"):
-                    weight = weight * layer.alpha
-            if hasattr(layer, "h_in"):
-                scale = layer.h_in * layer.var_in
-                if layer.act is None:
-                    scale /= layer.var_out
-                weight = weight / math.sqrt(scale)
+        elif (
+            hasattr(layer, "weight")
+            or hasattr(layer, "weights")
+            or hasattr(layer, "get_weight")
+        ):
+            weight = radial_linear_weight(layer)
             if weight.ndim != 2 or weight.shape[0] != program.size(value):
                 raise ValueError("Radial linear weight has an incompatible shape.")
             rows, columns = static_dimensions(weight)

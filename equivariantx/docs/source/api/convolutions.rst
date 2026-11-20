@@ -45,6 +45,9 @@ map can also reduce repeated table gradients by matrix multiplication.
 
 .. autofunction:: equivariantx.conv.indexed_rows
 
+.. autoclass:: equivariantx.conv.MultiCutoffRadial
+   :members: convolution_weights
+
 .. autofunction:: equivariantx.conv.undirected_edge_pairs
 
 For reciprocal weights, pass pair-sized radial inputs and ``edge_pairs=pairs``

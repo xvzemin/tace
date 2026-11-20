@@ -9,6 +9,7 @@ from ..ops.common.weights import ConvolutionWeights, indexed_rows, indexed_weigh
 from .attention import StreamingGraphAttention
 from .co3 import CartesianTensorProductConv
 from .o2_o3 import O2O3TensorProductConv
+from .radial import MultiCutoffRadial
 from .uu_o2 import UuO2TensorProductConv
 from .uv_o2 import UvO2TensorProductConv
 
@@ -16,6 +17,7 @@ __all__ = [
     "EdgePairs",
     "undirected_edge_pairs",
     "ConvolutionWeights",
+    "MultiCutoffRadial",
     "indexed_weights",
     "indexed_rows",
     "CartesianTensorProductConv",

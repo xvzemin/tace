@@ -13,6 +13,9 @@ from typing import Any
 from ...dataset.quantity import PROPERTIES
 from ..mlp import MLP
 
+# Most defaults are suitable for general use. Some are no longer recommended,
+# but must remain unchanged for compatibility with existing models and configurations.
+# After merging defaults, raise on conflicting options instead of overriding them.
 DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
     "Lmax": 2,
@@ -20,6 +23,7 @@ DEFAULT_MODEL_CONFIG = {
     "parity": None,
     "num_channel": 64,
     "num_layers": 2,
+    "max_neighbors": None,
     "mlp_type": "mlp_v1",
     "target_property": ["energy", "forces"],
     "embedding_property": [],
@@ -43,6 +47,7 @@ DEFAULT_MODEL_CONFIG = {
     "radial_basis": {
         "bias": False,
         "radial_basis": "j0",
+        "multi_cutoff": None,
         "num_radial_basis": 8,
         "num_mag_radial_basis": 10,
         "distance_transform": None,
@@ -159,37 +164,17 @@ DEFAULT_MODEL_CONFIG = {
 
 
 def recursive_update(
-    cfg: dict[str, Any],
+    cfg: Mapping[str, Any],
     *,
     default: dict[str, Any] = DEFAULT_MODEL_CONFIG,
 ) -> dict[str, Any]:
-    """
-    Recursively update `default` with `cfg`.
-
-    Rules:
-    - if key not in cfg: keep default
-    - if both values are dict: recurse
-    - otherwise: cfg overrides default
-    """
-    result = {}
-
-    for key, default_val in default.items():
+    """Merge nested model defaults with user overrides, retaining extra keys."""
+    result = {**default, **cfg}
+    for key, value in default.items():
         if key not in cfg:
-            result[key] = deepcopy(default_val)
-            continue
-
-        cfg_val = cfg[key]
-
-        if isinstance(default_val, dict) and isinstance(cfg_val, dict):
-            result[key] = recursive_update(cfg_val, default=default_val)
-        else:
-            result[key] = cfg_val
-
-    # allow cfg to introduce new keys
-    for key, cfg_val in cfg.items():
-        if key not in result:
-            result[key] = cfg_val
-
+            result[key] = deepcopy(value)
+        elif isinstance(value, dict) and isinstance(cfg[key], Mapping):
+            result[key] = recursive_update(cfg[key], default=value)
     return result
 
 
@@ -209,10 +194,12 @@ def get_equivariant_property(ue: dict) -> list[str]:
     return equivariant_property
 
 
-def check_model_config(cfg: dict[str, Any]):
-
-    # Update default config with user config
+def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Merge model defaults, validate options, and resolve per-layer settings."""
     cfg = recursive_update(cfg)
+    radial = cfg["radial_basis"]
+    atomic_basis = cfg["atomic_basis"]
+    product_basis = cfg["product_basis"]
 
     if cfg["mlp_type"] not in MLP:
         raise ValueError("mlp_type must be 'mlp_v1' or 'mlp_v2'.")
@@ -221,64 +208,64 @@ def check_model_config(cfg: dict[str, Any]):
             "layer_norm.final_norm_type='const_norm' is not supported. "
             "Use 'const_norm' only for layer_norm.pre_norm_type."
         )
-    radial = cfg["radial_basis"]
+    multi_cutoff = radial["multi_cutoff"]
+    if multi_cutoff is not None and (
+        not isinstance(multi_cutoff, list)
+        or not multi_cutoff
+        or any(
+            isinstance(r, bool)
+            or not isinstance(r, Real)
+            or not math.isfinite(r)
+            or r <= 0
+            for r in multi_cutoff
+        )
+        or any(a >= b for a, b in zip(multi_cutoff, multi_cutoff[1:]))
+        or multi_cutoff[-1] != cfg["cutoff"]
+    ):
+        raise ValueError(
+            "radial_basis.multi_cutoff must be a nonempty list of positive, "
+            "strictly increasing radii ending at model.config.cutoff."
+        )
     if "mlp_type" in radial:
         raise ValueError("Set model.config.mlp_type instead of radial_basis.mlp_type.")
     if radial["mlp_norm"] not in (None, "layer_norm", "rms_norm"):
         raise ValueError(
             "radial_basis.mlp_norm must be null, 'layer_norm' or 'rms_norm'."
         )
-    if cfg["edge_embedding"]["type"] in ("element", "element2"):
-        if cfg["edge_update"]["type"] != "identity":
-            raise ValueError(
-                "Element path embeddings require edge_update.type='identity'."
-            )
-        if radial["apply_cutoff"]:
-            raise ValueError(
-                "Element path embeddings require radial_basis.apply_cutoff=false "
-                "to cut off both the radial and element weights."
-            )
-    if cfg["edge_update"]["type"] == "element2_v2" and radial["apply_cutoff"]:
-        raise ValueError(
-            "edge_update.type='element2_v2' requires radial_basis.apply_cutoff=false "
-            "to apply the cutoff after the radial MLP."
-        )
-    if cfg["atomic_basis"]["scatter_norm"] == "cutoff" and radial["apply_cutoff"]:
-        raise ValueError(
-            "scatter_norm='cutoff' requires radial_basis.apply_cutoff=false "
-            "to apply the normalized cutoff to messages."
-        )
-
-    universal_embedding = cfg.get("universal_embedding")
-    if isinstance(universal_embedding, Mapping):
-        cfg = cfg.copy()
-        cfg["universal_embedding"] = {
-            name: value
-            for name, value in universal_embedding.items()
-            if name in DEFAULT_MODEL_CONFIG["universal_embedding"]
-        }
+    embedding = cfg["edge_embedding"]["type"]
+    update = cfg["edge_update"]["type"]
+    element_paths = embedding in ("element", "element2")
+    if element_paths and update != "identity":
+        raise ValueError("Element path embeddings require edge_update.type='identity'.")
+    if radial["apply_cutoff"] is not False:
+        for enabled, option in (
+            (multi_cutoff is not None, "radial_basis.multi_cutoff"),
+            (element_paths, f"edge_embedding.type='{embedding}'"),
+            (update == "element2_v2", "edge_update.type='element2_v2'"),
+            (atomic_basis["scatter_norm"] == "cutoff", "scatter_norm='cutoff'"),
+        ):
+            if enabled:
+                raise ValueError(f"{option} requires radial_basis.apply_cutoff=false.")
 
     magnetic_lmax = cfg["angular_basis"]["magnetic_Lmax"]
     if not isinstance(magnetic_lmax, int) or magnetic_lmax < 1:
         raise ValueError("angular_basis.magnetic_Lmax must be a positive integer.")
-    num_mag_radial_basis = cfg["radial_basis"]["num_mag_radial_basis"]
+    num_mag_radial_basis = radial["num_mag_radial_basis"]
     if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:
         raise ValueError("radial_basis.num_mag_radial_basis must be positive.")
 
-    if cfg.get("max_neighbors") is not None:
+    if cfg["max_neighbors"] is not None:
         raise ValueError(
-            "TACE does not "
-            "truncate neighbor lists. Set `max_neighbors: null` in the model "
-            "configuration."
+            "TACE does not truncate neighbor lists. Set `max_neighbors: null`."
         )
 
-    # Update statistics info
+    statistics = cfg["statistics"]
     cfg["atomic_numbers"] = sorted(
-        {z for s in cfg["statistics"] for z in s["atomic_numbers"]}
+        {z for stats in statistics for z in stats["atomic_numbers"]}
     )
-    cfg["avg_num_neighbors"] = sum(
-        s["avg_num_neighbors"] for s in cfg["statistics"]
-    ) / len(cfg["statistics"])
+    cfg["avg_num_neighbors"] = sum(s["avg_num_neighbors"] for s in statistics) / len(
+        statistics
+    )
 
     fidelity = cfg["fidelity"]
     if isinstance(fidelity, Mapping):
@@ -287,12 +274,8 @@ def check_model_config(cfg: dict[str, Any]):
     for idx, fidelity_config in enumerate(fidelity):
         magnetic_scale = fidelity_config.get("magnetic_scale")
         if magnetic_scale is None:
-            if idx >= len(cfg["statistics"]):
-                magnetic_scales = []
-                break
-            magnetic_scale = cfg["statistics"][idx].get(
-                "max_noncollinear_magmoms_norm_by_element"
-            )
+            stats = statistics[idx] if idx < len(statistics) else {}
+            magnetic_scale = stats.get("max_noncollinear_magmoms_norm_by_element")
             if magnetic_scale is None:
                 magnetic_scales = []
                 break
@@ -325,43 +308,44 @@ def check_model_config(cfg: dict[str, Any]):
     cfg["magnetic_scale"] = magnetic_scales or None
 
     cfg["atomic_energies"] = (
-        [stats["atomic_energy"] for stats in cfg["statistics"]]
+        [stats["atomic_energy"] for stats in statistics]
         if "energy" in cfg["target_property"]
         else None
     )
 
-    # Universal_embedding
-    cfg["invariant_property"] = get_invariant_property(cfg["universal_embedding"])
-    cfg["equivariant_property"] = get_equivariant_property(cfg["universal_embedding"])
+    universal_embedding = {
+        name: cfg["universal_embedding"][name]
+        for name in DEFAULT_MODEL_CONFIG["universal_embedding"]
+    }
+    cfg["universal_embedding"] = universal_embedding
+    cfg["invariant_property"] = get_invariant_property(universal_embedding)
+    cfg["equivariant_property"] = get_equivariant_property(universal_embedding)
 
-    # Update to list use num_layers
-    def _to_list(x):
-        if isinstance(x, int) or isinstance(x, str) or x is None:
-            return [x for _ in range(cfg["num_layers"])]
-        assert isinstance(x, list)
-        return x
+    for block, keys in (
+        (atomic_basis, ("type", "nonlinear", "edge_nonlinear")),
+        (product_basis, ("type", "correlation")),
+    ):
+        for key in keys:
+            value = block[key]
+            if isinstance(value, (int, str)) or value is None:
+                block[key] = [value] * cfg["num_layers"]
+            elif not isinstance(value, list):
+                raise TypeError(
+                    f"{key} must be a scalar or a list of per-layer values."
+                )
 
-    # cfg['Lmax'] = _to_list(cfg['Lmax'])
-    cfg["product_basis"]["correlation"] = _to_list(cfg["product_basis"]["correlation"])
-    cfg["atomic_basis"]["type"] = _to_list(cfg["atomic_basis"]["type"])
-    cfg["product_basis"]["type"] = _to_list(cfg["product_basis"]["type"])
-    cfg["atomic_basis"]["nonlinear"] = _to_list(cfg["atomic_basis"]["nonlinear"])
-    cfg["atomic_basis"]["edge_nonlinear"] = _to_list(
-        cfg["atomic_basis"]["edge_nonlinear"]
-    )
-
-    # if cfg['parity']: assert 'so2' not in cfg['atomic_basis']['type'], "When using SO(2) Interaction, set parity: false"
-    components = cfg["product_basis"]["return_components"]
-    if isinstance(components, list):
-        for idx, int_or_irrep in enumerate(components):
-            if isinstance(int_or_irrep, int):
-                parity = "e" if int_or_irrep % 2 == 0 else "o"
-                components[idx] = f"{int_or_irrep}{parity}"
-            else:
-                assert isinstance(int_or_irrep, str)
-    else:
-        assert components is None
-    cfg["product_basis"]["return_components"] = components
+    components = product_basis["return_components"]
+    if components is not None:
+        if not isinstance(components, list) or not all(
+            isinstance(c, (int, str)) for c in components
+        ):
+            raise TypeError(
+                "product_basis.return_components must be a list of degrees or irreps."
+            )
+        product_basis["return_components"] = [
+            f"{c}{'o' if c % 2 else 'e'}" if isinstance(c, int) else c
+            for c in components
+        ]
 
     if (
         cfg["scale_shift"]["enable"]
@@ -374,7 +358,7 @@ def check_model_config(cfg: dict[str, Any]):
             "atoms differently when evaluated alone. Do not use it for new "
             "models; set all_atoms=True."
         )
-    if cfg["atomic_basis"]["scatter_norm"] == "no_cutoff_density":
+    if atomic_basis["scatter_norm"] == "no_cutoff_density":
         logging.warning(
             "scatter_norm='no_cutoff_density' is a legacy option that can "
             "cause energy jumps when neighbors cross the cutoff and break "

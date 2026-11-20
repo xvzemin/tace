@@ -216,6 +216,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         radial_mlp_norm: str | None = None,
         path_irreps: o3.Irreps | None = None,
         num_residual_updates: int = 0,
+        multi_cutoff: list[float] | None = None,
     ) -> None:
         super().__init__()
 
@@ -236,6 +237,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
             target_irreps if path_irreps is None else path_irreps
         )
         self.radial_mlp = radial_mlp
+        self.multi_cutoff = multi_cutoff
         self.radial_bias = radial_bias
         self.mlp_type = mlp_type
         self.radial_mlp_norm = radial_mlp_norm

@@ -402,7 +402,12 @@ class Representation(torch.nn.Module):
             raise ValueError("TACE-OAM-XL-v2 currently implements training graphs")
         node_type = graph.node_type
         edge_index = data["edge_index"]
-        radial_basis, cutoff = self.radial_basis(
+        basis_fn = (
+            self.radial_basis
+            if self.multi_cutoff_radial_basis is None
+            else self.multi_cutoff_radial_basis[-1]
+        )
+        radial_basis, cutoff = basis_fn(
             graph.edge_length, node_type, edge_index, self.atomic_numbers
         )
         radial_basis = radial_basis.to(self.model_dtype)
@@ -484,7 +489,7 @@ class Representation(torch.nn.Module):
             from .radial_jet import hidden_jets
 
             hidden, hidden_slopes = hidden_jets(
-                self, graph.edge_length, node_type, edge_index
+                self, basis_fn, graph.edge_length, node_type, edge_index
             )
         else:
             hidden = grouped_networks(

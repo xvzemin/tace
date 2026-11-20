@@ -217,6 +217,91 @@ def test_materialize_partitions(edges):
     )
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("edges", [0, 7])
+@pytest.mark.parametrize("paired", [False, True])
+def test_multi_cutoff_convolution(backend, edges, paired, double_precision):
+    from e3nn.nn import FullyConnectedNet
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    tp = o3.TensorProduct(
+        "0e+1o",
+        "0e+1o",
+        "0e+1o",
+        [(0, 0, 0, "uvu", True), (1, 1, 0, "uvu", True), (0, 1, 1, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    ).to(device)
+    networks = [
+        FullyConnectedNet([3, tp.weight_numel], variance_in=2, variance_out=3),
+        torch.nn.Sequential(
+            torch.nn.Linear(5, 7), torch.nn.SiLU(), torch.nn.Linear(7, tp.weight_numel)
+        ),
+    ]
+    model = eqx_conv.MultiCutoffRadial(networks).to(device)
+    assert not tuple(model.parameters(recurse=False))
+
+    def rand(rows, width):
+        return torch.randn(rows, width, device=device, requires_grad=True)
+
+    index = torch.tensor([[0, 1, 0, 2, 3, 1, 2], [2, 0, 1, 0, 1, 3, 3]], device=device)[
+        :, :edges
+    ]
+    pairs = eqx_conv.undirected_edge_pairs(index, num_nodes=4) if paired else None
+    rows = edges if pairs is None else pairs.representatives.numel()
+    x, attrs, source = rand(4, 4), rand(edges, 4), rand(4, 2)
+    features, envelopes = rand(rows, 3), rand(edges, 2)
+    shared = rand(1, 3)
+    parts = ((features, "edge"), (source, "source"))
+    input_index = index if pairs is None else index[:, pairs.representatives]
+    dense = (shared.expand(rows, -1), materialize(parts, input_index))
+    if pairs is not None:
+        dense = tuple(pairs.expand(f) for f in dense)
+    torch.testing.assert_close(
+        model((shared, parts), envelopes, edge_index=index, edge_pairs=pairs),
+        model(dense, envelopes),
+    )
+    expected = sum(
+        x.new_zeros((4, 4)).index_add(
+            0,
+            index[1],
+            tp(x[index[0]], attrs, net(f)) * envelopes[:, i : i + 1],
+        )
+        for i, (net, f) in enumerate(zip(model.networks, dense))
+    )
+    active = (x, attrs, source, features, shared, envelopes, *model.parameters())
+    for mode in ("last", "full"):
+        conv = eqx_conv.O3TensorProductConv(tp, radial_mode=mode, backend=backend).to(
+            device
+        )
+        radial, projection, network = model.convolution_weights(
+            (shared, parts),
+            envelopes,
+            radial_mode=mode,
+            edge_index=index,
+            edge_pairs=pairs,
+            backend=backend,
+        )
+        actual = conv(x, attrs, radial, projection, index, radial_network=network)
+        ref = expected
+        for order in range(3):
+            torch.testing.assert_close(actual, ref, atol=1e-9, rtol=1e-9)
+            if order < 2:
+                actual, ref = (
+                    torch.cat(
+                        [
+                            g.reshape(-1)
+                            for g in torch.autograd.grad(
+                                y.sin().sum(), active, create_graph=True
+                            )
+                        ]
+                    )
+                    for y in (actual, ref)
+                )
+
+
 @pytest.mark.parametrize("kind", ["o3", "o2"])
 @pytest.mark.parametrize("width", [3, 129])
 def test_cuda_affine_projection_gradients(kind, width):

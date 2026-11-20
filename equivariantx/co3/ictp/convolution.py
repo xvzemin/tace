@@ -356,7 +356,7 @@ def evaluate(
         r = tuple((v[start:stop] if kind == "edge" else v, kind) for v, kind in parts)
         local_network = (
             network.narrow_edges(start, stop)
-            if isinstance(network, IndexedProjection)
+            if hasattr(network, "narrow_edges")
             else network
         )
         if network is None:
