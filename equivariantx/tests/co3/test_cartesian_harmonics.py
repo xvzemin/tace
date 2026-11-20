@@ -3,6 +3,7 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import co3
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

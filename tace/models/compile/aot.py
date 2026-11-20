@@ -14,6 +14,7 @@ from typing import Dict, Sequence, Set, Union
 
 import torch
 
+from equivariantx.ops.compiler import compile_and_package
 from tace.dataset.element import TorchElement
 
 from ..utils import prepare_direct_hessian_inputs
@@ -286,7 +287,7 @@ def export_aotinductor(
     logging.info(
         "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
     )
-    out_path = torch._inductor.aoti_compile_and_package(
+    out_path = compile_and_package(
         exported,
         package_path=output_path,
         inductor_configs=inductor_configs,
@@ -359,7 +360,7 @@ def export_lammps_aotinductor(
         "[AOTI 4/5] Compiling AOTInductor kernels; this may take several minutes..."
     )
     with size_oblivious_export():
-        out_path = torch._inductor.aoti_compile_and_package(
+        out_path = compile_and_package(
             exported,
             package_path=output_path,
             inductor_configs=inductor_configs,

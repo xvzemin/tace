@@ -5,6 +5,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import co2, co3
+from equivariantx.ops.compiler import compile_and_package
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -477,7 +478,7 @@ def test_reference_mixed_child_aoti(tmp_path, monkeypatch, double_precision):
         dynamic_shapes=({0: rows}, {0: rows}, None),
     )
     package = tmp_path / "ordinary-product.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     initial = weight.detach().clone()
     records = []
     for count in (3, 7, 5):

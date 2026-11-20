@@ -3,6 +3,7 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
 
@@ -200,18 +201,19 @@ def test_direction_derivatives(
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("projected", [False, True])
-def test_direction_zero_order_and_empty_edges(device, projected):
+@pytest.mark.parametrize("method", ["auto", "wigner"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_direction_zero_order_and_empty_edges(device, projected, method, dtype):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = (
         o2.O3TensorProduct("2x2e", "0e", "2x2e", [(0, 0, 0, "uvu", True)])
-        .to(device)
-        .double()
+        .to(device=device, dtype=dtype)
     )
     plan = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
     frame = o2.WignerD(2, 2).to(device).double()
     for size in (0, 4):
-        x = torch.randn(3, 10, device=device, dtype=torch.float64, requires_grad=True)
+        x = torch.randn(3, 10, device=device, dtype=dtype, requires_grad=True)
         vectors = torch.randn(
             size, 3, device=device, dtype=torch.float64, requires_grad=True
         )
@@ -219,14 +221,14 @@ def test_direction_zero_order_and_empty_edges(device, projected):
             size,
             3 if projected else 2,
             device=device,
-            dtype=torch.float64,
+            dtype=dtype,
             requires_grad=True,
         )
         projection = torch.randn(
             3 if projected else 0,
             2,
             device=device,
-            dtype=torch.float64,
+            dtype=dtype,
             requires_grad=True,
         )
         edges = torch.randint(3, (2, size), device=device)
@@ -239,7 +241,12 @@ def test_direction_zero_order_and_empty_edges(device, projected):
             edges,
             3,
             vectors=vectors,
+            method=method,
         )
+        radial = weights @ projection if projected else weights
+        messages = x[edges[0]].reshape(size, 5, 2) * radial[:, None, :]
+        expected = torch.zeros_like(x).index_add(0, edges[1], messages.flatten(1))
+        torch.testing.assert_close(output, expected)
         gradient = torch.autograd.grad(
             output.square().sum(), vectors, create_graph=True
         )[0]

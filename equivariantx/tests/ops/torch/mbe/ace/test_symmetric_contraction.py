@@ -19,6 +19,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx.mbe.ace import UuuSymmetricContraction
 from equivariantx.ops import config
 from equivariantx.ops.common.symmetric import symmetric_inputs
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.torch.mbe.ace import symmetric_contraction as kernel
 from equivariantx.tests.utils.testing import check_forward_ad
 from equivariantx.utils.metadata import parse_metadata
@@ -410,7 +411,7 @@ def test_nonscalar_dynamic_force_loss_aoti(
         dynamic_shapes=({0: nodes}, None, {0: nodes}),
     )
     package = tmp_path / "nonscalar.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
         assert any(name.endswith((".so", ".dylib", ".dll", ".pyd")) for name in names)

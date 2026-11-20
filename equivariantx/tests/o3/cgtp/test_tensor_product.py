@@ -10,6 +10,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import o3 as eqx_o3
+from equivariantx.ops.compiler import compile_and_package
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -270,7 +271,7 @@ def test_unbacked_joint_package(backend, shared, tmp_path, device, double_precis
         strict=True,
     )
     package = tmp_path / "cg-dynamic.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for count in (7, 11, 513):
         inputs = values(count)

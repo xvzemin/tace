@@ -6,8 +6,6 @@ from e3nn import o3
 
 from equivariantx import o3 as eqx_o3
 
-IRREPS = "0e+0o+1e+1o+2e+2o"
-
 
 @pytest.mark.parametrize(
     "irreps_in,irreps_out", [("", "2x0e"), ("2x1o", "3x0e"), ("0x0e+2x1o", "0x1o+0e")]

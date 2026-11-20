@@ -5,8 +5,9 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import config
-from equivariantx.ops.common.torch.convolution import reference
 from equivariantx.ops.common.o2_o3 import contraction
+from equivariantx.ops.common.torch.convolution import reference
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.ops.common.torch.test_convolution import convolution_case
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA frames")
@@ -98,7 +99,7 @@ def test_projected_joint(compiler, tmp_path, double_precision):
     inputs = tuple(value.detach() for value in values)
     if compiler == "aoti":
         exported = torch.export.export(graph, inputs)
-        package = torch._inductor.aoti_compile_and_package(
+        package = compile_and_package(
             exported, package_path=str(tmp_path / "aligned-projected.pt2")
         )
         run = torch._inductor.aoti_load_package(package)

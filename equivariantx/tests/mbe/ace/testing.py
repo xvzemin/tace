@@ -7,6 +7,7 @@ from equivariantx.mbe.ace import (
     IctdBilinearContraction,
     IctdUuuFullyConnectedSymmetricContraction,
 )
+from equivariantx.ops.compiler import compile_and_package
 
 
 def check_cpu_dynamic_coefficients(space, kind, monkeypatch, experts=1, dynamic=True):
@@ -442,7 +443,7 @@ def check_parent_aoti(
         graph, (*[value.detach() for value in inputs], types), strict=True
     )
     package = tmp_path / "ace.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale in (1.0, 0.8):
         changed = tuple((value.detach() * scale).requires_grad_() for value in inputs)

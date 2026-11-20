@@ -27,7 +27,6 @@ from tace.models.spherical.tace import SphericalTACE
 from tace.scripts.export_elements import select_elements
 from tace.utils.precision import configure_model_precision, torch_default_dtype
 
-DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 

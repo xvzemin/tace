@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.edge import edge_program, evaluate
 from equivariantx.ops.common.torch.edge import evaluate_torch
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.ops.common.torch.test_edge import program_case
 from equivariantx.utils.program import Program
 
@@ -466,7 +467,7 @@ def test_gradient_jvp_aoti(tmp_path):
         for node in exported.graph_module.graph.nodes
     )
     package = tmp_path / "edge_gradient_jvp.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale in (1.0, 0.8):
         changed = tuple(
@@ -526,7 +527,7 @@ def test_default_force_gradient_aoti_updates(tmp_path):
     assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     exported = torch.export.export(graph, tuple(value.detach() for value in values))
     package = tmp_path / "edge_force.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     rows = []
     x, radial, weight = values
     for _ in range(3):

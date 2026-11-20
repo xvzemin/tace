@@ -6,7 +6,42 @@ from e3nn import o3
 
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
+from equivariantx import o3 as eqx_o3
 from equivariantx.tests.conv.testing import layout
+
+
+@pytest.mark.parametrize(
+    ("product", "convolution"),
+    [
+        (eqx_o3.GauntTensorProduct, eqx_conv.GauntTensorProductConv),
+        (eqx_o3.MatrixTensorProduct, eqx_conv.MatrixTensorProductConv),
+    ],
+    ids=["gaunt", "matrix"],
+)
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_tensor_product_convolution_compile(
+    product, convolution, device, double_precision
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    tp = product("0e+1o", "0e+1o", "0e+1o+2e", shared_weights=False)
+    layer = convolution(tp).to(device)
+    compiled = torch.compile(layer, backend="aot_eager", fullgraph=True, dynamic=True)
+    for edges in (3, 6, 0):
+        x = torch.randn(4, 4, device=device, requires_grad=True)
+        y = torch.randn(edges, 4, device=device, requires_grad=True)
+        weight = torch.randn(edges, tp.weight_numel, device=device, requires_grad=True)
+        index = torch.randint(4, (2, edges), device=device)
+        actual, expected = (
+            compiled(x, y, index, weight),
+            layer(x, y, index, weight),
+        )
+        torch.testing.assert_close(actual, expected)
+        for a, b in zip(
+            torch.autograd.grad(actual.square().sum(), (x, y, weight)),
+            torch.autograd.grad(expected.square().sum(), (x, y, weight)),
+        ):
+            torch.testing.assert_close(a, b)
 
 
 @pytest.mark.skipif(

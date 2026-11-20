@@ -6,6 +6,7 @@ from e3nn import o3
 
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.conv.testing import assert_native_autograd, layout
 
 
@@ -628,7 +629,7 @@ def test_channel_mixing_joint_export(
         } == ({torch.ops.eqx.edge_program.default} if native else set())
         exported = torch.export.export(graph, detached)
         package = tmp_path / "channel_mixing.pt2"
-        torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+        compile_and_package(exported, package_path=str(package))
     cases = []
     changed = tuple(value.detach().requires_grad_() for value in values[:-1])
     for step in range(3):

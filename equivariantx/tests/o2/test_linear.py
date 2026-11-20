@@ -3,12 +3,12 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx import o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
-from equivariantx.tests.o2.testing import _transform
-from equivariantx.tests.o2.testing import _time_reverse
+from equivariantx.tests.o2.testing import _time_reverse, _transform
 
 
 @pytest.mark.parametrize("kind", ["linear", "uu"])

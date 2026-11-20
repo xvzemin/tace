@@ -20,6 +20,7 @@ class MagneticUvConvolution(UvConvolution):
         edge_radial_basis=None,
         edge_cutoff=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         return self.convolution(
             features,
@@ -30,5 +31,6 @@ class MagneticUvConvolution(UvConvolution):
             edge_radial_basis,
             edge_cutoff,
             radial_network,
-            magnetic,
+            magnetic=magnetic,
+            edge_pairs=edge_pairs,
         )

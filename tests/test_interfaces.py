@@ -718,3 +718,16 @@ def test_torchsim_system_fidelity_validation(
     torchsim_state.system_extras["fidelity_idx"] = torch.tensor(value, device=DEVICE)
     with pytest.raises(error, match="fidelity_idx"):
         torchsim_calculator()(torchsim_state)
+
+
+def test_clean_cli_preserves_outputs_on_help_and_invalid_arguments(tmp_path, monkeypatch):
+    from tace.scripts.clean import main
+
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "out.txt"
+    log.write_text("training")
+    for args, code in ((["--help"], 0), (["--unknown"], 2)):
+        with pytest.raises(SystemExit) as exc:
+            main(args)
+        assert exc.value.code == code
+        assert log.read_text() == "training"

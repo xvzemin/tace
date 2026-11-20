@@ -7,6 +7,7 @@ from e3nn import o3
 from equivariantx import co3, o2
 from equivariantx import o3 as eqx_o3
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.o2.testing import _transform
 from equivariantx.utils.module import copy_model
 
@@ -338,7 +339,7 @@ def test_moe_cpu_force_aoti_updates(
         shapes = ({0: count}, {}, {0: count}, {0: count})
     exported = torch.export.export(graph, inputs, dynamic_shapes=shapes, strict=True)
     package = tmp_path / "moe.pt2"
-    torch._inductor.aoti_compile_and_package(
+    compile_and_package(
         exported,
         package_path=str(package),
         inductor_configs={"joint_custom_pre_pass": JointCSE()},

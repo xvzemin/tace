@@ -11,6 +11,7 @@ from e3nn import o3
 
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.precision import (
     validate_module_precision,
     validate_precision,
@@ -262,7 +263,7 @@ def test_cpu_dynamic_joint_aoti(tmp_path):
         dynamic_shapes=({0: rows}, None, {0: rows}),
     )
     package = tmp_path / "precision.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for count in (7, 11, 5):
         values = inputs(count, weight)

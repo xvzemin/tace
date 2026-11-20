@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co2
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.torch.co2.spherical import reference
 from equivariantx.tests.utils.testing import package_script
 
@@ -120,7 +121,7 @@ def test_unbacked_joint_package(
         strict=True,
     )
     package = tmp_path / "spherical-dynamic.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     initial = weight.detach().cpu().clone()
     records = []
     for count in (7, 11, 33, 0, 1):

@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.co3.symmetric import SymmetricBasis
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.torch.co3 import symmetric as kernel
 
 
@@ -340,7 +341,7 @@ def test_shared_transform_aoti_checked_updates(tmp_path, monkeypatch):
             dynamic_shapes=({0: count}, {0: count}, None),
         )
         package = tmp_path / "shared-transform.pt2"
-        torch._inductor.aoti_compile_and_package(
+        compile_and_package(
             exported,
             package_path=str(package),
             inductor_configs={

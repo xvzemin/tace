@@ -1,8 +1,10 @@
 """Tests for the corresponding EQX source module."""
 
 import math
+
 import pytest
 import torch
+
 from equivariantx import co2, o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -45,7 +47,9 @@ def test_exact_sparse_harmonics(monkeypatch, backend, normalize, normalization):
     x = (
         torch.randn(3, 2, device=DEVICE, dtype=torch.float64) * 0.1 + 0.5
     ).requires_grad_()
-    ordinary = lambda x: reference(layer, x)
+    def ordinary(x):
+        return reference(layer, x)
+
     actual, expected = layer(x), ordinary(x)
     for _ in range(5):
         torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)

@@ -1,8 +1,9 @@
-"""Optional compiler passes for explicitly differentiated training graphs."""
+"""Compiler passes and AOTInductor packaging."""
 
 import hashlib
 import re
 from pathlib import Path
+from uuid import uuid4
 
 import torch
 
@@ -11,7 +12,41 @@ try:
 except ImportError:
     CustomGraphPass = object
 
-__all__ = ["JointCSE"]
+__all__ = ["JointCSE", "compile_and_package"]
+
+
+def compile_and_package(exported, *, package_path=None, inductor_configs=None):
+    """Compile an exported graph into an AOTInductor package.
+
+    Parameters
+    ----------
+    exported : torch.export.ExportedProgram
+        Exported tensor program.
+    package_path : str or pathlib.Path, optional
+        Output ``.pt2`` path.
+    inductor_configs : dict, optional
+        Inductor compilation options.
+
+    Examples
+    --------
+    >>> path = compile_and_package(exported, package_path="model.pt2")  # doctest: +SKIP
+    """
+    from torch._inductor import aoti_compile_and_package, config
+
+    options = dict(inductor_configs or {})
+    if hasattr(config.aot_inductor, "model_name_for_generated_files") and any(
+        isinstance(value := node.meta.get("val"), torch.Tensor) and value.is_cuda
+        for node in exported.graph.nodes
+        if node.op == "placeholder"
+    ):
+        # Inductor caches CUDA binaries by kernel name across graphs in a process.
+        # Distinguish exports even when they overwrite the same output package.
+        options.setdefault(
+            "aot_inductor.model_name_for_generated_files", f"eqx_{uuid4().hex}"
+        )
+    return aoti_compile_and_package(
+        exported, package_path=package_path, inductor_configs=options
+    )
 
 
 def cse_function():
@@ -55,7 +90,7 @@ class JointCSE(CustomGraphPass):
     --------
     >>> options = {"joint_custom_pre_pass": JointCSE()}
     >>> run = torch.compile(joint_graph, options=options)  # doctest: +SKIP
-    >>> package = torch._inductor.aoti_compile_and_package(  # doctest: +SKIP
+    >>> package = compile_and_package(  # doctest: +SKIP
     ...     exported, inductor_configs=options
     ... )
     """

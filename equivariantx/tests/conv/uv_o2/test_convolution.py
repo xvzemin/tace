@@ -5,6 +5,7 @@ import torch
 
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.conv.testing import assert_native_autograd
 
 
@@ -140,7 +141,7 @@ def test_transverse_aoti(radial_mode, tmp_path, monkeypatch, double_precision):
     )
     exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
     package = tmp_path / "transverse.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     module.conv.backend = "torch"
     for frame in module.conv.transverse_frames:
         if frame is not None:
@@ -219,7 +220,7 @@ def test_full_radial_native_joint(compiler, tmp_path, monkeypatch, double_precis
     )
     if compiler == "aoti":
         exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
-        package = torch._inductor.aoti_compile_and_package(
+        package = compile_and_package(
             exported, package_path=str(tmp_path / "tiled.pt2")
         )
         run = torch._inductor.aoti_load_package(package)
@@ -953,7 +954,7 @@ def test_reference_mixed_children_dynamic_aoti(
         dynamic_shapes=dynamic_shapes,
     )
     package = tmp_path / "reference.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         assert any(
             name.endswith((".so", ".dylib", ".dll", ".pyd"))

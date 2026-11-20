@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.torch.sparse_axis import reference
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
@@ -77,7 +78,7 @@ def test_joint_aoti(tmp_path):
     graph.recompile()
     exported = torch.export.export(graph, (x.detach(), w.detach()), strict=True)
     package = tmp_path / "sparse.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = operation(x, w, True)

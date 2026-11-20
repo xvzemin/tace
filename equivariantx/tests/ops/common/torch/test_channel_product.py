@@ -3,9 +3,9 @@
 import pytest
 import torch
 
+from equivariantx.ops.common.polynomial import polynomial_adjoint
 from equivariantx.ops.common.torch.channel_product import channel_product, reference
 from equivariantx.utils.metadata import channel_product_layout
-from equivariantx.ops.common.polynomial import polynomial_adjoint
 
 
 @pytest.mark.parametrize("strided", [False, True])

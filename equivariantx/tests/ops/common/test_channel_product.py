@@ -8,6 +8,8 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
+from equivariantx.ops.compiler import compile_and_package
+from equivariantx.tests.ops.testing import assert_gradient_is_independent
 from equivariantx.tests.utils.testing import package_script
 
 
@@ -136,7 +138,7 @@ def test_wide_dynamic_tensor_product(space, shared, monkeypatch, tmp_path):
         graph, initial, dynamic_shapes=({0: rows}, {0: rows}, None), strict=True
     )
     package, data = tmp_path / "product.pt2", tmp_path / "states.pt"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     torch.save(records, data)
     result = subprocess.run(
         [
@@ -373,14 +375,6 @@ def diagonal_force_loss(function, x, y, weight):
     return output, *forces, torch.autograd.grad(loss, weight)[0]
 
 
-def diagonal_clipping(outputs, arguments):
-    saved_inputs = tuple(value.detach().clone() for value in arguments)
-    saved_outputs = tuple(value.detach().clone() for value in outputs[:-1])
-    outputs[-1].mul_(0.125)
-    torch.testing.assert_close(arguments, saved_inputs, atol=0, rtol=0)
-    torch.testing.assert_close(outputs[:-1], saved_outputs, atol=0, rtol=0)
-
-
 def check_diagonal_product(space, shared, dtype, nodes, mode, monkeypatch):
     from equivariantx.ops import config
 
@@ -395,7 +389,7 @@ def check_diagonal_product(space, shared, dtype, nodes, mode, monkeypatch):
     expected = diagonal_force_loss(layer, *values)
     tolerance = 3e-6 if dtype == torch.float32 else 5e-11
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    diagonal_clipping(actual, values)
+    assert_gradient_is_independent(actual, values)
 
 
 def check_diagonal_transforms(space, monkeypatch):
@@ -449,7 +443,7 @@ def check_diagonal_broadcast(space, shared, monkeypatch):
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     expected = diagonal_force_loss(layer, x, y, weight)
     torch.testing.assert_close(actual, expected, atol=5e-11, rtol=5e-11)
-    diagonal_clipping(actual, (x, y, weight))
+    assert_gradient_is_independent(actual, (x, y, weight))
 
 
 def check_diagonal_boundaries(space, monkeypatch):
@@ -598,7 +592,7 @@ def check_diagonal_dynamic(space, shared, monkeypatch):
             arguments = tuple(value.detach() for value in values)
             actual = run(*arguments)
             torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
-            diagonal_clipping(actual, arguments)
+            assert_gradient_is_independent(actual, arguments)
             values = (
                 *values[:2],
                 (values[-1] - 0.001 * expected[-1]).detach().requires_grad_(),

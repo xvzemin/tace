@@ -13,6 +13,7 @@ from equivariantx.conv import (
 )
 from equivariantx.ops import config
 from equivariantx.ops.common.convolution import convolve
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 
@@ -570,7 +571,7 @@ def test_force_gradient_aoti(
     detached = tuple(value.detach() for value in inputs)
     exported = torch.export.export(graph, detached, strict=True)
     package = tmp_path / "convolution.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     # A packaged training graph must accept updated weights without recompiling.
     cases = []
     for scale in (1.0, 0.8):
@@ -691,7 +692,7 @@ def test_dynamic_cuda_force_gradient_aoti(tmp_path, double_precision, monkeypatc
         ),
     )
     package = tmp_path / "dynamic-convolution.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     state = projection, *parameters
     for edges in (7, 11, 9):

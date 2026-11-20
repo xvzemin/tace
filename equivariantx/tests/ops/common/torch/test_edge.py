@@ -6,6 +6,7 @@ import torch
 from equivariantx.ops import config, get_kernel
 from equivariantx.ops.common.torch.edge import evaluate_recomputed as evaluate
 from equivariantx.ops.common.torch.edge import evaluate_torch
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.utils.program import Program
 
 
@@ -377,7 +378,7 @@ def test_force_training_aoti_in_fresh_process(tmp_path):
         graph, tuple(value.detach() for value in inputs), strict=True
     )
     package_path = tmp_path / "joint.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package_path))
+    compile_and_package(exported, package_path=str(package_path))
     data_path = tmp_path / "data.pt"
     torch.save(
         {

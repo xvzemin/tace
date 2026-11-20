@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import o2
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.torch.o2.o3_tensor_product import reference
 from equivariantx.tests.ops.torch.o2.test_o3_tensor_product import training_problem
 from equivariantx.tests.utils.testing import package_script
@@ -30,7 +31,7 @@ def test_joint_aoti(mode, monkeypatch, tmp_path):
         graph, tuple(v.detach() for v in values), strict=True
     )
     package = tmp_path / "aligned.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     x, r, w = values
     for _ in range(3):

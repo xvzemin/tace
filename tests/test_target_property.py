@@ -37,7 +37,6 @@ from tace.utils.metrics import MaskMAE, supports_weight_filter
 from tace.utils.precision import configure_model_precision, torch_default_dtype
 
 DTYPE = torch.float64
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture

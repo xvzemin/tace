@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from equivariantx.utils.module import convert_modules, copy_model, default_dtype
 
 

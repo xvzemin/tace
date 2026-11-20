@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import o2
 from equivariantx.ops import config, get_kernel
 from equivariantx.ops.common import frame, rotary, rotation
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.decompositions import torch_decompositions
 from equivariantx.tests.ops.testing import assert_functional_derivatives
 from equivariantx.utils.metadata import parse_metadata
@@ -170,7 +171,7 @@ def test_force_derivatives_aoti(kind, role, double_precision, tmp_path):
         for node in exported.graph_module.graph.nodes
     )
     package = tmp_path / "frame.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale in (1.0, 0.7):
         changed = tuple((value.detach() * scale).requires_grad_() for value in inputs)

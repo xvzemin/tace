@@ -20,8 +20,13 @@ def test_row_expressions(backend, shape, device):
     metadata = repr((tuple(graph.nodes), ((output, 0, "edge"),)))
     value = torch.randn(shape, dtype=torch.float64, device=device, requires_grad=True)
     native = evaluate if backend == "cuda" else torch_evaluate
-    run = lambda x: native(x, metadata, 3)
-    reference = lambda x: x[..., [2, 0, 0]] * (x[..., [2, 0, 0]] + x[..., [1, 2, 1]])
+    def run(x):
+        return native(x, metadata, 3)
+
+    def reference(x):
+        a = x[..., [2, 0, 0]]
+        return a * (a + x[..., [1, 2, 1]])
+
     torch.testing.assert_close(run(value), reference(value), atol=2e-11, rtol=2e-11)
     if value.numel():
         assert torch.autograd.gradcheck(run, (value,))

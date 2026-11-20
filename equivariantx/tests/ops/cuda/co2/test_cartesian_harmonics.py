@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
@@ -37,7 +38,7 @@ def test_joint_aoti(tmp_path):
     graph = make_fx(lambda x, w: operation(x, w))(x, weight)
     exported = torch.export.export(graph, (x.detach(), weight.detach()), strict=True)
     package = tmp_path / "planar.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = operation(x, weight, True)

@@ -8,6 +8,7 @@ import torch
 
 from equivariantx import o3
 from equivariantx.conv import Wigner6jTensorProductConv
+from equivariantx.ops.compiler import compile_and_package
 
 
 def problem(
@@ -133,7 +134,7 @@ def check_package(kind, tmp_path, device="cuda", **options):
         graph, tuple(value.detach() for value in values), strict=True
     )
     package = tmp_path / (kind + ".pt2")
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = training(*values, reference=True)
@@ -234,7 +235,7 @@ def check_dynamic_convolution(tmp_path, backend, device, shared):
         strict=True,
     )
     package = tmp_path / "wigner-dynamic.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for count, nodes in ((7, 5), (15, 3), (3, 15)):
         _, values, index, _ = problem(

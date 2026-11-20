@@ -4,6 +4,15 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 
+def assert_gradient_is_independent(outputs, arguments):
+    """Clipping the weight gradient must not mutate inputs, outputs or forces."""
+    saved_inputs = tuple(value.detach().clone() for value in arguments)
+    saved_outputs = tuple(value.detach().clone() for value in outputs[:-1])
+    outputs[-1].mul_(0.125)
+    torch.testing.assert_close(arguments, saved_inputs, atol=0, rtol=0)
+    torch.testing.assert_close(outputs[:-1], saved_outputs, atol=0, rtol=0)
+
+
 def assert_functional_derivatives(function, reference, values, compiler=None):
     """Compare JVP, JVP of a gradient and a batch with distinct index maps."""
     primals, types = values[:-1], values[-1]

@@ -2,10 +2,13 @@
 
 import subprocess
 import sys
+
 import pytest
 import torch
+
 from equivariantx.ops import get_kernel
 from equivariantx.ops.common import layout
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.ops.common.torch.test_layout import column_map
 from equivariantx.tests.ops.testing import assert_functional_derivatives
 
@@ -79,7 +82,7 @@ def test_aoti_reload(tmp_path):
         },
     )
     path = tmp_path / "model.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(path))
+    compile_and_package(exported, package_path=str(path))
     script = """
 import sys
 import torch

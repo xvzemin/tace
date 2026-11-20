@@ -3,6 +3,7 @@
 import torch
 
 from equivariantx import o2
+from equivariantx.ops.compiler import compile_and_package
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
@@ -138,7 +139,7 @@ def check_joint_o2_aoti(kind, tmp_path):
         graph, tuple(t.detach() for t in values), strict=True
     )
     package = tmp_path / (kind + ".pt2")
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     x, w = values
     for _ in range(3):

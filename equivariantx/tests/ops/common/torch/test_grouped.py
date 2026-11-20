@@ -15,6 +15,7 @@ from equivariantx.ops.common.torch.linear import (
     element_linear_blocks,
     element_linear_grouped,
 )
+from equivariantx.ops.compiler import compile_and_package
 
 
 @pytest.fixture(params=["cpu", "cuda"])
@@ -336,7 +337,7 @@ def test_element_force_aoti(tmp_path, monkeypatch):
     )
     exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
     package = tmp_path / "element.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     for scale in (1.0, 0.8):

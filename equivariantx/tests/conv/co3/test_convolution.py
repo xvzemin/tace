@@ -6,6 +6,7 @@ from e3nn import o3
 
 from equivariantx import conv as eqx_conv
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.conv.testing import assert_native_autograd
 
 
@@ -647,7 +648,7 @@ def test_cartesian_reference_dynamic_aoti(
         dynamic_shapes=({0: dynamic}, {0: dynamic}, None),
     )
     package = tmp_path / "cartesian-reference.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     weight = values[-1]
     for rows in (7, 11, 5):

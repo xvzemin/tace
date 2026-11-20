@@ -15,6 +15,7 @@ from equivariantx.mbe.ace import (
     UuuSymmetricContraction,
 )
 from equivariantx.o3 import MoEElementLinear
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 
@@ -106,7 +107,7 @@ def test_gradient_jvp_aoti(kind, native, tmp_path, double_precision, monkeypatch
         for node in exported.graph_module.graph.nodes
     )
     package = tmp_path / "gradient_jvp.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale in (1.0, 0.8):
         changed = tuple(
@@ -247,7 +248,7 @@ def test_default_force_gradient_aoti_updates(
     )
     exported = torch.export.export(graph, tuple(value.detach() for value in values))
     package = tmp_path / "polynomial_force.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     module.backend = "torch"
     rows = []
     for _ in range(3):

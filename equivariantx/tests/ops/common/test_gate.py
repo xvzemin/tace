@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co2, co3, o2, o3
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA gates")
 
@@ -67,7 +68,7 @@ def test_inline_joint_aoti(tmp_path, monkeypatch, space, backend):
         graph, (value.detach(), weight.detach()), strict=True
     )
     package = tmp_path / "gate.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = operation(reference)(value, weight)

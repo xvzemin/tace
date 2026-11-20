@@ -3,6 +3,7 @@
 import pytest
 import torch
 from e3nn import o3
+
 from equivariantx.nn.activation import PolynomialActivation
 from equivariantx.o2.irreps import Irreps
 from equivariantx.o2.o2grid import O2Grid
@@ -146,7 +147,9 @@ def test_analytic_derivatives(monkeypatch, backend, degree, device):
         degree=degree, backend=backend, dtype=torch.float64, device=device
     )
     x = (torch.randn(5, device=device, dtype=torch.float64) * 0.2).requires_grad_()
-    ordinary = lambda x: reference(x / layer.bound, layer.coefficients)
+    def ordinary(x):
+        return reference(x / layer.bound, layer.coefficients)
+
     actual, expected = layer(x), ordinary(x)
     for _ in range(5):
         torch.testing.assert_close(actual, expected, atol=2e-11, rtol=2e-11)

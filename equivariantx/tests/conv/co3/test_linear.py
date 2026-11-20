@@ -10,6 +10,7 @@ import torch
 
 from equivariantx import conv as eqx_conv
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -390,7 +391,7 @@ def test_compact_basis_first_dynamic_fx_and_aoti_contract(monkeypatch, tmp_path)
         dynamic_shapes=({0: torch.export.Dim("rows", min=2, max=16)}, None, None),
     )
     package = tmp_path / "basis-first.pt2"
-    torch._inductor.aoti_compile_and_package(
+    compile_and_package(
         exported,
         package_path=str(package),
         inductor_configs={
@@ -672,7 +673,7 @@ def test_compact_reference_dynamic_aoti(output_basis, monkeypatch, tmp_path):
         dynamic_shapes=({0: rows}, None, None, {0: rows}),
     )
     package = tmp_path / "compact-linear.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     initial = tuple(value.detach().clone() for value in parameters)
     for count in (7, 11, 5):

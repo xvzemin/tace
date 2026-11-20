@@ -1,15 +1,19 @@
 """Tests for the corresponding EQX source module."""
 
 from copy import deepcopy
+
 import pytest
 import torch
+
 from equivariantx import o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
-from equivariantx.tests.o2.testing import _transform
-from equivariantx.tests.o2.testing import _tensor_product_case
-from equivariantx.tests.o2.testing import _time_reverse
+from equivariantx.tests.o2.testing import (
+    _tensor_product_case,
+    _time_reverse,
+    _transform,
+)
 
 
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])

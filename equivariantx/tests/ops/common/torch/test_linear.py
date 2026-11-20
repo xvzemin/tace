@@ -9,6 +9,7 @@ import torch
 
 from equivariantx.ops import config, get_kernel
 from equivariantx.ops.common.torch import linear
+from equivariantx.ops.compiler import compile_and_package
 
 
 def linear_case(nodes, channels=3, experts=2, layout="mul_ir", device="cpu"):
@@ -308,7 +309,7 @@ def test_grouped_force_aoti(tmp_path, double_precision):
     assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     exported = torch.export.export(graph, inputs)
     package = tmp_path / "linear.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale, indices in ((1.0, types), (0.7, torch.zeros_like(types))):
         changed = tuple(

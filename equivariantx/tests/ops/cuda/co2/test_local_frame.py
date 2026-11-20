@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import co2
 from equivariantx.ops import config
 from equivariantx.ops.common.torch.tensor_axis import transform
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.cuda.co2.frame_matrix import evaluate
 from equivariantx.tests.utils.testing import package_script
 
@@ -122,7 +123,7 @@ def test_joint_aoti(monkeypatch, request, tmp_path, wide, precision):
         dynamic_shapes=dynamic_shapes,
     )
     package = tmp_path / "local-frame.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     for rows in (3, 7, 5) if wide else (3, 3, 3):

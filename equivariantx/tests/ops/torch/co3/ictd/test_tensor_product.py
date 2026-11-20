@@ -7,6 +7,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import co3
 from equivariantx.ops import config
 from equivariantx.ops.torch.co3.ictd import tensor_product as kernel
+from equivariantx.tests.ops.testing import assert_gradient_is_independent
 
 
 def mixed(channels, per_edge, dtype):
@@ -45,14 +46,6 @@ def force_loss(function, x, y, weight):
     return output, *forces, torch.autograd.grad(loss, weight)[0]
 
 
-def check_clipping(outputs, arguments):
-    saved_inputs = tuple(value.detach().clone() for value in arguments)
-    saved_outputs = tuple(value.detach().clone() for value in outputs[:-1])
-    outputs[-1].mul_(0.125)
-    torch.testing.assert_close(arguments, saved_inputs, atol=0, rtol=0)
-    torch.testing.assert_close(outputs[:-1], saved_outputs, atol=0, rtol=0)
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("nodes", [0, 7])
 @pytest.mark.parametrize("per_edge", [False, True])
@@ -70,7 +63,7 @@ def test_mixed_paths(dtype, nodes, per_edge, freeze, monkeypatch):
         expected = force_loss(layer, *values)
     tolerance = 3e-6 if dtype == torch.float32 else 5e-11
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
-    check_clipping(actual, values)
+    assert_gradient_is_independent(actual, values)
 
 
 @pytest.mark.parametrize("per_edge", [False, True])
@@ -120,7 +113,7 @@ def test_self_coupling_and_forward_ad(per_edge, monkeypatch):
     actual = force_loss(lambda a, b, weight: graph(a, weight), x, x, w)
     expected = force_loss(layer, x, x, w)
     torch.testing.assert_close(actual, expected, atol=5e-11, rtol=5e-11)
-    check_clipping(actual, (x, x, w))
+    assert_gradient_is_independent(actual, (x, x, w))
 
 
 @pytest.mark.parametrize("per_edge", [False, True])
@@ -143,7 +136,7 @@ def test_broadcast_right_order(per_edge, monkeypatch):
         flags.setattr(config, "TORCH_REFERENCE", True)
         expected = force_loss(layer, x, y, weight)
     torch.testing.assert_close(actual, expected, atol=5e-11, rtol=5e-11)
-    check_clipping(actual, (x, y, weight))
+    assert_gradient_is_independent(actual, (x, y, weight))
 
 
 def test_order_selection_and_switches(monkeypatch):
@@ -238,5 +231,5 @@ def test_dynamic_force_loss(per_edge, monkeypatch):
             arguments = tuple(value.detach() for value in (x, y, weight))
             actual = run(*arguments)
             torch.testing.assert_close(actual, expected, atol=5e-10, rtol=5e-10)
-            check_clipping(actual, arguments)
+            assert_gradient_is_independent(actual, arguments)
             weight = (weight - 0.001 * expected[-1]).detach().requires_grad_()

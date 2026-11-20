@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co3
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
@@ -74,7 +75,7 @@ def test_joint_aoti(tmp_path, backend):
     inputs = value.detach(), weight.detach()
     exported = torch.export.export(graph, inputs, strict=True)
     package = tmp_path / "projection.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = joint(value, weight)
@@ -216,7 +217,7 @@ def test_change_basis_dynamic_aoti(tmp_path):
         strict=True,
     )
     package = tmp_path / "basis.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for nodes in (7, 11, 9):
         x = (

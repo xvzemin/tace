@@ -4,8 +4,8 @@ import pytest
 import torch
 
 from equivariantx.o2 import WignerD
-from equivariantx.ops.common.torch.quaternion import polynomial
 from equivariantx.ops.common.quaternion import quaternion_wigner
+from equivariantx.ops.common.torch.quaternion import polynomial
 
 
 @pytest.mark.parametrize("degree", [0, 1, 3, 6])
@@ -38,7 +38,9 @@ def test_polynomial_zero_components_and_transforms():
     polynomial_indices.cache_clear()
     q = torch.eye(4, dtype=torch.float64, requires_grad=True)
     tangent = torch.randn_like(q)
-    function = lambda value: polynomial(value, 3)
+    def function(value):
+        return polynomial(value, 3)
+
     for _ in range(2):
         _, jvp = torch.func.jvp(function, (q,), (tangent,))
     finite_difference = (

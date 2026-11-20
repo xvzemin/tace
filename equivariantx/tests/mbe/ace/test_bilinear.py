@@ -7,6 +7,7 @@ from e3nn import o3
 from equivariantx.mbe.ace import (
     BilinearContraction,
 )
+from equivariantx.ops.compiler import compile_and_package
 
 from .testing import (
     check_cpu_dynamic_coefficients,
@@ -316,7 +317,7 @@ def test_shared_coefficient_aoti_storage_clip(
     inputs = (*[value.detach() for value in values], types)
     exported = torch.export.export(graph, inputs, strict=True)
     package = tmp_path / "bilinear.pt2"
-    torch._inductor.aoti_compile_and_package(
+    compile_and_package(
         exported,
         package_path=str(package),
         inductor_configs={"joint_custom_pre_pass": JointCSE()},

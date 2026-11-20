@@ -18,6 +18,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import co2, o2
 from equivariantx.ops import config
 from equivariantx.ops.common.torch import tensor_axis
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.torch.co2 import local_frame as kernel
 from equivariantx.tests.utils.testing import check_forward_ad
 
@@ -329,7 +330,7 @@ def test_dynamic_cpu_force_loss_aoti(inverse, monkeypatch, tmp_path, aoti_thread
         dynamic_shapes=({0: count}, {0: count}, None),
     )
     package = tmp_path / "frame.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     with zipfile.ZipFile(package) as archive:
         names = archive.namelist()
         assert any(name.endswith((".so", ".dylib", ".dll", ".pyd")) for name in names)

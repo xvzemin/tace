@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import o2
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
@@ -91,7 +92,7 @@ def test_default_force_loss_package(inverse, inline_limit, tmp_path, monkeypatch
         graph, tuple(value.detach() for value in values), strict=True
     )
     package = tmp_path / "frame.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = training(*values, backend="torch")

@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.torch.sparse_bilinear import reference
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.ops.common.torch.test_sparse_bilinear import (
     check_coefficient_forward_ad,
     check_derivatives,
@@ -81,7 +82,7 @@ def test_joint_aoti(tmp_path):
         graph, tuple(v.detach() for v in (x, y, w)), strict=True
     )
     package = tmp_path / "bilinear.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = operation(x, y, w, True)

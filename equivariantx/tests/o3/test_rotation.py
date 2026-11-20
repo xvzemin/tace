@@ -3,9 +3,8 @@
 import pytest
 import torch
 from e3nn import o3
-from equivariantx import o3 as eqx_o3
 
-IRREPS = "0e+0o+1e+1o+2e+2o"
+from equivariantx import o3 as eqx_o3
 
 
 @pytest.mark.parametrize("degree", range(6))

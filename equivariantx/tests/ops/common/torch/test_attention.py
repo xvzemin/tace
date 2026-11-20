@@ -6,6 +6,7 @@ import torch
 from equivariantx.nn import graph_softmax
 from equivariantx.ops import config, get_kernel
 from equivariantx.ops.common.torch.attention import normalized_exp_reference
+from equivariantx.ops.compiler import compile_and_package
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -177,7 +178,7 @@ def test_force_gradient_aoti(backend, tmp_path, double_precision):
     assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
     package = tmp_path / "attention.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale, index in ((1.0, target), (0.7, target.roll(1))):
         changed = tuple(

@@ -23,6 +23,8 @@ from tace.models.spherical.node import NODE_UPDATE
 from tace.models.spherical.o2 import UvO2TensorProductConv
 from tace.models.spherical.representation import NodeRepresentation
 
+from .testing import time_reverse_features
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 
@@ -67,6 +69,58 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
     ]
     for value, target in zip(*gradients):
         torch.testing.assert_close(value, target, atol=2e-7, rtol=2e-8)
+
+
+@pytest.mark.parametrize("magnetic", [False, True])
+def test_cartesian_uv_reciprocal_weights(magnetic, double_precision):
+    from tace.models.cartesian.local import RotationMatrices, UvConvolution
+    from tace.models.cartesian.mtace import MagneticUvConvolution
+
+    spherical, cartesian = (
+        (MagneticUvO2TensorProductConv, MagneticUvConvolution)
+        if magnetic
+        else (UvO2TensorProductConv, UvConvolution)
+    )
+    irreps = ("2x0e+2x1o",) * (3 if magnetic else 2)
+    conv = cartesian(
+        spherical(
+            *irreps,
+            num_channel=2,
+            mmax=1,
+            even_scalar_act=torch.nn.SiLU(),
+            odd_scalar_act=torch.nn.Tanh(),
+            tensor_act=torch.nn.Sigmoid(),
+        )
+    )
+    index = torch.tensor([[1, 0, 2, 1], [0, 1, 1, 2]])
+    pairs = eqx_conv.undirected_edge_pairs(index, num_nodes=3)
+    positions = torch.randn(3, 3)
+    rotation, inverse = RotationMatrices()(positions[index[1]] - positions[index[0]])
+    cutoff = torch.rand(4, 1)
+    features = (torch.randn(3, conv.irreps_in.dim, requires_grad=True),)
+    if magnetic:
+        features += (torch.randn(4, conv.magnetic_edge_irreps.dim, requires_grad=True),)
+    radial = torch.randn(2, 2, requires_grad=True)
+    shared = torch.randn(1, 1, requires_grad=True)
+    net = torch.nn.Linear(3, conv.weight_numel)
+
+    def apply(weights, **kwargs):
+        return conv(
+            *features, weights, index, rotation, inverse, edge_cutoff=cutoff, **kwargs
+        )
+
+    by_pair = net(torch.cat((radial, shared.expand(2, 1)), dim=1))
+    expected = apply(by_pair[pairs.inverse])
+    torch.testing.assert_close(apply(by_pair, edge_pairs=pairs), expected)
+    actual = apply(
+        ((radial, "edge"), (shared, "shared")), radial_network=net, edge_pairs=pairs
+    )
+    torch.testing.assert_close(actual, expected)
+    variables = (*features, radial, shared, *net.parameters())
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.square().sum(), variables),
+        torch.autograd.grad(expected.square().sum(), variables),
+    )
 
 
 @pytest.mark.parametrize("magnetic", [False, True])
@@ -1196,13 +1250,6 @@ def test_tace_model_force_training(
             assert parameter.grad is None
         else:
             torch.testing.assert_close(parameter.grad, expected, atol=2e-8, rtol=2e-7)
-
-
-def time_reverse_features(features: torch.Tensor, irreps) -> torch.Tensor:
-    output = features.clone()
-    for ir_mul, ir_slice in zip(irreps, irreps.slices()):
-        output[..., ir_slice] *= ir_mul.ir.t
-    return output
 
 
 @pytest.mark.parametrize("interaction", ["uv_o2", "uu_o2"])

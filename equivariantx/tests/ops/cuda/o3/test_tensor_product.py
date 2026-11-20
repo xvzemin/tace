@@ -16,6 +16,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import config
 from equivariantx.ops.common.compilation import edge_work
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.ops.torch.o3.test_tensor_product import (
     convolution_training_problem,
     training_problem,
@@ -41,7 +42,7 @@ def test_native_joint_package(kind, monkeypatch, tmp_path):
         graph, tuple(v.detach() for v in values), strict=True
     )
     package = tmp_path / "factorized.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     for _ in range(3):
@@ -132,7 +133,7 @@ def test_radial_joint_package(mode, width, monkeypatch, tmp_path):
         dynamic_shapes=export_shapes,
     )
     package = tmp_path / "radial.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     start = 4 if dynamic else 3

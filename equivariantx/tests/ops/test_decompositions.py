@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.mbe.ace import UuuSymmetricContraction
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.decompositions import symmetric_forward
 
 
@@ -113,7 +114,7 @@ def test_cuda_primal_aoti_without_eqx(inline, tmp_path, monkeypatch):
     torch.testing.assert_close(lowered(*inputs), reference)
     exported = torch.export.export(graph, inputs, strict=True)
     path = tmp_path / "symmetric.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(path))
+    compile_and_package(exported, package_path=str(path))
     data_path = tmp_path / "data.pt"
     torch.save(
         {"inputs": tuple(value.cpu() for value in inputs), "output": reference.cpu()},

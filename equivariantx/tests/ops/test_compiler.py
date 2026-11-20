@@ -13,7 +13,22 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import compiler
-from equivariantx.ops.compiler import JointCSE
+from equivariantx.ops.compiler import JointCSE, compile_and_package
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_repeated_cuda_exports(tmp_path):
+    class Add(torch.nn.Module):
+        def forward(self, x, y):
+            return x + y
+
+    for step, width in enumerate((96, 8, 96)):
+        x = torch.arange(width, device="cuda", dtype=torch.float64) + step * 1000
+        y = x + 1
+        exported = torch.export.export(Add(), (x, y))
+        path = compile_and_package(exported, package_path=str(tmp_path / "add.pt2"))
+        result = torch._inductor.aoti_load_package(path)(x, y)
+        torch.testing.assert_close(result, x + y, atol=0, rtol=0)
 
 
 @pytest.fixture
@@ -226,7 +241,7 @@ def test_dynamic_aoti_state_updates(compiler_pass, width, tmp_path):
         dynamic_shapes=({0: rows}, None, None, None, None, None, None, {0: rows}),
     )
     package = tmp_path / "training.pt2"
-    torch._inductor.aoti_compile_and_package(
+    compile_and_package(
         exported,
         package_path=str(package),
         inductor_configs={"joint_custom_pre_pass": compiler_pass},

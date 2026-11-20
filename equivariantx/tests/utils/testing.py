@@ -11,6 +11,7 @@ from e3nn import o3
 import equivariantx
 from equivariantx import co2, co3, o2
 from equivariantx import o3 as eqx_o3
+from equivariantx.ops.compiler import compile_and_package
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SPACES = {2: o2, 3: eqx_o3}
@@ -388,7 +389,7 @@ def check_ictd_native_aoti(d, dtype, monkeypatch, tmp_path):
         graph.recompile()
         exported = torch.export.export(graph, (x.detach(), w.detach()), strict=True)
         package = tmp_path / "ictd.pt2"
-        torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+        compile_and_package(exported, package_path=str(package))
         records = []
         monkeypatch.setattr(config, "TORCH_REFERENCE", True)
         for _ in range(3):

@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from equivariantx import co2
 from equivariantx.co2.restriction import transverse_quarter_turn
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
@@ -57,7 +58,7 @@ def test_joint_aoti(rank, monkeypatch, tmp_path):
         graph, tuple(t.detach() for t in values), strict=True
     )
     package = tmp_path / "restriction.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
     for _ in range(3):

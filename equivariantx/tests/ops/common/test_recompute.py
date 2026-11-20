@@ -5,6 +5,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.recompute import Replay
+from equivariantx.ops.compiler import compile_and_package
 
 
 def test_replay_tf32_cache():
@@ -133,7 +134,7 @@ def test_streaming_attention_aoti(tmp_path):
     assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     exported = torch.export.export(graph, tuple(value.detach() for value in inputs))
     package = tmp_path / "attention.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale in (1.0, 0.8):
         values = tuple((value.detach() * scale).requires_grad_() for value in inputs)

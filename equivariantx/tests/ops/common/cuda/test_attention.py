@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops.common.torch.attention import normalized_exp_reference
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import check_forward_ad, package_script
 
 pytestmark = pytest.mark.skipif(
@@ -119,7 +120,7 @@ def test_dynamic_force_aoti_updates(dtype, tmp_path):
         strict=True,
     )
     package = tmp_path / "dynamic_attention.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     data = tmp_path / "records.pt"
     torch.save(dict(initial=initial, cases=records), data)
     script = """

@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co2
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
 pytestmark = pytest.mark.skipif(
@@ -59,7 +60,7 @@ def test_joint_aoti(monkeypatch, tmp_path, rank):
         graph, tuple(v.detach() for v in inputs), strict=True
     )
     package = tmp_path / "projection.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = operation(x, vectors, weight, True)

@@ -222,6 +222,7 @@ class O2O3TensorProductConv(torch.nn.Module):
             for (_, path), degree in zip(self.path_data, harmonic_degrees)
             if degree and min(path[4:6]) > 1
         ]
+        self.scalar_harmonics_only = not any(harmonic_degrees)
         self.reuse_rotation = (
             tensor_product.lmax <= config.TORCH_ALIGNED_MAX_DEGREE
             and len(coupled) >= 2
@@ -425,6 +426,12 @@ class O2O3TensorProductConv(torch.nn.Module):
         reference = (
             self.backend == "torch" or not features.is_cuda
         ) and config.TORCH_REFERENCE
+        if vectors is not None and self.scalar_harmonics_only:
+            # Y^0 is constant. Rotating into and out of a frame would leave
+            # roundoff in a direction derivative that is identically zero.
+            method = "baseline"
+            if vectors.dtype != features.dtype:
+                vectors = (vectors / vectors.norm(dim=-1, keepdim=True)).to(features)
         if vectors is not None and vectors.dtype != features.dtype:
             wigner = (
                 torch_wigner.packed(self.frame, vectors, "recursive")

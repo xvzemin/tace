@@ -16,6 +16,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import co2
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import check_forward_ad, package_script
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA kernels")
@@ -136,7 +137,7 @@ def test_dynamic_joint_aoti(kind, monkeypatch, tmp_path):
         strict=True,
     )
     package = tmp_path / "planar.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for rows in (7, 11, 9):
         x = (

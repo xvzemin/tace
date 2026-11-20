@@ -9,6 +9,7 @@ import torch
 
 from equivariantx.ops import config, get_kernel
 from equivariantx.ops.common.polynomial import polynomial_adjoint
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.utils.metadata import encode_plans
 
 
@@ -164,7 +165,7 @@ def test_grouped_force_aoti(tmp_path, double_precision):
     inputs = (*[value.detach() for value in values], types)
     exported = torch.export.export(graph, inputs)
     package = tmp_path / "grouped.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for scale, indices in ((1.0, types), (0.7, torch.zeros_like(types))):
         changed = tuple((value.detach() * scale).requires_grad_() for value in values)

@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from equivariantx.co3.symmetric import SymmetricBasis
+from equivariantx.ops.compiler import compile_and_package
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -132,7 +133,7 @@ def test_native_shared_matrix_dynamic_aoti(rank, channels, monkeypatch, tmp_path
         strict=True,
     )
     package = tmp_path / "shared_matrix.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = tmp_path / "records.pt"
     torch.save(dict(initial=initial, cases=cases), records)
     script = """

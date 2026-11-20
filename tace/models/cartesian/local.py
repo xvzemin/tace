@@ -256,6 +256,7 @@ class UvConvolution(torch.nn.Module):
         edge_radial_basis=None,
         edge_cutoff=None,
         radial_network=None,
+        edge_pairs=None,
     ):
         return self.convolution(
             features,
@@ -266,6 +267,7 @@ class UvConvolution(torch.nn.Module):
             edge_radial_basis,
             edge_cutoff,
             radial_network,
+            edge_pairs=edge_pairs,
         )
 
     def convolution(
@@ -279,6 +281,7 @@ class UvConvolution(torch.nn.Module):
         edge_cutoff,
         radial_network=None,
         magnetic=None,
+        edge_pairs=None,
     ):
         if (
             use_streamed_convolution(self.eqx_tp, features, edge_index)
@@ -299,11 +302,21 @@ class UvConvolution(torch.nn.Module):
                         self.linear_down.bias,
                     ),
                     radial_network=radial_network,
+                    edge_pairs=edge_pairs,
                 )
                 * self.scale
             )
+        if isinstance(weights, tuple):
+            radial_index = (
+                edge_index
+                if edge_pairs is None
+                else edge_index[:, edge_pairs.representatives]
+            )
+            weights = materialize(weights, radial_index)
         if radial_network is not None:
-            weights = radial_network(materialize(weights, edge_index))
+            weights = radial_network(weights)
+        if edge_pairs is not None:
+            weights = edge_pairs.expand(weights)
         source = self.local_frame_in(features[edge_index[0]], rotation)
         target = self.local_frame_in(features[edge_index[1]], rotation)
         inputs = [(target, self.node_irreps), (source, self.node_irreps)]

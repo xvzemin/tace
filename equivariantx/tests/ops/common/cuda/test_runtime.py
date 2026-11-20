@@ -8,7 +8,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from unittest.mock import MagicMock, Mock
+
 import pytest
+
 import equivariantx.ops.common.cuda.runtime as cuda
 
 

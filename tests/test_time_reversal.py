@@ -35,6 +35,8 @@ from tace.models.time_reversal import (
     with_time_reversal,
 )
 
+from .testing import time_reverse_features
+
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1054,10 +1056,3 @@ def test_magnetic_radial_basis_is_bounded_and_has_no_constant_mode():
     torch.testing.assert_close(radial[0], torch.ones_like(radial[0]))
     assert torch.isfinite(angular).all()
     torch.testing.assert_close(angular, basis.angular_basis(magmoms))
-
-
-def time_reverse_features(features: torch.Tensor, irreps) -> torch.Tensor:
-    output = features.clone()
-    for ir_mul, ir_slice in zip(irreps, irreps.slices()):
-        output[..., ir_slice] *= ir_mul.ir.t
-    return output

@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx import o2
+from equivariantx.ops.compiler import compile_and_package
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA joint compilation")
@@ -128,7 +129,7 @@ def test_force_derivatives_aoti(method, double_precision, tmp_path):
         for node in exported.graph_module.graph.nodes
     )
     package = tmp_path / "wigner.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     cases = []
     for offset in (0.0, 0.3):
         changed = vectors.detach().clone().add_(offset).requires_grad_()
@@ -202,7 +203,7 @@ def test_default_aoti_parameter_updates(method, tmp_path, double_precision):
     assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
     exported = torch.export.export(graph, (vectors.detach(), weight.detach()))
     package = tmp_path / "wigner_force.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     rows = []
     for _ in range(3):
         expected = joint(reference, vectors, weight)

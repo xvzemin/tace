@@ -10,6 +10,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.o2.o2grid import O2Grid
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.torch.o2 import o2grid as kernels
 from equivariantx.tests.utils.testing import package_script
 
@@ -55,7 +56,7 @@ def test_joint_aoti(time_odd, monkeypatch, tmp_path):
     )
     exported = torch.export.export(graph, (x.detach(), w.detach()), strict=True)
     package = tmp_path / "grid.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     for _ in range(3):
         expected = run(x, w, True)

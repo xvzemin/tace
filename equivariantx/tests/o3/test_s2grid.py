@@ -6,8 +6,6 @@ from e3nn import o3
 
 from equivariantx.o3.s2grid import S2Grid
 
-IRREPS = "0e+0o+1e+1o+2e+2o"
-
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_reference_preserves_cuda_provider(device, monkeypatch, double_precision):

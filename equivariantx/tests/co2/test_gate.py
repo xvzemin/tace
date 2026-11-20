@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from equivariantx import co2, o2
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

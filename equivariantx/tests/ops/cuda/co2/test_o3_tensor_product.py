@@ -9,6 +9,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from equivariantx.ops import config
+from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.ops.torch.co2.test_o3_tensor_product import training_problem
 from equivariantx.tests.utils.testing import package_script
 
@@ -29,7 +30,7 @@ def test_joint_aoti(monkeypatch, tmp_path):
         graph, tuple(v.detach() for v in values), strict=True
     )
     package = tmp_path / "module.pt2"
-    torch._inductor.aoti_compile_and_package(exported, package_path=str(package))
+    compile_and_package(exported, package_path=str(package))
     records = []
     x, y, w = values
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
