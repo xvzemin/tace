@@ -216,6 +216,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         radial_mlp_norm: str | None = None,
         path_irreps: o3.Irreps | None = None,
         num_residual_updates: int = 0,
+        radial_widths: tuple[int, ...] | None = None,
     ) -> None:
         super().__init__()
 
@@ -226,6 +227,7 @@ class Interaction(torch.nn.Module, e3nnGhostExchangeMixin):
         self.lmax = lmax
         self.correlation = correlation[layer]
         self.num_radial_basis = num_radial_basis
+        self.radial_widths = radial_widths
         self.avg_num_neighbors = avg_num_neighbors
         self.edge_feats_channel = edge_feats_channel
         self.l1l2 = l1l2

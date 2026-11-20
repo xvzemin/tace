@@ -14,7 +14,7 @@ from tace.utils.env import acceleration_enabled, memory_first
 from ..lammps import Graph
 from ..layer_norm import get_normalization_layer
 from ..linear import IndexedFeatures, e3nnLinear, radial_features
-from ..mlp import ACTIVATION, MLP, convolution_radial
+from ..mlp import ACTIVATION, BATCH_MLP, MLP, convolution_radial
 from .base import Interaction
 from .fused import (
     O2TensorProductConv,
@@ -55,34 +55,43 @@ class O3CgtpInteraction(Interaction):
         pass
 
     def _radial_projection(self, edge_feats, element=None, edge_pairs=None):
-        radial, layers = convolution_radial(self.edge_info, edge_feats)
-        last = layers[-1]
-        projection = last.get_weight()
-        radial_network = (
-            layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
-        )
+        if self.radial_widths is not None:
+            radial, projection, radial_network = self.edge_info.stream(
+                edge_feats,
+                backend=self.rejector.eqx_tp.backend,
+                paired=edge_pairs is not None,
+            )
+            bias = None
+        else:
+            radial, layers = convolution_radial(self.edge_info, edge_feats)
+            last = layers[-1]
+            projection, bias = last.get_weight(), last.bias
+            radial_network = (
+                layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
+            )
         if element is not None:
             table, endpoints = element
             ordered = isinstance(table, tuple)
-            terms = (
-                tuple(
-                    (t.to(projection) * 0.5, i)
-                    for t, i in zip(table, endpoints.unbind(0))
+            if ordered:
+                terms = tuple(
+                    (t.to(projection) * 0.5, i) for t, i in zip(table, endpoints)
                 )
-                if ordered
-                else ((table.to(projection), endpoints),)
-            )
+            elif edge_pairs is not None:
+                half = table.to(projection) * 0.5
+                terms = ((half, endpoints[0]), (half, endpoints[1]))
+            else:
+                terms = ((table.to(projection), endpoints),)
             return indexed_weights(
                 radial,
                 projection,
                 terms,
                 radial_network=radial_network,
-                bias=last.bias,
+                bias=bias,
                 radial_mode="full" if memory_first() else "last",
-                edge_pairs=edge_pairs if ordered else None,
+                edge_pairs=edge_pairs,
             )
-        if last.bias is not None:
-            projection = torch.cat((projection, last.bias.unsqueeze(0)), dim=0)
+        if bias is not None:
+            projection = torch.cat((projection, bias.unsqueeze(0)), dim=0)
             if radial_network is None:
                 radial = torch.cat((radial, torch.ones_like(radial[:, :1])), dim=-1)
         return radial, projection, radial_network
@@ -133,13 +142,27 @@ class O3CgtpInteraction(Interaction):
                 if self.mlp_type == "mlp_v1" and self.radial_layer_norm
                 else None
             )
-        self.edge_info = MLP[self.mlp_type](
-            [self.edge_feats_channel] + self.radial_mlp + [self.rejector.weight_numel],
+        options = dict(
             bias=self.radial_bias,
             layer_norm=radial_norm == "layer_norm",
             rms_norm=radial_norm == "rms_norm",
             act="silu",
         )
+        if self.radial_widths is None:
+            self.edge_info = MLP[self.mlp_type](
+                [self.edge_feats_channel]
+                + self.radial_mlp
+                + [self.rejector.weight_numel],
+                **options,
+            )
+        else:
+            self.edge_info = BATCH_MLP[self.mlp_type].from_product(
+                self.rejector,
+                self.radial_widths,
+                self.radial_mlp,
+                context_features=self.edge_feats_channel - sum(self.radial_widths),
+                **options,
+            )
         self._setup_additional_modules()
 
         self.scatter_norm = get_scatter_norm_layer(
@@ -229,7 +252,7 @@ class O3CgtpInteraction(Interaction):
                 if graph is not None
                 else None,
                 radial_network=radial_network,
-                edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,
+                edge_pairs=None if element is not None else edge_pairs,
             )
         conv_weights = self._conv_weights(edge_feats, element)
         if edge_cutoff is not None:
@@ -267,6 +290,7 @@ class O3CgtpInteraction(Interaction):
         # retains the partitions until each edge tile is evaluated.
         if (
             isinstance(edge_feats, tuple)
+            and self.radial_widths is None
             and self.edge_info.num_layers == 1
             and not self.use_eqx
         ):
@@ -440,7 +464,7 @@ class O2CgtpInteraction(O3CgtpInteraction):
                 edge_cutoff,
                 graph,
                 radial_network=radial_network,
-                edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,
+                edge_pairs=None if element is not None else edge_pairs,
             )
         conv_weights = self._conv_weights(edge_feats, element)
         if edge_cutoff is not None:
@@ -544,7 +568,10 @@ class UvO2Interaction(O3CgtpInteraction):
         edge_pairs=None,
     ) -> torch.Tensor:
         if edge_pairs is not None:
-            conv_weights, radial_network = edge_pairs.expand(self.edge_info(edge_feats)), None
+            conv_weights, radial_network = (
+                edge_pairs.expand(self.edge_info(edge_feats)),
+                None,
+            )
         elif self.use_eqx and self.rejector.eqx_tp is not None and node_feats.is_cuda:
             conv_weights, radial_network = (
                 radial_features(edge_feats),

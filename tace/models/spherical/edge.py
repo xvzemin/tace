@@ -198,6 +198,29 @@ class Element2EdgeEmbedding(ElementEdgeEmbedding):
         return source.index_select(1, index), target.index_select(1, index)
 
 
+class DegreeEdgeEmbedding(torch.nn.Module):
+    """Apply separate scalar edge embeddings to each angular degree."""
+
+    def __init__(self, cls, widths, **kwargs):
+        super().__init__()
+        self.widths = widths
+        self.embeddings = torch.nn.ModuleList(
+            [cls(num_radial_basis=n, **kwargs) for n in widths]
+        )
+        self.output_widths = tuple(m.out_dim for m in self.embeddings)
+        self.out_dim = sum(self.output_widths)
+
+    def forward(self, node_feats, node_type, edge_feats, edge_index, cutoff):
+        parts = edge_feats.split(self.widths, dim=-1)
+        return torch.cat(
+            [
+                m(node_feats, node_type, x, edge_index, cutoff)
+                for m, x in zip(self.embeddings, parts)
+            ],
+            dim=-1,
+        )
+
+
 class IdentityEdgeUpdate(EdgeUpdate):
     """
     An identity edge update module.

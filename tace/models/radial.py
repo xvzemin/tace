@@ -16,6 +16,8 @@ from scipy.special import spherical_jn
 
 from tace.utils.torch_scatter import scatter_sum
 
+from .physical_basis import PHYSICAL_BASES
+
 
 class j0SphericalBesselBasis(torch.nn.Module):
     """The Bessel Basis is proposed in the DimeNet: https://www.cs.cit.tum.de/daml/dimenet/"""
@@ -863,7 +865,7 @@ class RadialBasis(torch.nn.Module):
     def __init__(
         self,
         cutoff: float = 6.0,
-        num_basis: int = 8,
+        num_basis: int | list[int] | None = None,
         polynomial_cutoff: int = 5,
         radial_basis: str = "j0",
         distance_transform=None,
@@ -871,12 +873,17 @@ class RadialBasis(torch.nn.Module):
         apply_cutoff: bool = True,
         cutoff_fn: str = "mollifier",  # ['cosine', 'mollifier', 'polynomial']
         gaussian_width: float = 2.0,
+        lmax: int = 0,
+        max_eigenvalue: float | None = None,
     ):
         super().__init__()
 
         assert isinstance(trainable, bool)
         assert isinstance(apply_cutoff, bool)
-        if not isinstance(num_basis, int) or num_basis <= 0:
+        self.physical = radial_basis in PHYSICAL_BASES
+        if num_basis is None and not self.physical:
+            num_basis = 8
+        if not self.physical and (not isinstance(num_basis, int) or num_basis <= 0):
             raise ValueError("num_basis must be a positive integer.")
 
         if cutoff_fn == "mollifier":
@@ -888,7 +895,14 @@ class RadialBasis(torch.nn.Module):
         else:
             self.cutoff_fn = C2PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
 
-        if radial_basis == "bessel" or radial_basis == "j0":
+        self.widths = None
+        if self.physical:
+            if trainable or distance_transform is not None:
+                raise ValueError(f"{radial_basis} uses fixed eigenfunctions and its own distance transform.")
+            self.radial_fn = PHYSICAL_BASES[radial_basis](cutoff, lmax, num_basis, max_eigenvalue)
+            self.widths = self.radial_fn.widths
+            num_basis = sum(self.widths)
+        elif radial_basis == "bessel" or radial_basis == "j0":
             self.radial_fn = j0SphericalBesselBasis(
                 cutoff=cutoff,
                 num_basis=num_basis,
@@ -941,7 +955,8 @@ class RadialBasis(torch.nn.Module):
                 edge_length, node_type, edge_index, atomic_numbers
             )
 
-        radial = self.radial_fn(edge_length, node_type, edge_index)
+        types = atomic_numbers[node_type] if self.physical else node_type
+        radial = self.radial_fn(edge_length, types, edge_index)
 
         if self.apply_cutoff:
             return radial * cutoff, None

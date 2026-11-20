@@ -17,6 +17,113 @@ from equivariantx.ops.common.radial import (
 )
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("second_width", [2, 3])
+def test_grouped_radial_program(backend, second_width, double_precision, monkeypatch):
+    from equivariantx.nn import GroupedRadialMLP
+    from equivariantx.ops.common.convolution import radial_input
+    from equivariantx.ops.common.edge import evaluate
+    from equivariantx.ops.common.torch.edge import evaluate_torch
+    from equivariantx.utils.program import Program
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    branches = [
+        torch.nn.Sequential(
+            torch.nn.Linear(n, 4), torch.nn.SiLU(), torch.nn.Linear(4, m)
+        )
+        for n, m in [(3, 3), (4, second_width)]
+    ]
+    net = GroupedRadialMLP(
+        [2, 3], branches, [(0, 1), (1, second_width), (0, 2)], context_features=1
+    ).to(device)
+    monkeypatch.setattr(config, "RADIAL_CHAIN_TILE_BYTES", 1024)
+    x = torch.randn(35, 5, device=device, requires_grad=True)
+    ctx = torch.randn(3, 1, device=device, requires_grad=True)
+    index = torch.arange(len(x), device=device) % 3
+    program, inputs = Program(), []
+    root = radial_input(program, inputs, ((x, "edge"), (ctx, "target")), net)
+    metadata = repr((tuple(program.nodes), ((root, 0, "edge"),)))
+    evaluator = evaluate if backend == "cuda" else evaluate_torch
+    actual = evaluator(metadata, inputs, index, index, 3)[0]
+    a, b = [
+        branch(torch.cat((part, ctx[index]), -1))
+        for branch, part in zip(branches, x.split((2, 3), -1))
+    ]
+    expected = torch.cat((a[:, :1], b, a[:, 1:]), -1)
+    torch.testing.assert_close(net(torch.cat((x, ctx[index]), -1)), expected)
+    if backend == "cuda":
+        # Unequal input widths, shared context, independently weighted
+        # branches and a nontrivial output permutation. Probe mixed derivatives.
+        inp = torch.cat((x, ctx[index]), -1)
+        params = tuple(net.parameters())
+        for mode in ("last", "full"):
+            value, ref = net.stream_rows(inp, backend, mode), expected
+
+            def force_grad(y):
+                force = torch.autograd.grad(y.sin().sum(), x, create_graph=True)[0]
+                return torch.autograd.grad(
+                    force.square().sum(), params, retain_graph=True
+                )
+
+            torch.testing.assert_close(force_grad(value), force_grad(ref))
+            for variables in ((x,), (x, *params), (x, *params)):
+                torch.testing.assert_close(value, ref)
+                probes = [torch.randn_like(p) for p in variables]
+
+                def vjp(y):
+                    grads = torch.autograd.grad(
+                        y.sin().sum(), variables, create_graph=True
+                    )
+                    return sum((g * v).sum() for g, v in zip(grads, probes))
+
+                value, ref = vjp(value), vjp(ref)
+            torch.testing.assert_close(value, ref)
+    active = (x, ctx, *net.parameters())
+    for _ in range(2):
+        torch.testing.assert_close(actual, expected)
+        da, db = [
+            torch.autograd.grad(y.sin().sum(), active, create_graph=True)
+            for y in (actual, expected)
+        ]
+        torch.testing.assert_close(da, db)
+        actual, expected = (sum(z.sum() for z in d) for d in (da, db))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_fixed_spline(dtype, device):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.nn import uniform_cubic_spline
+    from equivariantx.ops.decompositions import torch_decompositions
+
+    c = torch.randn(4, 4, 7, device=device, dtype=dtype)
+    x = torch.tensor(
+        [-0.1, 0.0, 0.48, 0.5, 1.87, 2.0],
+        device=device,
+        dtype=dtype,
+        requires_grad=True,
+    )
+    expected = uniform_cubic_spline(x, c, 0.5, backend="torch")
+
+    def spline(value, table):
+        return uniform_cubic_spline(value, table, 0.5)
+
+    actual = spline(x, c)
+    torch.testing.assert_close(spline(x[:0], c), expected[:0])
+    graph = make_fx(spline, decomposition_table=torch_decompositions())(x, c)
+    assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
+    torch.testing.assert_close(graph(x, c), expected)
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected)
+        actual, expected = [
+            torch.autograd.grad(y.sum(), x, create_graph=True)[0]
+            for y in (actual, expected)
+        ]
+    torch.testing.assert_close(actual, expected)
+
+
 def embedded_case(kind, edges, shared, device):
     from equivariantx.tests.ops.common.torch.test_convolution import (
         convolution_case as aligned_case,

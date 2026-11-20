@@ -12,6 +12,7 @@ from typing import Any
 
 from ...dataset.quantity import PROPERTIES
 from ..mlp import MLP
+from ..physical_basis import PHYSICAL_BASES
 
 DEFAULT_MODEL_CONFIG = {
     "mmax": 2,
@@ -44,6 +45,7 @@ DEFAULT_MODEL_CONFIG = {
         "bias": False,
         "radial_basis": "j0",
         "num_radial_basis": 8,
+        "max_eigenvalue": None,
         "num_mag_radial_basis": 10,
         "distance_transform": None,
         "cutoff_fn": "c2poly",
@@ -212,7 +214,13 @@ def get_equivariant_property(ue: dict) -> list[str]:
 def check_model_config(cfg: dict[str, Any]):
 
     # Update default config with user config
+    radial_input = cfg.get("radial_basis", {})
     cfg = recursive_update(cfg)
+    if (
+        radial_input.get("radial_basis") in PHYSICAL_BASES
+        and "num_radial_basis" not in radial_input
+    ):
+        cfg["radial_basis"]["num_radial_basis"] = None
 
     if cfg["mlp_type"] not in MLP:
         raise ValueError("mlp_type must be 'mlp_v1' or 'mlp_v2'.")

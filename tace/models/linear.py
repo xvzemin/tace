@@ -280,12 +280,15 @@ class mlpLinear(torch.nn.Module):
 
     def get_weight(self) -> torch.Tensor:
         """Return the scaled weight, including an active low-rank update."""
-        weight = self.weight * self.alpha
+        weight, scale = self.weight_and_scale()
+        return weight * scale
+
+    def weight_and_scale(self) -> tuple[torch.Tensor, float]:
+        """Return the effective matrix and its constant gain for grouped projections."""
+        weight = self.weight
         if has_lora(self):
-            weight = (
-                self.weight + (self.lora_A @ self.lora_B) * _lora_scaling(self)
-            ) * self.alpha
-        return weight
+            weight = weight + (self.lora_A @ self.lora_B) * _lora_scaling(self)
+        return weight, self.alpha
 
     def forward(self, input: torch.Tensor | IndexedFeatures) -> torch.Tensor:
         """Project dense or partitioned inputs, gathering after projection.

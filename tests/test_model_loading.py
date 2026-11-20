@@ -624,7 +624,7 @@ def test_graph_precision_independent_of_network(dtype):
     )
 
 
-def make_model(interaction="cgtp", matrix=False, v2=False, *, edge_embedding=None):
+def make_model(interaction="cgtp", matrix=False, v2=False, *, edge_embedding=None, radial=None):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
         num_layers=2,
@@ -646,6 +646,8 @@ def make_model(interaction="cgtp", matrix=False, v2=False, *, edge_embedding=Non
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
+    if radial is not None:
+        config["radial_basis"].update(radial)
     if v2:
         config["edge_update"]["type"] = "element2_v2"
         config["mlp_type"] = "mlp_v2"
@@ -682,6 +684,77 @@ def make_model(interaction="cgtp", matrix=False, v2=False, *, edge_embedding=Non
     if matrix:
         switch_e3nn_weight_layout(model, "matrix")
     return configure_model_precision(model, torch.float64, device=DEVICE).eval()
+
+
+@pytest.mark.parametrize("v2", [False, True])
+@pytest.mark.parametrize("basis", ["physical", "pt_physical"])
+def test_physical_cgtp_model(double_precision, v2, basis):
+    if basis == "physical":
+        pytest.importorskip("physical_basis")
+    radial = dict(radial_basis=basis, num_radial_basis=[2, 1])
+    model = make_model(v2=v2, radial=radial)
+    expected = evaluate(model)
+    for implementation in ("co3", "o2"):
+        other = convert_cgtp(model, implementation)
+        actual = evaluate(other)
+        for key in ("energy", "forces", "stress"):
+            torch.testing.assert_close(actual[key], expected[key], rtol=1e-8, atol=1e-9)
+    model.train()
+    loss = evaluate(model)["forces"].square().sum()
+    branch = model.readout_fn.representation.interactions[0].edge_info
+    gradient = torch.autograd.grad(loss, next(branch.parameters()))[0]
+    assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+    with pytest.raises(RuntimeError, match="physical does not support"):
+        make_model(interaction="uv_o2", radial=radial)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="EQX CUDA convolution")
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize(
+    "interaction,embedding",
+    [
+        ("cgtp", None),
+        ("cgtp", "element2"),
+        ("co3", "element"),
+        ("o2_cgtp", "element2"),
+    ],
+)
+def test_physical_fused_convolution(
+    interaction, embedding, full, double_precision, monkeypatch
+):
+    pytest.importorskip("physical_basis")
+    options = dict(
+        radial=dict(radial_basis="physical", num_radial_basis=[2, 1]),
+        edge_embedding=embedding,
+        v2=True,
+    )
+    reference = make_model(interaction, **options).train()
+    embed = reference.readout_fn.representation.edge_embedding
+    if embedding:
+        with torch.no_grad():
+            for name in embed.table_names:
+                getattr(embed, name).weight.normal_(std=0.2)
+    expected = evaluate(reference)
+    loss = expected["forces"].square().sum()
+    named = dict(reference.named_parameters())
+    parameters = [
+        k
+        for k in named
+        if "edge_info.branches" in k or "representation.edge_embedding." in k
+    ]
+    grads = torch.autograd.grad(loss, [named[k] for k in parameters])
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_MEMORY_FIRST", str(int(full)))
+    model = make_model(interaction, **options).train()
+    model.load_state_dict(reference.state_dict())
+    output = evaluate(model)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(output[key], expected[key], rtol=1e-8, atol=1e-9)
+    named = dict(model.named_parameters())
+    actual = torch.autograd.grad(
+        output["forces"].square().sum(), [named[k] for k in parameters]
+    )
+    torch.testing.assert_close(actual, grads, rtol=1e-7, atol=1e-9)
 
 
 def evaluate(model, fidelity=0, numbers=(1, 1, 8)):

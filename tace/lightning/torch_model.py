@@ -88,8 +88,7 @@ def create_model(
         )
     except Exception as e:
         raise RuntimeError(
-            "Failed to instantiate the model using the provided configuration.\n"
-            # f"Model config: {model_config}"
+            f"Failed to instantiate the model using the provided configuration: {e}"
         ) from e
 
     return MODEL

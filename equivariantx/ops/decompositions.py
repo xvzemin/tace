@@ -20,17 +20,21 @@ def torch_decompositions():
         polynomials, including ordered Lie derivatives.
         Large expanded programs may use more memory than native kernels.
     """
+    from .common.pointwise import silu_derivative
     from .common.torch.attention import evaluate_adjoint, normalized_exp
     from .common.torch.convolution import contraction
     from .common.torch.frame import frame_rotation, indexed_frame, rotary_product
     from .common.torch.grid import linear
     from .common.torch.layout import gather_sum, grouped_permute, indexed_sum
     from .common.torch.quaternion import quaternion_polynomial
+    from .common.torch.spline import evaluate as spline
     from .common.torch.wigner import alignment, packed_wigner, rotation
     from .torch.co3.basis import rank_two
 
     decompositions = {
         **polynomial_decompositions(),
+        torch.ops.eqx.uniform_cubic_spline.default: spline,
+        torch.ops.eqx.silu_product.default: silu_derivative,
         torch.ops.eqx.edge_program.default: edge_decomposition,
         torch.ops.eqx.alignment_cuda.default: alignment,
         torch.ops.eqx.packed_wigner.default: packed_wigner,

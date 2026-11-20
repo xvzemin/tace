@@ -60,6 +60,14 @@ to the convolution. If only the radial term is reciprocal, pass the map to
                                radial_network=hidden, edge_pairs=pairs)
    out = conv(nodes, harmonics, r, p, edge_index, radial_network=net)
 
+For degree-specific radial bases, pass an
+:class:`~equivariantx.nn.GroupedRadialMLP` as ``radial_network`` and an empty
+projection of shape ``(0, conv.weight_numel)``. The convolution selects the
+backend. ``radial_mode="last"`` retains hidden activations and ``"full"``
+recomputes them during differentiation. If the pair-weight table exceeds the
+workspace budget, the convolution evaluates weights in directed-edge tiles.
+Both modes preserve the supplied path order.
+
 Only share a deterministic, pointwise function whose inputs agree on edge
 reversal. Reuse the map while the edge list and lattice translations are
 unchanged. Angular features and the two directed messages are not identified.

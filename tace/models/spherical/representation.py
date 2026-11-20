@@ -16,11 +16,13 @@ from ...dataset.quantity import PROPERTIES
 from ...utils.env import acceleration_enabled, get_tace_use_dens
 from ..layer_norm import get_normalization_layer, residual_update_count
 from ..linear import e3nnLinear
+from ..physical_basis import PHYSICAL_BASES
 from ..radial import RadialBasis
 from ..time_reversal import supports_time_reversal
 from .edge import (
     EDGE_EMBEDDING,
     EDGE_UPDATE,
+    DegreeEdgeEmbedding,
     Element2EdgeEmbedding,
     ElementEdgeEmbedding,
 )
@@ -92,6 +94,17 @@ class NodeRepresentation(torch.nn.Module):
         self.use_dens = get_tace_use_dens() == "1"
 
         # === radial basis ===
+        kinds = atomic_basis["type"]
+        if radial_basis["radial_basis"] in PHYSICAL_BASES:
+            for kind in kinds:
+                if INTERACTION.get(kind) not in (
+                    O3CgtpInteraction,
+                    O3IctdInteraction,
+                    O2CgtpInteraction,
+                ):
+                    raise ValueError(
+                        f"{radial_basis['radial_basis']} does not support interaction {kind!r}; use cgtp, co3 or o2_cgtp."
+                    )
         self.radial_basis = RadialBasis(
             cutoff=cutoff,
             num_basis=radial_basis["num_radial_basis"],
@@ -102,6 +115,8 @@ class NodeRepresentation(torch.nn.Module):
             trainable=radial_basis["trainable"],
             apply_cutoff=radial_basis["apply_cutoff"],
             gaussian_width=radial_basis["gaussian_width"],
+            lmax=lmax,
+            max_eigenvalue=radial_basis.get("max_eigenvalue"),
         )
 
         # === module classes ===
@@ -283,12 +298,14 @@ class NodeRepresentation(torch.nn.Module):
             mlp_type=mlp_type,
             radial_mlp_norm=radial_basis["mlp_norm"],
         )
-        self.edge_embedding = EDGE_EMBEDDING[edge_embedding["type"]](
-            num_elements=self.num_elements,
-            num_radial_basis=self.radial_basis.num_basis,
-            num_channel=num_channel,
-            bias=False,
-        )
+        widths = self.radial_basis.widths
+        embed = EDGE_EMBEDDING[edge_embedding["type"]]
+        opts = dict(num_elements=self.num_elements, num_channel=num_channel, bias=False)
+        if widths is not None and edge_embedding["type"] in ("linear", "nonlinear"):
+            self.edge_embedding = DegreeEdgeEmbedding(embed, widths, **opts)
+            widths = self.edge_embedding.output_widths
+        else:
+            self.edge_embedding = embed(num_radial_basis=self.radial_basis.num_basis, **opts)
 
         # === universal embedding ===
         if len(self.invariant_property) > 0:
@@ -367,7 +384,8 @@ class NodeRepresentation(torch.nn.Module):
             "num_channel": num_channel,
             "target_irreps": target_irreps,
             "path_irreps": path_irreps,
-            "num_radial_basis": radial_basis["num_radial_basis"],
+            "num_radial_basis": self.radial_basis.num_basis,
+            "radial_widths": widths,
             "num_mag_radial_basis": radial_basis["num_mag_radial_basis"],
             "radial_mlp": radial_basis["hidden"],
             "radial_bias": radial_basis["bias"],
@@ -689,13 +707,14 @@ class NodeRepresentation(torch.nn.Module):
         )
         directed_elements = isinstance(self.edge_embedding, Element2EdgeEmbedding)
         endpoint_types = (
-            node_type[data["edge_index"] if directed_elements else radial_index]
+            node_type[data["edge_index"]]
             if isinstance(self.edge_embedding, ElementEdgeEmbedding)
             else None
         )
         if (
             endpoint_types is not None
             and not directed_elements
+            and pairs is None
             and self.interactions[0].use_eqx
         ):
             endpoint_types = indexed_rows(
@@ -892,6 +911,10 @@ class PairRepresentation(torch.nn.Module):
         self.cutoff = float(cutoff)
         self.irreps_in = o3.Irreps(irreps_in)
         self.atomic_numbers = list(atomic_numbers)
+        if radial_basis["radial_basis"] in PHYSICAL_BASES and interaction_type != "cgtp":
+            raise ValueError(
+                f"{radial_basis['radial_basis']} does not support pair interaction {interaction_type!r}; use cgtp."
+            )
         self.radial_basis = RadialBasis(
             cutoff=cutoff,
             num_basis=radial_basis["num_radial_basis"],
@@ -902,6 +925,8 @@ class PairRepresentation(torch.nn.Module):
             trainable=radial_basis["trainable"],
             apply_cutoff=False,
             gaussian_width=radial_basis["gaussian_width"],
+            lmax=o3.Irreps(irreps_sh).lmax,
+            max_eigenvalue=radial_basis.get("max_eigenvalue"),
         )
         if interaction_type not in EDGE_INTERACTION:
             raise ValueError("interaction_type must be 'cgtp' or 'o2'.")
@@ -914,7 +939,7 @@ class PairRepresentation(torch.nn.Module):
                 irreps_out,
                 num_channel,
                 len(atomic_numbers),
-                radial_basis,
+                dict(radial_basis, widths=self.radial_basis.widths),
                 mlp_type=mlp_type,
             )
             self.interactions.append(interaction)

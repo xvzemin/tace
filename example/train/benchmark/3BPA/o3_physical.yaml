@@ -1,0 +1,10 @@
+defaults:
+  - o3
+  - _self_
+
+model:
+  config:
+    radial_basis:
+      radial_basis: physical
+      num_radial_basis: null  # or [3, 2, 1, 1] for lmax=3
+      max_eigenvalue: null

@@ -408,3 +408,130 @@ def test_spherical_bessel_invalid_name(name):
 def test_spherical_bessel_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
         jnSphericalBesselBasis(**kwargs)
+
+
+@pytest.mark.parametrize("counts", [None, [3, 1, 2]])
+def test_physical_basis(counts, double_precision):
+    reference = pytest.importorskip("physical_basis").PhysicalBasis()
+    from tace.models.physical_basis import PhysicalRadialBasis
+
+    radial = RadialBasis(
+        cutoff=6.0,
+        radial_basis="physical",
+        num_basis=counts,
+        lmax=2,
+        max_eigenvalue=25 if counts is None else 0.0,
+        cutoff_fn="c2poly",
+        apply_cutoff=counts is not None,
+    )
+    mod = radial.radial_fn
+    assert mod.widths == tuple(counts or [2, 1, 1])
+    distance = torch.tensor([[1.4], [1.4], [20.0]], requires_grad=True)
+    edges = torch.tensor([[0, 1, 0], [1, 0, 1]])
+    z = torch.tensor([6, 8])
+    y = mod(distance, z, edges)
+    features, cutoff = radial(distance, torch.tensor([0, 1]), edges, z)
+    if radial.apply_cutoff:
+        assert cutoff is None
+        torch.testing.assert_close(features, y * radial.cutoff_fn(distance))
+    else:
+        torch.testing.assert_close(features, y)
+        torch.testing.assert_close(cutoff, radial.cutoff_fn(distance))
+    x = np.array([1.4 / 1.094])
+    modes = [(n, l) for l, count in enumerate(mod.widths) for n in range(count)]
+    scale = (6**3 / 3) ** 0.5
+    expected = np.array([reference.compute(n, l, x)[0] for n, l in modes]) * scale
+    np.testing.assert_allclose(y[0].detach(), expected, rtol=2e-7, atol=2e-7)
+    torch.testing.assert_close(y[0], y[1])
+    assert y[2].count_nonzero() == 0
+    grad = torch.autograd.grad(y.sum(), distance, create_graph=True)[0]
+    derivative = sum(reference.compute_derivative(n, l, x)[0] for n, l in modes)
+    assert grad[0].item() == pytest.approx(derivative * scale / 1.094, abs=2e-5)
+    assert torch.autograd.grad(grad.sum(), distance)[0].isfinite().all()
+    with pytest.raises(ValueError, match="list"):
+        PhysicalRadialBasis(6.0, 2, 8)
+    with pytest.raises(ValueError, match="cover lmax"):
+        PhysicalRadialBasis(6.0, 3, None, 25)
+
+
+def test_pt_physical_basis():
+    from scipy.special import betaln, eval_jacobi
+
+    from tace.models.physical_basis import PtPhysicalRadialBasis
+
+    basis = PtPhysicalRadialBasis(5.0, 3)
+    assert basis.widths == (3, 2, 1, 1)
+    assert PtPhysicalRadialBasis(5.0, 5).widths[-1] == 1
+    assert PtPhysicalRadialBasis(5.0, 0, max_eigenvalue=35.0).widths == (2,)
+    assert PtPhysicalRadialBasis(5.0, 1, [1, 3], 0.0).widths == (1, 3)
+    with pytest.raises(ValueError, match="list"):
+        PtPhysicalRadialBasis(5.0, 1, 8)
+    with pytest.raises(ValueError, match="cover lmax"):
+        PtPhysicalRadialBasis(5.0, 3, max_eigenvalue=35)
+
+    r = torch.tensor([0.0, 0.5, 1.4, 4.8], requires_grad=True)
+    z = torch.tensor([6, 8])
+    edges = torch.tensor([[0, 1, 0, 1], [1, 0, 1, 0]])
+    values = basis(r, z, edges)
+    x = r.detach().numpy() / 1.094
+    expected = []
+    for l, count in enumerate(basis.widths):
+        b = (1 + math.sqrt(4 * l * (l + 1) + 25)) / 2
+        alpha, beta = l + 0.5, b - 0.5
+        for n in range(count):
+            norm = math.sqrt(
+                2
+                * 5**3
+                / 3
+                * (2 * n + alpha + beta + 1)
+                * math.exp(
+                    betaln(n + 1, alpha + beta + n + 1)
+                    - betaln(n + alpha + 1, n + beta + 1)
+                )
+            )
+            expected.append(
+                norm
+                * x**l
+                / (1 + x * x) ** ((l + b + 2) / 2)
+                * eval_jacobi(n, alpha, beta, (1 - x * x) / (1 + x * x))
+            )
+    np.testing.assert_allclose(values.detach(), np.stack(expected, axis=1), atol=1e-12)
+    assert torch.autograd.gradcheck(lambda d: basis(d, z, edges), r)
+    assert torch.autograd.gradgradcheck(lambda d: basis(d, z, edges), r)
+
+
+@pytest.mark.parametrize("version", ["mlp_v1", "mlp_v2"])
+@pytest.mark.parametrize("hidden", [[], [4, 4]])
+def test_batch_mlp_matches_independent_paths(version, hidden, double_precision):
+    from types import SimpleNamespace
+
+    from e3nn import o3
+
+    from tace.models.mlp import BATCH_MLP
+
+    product = SimpleNamespace(
+        irreps_in1=o3.Irreps("2x0e"),
+        irreps_in2=o3.Irreps("0e+1o+2e"),
+        instructions=[(0, l, i, "uvu", True) for i, l in enumerate([1, 0, 1, 2])],
+        weight_numel=8,
+    )
+    net = BATCH_MLP[version].from_product(
+        product, [2, 1, 1], hidden, context_features=2, bias=True, rms_norm=True
+    )
+    x = torch.randn(5, 4, requires_grad=True)
+    context = torch.randn(3, 2, requires_grad=True)
+    ids = torch.tensor([1, 0, 1, 2, 0])
+    actual = net(((x, None), (context, ids)))
+    a, b, c = [
+        m(torch.cat((v, context[ids]), 1))
+        for m, v in zip(net.branches, x.split([2, 1, 1], 1))
+    ]
+    expected = torch.cat((b[:, :2], a, b[:, 2:], c), 1)
+    inputs = (x, context, *net.parameters())
+
+    def derivatives(y):
+        grads = torch.autograd.grad(y.square().sum(), inputs, create_graph=True)
+        return grads, torch.autograd.grad(grads[0].sum(), inputs, allow_unused=True)
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(derivatives(actual), derivatives(expected))

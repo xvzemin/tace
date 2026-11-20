@@ -275,7 +275,9 @@ def contract_direct(
         tuple(result_ids[id(value)] for value in initialize),
         batch_paths,
         indexed,
-        pair_index is not None,
+        0
+        if pair_index is None
+        else (1 if pair_index.ndim == 1 else pair_index.shape[0]),
     )
     orders = {
         owner: prepare_graph(source, target, owner)
@@ -398,10 +400,12 @@ def contract(
             projected
             or pair_index.dtype != torch.long
             or pair_index.device != device
-            or pair_index.shape != source.shape
+            or pair_index.ndim not in (1, 2)
+            or pair_index.shape[-1] != source.numel()
+            or (pair_index.ndim == 2 and pair_index.shape[0] < 1)
         ):
             raise ValueError(
-                "Compact weights require direct weights and an int64 pair index per edge."
+                "Compact weights require int64 row indices of shape (edges,) or (terms, edges)."
             )
         pair_index = pair_index.contiguous()
     with torch.cuda.device(device):

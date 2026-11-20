@@ -57,6 +57,44 @@ them to the radial MLP output; gated O(2) applies them to the completed edge
 messages before summation. The SO(2) attention interaction retains its own
 normalization.
 
+Physical radial basis
+---------------------
+
+Use ``physical`` for the SPACE basis (install ``pip install '.[physical]'``) or
+``pt_physical`` for analytic Pöschl–Teller modes (no extra dependency).
+The ``cgtp``, ``co3`` and ``o2_cgtp``
+interactions generate weights independently for each harmonic input degree.
+For degree :math:`\ell_2`, one MLP maps its radial modes to the weight columns
+of all paths with that harmonic input. The output has shape
+``(num_edges, weight_numel)`` in the original CGTP instruction order.
+The MLP version, hidden widths, normalization, bias and cutoff placement use
+the standard TACE settings. With ``TACE_USE_EQX=1``, both use grouped radial
+projections. The SPACE basis uses a spline and the analytic basis uses PyTorch.
+``TACE_MEMORY_FIRST=0`` retains hidden activations for backward. Set it to
+``1`` to recompute them in bounded tiles. Reciprocal edges share the radial
+calculation when the pair table fits. With ``edge_embedding.type: element2``,
+the source and target tables are still applied in directed order.
+
+.. code-block:: yaml
+
+   lmax: 3
+   radial_basis:
+     radial_basis: physical
+     num_radial_basis: null
+     max_eigenvalue: null
+     hidden: [64, 64]
+
+Set ``num_radial_basis: [3, 2, 1, 1]`` to select the first modes explicitly
+for degrees 0 through 3 instead. The list overrides the eigenvalue threshold.
+In threshold mode every configured harmonic degree must retain at least one mode.
+With ``max_eigenvalue: null``, the dimensionless threshold is 36 for
+``physical`` and 77 for ``pt_physical``, raised if needed to include the first
+mode at ``lmax``. Both give ``[3, 2, 1, 1]`` at ``lmax: 3``. At other degrees,
+use an explicit list to guarantee identical widths. The
+`SPACE modes <https://github.com/frostedoyster/physical-basis>`_ and the
+`Pöschl–Teller modes <https://doi.org/10.1016/j.physleta.2006.05.037>`_
+use the same element-dependent distance scaling and external cutoff.
+
 Constant residual normalization
 -------------------------------
 

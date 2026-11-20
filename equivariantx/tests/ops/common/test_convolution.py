@@ -111,6 +111,15 @@ def test_pair_weight_derivatives(mode, ordered, device, double_precision, monkey
 
         actual, expected = derivative(actual), derivative(expected)
     torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-9)
+    if ordered:
+        # Exactly enough room for pair outputs, not for last-mode hidden states.
+        monkeypatch.setattr(
+            config,
+            "RADIAL_PROJECT_MAX_BYTES",
+            len(r) * module.weight_numel * r.element_size(),
+        )
+        _, selected = network.bind_pairs(rad, module)
+        assert (selected.pair is None) == (mode == "full")
     # Large-table policy: keep the directed streaming kernel and narrow inputs.
     monkeypatch.setattr(config, "RADIAL_PROJECT_MAX_BYTES", 0)
     module.radial_mode = "full"
@@ -126,11 +135,13 @@ def test_pair_weight_derivatives(mode, ordered, device, double_precision, monkey
         out = module(x, y, rad, p, idx, radial_network=network)
     else:
         out = module(x, y, r, matrix, idx, radial_network=net, edge_pairs=pairs)
+    ref = module.reference(
+        x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
+    )
+    torch.testing.assert_close(out, ref)
     torch.testing.assert_close(
-        out,
-        module.reference(
-            x, y, refweights, matrix.new_empty(0, module.weight_numel), idx, len(x)
-        ),
+        torch.autograd.grad(out.square().sum(), variables),
+        torch.autograd.grad(ref.square().sum(), variables),
     )
 
 

@@ -306,9 +306,21 @@ class O3TensorProductConv(torch.nn.Module):
         radial = cast_radial(radial, features.dtype)
         projection = projection.to(features)
         if isinstance(radial_network, IndexedProjection):
-            radial, radial_network = prepare_indexed(
-                self, radial, radial_network, edge_index, projection
-            )
+            radial, radial_network = radial_network.bind_pairs(radial, self)
+            if (
+                radial_network.lookup_only
+                and not radial_network.scales
+                and self.backend == "cuda"
+                and features.is_cuda
+                and indexed
+                and 0 < len(radial_network.terms) <= 4
+            ):
+                radial, pair_index = radial_network.packed_terms()
+                radial_network = None
+            else:
+                radial, radial_network = prepare_indexed(
+                    self, radial, radial_network, edge_index, projection, bound=True
+                )
         elif radial_network is not None and (
             radial_policy(self, radial_network) == "last"
             or (

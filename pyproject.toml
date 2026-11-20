@@ -32,6 +32,8 @@ dependencies = [
 
 [project.optional-dependencies]
 
+physical = ["physical-basis>=1.0.0"]
+
 dev = [
     "pytest",
     "ruff>=0.16,<0.17",
