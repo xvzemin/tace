@@ -623,8 +623,8 @@ def test_graph_precision_independent_of_network(dtype):
 def make_model(
     interaction="cgtp",
     matrix=False,
-    v2=False,
     *,
+    mlp_type="mlp_v1",
     edge_embedding=None,
     multi_cutoff=None,
     scatter_norm=None,
@@ -638,6 +638,7 @@ def make_model(
         mmax=1,
         cutoff=4.0,
         max_neighbors=None,
+        mlp_type=mlp_type,
         target_property=["energy", "forces", "stress"],
     )
     config["atomic_basis"].update(type=["cgtp", interaction], num_head=1)
@@ -653,9 +654,6 @@ def make_model(
     config["radial_basis"]["multi_cutoff"] = multi_cutoff
     if scatter_norm is not None:
         config["atomic_basis"]["scatter_norm"] = scatter_norm
-    if v2:
-        config["edge_update"]["type"] = "element2_v2"
-        config["mlp_type"] = "mlp_v2"
     if edge_embedding is not None:
         config["edge_embedding"]["type"] = edge_embedding
         config["edge_update"]["type"] = "identity"
@@ -774,7 +772,7 @@ def test_multi_cutoff_interaction(
         torch.manual_seed(31)
         return make_model(
             interaction,
-            v2=embedding is None,
+            mlp_type="mlp_v2" if embedding is None else "mlp_v1",
             edge_embedding=embedding,
             multi_cutoff=multi_cutoff,
             scatter_norm=norm,
@@ -970,9 +968,8 @@ def test_select_elements(interaction, elements, tmp_path, double_precision):
         torch.testing.assert_close(value, original[name], atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("v2", [False, True])
-def test_new_element_initialization(double_precision, v2):
-    model = make_model(v2=v2)
+def test_new_element_initialization(double_precision):
+    model = make_model()
     torch.manual_seed(12)
     selected = select_elements(model, [8, 14])
     torch.manual_seed(12)
@@ -1015,8 +1012,8 @@ def test_new_element_initialization(double_precision, v2):
 
 
 @pytest.mark.parametrize("elements", [[1, 8], [1, 6, 8, 14]])
-def test_v2_element_export_roundtrip(elements, tmp_path, double_precision):
-    model = make_model(v2=True)
+def test_mlp_v2_element_export_roundtrip(elements, tmp_path, double_precision):
+    model = make_model(mlp_type="mlp_v2")
     selected = select_elements(model, elements)
     path = tmp_path / "selected.pt"
     export_tace(selected, str(path))

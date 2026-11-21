@@ -23,6 +23,10 @@ Linear--Gate--Linear blocks retain their representation-aware operators.
 The default is ``mlp_v1``. Hidden widths and normalization remain specific to
 each module.
 
+``radial_basis.mlp_norm`` controls radial MLP hidden layers. Use ``identity``
+to skip normalization, ``layer_norm`` or ``rms_norm`` to select it explicitly,
+or ``null`` (default) to retain each module's default behavior.
+
 .. code-block:: yaml
 
    model:

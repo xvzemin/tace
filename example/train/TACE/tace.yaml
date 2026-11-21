@@ -169,9 +169,11 @@ dataset:
     enabled: false
     max_edges: null # inclusive edge limit; null disables; omitted default is 24000 when filtering is enabled
     max_atoms: null # inclusive atom-count limit; null disables
-    max_forces: null # max per-atom force Euclidean norm; null disables
+    min_covalent_ratio: 0.5 # minimum distance / (R_cov_i + R_cov_j); null disables
+    drop_isolated: true # require a neighbor for each atom in multi-atom structures
+    max_forces: 200.0 # maximum per-atom force norm (eV/angstrom); null disables
     max_energy_per_atom: null # signed energy/atom upper bound, not absolute value; null disables
-    max_stress: null # stress tensor Frobenius-norm upper bound; null disables
+    max_stress: 6.0 # stress tensor Frobenius norm (eV/angstrom^3); null disables
   shard_dirs: # reusable graph and record caches; source files remain unchanged
     - graphCache
   # Source-record cache for formats without random access; separate from graph shards.
@@ -375,10 +377,10 @@ model:
       type: linear # [linear, spherical_tensor, spherical_tensor_element2, wigner_tensor, wigner_tensor_element2]
 
     edge_embedding:
-      type: identity # [identity, linear, nonlinear, element, element2]
+      type: identity # [identity, element, element2, linear, nonlinear]
 
     edge_update:
-      type: element2  # [identity, element2, element2_v2]; element2_v2 requires apply_cutoff: false
+      type: element2  # [identity, element2]
 
     node_update:
       magnetic_type: identity # [identity, element, element2]
@@ -403,7 +405,7 @@ model:
       trainable: false # (bool)
       apply_cutoff: false # (bool) true: cutoff was use in before radial_mlp, false: after radial_mlp
       hidden: [64, 64] # list(int)
-      mlp_norm: null # [null, layer_norm, rms_norm]; null keeps the selected MLP's default
+      mlp_norm: null # [null, identity, layer_norm, rms_norm]; null keeps the default, identity skips normalization
       bias: true  # (bool)
 
     angular_basis:

@@ -839,7 +839,9 @@ class GraphDataModule(LightningDataModule):
         # Reuse this view when Lightning reloads the training loader.
         if self._filtered_train_dataset is None:
             self._filtered_train_dataset = filter_graphs(
-                self.train_dataset, self.filter_options
+                self.train_dataset,
+                self.filter_options,
+                graph_cutoff=self.graph_config["cutoff"],
             )
         dataset = self._filtered_train_dataset
         if self.augmentation:

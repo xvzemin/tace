@@ -73,10 +73,8 @@ def _time_reversal_model_config() -> dict:
     return config
 
 
-@pytest.mark.parametrize(
-    "edge_update,mlp_type", [("element2", "mlp_v1"), ("element2_v2", "mlp_v2")]
-)
-def test_magnetic_wigner6j_model(edge_update, mlp_type, monkeypatch, double_precision):
+@pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
+def test_magnetic_wigner6j_model(mlp_type, monkeypatch, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     config = _model_config()
@@ -90,7 +88,7 @@ def test_magnetic_wigner6j_model(edge_update, mlp_type, monkeypatch, double_prec
     config["angular_basis"]["magnetic_Lmax"] = 1
     config["radial_basis"]["apply_cutoff"] = False
     config["edge_embedding"]["type"] = "linear"
-    config["edge_update"]["type"] = edge_update
+    config["edge_update"]["type"] = "element2"
     model = TensorModel(SphericalTACE(**config)).cuda().train()
     representation = model.readout_fn.representation
     assert not hasattr(representation, "magnetic_edge_embedding")
@@ -100,7 +98,7 @@ def test_magnetic_wigner6j_model(edge_update, mlp_type, monkeypatch, double_prec
         representation.magnetic_edge_updates,
     ):
         assert isinstance(node_update, ElementNodeUpdate)
-        assert isinstance(spatial, EDGE_UPDATE[edge_update])
+        assert isinstance(spatial, EDGE_UPDATE["element2"])
         assert isinstance(magnetic, EDGE_UPDATE["identity"])
         assert magnetic.out_dim == config["num_channel"]
     data = {

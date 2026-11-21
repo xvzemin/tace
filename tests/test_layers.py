@@ -24,17 +24,9 @@ from tace.models.linear import (
 )
 from tace.models.mlp import MLP, MLPV2
 from tace.models.spherical import readout
-from tace.models.spherical.base import (
-    EdgeInteraction,
-    EdgeUpdate,
-    NodeEmbedding,
-)
+from tace.models.spherical.base import EdgeInteraction, NodeEmbedding
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG, check_model_config
-from tace.models.spherical.edge import (
-    Element2EdgeUpdate,
-    Element2EdgeUpdateV2,
-    ElementEdgeEmbedding,
-)
+from tace.models.spherical.edge import Element2EdgeUpdate, ElementEdgeEmbedding
 from tace.models.spherical.fused import UvO2TensorProduct
 from tace.models.spherical.node import NODE_EMBEDDING, NODE_UPDATE, LinearNodeEmbedding
 from tace.models.spherical.readout import EdgeReadOut
@@ -93,7 +85,7 @@ def test_element_edge_path_lookup():
 
 
 @pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
-@pytest.mark.parametrize("norm", [None, "layer_norm", "rms_norm"])
+@pytest.mark.parametrize("norm", [None, "identity", "layer_norm", "rms_norm"])
 @pytest.mark.parametrize(
     "embedding", ["linear", "spherical_tensor_element2", "wigner_tensor_element2"]
 )
@@ -119,7 +111,7 @@ def test_radial_mlp_configuration(mlp_type, norm, embedding):
         ],
     )
     config["node_embedding"]["type"] = embedding
-    config["edge_update"]["type"] = "element2_v2"
+    config["edge_update"]["type"] = "element2"
     config["mlp_type"] = mlp_type
     config["radial_basis"].update(
         mlp_norm=norm,
@@ -235,22 +227,14 @@ def test_universal_invariant_mlp_configuration(mlp_type):
 @pytest.mark.parametrize(
     "options,match",
     [
-        ({"apply_cutoff": True}, "apply_cutoff=false"),
         ({"mlp_type": "mlp_v2"}, "model.config.mlp_type"),
         ({"mlp_norm": "unknown"}, "mlp_norm"),
         ({"mlp_norm": "none"}, "mlp_norm"),
     ],
 )
-def test_v2_configuration_errors(options, match):
-    from tace.models.spherical.default import check_model_config
-
+def test_radial_mlp_configuration_errors(options, match):
     with pytest.raises(ValueError, match=match):
-        check_model_config(
-            {
-                "edge_update": {"type": "element2_v2"},
-                "radial_basis": {"apply_cutoff": False, **options},
-            }
-        )
+        check_model_config({"radial_basis": options})
 
 
 @pytest.mark.parametrize("mlp_type", ["unknown", "mlp", "v1", "v2", None])
@@ -481,88 +465,6 @@ def test_element2_legacy_state_dict(matrix, bias, dtype):
         torch.testing.assert_close(value, saved[key], atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("zero_elements", [False, True])
-def test_element2_v2_projection_and_derivatives(zero_elements):
-    kwargs = dict(
-        layer=0,
-        num_layers=2,
-        num_elements=3,
-        num_radial_basis=4,
-        num_channel=6,
-        edge_embedding_channel=4,
-    )
-    with pytest.raises(TypeError, match="element_std"):
-        Element2EdgeUpdateV2(**kwargs, element_std=0.0)
-    update = Element2EdgeUpdateV2(**kwargs).to(DEVICE)
-    if zero_elements:
-        torch.nn.init.zeros_(update.source_embedding.weight)
-        torch.nn.init.zeros_(update.target_embedding.weight)
-    assert isinstance(update, EdgeUpdate)
-    model = MLPV2([update.out_dim, 12, 3], bias=True).to(DEVICE)
-    types = torch.tensor([0, 1, 2, 0], device=DEVICE)
-    edges = torch.tensor([[0, 1, 2, 3, 0], [1, 2, 3, 0, 2]], device=DEVICE)
-    radial = torch.randn(5, 4, device=DEVICE, requires_grad=True)
-    node_feats = torch.randn(4, 6, device=DEVICE)
-    parts = update(node_feats, types, radial, edges, None)
-    dense = torch.cat([x if index is None else x[index] for x, index in parts], dim=-1)
-    actual, expected = model(parts), model(dense)
-    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
-
-    inputs = (radial, *update.parameters(), *model.parameters())
-    values = [actual.square().sum(), expected.square().sum()]
-    for _ in range(2):
-        gradients = [
-            torch.autograd.grad(value, inputs, create_graph=True, retain_graph=True)
-            for value in values
-        ]
-        for a, b in zip(*gradients):
-            torch.testing.assert_close(a, b, atol=1e-10, rtol=1e-10)
-        values = [sum(g.square().sum() for g in grads) for grads in gradients]
-
-    if zero_elements:
-        radial_model = MLPV2([4, 12, 3], bias=True).to(DEVICE)
-        with torch.no_grad():
-            radial_model.mlp[0].weight.copy_(model.mlp[0].weight[:4])
-            radial_model.mlp[0].bias.copy_(model.mlp[0].bias)
-        radial_model.mlp[2].load_state_dict(model.mlp[2].state_dict())
-        torch.testing.assert_close(actual, radial_model(radial), atol=1e-12, rtol=1e-12)
-        for grad in gradients[0][1:3]:
-            assert grad.abs().sum() > 0
-
-
-@pytest.mark.parametrize("num_elements,num_channel", [(4, 16), (80, 16), (80, 128)])
-def test_element2_v2_second_moment_without_mlp(num_elements, num_channel):
-    update = Element2EdgeUpdateV2(
-        layer=0,
-        num_layers=1,
-        num_elements=num_elements,
-        num_radial_basis=8,
-        num_channel=num_channel,
-        edge_embedding_channel=8,
-    ).to(DEVICE)
-    types = torch.arange(num_elements, device=DEVICE)
-    edges = torch.randint(num_elements, (2, 4096), device=DEVICE)
-    radial = torch.randn(4096, 8, device=DEVICE)
-    nodes = torch.empty(num_elements, num_channel, device=DEVICE)
-    linear = torch.nn.Linear(update.out_dim, 256, bias=False).to(DEVICE)
-    torch.nn.init.normal_(linear.weight, std=update.out_dim**-0.5)
-
-    with torch.no_grad():
-        parts = update(nodes, types, radial, edges, None)
-        dense = torch.cat(
-            [x if index is None else x[index] for x, index in parts], dim=-1
-        )
-        # The edge module sets the input scale; no MLP-specific initialization.
-        radial_moment = radial.square().mean()
-        expected = radial_moment + sum(
-            x[index].square().sum(dim=-1).mean() / update.out_dim
-            for x, index in parts[1:]
-        )
-        torch.testing.assert_close(dense.square().mean(), expected)
-        assert abs(dense.square().mean().item() / radial_moment.item() - 1) < 1e-4
-        assert abs(linear(dense).square().mean().item() / expected.item() - 1) < 0.15
-
-
 @pytest.mark.parametrize("matrix", ["0", "1"])
 @pytest.mark.parametrize(
     "cls,irrep",
@@ -615,7 +517,7 @@ def test_readout_head_initialization_and_loading(monkeypatch, cls, irrep, matrix
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("interaction_type", ["cgtp", "o2"])
 @pytest.mark.parametrize("mlp_type", ["mlp_v1", "mlp_v2"])
-@pytest.mark.parametrize("norm", [None, "layer_norm", "rms_norm"])
+@pytest.mark.parametrize("norm", [None, "identity", "layer_norm", "rms_norm"])
 def test_edge_representation_readout(dtype, interaction_type, mlp_type, norm):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     irreps = o3.Irreps("2x0e+2x0o+2x1o+2x1e+2x2e+2x3o")

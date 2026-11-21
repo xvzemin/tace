@@ -1,3 +1,8 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
 """Graph-cache metadata, statistics keys, and lossless shard copying.
 
 Examples

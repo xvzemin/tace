@@ -102,9 +102,9 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         Radial MLP hidden widths. Defaults to two layers of ``num_channel``.
     mlp_type : {"mlp_v1", "mlp_v2"}, optional
         Radial network initialization and activation convention.
-    radial_mlp_norm : {"layer_norm", "rms_norm"} or None, optional
-        Hidden normalization. ``None`` preserves the width-dependent LayerNorm
-        for ``mlp_v1`` and disables normalization for ``mlp_v2``.
+    radial_mlp_norm : {"identity", "layer_norm", "rms_norm"} or None, optional
+        Hidden normalization. ``"identity"`` disables it. ``None`` uses
+        width-dependent LayerNorm for ``mlp_v1`` and no normalization for ``mlp_v2``.
     """
 
     use_wigner = False

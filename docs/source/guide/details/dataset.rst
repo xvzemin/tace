@@ -159,9 +159,9 @@ Training filters
 ----------------
 
 ``dataset.filter`` selects complete training graphs without rewriting the cache.
-It is disabled by default. When enabled, ``max_edges`` defaults to 24,000 and
-other limits default to ``null``. A structure must satisfy every enabled upper
-bound; equality is accepted. ``null`` disables a bound.
+It is disabled by default. When enabled, ``max_edges`` defaults to 24,000,
+the other numeric bounds default to ``null``, and ``drop_isolated`` defaults
+to ``false``. A structure must satisfy every enabled filter.
 
 .. code-block:: yaml
 
@@ -170,21 +170,31 @@ bound; equality is accepted. ``null`` disables a bound.
        enabled: true
        max_edges: 24000
        max_atoms: null
+       min_covalent_ratio: null
+       drop_isolated: false
        max_forces: null
        max_energy_per_atom: null
        max_stress: null
 
 * ``max_atoms`` and ``max_edges`` count the full structure, including directed
   edges as stored. They do not truncate atoms or edges.
+* ``min_covalent_ratio`` bounds :math:`r_{ij}/(R_i+R_j)` from below for every
+  pair, using the ASE covalent radii of the two elements. For example, ``0.5``
+  rejects a structure if any distance is less than 50% of its pair's radius sum.
+  Nonzero-shift periodic self images count. Graphs without edges pass this bound.
+  The graph cutoff must cover the largest pair threshold for the dataset's elements.
+* ``drop_isolated: true`` rejects a multi-atom structure if any atom has no
+  neighbor within the graph cutoff. Single-atom structures pass this filter.
+  Nonzero-shift periodic images count as neighbors.
 * ``max_forces`` bounds the largest atomic force norm in eV/Angstrom.
 * ``max_energy_per_atom`` bounds signed total energy divided by the atom count,
   in eV/atom, without subtracting atomic reference energies.
 * ``max_stress`` bounds the Frobenius norm of the full stress matrix in
   eV/Angstrom^3.
 
-Physical bounds require cached labels and weights. Nonfinite or zero-weight
+Energy, force and stress bounds require cached labels and weights. Nonfinite or zero-weight
 labels fail the bound. Missing fields or an empty selection raise an error.
-Filtering scans counts first and decodes only the required physical labels.
+Filtering scans counts first and decodes only the required degrees, geometry or labels.
 The selection is retained in memory and reused each epoch.
 
 Filters support disk and ``memory`` caches. ``on_the_fly`` requires preparing a

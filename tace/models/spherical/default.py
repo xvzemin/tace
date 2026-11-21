@@ -228,9 +228,9 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
         )
     if "mlp_type" in radial:
         raise ValueError("Set model.config.mlp_type instead of radial_basis.mlp_type.")
-    if radial["mlp_norm"] not in (None, "layer_norm", "rms_norm"):
+    if radial["mlp_norm"] not in (None, "identity", "layer_norm", "rms_norm"):
         raise ValueError(
-            "radial_basis.mlp_norm must be null, 'layer_norm' or 'rms_norm'."
+            "radial_basis.mlp_norm must be null, 'identity', 'layer_norm' or 'rms_norm'."
         )
     embedding = cfg["edge_embedding"]["type"]
     update = cfg["edge_update"]["type"]
@@ -241,7 +241,6 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
         for enabled, option in (
             (multi_cutoff is not None, "radial_basis.multi_cutoff"),
             (element_paths, f"edge_embedding.type='{embedding}'"),
-            (update == "element2_v2", "edge_update.type='element2_v2'"),
             (atomic_basis["scatter_norm"] == "cutoff", "scatter_norm='cutoff'"),
         ):
             if enabled:

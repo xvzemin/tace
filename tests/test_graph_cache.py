@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 from ase import Atoms
+from ase.data import covalent_radii
 from filelock import FileLock, Timeout
 from omegaconf import OmegaConf
 from torch_geometric.data import Data
@@ -983,6 +984,7 @@ def test_compressed_graph_records_reject_corruption():
         ({"enabled": True}, [0, 2, 3, 4, 5, 6]),
         ({"enabled": True, "max_edges": 24001}, list(range(7))),
         ({"enabled": True, "max_edges": None}, list(range(7))),
+        ({"enabled": True, "max_edges": None, "drop_isolated": False}, list(range(7))),
         ({"enabled": True, "max_forces": 5}, [0, 2, 6]),
         ({"enabled": True, "max_energy_per_atom": -1}, [0, 3, 6]),
         ({"enabled": True, "max_stress": 5}, [0, 2, 6]),
@@ -1079,6 +1081,136 @@ def test_cached_graph_filters_are_inclusive_and_readonly(
     assert file_snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("storage", ["memory", "lmdb", "clmdb"])
+def test_min_covalent_ratio_filters_periodic_graphs(tmp_path, storage):
+    hh_limit = 0.5 * (covalent_radii[1] + covalent_radii[1])
+    frames = [
+        Atoms("H2", positions=[[0, 0, 0], [hh_limit, 0, 0]]),
+        Atoms("H2", positions=[[0, 0, 0], [np.nextafter(hh_limit, 0.0), 0, 0]]),
+        Atoms(
+            "H2",
+            positions=[[0, 0, 0], [0.95, 1.85, 0]],
+            cell=[[3, 0, 0], [1, 2, 0], [0, 0, 3]],
+            pbc=True,
+        ),
+        Atoms("H"),
+        Atoms("Si", cell=[0.8, 2, 2], pbc=[True, False, False]),
+        Atoms("H2", positions=[[0, 0, 0], [0, 0, 0]]),
+        Atoms("H2", positions=[[0, 0, 0], [5, 0, 0]]),
+        # H-H is the shortest distance, but only the longer Sb-Sb contact fails.
+        Atoms("H2Sb2", positions=[[0, 0, 0], [0.7, 0, 0], [8, 0, 0], [9.25, 0, 0]]),
+        Atoms("HO", positions=[[0, 0, 0], [0.49, 0, 0]]),
+        Atoms("HO", positions=[[0, 0, 0], [0.48, 0, 0]]),
+    ]
+    for i, atoms in enumerate(frames):
+        atoms.info["energy"] = 1.0 if i == 0 else -1.0
+    config = {"cutoff": 1.5, "max_neighbors": None}
+    dataset = create_graphs(
+        frames,
+        build_element_lookup([1, 8, 14, 51]),
+        dict(
+            config,
+            keyspec=KeySpecification.from_defaults(),
+            target_property=["energy"],
+            embedding_property=[],
+            neighborlist_backend="ase",
+        ),
+        "train",
+        [tmp_path],
+        storage_mode=storage,
+        graph_config=config,
+    )
+    before = file_snapshot(tmp_path)
+    view = dataset.project(["energy"])
+    options = filter_options(
+        {"enabled": True, "max_edges": None, "min_covalent_ratio": 0.5}
+    )
+    cutoff = config["cutoff"] if storage == "memory" else None
+    selected = filter_graphs(view, options, graph_cutoff=cutoff)
+    assert selected.indices.tolist() == [0, 3, 6, 8]
+    assert set(selected[0].keys()) == {"energy", "num_nodes"}
+    selected.close()
+    selected = filter_graphs(
+        view, {**options, "max_energy_per_atom": 0}, graph_cutoff=cutoff
+    )
+    assert selected.indices.tolist() == [3, 6, 8]
+    selected.close()
+    with pytest.raises(ValueError, match="min_covalent_ratio.*cutoff"):
+        filter_graphs(view, {"min_covalent_ratio": 0.55}, graph_cutoff=cutoff)
+    view.close()
+    dataset.close()
+    assert file_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("storage", ["memory", "lmdb", "clmdb"])
+@pytest.mark.parametrize(
+    "cutoff,expected",
+    [(1.0, [0, 1, 4, 5, 8]), (6.0, [0, 1, 4, 5, 6, 7, 8])],
+)
+def test_drop_isolated_keeps_single_atoms_and_uses_the_graph_cutoff(
+    tmp_path, storage, cutoff, expected
+):
+    def chain(*x):
+        return Atoms("H" * len(x), positions=[[r, 0, 0] for r in x])
+
+    frames = [
+        chain(0),
+        chain(0, 0.74),
+        chain(0, 7),
+        chain(0, 0.7, 1.4, 10),  # Six directed edges, but the last atom has none.
+        chain(0, 0.7, 10, 10.7),  # Two disconnected dimers; no isolated atom.
+        Atoms("H2", positions=[[0.2, 0, 0], [9.8, 0, 0]], cell=[10] * 3, pbc=True),
+        Atoms(
+            "H2",
+            positions=[[0, 0, 0], [0, 10, 0]],
+            cell=[1.5, 25, 25],
+            pbc=[True, False, False],
+        ),
+        chain(0, 2),
+        chain(0, 0.1),
+    ]
+    config = {"cutoff": cutoff, "max_neighbors": None}
+    dataset = create_graphs(
+        frames,
+        build_element_lookup([1]),
+        dict(
+            config,
+            keyspec=KeySpecification.from_defaults(),
+            target_property=[],
+            embedding_property=[],
+            neighborlist_backend="ase",
+        ),
+        "train",
+        [tmp_path],
+        storage_mode=storage,
+        graph_config=config,
+    )
+    before = file_snapshot(tmp_path)
+    view = dataset.project(["atomic_numbers"])
+    options = filter_options(
+        {"enabled": True, "max_edges": None, "drop_isolated": True}
+    )
+    selected = filter_graphs(view, options)
+    assert selected.indices.tolist() == expected
+    assert set(selected[0].keys()) == {"num_nodes", "atomic_numbers"}
+    selected.close()
+    selected = filter_graphs(
+        view, {**options, "min_covalent_ratio": 0.5}, graph_cutoff=cutoff
+    )
+    assert selected.indices.tolist() == [i for i in expected if i != 8]
+    selected.close()
+    if storage == "memory":
+        for graph in dataset.data_list:
+            del graph["num_neighbors"]
+            del graph["positions"]
+        selected = filter_graphs(view, options)
+        assert selected.indices.tolist() == expected
+        selected.close()
+    view.close()
+    dataset.close()
+    assert file_snapshot(tmp_path) == before
+
+
 @pytest.mark.parametrize(
     "options,error",
     [
@@ -1086,6 +1218,11 @@ def test_cached_graph_filters_are_inclusive_and_readonly(
         ({"enabled": True, "max_atoms": 2.5}, TypeError),
         ({"enabled": True, "max_edges": True}, TypeError),
         ({"enabled": True, "max_forces": -1}, ValueError),
+        ({"enabled": True, "min_covalent_ratio": -0.5}, ValueError),
+        ({"enabled": True, "min_covalent_ratio": True}, TypeError),
+        ({"enabled": True, "drop_isolated": 6.0}, TypeError),
+        ({"enabled": True, "drop_isolated": None}, TypeError),
+        ({"enabled": True, "min_distance": 0.5}, ValueError),
         ({"enabled": True, "max_energy_per_atom": float("inf")}, ValueError),
         ({"enabled": True, "max_stress": float("nan")}, ValueError),
         ({"enabled": True, "max_edge": 3}, ValueError),
