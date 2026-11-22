@@ -39,6 +39,87 @@ or ``null`` (default) to retain each module's default behavior.
          hidden: [64, 64]
          mlp_norm: null
 
+Radial mode selection
+---------------------
+
+``max_eigenvalue`` retains modes with eigenvalue **less than or equal to**
+the threshold. With both ``max_eigenvalue`` and ``num_radial_basis`` null,
+the reference is eight degree-zero modes. The units of the threshold depend
+on the basis:
+
+* ``j0`` (alias ``bessel``), a fixed order such as ``j2``, and ``jn``:
+  for cutoff :math:`R` in angstroms, the Dirichlet eigenvalues are
+  :math:`(z_{\ell k}/R)^2` in inverse square angstroms.
+  The default threshold is :math:`(8\pi/R)^2`. Changing :math:`R` at a
+  fixed numerical threshold can change the number of modes. Using the default
+  keeps their number unchanged. For trainable fixed-order Bessel functions,
+  the threshold selects the initial frequencies only. If a distance
+  transform is used, the spectrum refers to the uncomposed basis.
+* ``physical_basis``: the threshold applies to the tabulated dimensionless
+  eigenvalues in the coordinate :math:`x=r/r_0`, where :math:`r_0` depends
+  on the two elements. The default is the eighth degree-zero eigenvalue,
+  approximately 177.48726637. The model cutoff changes the envelope and
+  normalization, not the selected modes.
+* ``gaussian`` has no eigenvalue spectrum. Use ``num_radial_basis``
+  (eight by default).
+
+Alternatively, set ``num_radial_basis`` to an integer for a fixed order,
+or a list of ``lmax + 1`` positive integers for a degree-specific basis.
+Do not set both selectors. A threshold that leaves a requested degree empty
+raises an error.
+
+Physical radial basis
+---------------------
+
+.. code-block:: yaml
+
+   model:
+     config:
+       radial_basis:
+         radial_basis: physical_basis
+         num_radial_basis: null
+         max_eigenvalue: 36.0
+         use_interpolation: false
+
+Each weighted CGTP path uses the radial modes for its edge harmonic degree.
+For example, the explicit threshold 36 selects ``[3, 2, 1, 1]`` at
+``lmax: 3``, versus ``[8, 7, 6, 6]`` with the default threshold.
+The default evaluation uses the full Fourier expansion.
+Set ``use_interpolation: true`` for cubic Hermite interpolation. Both modes
+use the same state dictionary.
+The basis supports ``cgtp``, its Cartesian and edge-aligned equivalents,
+and CGTP in ``tace-train-oamv2``. OAMv2 evaluates degree-specific radial heads
+in batches by default. Set ``TACE_MEMORY_FIRST=1`` to stream the grouped MLP
+through the EQX convolution instead.
+
+Degree-specific spherical Bessel basis
+--------------------------------------
+
+.. code-block:: yaml
+
+   model:
+     config:
+       lmax: 3
+       radial_basis:
+         radial_basis: jn
+         max_eigenvalue: null
+
+Each path uses :math:`j_\ell` modes with its edge harmonic degree
+:math:`\ell`. At ``lmax: 3`` the default counts are ``[8, 7, 7, 6]``.
+For cutoff :math:`R` and the
+:math:`k`-th positive zero :math:`z_{\ell k}` of :math:`j_\ell`, the mode is
+
+.. math::
+
+   B_{\ell k}(r) =
+   \frac{\sqrt{2/R^3}}{|j_{\ell+1}(z_{\ell k})|}
+   j_\ell(z_{\ell k}r/R).
+
+The modes are evaluated directly at the interatomic distance, without
+interpolation. The grouped radial MLP and the
+supported EQX and OAMv2 convolutions are the same as for ``physical_basis``.
+Selecting a fixed order such as ``j1`` instead uses that one order for all paths.
+
 O(3) Cgtp
 ---------
 

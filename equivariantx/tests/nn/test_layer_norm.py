@@ -17,6 +17,24 @@ def pack(blocks, layout):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA scalar RMS backward")
+def test_scalar_rms_joint_derivatives():
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    norm = nn.SoftCapRmsNorm(o3.Irreps("4x0e")).cuda()
+
+    def derivative(x):
+        return torch.autograd.grad(norm(x).sum(), x, create_graph=True)[0]
+
+    graph = make_fx(derivative, tracing_mode="symbolic")(
+        torch.randn(7, 4, device="cuda", requires_grad=True)
+    )
+    assert not any("fused_rms_norm" in str(node.target) for node in graph.graph.nodes)
+    x = torch.randn(9, 4, device="cuda", requires_grad=True)
+    reference = x * (1.0 + x.square().mean(-1, keepdim=True)).rsqrt()
+    torch.testing.assert_close(graph(x), torch.autograd.grad(reference.sum(), x)[0])
+
+
 @pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm])
 @pytest.mark.parametrize("layout", ["mul_ir", "ir_mul"])
 @pytest.mark.parametrize("planar", [False, True])

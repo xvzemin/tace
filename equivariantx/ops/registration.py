@@ -4,6 +4,9 @@ from importlib import import_module
 
 for module in (
     "equivariantx.ops.common.ace",
+    "equivariantx.ops.common.fourier",
+    "equivariantx.ops.common.spline",
+    "equivariantx.ops.common.pointwise",
     "equivariantx.ops.common.symmetric",
     "equivariantx.ops.common.attention",
     "equivariantx.ops.common.edge",

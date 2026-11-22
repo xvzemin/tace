@@ -19,6 +19,10 @@ def project_rows(radial, projection, network, bias, backend, mode, rows):
     optimized = not (
         config.TORCH_REFERENCE and (backend == "torch" or not radial.is_cuda)
     )
+    if optimized and hasattr(network, "stream_rows"):
+        value = network.stream_rows(radial, backend, mode)
+        if value is not None:
+            return project_rows(value, projection, None, bias, backend, mode, rows)
     if (
         network is not None
         and mode == "full"

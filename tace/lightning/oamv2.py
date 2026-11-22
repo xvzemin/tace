@@ -17,6 +17,7 @@ from equivariantx.models.tace.tace_oam_xl_v2.precision import (
 )
 from equivariantx.models.tace.tace_oam_xl_v2.training import GradientWorkspace
 from tace.lightning.lit_model import LightningWrapperModel
+from tace.utils.env import memory_first
 
 
 class OAMLightningModule(LightningWrapperModel):
@@ -86,14 +87,18 @@ class OAMLightningModule(LightningWrapperModel):
             )
         require_tensors((*self.model.parameters(), *self.model.buffers()))
         original = self.model
+        stream = (
+            memory_first()
+            and original.readout_fn.representation.radial_basis.widths is not None
+        )
         self.model = TACEOAMXLV2.from_tace(
             original,
             fuse_products=False,
-            radial_mode="materialize",
+            radial_mode="stream" if stream else "materialize",
             angular_mode="cg",
             product_layout="ir_mul",
             linear_mode="torch",
-            edge_mode="scheduled",
+            edge_mode="original" if stream else "scheduled",
             gradient_schedule="fused",
             product_mode="packed",
             compose_products=True,

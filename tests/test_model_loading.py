@@ -639,6 +639,7 @@ def make_model(
     mlp_type="mlp_v1",
     edge_embedding=None,
     scatter_norm=None,
+    radial=None,
 ):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -662,6 +663,8 @@ def make_model(
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
+    if radial is not None:
+        config["radial_basis"].update(radial)
     if scatter_norm is not None:
         config["atomic_basis"]["scatter_norm"] = scatter_norm
     if edge_embedding is not None:
@@ -697,6 +700,62 @@ def make_model(
     if matrix:
         switch_e3nn_weight_layout(model, "matrix")
     return configure_model_precision(model, torch.float64, device=DEVICE).eval()
+
+
+@pytest.mark.parametrize(
+    "basis,interaction,embedding,interpolate",
+    [
+        ("physical_basis", "cgtp", None, False),
+        ("physical_basis", "cgtp", "element2", True),
+        ("physical_basis", "co3", "element", False),
+        ("physical_basis", "o2_cgtp", "element2", False),
+        ("physical_basis", "nonlinear_ictd", "element2", False),
+        ("j0", "cgtp", "element2", False),
+        ("jn", "cgtp", "element2", False),
+        ("jn", "co3", "element", False),
+        ("jn", "o2_cgtp", "element2", False),
+        ("jn", "nonlinear_ictd", "element2", False),
+    ],
+)
+def test_spectral_radial_convolution(
+    basis, interaction, embedding, interpolate, double_precision, monkeypatch
+):
+    radial = dict(
+        radial_basis=basis,
+        use_interpolation=interpolate,
+    )
+    if basis != "physical_basis":
+        radial["max_eigenvalue"] = 3.0
+    else:
+        radial["num_radial_basis"] = [2, 1]
+    model = make_model(
+        interaction, edge_embedding=embedding, mlp_type="mlp_v2", radial=radial
+    ).train()
+    embed = model.readout_fn.representation.edge_embedding
+    with torch.no_grad():
+        for name in getattr(embed, "table_names", ()):
+            getattr(embed, name).weight.normal_(std=0.1)
+    keys = ("energy", "forces", "stress")
+
+    def run(m):
+        y = evaluate(m)
+        p = [
+            v
+            for name, v in m.named_parameters()
+            if "edge_info." in name or "representation.edge_embedding." in name
+        ]
+        assert p
+        return [y[k] for k in keys], torch.autograd.grad(y["forces"].square().sum(), p)
+
+    ref = run(model)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    for mode in ("0", "1"):
+        monkeypatch.setenv("TACE_MEMORY_FIRST", mode)
+        other = make_model(
+            interaction, edge_embedding=embedding, mlp_type="mlp_v2", radial=radial
+        ).train()
+        other.load_state_dict(model.state_dict())
+        torch.testing.assert_close(run(other), ref, rtol=1e-8, atol=1e-9)
 
 
 def evaluate(model, fidelity=0, numbers=(1, 1, 8)):

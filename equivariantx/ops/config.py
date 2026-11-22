@@ -106,6 +106,8 @@ ROTARY_INLINE = True
 # Zero disables this schedule; full-network fusion retains its tiled execution.
 RADIAL_PROJECT_MIN_WIDTH = 1024
 RADIAL_PROJECT_MAX_BYTES = 256 << 20
+# Bound temporary storage for grouped radial networks.
+RADIAL_CHAIN_TILE_BYTES = 512 << 20
 # No-gradient pair MLPs can run directly if all their hidden rows fit.
 PAIR_EAGER_MAX_BYTES = 64 << 20
 

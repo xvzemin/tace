@@ -23,3 +23,9 @@ Neural network modules
    :members: forward
 
 .. autofunction:: equivariantx.nn.graph_softmax
+
+.. autoclass:: equivariantx.nn.GroupedRadialMLP
+
+.. autofunction:: equivariantx.nn.fourier_radial
+
+.. autofunction:: equivariantx.nn.uniform_cubic_spline

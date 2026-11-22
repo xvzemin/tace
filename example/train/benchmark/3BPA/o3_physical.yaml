@@ -1,0 +1,10 @@
+defaults:
+  - o3
+  - _self_
+
+model:
+  config:
+    radial_basis:
+      radial_basis: physical_basis
+      num_radial_basis: null
+      use_interpolation: false

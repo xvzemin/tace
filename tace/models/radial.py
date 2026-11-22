@@ -16,6 +16,10 @@ from scipy.special import spherical_jn
 
 from tace.utils.torch_scatter import scatter_sum
 
+from .physical_basis import PhysicalRadialBasis
+
+DEFAULT_RADIAL_MODES = 8
+
 
 class j0SphericalBesselBasis(torch.nn.Module):
     """The Bessel Basis is proposed in the DimeNet: https://www.cs.cit.tum.de/daml/dimenet/"""
@@ -83,6 +87,49 @@ def compute_jn_zeros(n: int, k: int) -> np.ndarray:
             )
         left, value = right, next_value
     return np.array(zeros, dtype=np.float64)
+
+
+def check_radial_selection(
+    num_basis: int | list[int] | tuple[int, ...] | None,
+    max_eigenvalue: float | None,
+) -> None:
+    """Validate the choice between explicit mode counts and a spectral cutoff."""
+    if max_eigenvalue is None:
+        return
+    if num_basis is not None:
+        raise ValueError("Specify only one of num_radial_basis and max_eigenvalue.")
+    if (
+        isinstance(max_eigenvalue, bool)
+        or not isinstance(max_eigenvalue, (int, float))
+        or not math.isfinite(max_eigenvalue)
+        or max_eigenvalue <= 0
+    ):
+        raise ValueError("max_eigenvalue must be a finite positive number.")
+
+
+def bessel_mode_counts(
+    cutoff: float, degrees: range | tuple[int, ...], max_eigenvalue: float | None
+) -> tuple[int, ...]:
+    """Count Dirichlet modes with squared wave number at most the threshold."""
+    if not math.isfinite(cutoff) or cutoff <= 0:
+        raise ValueError("cutoff must be positive and finite.")
+    limit = max_eigenvalue
+    if limit is None:
+        wave_number = DEFAULT_RADIAL_MODES * math.pi / cutoff
+        limit = wave_number * wave_number
+    # z(l,k) >= k*pi. One extra candidate avoids rounding a boundary down.
+    candidates = math.floor(cutoff * math.sqrt(limit) / math.pi) + 1
+    counts = []
+    for degree in degrees:
+        spectrum = (compute_jn_zeros(degree, candidates) / cutoff) ** 2
+        count = int(np.searchsorted(spectrum, limit, side="right"))
+        if not count:
+            raise ValueError(
+                f"max_eigenvalue={limit:g} leaves degree {degree} empty at cutoff="
+                f"{cutoff:g}; the lowest eigenvalue is {spectrum[0]:.17g}."
+            )
+        counts.append(count)
+    return tuple(counts)
 
 
 @lru_cache(maxsize=None)
@@ -858,12 +905,36 @@ class ZBLBasis(torch.nn.Module):
 
 
 class RadialBasis(torch.nn.Module):
+    """Expand interatomic distances in radial modes and evaluate the cutoff.
+
+    Parameters
+    ----------
+    cutoff : float
+        Interaction radius in angstroms.
+    radial_basis : str
+        Fixed Bessel order, ``jn``, ``physical_basis``, or ``gaussian``.
+    num_basis : int or list of int, optional
+        Explicit width, or one width per edge harmonic degree for ``jn``
+        and ``physical_basis``. Mutually exclusive with ``max_eigenvalue``.
+    max_eigenvalue : float, optional
+        Inclusive spectral threshold in inverse square angstroms for Bessel
+        modes or in tabulated dimensionless units for ``physical_basis``.
+        The default threshold retains eight degree-zero modes.
+    lmax : int
+        Maximum edge harmonic degree for degree-specific bases.
+
+    Examples
+    --------
+    >>> RadialBasis(radial_basis="jn", lmax=3).widths
+    (8, 7, 7, 6)
+    """
+
     geometry_precision = True
 
     def __init__(
         self,
         cutoff: float = 6.0,
-        num_basis: int = 8,
+        num_basis: int | list[int] | None = None,
         polynomial_cutoff: int = 5,
         radial_basis: str = "j0",
         distance_transform=None,
@@ -871,13 +942,19 @@ class RadialBasis(torch.nn.Module):
         apply_cutoff: bool = True,
         cutoff_fn: str = "mollifier",  # ['cosine', 'mollifier', 'polynomial']
         gaussian_width: float = 2.0,
+        lmax: int = 0,
+        max_eigenvalue: float | None = None,
+        use_interpolation: bool = False,
     ):
         super().__init__()
 
         assert isinstance(trainable, bool)
         assert isinstance(apply_cutoff, bool)
-        if not isinstance(num_basis, int) or num_basis <= 0:
-            raise ValueError("num_basis must be a positive integer.")
+        self.physical = radial_basis == "physical_basis"
+        if not self.physical:
+            check_radial_selection(num_basis, max_eigenvalue)
+            if use_interpolation:
+                raise ValueError("use_interpolation requires radial_basis='physical_basis'.")
 
         if cutoff_fn == "mollifier":
             self.cutoff_fn = MollifierCutoff(cutoff=cutoff)
@@ -888,25 +965,55 @@ class RadialBasis(torch.nn.Module):
         else:
             self.cutoff_fn = C2PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
 
-        if radial_basis == "bessel" or radial_basis == "j0":
-            self.radial_fn = j0SphericalBesselBasis(
-                cutoff=cutoff,
-                num_basis=num_basis,
-                trainable=trainable,
+        self.widths = None
+        if self.physical:
+            if trainable or distance_transform is not None:
+                raise ValueError(
+                    f"{radial_basis} uses fixed eigenfunctions and its own distance transform."
+                )
+            self.radial_fn = PhysicalRadialBasis(
+                cutoff, lmax, num_basis, max_eigenvalue, use_interpolation
             )
-        elif re.fullmatch(r"j[1-9][0-9]*", radial_basis):
+            self.widths = self.radial_fn.widths
+        elif radial_basis == "jn":
+            if type(lmax) is not int or lmax < 0:
+                raise ValueError("jn requires a nonnegative integer lmax.")
+            degrees = range(lmax + 1)
+            if num_basis is None:
+                self.widths = bessel_mode_counts(cutoff, degrees, max_eigenvalue)
+            elif (
+                not isinstance(num_basis, (list, tuple))
+                or len(num_basis) != len(degrees)
+                or any(type(n) is not int or n <= 0 for n in num_basis)
+            ):
+                raise ValueError(
+                    "jn requires num_radial_basis to contain lmax + 1 positive integers."
+                )
+            else:
+                self.widths = tuple(num_basis)
+            if trainable or distance_transform is not None:
+                raise ValueError("jn requires trainable=false and distance_transform=null.")
             self.radial_fn = jnSphericalBesselBasis(
-                cutoff=cutoff,
-                order=int(radial_basis[1:]),
-                num_basis=num_basis,
-                trainable=trainable,
+                cutoff=cutoff, order=list(degrees), num_basis=list(self.widths)
             )
-        # elif radial_basis == "chebychev":
-        #     self.radial_fn = ChebyshevTBasis(
-        #         cutoff=cutoff,
-        #         num_basis=num_basis,
-        #     )
+        elif radial_basis == "bessel" or re.fullmatch(r"j(0|[1-9][0-9]*)", radial_basis):
+            degree = 0 if radial_basis == "bessel" else int(radial_basis[1:])
+            if num_basis is None:
+                (num_basis,) = bessel_mode_counts(cutoff, (degree,), max_eigenvalue)
+            elif type(num_basis) is not int or num_basis <= 0:
+                raise ValueError("num_basis must be a positive integer.")
+            self.radial_fn = (
+                j0SphericalBesselBasis(cutoff, num_basis, trainable)
+                if degree == 0
+                else jnSphericalBesselBasis(cutoff, degree, num_basis, trainable)
+            )
         elif radial_basis == "gaussian":
+            if max_eigenvalue is not None:
+                raise ValueError("Gaussian basis functions do not have a max_eigenvalue.")
+            if num_basis is None:
+                num_basis = DEFAULT_RADIAL_MODES
+            elif type(num_basis) is not int or num_basis <= 0:
+                raise ValueError("num_basis must be a positive integer.")
             self.radial_fn = GaussianBasis(
                 cutoff=cutoff,
                 num_basis=num_basis,
@@ -924,8 +1031,9 @@ class RadialBasis(torch.nn.Module):
         else:
             self.use_distance_transform = False
 
-        self.out_dim = num_basis
-        self.num_basis = num_basis
+        self.out_dim = self.num_basis = (
+            num_basis if self.widths is None else sum(self.widths)
+        )
         self.apply_cutoff = apply_cutoff
 
     def forward(
@@ -941,7 +1049,8 @@ class RadialBasis(torch.nn.Module):
                 edge_length, node_type, edge_index, atomic_numbers
             )
 
-        radial = self.radial_fn(edge_length, node_type, edge_index)
+        types = atomic_numbers[node_type] if self.physical else node_type
+        radial = self.radial_fn(edge_length, types, edge_index)
 
         if self.apply_cutoff:
             return radial * cutoff, None

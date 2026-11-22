@@ -4,6 +4,7 @@ from math import isfinite
 
 import torch
 from e3nn import o3
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ..ops import config, resolve_backend
 from ..ops.precision import validate_module_precision
@@ -185,6 +186,11 @@ class EquivariantLayerNorm(torch.nn.Module):
             and self.p == 1.0
             and self.max_rms == 1.0
             and not forward_ad_active()
+            # Native RMS backward requires concrete batch sizes.
+            and (
+                self.scalar_blocks
+                or (not torch.compiler.is_compiling() and get_proxy_mode() is None)
+            )
         ):
             if self.scalar_blocks:
                 out = torch.nn.functional.layer_norm(

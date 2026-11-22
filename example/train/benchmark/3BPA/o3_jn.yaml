@@ -1,0 +1,9 @@
+defaults:
+  - o3
+  - _self_
+
+model:
+  config:
+    radial_basis:
+      radial_basis: jn
+      max_eigenvalue: null

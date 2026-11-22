@@ -132,6 +132,41 @@ def test_mixed_local_conversion(monkeypatch, modes):
     )
 
 
+@pytest.mark.parametrize(
+    "basis,device,radial_mode,projection,embedding,interpolate",
+    [
+        ("physical_basis", "cpu", "stream", "individual", "element2", False),
+        ("physical_basis", "cpu", "materialize", "composed", "linear", True),
+        ("physical_basis", "cuda", "materialize", "individual", "linear", False),
+        ("physical_basis", "cuda", "materialize", "individual", "element2", True),
+        ("physical_basis", "cuda", "stream", "individual", "element", False),
+        ("j0", "cuda", "materialize", "individual", "element2", False),
+        ("jn", "cpu", "materialize", "composed", "element2", False),
+        ("jn", "cuda", "materialize", "individual", "element2", False),
+        ("jn", "cuda", "stream", "individual", "element", False),
+    ],
+)
+def test_spectral_radial_conversion(
+    monkeypatch, basis, device, radial_mode, projection, embedding, interpolate
+):
+    monkeypatch.setenv("TACE_MEMORY_FIRST", str(int(radial_mode == "stream")))
+    check_conversion(
+        monkeypatch,
+        radial_mode,
+        "density" if embedding == "linear" else "cutoff",
+        device,
+        embedding,
+        projection,
+        "pairs",
+        "cgtp",
+        radial_basis=dict(
+            radial_basis=basis,
+            max_eigenvalue=None if basis == "physical_basis" else 6.0,
+            use_interpolation=interpolate,
+        ),
+    )
+
+
 def check_conversion(
     monkeypatch,
     radial_mode,
@@ -143,6 +178,7 @@ def check_conversion(
     interaction,
     degree=1,
     norm_type=None,
+    radial_basis=None,
 ):
     pytest.importorskip("tace")
     if device == "cuda" and not torch.cuda.is_available():
@@ -152,7 +188,7 @@ def check_conversion(
 
     for name, value in {"EQX": "1", "MATRIX_WEIGHT": "1", "COMPILE": "0"}.items():
         monkeypatch.setenv(f"TACE_USE_{name}", value)
-    edge_mode = "scheduled" if device == "cuda" else "original"
+    edge_mode = "scheduled" if device == "cuda" and (interaction != "cgtp" or radial_mode != "stream") else "original"
     associate_norm = scatter_norm == "cutoff" and conditioning == "linear"
     pre_norm = norm_type or (
         "const_norm" if conditioning == "element" else "merge_rms_norm"
@@ -179,6 +215,8 @@ def check_conversion(
         )
         config["edge_embedding"]["type"] = conditioning
         config["radial_basis"].update(hidden=[4, 4], bias=True, apply_cutoff=False)
+        if radial_basis is not None:
+            config["radial_basis"].update(radial_basis)
         config["atomic_basis"].update(type=interaction, scatter_norm=scatter_norm)
         if interaction == "uv_o2" or (
             isinstance(interaction, list) and "uv_o2" in interaction

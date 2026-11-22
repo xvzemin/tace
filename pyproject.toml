@@ -22,6 +22,7 @@ dependencies = [
     "numpy",
     "e3nn>=0.4.4",
     "scipy>=1.15",
+    "physical-basis>=1.0.0,<2",
     "configargparse",
     "pandas",
     "matplotlib",

@@ -225,7 +225,8 @@ def grouped_networks(
                         values + torch.stack([item.bias for item in layers])[:, None, :]
                     )
             elif isinstance(layer, torch.nn.RMSNorm):
-                values = F.rms_norm(values, layer.normalized_shape, eps=layer.eps)
+                eps = torch.finfo(values.dtype).eps if layer.eps is None else layer.eps
+                values = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + eps)
                 if layer.weight is not None:
                     values = (
                         values
@@ -253,7 +254,7 @@ def grouped_projections(
     for index, network in enumerate(networks):
         layer = network.mlp[-1]
         key = (
-            tuple(layer.get_weight().shape),
+            (layer.in_dim, layer.out_dim),
             layer.bias is not None,
             len(network.mlp) == 1 and hasattr(updates[index], "source_embedding"),
         )
@@ -317,6 +318,58 @@ def project_radial(network, features, materialize, affine):
         features = features @ weight
         weight = features.new_empty((0, features.shape[-1]))
     return features, weight
+
+
+def degree_projections(
+    networks, updates, radial, source, target, mode, embedding, basis, materialize
+):
+    """Batch each harmonic degree across layers and restore convolution path order."""
+    parts = radial.split(networks[0].in_features, -1)
+    basis_parts = basis.split(embedding.widths, -1) if embedding is not None else ()
+    blocks = [[] for _ in networks]
+    for degree, part in enumerate(parts):
+        ids = [i for i, net in enumerate(networks) if degree in net.active]
+        if not ids:
+            continue
+        heads = [networks[i].branches[networks[i].active.index(degree)] for i in ids]
+        conditioning = [updates[i] for i in ids]
+        hidden = grouped_networks(
+            heads,
+            conditioning,
+            part,
+            source,
+            target,
+            hidden=True,
+            embedding=embedding.embeddings[degree] if embedding is not None else None,
+            basis=basis_parts[degree] if embedding is not None else None,
+        )
+        values = (
+            grouped_projections(heads, conditioning, hidden, part, source, target, mode)
+            if materialize
+            else hidden
+        )
+        for i, value in zip(ids, values):
+            blocks[i].append(value)
+    results = []
+    for net, values in zip(networks, blocks):
+        features = torch.cat(values, -1) if values else radial[:, :0]
+        if materialize:
+            if net.output_order is not None:
+                features = features.index_select(-1, net.output_order)
+            projection = features.new_empty((0, net.out_features))
+        else:
+            # The aligned kernel consumes a single shared projection matrix.
+            heads = [branch.mlp[-1] for branch in net.branches]
+            projection = torch.block_diag(*(head.get_weight() for head in heads))
+            if heads and heads[0].bias is not None:
+                features = F.pad(features, (0, 1), value=1.0)
+                projection = torch.cat(
+                    (projection, torch.cat([head.bias for head in heads])[None]), 0
+                )
+            if net.output_order is not None:
+                projection = projection.index_select(1, net.output_order)
+        results.append((features, projection))
+    return results
 
 
 def add_element_weights(features, projection, table, endpoints, materialize):
@@ -558,7 +611,11 @@ class Representation(torch.nn.Module):
             and nodes.is_cuda
             and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1"
         )
-        radial_jet = self.training and os.environ.get("EQX_XL_RADIAL_JET", "0") == "1"
+        radial_jet = (
+            not self.degree_radial
+            and self.training
+            and os.environ.get("EQX_XL_RADIAL_JET", "0") == "1"
+        )
         if radial_jet and self.radial_projection != "individual":
             raise ValueError("Radial jets require individual heads")
         embedding = (
@@ -568,7 +625,47 @@ class Representation(torch.nn.Module):
             else None
         )
         networks = [layer.edge_info for layer in self.interactions]
-        if radial_jet:
+        degree_heads = pair_rows = pairs = None
+        degree_stream = (
+            self.degree_radial
+            and self.radial_mode == "stream"
+            and self.angular_mode == "cg"
+        )
+        if degree_stream:
+            from equivariantx.conv import EdgePairs, indexed_rows
+
+            if radial_map is not None:
+                pairs = EdgePairs(representatives, radial_map)
+            if getattr(self.edge_embedding, "table_names", ()) == ("embedding",):
+                pair_rows = indexed_rows(
+                    node_type[radial_index],
+                    self.num_elements,
+                    dtype=nodes.dtype,
+                    reduce="mean",
+                    backend=self.interactions[0].rejector.eqx_tp.backend,
+                )
+        if self.degree_radial:
+            if not degree_stream:
+                degree_embedding = (
+                    self.edge_embedding
+                    if self.radial_projection == "composed"
+                    and hasattr(self.edge_embedding, "embeddings")
+                    and type(self.edge_embedding.embeddings[0]).__name__
+                    == "LinearEdgeEmbedding"
+                    else None
+                )
+                degree_heads = degree_projections(
+                    networks,
+                    self.edge_updates,
+                    radial,
+                    source_types,
+                    target_types,
+                    self.radial_projection,
+                    degree_embedding,
+                    basis,
+                    self.radial_mode == "materialize",
+                )
+        elif radial_jet:
             from .radial_jet import AttachRadialJet, hidden_jets
 
             values, slopes = hidden_jets(self, networks, length, node_type, radial_index)
@@ -588,7 +685,7 @@ class Representation(torch.nn.Module):
                 basis=basis,
             )
         projected = None
-        if self.radial_projection in ("batched", "split"):
+        if not self.degree_radial and self.radial_projection in ("batched", "split"):
             projected = grouped_projections(
                 networks,
                 self.edge_updates,
@@ -648,7 +745,29 @@ class Representation(torch.nn.Module):
                 if hasattr(inter, "norm1"):
                     nodes = inter.norm1(nodes)
                 nodes = inter.linear_up(nodes)
-            if projected is not None:
+            radial_network, edge_pairs = None, None
+            if degree_stream:
+                edge_pairs = pairs
+                inputs = self.edge_updates[index](
+                    nodes, node_type, radial, radial_index, cutoff
+                )
+                element = None
+                if hasattr(self.edge_embedding, "layer_weights"):
+                    table = self.edge_embedding.layer_weights(index)
+                    element = (
+                        table,
+                        node_type[edge_index]
+                        if isinstance(table, tuple)
+                        else pair_rows,
+                    )
+                features, projection, radial_network = inter._radial_projection(
+                    inputs, element, edge_pairs
+                )
+                if element is not None and isinstance(element[0], tuple):
+                    edge_pairs = None
+            elif degree_heads is not None:
+                features, projection = degree_heads[index]
+            elif projected is not None:
                 features = projected[index]
                 projection = features.new_empty((0, features.shape[-1]))
             else:
@@ -658,7 +777,7 @@ class Representation(torch.nn.Module):
                     self.radial_mode == "materialize",
                     self.affine_radial,
                 )
-            if hasattr(self.edge_embedding, "layer_weights"):
+            if not degree_stream and hasattr(self.edge_embedding, "layer_weights"):
                 features, projection = add_element_weights(
                     features,
                     projection,
@@ -666,7 +785,7 @@ class Representation(torch.nn.Module):
                     (source_types, target_types),
                     self.radial_mode == "materialize",
                 )
-            if radial_map is not None and not compressed_radial:
+            if radial_map is not None and not compressed_radial and not degree_stream:
                 features = features[radial_map]
             if mode in ("uv_o2", "uu_o2"):
                 rejector = inter.rejector
@@ -745,6 +864,8 @@ class Representation(torch.nn.Module):
                     edge_index,
                     message_cutoff,
                     edge_vector=direction,
+                    radial_network=radial_network,
+                    edge_pairs=edge_pairs,
                 )
             message = (
                 packed_linear(inter.linear_down, message)
@@ -855,7 +976,7 @@ def validate(source):
             raise ValueError(
                 "Expected identity or element2 geometry-only edge conditioning"
             )
-        if type(inter.edge_info).__name__ != "MLPV2":
+        if type(inter.edge_info).__name__ not in ("MLPV2", "BatchMLPV2"):
             raise ValueError("Expected MLPV2 radial networks")
         if type(inter.scatter_norm).__name__ not in (
             "DensityScatterNorm",
@@ -1063,6 +1184,7 @@ class TACEOAMXLV2(torch.nn.Module):
 
         lower(readout)
         representation = transplant(Representation, readout.representation)
+        representation.degree_radial = representation.radial_basis.widths is not None
         representation.radial_mode = radial_mode
         representation.affine_radial = affine_radial
         representation.radial_projection = radial_projection

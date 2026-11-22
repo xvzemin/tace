@@ -3,6 +3,29 @@
 from ..registry import get_kernel, register_kernel
 
 register_kernel(
+    "fourier_radial",
+    "torch",
+    "equivariantx.ops.common.fourier:fourier_torch",
+)
+register_kernel(
+    "fourier_radial",
+    "cuda",
+    "equivariantx.ops.common.fourier:fourier_cuda",
+)
+
+register_kernel(
+    "uniform_cubic_spline",
+    "torch",
+    "equivariantx.ops.common.torch.spline:evaluate",
+    reference="equivariantx.ops.common.torch.spline:evaluate",
+)
+register_kernel(
+    "uniform_cubic_spline",
+    "cuda",
+    "equivariantx.ops.common.spline:spline_cuda",
+)
+
+register_kernel(
     "cartesian_product",
     "torch",
     "equivariantx.ops.common.torch.cartesian:evaluate",

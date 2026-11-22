@@ -7,7 +7,7 @@ import torch
 from e3nn import o3
 
 from ..linear import e3nnLinear
-from ..mlp import MLP
+from ..mlp import BATCH_MLP, MLP
 from .base import EdgeInteraction
 from .fused import UvO2TensorProduct, UvuTensorProduct
 from .paths import generate_paths
@@ -24,15 +24,31 @@ class O3CgtpEdgeInteraction(EdgeInteraction):
 
         radial_basis = self.radial_basis
         radial_norm = radial_basis["mlp_norm"] or "layer_norm"
-        self.edge_info = MLP[self.mlp_type](
-            [radial_basis["num_radial_basis"] + 2 * self.num_elements]
-            + list(radial_basis["hidden"])
-            + [self.weight_numel],
+        options = dict(
             bias=radial_basis["bias"],
             layer_norm=radial_norm == "layer_norm",
             rms_norm=radial_norm == "rms_norm",
             act="silu",
         )
+        widths = radial_basis.get("widths")
+        if widths is None:
+            self.edge_info = MLP[self.mlp_type](
+                [radial_basis["num_radial_basis"] + 2 * self.num_elements]
+                + list(radial_basis["hidden"])
+                + [self.weight_numel],
+                **options,
+            )
+        else:
+            self.edge_info = BATCH_MLP[self.mlp_type].from_product(
+                self.rejector,
+                widths,
+                radial_basis["hidden"],
+                context_features=2 * self.num_elements,
+                **options,
+            )
+            self.register_buffer(
+                "element_basis", torch.eye(self.num_elements), persistent=False
+            )
 
     def _setup_convolution(self) -> None:
         self.linear_up = e3nnLinear(
@@ -69,6 +85,15 @@ class O3CgtpEdgeInteraction(EdgeInteraction):
 
     def radial_weights(self, radial, node_type, edge_index):
         """Project radial features and element-table rows without one-hot inputs."""
+        if self.radial_basis.get("widths") is not None:
+            source, target = edge_index
+            return self.edge_info(
+                (
+                    (radial, None),
+                    (self.element_basis, node_type[source]),
+                    (self.element_basis, node_type[target]),
+                )
+            )
         linear = self.edge_info.mlp[0]
         weight = linear.get_weight()
         radial_width = self.radial_basis["num_radial_basis"]

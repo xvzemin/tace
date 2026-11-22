@@ -12,6 +12,7 @@ from typing import Any
 
 from ...dataset.quantity import PROPERTIES
 from ..mlp import MLP
+from ..radial import check_radial_selection
 
 # Most defaults are suitable for general use. Some are no longer recommended,
 # but must remain unchanged for compatibility with existing models and configurations.
@@ -47,7 +48,9 @@ DEFAULT_MODEL_CONFIG = {
     "radial_basis": {
         "bias": False,
         "radial_basis": "j0",
-        "num_radial_basis": 8,
+        "num_radial_basis": None,
+        "max_eigenvalue": None,
+        "use_interpolation": False,
         "num_mag_radial_basis": 10,
         "distance_transform": None,
         "cutoff_fn": "c2poly",
@@ -199,6 +202,11 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Merge model defaults, validate options, and resolve per-layer settings."""
     cfg = recursive_update(cfg)
     radial = cfg["radial_basis"]
+    check_radial_selection(radial["num_radial_basis"], radial["max_eigenvalue"])
+    if "jn_max_eigenvalue" in radial:
+        raise ValueError("Set radial_basis.max_eigenvalue instead of jn_max_eigenvalue.")
+    if radial["radial_basis"] != "physical_basis" and radial["use_interpolation"]:
+        raise ValueError("use_interpolation requires radial_basis='physical_basis'.")
     atomic_basis = cfg["atomic_basis"]
     product_basis = cfg["product_basis"]
 
