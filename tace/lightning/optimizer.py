@@ -10,7 +10,7 @@ from fnmatch import fnmatchcase
 import torch
 from e3nn.nn import BatchNorm
 
-from equivariantx.nn import MergeRmsNorm
+from equivariantx.nn import EquivariantLayerNorm
 from equivariantx.utils.autograd import clip_gradient_norm as clip_gradient_norm
 from tace.models.blocks import ScaleShift
 from tace.models.linear import (
@@ -52,7 +52,7 @@ NO_WEIGHT_DECAY_MODULES = (
     torch.nn.EmbeddingBag,
     torch.nn.PReLU,
     BatchNorm,
-    MergeRmsNorm,
+    EquivariantLayerNorm,
     ScatterNorm,
     ScaleShift,
     AgnesiTransform,
@@ -131,7 +131,7 @@ NO_MUON_MODULES = (
     ElementEmbedding,
     torch.nn.PReLU,
     BatchNorm,
-    MergeRmsNorm,
+    EquivariantLayerNorm,
     ScaleShift,
     AgnesiTransform,
     SoftTransform,

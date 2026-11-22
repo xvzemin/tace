@@ -14,7 +14,7 @@ from equivariantx.mbe.ace import (
     IctdBilinearContraction,
     IctdUuuFullyConnectedSymmetricContraction,
 )
-from equivariantx.nn import MergeRmsNorm
+from equivariantx.nn import EquivariantLayerNorm
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -279,7 +279,7 @@ def cartesian_modules(module):
         return module
     if isinstance(module, _SymmetricRankTwoBasisChange):
         return RankTwoReadout()
-    if isinstance(module, MergeRmsNorm):
+    if isinstance(module, EquivariantLayerNorm):
         module.set_storage(co3.Irreps(module.irreps))
         return module
     if isinstance(module, Gate):

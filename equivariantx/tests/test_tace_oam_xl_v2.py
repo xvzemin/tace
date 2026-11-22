@@ -149,6 +149,9 @@ def test_local_conversion(
         "pairs",
         interaction,
         degree,
+        norm_type="soft_cap_rms_norm"
+        if degree == 1 and embedding != "element"
+        else None,
     )
 
 
@@ -178,6 +181,7 @@ def check_conversion(
     topology,
     interaction,
     degree=1,
+    norm_type=None,
 ):
     pytest.importorskip("tace")
     if device == "cuda" and not torch.cuda.is_available():
@@ -189,7 +193,9 @@ def check_conversion(
         monkeypatch.setenv(f"TACE_USE_{name}", value)
     edge_mode = "scheduled" if device == "cuda" else "original"
     associate_norm = scatter_norm == "cutoff" and conditioning == "linear"
-    pre_norm = "const_norm" if conditioning == "element" else "merge_rms_norm"
+    pre_norm = norm_type or (
+        "const_norm" if conditioning == "element" else "merge_rms_norm"
+    )
     monkeypatch.setenv("EQX_XL_ASSOCIATE_NORM", str(int(associate_norm)))
     monkeypatch.setenv("EQX_XL_COMPRESSED_RADIAL", str(int(topology == "pairs")))
     monkeypatch.setenv("EQX_XL_RADIAL_JET", str(int(projection == "jet")))
@@ -223,7 +229,7 @@ def check_conversion(
             )
         config["resnet"].update(type="BAB", linear_type="identity")
         config["layer_norm"].update(
-            pre_norm_type=pre_norm, final_norm_type="merge_rms_norm"
+            pre_norm_type=pre_norm, final_norm_type=norm_type or "merge_rms_norm"
         )
         config["product_basis"].update(
             type="nonlinear_cgtp", correlation=2, num_expert=1, num_channel_per_expert=8

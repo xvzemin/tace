@@ -8,6 +8,11 @@ Neural network modules
 .. autoclass:: equivariantx.nn.PolynomialActivation
    :members: forward
 
+.. autoclass:: equivariantx.nn.EquivariantLayerNorm
+   :members: forward
+
+.. autoclass:: equivariantx.nn.SoftCapRmsNorm
+
 .. autoclass:: equivariantx.nn.MergeRmsNorm
    :members: forward
 

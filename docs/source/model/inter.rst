@@ -105,8 +105,16 @@ computed. :math:`B` counts two additions per ``BAB`` layer or one per ``AB``
 or ``BB`` layer. The first layer counts only when both ``use_first_resnet``
 and ``use_first_pre_norm`` are true. Otherwise its update is unchanged.
 
-``final_norm_type`` accepts only ``null``, ``merge_layer_norm`` or
-``merge_rms_norm``. It does not scale the final features by the residual factor.
+``final_norm_type`` accepts ``null``, ``merge_layer_norm``, ``merge_rms_norm``
+or ``soft_cap_rms_norm``. It does not scale the final features by the residual factor.
+
+Soft-capped RMS normalization
+-----------------------------
+
+Use ``soft_cap_rms_norm`` for ``pre_norm_type``, ``final_norm_type`` or both,
+including with ``tace-train-oamv2``. With the model defaults this maps
+:math:`x\mapsto x/\sqrt{1+v}`, where :math:`v` is the merged mean square of
+the irrep blocks in one sample. There is no learned scale or bias.
 
 O(2) CGTP
 ---------

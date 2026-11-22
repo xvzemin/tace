@@ -75,7 +75,7 @@ def test_norm_blocks(cls, layout, planar, device, double_precision):
         torch.testing.assert_close(x, y)
 
 
-@pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm])
+@pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm, nn.SoftCapRmsNorm])
 @pytest.mark.parametrize("planar", [False, True])
 def test_norm_change_of_basis(cls, planar, device, double_precision):
     group = co2 if planar else co3
@@ -111,7 +111,7 @@ def test_norm_change_of_basis(cls, planar, device, double_precision):
             torch.testing.assert_close(norm(v @ matrix.T), norm(v) @ matrix.T)
 
 
-@pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm])
+@pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm, nn.SoftCapRmsNorm])
 def test_uniform_storage(cls, device, double_precision):
     for irreps in (
         o3.Irreps("3x0e + 3x2e"),
@@ -133,13 +133,51 @@ def test_uniform_storage(cls, device, double_precision):
     torch.testing.assert_close(norm(scalar), ref(scalar, (3,), eps=norm.eps))
 
 
+@pytest.mark.parametrize("p", [1.0, 1.5, 2.0])
+def test_soft_cap_rms(p, device, double_precision):
+    norm = nn.SoftCapRmsNorm("2x0e + 1x1o", p=p, max_rms=2, eps=0.25).to(device)
+    assert isinstance(norm, nn.EquivariantLayerNorm)
+    assert not norm.state_dict() and not list(norm.buffers())
+    x = torch.randn(6, 5, device=device, requires_grad=True)
+    v = (x[:, :2].square().mean(1) + x[:, 2:].square().mean(1)) / 2
+    reference = x * (0.25**p + (v / 4).pow(p))[:, None].pow(-0.5 / p)
+    actual = norm(x)
+    torch.testing.assert_close(actual, reference)
+    for _ in range(3):
+        probe = torch.randn_like(x)
+        actual, reference = (
+            torch.autograd.grad((y * probe).sum(), x, create_graph=True)[0]
+            for y in (actual, reference)
+        )
+        torch.testing.assert_close(actual, reference)
+    large = norm(1e15 * torch.ones_like(x))
+    torch.testing.assert_close(large, torch.full_like(x, 2))
+
+    z = torch.zeros_like(x, requires_grad=True)
+    for layer in (nn.EquivariantLayerNorm, nn.SoftCapRmsNorm):
+        default = layer("2x0e + 1x1o", p=p).to(device)
+        out = default(z)
+        grad = torch.autograd.grad(out.sum(), z, create_graph=True)[0]
+        curvature = torch.autograd.grad(grad.sum(), z)[0]
+        torch.testing.assert_close(out, torch.zeros_like(z))
+        torch.testing.assert_close(grad, torch.ones_like(z))
+        torch.testing.assert_close(curvature, torch.zeros_like(z))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("cls", [nn.MergeRmsNorm, nn.MergeLayerNorm])
+@pytest.mark.parametrize(
+    "cls,kwargs",
+    [
+        (nn.MergeRmsNorm, {}),
+        (nn.MergeLayerNorm, {}),
+        (nn.SoftCapRmsNorm, {"p": 2.0, "max_rms": 1.5}),
+    ],
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_normalization_derivatives(cls, dtype, double_precision):
+def test_normalization_derivatives(cls, kwargs, dtype, double_precision):
     irreps = co2.Irreps("40x0e+20x0o+18x2m+12x0e")
-    layer = cls(irreps, backend="cuda").cuda().to(dtype)
-    reference = cls(irreps, backend="torch").cuda().to(dtype)
+    layer = cls(irreps, backend="cuda", **kwargs).cuda().to(dtype)
+    reference = cls(irreps, backend="torch", **kwargs).cuda().to(dtype)
     x = torch.randn(3, irreps.dim, device="cuda", dtype=dtype)
     x[0] = 0
     x[1] *= 1e-4

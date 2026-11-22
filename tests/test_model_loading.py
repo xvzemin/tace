@@ -145,6 +145,7 @@ def test_model_target_aliases(tmp_path, monkeypatch, double_precision, basis, co
         "nonlinear_cgtp",
         "matrix",
         "normalization",
+        "soft_cap_rms_norm",
     ],
 )
 @pytest.mark.parametrize("fused", [False, True])
@@ -170,7 +171,12 @@ def test_native_cartesian_model(
         target_property=["energy", "forces", "stress", "virials"],
     )
     config["atomic_basis"].update(type=interaction, edge_nonlinear="gate")
-    if interaction in ("matrix", "normalization", "nonlinear_cgtp"):
+    if interaction in (
+        "matrix",
+        "normalization",
+        "soft_cap_rms_norm",
+        "nonlinear_cgtp",
+    ):
         config["atomic_basis"]["type"] = "cgtp"
     if interaction == "nonlinear_cgtp":
         config["product_basis"].update(type="nonlinear_cgtp", correlation=3)
@@ -180,6 +186,12 @@ def test_native_cartesian_model(
         config["layer_norm"].update(
             pre_norm_type="merge_layer_norm",
             final_norm_type="merge_rms_norm",
+            use_first_pre_norm=True,
+        )
+    if interaction == "soft_cap_rms_norm":
+        config["layer_norm"].update(
+            pre_norm_type="soft_cap_rms_norm",
+            final_norm_type="soft_cap_rms_norm",
             use_first_pre_norm=True,
         )
     if interaction in ("bilinear", "moe", "correlation3"):

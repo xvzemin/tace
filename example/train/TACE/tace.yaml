@@ -418,8 +418,8 @@ model:
       use_first_resnet: false
 
     layer_norm:
-      pre_norm_type: null     # [merge_rms_norm, merge_layer_norm, const_norm]
-      final_norm_type: null   # [merge_rms_norm, merge_layer_norm]
+      pre_norm_type: null     # [merge_rms_norm, merge_layer_norm, soft_cap_rms_norm, const_norm]
+      final_norm_type: null   # [merge_rms_norm, merge_layer_norm, soft_cap_rms_norm]
       use_first_pre_norm: false
 
     atomic_basis:

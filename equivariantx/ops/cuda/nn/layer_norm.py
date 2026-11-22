@@ -11,7 +11,7 @@ from ...common.cuda.pointwise import launch, scalar_type
 
 @lru_cache(maxsize=128)
 def source(key, dtype, adjoint=False, incoming=True, radial=False):
-    widths, factors, centered = parse_metadata(key)
+    widths, factors, centered, p = parse_metadata(key)
     moments, variances, outputs = [], [], []
     start = 0
     for i, (width, factor) in enumerate(zip(widths, factors)):
@@ -27,23 +27,38 @@ def source(key, dtype, adjoint=False, incoming=True, radial=False):
             T m{i}=reduce(s{i},buf)/T({width});
             """)
         z = f"({value}-m{i})" if i in centered else value
-        variances.append(f"{loop} {{T z={z}; sum+=T({factor!r})*z*z;}}")
+        variances.append(
+            f"{loop} {{T z={'v[j]' if adjoint else z}; sum+=T({factor!r})*z*z;}}"
+        )
         outputs.append(f"{loop} u[j]={z}*r;")
         start += width
     declarations = "const T* x,T* y,T* inv"
+    scale = "T r=T(1)/sqrt(q+T(EPSILON));"
+    if p != 1.0:
+        scale = f"""
+        T unit=fmax(q,T(EPSILON));
+        T r=pow(pow(q/unit,T({p!r}))+pow(T(EPSILON)/unit,T({p!r})),T({-0.5 / p!r}))/sqrt(unit);
+        """
     norm = f"""
         {"".join(moments)}
         T sum=0; {"".join(variances)}
-        T r=T(1)/sqrt(reduce(sum,buf)+T(EPSILON));
+        T q=reduce(sum,buf); {scale}
         if(!tid)inv[row]=r;
     """
     if adjoint:
         declarations = "const T* x,const T* inv,const T* dy,const T* dr,T* y"
+        correction = (
+            f"sum=0; {''.join(variances)} T q=reduce(sum,buf); "
+            f"dot*=q>T(0)?pow(q,T({p - 1!r})):T(0);"
+            if p != 1.0
+            else ""
+        )
         norm = f"""
         const T* g=dy+{"row*" + str(start) if incoming else "0"}; T r=inv[row];
         T sum=0;
         {f"for(int j=tid;j<{start};j+=blockDim.x) sum+=g[j]*v[j];" if incoming else ""}
         T dot={"reduce(sum,buf)" if incoming else "T(0)"} {"+dr[row]*r" if radial else ""};
+        {correction}
         {"".join(moments)}
         """
     shuffle = dtype == torch.float32 and bool(centered) and start >= 128
@@ -78,7 +93,7 @@ def source(key, dtype, adjoint=False, incoming=True, radial=False):
 
 
 def validate(key, x):
-    widths, factors, centered = parse_metadata(key)
+    widths, factors, centered, p = parse_metadata(key)
     if (
         x.ndim != 2
         or x.dtype not in (torch.float32, torch.float64)
@@ -88,6 +103,8 @@ def validate(key, x):
         or sum(widths) != x.shape[1]
         or any(type(f) is not float or not isfinite(f) for f in factors)
         or any(type(i) is not int or not 0 <= i < len(widths) for i in centered)
+        or not isfinite(p)
+        or p <= 0
     ):
         raise ValueError("Invalid normalization layout or input.")
 
@@ -172,7 +189,7 @@ def setup_adjoint(ctx, inputs, output):
 
 def transpose_adjoint(ctx, x):
     y, r, dy, dr = ctx.saved_tensors
-    widths, factors, centered = parse_metadata(ctx.key)
+    widths, factors, centered, p = parse_metadata(ctx.key)
     if centered:
         bands = list(x.split(widths, -1))
         for i in centered:
@@ -184,8 +201,28 @@ def transpose_adjoint(ctx, x):
     if dr is not None:
         b = b + dr * r
     needs = ctx.needs_input_grad
-    # VJP of r P(dy - q y (<dy,y> + r dr)), treating y and r as outputs.
-    gy = -r * (qx * b + (dy * a if dy is not None else 0)) if needs[1] else None
+    # The adjoint is r P(dy - Q y k (<dy,y> + r dr)), k = (y^T Q y)^(p-1).
+    dk = None
+    if p != 1.0:
+        qy = torch.cat([v * f for v, f in zip(y.split(widths, -1), factors)], -1)
+        u = (qy * y).sum(-1, keepdim=True)
+        if p.is_integer():
+            k = u.pow(p - 1)
+            if needs[1]:
+                dk = 2 * (p - 1) * qy * u.pow(p - 2)
+        else:
+            positive = u > 0
+            safe = u.masked_fill(~positive, 1)
+            k = torch.where(positive, safe.pow(p - 1), 0)
+            if needs[1]:
+                dk = 2 * (p - 1) * qy * torch.where(positive, safe.pow(p - 2), 0)
+        if needs[1]:
+            dk = dk * (a * b)
+        a = a * k
+        qx = qx * k
+    gy = qx * b + (dy * a if dy is not None else 0) if needs[1] else None
+    if gy is not None:
+        gy = -r * (gy if dk is None else gy + dk)
     gr = (
         ((x * dy).sum(-1, keepdim=True) if dy is not None else 0)
         - a * (b + (dr * r if dr is not None else 0))
