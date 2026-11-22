@@ -55,11 +55,16 @@ on the basis:
   keeps their number unchanged. For trainable fixed-order Bessel functions,
   the threshold selects the initial frequencies only. If a distance
   transform is used, the spectrum refers to the uncomposed basis.
-* ``physical_basis``: the threshold applies to the tabulated dimensionless
+* ``spb`` (SPACE): the threshold applies to the tabulated dimensionless
   eigenvalues in the coordinate :math:`x=r/r_0`, where :math:`r_0` depends
   on the two elements. The default is the eighth degree-zero eigenvalue,
   approximately 177.48726637. The model cutoff changes the envelope and
   normalization, not the selected modes.
+* ``ejn``: the threshold applies to a shared dimensionless spectrum on
+  :math:`[0,X]`, where :math:`X` is the numerical value of the graph cutoff
+  in angstroms. The default is the eighth degree-zero eigenvalue on this
+  interval. Changing the cutoff changes the spectrum; changing the element
+  vocabulary does not.
 * ``gaussian`` has no eigenvalue spectrum. Use ``num_radial_basis``
   (eight by default).
 
@@ -67,6 +72,9 @@ Alternatively, set ``num_radial_basis`` to an integer for a fixed order,
 or a list of ``lmax + 1`` positive integers for a degree-specific basis.
 Do not set both selectors. A threshold that leaves a requested degree empty
 raises an error.
+
+For a 6 Å graph cutoff, integer thresholds of 28 for ``j0``, 284 for
+``ejn`` and 271 for ``spb`` each retain ten degree-zero modes.
 
 Physical radial basis
 ---------------------
@@ -76,18 +84,37 @@ Physical radial basis
    model:
      config:
        radial_basis:
-         radial_basis: physical_basis
+         radial_basis: spb
          num_radial_basis: null
          max_eigenvalue: 36.0
          use_interpolation: false
 
 Each weighted CGTP path uses the radial modes for its edge harmonic degree.
-For example, the explicit threshold 36 selects ``[3, 2, 1, 1]`` at
+For ``spb``, the explicit threshold 36 selects ``[3, 2, 1, 1]`` at
 ``lmax: 3``, versus ``[8, 7, 6, 6]`` with the default threshold.
 The default evaluation uses the full Fourier expansion.
-Set ``use_interpolation: true`` for cubic Hermite interpolation. Both modes
+For ``spb``, set ``use_interpolation: true`` for cubic Hermite interpolation. Both modes
 use the same state dictionary.
-The basis supports ``cgtp``, its Cartesian and edge-aligned equivalents,
+
+With ``radial_basis: ejn``, the model solves the weighted eigenproblem
+
+.. math::
+
+   -\frac{d}{dx}\left(x^2 e^x \frac{du}{dx}\right)
+   + \ell(\ell+1)e^x u = \lambda x^2 u, \qquad u(X)=0.
+
+Both bases use :math:`r_0=0.1+0.7(r_{\rm cov,i}+r_{\rm cov,j})` in
+angstroms and the same normalization in :math:`x=r/r_0`.
+``ejn`` solves once per degree and stores the shared eigenvalues and
+200-term Fourier coefficients as model buffers. The element pair enters
+only when evaluating the shared modes at :math:`x=r/r_0`.
+At :math:`X=10`, this reproduces the tabulated SPACE basis up to the
+sign of each eigenfunction. Modes are zero for :math:`r \ge X r_0`.
+If this boundary lies inside the graph cutoff, the basis is continuous there
+but its first derivative need not be. The graph cutoff envelope still acts
+on the physical distance :math:`r`.
+
+Both bases support ``cgtp``, its Cartesian and edge-aligned equivalents,
 and CGTP in ``tace-train-oamv2``. OAMv2 evaluates degree-specific radial heads
 in batches by default. Set ``TACE_MEMORY_FIRST=1`` to stream the grouped MLP
 through the EQX convolution instead.
@@ -117,7 +144,7 @@ For cutoff :math:`R` and the
 
 The modes are evaluated directly at the interatomic distance, without
 interpolation. The grouped radial MLP and the
-supported EQX and OAMv2 convolutions are the same as for ``physical_basis``.
+supported EQX and OAMv2 convolutions are the same as for ``spb`` and ``ejn``.
 Selecting a fixed order such as ``j1`` instead uses that one order for all paths.
 
 O(3) Cgtp

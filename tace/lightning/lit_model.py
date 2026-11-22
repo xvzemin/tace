@@ -449,7 +449,7 @@ class LightningWrapperModel(L.LightningModule):
         statistics = checkpoint["hyper_parameters"]["statistics"]
         with torch_default_dtype(model_dtype):
             model = create_model(
-                cfg["model"]["config"],
+                saved_radial_config(cfg["model"]["config"], checkpoint["state_dict"]),
                 statistics,
                 target_property,
                 embedding_property,
@@ -474,6 +474,30 @@ class LightningWrapperModel(L.LightningModule):
         )
 
         return configure_model_precision(model, model_dtype, device=map_location)
+
+
+def saved_radial_config(config, state):
+    """Restore the selector and spectral cutoff of a pre-SPB state dictionary."""
+    radial = config.get("radial_basis", {})
+    if radial.get("radial_basis") != "physical_basis":
+        return config
+    radial = {**radial, "radial_basis": "spb"}
+    if radial.get("num_radial_basis") is None and radial.get("max_eigenvalue") is None:
+        from tace.models.physical_basis import space_spectrum
+
+        # Historical default thresholds differed. Use the actual number of
+        # Fourier rows in the saved model instead of today's default.
+        key = next(
+            k
+            for k in state
+            if k.endswith(".representation.radial_basis.radial_fn.coefficients")
+        )
+        coefficients = state[key]
+        n = coefficients.shape[0] if coefficients.ndim == 2 else coefficients.shape[-1]
+        spectrum = space_spectrum().E_ln[: config["lmax"] + 1].flatten()
+        spectrum.partition(n - 1)
+        radial["max_eigenvalue"] = float(spectrum[n - 1])
+    return {**config, "radial_basis": radial}
 
 
 def _dominant_floating_dtype(values) -> torch.dtype:
@@ -624,7 +648,7 @@ def load_tace(
         state_dict = model["state_dict"]
         with torch_default_dtype(target_dtype):
             model = create_model(
-                model_config=model["cfg"],
+                model_config=saved_radial_config(model["cfg"], state_dict),
                 statistics=model["statistics"],
                 target_property=model["target_property"],
                 embedding_property=model["embedding_property"],

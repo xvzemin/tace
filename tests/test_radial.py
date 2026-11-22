@@ -26,12 +26,12 @@ pytestmark = pytest.mark.usefixtures("double_precision")
 
 
 @pytest.mark.parametrize("interpolate", [False, True])
-def test_physical_radial_basis(interpolate):
-    from physical_basis import PhysicalBasis
+def test_space_physical_basis(interpolate):
+    PhysicalBasis = pytest.importorskip("physical_basis").PhysicalBasis
 
-    from tace.models.physical_basis import PhysicalRadialBasis
+    from tace.models.physical_basis import SpacePhysicalBasis
 
-    module = PhysicalRadialBasis(6.0, 3, use_interpolation=interpolate)
+    module = SpacePhysicalBasis(6.0, 3, use_interpolation=interpolate)
     assert module.widths == (8, 7, 6, 6)
     z, edges = torch.tensor([6, 8]), torch.tensor([[0, 1, 0], [1, 0, 1]])
     r = torch.tensor([1.4, 1.4, 20.0], requires_grad=True)
@@ -48,16 +48,128 @@ def test_physical_radial_basis(interpolate):
         y[0].detach(), expected, atol=2e-7 if interpolate else 1e-12, rtol=0
     )
     torch.testing.assert_close(y[0], y[1])
-    other = PhysicalRadialBasis(6.0, 3, use_interpolation=not interpolate)
+    other = SpacePhysicalBasis(6.0, 3, use_interpolation=not interpolate)
     other.load_state_dict(module.state_dict(), strict=True)
     torch.testing.assert_close(other(r, z, edges), y, rtol=0, atol=2e-7)
+    if interpolate:
+        legacy = {
+            "lengthscale": module.lengthscale,
+            "coefficients": module.spline_table,
+        }
+        module.load_state_dict(legacy, strict=True)
+        torch.testing.assert_close(module(r, z, edges), y, rtol=0, atol=0)
     assert not y[2].count_nonzero()
     grad = torch.autograd.grad(y.sum(), r, create_graph=True)[0]
     assert grad[0].item() == pytest.approx(
         slope, abs=2e-5 if interpolate else 1e-12, rel=0
     )
     assert torch.autograd.grad(grad.sum(), r)[0].isfinite().all()
-    assert PhysicalRadialBasis(4.0, 0, [3])(r, z, edges).shape == (3, 3)
+    assert SpacePhysicalBasis(4.0, 0, [3])(r, z, edges).shape == (3, 3)
+
+
+def test_ejn_space_reference():
+    from tace.models.physical_basis import (
+        ExpWeightedjnSphericalBesselBasis,
+        SpacePhysicalBasis,
+        radial_spectrum,
+    )
+
+    official = pytest.importorskip("physical_basis").PhysicalBasis()
+    x = np.linspace(0, 10, 1001)
+    for degree, n in enumerate((8, 7, 6, 6)):
+        eigen, rows = radial_spectrum(10.0, degree)
+        reference = official.eigenvectors[degree, :, :n].T
+        signs = np.sign((reference * rows[:n]).sum(axis=1))
+        rows = rows[:n] * signs[:, None]
+        np.testing.assert_allclose(
+            eigen[:n], official.E_ln[degree, :n], atol=2e-7, rtol=0
+        )
+        np.testing.assert_allclose(rows, reference, atol=5e-8, rtol=0)
+        w = np.pi / 10 * (np.arange(rows.shape[1]) + (1 if degree else 0.5))
+        phase = x[:, None] * w
+        fn = np.sin(phase) if degree else np.cos(phase)
+        df = (np.cos(phase) if degree else -np.sin(phase)) * w
+        np.testing.assert_allclose(fn @ rows.T, fn @ reference.T, atol=2e-6, rtol=0)
+        np.testing.assert_allclose(df @ rows.T, df @ reference.T, atol=5e-5, rtol=0)
+
+    numbers = torch.tensor([1, 6, 8])
+    ejn = ExpWeightedjnSphericalBesselBasis(10.0, 3, numbers.tolist())
+    spb = SpacePhysicalBasis(10.0, 3)
+    assert ejn.widths == spb.widths == (8, 7, 6, 6)
+    r = torch.linspace(0.01, 12.0, 241)
+    i = torch.arange(len(r))
+    edges = torch.stack((i % 3, i // 3 % 3))
+    signs = (spb.coefficients * ejn.coefficients).sum(-1).sign()
+    torch.testing.assert_close(
+        ejn(r, torch.arange(3), edges) * signs,
+        spb(r, numbers, edges),
+        atol=4e-5,
+        rtol=0,
+    )
+
+
+def test_ejn_boundary_spectrum_and_checkpoint(monkeypatch):
+    import sys
+
+    from scipy.special import roots_legendre
+
+    monkeypatch.setitem(sys.modules, "physical_basis", None)
+    basis = RadialBasis(cutoff=6.0, radial_basis="ejn", lmax=2, atomic_numbers=[1, 14])
+    module = basis.radial_fn
+    assert basis.widths[0] == 8
+    assert module.coefficients.shape == (sum(basis.widths), 200)
+    # Independently integrate the Rayleigh quotient in the scaled coordinate.
+    t, wt = roots_legendre(700)
+    x, wt = (1 + t) * 3, wt * 3
+    for degree, offset in enumerate((0, *np.cumsum(basis.widths)[:-1])):
+        w = module.frequencies[int(degree > 0)].numpy()
+        c = module.coefficients[offset].numpy()
+        phase = x[:, None] * w
+        y = (np.sin(phase) if degree else np.cos(phase)) @ c
+        slope = ((np.cos(phase) if degree else -np.sin(phase)) * w) @ c
+        mass = wt @ (x**2 * y**2)
+        energy = (wt * np.exp(x)) @ (x**2 * slope**2 + degree * (degree + 1) * y**2)
+        assert energy / mass == pytest.approx(
+            module.eigenvalues[offset].item(), rel=3e-6
+        )
+        assert abs((np.sin(w * 6) if degree else np.cos(w * 6)) @ c) < 1e-11
+
+    # H-H, Si-Si, H-Si and Si-H evaluated at the same scaled distance.
+    r0 = torch.tensor([0.534, 1.654, 1.094, 1.094])
+    r = torch.cat((1.5 * r0, torch.tensor([3.20, 3.21, 5.99]))).requires_grad_()
+    types = torch.tensor([0, 1])
+    edges = torch.tensor([[0, 1, 0, 1, 0, 0, 1], [0, 1, 1, 0, 0, 0, 1]])
+    saved = {k: v.clone() for k, v in module.state_dict().items()}
+    expected = module(r, types, edges)
+    torch.testing.assert_close(expected[:4], expected[0].expand_as(expected[:4]))
+    assert expected[4].count_nonzero() and not expected[5].count_nonzero()
+    assert expected[6].count_nonzero()
+    slope = torch.autograd.grad(expected.sum(), r, create_graph=True)[0]
+    torch.testing.assert_close(slope[:4] * r0, (slope[0] * r0[0]).expand(4))
+    assert torch.autograd.grad(slope.sum(), r)[0].isfinite().all()
+    module.coefficients.zero_()
+    assert not module(r, types, edges).count_nonzero()
+    module.load_state_dict(saved, strict=True)
+    torch.testing.assert_close(module(r, types, edges), expected, rtol=0, atol=0)
+    with pytest.raises(ImportError, match="tace\\[spb\\]"):
+        RadialBasis(radial_basis="spb")
+
+
+def test_ejn_shared_spectral_threshold():
+    options = dict(radial_basis="ejn", cutoff=6.0, lmax=3, max_eigenvalue=284)
+    shared = RadialBasis(**options)
+    local = RadialBasis(**options, atomic_numbers=[1, 6, 8])
+    assert local.widths == shared.widths == (10, 9, 8, 8)
+    values = local.radial_fn.eigenvalues
+    torch.testing.assert_close(values, shared.radial_fn.eigenvalues)
+    assert 0 < values.min() and values.max() <= 284
+    z = torch.tensor([1, 6, 8])
+    edges = torch.tensor([[0, 1, 2], [1, 2, 0]])
+    args = (torch.tensor([[1.3], [1.4], [1.5]]), torch.arange(3), edges, z)
+    torch.testing.assert_close(local(*args), shared(*args), rtol=0, atol=0)
+    tenth = values[9].item()
+    for limit, count in [(tenth, 10), (math.nextafter(tenth, 0.0), 9)]:
+        assert RadialBasis(**{**options, "max_eigenvalue": limit}).widths[0] == count
 
 
 @pytest.mark.parametrize(
@@ -462,20 +574,19 @@ def test_degree_bessel_basis(counts):
             actual = torch.autograd.grad(value, r, create_graph=True)[0]
 
 
-@pytest.mark.parametrize(
-    "counts", [2, [], [1], [1, 2, 3], [1, 0], [True, 1], [1.5, 2]]
-)
+@pytest.mark.parametrize("counts", [2, [], [1], [1, 2, 3], [1, 0], [True, 1], [1.5, 2]])
 def test_degree_bessel_counts(counts):
     with pytest.raises(ValueError, match="num_radial_basis"):
         RadialBasis(radial_basis="jn", lmax=1, num_basis=counts)
 
 
 def test_radial_spectral_defaults():
-    from physical_basis import PhysicalBasis
-
     threshold = (8 * math.pi / 6) ** 2
+
     def basis(name, cutoff, limit=None):
-        return RadialBasis(cutoff=cutoff, radial_basis=name, lmax=3, max_eigenvalue=limit)
+        return RadialBasis(
+            cutoff=cutoff, radial_basis=name, lmax=3, max_eigenvalue=limit
+        )
 
     for cutoff in (5.0, 6.0, 8.0):
         widths = basis("jn", cutoff).widths
@@ -485,21 +596,27 @@ def test_radial_spectral_defaults():
         explicit = basis("jn", cutoff, threshold).widths
         assert explicit == {5: (6, 6, 5, 5), 6: widths, 8: (10, 10, 9, 9)}[cutoff]
         assert basis("j0", cutoff, threshold).num_basis == explicit[0]
-        assert basis("physical_basis", cutoff).widths == (8, 7, 6, 6)
-        assert basis("physical_basis", cutoff, 36.0).widths == (3, 2, 1, 1)
 
     assert basis("j0", 4.76).num_basis == 8
 
     # Include a mode exactly at the threshold, but not below it.
-    physical_limit = PhysicalBasis().return_eigenvalue(7, 0)
     for name, limit, n in [
         ("j0", threshold, 8),
         ("j2", (compute_jn_zeros(2, 3)[-1] / 6) ** 2, 3),
-        ("physical_basis", physical_limit, 8),
     ]:
         for value, expected in [(limit, n), (math.nextafter(limit, 0.0), n - 1)]:
             selected = RadialBasis(cutoff=6, radial_basis=name, max_eigenvalue=value)
             assert selected.num_basis == expected
+
+
+def test_space_spectral_threshold():
+    data = pytest.importorskip("physical_basis").PhysicalBasis()
+    limit = data.return_eigenvalue(7, 0)
+    for R in (5., 8.):
+        assert RadialBasis(R, radial_basis="spb", lmax=3).widths == (8, 7, 6, 6)
+        assert RadialBasis(R, radial_basis="spb", lmax=3, max_eigenvalue=36.).widths == (3, 2, 1, 1)
+    for value, n in ((limit, 8), (math.nextafter(limit, 0.0), 7)):
+        assert RadialBasis(radial_basis="spb", max_eigenvalue=value).num_basis == n
 
 
 @pytest.mark.parametrize(
@@ -507,18 +624,18 @@ def test_radial_spectral_defaults():
     [
         ("j0", 8, 20.0, "only one"),
         ("jn", [2, 1], 20.0, "only one"),
-        ("physical_basis", [2, 1], 36.0, "only one"),
+        ("spb", [2, 1], 36.0, "only one"),
         ("j0", None, float("nan"), "finite positive"),
         ("jn", None, True, "finite positive"),
-        ("physical_basis", None, 0, "finite positive"),
+        ("spb", None, 0, "finite positive"),
         ("jn", None, 0.4, "empty"),
-        ("physical_basis", None, 8.0, "empty"),
+        ("ejn", None, 0.4, "empty"),
         ("gaussian", None, 20, "eigenvalue"),
     ],
 )
 def test_radial_spectral_errors(name, counts, limit, match):
     with pytest.raises(ValueError, match=match):
-        RadialBasis(radial_basis=name, lmax=1, num_basis=counts, max_eigenvalue=limit)
+        RadialBasis(radial_basis=name, lmax=1, num_basis=counts, max_eigenvalue=limit, atomic_numbers=[1])
 
 
 @pytest.mark.parametrize("name", ["j-1", "j1.5", "jx"])

@@ -158,6 +158,37 @@ def test_fourier_radial(dtype, device):
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("edges", [0, 7, 135])
+def test_indexed_fourier(edges, device):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.nn import fourier_radial
+    from equivariantx.ops.decompositions import torch_decompositions
+
+    x = torch.linspace(
+        0, 2, edges, device=device, dtype=torch.float64, requires_grad=True
+    )
+    ids = torch.arange(edges, device=device) % 3
+    w = torch.randn(2, 37, device=device, dtype=x.dtype)
+    c = torch.randn(3, 5, 37, device=device, dtype=x.dtype)
+    ref = torch.stack([fourier_radial(x, w, row, 2, 2.0, backend="torch") for row in c])
+    ref = ref[ids, torch.arange(edges, device=device)]
+
+    def evaluate(x, w, c, ids):
+        return fourier_radial(x, w, c, 2, 2.0, indices=ids)
+
+    y = evaluate(x, w, c, ids)
+    graph = make_fx(evaluate, decomposition_table=torch_decompositions())(x, w, c, ids)
+    assert not any(str(node.target).startswith("eqx.") for node in graph.graph.nodes)
+    torch.testing.assert_close(graph(x, w, c, ids), ref)
+    for _ in range(3):
+        torch.testing.assert_close(y, ref)
+        y, ref = (
+            torch.autograd.grad(v.sum(), x, create_graph=True)[0] for v in (y, ref)
+        )
+    torch.testing.assert_close(y, ref)
+
+
 def embedded_case(kind, edges, shared, device):
     from equivariantx.tests.ops.common.torch.test_convolution import (
         convolution_case as aligned_case,

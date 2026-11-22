@@ -135,11 +135,14 @@ def test_mixed_local_conversion(monkeypatch, modes):
 @pytest.mark.parametrize(
     "basis,device,radial_mode,projection,embedding,interpolate",
     [
-        ("physical_basis", "cpu", "stream", "individual", "element2", False),
-        ("physical_basis", "cpu", "materialize", "composed", "linear", True),
-        ("physical_basis", "cuda", "materialize", "individual", "linear", False),
-        ("physical_basis", "cuda", "materialize", "individual", "element2", True),
-        ("physical_basis", "cuda", "stream", "individual", "element", False),
+        ("spb", "cpu", "stream", "individual", "element2", False),
+        ("spb", "cpu", "materialize", "composed", "linear", True),
+        ("spb", "cuda", "materialize", "individual", "linear", False),
+        ("spb", "cuda", "materialize", "individual", "element2", True),
+        ("spb", "cuda", "stream", "individual", "element", False),
+        ("ejn", "cpu", "stream", "individual", "element2", False),
+        ("ejn", "cuda", "materialize", "individual", "element2", False),
+        ("ejn", "cuda", "stream", "individual", "element", False),
         ("j0", "cuda", "materialize", "individual", "element2", False),
         ("jn", "cpu", "materialize", "composed", "element2", False),
         ("jn", "cuda", "materialize", "individual", "element2", False),
@@ -149,6 +152,8 @@ def test_mixed_local_conversion(monkeypatch, modes):
 def test_spectral_radial_conversion(
     monkeypatch, basis, device, radial_mode, projection, embedding, interpolate
 ):
+    if basis == "spb":
+        pytest.importorskip("physical_basis")
     monkeypatch.setenv("TACE_MEMORY_FIRST", str(int(radial_mode == "stream")))
     check_conversion(
         monkeypatch,
@@ -161,7 +166,7 @@ def test_spectral_radial_conversion(
         "cgtp",
         radial_basis=dict(
             radial_basis=basis,
-            max_eigenvalue=None if basis == "physical_basis" else 6.0,
+            max_eigenvalue=None if basis in ("spb", "ejn") else 6.0,
             use_interpolation=interpolate,
         ),
     )

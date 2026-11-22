@@ -3,8 +3,8 @@
 from .pointwise import launch, scalar_type
 
 
-def evaluate(x, frequencies, coefficients, num_cos, extent, order):
-    channels, terms = coefficients.shape
+def evaluate(x, frequencies, coefficients, num_cos, extent, order, indices=None):
+    channels, terms = coefficients.shape[-2:]
     output = x.new_empty((x.numel(), channels))
     if not x.numel():
         return output
@@ -33,7 +33,7 @@ def evaluate(x, frequencies, coefficients, num_cos, extent, order):
                 #pragma unroll
                 for (int t=0; t < tiles; ++t) {{
                     int k = lane + 32*t;
-                    if (k < terms) sum += values[t] * coeff[c*terms+k];
+                    if (k < terms) sum += values[t] * table[c*terms+k];
                 }}
                 #pragma unroll
                 for (int s=16; s; s/=2) sum += __shfl_down_sync(0xffffffffu, sum, s);
@@ -43,22 +43,31 @@ def evaluate(x, frequencies, coefficients, num_cos, extent, order):
     source = f"""
     using T = {scalar_type(x.dtype)};
     extern "C" __global__ void run(const T* x, const T* freq, const T* coeff,
-                                   T* out, long long n) {{
+                                   {"const long long* indices," if indices is not None else ""} T* out, long long n) {{
         constexpr int channels={channels}, terms={terms}, tiles=(terms+31)/32;
         const int lane=threadIdx.x%32;
         for (long long row=((long long)blockIdx.x*blockDim.x+threadIdx.x)/32;
              row<n; row+=(long long)gridDim.x*blockDim.x/32) {{
             const T xv = x[row];
-            if (!(xv >= T(0) && xv < T({float(extent).hex()}))) {{
+            {"const long long id = indices[row];" if indices is not None else ""}
+            if (!(xv >= T(0) && xv < T({float(extent).hex()}))
+                {f"|| id < 0 || id >= {coefficients.shape[0]}" if indices is not None else ""}) {{
                 for (int c=lane; c<channels; c+=32) out[row*channels+c] = T(0);
                 continue;
             }}
+            const T* table = coeff {"+ id*channels*terms" if indices is not None else ""};
             {"".join(families)}
         }}
     }}"""
     launch(
         source,
-        (x.contiguous(), frequencies.contiguous(), coefficients.contiguous(), output),
+        (
+            x.contiguous(),
+            frequencies.contiguous(),
+            coefficients.contiguous(),
+            *((indices.contiguous(),) if indices is not None else ()),
+            output,
+        ),
         (x.numel(),),
         x.numel() * 32,
         threads=128,

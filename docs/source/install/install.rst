@@ -42,6 +42,14 @@ C++ compiler (MSVC on Windows). They are not available on macOS.
 The LAMMPS interface additionally requires a CUDA Kokkos ML-IAP build; the
 host-only LAMMPS backend is not supported. See :doc:`../guide/lammps`.
 
+The tabulated SPACE radial basis (``spb``) is optional:
+
+.. code-block:: bash
+
+   pip install "tace[spb]"
+
+The cutoff-adapted ``ejn`` basis does not require this extra.
+
 EquivariantX (EQX)
 ------------------
 

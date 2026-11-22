@@ -205,8 +205,8 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
     check_radial_selection(radial["num_radial_basis"], radial["max_eigenvalue"])
     if "jn_max_eigenvalue" in radial:
         raise ValueError("Set radial_basis.max_eigenvalue instead of jn_max_eigenvalue.")
-    if radial["radial_basis"] != "physical_basis" and radial["use_interpolation"]:
-        raise ValueError("use_interpolation requires radial_basis='physical_basis'.")
+    if radial["radial_basis"] != "spb" and radial["use_interpolation"]:
+        raise ValueError("use_interpolation requires radial_basis='spb'.")
     atomic_basis = cfg["atomic_basis"]
     product_basis = cfg["product_basis"]
 

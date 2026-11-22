@@ -705,11 +705,12 @@ def make_model(
 @pytest.mark.parametrize(
     "basis,interaction,embedding,interpolate",
     [
-        ("physical_basis", "cgtp", None, False),
-        ("physical_basis", "cgtp", "element2", True),
-        ("physical_basis", "co3", "element", False),
-        ("physical_basis", "o2_cgtp", "element2", False),
-        ("physical_basis", "nonlinear_ictd", "element2", False),
+        ("spb", "cgtp", None, False),
+        ("spb", "cgtp", "element2", True),
+        ("spb", "co3", "element", False),
+        ("spb", "o2_cgtp", "element2", False),
+        ("spb", "nonlinear_ictd", "element2", False),
+        ("ejn", "cgtp", "element2", False),
         ("j0", "cgtp", "element2", False),
         ("jn", "cgtp", "element2", False),
         ("jn", "co3", "element", False),
@@ -724,7 +725,9 @@ def test_spectral_radial_convolution(
         radial_basis=basis,
         use_interpolation=interpolate,
     )
-    if basis != "physical_basis":
+    if basis == "spb":
+        pytest.importorskip("physical_basis")
+    if basis not in ("spb", "ejn"):
         radial["max_eigenvalue"] = 3.0
     else:
         radial["num_radial_basis"] = [2, 1]
@@ -756,6 +759,39 @@ def test_spectral_radial_convolution(
         ).train()
         other.load_state_dict(model.state_dict())
         torch.testing.assert_close(run(other), ref, rtol=1e-8, atol=1e-9)
+
+
+def test_spb_legacy_spectral_cutoff(double_precision, tmp_path):
+    pytest.importorskip("physical_basis")
+    model = make_model(radial={"radial_basis": "spb", "max_eigenvalue": 36.0})
+    expected = evaluate(model)
+    model.readout_fn.model_config["radial_basis"].update(
+        radial_basis="physical_basis", max_eigenvalue=None
+    )
+    path = tmp_path / "legacy.pt"
+    export_tace(model, str(path))
+    restored = load_tace(path, device=DEVICE, dtype=torch.float64)
+    assert restored.readout_fn.representation.radial_basis.widths == (3, 2)
+    actual = evaluate(restored)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key])
+
+
+def test_ejn_export_elements(double_precision):
+    model = make_model(radial=dict(radial_basis="ejn", max_eigenvalue=40))
+    basis = model.readout_fn.representation.radial_basis.radial_fn
+    # A saved eigenfunction may have either sign.
+    basis.coefficients[0].neg_()
+    basis.lengthscale[2].add_(0.05)
+    selected = select_elements(model, [1, 8, 14, 16])
+    expected, actual = evaluate(model), evaluate(selected)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key])
+    new_basis = selected.readout_fn.representation.radial_basis.radial_fn
+    torch.testing.assert_close(
+        new_basis.coefficients, basis.coefficients, rtol=0, atol=0
+    )
+    torch.testing.assert_close(new_basis.lengthscale[1], basis.lengthscale[2])
 
 
 def evaluate(model, fidelity=0, numbers=(1, 1, 8)):

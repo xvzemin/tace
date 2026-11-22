@@ -95,6 +95,7 @@ class NodeRepresentation(torch.nn.Module):
         # === radial basis ===
         self.radial_basis = RadialBasis(
             cutoff=cutoff,
+            atomic_numbers=atomic_numbers,
             num_basis=radial_basis["num_radial_basis"],
             cutoff_fn=radial_basis["cutoff_fn"],
             polynomial_cutoff=radial_basis["polynomial_cutoff"],
@@ -918,6 +919,7 @@ class PairRepresentation(torch.nn.Module):
         self.atomic_numbers = list(atomic_numbers)
         self.radial_basis = RadialBasis(
             cutoff=cutoff,
+            atomic_numbers=atomic_numbers,
             num_basis=radial_basis["num_radial_basis"],
             cutoff_fn=radial_basis["cutoff_fn"],
             polynomial_cutoff=radial_basis["polynomial_cutoff"],

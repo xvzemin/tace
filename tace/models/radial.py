@@ -16,7 +16,7 @@ from scipy.special import spherical_jn
 
 from tace.utils.torch_scatter import scatter_sum
 
-from .physical_basis import PhysicalRadialBasis
+from .physical_basis import ExpWeightedjnSphericalBesselBasis, SpacePhysicalBasis
 
 DEFAULT_RADIAL_MODES = 8
 
@@ -912,16 +912,18 @@ class RadialBasis(torch.nn.Module):
     cutoff : float
         Interaction radius in angstroms.
     radial_basis : str
-        Fixed Bessel order, ``jn``, ``physical_basis``, or ``gaussian``.
+        Fixed Bessel order, ``jn``, ``spb``, ``ejn``, or ``gaussian``.
     num_basis : int or list of int, optional
         Explicit width, or one width per edge harmonic degree for ``jn``
-        and ``physical_basis``. Mutually exclusive with ``max_eigenvalue``.
+        and the physical bases. Mutually exclusive with ``max_eigenvalue``.
     max_eigenvalue : float, optional
-        Inclusive spectral threshold in inverse square angstroms for Bessel
-        modes or in tabulated dimensionless units for ``physical_basis``.
+        Inclusive spectral threshold in inverse square angstroms for the
+        unweighted Bessel modes, or dimensionless units for ``spb`` and ``ejn``.
         The default threshold retains eight degree-zero modes.
     lmax : int
         Maximum edge harmonic degree for degree-specific bases.
+    atomic_numbers : list of int, optional
+        Element vocabulary for the ``ejn`` distance scaling.
 
     Examples
     --------
@@ -945,16 +947,18 @@ class RadialBasis(torch.nn.Module):
         lmax: int = 0,
         max_eigenvalue: float | None = None,
         use_interpolation: bool = False,
+        atomic_numbers: list[int] | None = None,
     ):
         super().__init__()
 
         assert isinstance(trainable, bool)
         assert isinstance(apply_cutoff, bool)
-        self.physical = radial_basis == "physical_basis"
-        if not self.physical:
-            check_radial_selection(num_basis, max_eigenvalue)
-            if use_interpolation:
-                raise ValueError("use_interpolation requires radial_basis='physical_basis'.")
+        self.use_atomic_numbers = radial_basis == "spb" or (
+            radial_basis == "ejn" and atomic_numbers is None
+        )
+        check_radial_selection(num_basis, max_eigenvalue)
+        if use_interpolation and radial_basis != "spb":
+            raise ValueError("use_interpolation requires radial_basis='spb'.")
 
         if cutoff_fn == "mollifier":
             self.cutoff_fn = MollifierCutoff(cutoff=cutoff)
@@ -966,13 +970,19 @@ class RadialBasis(torch.nn.Module):
             self.cutoff_fn = C2PolynomialCutoff(cutoff=cutoff, p=polynomial_cutoff)
 
         self.widths = None
-        if self.physical:
+        if radial_basis in ("spb", "ejn"):
             if trainable or distance_transform is not None:
                 raise ValueError(
                     f"{radial_basis} uses fixed eigenfunctions and its own distance transform."
                 )
-            self.radial_fn = PhysicalRadialBasis(
-                cutoff, lmax, num_basis, max_eigenvalue, use_interpolation
+            self.radial_fn = (
+                SpacePhysicalBasis(
+                    cutoff, lmax, num_basis, max_eigenvalue, use_interpolation
+                )
+                if radial_basis == "spb"
+                else ExpWeightedjnSphericalBesselBasis(
+                    cutoff, lmax, atomic_numbers, num_basis, max_eigenvalue
+                )
             )
             self.widths = self.radial_fn.widths
         elif radial_basis == "jn":
@@ -992,7 +1002,9 @@ class RadialBasis(torch.nn.Module):
             else:
                 self.widths = tuple(num_basis)
             if trainable or distance_transform is not None:
-                raise ValueError("jn requires trainable=false and distance_transform=null.")
+                raise ValueError(
+                    "jn requires trainable=false and distance_transform=null."
+                )
             self.radial_fn = jnSphericalBesselBasis(
                 cutoff=cutoff, order=list(degrees), num_basis=list(self.widths)
             )
@@ -1049,7 +1061,7 @@ class RadialBasis(torch.nn.Module):
                 edge_length, node_type, edge_index, atomic_numbers
             )
 
-        types = atomic_numbers[node_type] if self.physical else node_type
+        types = atomic_numbers[node_type] if self.use_atomic_numbers else node_type
         radial = self.radial_fn(edge_length, types, edge_index)
 
         if self.apply_cutoff:

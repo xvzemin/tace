@@ -6,6 +6,7 @@ register_kernel(
     "fourier_radial",
     "torch",
     "equivariantx.ops.common.fourier:fourier_torch",
+    reference="equivariantx.ops.common.fourier:fourier_torch",
 )
 register_kernel(
     "fourier_radial",

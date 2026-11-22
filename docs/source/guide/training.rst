@@ -27,7 +27,7 @@ overrides:
     tace-train-oam-v2 -cn omat.yaml
     tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uv_o2
     tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uu_o2
-    tace-train-oamv2 -cn omat.yaml model.config.radial_basis.radial_basis=physical_basis model.config.radial_basis.num_radial_basis=null
+    tace-train-oamv2 -cn omat.yaml model.config.radial_basis.radial_basis=ejn model.config.radial_basis.num_radial_basis=null
 
 This entry uses one worker per visible CUDA device, FP32 model weights and
 TF32 matrix multiplication. The command ``tace-train-oamv2`` is equivalent.

@@ -1,7 +1,0 @@
-defaults:
-  - o3
-  - _self_
-
-model:
-  config:
-    edge_embedding: {type: element2}
